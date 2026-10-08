@@ -790,12 +790,6 @@ function LauncherShell({
                   onClick={() => navigateSurface("antigravity-cli")}
                 />
                 <SidebarItem
-                  active={surface === "providers"}
-                  icon="providers"
-                  label={copy.providers}
-                  onClick={() => navigateSurface("providers")}
-                />
-                <SidebarItem
                   active={surface === "integrations"}
                   icon="globe"
                   label={copy.integrations}

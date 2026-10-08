@@ -255,6 +255,25 @@ test("opt-in auth probe distinguishes missing frame from a managed request witho
   }
 });
 
+
+test("Cline switcher frame gets the opaque marker exchange only for its own management API", async () => {
+  const f = fixture();
+  f.install();
+  await f.webContents.listeners("did-frame-finish-load")[0]({}, false, 5, 9);
+  const marker = f.sessionStorage.getItem("coding-tools-cpa-session");
+  const frame = { url: `${ORIGIN}/v0/resource/plugins/cline-pass-switcher/index.html`,
+    top: f.mainFrame, parent: f.frame, isDestroyed: () => false };
+  const requestHeaders = { Authorization: `Bearer ${marker}` };
+  assert.deepEqual(await f.request({ frame, url: `${ORIGIN}/v0/management/cline-pass-switcher/api/accounts`, requestHeaders }), {
+    requestHeaders: { Authorization: `Bearer ${SECRET}` },
+  });
+  for (const url of [`${ORIGIN}/v0/management/config`, `${ORIGIN}/v0/management/cpa-helper/usage`,
+    `${ORIGIN}/v0/management/cline-pass-switcher-evil/api/accounts`]) {
+    assert.deepEqual(await f.request({ frame, url, requestHeaders }), { requestHeaders });
+  }
+  assert.equal(JSON.stringify(f.logs).includes(SECRET), false);
+});
+
 test("non-loopback origins are rejected and destroying the host removes the request hook", () => {
   for (const origin of [
     "http://localhost:8317",

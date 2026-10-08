@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import type { AoMission, AoNode } from "./AgentOrchestratorSurface";
 
-export type RoleSettings = { name: string; specialty: string; instructions: string; expected_output: string; working_directory: string; revision: number; auto_decide?: boolean };
-export type AoTeam = { id: string; workspace_id: string; name: string; revision: number; worker_limit: number; max_review_rounds?: number; nodes: AoNode[] };
+export type RoleSettings = { name: string; specialty: string; instructions: string; expected_output: string; working_directory: string; revision: number; auto_decide?: boolean; role_name?: string };
+export type AoTeam = { id: string; workspace_id: string; name: string; revision: number; worker_limit: number; max_review_rounds?: number; nodes: AoNode[]; permission_selections?: Record<string, { permission_profile?: string; approval_policy?: string; approvals_reviewer?: string }> };
 export type AoHarness = { id: string; label: string; runnable: boolean; installed: boolean; authStatus?: string; chat?: boolean };
 export type AoRoute = AoNode["route"];
 export const emptyRoleSettings = (): RoleSettings => ({ name: "", specialty: "", instructions: "", expected_output: "", working_directory: "", revision: 0 });
@@ -18,27 +18,80 @@ export const SPECIALTIES = ["planning", "research", "architecture", "frontend", 
   "testing", "performance", "debugging", "refactor", "docs", "ui-ux", "mobile", "data-ml", "implementation", "qa", "review", "delivery"];
 
 /**
- * Any worker may use any harness and model: Native Codex runs WebGPT or any model in the
- * shared CPA pool; every other harness runs as an AO worker session. WebGPT only works through
- * the bridge on Native Codex, so a WebGPT model always gets the Native Codex route.
+ * Native Codex runs only WebGPT, through the bridge; every other model runs on an AO harness
+ * (CPA pool models through the gateway as "cpa/<model>"). A WebGPT model therefore always gets
+ * the Native Codex route, and any other model picked on Native Codex moves to an AO harness:
+ * Unspecified non-WebGPT choices default to Claude Code; explicit AO choices stay unchanged.
  */
 export const isWebModel = (model: string) => model.replace(/^cpa\//, "").startsWith("chatgpt-web/");
 
 export function workerRoute(harness: string, model: string, permission: NativePermission = ":workspace"): AoRoute {
-  const web = model.replace(/^cpa\//, "");
-  if (isWebModel(model)) return { ...WEB_ROUTE, model: web, permission_profile: permission };
-  if (harness.startsWith("ao:")) {
-    return { harness_id: harness, provider_id: "agent-orchestrator", account_id: "ao-local", model: model || "default", permission_profile: ":ao-default" };
+  const bare = model.replace(/^cpa\//, "");
+  if (isWebModel(model)) return { ...WEB_ROUTE, model: bare, permission_profile: permission === ":ao-default" ? WEB_ROUTE.permission_profile : permission };
+  const agent = harness.startsWith("ao:") ? harness : DEFAULT_WORKER_HARNESS;
+  const routed = harness.startsWith("ao:") || !model ? model : `cpa/${bare}`;
+  return { harness_id: agent, provider_id: "agent-orchestrator", account_id: "ao-local", model: routed || "default", permission_profile: ":ao-default" };
+}
+
+/** Reasoning efforts a card may ask for (Codex's names; the engine checks the same list). */
+export const EFFORTS = ["minimal", "low", "medium", "high", "xhigh"] as const;
+/** Effort applies on Native Codex and to an AO agent's own models; AO skips it for gateway models. */
+export const effortApplies = (route: AoRoute) => !(route.harness_id.startsWith("ao:") && route.model.startsWith("cpa/"));
+/** Only Native Codex has a context-window setting. */
+export const contextApplies = (route: AoRoute) => route.harness_id === NATIVE_HARNESS;
+
+/** Carry a card's effort and context window over to its new route where they still apply. */
+export function withTuning(next: AoRoute, previous: AoRoute): AoRoute {
+  const route: AoRoute = { ...next };
+  // Routing is not a permission change: preserve raw custom and managed profile IDs.
+  const permission = previous.harness_id === NATIVE_HARNESS ? previous.permission_profile : previous.native_permission_profile ?? (previous.permission_profile !== ":ao-default" ? previous.permission_profile : undefined);
+  if (permission !== undefined) {
+    if (route.harness_id === NATIVE_HARNESS) route.permission_profile = permission;
+    else route.native_permission_profile = permission;
   }
-  return { harness_id: NATIVE_HARNESS, provider_id: "cliproxyapi-antigravity", account_id: "shared-cpa-pool", model, permission_profile: permission };
+  if (route.harness_id === NATIVE_HARNESS && previous.native_permission_profile !== undefined) route.native_permission_profile = previous.native_permission_profile;
+  if (previous.approval_policy !== undefined) route.approval_policy = previous.approval_policy;
+  if (previous.approvals_reviewer !== undefined) route.approvals_reviewer = previous.approvals_reviewer;
+  delete route.effort;
+  delete route.context_window;
+  if (previous.effort && effortApplies(route)) route.effort = previous.effort;
+  if (previous.context_window && contextApplies(route)) route.context_window = previous.context_window;
+  return route;
+}
+
+/** 262144 -> "256K"; 1048576 and 1000000 -> "1M". */
+export function tokensLabel(tokens: number): string {
+  if (tokens >= 1_048_576 && tokens % 1_048_576 === 0) return `${tokens / 1_048_576}M`;
+  if (tokens >= 1_000_000 && tokens % 1_000_000 === 0) return `${tokens / 1_000_000}M`;
+  if (tokens >= 1_024 && tokens % 1_024 === 0) return `${tokens / 1_024}K`;
+  return tokens.toLocaleString("en-US");
+}
+
+const ROLE_LABELS = { planner: "Orchestrator", approver: "Command approver", worker: "Worker", review_split: "Main reviewer · split", sub_reviewer: "Sub-reviewer", reviewer: "Main reviewer" } as const;
+
+/** The role a card shows: the custom role the user typed, else its built-in role's name. */
+export function roleLabel(node: Pick<AoNode, "role" | "settings">): string {
+  return node.settings?.role_name?.trim() || ROLE_LABELS[node.role];
+}
+
+/** One line describing how a card runs: harness · model · effort · context · role. */
+export function cardMeta(node: Pick<AoNode, "role" | "settings" | "route">, harnesses: AoHarness[] = []): string {
+  const route = node.route;
+  return [
+    harnessLabel(route.harness_id, harnesses),
+    modelLabel(route.model),
+    route.effort && effortApplies(route) ? `effort ${route.effort}` : "",
+    route.context_window && contextApplies(route) ? `${tokensLabel(route.context_window)} context` : "",
+    roleLabel(node),
+  ].filter(Boolean).join(" · ");
 }
 
 /**
  * Native Codex cards use Codex's own profiles: workspace (create, edit and delete inside the
  * workspace; anything else is asked for) or read-only. Workers default to workspace.
  */
-export type NativePermission = ":workspace" | ":read-only";
-export const nativePermission = (route: AoRoute): NativePermission => route.permission_profile === ":workspace" ? ":workspace" : ":read-only";
+export type NativePermission = string;
+export const nativePermission = (route: AoRoute): NativePermission => route.harness_id === NATIVE_HARNESS ? route.permission_profile : route.native_permission_profile ?? route.permission_profile;
 
 /** "chatgpt-web/extra-high" -> "WebGPT Extra High"; other model ids are shown as-is. */
 export function modelLabel(model: string): string {
@@ -55,8 +108,14 @@ export function harnessLabel(harnessId: string, harnesses: AoHarness[]): string 
 
 export function teamForMission(mission: AoMission, saved: AoTeam | null): AoTeam {
   if (saved) {
+    if (mission.team && mission.team.id !== saved.id) return structuredClone(mission.team);
     const team = structuredClone(saved);
     if (mission.team?.id === team.id) {
+      // Use this mission's policy snapshot, retaining the revision needed for optimistic save.
+      team.nodes = team.nodes.map(role => {
+        const snapshot = mission.team!.nodes.find(item => item.id === role.id);
+        return snapshot ? { ...role, route: structuredClone(snapshot.route), settings: structuredClone(snapshot.settings) } : role;
+      });
       const extra = mission.team.nodes.filter(role => !team.nodes.some(existing => existing.id === role.id));
       team.nodes.push(...structuredClone(extra));
       const reviewer = team.nodes.find(role => role.role === "reviewer");
@@ -83,8 +142,8 @@ export function defaultTeam(workspaceId: string, worker: AoRoute): AoTeam {
 }
 
 /** Harness + model pickers shared by the inspector, New mission and Add worker sheets. */
-export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled = false }: {
-  route: AoRoute; harnesses: AoHarness[]; disabled?: boolean;
+export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled = false, hideModel = false, hidePermissionNote = false }: {
+  route: AoRoute; harnesses: AoHarness[]; disabled?: boolean; hideModel?: boolean; hidePermissionNote?: boolean;
   loadModels: (harness: string) => Promise<string[]>;
   onChange: (route: AoRoute) => void;
 }) {
@@ -104,18 +163,18 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
   }, [harness, loadModels]);
   const known = harnesses.some(item => item.id === harness);
   return <>
-    <label>Harness<select value={harness} disabled={disabled} onChange={event => {
+    <label>Harness<select value={harness} disabled={disabled || isWebModel(route.model)} title={isWebModel(route.model) ? "WebGPT requires Native Codex" : undefined} onChange={event => {
       // Start each harness on an explicit model; an agent without a known one shows "Choose a model".
       const next = event.target.value;
       const model = next === NATIVE_HARNESS ? WEB_ROUTE.model : next === DEFAULT_WORKER_HARNESS ? DEFAULT_WORKER_MODEL : "";
-      onChange(workerRoute(next, model, nativePermission(route)));
+      onChange(withTuning(workerRoute(next, model, nativePermission(route)), route));
     }}>
       {!known ? <option value={harness}>{harnessLabel(harness, harnesses)}</option> : null}
       {harnesses.map(item => <option key={item.id} value={item.id} disabled={!item.runnable}>
         {item.label}{!item.runnable ? " · not installed" : item.authStatus === "unauthorized" ? " · sign in" : item.chat === false ? " · terminal" : ""}
       </option>)}
     </select></label>
-    <label>Model<select value={route.model} disabled={disabled || models === null} onChange={event => onChange(workerRoute(route.harness_id, event.target.value, nativePermission(route)))}>
+    {!hideModel ? <label>Model<select value={route.model} disabled={disabled || models === null} onChange={event => onChange(withTuning(workerRoute(route.harness_id, event.target.value, nativePermission(route)), route))}>
       {!route.model || route.model === AGENT_DEFAULT_MODEL
         ? <option value={route.model} disabled>Choose a model{route.model ? " (\"default\" is not allowed)" : ""}</option>
         : models && !models.includes(route.model) ? <option value={route.model}>{route.model} (unverified)</option> : null}
@@ -123,20 +182,34 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
       {(models ?? []).map(model => <option key={model} value={model}>
         {modelLabel(model)}{harness !== NATIVE_HARNESS && isWebModel(model) ? " · switches to Native Codex" : ""}
       </option>)}
-    </select></label>
-    {harness === NATIVE_HARNESS ? <label>Permission<select value={nativePermission(route)} disabled={disabled}
-      onChange={event => onChange({ ...route, permission_profile: event.target.value })}>
-      <option value=":workspace">Workspace: create, edit and delete in this workspace</option>
-      <option value=":read-only">Read only</option>
-    </select></label> : <p className="ao-hint">WebGPT runs only on Native Codex; choosing a WebGPT model switches the harness.</p>}
+    </select></label> : null}
+    {!hidePermissionNote ? harness === NATIVE_HARNESS ? <p className="ao-hint">Saved native permission: {nativePermission(route) || "Unknown"}. Change permissions explicitly in the chat composer menu; runtime capabilities are authoritative.</p>
+      : <p className="ao-hint">Native Codex runs only WebGPT: choosing a WebGPT model switches to it, and any other model runs here. Native permissions are retained but unavailable on this adapter.</p> : null}
+    <fieldset className="ao-route-tuning"><legend>Model tuning</legend>
+    <label title={effortApplies(route) ? "Reasoning effort for this card" : "AO skips effort for CPA gateway models"}>Reasoning effort
+      <select value={effortApplies(route) ? route.effort ?? "" : ""} disabled={disabled || !effortApplies(route)}
+        onChange={event => { const next = { ...route }; if (event.target.value) next.effort = event.target.value; else delete next.effort; onChange(next); }}>
+        <option value="">{effortApplies(route) ? "Model default" : "Not applicable (gateway model)"}</option>
+        {EFFORTS.map(effort => <option key={effort} value={effort}>{effort}</option>)}
+      </select></label>
+    <label title={contextApplies(route) ? "Context window in tokens (4,096 to 2,000,000)" : "AO harnesses have no context-window setting"}>Context window
+      <input type="number" min={4096} max={2000000} step={1} inputMode="numeric" disabled={disabled || !contextApplies(route)}
+        placeholder={contextApplies(route) ? "Model default" : "Not applicable on AO harnesses"}
+        value={contextApplies(route) ? route.context_window ?? "" : ""}
+        onChange={event => { const next = { ...route }; const tokens = Math.round(Number(event.target.value)); if (event.target.value && Number.isFinite(tokens)) next.context_window = tokens; else delete next.context_window; onChange(next); }} /></label>
+    <p className="ao-hint ao-wide">{contextApplies(route)
+      ? "Native harness context budget: 4,096–2,000,000 tokens. Blank uses the model default, not a claimed model limit."
+      : effortApplies(route) ? "This harness accepts reasoning effort; context window is managed by the harness."
+      : "CPA gateway models manage their own effort and context window; these overrides are not sent."}</p>
+    </fieldset>
     {notice ? <p className="ao-hint" role="status">{notice}</p> : null}
   </>;
 }
 
-export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, loadModels, busy, change, apply, discard, close, taskName }: {
+export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, loadModels, busy, change, apply, discard, taskName }: {
   node: AoNode; mission: AoMission; draft: AoTeam; harnesses: AoHarness[]; busy: boolean;
   loadModels: (harness: string) => Promise<string[]>;
-  change: (team: AoTeam) => void; apply: () => void; discard: () => void; close: () => void; taskName: (id: string) => string;
+  change: (team: AoTeam) => void; apply: () => void; discard: () => void; taskName: (id: string) => string;
 }) {
   const [tab, setTab] = useState<"settings" | "output" | "history">("settings");
   const roleId = node.template_role_id || node.id;
@@ -149,27 +222,38 @@ export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, l
   const updateSettings = (patch: Partial<RoleSettings>) => updateRole({ settings: { ...settings, ...patch } });
   const changeKind = (kind: AoNode["role"]) => {
     // Every role may run on any harness and model, so changing the role keeps its route.
-    if (role) updateRole({ role: kind });
+    if (role) updateRole({ role: kind, settings: { ...settings, role_name: "" } });
   };
-  return <aside className="ao-role-inspector" aria-label="Role inspector">
-    <div className="ao-inspector-header">
-      <span className={`ao-dot ao-dot-${node.state}`} aria-hidden="true" />
-      <strong>{settings.name || node.role}</strong>
-      <span className="ao-inspector-state">{node.state}</span>
-      <button type="button" onClick={close} aria-label="Close role inspector">×</button>
-    </div>
+  // A custom role works as a worker under the name the user typed; names already used in this
+  // team are offered again.
+  const customRoles = [...new Set(draft.nodes.map(item => item.settings?.role_name?.trim() || "").filter(Boolean))];
+  const roleValue = settings.role_name !== undefined && settings.role_name !== "" ? `custom:${settings.role_name}` : role?.role ?? "worker";
+  const [typingRole, setTypingRole] = useState(false);
+  const pickRole = (value: string) => {
+    if (!role) return;
+    if (value === "custom:") { setTypingRole(true); updateRole({ role: "worker", settings: { ...settings, role_name: settings.role_name || "" } }); return; }
+    setTypingRole(false);
+    if (value.startsWith("custom:")) updateRole({ role: "worker", settings: { ...settings, role_name: value.slice(7) } });
+    else changeKind(value as AoNode["role"]);
+  };
+  return <div className="ao-role-inspector" aria-label="Role inspector">
     <div className="ao-inspector-tabs" role="tablist" aria-label="Role details">
       {(["settings", "output", "history"] as const).map(name => <button key={name} type="button" role="tab" aria-selected={tab === name} onClick={() => setTab(name)}>{name}</button>)}
     </div>
     {tab === "settings" ? role ? <form onSubmit={event => { event.preventDefault(); apply(); }}>
       <div className="ao-field-row">
         <label>Name<input maxLength={96} value={settings.name} onChange={event => updateSettings({ name: event.target.value })} /></label>
-        <label>Role<select value={role.role} onChange={event => changeKind(event.target.value as AoNode["role"])}>
+        <label>Role<select value={typingRole ? "custom:" : roleValue} onChange={event => pickRole(event.target.value)}>
           <option value="planner">Orchestrator</option><option value="approver">Command approver</option><option value="worker">Worker</option>
           <option value="sub_reviewer">Sub-reviewer</option><option value="reviewer">Main reviewer</option>
           {role.role === "review_split" ? <option value="review_split">Main reviewer · split</option> : null}
+          {customRoles.map(name => <option key={name} value={`custom:${name}`}>{name}</option>)}
+          <option value="custom:">Custom role…</option>
         </select></label>
       </div>
+      {typingRole || (settings.role_name !== undefined && settings.role_name !== "" && !customRoles.includes(settings.role_name.trim()))
+        ? <label>Custom role<input autoFocus maxLength={48} placeholder="e.g. Security auditor" value={settings.role_name ?? ""}
+          onChange={event => updateSettings({ role_name: event.target.value })} onBlur={() => setTypingRole(false)} /></label> : null}
       <div className="ao-field-row">
         <HarnessPicker route={role.route} harnesses={harnesses} loadModels={loadModels} onChange={route => updateRole({ route })} />
       </div>
@@ -202,5 +286,5 @@ export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, l
       </details>)}
       {!item.receipt && !item.history?.length ? <p className="ao-hint">Not started</p> : null}
     </section>)}</div> : null}
-  </aside>;
+  </div>;
 }

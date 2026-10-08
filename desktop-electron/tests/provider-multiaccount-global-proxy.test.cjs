@@ -121,6 +121,37 @@ test("proxy routing resolves account then provider then global saved profiles", 
   );
 });
 
+test("the global proxy login handler leaves owned Antigravity authentication to its exact-proxy handler", async () => {
+  const { EventEmitter } = require("node:events");
+  const app = new EventEmitter();
+  app.whenReady = () => Promise.resolve();
+  app.getPath = () => "unused";
+  const calls = [];
+  const loaded = { exports: {} };
+  const dependencies = {
+    "./provider-network.cjs": {
+      createProviderNetworkController: () => ({
+        store: { snapshot: () => ({ routing: {} }) },
+        handleProxyLogin: (...args) => calls.push(args),
+      }),
+    },
+    "./provider-execution-router.cjs": {},
+    "./profile.cjs": { resolveLauncherProfile: () => ({ browserPartition: "test" }) },
+  };
+  require("node:vm").runInNewContext(fs.readFileSync(path.join(__dirname, "../electron/provider-bootstrap.cjs"), "utf8"), {
+    module: loaded, require: name => dependencies[name], console,
+  });
+  loaded.exports.installProviderNetwork({ app, BrowserWindow: { getAllWindows: () => [] }, ipcMain: { handle() {} } });
+  await loaded.exports.providerNetworkReady();
+  const event = { preventDefault() {} };
+  const auth = { isProxy: true };
+  const callback = () => {};
+  app.emit("login", event, { __codingToolsAntigravityAuth: true }, {}, auth, callback);
+  assert.equal(calls.length, 0);
+  app.emit("login", event, {}, {}, auth, callback);
+  assert.equal(calls.length, 1, "other browser sessions retain the existing handler");
+});
+
 test("renderer and Electron IPC expose the Provider Hub and global proxy controls", () => {
   const read = (relativePath) => fs.readFileSync(path.join(__dirname, "..", relativePath), "utf8");
   const main = read("src/main.tsx");

@@ -355,6 +355,8 @@ struct ContextEntry {
     context: Arc<tools::ToolContext>,
 }
 
+type AoHubMap = HashMap<(String, String, String), Arc<AoCodexHub>>;
+
 #[derive(Clone)]
 struct ServiceState {
     lifecycle: Lifecycle,
@@ -362,7 +364,7 @@ struct ServiceState {
     local_ui_token: Option<String>,
     core: Arc<CoreState>,
     contexts: Arc<Mutex<HashMap<String, ContextEntry>>>,
-    ao_hubs: Arc<Mutex<HashMap<(String, String, String), Arc<AoCodexHub>>>>,
+    ao_hubs: Arc<Mutex<AoHubMap>>,
     ao_home_root: PathBuf,
     operations: Arc<Mutex<OperationStore>>,
     shutdown_tx: tokio::sync::watch::Sender<Option<String>>,
@@ -560,11 +562,15 @@ struct AoReadRequest {
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum AoMutation {
     CreateFromTeam {
-        run_id: String, task_id: String, expected_board_revision: u64, team_revision: u64, worker_limit: u8,
+        run_id: String, task_id: String, expected_board_revision: u64, worker_limit: u8,
+        #[serde(default)] team_revision: Option<u64>,
+        #[serde(default)] team_id: Option<String>,
+        #[serde(default)] execution_mode: Option<integrations::ao::ExecutionMode>,
+        #[serde(default)] single_route: Option<Box<integrations::ao::Route>>,
     },
     Create {
         expected_board_revision: u64,
-        run: integrations::ao::Run,
+        run: Box<integrations::ao::Run>,
     },
     Graph {
         run_id: String,
@@ -576,7 +582,13 @@ enum AoMutation {
         expected_revision: u64,
     },
     SaveTeam { expected_revision: u64, team: integrations::ao_team::Team },
-    ApplyTeam { run_id: String, expected_revision: u64, team_revision: u64 },
+    ApplyTeam {
+        run_id: String, expected_revision: u64,
+        #[serde(default)] team_revision: Option<u64>,
+        #[serde(default)] team_id: Option<String>,
+        #[serde(default)] selected_role_ids: Option<Vec<String>>,
+        #[serde(default)] permission_selection: Option<integrations::ao_team::PermissionSelection>,
+    },
     SetLimits { expected_revision: u64, max_workers: u8, run_id: Option<String>, run_revision: Option<u64>, worker_limit: Option<u8> },
 }
 
@@ -679,7 +691,14 @@ struct AoHarnessApprovalRequest {
     run_id: String,
     node_id: String,
     approval_id: String,
-    allow: bool,
+    #[serde(default)]
+    allow: Option<bool>,
+    #[serde(default)]
+    response: Option<Value>,
+    #[serde(default)]
+    thread_id: Option<String>,
+    #[serde(default)]
+    turn_id: Option<String>,
     confirm: bool,
     /// Set when the mission's command approver answers instead of a person.
     #[serde(default)]
@@ -1339,6 +1358,129 @@ mod workspace_auth_tests {
     }
 
     #[test]
+    fn ao_create_payload_stays_flat_and_mutation_stack_is_bounded() {
+        let raw = json!({"id":"run","workspace_id":"qa","project_id":"goal","revision":0,"cancelled":false,"nodes":[]});
+        let expected: integrations::ao::Run = serde_json::from_value(raw.clone()).unwrap();
+        let request: AoMutation = serde_json::from_value(json!({
+            "operation":"create","expected_board_revision":2,"run":raw
+        }))
+        .unwrap();
+        let AoMutation::Create {
+            expected_board_revision,
+            run,
+        } = request
+        else {
+            panic!("create request was changed");
+        };
+        assert_eq!(expected_board_revision, 2);
+        assert_eq!(
+            serde_json::to_value(run).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        assert!(
+            std::mem::size_of::<AoMutation>() < 256,
+            "large mission graphs must not inflate every mutation request"
+        );
+    }
+
+    #[test]
+    fn composer_execution_dto_keeps_legacy_team_and_explicit_single_separate() {
+        let legacy: AoMutation = serde_json::from_value(json!({"operation":"create_from_team","run_id":"run","task_id":"task","expected_board_revision":1,"team_revision":2,"worker_limit":1})).unwrap();
+        assert!(matches!(
+            legacy,
+            AoMutation::CreateFromTeam {
+                execution_mode: None,
+                team_revision: Some(2),
+                single_route: None,
+                ..
+            }
+        ));
+        let mut single = json!({"operation":"create_from_team","run_id":"run","task_id":"task","expected_board_revision":1,"worker_limit":1,
+            "execution_mode":"single","single_route":{"harness_id":"ao:claude-code","provider_id":"agent-orchestrator","account_id":"ao-local","model":"cpa/gpt-6-luna","permission_profile":":ao-default"}});
+        let parsed: AoMutation = serde_json::from_value(single.clone()).unwrap();
+        assert!(matches!(
+            parsed,
+            AoMutation::CreateFromTeam {
+                execution_mode: Some(integrations::ao::ExecutionMode::Single),
+                team_revision: None,
+                team_id: None,
+                single_route: Some(_),
+                ..
+            }
+        ));
+        single["execution_mode"] = json!("fake_single");
+        assert!(serde_json::from_value::<AoMutation>(single).is_err());
+        let apply: AoMutation = serde_json::from_value(json!({"operation":"apply_team","run_id":"run","expected_revision":2,"selected_role_ids":["only"],
+            "permission_selection":{"permission_profile":":workspace","approval_policy":"on-request","approvals_reviewer":"user"}})).unwrap();
+        assert!(matches!(
+            apply,
+            AoMutation::ApplyTeam {
+                team_revision: None,
+                team_id: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn native_reconnect_retires_only_mismatched_idle_pending_policy() {
+        let mut node: integrations::ao::Node = serde_json::from_value(json!({
+            "id":"role","task_id":"","role":"worker","parents":[],"x":0,"y":0,"state":"pending",
+            "route":{"harness_id":"codex-native","provider_id":"chatgpt-web","account_id":"chatgpt-web","model":"chatgpt-web/high","permission_profile":":workspace","approval_policy":"on-request","approvals_reviewer":"user"}
+        })).unwrap();
+        let mut status = json!({"permission_profile":":read-only","approval_policy":"never","approvals_reviewer":"user","threads":[]});
+        assert!(idle_hub_policy_differs(&node, &status));
+        status["threads"] = json!([{"status":"inProgress"}]);
+        assert!(!idle_hub_policy_differs(&node, &status));
+        status["threads"] = json!([{"status":"starting"}]);
+        assert!(!idle_hub_policy_differs(&node, &status));
+        status["threads"] = json!([]);
+        node.state = integrations::ao::State::Reserved;
+        assert!(!idle_hub_policy_differs(&node, &status));
+        node.state = integrations::ao::State::Pending;
+        status["permission_profile"] = json!(":workspace");
+        status["approval_policy"] = json!("on-request");
+        assert!(
+            !idle_hub_policy_differs(&node, &status),
+            "matching owned hubs are not replaced"
+        );
+        status["threads"] = Value::Null;
+        status["permission_profile"] = json!(":read-only");
+        assert!(
+            !idle_hub_policy_differs(&node, &status),
+            "unknown activity is not proof of idleness"
+        );
+    }
+
+    #[test]
+    fn native_consent_dto_preserves_legacy_allow_and_exact_typed_scope() {
+        let base = json!({"workspace_id":"qa","run_id":"run","node_id":"role","approval_id":"request","confirm":true});
+        let mut legacy = base.clone();
+        legacy["allow"] = json!(false);
+        let request: AoHarnessApprovalRequest = serde_json::from_value(legacy).unwrap();
+        assert_eq!(request.allow, Some(false));
+        assert!(request.response.is_none());
+        let mut typed = base.clone();
+        typed["response"] = json!({"decision":"decline"});
+        typed["thread_id"] = json!("thread");
+        typed["turn_id"] = json!("turn");
+        let request: AoHarnessApprovalRequest = serde_json::from_value(typed).unwrap();
+        assert!(request.allow.is_none());
+        assert_eq!(request.thread_id.as_deref(), Some("thread"));
+        assert_eq!(request.turn_id.as_deref(), Some("turn"));
+        let apply: AoMutation = serde_json::from_value(json!({"operation":"apply_team","run_id":"run","expected_revision":2,"team_revision":1,
+            "selected_role_ids":["helper"],"permission_selection":{"permission_profile":":read-only"}})).unwrap();
+        assert!(matches!(
+            apply,
+            AoMutation::ApplyTeam {
+                selected_role_ids: Some(_),
+                permission_selection: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn ao_connect_policy_keeps_worker_pool_and_web_key_separate() {
         let mut node = integrations::ao::Node {
             id: "worker".into(),
@@ -1358,6 +1500,11 @@ mod workspace_auth_tests {
                 account_id: "shared-cpa-pool".into(),
                 model: "gemini-3.8-flash-high".into(),
                 permission_profile: ":read-only".into(),
+                native_permission_profile: None,
+                approval_policy: None,
+                approvals_reviewer: None,
+                effort: None,
+                context_window: None,
             },
             request_key: None,
             receipt: None,
@@ -1370,15 +1517,16 @@ mod workspace_auth_tests {
             allow_model_usage: true,
             allow_command_execution: false,
             permission_profile: ":read-only".into(),
+            approval_policy: None,
+            approvals_reviewer: None,
             model: "gemini-3.8-flash-high".into(),
             request_limit: 1,
             lifetime_seconds: 30,
+            effort: None,
+            context_window: None,
         };
         let sentinel = "SENTINEL_KEY_DO_NOT_LOG_1234567890";
-        assert_eq!(
-            ao_connect_policy(&node, &connection, Some(sentinel)).unwrap(),
-            true
-        );
+        assert!(ao_connect_policy(&node, &connection, Some(sentinel)).unwrap());
         assert!(ao_connect_policy(&node, &connection, None).is_err());
         // Codex's workspace profile is allowed when the saved card chose it; the connection
         // must match the card, and no other profile or standalone commands are accepted.
@@ -1391,7 +1539,17 @@ mod workspace_auth_tests {
         connection.allow_command_execution = false;
         node.route.permission_profile = ":danger-full-access".into();
         connection.permission_profile = ":danger-full-access".into();
+        assert!(ao_connect_policy(&node, &connection, Some(sentinel)).unwrap());
+        node.route.approval_policy = Some("on-request".into());
+        node.route.approvals_reviewer = Some("auto_review".into());
         assert!(ao_connect_policy(&node, &connection, Some(sentinel)).is_err());
+        connection.approval_policy = node.route.approval_policy.clone();
+        connection.approvals_reviewer = node.route.approvals_reviewer.clone();
+        assert!(ao_connect_policy(&node, &connection, Some(sentinel)).unwrap());
+        node.route.approval_policy = None;
+        node.route.approvals_reviewer = None;
+        connection.approval_policy = None;
+        connection.approvals_reviewer = None;
         node.route.permission_profile = ":read-only".into();
         connection.permission_profile = ":read-only".into();
         // Any CPA pool model is allowed for a worker, but not a model name with config syntax.
@@ -1419,11 +1577,11 @@ mod workspace_auth_tests {
         node.route.model = "chatgpt-web/high".into();
         connection.model = "chatgpt-web/high".into();
         assert!(ao_connect_policy(&node, &connection, Some(sentinel)).is_err());
-        assert_eq!(ao_connect_policy(&node, &connection, None).unwrap(), false);
+        assert!(!ao_connect_policy(&node, &connection, None).unwrap());
         // The orchestrator may run on another WebGPT tier, or on a CPA model with the pool key.
         node.route.model = "chatgpt-web/extra-high".into();
         connection.model = node.route.model.clone();
-        assert_eq!(ao_connect_policy(&node, &connection, None).unwrap(), false);
+        assert!(!ao_connect_policy(&node, &connection, None).unwrap());
         node.route.provider_id = "cliproxyapi-antigravity".into();
         node.route.account_id = "shared-cpa-pool".into();
         node.route.model = "claude-sonnet-4-6".into();
@@ -2417,7 +2575,9 @@ fn ao_connect_policy(
     // Codex's own profiles: read-only, or workspace (create, edit and delete inside the
     // registered workspace; everything else is asked for). The card's saved route decides.
     if node.route.harness_id != "codex-native"
-        || !matches!(node.route.permission_profile.as_str(), ":read-only" | ":workspace")
+        || node.route.permission_profile == ":ao-default"
+        || connection.approval_policy != node.route.approval_policy
+        || connection.approvals_reviewer != node.route.approvals_reviewer
         || connection.model != node.route.model
         || connection.permission_profile != node.route.permission_profile
         || !connection.allow_model_usage
@@ -2577,7 +2737,13 @@ async fn ao_harness_connect(
         };
     let root = match root.join(&node.settings.working_directory).canonicalize() {
         Ok(directory) if directory.is_dir() && directory.starts_with(&root) => directory,
-        _ => return json_error(StatusCode::BAD_REQUEST, "AO_WORKING_DIRECTORY_INVALID", "Role working directory must exist inside the registered workspace"),
+        _ => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "AO_WORKING_DIRECTORY_INVALID",
+                "Role working directory must exist inside the registered workspace",
+            )
+        }
     };
     if cancelled
         || !matches!(
@@ -2594,7 +2760,7 @@ async fn ao_harness_connect(
     let private_key = body.private_proxy_api_key;
     let web_base_url = body.web_bridge_base_url;
     let web_catalog = body.web_model_catalog;
-    let connection: AoCodexConnection = match serde_json::from_value(body.connection) {
+    let mut connection: AoCodexConnection = match serde_json::from_value(body.connection) {
         Ok(connection) => connection,
         Err(_) => {
             return json_error(
@@ -2604,13 +2770,18 @@ async fn ao_harness_connect(
             )
         }
     };
+    // The card's tuning comes from its saved (and fingerprinted) route, never from the caller.
+    connection.effort = node.route.effort.clone();
+    connection.context_window = node.route.context_window;
     let worker = match ao_connect_policy(&node, &connection, private_key.as_deref()) {
         Ok(worker) => worker,
         Err(error) => return json_error(StatusCode::BAD_REQUEST, "AO_ROUTE_MISMATCH", error),
     };
     // As with a native Codex session: a writable card needs a workspace-write workspace.
     if node.route.permission_profile == ":workspace"
-        && !state.context(&body.workspace_id).is_ok_and(|context| context.permission_mode == "workspace-write")
+        && !state
+            .context(&body.workspace_id)
+            .is_ok_and(|context| context.permission_mode == "workspace-write")
     {
         return json_error(
             StatusCode::BAD_REQUEST,
@@ -2691,26 +2862,58 @@ async fn ao_harness_connect(
     }
     let key = (body.workspace_id, body.run_id, body.node_id);
     let hub = Arc::new(AoCodexHub::default());
-    {
-        let mut hubs = match state.ao_hubs.lock() {
-            Ok(hubs) => hubs,
-            Err(_) => {
-                return json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "AO_HUBS_UNAVAILABLE",
-                    "AO harness store unavailable",
-                )
-            }
-        };
-        if hubs.contains_key(&key) {
-            return json_error(
-                StatusCode::CONFLICT,
-                "AO_HARNESS_OWNERSHIP",
-                "AO harness already connected",
-            );
+    let admission = coding_tools_core::data::DataStore::read_file(|data| {
+        let run = data
+            .ao_runs
+            .iter()
+            .find(|run| run.workspace_id == key.0 && run.id == key.1)
+            .ok_or_else(|| {
+                coding_tools_core::error::AppError::Message("AO mission no longer exists".into())
+            })?;
+        let current = run
+            .nodes
+            .iter()
+            .find(|current| current.id == key.2)
+            .ok_or_else(|| {
+                coding_tools_core::error::AppError::Message("AO node no longer exists".into())
+            })?;
+        if run.cancelled || current.route != node.route || current.state != node.state {
+            return Err(coding_tools_core::error::AppError::Message(
+                "AO node changed before connect; refresh".into(),
+            ));
         }
-        if hubs.len() >= 8 { return Json(json!({"ok":true,"waiting":true,"reason":"harness_capacity"})).into_response(); }
+        if !body.confirm {
+            integrations::ao::grant_valid(data, run, now_ms(), &connection.expected_sha256)?;
+        }
+        let mut hubs = state.ao_hubs.lock().map_err(|_| {
+            coding_tools_core::error::AppError::Message("AO harness store unavailable".into())
+        })?;
+        if let Some(existing) = hubs.get(&key) {
+            if !existing
+                .status()
+                .is_ok_and(|status| idle_hub_policy_differs(current, &status))
+            {
+                return Err(coding_tools_core::error::AppError::Message("Reconnect requires a pending native node and a mismatched idle owned policy; active or matching connections are never replaced".into()));
+            }
+            if let Some(existing) = hubs.remove(&key) {
+                existing.disconnect();
+            }
+        }
+        if hubs.len() >= 8 {
+            return Err(coding_tools_core::error::AppError::Message(
+                "AO_HARNESS_CAPACITY".into(),
+            ));
+        }
         hubs.insert(key.clone(), hub.clone());
+        Ok(())
+    });
+    if let Err(error) = admission {
+        let error = text_error(error);
+        if error == "AO_HARNESS_CAPACITY" {
+            return Json(json!({"ok":true,"waiting":true,"reason":"harness_capacity"}))
+                .into_response();
+        }
+        return json_error(StatusCode::CONFLICT, "AO_RECONNECT_REQUIRED", error);
     }
     let running = hub.clone();
     let outcome = tokio::task::spawn_blocking(move || {
@@ -2739,6 +2942,49 @@ async fn ao_harness_connect(
             };
             json_error(StatusCode::BAD_REQUEST, "AO_HARNESS_CONNECT_FAILED", detail)
         }
+    }
+}
+
+async fn ao_harness_permission_profiles(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(body): Json<AoHarnessNodeRequest>,
+) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let _lease = match admit(&state, "ao_harness_permission_profiles") {
+        Ok(lease) => lease,
+        Err(response) => return *response,
+    };
+    let (_, node, _) = match ao_target(&state, &body.workspace_id, &body.run_id, &body.node_id) {
+        Ok(target) => target,
+        Err(error) => return json_error(StatusCode::BAD_REQUEST, "AO_NODE_SCOPE_FAILED", error),
+    };
+    let unavailable = |reason: &str| {
+        Json(json!({"ok":true,"capability":{"supported":false,"profiles":[],"reason":reason}}))
+            .into_response()
+    };
+    if node.route.harness_id != "codex-native" {
+        return unavailable("This harness cannot enforce native Codex permission profiles");
+    }
+    let key = (body.workspace_id, body.run_id, body.node_id);
+    let hub = state
+        .ao_hubs
+        .lock()
+        .ok()
+        .and_then(|hubs| hubs.get(&key).cloned());
+    let Some(hub) = hub else {
+        return unavailable(
+            "Connect this role with local consent before reading native permission metadata",
+        );
+    };
+    match tokio::task::spawn_blocking(move || hub.permission_profiles()).await {
+        Ok(Ok(capability)) => Json(json!({"ok":true,"capability":capability})).into_response(),
+        Ok(Err(error)) => unavailable(&error),
+        Err(_) => unavailable(
+            "Native permission metadata request failed; no connection or model was started",
+        ),
     }
 }
 
@@ -2857,6 +3103,8 @@ async fn ao_harness_execute(
     if status["connected"] != true
         || status["model"] != node.route.model
         || status["permission_profile"] != node.route.permission_profile
+        || node.route.approval_policy.as_ref().is_some_and(|policy| status["approval_policy"] != *policy)
+        || node.route.approvals_reviewer.as_ref().is_some_and(|reviewer| status["approvals_reviewer"] != *reviewer)
     {
         return json_error(
             StatusCode::CONFLICT,
@@ -3183,7 +3431,7 @@ fn ao_external_node(
     workspace_id: &str,
     run_id: &str,
     node_id: &str,
-) -> Result<integrations::ao::Node, Response> {
+) -> Result<integrations::ao::Node, Box<Response>> {
     // Any role (orchestrator, worker or reviewer) may run on an AO harness.
     match ao_target(state, workspace_id, run_id, node_id) {
         Ok((_root, node, _cancelled))
@@ -3191,11 +3439,11 @@ fn ao_external_node(
         {
             Ok(node)
         }
-        _ => Err(json_error(
+        _ => Err(Box::new(json_error(
             StatusCode::BAD_REQUEST,
             "AO_EXTERNAL_SCOPE_FAILED",
             "AO harness card unavailable",
-        )),
+        ))),
     }
 }
 
@@ -3228,7 +3476,7 @@ async fn ao_external_reserve(
         }
     };
     if let Err(response) = ao_external_node(&state, &body.workspace_id, &body.run_id, &body.node_id) {
-        return response;
+        return *response;
     }
     let grant_now_ms = background.then(now_ms);
     let request_key = format!("ao-{}", uuid::Uuid::new_v4());
@@ -3290,7 +3538,7 @@ async fn ao_external_submitted(
         Err(response) => return *response,
     };
     if let Err(response) = ao_external_node(&state, &body.workspace_id, &body.run_id, &body.node_id) {
-        return response;
+        return *response;
     }
     let saved = tokio::task::spawn_blocking(move || {
         coding_tools_core::data::DataStore::update_file(|data| {
@@ -3329,7 +3577,7 @@ async fn ao_external_terminal(
         Err(response) => return *response,
     };
     if let Err(response) = ao_external_node(&state, &body.workspace_id, &body.run_id, &body.node_id) {
-        return response;
+        return *response;
     }
     let (workspace_id, run_id, node_id) = (
         body.workspace_id.clone(),
@@ -3408,10 +3656,81 @@ async fn ao_harness_approval(
     if let Err(response) = auth(&headers, &state) {
         return *response;
     }
+    if body.allow.is_some() == body.response.is_some()
+        || (body.response.is_some()
+            && (body.thread_id.is_none()
+                || body.turn_id.is_none()
+                || body.approver_reason.is_some()))
+    {
+        return json_error(StatusCode::BAD_REQUEST, "AO_APPROVAL_RESPONSE_INVALID", "Supply either legacy allow or a typed response with exact thread_id/turn_id; typed responses require local human consent");
+    }
     let _lease = match admit(&state, "ao_harness_approval") {
         Ok(lease) => lease,
         Err(response) => return *response,
     };
+    let (_, node, _) = match ao_target(&state, &body.workspace_id, &body.run_id, &body.node_id) {
+        Ok(target) => target,
+        Err(_) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "AO_NODE_SCOPE_FAILED",
+                "AO node unavailable",
+            )
+        }
+    };
+    if node.state != integrations::ao::State::Running {
+        return json_error(
+            StatusCode::CONFLICT,
+            "AO_NODE_NOT_RUNNING",
+            "AO node has no active turn",
+        );
+    }
+    let key = (
+        body.workspace_id.clone(),
+        body.run_id.clone(),
+        body.node_id.clone(),
+    );
+    let hub = state
+        .ao_hubs
+        .lock()
+        .ok()
+        .and_then(|hubs| hubs.get(&key).cloned());
+    let Some(hub) = hub else {
+        return json_error(
+            StatusCode::CONFLICT,
+            "AO_HARNESS_NOT_CONNECTED",
+            "AO harness unavailable",
+        );
+    };
+    let pending = match hub.status().ok().and_then(|status| {
+        status["pending_approvals"].as_array().and_then(|requests| {
+            requests
+                .iter()
+                .find(|request| request["approval_id"] == body.approval_id)
+                .cloned()
+        })
+    }) {
+        Some(request) => request,
+        None => {
+            return json_error(
+                StatusCode::CONFLICT,
+                "AO_APPROVAL_UNAVAILABLE",
+                "Native request expired or was already answered",
+            )
+        }
+    };
+    if node
+        .receipt
+        .as_ref()
+        .and_then(|receipt| receipt.thread_id.as_deref())
+        != pending["thread_id"].as_str()
+        || (body.response.is_some()
+            && (body.thread_id.as_deref() != pending["thread_id"].as_str()
+                || body.turn_id.as_deref() != pending["turn_id"].as_str()))
+        || (body.approver_reason.is_some() && pending["kind"] != "command")
+    {
+        return json_error(StatusCode::CONFLICT, "AO_APPROVAL_SCOPE_CHANGED", "Native request does not belong to the node's exact live attempt; automatic mission approval is command-only");
+    }
     if let Some(reason) = body.approver_reason.as_deref() {
         // The command approver answers within the mission's own grant; the decision is logged
         // on the card, and allowing needs the approver's auto-decide setting.
@@ -3421,7 +3740,7 @@ async fn ao_harness_approval(
             body.node_id.clone(),
         );
         let (allow, reason, request) = (
-            body.allow,
+            body.allow.unwrap_or(false),
             reason.to_owned(),
             body.approver_request.clone().unwrap_or_default(),
         );
@@ -3461,43 +3780,19 @@ async fn ao_harness_approval(
             "Answer this AO approval in the focused local window",
         );
     }
-    let (_, node, _) = match ao_target(&state, &body.workspace_id, &body.run_id, &body.node_id) {
-        Ok(target) => target,
-        Err(_) => {
-            return json_error(
-                StatusCode::BAD_REQUEST,
-                "AO_NODE_SCOPE_FAILED",
-                "AO node unavailable",
-            )
-        }
+    let result = if let Some(response) = &body.response {
+        hub.resolve_request(
+            &body.approval_id,
+            body.thread_id.as_deref().unwrap_or(""),
+            body.turn_id.as_deref().unwrap_or(""),
+            response,
+        )
+    } else {
+        hub.resolve_approval(&body.approval_id, body.allow.unwrap_or(false))
     };
-    if node.state != integrations::ao::State::Running {
-        return json_error(
-            StatusCode::CONFLICT,
-            "AO_NODE_NOT_RUNNING",
-            "AO node has no active turn",
-        );
-    }
-    let key = (body.workspace_id, body.run_id, body.node_id);
-    let hub = state
-        .ao_hubs
-        .lock()
-        .ok()
-        .and_then(|hubs| hubs.get(&key).cloned());
-    let Some(hub) = hub else {
-        return json_error(
-            StatusCode::CONFLICT,
-            "AO_HARNESS_NOT_CONNECTED",
-            "AO harness unavailable",
-        );
-    };
-    match hub.resolve_approval(&body.approval_id, body.allow) {
+    match result {
         Ok(result) => Json(json!({"ok":true,"result":result})).into_response(),
-        Err(_) => json_error(
-            StatusCode::CONFLICT,
-            "AO_APPROVAL_UNAVAILABLE",
-            "AO approval expired or belongs to another turn",
-        ),
+        Err(error) => json_error(StatusCode::CONFLICT, "AO_APPROVAL_UNAVAILABLE", error),
     }
 }
 
@@ -3579,9 +3874,10 @@ async fn ao_read(
             } else {
                 scoped.take(100).cloned().collect()
             };
-            let team = data.ao_teams.iter().find(|team| team.workspace_id == body.workspace_id);
+            let teams: Vec<_> = data.ao_teams.iter().filter(|team| team.workspace_id == body.workspace_id).collect();
+            let team = teams.first().copied();
             let capacity: std::collections::HashMap<_, _> = runs.iter().map(|run| (run.id.clone(), integrations::ao_team::available_workers(data, run))).collect();
-            Ok(json!({"ok":true,"runs":runs,"board_revision":data.control_board.revision,"team":team,"limits":data.ao_limits,"worker_capacity":capacity}))
+            Ok(json!({"ok":true,"runs":runs,"board_revision":data.control_board.revision,"team":team,"teams":teams,"limits":data.ao_limits,"worker_capacity":capacity}))
         })
         .map_err(text_error)
     })
@@ -3595,6 +3891,91 @@ async fn ao_read(
             "AO read outcome unknown",
         ),
     }
+}
+
+fn idle_hub_policy_differs(node: &integrations::ao::Node, status: &Value) -> bool {
+    node.state == integrations::ao::State::Pending
+        && node.route.harness_id == "codex-native"
+        && (status["permission_profile"] != node.route.permission_profile
+            || node
+                .route
+                .approval_policy
+                .as_ref()
+                .is_some_and(|policy| status["approval_policy"] != *policy)
+            || node
+                .route
+                .approvals_reviewer
+                .as_ref()
+                .is_some_and(|reviewer| status["approvals_reviewer"] != *reviewer))
+        && status["threads"].as_array().is_some_and(|threads| {
+            threads.iter().all(|thread| {
+                matches!(
+                    thread["status"].as_str(),
+                    Some("idle" | "closed" | "completed" | "failed" | "interrupted")
+                )
+            })
+        })
+}
+
+/// Hold the data-file revision lock while removing only stale idle owned connections.
+/// Old-route dispatch cannot reserve against the new revision; new-route dispatch rejects
+/// the old connection policy before reservation. Active or ambiguous hubs are never stopped.
+fn retire_idle_policy_hubs(
+    state: &ServiceState,
+    applied: &integrations::ao::Run,
+    roles: &[String],
+) -> Result<Vec<String>, String> {
+    coding_tools_core::data::DataStore::read_file(|data| {
+        let current = data
+            .ao_runs
+            .iter()
+            .find(|run| run.id == applied.id && run.workspace_id == applied.workspace_id)
+            .ok_or_else(|| {
+                coding_tools_core::error::AppError::Message(
+                    "Applied mission no longer exists".into(),
+                )
+            })?;
+        if current.revision != applied.revision || current.cancelled {
+            return Err(coding_tools_core::error::AppError::Message(
+                "Applied mission revision changed before idle reconnect; refresh".into(),
+            ));
+        }
+        let mut hubs = state.ao_hubs.lock().map_err(|_| {
+            coding_tools_core::error::AppError::Message(
+                "AO connection ownership unavailable".into(),
+            )
+        })?;
+        let mut retired = Vec::new();
+        for node in &current.nodes {
+            if !roles
+                .iter()
+                .any(|role| role == node.template_role_id.as_deref().unwrap_or(&node.id))
+            {
+                continue;
+            }
+            let saved = applied.nodes.iter().find(|saved| saved.id == node.id);
+            if saved.is_none_or(|saved| saved.state != node.state || saved.route != node.route) {
+                continue;
+            }
+            let key = (
+                current.workspace_id.clone(),
+                current.id.clone(),
+                node.id.clone(),
+            );
+            if hubs
+                .get(&key)
+                .and_then(|hub| hub.status().ok())
+                .is_some_and(|status| idle_hub_policy_differs(node, &status))
+            {
+                if let Some(hub) = hubs.remove(&key) {
+                    hub.disconnect();
+                    retired.push(node.id.clone());
+                }
+            }
+        }
+        Ok(retired)
+    })
+    .map_err(text_error)
 }
 
 async fn ao_update(
@@ -3622,6 +4003,15 @@ async fn ao_update(
             return json_error(StatusCode::BAD_REQUEST, "WORKSPACE_CONTEXT_FAILED", error)
         }
     };
+    let scoped_roles = match &body.change {
+        AoMutation::ApplyTeam {
+            selected_role_ids: Some(ids),
+            permission_selection: Some(_),
+            ..
+        } => Some(ids.clone()),
+        _ => None,
+    };
+    let lifecycle_state = state.clone();
     let workspace_id = body.workspace_id;
     let outcome = tokio::task::spawn_blocking(move || {
         let request = context
@@ -3630,13 +4020,15 @@ async fn ao_update(
         let _guard = request
             .policy_execution_guard()
             .map_err(|error| error.message().to_string())?;
-        coding_tools_core::data::DataStore::update_file(|data| match body.change {
-            AoMutation::CreateFromTeam { run_id, task_id, expected_board_revision, team_revision, worker_limit } =>
-                integrations::ao_team::create_run(data, &workspace_id, run_id, task_id, expected_board_revision, team_revision, worker_limit)
+        let mut result = coding_tools_core::data::DataStore::update_file(|data| match body.change {
+            AoMutation::CreateFromTeam { run_id, task_id, expected_board_revision, team_revision, team_id, execution_mode, single_route, worker_limit } =>
+                integrations::ao_team::create_selected_run(data, &workspace_id, run_id, task_id, expected_board_revision, worker_limit,
+                    integrations::ao_team::CreateSelection { execution_mode, team_id, team_revision, single_route: single_route.map(|route| *route) })
                     .map(|run| json!({"ok":true,"run":run})),
             AoMutation::SaveTeam { expected_revision, team } => integrations::ao_team::save(data, &workspace_id, expected_revision, team)
                 .map(|team| json!({"ok":true,"team":team})),
-            AoMutation::ApplyTeam { run_id, expected_revision, team_revision } => integrations::ao_team::apply(data, &workspace_id, &run_id, expected_revision, team_revision)
+            AoMutation::ApplyTeam { run_id, expected_revision, team_revision, team_id, selected_role_ids, permission_selection } => integrations::ao_team::apply_selected_config(data, &workspace_id, &run_id, expected_revision,
+                integrations::ao_team::ApplySelection { team_id, team_revision, selected_role_ids, permission_selection })
                 .map(|run| json!({"ok":true,"run":run})),
             AoMutation::SetLimits { expected_revision, max_workers, run_id, run_revision, worker_limit } => {
                 let mission = match (run_id.as_deref(), run_revision, worker_limit) {
@@ -3656,7 +4048,7 @@ async fn ao_update(
                         "AO run belongs to another workspace".into(),
                     ));
                 }
-                integrations::ao::create(data, expected_board_revision, run).map(|run| json!({"ok":true,"run":run}))
+                integrations::ao::create(data, expected_board_revision, *run).map(|run| json!({"ok":true,"run":run}))
             }
             AoMutation::Graph {
                 run_id,
@@ -3674,7 +4066,15 @@ async fn ao_update(
                 expected_revision,
             } => integrations::ao::cancel(data, &workspace_id, &run_id, expected_revision).map(|run| json!({"ok":true,"run":run})),
         })
-        .map_err(text_error)
+        .map_err(text_error)?;
+        if let Some(roles) = scoped_roles {
+            let run: integrations::ao::Run = serde_json::from_value(result["run"].clone()).map_err(|_| "Native policy was saved but readback is unavailable; refresh before reconnecting")?;
+            match retire_idle_policy_hubs(&lifecycle_state, &run, &roles) {
+                Ok(retired) => result["reconnect_required"] = json!(retired),
+                Err(error) => result["reconnect_error"] = json!(error),
+            }
+        }
+        Ok::<_, String>(result)
     })
     .await;
     match outcome {
@@ -4103,6 +4503,7 @@ fn router(state: ServiceState) -> Router {
         .route("/api/v1/ao/harness/execute", post(ao_harness_execute))
         .route("/api/v1/ao/harness/observe", post(ao_harness_observe))
         .route("/api/v1/ao/harness/approval", post(ao_harness_approval))
+        .route("/api/v1/ao/harness/permission-profiles", post(ao_harness_permission_profiles))
         .route("/api/v1/ao/harness/disconnect", post(ao_harness_disconnect))
         .route("/api/v1/ao/external/reserve", post(ao_external_reserve))
         .route("/api/v1/ao/external/submitted", post(ao_external_submitted))

@@ -58,7 +58,7 @@ async function allocatePort() {
   return port;
 }
 
-function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, getWorkspaces, missionCall, extraPath = () => null, extraEnv = () => ({}), logger = console }) {
+function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, extraPath = () => null, extraEnv = () => ({}), logger = console }) {
   let child = null;
   let gateway = null;
   let view = null;
@@ -78,7 +78,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   let originalPath = "/";
 
   // AO terminals open clicked links with window.open (e.g. agy's Google sign-in URL). The view
-  // always denies the new window; this decides whether the URL goes to the system browser.
+  // always denies the new window; Google sign-in stays inside the proxy-routed browser.
   async function openTerminalLink(rawUrl) {
     let url;
     try { url = new URL(String(rawUrl || "")); } catch { return false; }
@@ -86,7 +86,10 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     // Terminal output is untrusted: only the sign-in hosts agy prints open without asking.
     const trusted = url.protocol === "https:" && TRUSTED_TERMINAL_LINK_HOSTS.has(url.hostname);
     if (!trusted && !(await confirm({ message: "Open this link from the terminal?", detail: url.toString() }))) return false;
-    await shell.openExternal(url.toString());
+    if (trusted) {
+      if (typeof openAuth !== "function") throw new Error("Proxy-routed Antigravity sign-in is unavailable");
+      await openAuth(url.toString());
+    } else await shell.openExternal(url.toString());
     return true;
   }
   const workspaceBoard = typeof getWorkspaces === "function" && typeof missionCall === "function"
@@ -179,18 +182,23 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return (Array.isArray(catalog?.models) ? catalog.models : []).filter(model => typeof model?.id === "string" && model.id.length <= 128)
         .slice(0, 100).map(model => ({ id: model.id, label: String(model.label || model.id).slice(0, 128), isDefault: model.isDefault === true }));
     },
-    async spawn({ workspaceId, agent, model, prompt, name, gateway = null }) {
+    async spawn({ workspaceId, agent, model, prompt, name, gateway = null, effort = null, approvalMode = null }) {
+      if (approvalMode !== null && !["default", "accept-edits", "auto", "bypass-permissions"].includes(approvalMode)) throw new Error("Unsupported AO permission mode");
       const projectId = await projectFor(workspaceId);
       const settings = await internalApi("GET", "/api/v1/settings");
       // Chat-capable agents return their answer as a conversation turn. Every other
       // installed agent runs in its own terminal UI and hands back a result file.
       const chat = Array.isArray(settings?.chatHarnesses) && settings.chatHarnesses.includes(agentId(agent));
+      const codexWorkspace = agent === "codex" && ["accept-edits", "auto"].includes(approvalMode);
+      if (codexWorkspace && !chat) throw new Error("Codex workspace permissions require its capable chat driver; TUI sandbox settings cannot be verified.");
       // AO caps prompts at 16 KiB of UTF-8; leave room for the TUI result instruction.
       const brief = utf8Prefix(prompt, 16384 - Buffer.byteLength(TUI_RESULT_INSTRUCTION, "utf8") - 2);
       const launch = (mode) => internalApi("POST", "/api/v1/sessions", {
         projectId, kind: "worker", harness: agentId(agent), mode,
+        ...(approvalMode ? { approvalMode } : {}),
         prompt: mode === "chat" ? brief : `${brief}\n\n${TUI_RESULT_INSTRUCTION}`,
         ...(model && model !== "default" ? { model: String(model).slice(0, 256) } : {}),
+        ...(effort && !gateway ? { effort: String(effort).slice(0, 32) } : {}),
         // A CPA model runs through the local gateway; AO adds the key from its own environment.
         ...(gateway?.provider === "cpa" && typeof gateway.model === "string" ? { gateway: { provider: "cpa", model: gateway.model.slice(0, 256) } } : {}),
         displayName: String(name || "AO worker").slice(0, 100),
@@ -201,7 +209,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       } catch (error) {
         // Chat mode needs AO's packaged ACP runtime (Claude's chat driver). Without it the agent
         // still runs in its own terminal and hands back a result file.
-        if (!chat || !/CHAT_DRIVER_UNAVAILABLE/.test(String(error?.message))) throw error;
+        if (!chat || codexWorkspace || !/CHAT_DRIVER_UNAVAILABLE/.test(String(error?.message))) throw error;
         data = await launch("tui");
       }
       return sessionId(data?.session?.id);
@@ -319,6 +327,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       if (!workspaceBoard || !["open", "start", "resume", "restart"].includes(args.intent)) throw new Error("Invalid mission navigation request");
       const board = await workspaceBoard.readWorkspace(args.workspaceId, args.runId);
       if (!board.runs.some(run => run.id === args.runId)) throw new Error("Mission is outside this workspace");
+      // The board owns keyboard focus; return it before the main controller requests consent.
+      const parent = getWindow();
+      if (args.intent !== "open" && attached && view && !view.webContents.isDestroyed()
+        && view.webContents.isFocused() && parent && !parent.isDestroyed()
+        && parent.isVisible() && !parent.isMinimized() && parent.isFocused()) {
+        parent.webContents.focus();
+      }
       missionSelection = { id: crypto.randomUUID(), workspaceId: board.workspaceId, runId: args.runId, intent: args.intent };
       return { ok: true };
     }

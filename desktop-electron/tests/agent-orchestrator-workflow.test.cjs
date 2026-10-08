@@ -198,6 +198,7 @@ test("AO WebGPT connect uses the selected Codex bundled catalog without a CPA ke
     },
     cpaConnection: () => { throw new Error("WebGPT must not request a CPA key"); },
     webBridgeConnection: () => ({ baseUrl: "http://127.0.0.1:17841/v1" }),
+    webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
     webModelCatalog: async ({ executable, model }) => {
       assert.equal(confirmed, true, "do not launch a selected executable before local approval");
       assert.equal(executable, "C:\\codex.exe");
@@ -256,6 +257,7 @@ test("a Luna orchestrator card connects on the Luna tier", async () => {
       return { ok: true, owned: true, status: { model: "chatgpt-web/luna" } };
     },
     webBridgeConnection: () => ({ baseUrl: "http://127.0.0.1:17841/v1" }),
+    webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
     webModelCatalog: async ({ model }) => ({ models: [{ slug: model }] }),
     resolveHarness: async ({ model, permissionProfile }) => ({ executable: "C:\\codex.exe", expected_sha256: "0".repeat(64),
       codex_home: "C:\\ao-home", model, allow_model_usage: true,
@@ -297,11 +299,23 @@ test("AO native resolver pins an executable and a distinct unopened home per nod
   assert.equal(fs.existsSync(first.codex_home), false, "inspection must not create an AO home before approval");
   assert.equal(first.permission_profile, ":read-only");
   assert.equal(first.allow_command_execution, false);
-  // A card saved with Codex's workspace profile connects with it; nothing wider is accepted.
+  // Keep the exact native profile and reviewer; native metadata enforces managed availability.
   const writable = await resolveAoNativeConnection({ ...input, permissionProfile: ":workspace" });
   assert.equal(writable.permission_profile, ":workspace");
   assert.equal(writable.allow_command_execution, false);
-  await assert.rejects(resolveAoNativeConnection({ ...input, permissionProfile: ":danger-full-access" }), /read-only or workspace/);
+  assert.equal(Object.hasOwn(first, "approval_policy"), false, "legacy grants retain absent policy fields");
+  for (const permissionProfile of [":danger-full-access", "custom-profile"]) {
+    const selected = await resolveAoNativeConnection({ ...input, permissionProfile,
+      approvalPolicy: "on-request", approvalsReviewer: "auto_review" });
+    assert.equal(selected.permission_profile, permissionProfile);
+    assert.equal(selected.approval_policy, "on-request");
+    assert.equal(selected.approvals_reviewer, "auto_review");
+    assert.equal(selected.allow_command_execution, false);
+  }
+  await assert.rejects(resolveAoNativeConnection({ ...input, approvalPolicy: "always" }), /policy/i);
+  await assert.rejects(resolveAoNativeConnection({ ...input, approvalPolicy: "never", approvalsReviewer: "auto_review" }), /review/i);
+  await assert.rejects(resolveAoNativeConnection({ ...input, permissionProfile: ":ao-default" }), /profile/i);
+  fs.rmSync(root, { recursive: true, force: true });
   await assert.rejects(resolveAoNativeConnection({ ...input, executable: "relative-codex.exe" }), /absolute/i);
 });
 
@@ -333,6 +347,7 @@ test("AO advances only a ready card and observes an existing reservation without
       throw new Error(`Unexpected AO endpoint ${endpoint}`);
     },
     cpaConnection: () => { throw new Error("Planner must not use CPA"); },
+    webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
     confirm: async () => true,
   });
   const input = { workspaceId: "ws-1", runId: "run-1", executable: "C:\\codex.exe" };
@@ -427,8 +442,10 @@ test("AO granted run dispatches parallel workers after focus loss and finishes e
         focused = false;
         return { ok: true, run: structuredClone(run), grant: { executable_sha256: "a".repeat(64) } };
       }
-      if (endpoint === "/api/v1/ao/harness/status") return { ok: true, status: { connected: false } };
+      if (endpoint === "/api/v1/ao/harness/status") return { ok: true, status: { connected: true,
+        model: nodes.find(node => node.id === body.node_id).route.model, permission_profile: ":danger-full-access" } };
       if (endpoint === "/api/v1/ao/harness/connect") {
+        assert.equal(body.connection.permission_profile, ":read-only", "stale idle policy is replaced through the existing exact graph grant");
         assert.equal(focused, false);
         assert.equal(body.confirm, false);
         assert.equal(options?.localConfirmation, undefined);
@@ -458,6 +475,7 @@ test("AO granted run dispatches parallel workers after focus loss and finishes e
     },
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "SENTINEL_PRIVATE_KEY_12345678901234567890" }),
     webBridgeConnection: () => ({ baseUrl: "http://127.0.0.1:17841/v1" }),
+    webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
     webModelCatalog: async () => ({ models: [{ slug: "chatgpt-web/high" }] }),
     resolveHarness: async ({ model }) => ({ executable: "C:\\codex.exe", expected_sha256: "a".repeat(64),
       codex_home: "C:\\ao-home", model, allow_model_usage: true,
@@ -569,6 +587,7 @@ test("AO background waits for an explicit tool decision without approving it", a
     resolveHarness: async ({ model }) => ({ executable: "C:\\codex.exe", expected_sha256: "a".repeat(64),
       model, allow_model_usage: true, allow_command_execution: false, permission_profile: ":read-only" }),
     webBridgeConnection: () => ({ baseUrl: "http://127.0.0.1:17841/v1" }),
+    webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
     webModelCatalog: async () => ({ models: [{ slug: "chatgpt-web/high" }] }),
     confirm: async () => true,
   });
@@ -615,6 +634,7 @@ test("AO background runs report progress, approval waits and errors to the MCP e
     resolveHarness: async ({ model }) => ({ executable: "C:\\codex.exe", expected_sha256: "a".repeat(64),
       model, allow_model_usage: true, allow_command_execution: false, permission_profile: ":read-only" }),
     webBridgeConnection: () => ({ baseUrl: "http://127.0.0.1:17841/v1" }),
+    webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
     webModelCatalog: async () => ({ models: [{ slug: "chatgpt-web/high" }] }),
     confirm: async () => true,
     onRunState: (update) => {
@@ -711,7 +731,7 @@ test("AO harness workers run as AO sessions and return their answer as the card 
   assert.equal(calls.filter((item) => item.endpoint.startsWith("/api/v1/ao/harness/")).length, 0);
 });
 
-test("Native Codex offers every WebGPT tier, Luna included, and every CPA pool model except Gemini", async () => {
+test("Native Codex offers only WebGPT, every tier with Luna included; CPA models run on AO harnesses", async () => {
   const WEB = ["chatgpt-web/light", "chatgpt-web/medium", "chatgpt-web/high", "chatgpt-web/extra-high", "chatgpt-web/pro",
     "chatgpt-web/luna", "chatgpt-web/think"];
   const workflow = createAgentOrchestratorWorkflow({
@@ -720,8 +740,8 @@ test("Native Codex offers every WebGPT tier, Luna included, and every CPA pool m
     fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "gemini-3.8-flash-high" }, { id: "claude-sonnet-4-6" }, { id: "gpt-5.5" }] }) }),
     confirm: async () => true,
   });
-  assert.deepEqual((await workflow.call("models", { harness: "codex-native" })).models,
-    [...WEB, "claude-sonnet-4-6", "gpt-5.5"], "Gemini runs on Claude Code, not Native Codex");
+  assert.deepEqual((await workflow.call("models", { harness: "codex-native" })).models, WEB,
+    "CPA pool models run on an AO harness through the gateway, never on Native Codex");
   const offline = createAgentOrchestratorWorkflow({
     requestHeadless: async () => { throw new Error("no headless call expected"); },
     cpaConnection: () => null, confirm: async () => true,
@@ -743,6 +763,22 @@ test("WebGPT is offered only on Native Codex; AO harnesses get every other CPA m
   assert.deepEqual((await workflow.call("models", { harness: "ao:codex", workspaceId: "ws-1" })).models,
     ["gpt-5.5", "cpa/gemini-3.8-flash-high"]);
   assert.ok((await workflow.call("models", { harness: "codex-native" })).models.includes("chatgpt-web/high"));
+});
+
+test("CPA models go only to agents that can use them through the gateway", async () => {
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async () => { throw new Error("no headless call expected"); },
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k".repeat(40) }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "gpt-5.5" }, { id: "gemini-3.8-flash-high" }, { id: "gemini-3.1-pro-low" }] }) }),
+    aoHarness: { catalog: async () => [], models: async () => [{ id: "own-model" }] },
+    confirm: async () => true,
+  });
+  // Aider has no gateway launch support: its own models only.
+  assert.deepEqual((await workflow.call("models", { harness: "ao:aider" })).models, ["own-model"]);
+  // agy's gateway mode sends no tools for CPA's model names, so it keeps its own models.
+  assert.deepEqual((await workflow.call("models", { harness: "ao:agy" })).models, ["own-model"]);
+  assert.deepEqual((await workflow.call("models", { harness: "ao:claude-code" })).models,
+    ["own-model", "cpa/gpt-5.5", "cpa/gemini-3.8-flash-high", "cpa/gemini-3.1-pro-low"]);
 });
 
 // A fake headless service holding one workspace's board, runs and team.
@@ -935,6 +971,7 @@ test("a held card is handed to the recovery helper, which retries it and restart
       asked.push(JSON.parse(init.body).messages[0].content);
       return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"retry","reason":"The send timed out"}' } }] }) };
     },
+    webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
     onRunState: (update) => states.push(update?.detail),
     resolveHarness: async () => ({ expected_sha256: "a".repeat(64), executable: path.resolve("codex.exe") }) });
   await workflow.call("start_run", { workspaceId: "ws-1", runId: "r1" });
@@ -949,6 +986,7 @@ test("the helper stops retrying a card that already failed three times", async (
   let asked = 0;
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/Codex/codex.exe",
     fetchImpl: async () => { asked += 1; throw new Error("no"); },
+    webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
     resolveHarness: async () => ({ expected_sha256: "a".repeat(64), executable: path.resolve("codex.exe") }) });
   await workflow.call("start_run", { workspaceId: "ws-1", runId: "r1" });
   await until(() => world.reads >= 2);
@@ -1068,5 +1106,409 @@ test("relinking or removing a working card stops its turn; an idle card is just 
     await workflow.call("update_run", { workspaceId: "ws-1", change: { operation: "graph", run_id: "run-1",
       expected_revision: 3, change: { operation: "set_parents", node_id: "w2", parents: ["planner"] } } });
     assert.equal(calls.includes("/api/v1/ao/harness/disconnect"), stops, state);
+  }
+});
+
+test("activity reports each working card's runtime and current step without advancing the run", async () => {
+  const calls = [];
+  const native = { id: "w1", role: "worker", state: "running", route: { harness_id: "codex-native", provider_id: "chatgpt-web", model: "chatgpt-web/high" },
+    receipt: { status: "submitted", thread_id: "thread-1", started_at_ms: 1_000 } };
+  const stuck = { id: "w2", role: "worker", state: "running", route: { harness_id: "codex-native", provider_id: "chatgpt-web", model: "chatgpt-web/high" },
+    receipt: { status: "submitted", thread_id: "thread-2", started_at_ms: 2_000 } };
+  const agent = { id: "w3", role: "worker", state: "running", route: { harness_id: "ao:codex", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" },
+    receipt: { status: "submitted", thread_id: "sess-3" } };
+  const done = { id: "p", role: "planner", state: "finished", route: native.route, receipt: { status: "completed" } };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body) => {
+      calls.push(endpoint);
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [done, native, stuck, agent] }] };
+      if (endpoint === "/api/v1/ao/harness/status") {
+        return { ok: true, status: { connected: true, threads: body.node_id === "w1"
+          ? [{ id: "thread-1", turn_id: "turn-1", activity: "running a command", activity_at_ms: 5_000, last_event_at_ms: 6_000 }]
+          : [{ id: "thread-2", turn_id: null, activity: null, started_at_ms: 2_000 }] } };
+      }
+      throw new Error(`unexpected ${endpoint}`);
+    },
+    aoHarness: { observe: async () => ({ turnState: "running", turnId: "t-3" }) },
+    confirm: async () => true,
+  });
+  const result = await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
+  assert.deepEqual(Object.keys(result.nodes).sort(), ["w1", "w2", "w3"], "only working cards");
+  assert.equal(result.nodes.w1.activity, "running a command");
+  assert.equal(result.nodes.w1.last_event_at_ms, 6_000);
+  assert.equal(result.nodes.w1.started_at_ms, 1_000);
+  assert.equal(result.nodes.w2.activity, "waiting for the turn to start");
+  assert.equal(result.nodes.w2.turn_started, false);
+  assert.equal(result.nodes.w3.activity, "running");
+  assert.ok(calls.every((endpoint) => endpoint === "/api/v1/ao/read" || endpoint === "/api/v1/ao/harness/status"), "read-only calls only");
+});
+
+test("AO chat reads native managed capability for exactly one consented node", async () => {
+  const calls = [];
+  const capability = { supported: true, profiles: [{ id: ":workspace", allowed: true }],
+    requirements: {}, approval_policies: ["on-request", "never"], approvals_reviewers: ["user", "auto_review"] };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body) => { calls.push({ endpoint, body }); return { ok: true, capability }; },
+  });
+  const host = createCodingToolsAppsHost({ services: { agentOrchestrator: (operation, args) => workflow.call(operation, args) } });
+  const reply = await host.call("agent-orchestrator", "permission_profiles", { workspaceId: "ws", runId: "run", nodeId: "planner" });
+  assert.deepEqual(reply.result.capability, capability);
+  assert.deepEqual(calls, [{ endpoint: "/api/v1/ao/harness/permission-profiles",
+    body: { workspace_id: "ws", run_id: "run", node_id: "planner" } }]);
+});
+
+test("AO typed native replies preserve exact payload and thread/turn scope after local confirmation", async () => {
+  const calls = [], prompts = [];
+  const pending = { approval_id: "approval", kind: "command", method: "item/commandExecution/requestApproval",
+    thread_id: "thread", turn_id: "turn", request: { command: "Get-Content test.txt", availableDecisions: ["accept", "decline"] } };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body, options) => {
+      calls.push({ endpoint, body, options });
+      if (endpoint.endsWith("/status")) return { ok: true, status: { pending_approvals: [pending] } };
+      return { ok: true, result: { ok: true } };
+    },
+    confirm: async prompt => { prompts.push(prompt); return true; },
+  });
+  const base = { workspaceId: "ws", runId: "run", nodeId: "worker", approvalId: "approval", threadId: "thread", turnId: "turn" };
+  for (const response of [{ decision: "accept" }, { permissions: { filesystem: { read: ["C:/project"] } }, scope: "turn" },
+    { answers: { choice: { answers: ["Yes"] } } }, { action: "accept", content: { approved: true } }]) {
+    await workflow.call("approve_harness", { ...base, response });
+    const sent = calls.at(-1);
+    assert.deepEqual(sent.body, { workspace_id: "ws", run_id: "run", node_id: "worker",
+      approval_id: "approval", thread_id: "thread", turn_id: "turn", response, confirm: true });
+    assert.deepEqual(sent.options, { localConfirmation: true });
+  }
+  assert.match(prompts[0].detail, /thread.*turn/s);
+  assert.match(prompts[0].detail, /accept/);
+  for (const invalid of [{ ...base, response: { decision: "accept" }, allow: true },
+    { ...base, turnId: "stale", response: { decision: "accept" } },
+    { ...base, threadId: undefined, response: { decision: "accept" } }]) {
+    const before = calls.filter(call => call.endpoint.endsWith("/approval")).length;
+    await assert.rejects(workflow.call("approve_harness", invalid), /scope|reply|either|turn|thread|pending/i);
+    assert.equal(calls.filter(call => call.endpoint.endsWith("/approval")).length, before);
+  }
+});
+
+test("AO typed approval cancelled in the local confirmation never forwards", async () => {
+  let sent = 0;
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint) => {
+      if (endpoint.endsWith("/status")) return { ok: true, status: { pending_approvals: [
+        { approval_id: "a", method: "mcpServer/elicitation/request", thread_id: "t", turn_id: "v", kind: "mcp_url" }] } };
+      sent++; return { ok: true, result: { ok: true } };
+    },
+    confirm: async () => false,
+  });
+  const result = await workflow.call("approve_harness", { workspaceId: "ws", runId: "run", nodeId: "worker",
+    approvalId: "a", threadId: "t", turnId: "v", response: { action: "decline" } });
+  assert.equal(result.cancelled, true);
+  assert.equal(sent, 0);
+});
+
+test("AO connection forwards saved native policy and rejects a resolver substitution", async () => {
+  const calls = [], selections = [];
+  let substitute = false;
+  const route = { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web",
+    model: "chatgpt-web/high", permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run", workspace_id: "ws",
+        nodes: [{ id: "worker", role: "worker", state: "pending", route }] }] };
+      calls.push({ endpoint, body }); return { ok: true, status: { model: route.model } };
+    },
+    webBridgeConnection: () => ({ baseUrl: "http://127.0.0.1:17841/v1" }),
+    webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
+    webModelCatalog: async () => ({ models: [{ slug: route.model }] }),
+    resolveHarness: async selection => {
+      selections.push(selection);
+      return { executable: "C:/codex.exe", model: route.model, permission_profile: route.permission_profile,
+        allow_model_usage: true, allow_command_execution: false, approval_policy: selection.approvalPolicy,
+        approvals_reviewer: substitute ? "user" : selection.approvalsReviewer };
+    },
+    confirm: async () => true,
+  });
+  const input = { workspaceId: "ws", runId: "run", nodeId: "worker", executable: "C:/codex.exe" };
+  await workflow.call("connect_harness", input);
+  assert.equal(selections[0].approvalPolicy, "on-request");
+  assert.equal(selections[0].approvalsReviewer, "auto_review");
+  assert.equal(calls[0].body.connection.approvals_reviewer, "auto_review");
+  substitute = true;
+  await assert.rejects(workflow.call("connect_harness", input), /saved.*permission|policy/i);
+  assert.equal(calls.length, 1);
+});
+
+test("background command approver leaves typed non-command, truncated and unoffered grants for the person", async () => {
+  for (const scenario of ["non-command", "unoffered", "truncated"]) {
+    const route = { harness_id: "codex-native", provider_id: "cliproxyapi-antigravity",
+      model: "test-model", permission_profile: ":read-only" };
+    const pending = scenario === "non-command"
+      ? ["permissions", "questions", "file_change", "mcp_form", "mcp_url", "file_write"].map(kind =>
+        ({ approval_id: kind, kind, method: "native/" + kind }))
+      : [{ approval_id: scenario, kind: "command", command: "Get-Content test.txt", cwd: "C:/outside",
+        request: { availableDecisions: ["decline"],
+          ...(scenario === "truncated" ? { additionalPermissions: "requested".repeat(150),
+            networkApprovalContext: { host: "outside.invalid", protocol: "https" } } : {}) } }];
+    const mission = { id: "run", workspace_id: "ws", revision: 3, grant: { executable_sha256: "a".repeat(64) }, nodes: [
+      { id: "approver", role: "approver", state: "finished", parents: [], route,
+        receipt: { verdict: "APPROVED" }, settings: { auto_decide: true } },
+      { id: "worker", role: "worker", state: "running", parents: ["approver"], route },
+    ] };
+    let finished = false, sent = 0, asked = 0;
+    const workflow = createAgentOrchestratorWorkflow({
+      findCodexExecutable: () => process.execPath,
+      resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+      cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+      fetchImpl: async url => {
+        if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) };
+        asked++;
+        return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"allow","reason":"Fixture only"}' } }] }) };
+      },
+      requestHeadless: async endpoint => {
+        if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+        if (endpoint.endsWith("/observe")) {
+          if (finished) mission.nodes[1].state = "finished";
+          return { ok: true, pending_approvals: finished ? [] : pending };
+        }
+        if (endpoint.endsWith("/approval")) { sent++; throw new Error("A non-command/unoffered grant must not auto-submit"); }
+        throw new Error("Unexpected endpoint " + endpoint);
+      },
+    });
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    let status;
+    for (let tries = 0; tries < 40; tries++) {
+      status = await workflow.call("run_status", { workspaceId: "ws", runId: "run" });
+      if (status.detail === "Waiting for your tool approval" || status.status === "held") break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    await new Promise(resolve => setTimeout(resolve, 20)); // let the mock advisor complete its awaited callbacks
+    status = await workflow.call("run_status", { workspaceId: "ws", runId: "run" });
+    finished = true;
+    assert.equal(status.status, "running", scenario + ": " + JSON.stringify(status));
+    assert.match(status.detail, /Waiting for your tool approval|checking it yourself/, scenario);
+    assert.equal(sent, 0, scenario);
+    if (scenario !== "unoffered") assert.equal(asked, 0, scenario + " must not send incomplete/native form scope to command advisor");
+    for (let tries = 0; tries < 70; tries++) {
+      if ((await workflow.call("run_status", { workspaceId: "ws", runId: "run" })).status === "finished") break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  }
+});
+
+test("manual dispatch reconnects a stale idle native policy through exact normal consent", async () => {
+  const calls = [], prompts = [];
+  const route = { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web",
+    model: "chatgpt-web/high", permission_profile: ":read-only", approval_policy: "on-request", approvals_reviewer: "user" };
+  const mission = { id: "run", workspace_id: "ws", revision: 2, nodes: [
+    { id: "worker", role: "worker", state: "pending", parents: [], route }] };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body, options) => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [mission] };
+      if (endpoint.endsWith("/status")) return { ok: true, status: { connected: true, model: route.model,
+        permission_profile: ":danger-full-access", approval_policy: "never", approvals_reviewer: "user" } };
+      calls.push({ endpoint, body, options });
+      return { ok: true, status: { model: route.model } };
+    },
+    webBridgeConnection: () => ({ baseUrl: "http://127.0.0.1:17841/v1" }),
+    webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
+    webModelCatalog: async () => ({ models: [{ slug: route.model }] }),
+    resolveHarness: async selected => ({ executable: "C:/codex.exe", model: route.model,
+      permission_profile: selected.permissionProfile, approval_policy: selected.approvalPolicy,
+      approvals_reviewer: selected.approvalsReviewer, allow_model_usage: true, allow_command_execution: false }),
+    confirm: async prompt => { prompts.push(prompt); return true; },
+  });
+  await workflow.call("advance", { workspaceId: "ws", runId: "run", executable: "C:/codex.exe" });
+  assert.deepEqual(calls.map(call => call.endpoint), ["/api/v1/ao/harness/connect", "/api/v1/ao/harness/execute"]);
+  assert.equal(calls[0].body.connection.permission_profile, ":read-only");
+  assert.equal(calls[0].body.confirm, true);
+  assert.deepEqual(calls[0].options, { localConfirmation: true });
+  assert.match(prompts[0].detail, /Permission: read-only/);
+});
+
+test("secret native question answers are forwarded but masked in local confirmation", async () => {
+  let detail = "", sent;
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint.endsWith("/status")) return { ok: true, status: { pending_approvals: [{
+        approval_id: "a", method: "item/tool/requestUserInput", kind: "questions", thread_id: "t", turn_id: "v",
+        request: { questions: [{ id: "code", isSecret: true, question: "Enter code" }] },
+      }] } };
+      sent = body; return { ok: true, result: { ok: true } };
+    },
+    confirm: async prompt => { detail = prompt.detail; return true; },
+  });
+  const response = { answers: { code: { answers: ["private-code-answer"] } } };
+  await workflow.call("approve_harness", { workspaceId: "ws", runId: "run", nodeId: "worker",
+    approvalId: "a", threadId: "t", turnId: "v", response });
+  assert.deepEqual(sent.response, response);
+  assert.doesNotMatch(detail, /private-code-answer/);
+  assert.match(detail, /redacted/i);
+});
+
+test("explicit single chat binds one selected route without a saved team", async () => {
+  const world = chatWorld(), route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local",
+    model: "cpa/gemini-3.8-flash-high", permission_profile: ":ao-default" };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (...args) => {
+      const result = await world.requestHeadless(...args);
+      return args[0] === "/api/v1/ao/read" ? { ...result, team: null, teams: [] } : result;
+    },
+    findCodexExecutable: () => "C:/Codex/codex.exe",
+    resolveHarness: async () => { throw new Error("fixture stop"); },
+  });
+  const sent = await workflow.call("chat_send", { workspaceId: "ws-1", message: "single task", executionMode: "single", singleRoute: route });
+  assert.equal(sent.taskId, "task-1");
+  assert.equal(world.updates.length, 1);
+  assert.equal(world.updates[0].execution_mode, "single");
+  assert.deepEqual(world.updates[0].single_route, route);
+  assert.equal(Object.hasOwn(world.updates[0], "team_revision"), false);
+  assert.equal(Object.hasOwn(world.updates[0], "team_id"), false);
+});
+
+test("team chat binds selected identity and rejects stale config before writing", async () => {
+  for (const stale of [false, true]) {
+    const world = chatWorld(), selected = { id: "team-picked", revision: 9, worker_limit: 1 };
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless: async (...args) => {
+        const result = await world.requestHeadless(...args);
+        return args[0] === "/api/v1/ao/read" ? { ...result, teams: [result.team, selected] } : result;
+      },
+      findCodexExecutable: () => "C:/Codex/codex.exe",
+      resolveHarness: async () => { throw new Error("fixture stop"); },
+    });
+    const input = { workspaceId: "ws-1", message: "team task", executionMode: "team", teamId: "team-picked", teamRevision: stale ? 8 : 9 };
+    if (stale) {
+      await assert.rejects(workflow.call("chat_send", input), /team.*changed|revision|saved/i);
+      assert.equal(world.tasks.length, 0);
+    } else {
+      await workflow.call("chat_send", input);
+      assert.equal(world.updates[0].team_id, selected.id);
+      assert.equal(world.updates[0].team_revision, 9);
+      assert.equal(world.updates[0].execution_mode, "team");
+      assert.equal(Object.hasOwn(world.updates[0], "single_route"), false);
+    }
+  }
+});
+
+test("external Codex-style permission tuples map to the real AO approval mode at spawn", async () => {
+  for (const agent of ["codex", "claude-code"]) for (const [policy, reviewer, expected] of [["on-request","user","accept-edits"],["on-request","auto_review","auto"],["never","user","bypass-permissions"]]) {
+    let launched;
+    const route = { harness_id: `ao:${agent}`, provider_id: "agent-orchestrator", account_id: "ao-local", model: "gpt-6-luna",
+      permission_profile: ":ao-default", native_permission_profile: policy === "never" ? ":danger-full-access" : ":workspace", approval_policy: policy, approvals_reviewer: reviewer };
+    const mission = { id:"run", workspace_id:"ws", revision:1, nodes:[{id:"one",role:"planner",state:"pending",parents:[],route}] };
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless: async endpoint => endpoint.endsWith("/read") ? {ok:true,runs:[mission],worker_capacity:{run:1}}
+        : endpoint.endsWith("/reserve") ? {ok:true,request_key:"key",prompt:"direct task"} : {ok:true,run:mission},
+      aoHarness: { spawn: async input => { launched=input;return "session"; } },
+      confirm: async () => true,
+    });
+    await workflow.call("advance", {workspaceId:"ws",runId:"run",executable:"C:/codex.exe"});
+    assert.equal(launched.approvalMode, expected);
+  }
+});
+
+test("permission capabilities use installed AO adapter modes without fabricating native metadata", async () => {
+  const reads = [], launches = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint) => { reads.push(endpoint); throw new Error("No native connection"); },
+    aoHarness: { catalog: async () => [
+      { id: "claude-code", installed: true }, { id: "codex", installed: true }, { id: "opencode", installed: true },
+    ], spawn: async (...args) => { launches.push(args); } },
+  });
+  const capability = (await workflow.call("permission_profiles", { workspaceId: "ws-1", route: { harness_id: "ao:claude-code" } })).capability;
+  assert.equal(capability.supported, true);
+  assert.equal(capability.source, "ao-adapter");
+  assert.equal(capability.requested_only, true, "adapter modes are requests, not effective native readback");
+  assert.deepEqual(capability.profiles.map(profile => profile.id), [":workspace", ":danger-full-access"]);
+  assert.deepEqual(capability.approval_policies, ["on-request", "never"]);
+  assert.deepEqual(capability.approvals_reviewers, ["user", "auto_review"]);
+  for (const harness_id of ["ao:opencode", "codex-native"]) {
+    const unsupported = await workflow.call("permission_profiles", { workspaceId: "ws-1", route: { harness_id } });
+    assert.equal(unsupported.capability.supported, false);
+  }
+  assert.deepEqual(reads, []);
+  assert.deepEqual(launches, []);
+});
+
+test("explicit single mode has no hidden task-naming or recovery model", async () => {
+  const naming = startableChatWorld();
+  const requests = [];
+  const options = requestHeadless => ({
+    requestHeadless, findCodexExecutable: () => "C:/Codex/codex.exe",
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async url => {
+      requests.push(String(url));
+      return { ok: true, json: async () => String(url).endsWith("/v1/models")
+        ? { data: [{ id: "another-model" }] } : { choices: [{ message: { content: "Another model named it" } }] } };
+    },
+    webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
+    resolveHarness: async () => ({ expected_sha256: "a".repeat(64), executable: path.resolve("codex.exe") }),
+  });
+  await createAgentOrchestratorWorkflow(options(naming.requestHeadless)).call("chat_send", {
+    workspaceId: "ws-1", message: "Single task", executionMode: "single",
+    singleRoute: { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web", model: "chatgpt-web/high", permission_profile: ":workspace" },
+  });
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.deepEqual(requests, [], "no separate model names a single-mode chat");
+
+  const recovery = heldMissionWorld();
+  const requestHeadless = async (...args) => {
+    const result = await recovery.requestHeadless(...args);
+    if (args[0] === "/api/v1/ao/read") result.runs[0].execution_mode = "single";
+    return result;
+  };
+  const workflow = createAgentOrchestratorWorkflow(options(requestHeadless));
+  await workflow.call("start_run", { workspaceId: "ws-1", runId: "r1" });
+  await until(() => recovery.reads >= 2);
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal((await workflow.call("run_status", { workspaceId: "ws-1", runId: "r1" })).status, "held");
+  assert.deepEqual(recovery.controls, [], "a failed single model requires an explicit retry");
+  assert.deepEqual(requests, [], "no recovery model is invoked");
+});
+
+test("external dispatch refuses permission tuples the adapter cannot honor", async () => {
+  for (const tuple of [
+    { native_permission_profile: ":read-only" },
+    { native_permission_profile: "managed/custom" },
+    { native_permission_profile: ":workspace" },
+    { native_permission_profile: ":read-only", approval_policy: "never", approvals_reviewer: "user" },
+    { native_permission_profile: "managed/custom", approval_policy: "on-request", approvals_reviewer: "user" },
+    { native_permission_profile: ":workspace", approval_policy: "untrusted", approvals_reviewer: "user" },
+  ]) {
+    let launched = false;
+    const route = { harness_id: "ao:codex", model: "gpt-6-luna", permission_profile: ":ao-default", ...tuple };
+    const mission = { id:"run",workspace_id:"ws",revision:1,nodes:[{id:"one",role:"planner",state:"pending",parents:[],route}] };
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless: async endpoint => endpoint.endsWith("/read") ? {ok:true,runs:[mission],worker_capacity:{run:1}}
+        : endpoint.endsWith("/reserve") ? {ok:true,request_key:"key",prompt:"direct"} : {ok:true,run:mission},
+      aoHarness: { spawn: async () => { launched=true;return "session"; } }, confirm: async()=>true,
+    });
+    await assert.rejects(workflow.call("advance", {workspaceId:"ws",runId:"run"}), /cannot honor|permission tuple|unsupported.*permission/i);
+    assert.equal(launched, false);
+  }
+});
+
+test("single restart honors deferred narrowing without rewriting its completed full-access receipt", async () => {
+  for (const harness_id of ["codex-native", "ao:codex"]) {
+    const native = harness_id === "codex-native";
+    const originalRoute = { harness_id, provider_id:native?"chatgpt-web":"agent-orchestrator", account_id:"local",
+      model:native?"chatgpt-web/high":"gpt-6-luna", permission_profile:native?":danger-full-access":":ao-default",
+      native_permission_profile:":danger-full-access", approval_policy:"never", approvals_reviewer:"user", effort:"high" };
+    const receipt = { status:"finished", answer:"Old answer", route:structuredClone(originalRoute) };
+    const mission = { id:"old-single", project_id:"task-1", workspace_id:"ws-1", revision:6, cancelled:false, execution_mode:"single",
+      nodes:[{id:"attempt",template_role_id:"selected",state:"finished",route:originalRoute,receipt}],
+      team:{id:"single-snapshot",permission_selections:{selected:{permission_profile:":workspace",approval_policy:"on-request",approvals_reviewer:"user"}}} };
+    const snapshot = structuredClone(mission);
+    const world = chatWorld({ runs:[mission], tasks:[{id:"task-1",title:"Single",description:"Task",state:"backlog",clauses:[]}] });
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless:world.requestHeadless,findCodexExecutable:()=>"C:/Codex/codex.exe",
+      resolveHarness:async()=>{throw new Error("fixture stop before dispatch")},
+    });
+    await workflow.call("restart_run", {workspaceId:"ws-1",runId:"old-single"});
+    const replacement = world.updates.find(change=>change.operation==="create_from_team");
+    assert.equal(replacement.execution_mode,"single");
+    assert.deepEqual(replacement.single_route, {...originalRoute,native_permission_profile:":workspace",
+      permission_profile:native?":workspace":":ao-default",approval_policy:"on-request",approvals_reviewer:"user"});
+    assert.deepEqual(mission,snapshot,"historical raw route/receipt/model and harness stay immutable");
+    assert.equal(Object.hasOwn(replacement,"team_id"),false);
   }
 });

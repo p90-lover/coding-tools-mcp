@@ -77,6 +77,7 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
   const positions = useRef(new Map<string, Point>());
   const heights = useRef(new Map<string, number>());
   const camera = useRef({ x: 0, y: 0, scale: 1 });
+  const manuallyNavigated = useRef(false);
   const drag = useRef<{ id: string | null; start: Point; original: Point; group: Map<string, Point>; last: Point; moved: boolean; parent?: string } | null>(null);
   const wind = useRef(0);
   const frame = useRef(0);
@@ -159,10 +160,12 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
     const h = Math.max(...[...positions.current].map(([id, p]) => p.y + (heights.current.get(id) || height))) - top;
     const scale = Math.max(.3, Math.min(1.25, (box.width - 80) / w, (box.height - 120) / h));
     camera.current = { x: (box.width - w * scale) / 2 - left * scale, y: (box.height - h * scale) / 2 - top * scale, scale };
+    manuallyNavigated.current = false;
     schedule();
     return true;
   };
   const zoom = (factor: number, x = viewport.current!.clientWidth / 2, y = viewport.current!.clientHeight / 2) => {
+    manuallyNavigated.current = true;
     const before = camera.current, scale = Math.max(.3, Math.min(2, before.scale * factor));
     camera.current = { x: x - (x - before.x) * scale / before.scale, y: y - (y - before.y) * scale / before.scale, scale };
     schedule();
@@ -179,15 +182,32 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
     if (!initialized.current) initialized.current = fit(); else schedule();
   }, [nodes, levels]);
 
-  // Fit once the canvas first gets a real size, and again each time it comes back from hidden.
+  // Automatic views refit on pane/window resize. Manual navigation keeps its world centre
+  // unless resizing would leave every card offscreen, in which case restore an inspectable view.
   useLayoutEffect(() => {
     const surface = viewport.current;
     if (!surface || typeof ResizeObserver === "undefined") return;
-    let wasHidden = surface.clientWidth === 0 || surface.clientHeight === 0;
+    let previous = { width: surface.clientWidth, height: surface.clientHeight };
     const observer = new ResizeObserver(() => {
-      const hidden = surface.clientWidth === 0 || surface.clientHeight === 0;
+      const next = { width: surface.clientWidth, height: surface.clientHeight };
+      const hidden = next.width === 0 || next.height === 0;
+      const wasHidden = previous.width === 0 || previous.height === 0;
       if (!hidden && (wasHidden || !initialized.current)) initialized.current = fit() || initialized.current;
-      wasHidden = hidden;
+      else if (!hidden && (next.width !== previous.width || next.height !== previous.height)) {
+        if (!manuallyNavigated.current) fit();
+        else {
+          const view = camera.current;
+          view.x += (next.width - previous.width) / 2;
+          view.y += (next.height - previous.height) / 2;
+          const visible = [...positions.current].some(([id, point]) => {
+            const x = view.x + (point.x + width / 2) * view.scale;
+            const y = view.y + (point.y + (heights.current.get(id) || height) / 2) * view.scale;
+            return x >= 0 && x <= next.width && y >= 0 && y <= next.height;
+          });
+          if (!visible) fit(); else schedule();
+        }
+      }
+      previous = next;
     });
     observer.observe(surface);
     return () => observer.disconnect();
@@ -205,6 +225,7 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
         const bounds = surface.getBoundingClientRect();
         zoom(Math.exp(-event.deltaY * .002), event.clientX - bounds.left, event.clientY - bounds.top);
       } else {
+        manuallyNavigated.current = true;
         camera.current.x -= event.shiftKey ? event.deltaY : event.deltaX;
         camera.current.y -= event.shiftKey ? 0 : event.deltaY;
         schedule();
@@ -247,7 +268,7 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
         if (distance < nearest) { nearest = distance; target = node.id; }
       }
       active.parent = target || undefined; setDropTarget(previous => previous === target ? previous : target);
-    } else { camera.current.x = active.original.x + dx; camera.current.y = active.original.y + dy; }
+    } else { manuallyNavigated.current = true; camera.current.x = active.original.x + dx; camera.current.y = active.original.y + dy; }
     active.last = { x: event.clientX, y: event.clientY }; schedule();
   };
   const end = (cancelled: boolean) => {

@@ -5,7 +5,7 @@ use crate::{
     error::{AppError, AppResult},
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 fn fail(message: &str) -> AppError {
     AppError::Message(message.into())
@@ -27,6 +27,11 @@ pub struct RoleSettings {
     /// Omitted when off, so grants issued before this setting keep their fingerprint.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub auto_decide: bool,
+    /// A role the user typed (e.g. "Security auditor"). The card keeps its base role's place in
+    /// the mission; the name is shown everywhere and given to the model as its role.
+    /// Omitted when empty, so grants issued before this setting keep their fingerprint.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub role_name: String,
 }
 
 impl RoleSettings {
@@ -37,6 +42,7 @@ impl RoleSettings {
             (&self.instructions, 4096, true),
             (&self.expected_output, 2048, true),
             (&self.working_directory, 512, false),
+            (&self.role_name, 48, false),
         ] {
             if value.len() > limit
                 || value
@@ -76,6 +82,9 @@ pub struct Team {
     #[serde(default = "ao::default_review_rounds")]
     pub max_review_rounds: u8,
     pub nodes: Vec<Node>,
+    /// Explicit mission-only future intent; never persisted as a reusable team's grant.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub permission_selections: BTreeMap<String, PermissionSelection>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,7 +200,35 @@ pub fn normalize_roles(nodes: &mut Vec<Node>) {
         nodes.iter().find(|node| node.id == reviewer).cloned(),
     ) {
         if let Some(node) = nodes.iter_mut().find(|node| &node.id == split_id) {
+            let previous = node.route.clone();
             node.route = main.route;
+            node.route.permission_profile = if node.route.harness_id == "codex-native" {
+                if previous.harness_id == "codex-native" {
+                    previous.permission_profile.clone()
+                } else {
+                    previous
+                        .native_permission_profile
+                        .clone()
+                        .unwrap_or_else(|| {
+                            if previous.permission_profile == ao::EXTERNAL_PERMISSION {
+                                ":read-only".into()
+                            } else {
+                                previous.permission_profile.clone()
+                            }
+                        })
+                }
+            } else {
+                ao::EXTERNAL_PERMISSION.into()
+            };
+            node.route.native_permission_profile = if node.route.harness_id != "codex-native"
+                && previous.harness_id == "codex-native"
+            {
+                Some(previous.permission_profile)
+            } else {
+                previous.native_permission_profile
+            };
+            node.route.approval_policy = previous.approval_policy;
+            node.route.approvals_reviewer = previous.approvals_reviewer;
             node.settings = main.settings.clone();
             node.settings.name = format!(
                 "{} · split",
@@ -227,21 +264,28 @@ pub fn normalize_roles(nodes: &mut Vec<Node>) {
     }
 }
 
-/// Gemini runs on Claude Code through the CPA gateway ("cpa/<model>"), not on Native Codex.
-/// A Native Codex card with a Gemini CPA model is moved there when a team is saved or a
-/// mission is created from it.
+/// Native Codex runs only WebGPT. Every other model runs on an AO harness through the CPA
+/// gateway ("cpa/<model>"): Gemini on Claude Code, the rest on Codex. A Native Codex card with
+/// a CPA model is moved there when a team is saved or a mission is created from it; its effort
+/// is kept, and its context window dropped (AO harnesses have no such setting).
 pub fn normalize_routes(nodes: &mut [Node]) {
     for node in nodes {
         let route = &mut node.route;
-        if route.harness_id == "codex-native"
-            && route.provider_id == "cliproxyapi-antigravity"
-            && route.model.to_ascii_lowercase().starts_with("gemini")
-        {
+        if route.harness_id == "codex-native" && route.provider_id == "cliproxyapi-antigravity" {
+            let agent = if route.model.to_ascii_lowercase().starts_with("gemini") {
+                "ao:claude-code"
+            } else {
+                "ao:codex"
+            };
             route.model = format!("cpa/{}", route.model);
-            route.harness_id = "ao:claude-code".into();
+            route.harness_id = agent.into();
             route.provider_id = "agent-orchestrator".into();
             route.account_id = "ao-local".into();
+            if route.native_permission_profile.is_none() {
+                route.native_permission_profile = Some(route.permission_profile.clone());
+            }
             route.permission_profile = ":ao-default".into();
+            route.context_window = None;
         }
     }
 }
@@ -266,6 +310,11 @@ pub fn save(
     expected_revision: u64,
     mut team: Team,
 ) -> AppResult<Team> {
+    if !team.permission_selections.is_empty() {
+        return Err(fail(
+            "Mission-only deferred permissions cannot be saved as a reusable team",
+        ));
+    }
     if team.workspace_id != workspace_id
         || !data
             .profiles
@@ -292,12 +341,11 @@ pub fn save(
     let existing = data
         .ao_teams
         .iter()
-        .position(|item| item.workspace_id == workspace_id);
+        .position(|item| item.workspace_id == workspace_id && item.id == team.id);
     if existing
         .map(|index| data.ao_teams[index].revision)
         .unwrap_or(0)
         != expected_revision
-        || existing.is_some_and(|index| data.ao_teams[index].id != team.id)
     {
         return Err(fail("AO team revision changed; refresh before applying"));
     }
@@ -331,6 +379,7 @@ pub fn save(
         review_parts: Default::default(),
         rerun_after: Default::default(),
         solo: false,
+        execution_mode: ao::ExecutionMode::Team,
     };
     ao::validate(None, &proposal)?;
     team.revision = expected_revision + 1;
@@ -346,6 +395,32 @@ pub fn save(
     Ok(team)
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct CreateSelection {
+    pub execution_mode: Option<ao::ExecutionMode>,
+    pub team_id: Option<String>,
+    pub team_revision: Option<u64>,
+    pub single_route: Option<ao::Route>,
+}
+
+fn selected_team<'a>(
+    data: &'a AppData,
+    workspace_id: &str,
+    id: Option<&str>,
+    revision: u64,
+) -> AppResult<&'a Team> {
+    // Never search by revision alone: multiple saved identities may have the same revision.
+    let team = data
+        .ao_teams
+        .iter()
+        .find(|team| team.workspace_id == workspace_id && id.is_none_or(|id| team.id == id))
+        .ok_or_else(|| fail("Saved team was not found in this workspace"))?;
+    if team.revision != revision {
+        return Err(fail("Saved team revision changed; refresh"));
+    }
+    Ok(team)
+}
+
 pub fn create_run(
     data: &mut AppData,
     workspace_id: &str,
@@ -355,12 +430,96 @@ pub fn create_run(
     team_revision: u64,
     worker_limit: u8,
 ) -> AppResult<Run> {
-    let team = data
-        .ao_teams
-        .iter()
-        .find(|team| team.workspace_id == workspace_id && team.revision == team_revision)
-        .cloned()
-        .ok_or_else(|| fail("Saved team changed; refresh before creating this mission"))?;
+    create_selected_run(
+        data,
+        workspace_id,
+        run_id,
+        task_id,
+        expected_board_revision,
+        worker_limit,
+        CreateSelection {
+            team_revision: Some(team_revision),
+            ..Default::default()
+        },
+    )
+}
+
+pub fn create_selected_run(
+    data: &mut AppData,
+    workspace_id: &str,
+    run_id: String,
+    task_id: String,
+    expected_board_revision: u64,
+    worker_limit: u8,
+    selection: CreateSelection,
+) -> AppResult<Run> {
+    if !(1..=24).contains(&worker_limit) {
+        return Err(fail("Mission worker limit must be one to 24"));
+    }
+    if selection.execution_mode == Some(ao::ExecutionMode::Single) {
+        if selection.team_id.is_some() || selection.team_revision.is_some() {
+            return Err(fail("Single execution does not select a reusable team"));
+        }
+        let route = selection
+            .single_route
+            .ok_or_else(|| fail("Single execution requires an explicit selected model route"))?;
+        let node = Node {
+            id: uuid::Uuid::new_v4().to_string(),
+            task_id: task_id.clone(),
+            clause_id: None,
+            role: Role::Planner,
+            parents: vec![],
+            x: 0,
+            y: 0,
+            positioned: false,
+            state: State::Pending,
+            route,
+            template_role_id: None,
+            settings: RoleSettings {
+                name: "Single assistant".into(),
+                ..Default::default()
+            },
+            request_key: None,
+            receipt: None,
+            history: vec![],
+        };
+        require_explicit_models(std::slice::from_ref(&node))?;
+        return ao::create(
+            data,
+            expected_board_revision,
+            Run {
+                id: run_id,
+                workspace_id: workspace_id.into(),
+                project_id: task_id,
+                revision: 0,
+                cancelled: false,
+                paused: false,
+                nodes: vec![node],
+                grant: None,
+                team: None,
+                worker_limit: 1,
+                review_rounds: 0,
+                assignments: Default::default(),
+                max_review_rounds: ao::default_review_rounds(),
+                plan_rounds: 0,
+                review_parts: Default::default(),
+                rerun_after: Default::default(),
+                solo: false,
+                execution_mode: ao::ExecutionMode::Single,
+            },
+        );
+    }
+    if selection.single_route.is_some()
+        || (selection.execution_mode.is_some() && selection.team_id.is_none())
+    {
+        return Err(fail(
+            "Team execution requires a saved team identity and no single route",
+        ));
+    }
+    let revision = selection
+        .team_revision
+        .ok_or_else(|| fail("Team execution requires the saved team revision"))?;
+    let team = selected_team(data, workspace_id, selection.team_id.as_deref(), revision)?.clone();
     if !(1..=24).contains(&worker_limit) {
         return Err(fail("Mission worker limit must be one to 24"));
     }
@@ -409,6 +568,7 @@ pub fn create_run(
             review_parts: Default::default(),
             rerun_after: Default::default(),
             solo: false,
+            execution_mode: ao::ExecutionMode::Team,
         },
     )
 }
@@ -457,6 +617,7 @@ pub fn control(
                 }
                 node.request_key = None;
                 node.state = State::Pending;
+                bind_future_permission(node, run.team.as_ref());
                 retried = true;
             }
             if !retried {
@@ -483,6 +644,98 @@ pub fn control(
     Ok(run.clone())
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PermissionSelection {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_policy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approvals_reviewer: Option<String>,
+}
+
+impl PermissionSelection {
+    fn validate(&self) -> AppResult<()> {
+        if (self.permission_profile.is_none()
+            && self.approval_policy.is_none()
+            && self.approvals_reviewer.is_none())
+            || self.permission_profile.as_deref().is_some_and(|value| {
+                value.is_empty()
+                    || value.len() > 128
+                    || value.trim() != value
+                    || value.chars().any(char::is_control)
+                    || value == ao::EXTERNAL_PERMISSION
+            })
+            || self
+                .approval_policy
+                .as_deref()
+                .is_some_and(|value| !matches!(value, "on-request" | "never"))
+            || self
+                .approvals_reviewer
+                .as_deref()
+                .is_some_and(|value| !matches!(value, "user" | "auto_review"))
+        {
+            return Err(fail(
+                "Choose at least one explicit valid native permission field",
+            ));
+        }
+        Ok(())
+    }
+    fn merge(&mut self, selection: &Self) {
+        if selection.permission_profile.is_some() {
+            self.permission_profile = selection.permission_profile.clone();
+        }
+        if selection.approval_policy.is_some() {
+            self.approval_policy = selection.approval_policy.clone();
+        }
+        if selection.approvals_reviewer.is_some() {
+            self.approvals_reviewer = selection.approvals_reviewer.clone();
+        }
+    }
+    fn apply(&self, route: &mut ao::Route) {
+        if let Some(profile) = &self.permission_profile {
+            route.native_permission_profile = Some(profile.clone());
+            if route.harness_id == "codex-native" {
+                route.permission_profile = profile.clone();
+            }
+        }
+        if let Some(policy) = &self.approval_policy {
+            route.approval_policy = Some(policy.clone());
+        }
+        if let Some(reviewer) = &self.approvals_reviewer {
+            route.approvals_reviewer = Some(reviewer.clone());
+        }
+    }
+}
+
+fn mission_role(nodes: &[Node], node: &Node) -> Node {
+    let mut role = node.clone();
+    role.id = node
+        .template_role_id
+        .clone()
+        .unwrap_or_else(|| node.id.clone());
+    role.parents = node
+        .parents
+        .iter()
+        .filter_map(|id| nodes.iter().find(|parent| &parent.id == id))
+        .map(|parent| {
+            parent
+                .template_role_id
+                .clone()
+                .unwrap_or_else(|| parent.id.clone())
+        })
+        .collect();
+    role.task_id.clear();
+    role.clause_id = None;
+    role.template_role_id = None;
+    role.request_key = None;
+    role.receipt = None;
+    role.history.clear();
+    role.state = State::Pending;
+    role
+}
+
 pub fn apply(
     data: &mut AppData,
     workspace_id: &str,
@@ -490,12 +743,58 @@ pub fn apply(
     expected_revision: u64,
     team_revision: u64,
 ) -> AppResult<Run> {
-    let team = data
-        .ao_teams
-        .iter()
-        .find(|team| team.workspace_id == workspace_id && team.revision == team_revision)
-        .cloned()
-        .ok_or_else(|| fail("Saved team changed; refresh before applying"))?;
+    apply_selected(
+        data,
+        workspace_id,
+        run_id,
+        expected_revision,
+        team_revision,
+        None,
+        None,
+    )
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ApplySelection {
+    pub team_id: Option<String>,
+    pub team_revision: Option<u64>,
+    pub selected_role_ids: Option<Vec<String>>,
+    pub permission_selection: Option<PermissionSelection>,
+}
+
+pub fn apply_selected(
+    data: &mut AppData,
+    workspace_id: &str,
+    run_id: &str,
+    expected_revision: u64,
+    team_revision: u64,
+    selected_role_ids: Option<&[String]>,
+    permission_selection: Option<&PermissionSelection>,
+) -> AppResult<Run> {
+    apply_selected_config(
+        data,
+        workspace_id,
+        run_id,
+        expected_revision,
+        ApplySelection {
+            team_revision: Some(team_revision),
+            selected_role_ids: selected_role_ids.map(<[String]>::to_vec),
+            permission_selection: permission_selection.cloned(),
+            ..Default::default()
+        },
+    )
+}
+
+pub fn apply_selected_config(
+    data: &mut AppData,
+    workspace_id: &str,
+    run_id: &str,
+    expected_revision: u64,
+    selection: ApplySelection,
+) -> AppResult<Run> {
+    let team_revision = selection.team_revision.unwrap_or(0);
+    let selected_role_ids = selection.selected_role_ids.as_deref();
+    let permission_selection = selection.permission_selection.as_ref();
     let index = data
         .ao_runs
         .iter()
@@ -505,19 +804,73 @@ pub fn apply(
     if next.revision != expected_revision || next.cancelled {
         return Err(fail("AO mission revision changed"));
     }
-    if next
-        .team
-        .as_ref()
-        .is_some_and(|snapshot| snapshot.id != team.id)
+    let single = next.execution_mode == ao::ExecutionMode::Single;
+    let team = if single {
+        if selection.team_id.is_some()
+            || selection.team_revision.is_some()
+            || selected_role_ids.is_none()
+            || permission_selection.is_none()
+        {
+            return Err(fail(
+                "Single execution permits only scoped policy selection without a reusable team",
+            ));
+        }
+        None
+    } else {
+        Some(
+            selected_team(
+                data,
+                workspace_id,
+                selection.team_id.as_deref(),
+                selection
+                    .team_revision
+                    .ok_or_else(|| fail("Saved team revision is required"))?,
+            )?
+            .clone(),
+        )
+    };
+    if selected_role_ids.is_none()
+        && next
+            .team
+            .as_ref()
+            .is_some_and(|snapshot| team.as_ref().is_some_and(|team| snapshot.id != team.id))
     {
         return Err(fail("Mission uses another team"));
+    }
+    if selected_role_ids.is_some() != permission_selection.is_some() {
+        return Err(fail(
+            "Selected roles and permission_selection must be supplied together",
+        ));
+    }
+    if let (Some(ids), Some(selection)) = (selected_role_ids, permission_selection) {
+        selection.validate()?;
+        if ids.is_empty()
+            || ids.len() > next.nodes.len()
+            || ids.iter().enumerate().any(|(index, id)| {
+                ids[..index].contains(id)
+                    || !next.nodes.iter().any(|node| {
+                        policy_supported_route(&node.route)
+                            && node.template_role_id.as_deref().unwrap_or(&node.id) == id
+                    })
+            })
+        {
+            return Err(fail(
+                "Select nonempty unique known supported mission role IDs",
+            ));
+        }
     }
     for node in &mut next.nodes {
         if node.state != State::Pending {
             continue;
         }
         let role_id = node.template_role_id.as_deref().unwrap_or(&node.id);
-        let role = team.nodes.iter().find(|role| role.id == role_id)
+        if let (Some(ids), Some(selection)) = (selected_role_ids, permission_selection) {
+            if ids.iter().any(|id| id == role_id) && node.route.harness_id == "codex-native" {
+                selection.apply(&mut node.route);
+            }
+            continue;
+        }
+        let role = team.as_ref().expect("legacy team selected").nodes.iter().find(|role| role.id == role_id)
             .ok_or_else(|| fail("A queued role was removed; cancel its task or use the changed team for a new mission"))?;
         node.template_role_id = Some(role.id.clone());
         node.settings = role.settings.clone();
@@ -525,9 +878,52 @@ pub fn apply(
         node.role = role.role.clone();
     }
     ao::validate(Some(data), &next)?;
-    next.team = Some(team);
+    if let (Some(ids), Some(selection)) = (selected_role_ids, permission_selection) {
+        if next.team.is_none() {
+            next.team = Some(Team {
+                id: format!("mission:{}", next.id),
+                workspace_id: next.workspace_id.clone(),
+                name: "Mission-only role policy".into(),
+                revision: team_revision,
+                worker_limit: next.worker_limit,
+                max_review_rounds: next.max_review_rounds,
+                nodes: next
+                    .nodes
+                    .iter()
+                    .map(|node| mission_role(&next.nodes, node))
+                    .collect(),
+                permission_selections: BTreeMap::new(),
+            });
+        }
+        let snapshot = next.team.as_mut().expect("mission snapshot created");
+        for id in ids {
+            if !snapshot.nodes.iter().any(|role| &role.id == id) {
+                let node = next
+                    .nodes
+                    .iter()
+                    .find(|node| node.template_role_id.as_deref().unwrap_or(&node.id) == id)
+                    .expect("known role");
+                let role = mission_role(&next.nodes, node);
+                snapshot.nodes.push(role);
+            }
+            snapshot
+                .permission_selections
+                .entry(id.clone())
+                .or_default()
+                .merge(selection);
+        }
+        for role in &mut snapshot.nodes {
+            if ids.contains(&role.id) {
+                selection.apply(&mut role.route);
+            }
+        }
+    } else {
+        next.team = team;
+    }
     // This API is local-UI-only. Apply explicitly authorizes queued settings; running receipts stay intact.
-    if next.grant.is_some() {
+    if selected_role_ids.is_some() {
+        next.grant = None; // A new native scope needs the normal local background grant again.
+    } else if next.grant.is_some() {
         let fingerprint = ao::graph_sha256(data, &next)?;
         if let Some(grant) = next.grant.as_mut() {
             grant.graph_sha256 = fingerprint;
@@ -565,7 +961,25 @@ pub fn set_limits(
     Ok(())
 }
 
-fn requeue(node: &mut Node) {
+pub fn policy_supported_route(route: &ao::Route) -> bool {
+    matches!(
+        route.harness_id.as_str(),
+        "codex-native" | "ao:claude-code" | "ao:codex"
+    )
+}
+
+fn bind_future_permission(node: &mut Node, snapshot: Option<&Team>) {
+    if !policy_supported_route(&node.route) {
+        return;
+    }
+    let role_id = node.template_role_id.as_deref().unwrap_or(&node.id);
+    if let Some(selection) = snapshot.and_then(|team| team.permission_selections.get(role_id)) {
+        selection.apply(&mut node.route);
+    }
+}
+
+fn requeue(node: &mut Node, snapshot: Option<&Team>) -> bool {
+    let previous = node.route.clone();
     if let Some(receipt) = node.receipt.take() {
         node.history.push(receipt);
     }
@@ -575,6 +989,8 @@ fn requeue(node: &mut Node) {
     }
     node.request_key = None;
     node.state = State::Pending;
+    bind_future_permission(node, snapshot);
+    node.route != previous
 }
 
 // Called only after the owned gate connection is closed, never when reopening saved work.
@@ -594,6 +1010,9 @@ pub fn queue_rework(
         .position(|run| run.id == run_id && run.workspace_id == workspace_id)
         .ok_or_else(|| fail("AO mission was not found"))?;
     let mut next = data.ao_runs[index].clone();
+    if next.execution_mode == ao::ExecutionMode::Single {
+        return Ok(None);
+    }
     let gate = next.nodes.iter().position(|node| {
         node.id == gate_id
             && matches!(node.role, Role::Reviewer | Role::Approver)
@@ -639,7 +1058,9 @@ pub fn queue_rework(
             .iter_mut()
             .filter(|node| matches!(node.role, Role::Planner | Role::Approver))
         {
-            requeue(node);
+            if requeue(node, next.team.as_ref()) {
+                next.grant = None;
+            }
         }
         next.plan_rounds += 1;
     } else {
@@ -663,8 +1084,8 @@ pub fn queue_rework(
                 Role::ReviewSplit | Role::SubReviewer | Role::Reviewer => true,
                 Role::Planner | Role::Approver => false,
             };
-            if redo {
-                requeue(node);
+            if redo && requeue(node, next.team.as_ref()) {
+                next.grant = None;
             }
         }
         next.review_parts.clear();
@@ -679,6 +1100,319 @@ pub fn queue_rework(
 mod tests {
     use super::*;
 
+    #[test]
+    fn selected_models_and_saved_team_ids_do_not_substitute_or_mutate_running_work() {
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../aiTemp")
+            .canonicalize()
+            .unwrap();
+        let mut data: AppData = serde_json::from_value(json!({
+            "profiles":[{"id":"qa","name":"QA","path":workspace.to_string_lossy(),"tunnel":{},"auth":{"type":"bearer"},"runtime":{},"actions":{}}],
+            "control_board":{"revision":1,"tasks":[{"id":"task","workspace_id":"qa","title":"Task","description":"Direct task","state":"pending","step":0,"created_at":0,"updated_at":0,"clauses":[],"evidence":[]}]}
+        })).unwrap();
+        let route: ao::Route = serde_json::from_value(json!({"harness_id":"ao:claude-code","provider_id":"agent-orchestrator","account_id":"ao-local","model":"cpa/gpt-6-luna","permission_profile":":ao-default","native_permission_profile":":workspace","approval_policy":"on-request","approvals_reviewer":"user"})).unwrap();
+        let single = |route: ao::Route| CreateSelection {
+            execution_mode: Some(ao::ExecutionMode::Single),
+            single_route: Some(route),
+            ..Default::default()
+        };
+        let created = create_selected_run(
+            &mut data,
+            "qa",
+            "one".into(),
+            "task".into(),
+            1,
+            1,
+            single(route.clone()),
+        )
+        .unwrap();
+        assert_eq!(created.nodes.len(), 1);
+        assert_eq!(created.nodes[0].route, route);
+        assert!(data.ao_teams.is_empty() && created.team.is_none());
+        let id = created.nodes[0].id.clone();
+        let sha = "a".repeat(64);
+        let granted = ao::grant_run(&mut data, "qa", "one", created.revision, &sha, 100).unwrap();
+        assert_eq!(granted.grant.as_ref().unwrap().max_turns, 1);
+        ao::reserve(
+            &mut data,
+            "qa",
+            "one",
+            &id,
+            granted.revision,
+            "request".into(),
+            Some(101),
+        )
+        .unwrap();
+        let running =
+            ao::record_submission(&mut data, "qa", "one", &id, "request", Some("thread")).unwrap();
+        let before = serde_json::to_value(&running.nodes[0]).unwrap();
+        let staged = apply_selected_config(
+            &mut data,
+            "qa",
+            "one",
+            running.revision,
+            ApplySelection {
+                selected_role_ids: Some(vec![id.clone()]),
+                permission_selection: Some(PermissionSelection {
+                    permission_profile: Some(":danger-full-access".into()),
+                    approval_policy: Some("never".into()),
+                    approvals_reviewer: Some("user".into()),
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(serde_json::to_value(&staged.nodes[0]).unwrap(), before);
+        assert!(data.ao_teams.is_empty());
+        let done = ao::record_terminal(
+            &mut data,
+            "qa",
+            "one",
+            &id,
+            "thread",
+            Some("turn"),
+            Some("Direct answer, no assignment fence"),
+            true,
+            None,
+        )
+        .unwrap();
+        assert_eq!(done.nodes[0].state, State::Finished);
+        assert!(
+            done.assignments.is_empty()
+                && !done.solo
+                && done.nodes[0].receipt.as_ref().unwrap().verdict.is_none()
+        );
+        assert!(queue_rework(&mut data, "qa", "one", &id, "request", 102)
+            .unwrap()
+            .is_none());
+        let mut invalid = single(route.clone());
+        invalid.team_revision = Some(1);
+        assert!(
+            create_selected_run(&mut data, "qa", "bad".into(), "task".into(), 1, 1, invalid)
+                .is_err()
+        );
+        assert!(create_selected_run(
+            &mut data,
+            "other",
+            "bad".into(),
+            "task".into(),
+            1,
+            1,
+            single(route.clone())
+        )
+        .is_err());
+        assert!(create_selected_run(
+            &mut data,
+            "qa",
+            "bad".into(),
+            "task".into(),
+            99,
+            1,
+            single(route.clone())
+        )
+        .is_err());
+        let mut bad_route = route;
+        bad_route.model = "chatgpt-web/high".into();
+        assert!(create_selected_run(
+            &mut data,
+            "qa",
+            "bad".into(),
+            "task".into(),
+            1,
+            1,
+            single(bad_route)
+        )
+        .is_err());
+
+        let web = json!({"harness_id":"codex-native","provider_id":"chatgpt-web","account_id":"chatgpt-web","model":"chatgpt-web/high","permission_profile":":read-only"});
+        let team = |id: &str| -> Team {
+            serde_json::from_value(json!({"id":id,"workspace_id":"qa","name":id,"revision":0,"nodes":[
+            {"id":"lead","task_id":"","role":"planner","parents":[],"x":0,"y":0,"state":"pending","route":web},
+            {"id":"worker","task_id":"","role":"worker","parents":["lead"],"x":0,"y":1,"state":"pending","route":web},
+            {"id":"review","task_id":"","role":"reviewer","parents":["worker"],"x":0,"y":2,"state":"pending","route":web}
+        ]})).unwrap()
+        };
+        let first = save(&mut data, "qa", 0, team("first")).unwrap();
+        let second = save(&mut data, "qa", 0, team("second")).unwrap();
+        assert_eq!(data.ao_teams[0], first);
+        assert_eq!(data.ao_teams.len(), 2);
+        let team_selection = |id: &str, revision: u64| CreateSelection {
+            execution_mode: Some(ao::ExecutionMode::Team),
+            team_id: Some(id.into()),
+            team_revision: Some(revision),
+            ..Default::default()
+        };
+        let selected = create_selected_run(
+            &mut data,
+            "qa",
+            "two".into(),
+            "task".into(),
+            1,
+            1,
+            team_selection("second", second.revision),
+        )
+        .unwrap();
+        assert_eq!(selected.nodes.len(), 3);
+        assert_eq!(selected.team.as_ref().unwrap().id, "second");
+        assert!(
+            serde_json::to_value(&selected)
+                .unwrap()
+                .get("execution_mode")
+                .is_none(),
+            "legacy team serialization stays unchanged"
+        );
+        assert_eq!(selected.execution_mode, ao::ExecutionMode::Team);
+        let legacy_hash = ao::graph_sha256(&data, &selected).unwrap();
+        let mut explicit_team = serde_json::to_value(&selected).unwrap();
+        explicit_team["execution_mode"] = json!("team");
+        assert_eq!(
+            legacy_hash,
+            ao::graph_sha256(&data, &serde_json::from_value(explicit_team).unwrap()).unwrap()
+        );
+        let mut wrong_mode = created.clone();
+        wrong_mode.execution_mode = ao::ExecutionMode::Team;
+        assert!(
+            ao::validate(Some(&data), &wrong_mode).is_err(),
+            "one-node team graph cannot masquerade as Single"
+        );
+        let mut polluted_single = created.clone();
+        polluted_single.nodes.push(polluted_single.nodes[0].clone());
+        assert!(
+            ao::validate(Some(&data), &polluted_single).is_err(),
+            "Single cannot acquire hidden extra phases"
+        );
+        let mut wrong_workspace_team = team("foreign");
+        wrong_workspace_team.workspace_id = "other".into();
+        data.ao_teams.push(wrong_workspace_team);
+        assert!(create_selected_run(
+            &mut data,
+            "qa",
+            "bad".into(),
+            "task".into(),
+            1,
+            1,
+            team_selection("foreign", 0)
+        )
+        .is_err());
+        assert!(create_selected_run(
+            &mut data,
+            "qa",
+            "bad".into(),
+            "task".into(),
+            1,
+            1,
+            team_selection("deleted", 1)
+        )
+        .is_err());
+        assert!(create_selected_run(
+            &mut data,
+            "qa",
+            "bad".into(),
+            "task".into(),
+            1,
+            1,
+            team_selection("second", 99)
+        )
+        .is_err());
+        let mut updated = second;
+        updated.name = "Updated second".into();
+        save(&mut data, "qa", 1, updated.clone()).unwrap();
+        assert_eq!(data.ao_teams[0], first);
+        assert!(save(&mut data, "qa", 1, updated).is_err());
+        assert_eq!(
+            create_run(
+                &mut data,
+                "qa",
+                "legacy".into(),
+                "task".into(),
+                1,
+                first.revision,
+                1
+            )
+            .unwrap()
+            .team
+            .unwrap()
+            .id,
+            "first"
+        );
+    }
+
+    #[test]
+    fn explicit_single_run_is_one_node_without_a_team_or_planning_protocol() {
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../aiTemp")
+            .canonicalize()
+            .unwrap();
+        let data: AppData = serde_json::from_value(json!({
+            "profiles":[{"id":"qa","name":"QA","path":workspace.to_string_lossy(),"tunnel":{},"auth":{"type":"bearer"},"runtime":{},"actions":{}}],
+            "control_board":{"revision":1,"tasks":[{"id":"task","workspace_id":"qa","title":"Direct answer","description":"Explain the result","state":"pending","step":0,"created_at":0,"updated_at":0,"clauses":[],"evidence":[]}]}
+        })).unwrap();
+        let run: Run = serde_json::from_value(json!({
+            "id":"single","workspace_id":"qa","project_id":"task","revision":0,"execution_mode":"single",
+            "nodes":[{"id":"only","task_id":"task","role":"planner","parents":[],"x":0,"y":0,"state":"pending",
+                "route":{"harness_id":"codex-native","provider_id":"chatgpt-web","account_id":"chatgpt-web","model":"chatgpt-web/high","permission_profile":":workspace","approval_policy":"on-request","approvals_reviewer":"user"}}]
+        })).unwrap();
+        assert!(ao::validate(Some(&data), &run).is_ok());
+        let prompt = ao::prompt_for_node(&data, &run, "only").unwrap();
+        assert!(prompt.contains("Explain the result"));
+        assert!(
+            !prompt.contains("First judge")
+                && !prompt.contains("```assignments")
+                && !prompt.contains("```solo")
+        );
+    }
+
+    #[test]
+    fn split_keeps_its_own_permission_selection_when_reviewer_changes() {
+        let web = json!({"harness_id":"codex-native","provider_id":"chatgpt-web","account_id":"chatgpt-web","model":"chatgpt-web/high","permission_profile":":read-only"});
+        let node = |id: &str, role: &str| -> Node {
+            serde_json::from_value(json!({"id":id,"task_id":"","role":role,"parents":[],"x":0,"y":0,"state":"pending","route":web})).unwrap()
+        };
+        let mut nodes = vec![
+            node("lead", "planner"),
+            node("worker", "worker"),
+            node("review", "reviewer"),
+            node("sub", "sub_reviewer"),
+            node("split", "review_split"),
+        ];
+        nodes[4].route.permission_profile = ":workspace".into();
+        nodes[4].route.native_permission_profile = Some(":workspace".into());
+        nodes[4].route.approval_policy = Some("on-request".into());
+        nodes[4].route.approvals_reviewer = Some("auto_review".into());
+        let before = nodes[4].route.clone();
+        nodes[2].route.permission_profile = ":danger-full-access".into();
+        nodes[2].route.approval_policy = Some("never".into());
+        normalize_roles(&mut nodes);
+        assert_eq!(
+            nodes[4].route, before,
+            "single main reviewer change must not overwrite split policy"
+        );
+        nodes[4].route.permission_profile = "custom-minimal".into();
+        nodes[4].route.native_permission_profile = Some("custom-minimal".into());
+        let chosen = nodes[4].route.clone();
+        normalize_roles(&mut nodes);
+        assert_eq!(
+            nodes[4].route, chosen,
+            "split-only choice survives save normalization"
+        );
+        nodes[2].route.harness_id = "ao:codex".into();
+        nodes[2].route.permission_profile = ":ao-default".into();
+        normalize_roles(&mut nodes);
+        assert_eq!(nodes[4].route.permission_profile, ":ao-default");
+        assert_eq!(
+            nodes[4].route.native_permission_profile.as_deref(),
+            Some("custom-minimal")
+        );
+        assert_eq!(nodes[4].route.approvals_reviewer, chosen.approvals_reviewer);
+        nodes[2].route = serde_json::from_value(web).unwrap();
+        normalize_roles(&mut nodes);
+        assert_eq!(nodes[4].route.permission_profile, "custom-minimal");
+        nodes[4].route.harness_id = "ao:codex".into();
+        nodes[4].route.permission_profile = ":ao-default".into();
+        nodes[4].route.native_permission_profile = None;
+        normalize_roles(&mut nodes);
+        assert_eq!(nodes[4].route.permission_profile, ":read-only", "an external-only legacy role initializes safe new native scope, never the main reviewer's broader rights");
+    }
     #[test]
     fn gemini_moves_to_claude_code_and_default_models_are_refused() {
         let node = |route: serde_json::Value| -> Node {
@@ -702,10 +1436,10 @@ mod tests {
         assert_eq!(nodes[0].route.harness_id, "ao:claude-code");
         assert_eq!(nodes[0].route.model, "cpa/gemini-3.8-flash-high");
         assert_eq!(nodes[0].route.provider_id, "agent-orchestrator");
-        assert_eq!(
-            nodes[1].route.harness_id, "codex-native",
-            "OpenAI CPA models stay on Native Codex"
-        );
+        // Native Codex runs only WebGPT: every other CPA model moves to AO's Codex harness.
+        assert_eq!(nodes[1].route.harness_id, "ao:codex");
+        assert_eq!(nodes[1].route.model, "cpa/gpt-6-luna");
+        assert_eq!(nodes[1].route.permission_profile, ":ao-default");
         assert!(require_explicit_models(&nodes).is_ok());
         nodes[1].route.model = "default".into();
         let refused = require_explicit_models(&nodes).unwrap_err().to_string();
@@ -727,7 +1461,7 @@ mod tests {
             "control_board":{"revision":1,"tasks":[{"id":"goal","workspace_id":"qa","title":"Test roles","description":"Read only","state":"pending","step":0,"created_at":0,"updated_at":0,"clauses":[],"evidence":[]}]}
         })).unwrap();
         let web = json!({"harness_id":"codex-native","provider_id":"chatgpt-web","account_id":"chatgpt-web","model":"chatgpt-web/high","permission_profile":":read-only"});
-        let worker = json!({"harness_id":"codex-native","provider_id":"cliproxyapi-antigravity","account_id":"shared-cpa-pool","model":"gemini-3.8-flash-high","permission_profile":":read-only"});
+        let worker = json!({"harness_id":"ao:codex","provider_id":"agent-orchestrator","account_id":"ao-local","model":"cpa/gemini-3.8-flash-high","permission_profile":":ao-default"});
         let team: Team = serde_json::from_value(json!({"id":"team","workspace_id":"qa","name":"Product team","revision":0,"nodes":[
             {"id":"lead","task_id":"","role":"planner","parents":[],"x":0,"y":0,"state":"pending","route":web},
             {"id":"worker","task_id":"","role":"worker","parents":["lead"],"x":0,"y":1,"state":"pending","route":worker},
@@ -762,6 +1496,195 @@ mod tests {
         team.nodes[1].settings.instructions = "Verify the API contract".into();
         let saved = save(&mut data, "qa", 1, team.clone()).unwrap();
         assert!(save(&mut data, "qa", 1, team).is_err());
+        let mut scoped_data = data.clone();
+        let before = scoped_data.ao_runs[0].clone();
+        let selection = PermissionSelection {
+            approval_policy: Some("on-request".into()),
+            ..Default::default()
+        };
+        let ids = vec!["lead".into(), "review".into()];
+        let scoped = apply_selected(
+            &mut scoped_data,
+            "qa",
+            "run",
+            active.revision,
+            saved.revision,
+            Some(&ids),
+            Some(&selection),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&scoped.nodes[0]).unwrap(),
+            serde_json::to_value(&before.nodes[0]).unwrap(),
+            "running attempt stays exact"
+        );
+        assert_eq!(
+            serde_json::to_value(&scoped.nodes[1]).unwrap(),
+            serde_json::to_value(&before.nodes[1]).unwrap(),
+            "unselected queued policy and settings stay exact"
+        );
+        assert_eq!(
+            scoped.nodes[2].route.approval_policy.as_deref(),
+            Some("on-request")
+        );
+        assert_eq!(
+            scoped.nodes[2].route.permission_profile,
+            before.nodes[2].route.permission_profile
+        );
+        assert_eq!(scoped.nodes[2].settings, before.nodes[2].settings);
+        assert_eq!(
+            serde_json::to_value(&scoped.team.as_ref().unwrap().nodes[1]).unwrap(),
+            serde_json::to_value(&before.team.as_ref().unwrap().nodes[1]).unwrap()
+        );
+        assert!(apply_selected(
+            &mut scoped_data,
+            "qa",
+            "run",
+            scoped.revision,
+            saved.revision,
+            Some(&["unknown".into()]),
+            Some(&selection)
+        )
+        .is_err());
+        assert!(apply_selected(
+            &mut scoped_data,
+            "qa",
+            "run",
+            scoped.revision,
+            saved.revision,
+            Some(&ids),
+            Some(&PermissionSelection::default())
+        )
+        .is_err());
+        let mut helper_data = data.clone();
+        helper_data.ao_teams[0].id = "different-future-team".into();
+        helper_data.ao_runs[0].nodes[2].template_role_id = None;
+        let helper_id = helper_data.ao_runs[0].nodes[2].id.clone();
+        let helper_before = serde_json::to_value(&helper_data.ao_runs[0].nodes[2]).unwrap();
+        let helper_selected = apply_selected(
+            &mut helper_data,
+            "qa",
+            "run",
+            active.revision,
+            saved.revision,
+            Some(&[helper_id]),
+            Some(&selection),
+        )
+        .unwrap();
+        let mut helper_expected = helper_before;
+        helper_expected["route"]["approval_policy"] = json!("on-request");
+        assert_eq!(serde_json::to_value(&helper_selected.nodes[2]).unwrap(), helper_expected, "mission-only role receives only explicitly selected policy despite a different future team");
+        assert_eq!(
+            helper_selected.team.as_ref().unwrap().id,
+            before.team.as_ref().unwrap().id
+        );
+        let mut deferred_data = data.clone();
+        deferred_data.ao_runs[0].nodes[0].route.permission_profile = ":workspace".into();
+        deferred_data.ao_runs[0].nodes[0]
+            .receipt
+            .as_mut()
+            .unwrap()
+            .route
+            .permission_profile = ":workspace".into();
+        deferred_data.ao_runs[0].team.as_mut().unwrap().nodes[0]
+            .route
+            .approval_policy = Some("never".into());
+        let running_before = serde_json::to_value(&deferred_data.ao_runs[0].nodes[0]).unwrap();
+        let narrow = PermissionSelection {
+            permission_profile: Some(":read-only".into()),
+            ..Default::default()
+        };
+        let staged = apply_selected(
+            &mut deferred_data,
+            "qa",
+            "run",
+            active.revision,
+            saved.revision,
+            Some(&["lead".into()]),
+            Some(&narrow),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&staged.nodes[0]).unwrap(),
+            running_before
+        );
+        assert!(staged.grant.is_none());
+        deferred_data.ao_runs[0].nodes[0].state = State::Held;
+        let retried = control(&mut deferred_data, "qa", "run", "retry").unwrap();
+        assert_eq!(retried.nodes[0].route.permission_profile, ":read-only");
+        assert_eq!(
+            retried.nodes[0].route.approval_policy, None,
+            "omitted field is not copied from a differing historical snapshot"
+        );
+        assert_eq!(
+            retried.nodes[0]
+                .history
+                .last()
+                .unwrap()
+                .route
+                .permission_profile,
+            ":workspace"
+        );
+        let mut finished = staged.nodes[0].clone();
+        finished.state = State::Finished;
+        assert!(requeue(&mut finished, staged.team.as_ref()));
+        assert_eq!(finished.route.permission_profile, ":read-only");
+
+        let mut legacy_helper = data.clone();
+        legacy_helper.ao_runs[0].team = None;
+        legacy_helper.ao_runs[0].nodes[0].template_role_id = None;
+        legacy_helper.ao_runs[0].nodes[0].route.permission_profile = ":workspace".into();
+        legacy_helper.ao_runs[0].nodes[0]
+            .receipt
+            .as_mut()
+            .unwrap()
+            .route
+            .permission_profile = ":workspace".into();
+        let reusable_before = serde_json::to_value(&legacy_helper.ao_teams).unwrap();
+        let helper_id = legacy_helper.ao_runs[0].nodes[0].id.clone();
+        let staged = apply_selected(
+            &mut legacy_helper,
+            "qa",
+            "run",
+            active.revision,
+            saved.revision,
+            Some(std::slice::from_ref(&helper_id)),
+            Some(&narrow),
+        )
+        .unwrap();
+        assert_eq!(
+            staged.team.as_ref().unwrap().nodes.len(),
+            staged.nodes.len()
+        );
+        assert!(staged
+            .team
+            .as_ref()
+            .unwrap()
+            .permission_selections
+            .contains_key(&helper_id));
+        assert_eq!(
+            serde_json::to_value(&legacy_helper.ao_teams).unwrap(),
+            reusable_before,
+            "no reusable helper role is created"
+        );
+        legacy_helper.ao_runs[0].nodes[0].state = State::Held;
+        assert_eq!(
+            control(&mut legacy_helper, "qa", "run", "retry")
+                .unwrap()
+                .nodes[0]
+                .route
+                .permission_profile,
+            ":read-only"
+        );
+        assert!(save(
+            &mut legacy_helper,
+            "qa",
+            saved.revision,
+            staged.team.unwrap()
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("Mission-only"));
         let applied = apply(&mut data, "qa", "run", active.revision, saved.revision).unwrap();
         assert_eq!(applied.nodes[0].settings.revision, 1);
         assert_eq!(

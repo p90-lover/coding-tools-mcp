@@ -190,7 +190,7 @@ async function startCpaAccountLogin({
   adapterId,
   requestJson,
   openExternal,
-  sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  sleep = (milliseconds, options) => require("node:timers/promises").setTimeout(milliseconds, undefined, options),
   now = Date.now,
   timeoutMs = 5 * 60_000,
   pollIntervalMs = 1_000,
@@ -200,69 +200,70 @@ async function startCpaAccountLogin({
   boundAuthFileIndex = null,
   reservedAuthFileIds = [],
   requireBound = false,
+  signal,
 }) {
   if (typeof requestJson !== "function") throw new Error("CPA management request adapter is required");
   const adapter = adapterDefinition(adapterId);
   const reserved = new Set(reservedAuthFileIds.filter(Boolean));
   if (boundAuthFileId) reserved.delete(boundAuthFileId);
+  const request = async (pathname, options = {}) => {
+    signal?.throwIfAborted();
+    const result = await requestJson(pathname, { ...options, ...(signal ? { signal } : {}) });
+    signal?.throwIfAborted();
+    return result;
+  };
 
   if (adapter.kind === "cpa_auth_file") {
     const resolved = await resolveAuthFile({
-      adapter,
-      requestJson,
-      reservedAuthFileIds: reserved,
-      boundAuthFileId,
-      boundAuthFileName,
-      boundAuthFileIndex,
-      identity,
-      requireBound,
+      adapter, requestJson: request, reservedAuthFileIds: reserved,
+      boundAuthFileId, boundAuthFileName, boundAuthFileIndex, identity, requireBound,
     });
+    signal?.throwIfAborted();
     return { opened: false, mode: "import", state: null, ...resolved };
   }
 
-  const baselineListing = await requestJson("/v0/management/auth-files");
+  const baselineListing = await request("/v0/management/auth-files");
   const baselineIds = new Set(adapterFiles(baselineListing, adapter).map((entry) => entry.id));
+  // Let initiation return its state even if cancelled, so the finally block can delete it.
   const login = await requestJson(`/v0/management/${adapter.route}?is_webui=true`);
   const state = normalizedText(login?.state);
   const loginUrl = normalizedText(login?.url);
-  if (login?.status !== "ok" || !state || !loginUrl) {
-    throw new Error(`CPA did not start ${adapter.providers[0]} authentication`);
-  }
-  if (typeof openExternal !== "function") throw new Error("CPA OAuth browser opener is unavailable");
-  await openExternal(loginUrl);
-
-  const deadline = now() + Math.max(1, timeoutMs);
-  while (now() <= deadline) {
-    const status = await requestJson(
-      `/v0/management/get-auth-status?state=${encodeURIComponent(state)}`,
-    );
-    if (status?.status === "ok") {
-      const resolved = await resolveAuthFile({
-        adapter,
-        requestJson,
-        baselineIds,
-        reservedAuthFileIds: reserved,
-        boundAuthFileId,
-        boundAuthFileName,
-        boundAuthFileIndex,
-        identity,
-        requireBound,
-      });
-      return { opened: true, mode: "external", state, ...resolved };
-    }
-    if (status?.status === "error") {
-      throw new Error(String(status.error || `${adapter.providers[0]} authentication failed`));
-    }
-    await sleep(Math.max(1, pollIntervalMs));
-  }
-
+  let browser;
+  let completed = false;
   try {
-    await requestJson(
-      `/v0/management/oauth-session?state=${encodeURIComponent(state)}`,
-      { method: "DELETE" },
-    );
-  } catch {}
-  throw new Error(`${adapter.providers[0]} authentication timed out`);
+    signal?.throwIfAborted();
+    if (login?.status !== "ok" || !state || !loginUrl) {
+      throw new Error(`CPA did not start ${adapter.providers[0]} authentication`);
+    }
+    if (typeof openExternal !== "function") throw new Error("CPA OAuth browser opener is unavailable");
+    browser = await openExternal(loginUrl, { signal });
+    signal?.throwIfAborted();
+    const deadline = now() + Math.max(1, timeoutMs);
+    while (now() <= deadline) {
+      const status = await request(`/v0/management/get-auth-status?state=${encodeURIComponent(state)}`);
+      if (status?.status === "ok") {
+        const resolved = await resolveAuthFile({
+          adapter, requestJson: request, baselineIds, reservedAuthFileIds: reserved,
+          boundAuthFileId, boundAuthFileName, boundAuthFileIndex, identity, requireBound,
+        });
+        signal?.throwIfAborted();
+        completed = true;
+        return { opened: true, mode: "external", state, ...resolved };
+      }
+      if (status?.status === "error") throw new Error(String(status.error || `${adapter.providers[0]} authentication failed`));
+      await sleep(Math.max(1, pollIntervalMs), { signal });
+      signal?.throwIfAborted();
+    }
+    throw new Error(`${adapter.providers[0]} authentication timed out`);
+  } finally {
+    browser?.close?.();
+    if (state && !completed) {
+      try {
+        // Cleanup must not inherit the cancelled request's signal.
+        await requestJson(`/v0/management/oauth-session?state=${encodeURIComponent(state)}`, { method: "DELETE" });
+      } catch {}
+    }
+  }
 }
 
 async function inspectCpaAccount(options) {

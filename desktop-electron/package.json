@@ -106,6 +106,10 @@
         "to": "acp-runtime"
       },
       {
+        "from": "build/acp-runtime/node_modules",
+        "to": "acp-runtime/node_modules"
+      },
+      {
         "from": "build/package-resources",
         "to": "."
       },

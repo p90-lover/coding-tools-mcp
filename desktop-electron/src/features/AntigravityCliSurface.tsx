@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getCodingToolsClient } from "../api/client";
 import type { JsonObject, WorkspaceSummary } from "../api/contracts";
 import { AgentOrchestratorOriginalSurface, type AoTerminalView } from "./AgentOrchestratorOriginalSurface";
@@ -12,7 +12,7 @@ type Status = {
   command: string; shim: string | null; previous: string[];
   download: { fileName: string; size: number; url: string } | null;
   proxy?: { configured: boolean; error?: string };
-  cpa: { auto: boolean; accounts: Account[]; needsAttention: number; signingIn: boolean; lastSweep: Sweep | null; error: string | null };
+  cpa: { auto: boolean; accounts: Account[]; needsAttention: number; signingIn: boolean; signInAccount?: { name: string; startedAt: string } | null; lastSweep: Sweep | null; error: string | null };
 };
 
 const TERMINAL_KEY = "coding-tools:agy:terminal";
@@ -45,6 +45,8 @@ export function AntigravityCliSurface({ setError, openNetwork }: { setError: (er
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [workspaceId, setWorkspaceId] = useState("");
   const [busy, setBusy] = useState("");
+  const [signingName, setSigningName] = useState<string | null>(null);
+  const signInRequest = useRef(0);
   const [tab, setTab] = useState<"terminal" | "accounts">("terminal");
   const [terminal, setTerminal] = useState<AoTerminalView | null>(savedTerminal);
 
@@ -70,6 +72,24 @@ export function AntigravityCliSurface({ setError, openNetwork }: { setError: (er
     finally { setBusy(""); await refreshStatus(); }
   };
 
+  const signIn = (name: string) => async () => {
+    const request = ++signInRequest.current;
+    setSigningName(name); setError(null);
+    try { await call("sign_in", { name }); }
+    catch (cause) {
+      if (request === signInRequest.current) setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      if (request === signInRequest.current) { setSigningName(null); await refreshStatus(); }
+    }
+  };
+  const cancelSignIn = (name: string) => async () => {
+    ++signInRequest.current;
+    setSigningName(null);
+    try { await call("cancel_sign_in", { name }); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { await refreshStatus(); }
+  };
+
   const openTerminal = run("terminal", "terminal_open", workspaceId ? { workspaceId } : {}, result => {
     const next = { handle: String(result.handle), generation: String(result.generation || result.handle), title: "agy" };
     saveTerminal(next); setTerminal(next); setTab("terminal");
@@ -83,6 +103,7 @@ export function AntigravityCliSurface({ setError, openNetwork }: { setError: (er
 
   const cpa = status?.cpa;
   const proxyReady = status?.proxy?.configured === true;
+  const activeSignIn = signingName ?? cpa?.signInAccount?.name;
   return (
     <section className="agy-surface" aria-label="Antigravity CLI">
       <header className="agy-bar">
@@ -96,7 +117,7 @@ export function AntigravityCliSurface({ setError, openNetwork }: { setError: (er
         </div>
         <span className="agy-spacer" />
         <button type="button" className={`agy-proxy ${proxyReady ? "is-ok" : "is-off"}`} onClick={openNetwork}
-          title={proxyReady ? "All agy traffic goes through the global network proxy" : status?.proxy?.error || "Select a global proxy to run agy"}>
+          title={proxyReady ? "agy requests and managed sign-in use the selected global proxy" : status?.proxy?.error || "Select a global proxy to run agy"}>
           {proxyReady ? "Proxy on" : "Proxy required"}
         </button>
         {status?.installed ? <>
@@ -105,7 +126,7 @@ export function AntigravityCliSurface({ setError, openNetwork }: { setError: (er
             {workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
           </select>
           <button type="button" className="button-primary" disabled={Boolean(busy) || !proxyReady} onClick={openTerminal}
-            title="Opens agy in an in-app terminal. The first run signs in with Google.">{terminal ? "New terminal" : "Open agy"}</button>
+            title="Opens agy in an in-app terminal. Click its Google sign-in link, then paste the authorization code back into the terminal.">{terminal ? "New terminal" : "Open agy"}</button>
           {terminal ? <button type="button" className="button-secondary" disabled={Boolean(busy)} onClick={closeTerminal}>Close</button> : null}
         </> : <button type="button" className="button-primary" disabled={!status?.supported || Boolean(busy) || status?.installing}
           onClick={run("install", "install")} title={status?.download ? `${status.download.fileName} · ${(status.download.size / 1048576).toFixed(0)} MB · checksum-verified` : undefined}>
@@ -141,9 +162,12 @@ export function AntigravityCliSurface({ setError, openNetwork }: { setError: (er
                 <small title={account.error ?? undefined}>{account.disabled ? "disabled" : account.status}{account.error ? ` · ${account.error}` : ""}</small>
               </span>
               {!account.disabled ? <>
-                <button type="button" className="button-secondary" disabled={Boolean(busy)} onClick={run(`refresh:${account.name}`, "refresh", { name: account.name })}>Refresh</button>
-                <button type="button" className={needsAuth(account) ? "button-primary" : "button-secondary"} disabled={Boolean(busy) || cpa.signingIn}
-                  onClick={run(`sign:${account.name}`, "sign_in", { name: account.name })}>{busy === `sign:${account.name}` ? "Waiting for browser…" : "Sign in again"}</button>
+                <button type="button" className="button-secondary" disabled={Boolean(busy) || activeSignIn === account.name} onClick={run(`refresh:${account.name}`, "refresh", { name: account.name })}>Refresh</button>
+                {activeSignIn === account.name ? <>
+                  <span role="status">Waiting for sign-in…</span>
+                  <button type="button" className="button-secondary" onClick={cancelSignIn(account.name)}>Cancel</button>
+                </> : <button type="button" className={needsAuth(account) ? "button-primary" : "button-secondary"} disabled={!proxyReady}
+                  onClick={signIn(account.name)} title={activeSignIn ? "Cancels the current sign-in and starts this account" : undefined}>Sign in again</button>}
               </> : null}
             </li>)}
           </ul>
@@ -156,7 +180,7 @@ export function AntigravityCliSurface({ setError, openNetwork }: { setError: (er
           <dl>
             <dt>Agent Orchestrator</dt><dd>{status?.installed ? "Available as the Agy worker harness (restart the AO runtime once after install or proxy changes)" : "Install to enable the Agy harness"}</dd>
             <dt>Network</dt><dd>Every agy process, in this terminal or started by AO, uses the global network proxy and refuses to start without it.</dd>
-            <dt>Sign-in</dt><dd>The CLI keeps its own Google sign-in. CPA accounts are renewed through CPA; the CLI's credentials are never read.</dd>
+            <dt>Sign-in</dt><dd>For CLI sign-in, click the Google link in the terminal to open the proxy-routed window, then paste its authorization code back into agy. CPA accounts renew separately; their sign-in can be cancelled or switched to another account.</dd>
           </dl>
         </section>
       </div>}
