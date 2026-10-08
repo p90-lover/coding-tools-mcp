@@ -107,7 +107,7 @@ function MessageActions({ text, children }: { text: string; children?: ReactNode
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, working = false, describeNode, activity, permissions, composer, onOpenTeam, onOpenMissionBoard,
-  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath,
+  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, seed, onSeedUsed,
   pendingMessage, pendingTitle, pendingCreation = false,
 }: {
   /** A message being sent into a chat that has no run yet (shown at once, as Codex does). */
@@ -148,6 +148,9 @@ export function AgentOrchestratorChat({
   onSettings?: () => void;
   /** The path of a dropped or picked file, when the app can tell. */
   filePath?: (file: File) => string;
+  /** A new chat's starting draft ("Continue in project"); taken once, then onSeedUsed clears it. */
+  seed?: { key: string; title: string; text: string };
+  onSeedUsed?: () => void;
 }) {
   const chats = useMemo(() => chatList(runs, tasks, [], true), [runs, tasks]);
   const chat = chats.find((entry) => entry.taskId === selectedTaskId);
@@ -204,6 +207,13 @@ export function AgentOrchestratorChat({
   useEffect(() => { if (atBottom) scroller.current?.scrollTo({ top: scroller.current.scrollHeight }); }, [turns.length, stepCount, atBottom]);
   // A new chat starts at the bottom.
   useEffect(() => { setAtBottom(true); setShowStructure(false); setRenaming(null); }, [selectedTaskId]);
+  // Continue in project: the new chat opens with the carried messages, ready to review and send.
+  useEffect(() => {
+    if (!seed || selectedTaskId) return;
+    setDraft(seed.text); setTitle(seed.title);
+    onSeedUsed?.();
+    window.setTimeout(() => input.current?.focus(), 0);
+  }, [seed?.key]);
   // The composer grows with its text, like Codex, up to a cap.
   useEffect(() => {
     const box = input.current;

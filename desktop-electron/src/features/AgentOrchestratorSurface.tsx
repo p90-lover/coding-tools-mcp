@@ -11,6 +11,7 @@ import { AgentOrchestratorPermissions, mergeSavedPermissions, missionPermissionN
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
 import { chatArchived, chatList, chatMarkdown, chatMessagesFromDescription, chatTurns, type ChatActivity, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
+import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { createLatestConfigQueue } from "./ao-config";
 import {
   AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, defaultTeam, emptyRoleSettings,
@@ -418,6 +419,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [missionTitle, setMissionTitle] = useState("");
   const [missionPrompt, setMissionPrompt] = useState("");
   const [pendingChat, setPendingChat] = useState<{ title: string; message: string; taskId?: string } | null>(null);
+  /** "Continue in project": a new chat in another project, its composer filled with this chat's messages. */
+  const [chatSeed, setChatSeed] = useState<{ key: string; workspaceId: string; title: string; text: string } | null>(null);
 
   const selection = useRef({ workspaceId, taskId: chatTaskId ?? "", runId: selectedRunId });
   selection.current = { workspaceId, taskId: chatTaskId ?? "", runId: selectedRunId };
@@ -589,6 +592,17 @@ export function AgentOrchestratorSurface({ language, setError }: {
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setBusy(""); }
   };
+  // Chat-list actions (rename, archive, delete, restore, cancel a schedule) are guarded per chat,
+  // not by the surface-wide busy flag: run() silently skips its action while anything else is in
+  // flight (a team auto-save, a start awaiting consent), which made these menu items do nothing.
+  const chatBusyIds = useRef(new Set<string>());
+  const [chatBusy, setChatBusy] = useState<string[]>([]);
+  const chatRun = (taskId: string, action: () => Promise<void>) => new Promise<void>((resolve, reject) => {
+    if (chatBusyIds.current.has(taskId)) { reject(new Error("This chat is still being updated")); return; }
+    chatBusyIds.current.add(taskId); setChatBusy([...chatBusyIds.current]); setError(null);
+    action().then(resolve, (cause) => { setError(cause instanceof Error ? cause.message : String(cause)); reject(cause); })
+      .finally(() => { chatBusyIds.current.delete(taskId); setChatBusy([...chatBusyIds.current]); });
+  });
 
   const createWorkspace = () => void run("workspace", async () => {
     const result = await getCodingToolsClient().workspaces.create({
@@ -604,6 +618,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
   useEffect(() => { setChatTaskId(null); }, [workspaceId]);
   useEffect(() => {
     if (chatTaskId !== null || !board) return;
+    // "Continue in project" switched here to open a new, pre-filled chat, not the latest one.
+    if (chatSeed?.workspaceId === workspaceId) { setChatTaskId(""); setView("chat"); return; }
     const latest = chatList(missions, board.tasks, taskLifecycle)[0];
     setChatTaskId(latest?.taskId ?? "");
     if (latest) setSelectedRunId(latest.latestRunId);
@@ -709,7 +725,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     if (action === "schedule") { setScheduleTarget(scope); setSheet("schedule"); return; }
     const pending = draftScopes.current.get(JSON.stringify([workspaceId,taskId]));
     if (pending) configuration.current?.cancel(pending);
-    void run("mission_action", async () => {
+    void chatRun(taskId, async () => {
       const operation = action === "cancel_schedule" ? action : `${action}_task`;
       await moduleCall(operation,{workspaceId:scope.workspaceId,taskId:scope.taskId});
       if (selection.current.workspaceId !== scope.workspaceId) return;
@@ -717,7 +733,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
       if (selection.current.taskId === taskId && ["archive","delete"].includes(action)) {
         setChatTaskId("");setDraftTeam(null);setInspectedId("");
       }
-    });
+    }).catch(() => {});
   };
   const submitSchedule = () => void run("schedule",async()=>{
     const target=scheduleTarget;
@@ -1156,15 +1172,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
     return next;
   });
   const startNewChat = () => { setPendingChat(null); setChatTaskId(""); setDraftTeam(null); setInspectedId(""); setView("chat"); setSheet(""); setMissionTeamId(team?.id ?? ""); };
-  const renameChat = (taskId: string, title: string) => new Promise<void>((resolve, reject) => {
-    if (busy) { reject(new Error("Another action is still running")); return; }
-    void run("rename", async () => {
-      try {
-        await moduleCall("task_rename", { workspaceId, taskId, title });
-        await loadBoard(workspaceId);
-        resolve();
-      } catch (cause) { reject(cause); throw cause; }
-    });
+  const renameChat = (taskId: string, title: string) => chatRun(taskId, async () => {
+    await moduleCall("task_rename", { workspaceId, taskId, title });
+    await loadBoard(workspaceId);
   });
   // "Archive chats" on a project: each chat goes through the lifecycle's own archive (which asks
   // before stopping a chat's running work), one after another.
@@ -1181,15 +1191,48 @@ export function AgentOrchestratorSurface({ language, setError }: {
     if (!kept.length) return;
     await sendChat({ title: `Fork of ${taskName(taskId)}`.slice(0, 240), message: kept.map((message) => message.text).join("\n\n").slice(0, 8192) });
   })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+  /** A chat as Codex turns, read fresh (the board list omits task descriptions). */
+  const chatTranscript = async (taskId: string) => chatTurns(missions.filter((mission) => mission.project_id === taskId) as unknown as ChatRun[],
+    await loadDescription(taskId), { describe: describeChatNode, activity: chatActivity, now: Date.now() });
   const copyChat = (taskId: string, what: "title" | "conversation" | "answer" | "id") => void (async () => {
     let text = what === "title" ? taskName(taskId) : what === "id" ? taskId : "";
     if (what === "conversation" || what === "answer") {
-      const turns = chatTurns(missions.filter((mission) => mission.project_id === taskId) as unknown as ChatRun[], await loadDescription(taskId), { describe: describeChatNode });
+      const turns = await chatTranscript(taskId);
       text = what === "conversation" ? chatMarkdown(taskName(taskId), turns)
         : [...turns].reverse().map((turn) => turn.final?.text ?? [...turn.steps].reverse().find((step) => step.text)?.text).find(Boolean) ?? "";
     }
     if (text) await navigator.clipboard.writeText(text);
   })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+  // Share: chats stay on this computer, so sharing saves the conversation as a Markdown file
+  // (Electron asks where, as for any download).
+  const shareChat = (taskId: string) => void (async () => {
+    const markdown = chatMarkdown(taskName(taskId), await chatTranscript(taskId));
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(new Blob([markdown], { type: "text/markdown;charset=utf-8" }));
+    link.download = `${taskName(taskId).replace(/[\\/:*?"<>|]+/g, " ").trim().slice(0, 120) || "chat"}.md`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(link.href), 60_000);
+  })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+  // Continue in project: runs stay with their own project, so another project gets a new chat whose
+  // composer holds this chat's messages; you pick that project's team or model and send.
+  const continueInProject = (taskId: string, targetWorkspaceId: string) => void (async () => {
+    const messages = chatMessagesFromDescription(await loadDescription(taskId));
+    const text = messages.map((message) => message.text).join("\n\n").slice(0, 8192);
+    setChatSeed({ key: crypto.randomUUID(), workspaceId: targetWorkspaceId, title: `${taskName(taskId)} (continued)`.slice(0, 240), text });
+    setPendingChat(null); setInspectedId(""); setDraftTeam(null); setSheet("");
+    if (targetWorkspaceId === workspaceId) { setChatTaskId(""); setView("chat"); } else chooseWorkspace(targetWorkspaceId);
+  })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+  // Open in new window: a read-only live copy of the chat (see chat-window.tsx); kept current below.
+  const [chatWindowIds, setChatWindowIds] = useState<string[]>([]);
+  const pushChatWindow = async (taskId: string, mode: "open" | "update") => {
+    const launcher = window.codexWebLauncher;
+    if (!launcher?.showChatWindow) throw new Error("Update Coding Tools to open chats in a new window");
+    const title = taskName(taskId), turns = await chatTranscript(taskId);
+    const result = await launcher.showChatWindow({ key: taskId, title, page: chatWindowPage(title, turns), body: chatWindowBody(title, turns), mode });
+    setChatWindowIds((current) => result.open ? (current.includes(taskId) ? current : [...current, taskId]) : current.filter((id) => id !== taskId));
+  };
+  const openChatWindow = (taskId: string) => void pushChatWindow(taskId, "open")
+    .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
   const openFolder = (item: ThreadWorkspace) => {
     if (item.path) void window.codexWebLauncher?.openFolder?.(item.path).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
   };
@@ -1274,18 +1317,28 @@ export function AgentOrchestratorSurface({ language, setError }: {
     });
     return () => { live = false; window.clearInterval(timer); window.clearTimeout(follow); stopPush(); };
   }, [workspaceId, workingRunIds]);
+  // Chats open in their own window follow along: re-render and push shortly after they change.
+  // A push to a window the user closed answers open:false, which drops it from the list.
+  useEffect(() => {
+    if (!chatWindowIds.length) return;
+    const timer = window.setTimeout(() => {
+      for (const id of chatWindowIds) void pushChatWindow(id, "update").catch(() => {});
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [missions, chatActivity, chatWindowIds]);
 
   return (
     <section className="ao-workflow" aria-label={copy.title} lang={language}>
       <ChatThreadList workspaces={workspaces.map((item) => ({ id: item.id, name: item.name, path: item.path }))} workspaceId={workspaceId} onWorkspace={chooseWorkspace}
         chats={chatList(missions, allTasks, taskLifecycle)} archived={chatArchived(missions, allTasks, taskLifecycle)} selectedTaskId={chatTaskId ?? ""} now={listNow}
         pinned={chatPins} togglePin={togglePin} unread={chatUnread} setUnread={markUnread}
-        pinnedProjects={projectPins} toggleProjectPin={toggleProjectPin} busy={Boolean(busy)}
-        busyTaskId={busy ? chatTaskId ?? "" : undefined} pendingTitle={pendingChat && !pendingChat.taskId ? pendingChat.title : undefined}
+        pinnedProjects={projectPins} toggleProjectPin={toggleProjectPin}
+        busyTaskIds={chatBusy} pendingTitle={pendingChat && !pendingChat.taskId ? pendingChat.title : undefined}
         actions={{ select: (taskId) => selectChat(taskId, "chat"), newChat: startNewChat, rename: renameChat,
           lifecycle: missionAction, archiveAll: archiveAllChats,
           fork: (taskId, from) => forkChat(taskId, from === "first" ? "first" : undefined), copy: copyChat,
-          openStructure: (taskId) => selectChat(taskId, "overview"), openBoard: () => { setSheet(""); setView("board"); }, openFolder }} />
+          openStructure: (taskId) => selectChat(taskId, "overview"), openBoard: () => { setSheet(""); setView("board"); }, openFolder,
+          continueIn: continueInProject, share: shareChat, openWindow: openChatWindow }} />
       <div className="ao-main">
       <div className="ao-dragstrip" aria-hidden="true" />
       {view !== "chat" ? <header className="ao-workspace-head">
@@ -1444,6 +1497,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
                   onUnlink={unlink} canUnlink={(nodeId, parentId) => Boolean(aoUnlinkChange(selectedRun, nodeId, parentId))}
                   onRemove={removeCard} canRemove={(nodeId) => Boolean(aoRemoveChange(selectedRun, nodeId))} /> : undefined}
                 busy={Boolean(busy)} loadDescription={loadDescription} send={sendChat}
+                seed={chatSeed && chatSeed.workspaceId === workspaceId && !chatTaskId ? chatSeed : undefined}
+                onSeedUsed={() => setChatSeed(null)}
                 pendingMessage={pendingChat && (!pendingChat.taskId || pendingChat.taskId === chatTaskId) ? pendingChat.message : undefined}
                 pendingTitle={pendingChat?.title} pendingCreation={Boolean(pendingChat && !pendingChat.taskId)}
                 working={Boolean(selectedRun && chatTaskId && selectedRun.project_id === chatTaskId && ["starting", "running"].includes(autoStatus))}

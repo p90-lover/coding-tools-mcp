@@ -27,6 +27,7 @@ const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
 const { createChatGptDesktopHost } = require("./chatgpt-desktop.cjs");
 const { createGptBrowserHost, cleanUserAgent } = require("./gpt-browser.cjs");
 const { createEmailHost } = require("./email-host.cjs");
+const { createChatWindows } = require("./chat-windows.cjs");
 const { installKeysmithIpc } = require("./keysmith-ipc.cjs");
 const { parseMessage, sanitizeHtml } = require("./email-mime.cjs");
 const { createConfiguredConnector } = require("./mcp-connector-setup.cjs");
@@ -1347,6 +1348,15 @@ function registerIpc({ logger, stateStore }) {
     const failure = await shell.openPath(resolved);
     if (failure) throw new Error(failure);
     return true;
+  });
+
+  // "Open in new window" for a Mission chat. Only the main window sends content; the chat
+  // window itself is a script-free viewer with no preload (see chat-windows.cjs).
+  let chatWindows = null;
+  handle("launcher:chat-window", async (event, input) => {
+    assertFocusedMainWindow(event, false);
+    chatWindows ||= createChatWindows({ BrowserWindow, logger });
+    return chatWindows.show(input);
   });
 
   handle("launcher:open-external", async (_event, url) => {
