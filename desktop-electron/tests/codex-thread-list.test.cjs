@@ -64,13 +64,14 @@ test("each chat row has Codex's hover Pin and Archive buttons, not the old envel
     assert.deepEqual(labels, ["Pin chat", "Archive chat"]);
     assert.ok(!walk(row).some((element) => element.type === "Icon" && ["mail", "orchestrator"].includes(element.props.name)), "the envelope and funnel icons are gone");
   }
+  // Archive goes through the lifecycle, which asks before stopping a running chat's work.
   const archiveRunning = walk(rows[0]).find((element) => element.props?.["aria-label"] === "Archive chat");
-  assert.equal(archiveRunning.props.disabled, true, "a running chat can't be archived");
+  assert.equal(archiveRunning.props.disabled, false);
   assert.match(rows[0].props.className, /is-unread/, "an unread chat that isn't open is marked");
   walk(rows[1]).find((element) => element.props?.["aria-label"] === "Pin chat").props.onClick();
   walk(rows[1]).find((element) => element.props?.["aria-label"] === "Archive chat").props.onClick();
   walk(rows[1]).find((element) => element.props?.className === "cx-thread-select").props.onClick();
-  assert.deepEqual(calls, [["pin", "t2"], ["archive", "t2"], ["select", "t2"]]);
+  assert.deepEqual(calls, [["pin", "t2"], ["lifecycle", "t2", "archive"], ["select", "t2"]]);
 });
 
 test("clicking the open project collapses it; clicking another project opens it", () => {
@@ -98,13 +99,16 @@ test("right-click menus match Codex and every item is either wired or disabled w
   const rows = walk(list.render()).filter((element) => element.type === "li" && element.props.onContextMenu);
   rows[1].props.onContextMenu(event);
   const taskMenu = menuOf().items.filter((item) => item.kind !== "separator");
-  assert.deepEqual(plain(taskMenu.map((item) => item.label)), ["Rename", "Pin", "Mark as unread", "Project", "Section", "Fork", "Share", "Copy",
-    "Open in new window", "Open in", "Archive", "Permanently delete"]);
+  assert.deepEqual(plain(taskMenu.map((item) => item.label)), ["Rename", "Pin", "Mark as unread", "Project", "Section", "Fork", "Schedule start…", "Share", "Copy",
+    "Open in new window", "Open in", "Archive", "Delete (recoverable)"]);
   assert.deepEqual(plain(taskMenu.filter((item) => item.shortcut).map((item) => [item.label, item.shortcut])),
     [["Rename", "Alt+Ctrl+R"], ["Pin", "Alt+Ctrl+P"], ["Mark as unread", "Ctrl+Shift+U"], ["Archive", "Ctrl+Shift+A"]]);
   for (const item of taskMenu) assert.ok(item.run || item.items?.length || item.reason, `${item.label} is wired or explains why not`);
   assert.deepEqual(plain(taskMenu.filter((item) => !item.run && !item.items).map((item) => item.label)),
-    ["Project", "Section", "Share", "Open in new window", "Permanently delete"]);
+    ["Project", "Section", "Share", "Open in new window"]);
+  taskMenu.find((item) => item.label === "Schedule start…").run();
+  taskMenu.find((item) => item.label === "Delete (recoverable)").run();
+  assert.deepEqual(calls.splice(0), [["lifecycle", "t2", "schedule"], ["lifecycle", "t2", "delete"]]);
   taskMenu.find((item) => item.label === "Fork").items[0].run();
   taskMenu.find((item) => item.label === "Copy").items[1].run();
   taskMenu.find((item) => item.label === "Open in").items[0].run();
@@ -125,5 +129,5 @@ test("archived chats sit in their own section and can be restored", () => {
   assert.match(text(toggle), /Archived \(1\)/);
   toggle.props.onClick();
   walk(list.render()).find((element) => element.props?.className === "cx-restore").props.onClick();
-  assert.deepEqual(calls, [["restore", "t3"]]);
+  assert.deepEqual(calls, [["lifecycle", "t3", "restore"]]);
 });

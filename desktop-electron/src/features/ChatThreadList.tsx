@@ -2,10 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { Icon } from "../icons";
 import { ChatMenu, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
-import { chatRelativeTime, type ChatStatus, type ChatSummary } from "./ao-chat";
+import { chatRelativeTime, scheduledStartLabel, type ChatStatus, type ChatSummary } from "./ao-chat";
 
 const STATUS_LABEL: Record<ChatStatus, string> = {
-  queued: "Starting", running: "Running", paused: "Paused", attention: "Needs you", stopped: "Stopped", done: "Done",
+  queued: "Starting", scheduled: "Scheduled", running: "Running", paused: "Paused", attention: "Needs you", stopped: "Stopped", done: "Done",
 };
 
 export type ThreadWorkspace = { id: string; name: string; path?: string };
@@ -15,8 +15,8 @@ export type ThreadActions = {
   select: (taskId: string) => void;
   newChat: () => void;
   rename: (taskId: string, title: string) => Promise<void>;
-  archive: (taskId: string) => void;
-  restore: (taskId: string) => void;
+  /** The task lifecycle: a one-time delayed start, archive, recoverable delete and restore. */
+  lifecycle: (taskId: string, action: "schedule" | "cancel_schedule" | "archive" | "delete" | "restore") => void;
   archiveAll: () => void;
   fork: (taskId: string, from: "start" | "first") => void;
   copy: (taskId: string, what: "title" | "conversation" | "answer" | "id") => void;
@@ -40,6 +40,10 @@ export type ThreadListProps = {
   pinnedProjects: string[];
   toggleProjectPin: (workspaceId: string) => void;
   busy: boolean;
+  /** The chat whose lifecycle action is in flight. */
+  busyTaskId?: string;
+  /** A new chat being created, shown at once at the top of its project. */
+  pendingTitle?: string;
   actions: ThreadActions;
 };
 
@@ -50,7 +54,7 @@ const SHORTCUTS = { rename: "Alt+Ctrl+R", pin: "Alt+Ctrl+P", unread: "Ctrl+Shift
  * Only the open project's chats are loaded, so opening another project switches to it.
  */
 export function ChatThreadList(props: ThreadListProps) {
-  const { workspaces, workspaceId, chats, archived, selectedTaskId, now, pinned, unread, actions, busy } = props;
+  const { workspaces, workspaceId, chats, archived, selectedTaskId, now, pinned, unread, actions, busy, busyTaskId } = props;
   const [collapsed, setCollapsed] = useState<Set<string>>(() => {
     try { return new Set(JSON.parse(localStorage.getItem("coding-tools:ao:collapsed-projects") || "[]")); } catch { return new Set(); }
   });
@@ -88,6 +92,8 @@ export function ChatThreadList(props: ThreadListProps) {
     const isPinned = pinned.includes(chat.taskId);
     const isUnread = unread.includes(chat.taskId);
     const running = chat.status === "running";
+    const scheduled = chat.schedule?.state === "scheduled";
+    const lifecycleBusy = busyTaskId === chat.taskId;
     return [
       { label: "Rename", shortcut: SHORTCUTS.rename, run: () => startRename(chat) },
       { label: isPinned ? "Unpin" : "Pin", shortcut: SHORTCUTS.pin, run: () => props.togglePin(chat.taskId) },
@@ -99,6 +105,10 @@ export function ChatThreadList(props: ThreadListProps) {
         { label: "From the whole conversation", run: () => actions.fork(chat.taskId, "start") },
         { label: "From the first message", run: () => actions.fork(chat.taskId, "first") },
       ] },
+      scheduled
+        ? { label: "Cancel scheduled start", run: () => actions.lifecycle(chat.taskId, "cancel_schedule") }
+        : running ? { label: "Schedule start…", reason: "Stop this mission before scheduling a start" }
+          : { label: "Schedule start…", run: () => actions.lifecycle(chat.taskId, "schedule") },
       { label: "Share", reason: "Chats stay on this computer; sharing isn't available" },
       { label: "Copy", items: [
         { label: "Title", run: () => actions.copy(chat.taskId, "title") },
@@ -113,10 +123,11 @@ export function ChatThreadList(props: ThreadListProps) {
         { label: "Mission Board", run: () => actions.openBoard() },
       ] },
       { kind: "separator" },
-      running
-        ? { label: "Archive", shortcut: SHORTCUTS.archive, reason: "Stop the running mission before archiving this chat" }
-        : { label: "Archive", shortcut: SHORTCUTS.archive, run: () => actions.archive(chat.taskId) },
-      { label: "Permanently delete", danger: true, reason: "Archived chats keep their runs and can be restored; permanent delete isn't supported" },
+      // Archive and delete stop the chat's own running work after a confirmation; both can be restored.
+      lifecycleBusy ? { label: "Archive", shortcut: SHORTCUTS.archive, reason: "This chat is being updated" }
+        : { label: "Archive", shortcut: SHORTCUTS.archive, run: () => actions.lifecycle(chat.taskId, "archive") },
+      lifecycleBusy ? { label: "Delete (recoverable)", danger: true, reason: "This chat is being updated" }
+        : { label: "Delete (recoverable)", danger: true, run: () => actions.lifecycle(chat.taskId, "delete") },
     ];
   };
   const projectMenu = (item: ThreadWorkspace): ChatMenuItem[] => {
@@ -128,9 +139,9 @@ export function ChatThreadList(props: ThreadListProps) {
       item.path && actions.openFolder
         ? { label: "Open in Explorer", run: () => actions.openFolder!(item) }
         : { label: "Open in Explorer", reason: "This project's folder isn't known" },
-      current && chats.some((chat) => chat.status !== "running")
+      current && chats.length
         ? { label: "Archive chats", run: () => actions.archiveAll() }
-        : { label: "Archive chats", reason: current ? "No chats that can be archived (running chats must be stopped first)" : "Open this project first" },
+        : { label: "Archive chats", reason: current ? "This project has no chats" : "Open this project first" },
       { kind: "separator" },
       { label: "Remove project", danger: true, reason: "Remove projects on the Workspace page" },
     ];
@@ -151,7 +162,7 @@ export function ChatThreadList(props: ThreadListProps) {
       if (event.ctrlKey && event.altKey && key === "r") { event.preventDefault(); startRename(chat); }
       else if (event.ctrlKey && event.altKey && key === "p") { event.preventDefault(); props.togglePin(chat.taskId); }
       else if (event.ctrlKey && event.shiftKey && key === "u") { event.preventDefault(); props.setUnread(chat.taskId, !unread.includes(chat.taskId)); }
-      else if (event.ctrlKey && event.shiftKey && key === "a" && chat.status !== "running") { event.preventDefault(); actions.archive(chat.taskId); }
+      else if (event.ctrlKey && event.shiftKey && key === "a" && busyTaskId !== chat.taskId) { event.preventDefault(); actions.lifecycle(chat.taskId, "archive"); }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -179,13 +190,13 @@ export function ChatThreadList(props: ThreadListProps) {
       <button type="button" className="cx-thread-select" aria-current={chat.taskId === selectedTaskId} onClick={() => actions.select(chat.taskId)}>
         <span className={`cx-thread-dot status-${chat.status}`} aria-label={STATUS_LABEL[chat.status]} />
         <span className="cx-thread-title">{chat.title}</span>
-        <span className="cx-thread-age">{chatRelativeTime(chat.updatedAtMs, now)}</span>
+        <span className="cx-thread-age">{chat.schedule?.state === "scheduled" ? "◷" : chatRelativeTime(chat.updatedAtMs, now)}</span>
       </button>
       <span className="cx-thread-hover">
         <button type="button" aria-label={isPinned ? "Unpin chat" : "Pin chat"} title={isPinned ? "Unpin chat" : "Pin chat"} aria-pressed={isPinned}
           onClick={() => props.togglePin(chat.taskId)}>📌</button>
-        <button type="button" aria-label="Archive chat" title={chat.status === "running" ? "Stop the mission before archiving" : "Archive chat"}
-          disabled={busy || chat.status === "running"} onClick={() => actions.archive(chat.taskId)}>🗄</button>
+        <button type="button" aria-label="Archive chat" title="Archive chat"
+          disabled={busy || busyTaskId === chat.taskId} onClick={() => actions.lifecycle(chat.taskId, "archive")}>🗄</button>
       </span>
     </li>;
   };
@@ -215,6 +226,9 @@ export function ChatThreadList(props: ThreadListProps) {
                   {props.pinnedProjects.includes(item.id) ? <span className="cx-project-pin" aria-label="Pinned project">📌</span> : null}
                 </button>
                 {open ? <ul>
+                  {props.pendingTitle ? <li className="cx-thread-row is-pending"><span className="cx-thread-select" aria-current="true">
+                    <span className="cx-thread-dot status-queued" aria-label="Starting" /><span className="cx-thread-title">{props.pendingTitle}</span>
+                  </span></li> : null}
                   {chats.filter((chat) => !pinned.includes(chat.taskId)).map(row)}
                   {!chats.length ? <li className="cx-thread-empty">No chats yet</li> : null}
                 </ul> : null}
@@ -228,13 +242,15 @@ export function ChatThreadList(props: ThreadListProps) {
           </button>
           {showArchived ? <ul>{archived.map((chat) => <li key={chat.taskId} className="cx-thread-row is-archived">
             <span className="cx-thread-title" title={chat.title}>{chat.title}</span>
-            <button type="button" className="cx-restore" disabled={busy} onClick={() => actions.restore(chat.taskId)}>Restore</button>
+            {chat.visibility === "deleted" ? <span className="cx-thread-badge">Deleted</span> : null}
+            <button type="button" className="cx-restore" disabled={busy || busyTaskId === chat.taskId} onClick={() => actions.lifecycle(chat.taskId, "restore")}>Restore</button>
           </li>)}</ul> : null}
         </section> : null}
       </nav>
       {hover ? <div className="cx-hover-card" role="tooltip" style={{ top: hover.top, left: hover.left }}>
         <strong>{hover.chat.title}</strong>
         <span>{STATUS_LABEL[hover.chat.status]}{hover.chat.updatedAtMs ? ` · updated ${chatRelativeTime(hover.chat.updatedAtMs, now)} ago`.replace("now ago", "just now") : ""}</span>
+        {hover.chat.schedule?.state === "scheduled" ? <span>◷ {scheduledStartLabel(hover.chat.schedule.due_at_ms, now)}</span> : null}
         <span>📁 {workspace?.name}</span>
         {workspace?.path ? <span className="cx-hover-path">{workspace.path}</span> : null}
         <span>{hover.chat.runIds.length} {hover.chat.runIds.length === 1 ? "run" : "runs"}</span>

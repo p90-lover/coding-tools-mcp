@@ -201,3 +201,7 @@
   .cx-shimmer, .cx-thread-dot.status-running, .cx-step.tone-working .cx-step-dot { animation: none; }
   .cx-shimmer { color: var(--ao-muted); background: none; }
 }
+
+/* #256 lifecycle in the thread list: a deleted chat's badge and the new chat being created. */
+.cx-thread-badge { padding: 0 6px; border-radius: 8px; background: var(--cx-hover); color: var(--ao-red); font-size: 10px; }
+.cx-thread-row.is-pending .cx-thread-select { cursor: default; color: var(--ao-muted); }

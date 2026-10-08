@@ -14,7 +14,7 @@ import {
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
 
 const STATUS_LABEL: Record<ChatStatus, string> = {
-  queued: "Starting", running: "Running", paused: "Paused", attention: "Needs you", stopped: "Stopped", done: "Done",
+  queued: "Starting", scheduled: "Scheduled", running: "Running", paused: "Paused", attention: "Needs you", stopped: "Stopped", done: "Done",
 };
 /** Text files up to this size are attached inline when their path is unknown. */
 const INLINE_ATTACHMENT_BYTES = 200 * 1024;
@@ -91,7 +91,10 @@ export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, working = false, describeNode, activity, permissions, composer, onOpenTeam, onOpenMissionBoard,
   projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath,
+  pendingMessage, pendingTitle, pendingCreation = false,
 }: {
+  /** A message being sent into a chat that has no run yet (shown at once, as Codex does). */
+  pendingMessage?: string; pendingTitle?: string; pendingCreation?: boolean;
   /** How each card runs (harness · model · effort · context · role), shown on its messages. */
   describeNode?: (node: ChatNode) => string;
   /** What each working card is doing now, by "<run id>:<card id>". */
@@ -129,7 +132,7 @@ export function AgentOrchestratorChat({
   /** The path of a dropped or picked file, when the app can tell. */
   filePath?: (file: File) => string;
 }) {
-  const chats = useMemo(() => chatList(runs, tasks), [runs, tasks]);
+  const chats = useMemo(() => chatList(runs, tasks, [], true), [runs, tasks]);
   const chat = chats.find((entry) => entry.taskId === selectedTaskId);
   const chatRuns = useMemo(() => runs.filter((run) => run.project_id === selectedTaskId), [runs, selectedTaskId]);
   const latest = chatRuns[chatRuns.length - 1];
@@ -167,8 +170,8 @@ export function AgentOrchestratorChat({
     return () => window.clearInterval(timer);
   }, [anyWorking]);
   const turns: ChatTurn[] = useMemo(
-    () => chatTurns(chatRuns, descriptions[selectedTaskId], { describe: describeNode, activity, now }),
-    [chatRuns, descriptions, selectedTaskId, describeNode, activity, now],
+    () => chatTurns(chatRuns, descriptions[selectedTaskId] ?? pendingMessage, { describe: describeNode, activity, now }),
+    [chatRuns, descriptions, selectedTaskId, describeNode, activity, now, pendingMessage],
   );
   const stepCount = turns.reduce((total, turn) => total + turn.steps.length + (turn.final ? 1 : 0), 0);
   useEffect(() => { if (atBottom) scroller.current?.scrollTo({ top: scroller.current.scrollHeight }); }, [turns.length, stepCount, atBottom]);
@@ -260,14 +263,15 @@ export function AgentOrchestratorChat({
     <div className={`cx-chat${showStructure && structure ? " has-structure" : ""}`}>
       <section className="cx-thread" aria-label={chat?.title || CHAT_DEFAULT_TITLE}>
         <header className="cx-thread-head">
-          {selectedTaskId
+          {selectedTaskId || pendingCreation
             ? renaming !== null
               ? <input autoFocus className="cx-title-input" aria-label="Chat name" maxLength={240} value={renaming}
                   onChange={(event) => setRenaming(event.target.value)} onBlur={() => void commitRename()}
                   onKeyDown={(event) => { if (event.key === "Enter") void commitRename(); if (event.key === "Escape") setRenaming(null); }} />
-              : <h2 title="Double-click to rename" onDoubleClick={() => chat && thread && setRenaming(chat.title)}>{chat?.title || CHAT_DEFAULT_TITLE}</h2>
+              : <h2 title="Double-click to rename" onDoubleClick={() => chat && thread && setRenaming(chat.title)}>{chat?.title || pendingTitle || CHAT_DEFAULT_TITLE}</h2>
             : <input aria-label="Task name" className="cx-title-input is-new" maxLength={240} placeholder={CHAT_DEFAULT_TITLE}
                 value={title} onChange={(event) => setTitle(event.target.value)} />}
+          {pendingCreation && !chat ? <span className="cx-status status-queued" role="status">Starting</span> : null}
           {chat ? <span className={`cx-status status-${chat.status}`}>{STATUS_LABEL[chat.status]}</span> : null}
           <span className="cx-head-spacer" />
           {structure || latest ? <button type="button" className="cx-icon-button" aria-pressed={showStructure} title="Show cards (Structure)" aria-label="Show cards"
@@ -311,7 +315,7 @@ export function AgentOrchestratorChat({
               {turn.status === "stopped" ? <p className="cx-note">Stopped</p> : null}
               {turn.solo ? <p className="cx-note">Answered by the orchestrator alone; no workers ran.</p> : null}
             </article>)}
-            {notice && latest && chat?.status === "queued" ? (
+            {notice && latest && chat?.status === "queued" && !working ? (
               <div className="cx-card tone-error">
                 <strong>The run could not start</strong>
                 <p>{notice}</p>

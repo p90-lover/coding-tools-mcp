@@ -1,0 +1,217 @@
+diff --git a/frontend/src/renderer/components/CodingToolsMissionBoard.tsx b/frontend/src/renderer/components/CodingToolsMissionBoard.tsx
+index 0443be0..d684366 100644
+--- a/frontend/src/renderer/components/CodingToolsMissionBoard.tsx
++++ b/frontend/src/renderer/components/CodingToolsMissionBoard.tsx
+@@ -1,12 +1,13 @@
+ import { useEffect, useState } from "react";
+ import { useQuery } from "@tanstack/react-query";
+ import { SessionCardView, SessionsBoardGridView, type BoardSessionPresentation } from "@aoagents/product-ui";
+-import { readCodingToolsMissions, openCodingToolsMission } from "../lib/coding-tools-bridge";
++import { readCodingToolsMissions, openCodingToolsMission, actionCodingToolsMission } from "../lib/coding-tools-bridge";
+ import { boardKanbanColumnOrder, getKanbanColumnView } from "../lib/session-presentation";
+ import { useTranslation } from "react-i18next";
+ import { ProductExternalLink } from "./ProductExternalLink";
+ import { Button } from "./ui/button";
+ import { AgentAvatar } from "./AgentAvatar";
++import { ClockIcon,ArchiveIcon,Trash2Icon,MessageSquareIcon,NetworkIcon,RotateCcwIcon } from "lucide-react";
+ import { sessionUsageQueryOptions, type SessionUsageSummary } from "../hooks/useSessionUsageSummaries";
+ import { formatCostNanos } from "../lib/format-cost";
+ import { formatTokenCount } from "../lib/format-token-count";
+@@ -18,7 +19,11 @@ type Mission = {
+ 	id: string; project_id: string; workspace_id: string; revision: number; cancelled: boolean; paused?: boolean;
+ 	nodes: { id: string; role: string; state: string; route?: Route; receipt?: Receipt | null; history?: Receipt[] }[];
+ };
+-type Board = { workspaceId: string; projectId: string | null; runs: Mission[]; tasks: { id: string; title: string; updated_at?: number }[] };
++type Accounting = {processedTokens:number|null;coverage:string;measuredSessions:number;requestedSessions:number;
++ sessions?:{measurements:{source:string}[]}[];cost:{source:string;totalNanos:number|null;coverage:string;priceUpdatedMs?:number|null}};
++type Lifecycle = {task_id:string;visibility?:string;schedule?:{run_id:string;state:string;due_at_ms:number}|null};
++type Board = {workspaceId:string;projectId:string|null;runs:Mission[];tasks:{id:string;title:string;updated_at?:number}[];
++ accounting?:Record<string,Accounting>;taskLifecycle?:Lifecycle[]};
+ type MissionRoute = { harness: string; model: string; provider: string; label: string; configured: boolean };
+ type Card = BoardSessionPresentation & {
+ 	mission: Mission; state: string; routes: MissionRoute[]; sessionIds: string[];
+@@ -26,13 +31,16 @@ type Card = BoardSessionPresentation & {
+ 	startedAt: string | null; elapsedLabel: string | null;
+ };
+ 
+-export function missionCard(mission: Mission, task?: Board["tasks"][number], usageBySession?: ReadonlyMap<string, SessionUsageSummary>, now = Date.now()): Card {
+-	const state = mission.nodes.some(node => node.role === "reviewer" && ["running", "reserved"].includes(node.state)) ? "review"
+-		: mission.nodes.some(node => ["running", "reserved"].includes(node.state)) ? "running"
+-		: mission.cancelled ? "cancelled"
++export function missionCard(mission: Mission, task?: Board["tasks"][number], usageBySession?: ReadonlyMap<string, SessionUsageSummary>, now = Date.now(), accounting?: Accounting, lifecycle?: Lifecycle): Card {
++	const state = lifecycle?.visibility === "deleted" ? "deleted" : lifecycle?.visibility === "archived" ? "archived"
++		: mission.cancelled ? "cancelled" : mission.paused ? "paused"
++		: lifecycle?.schedule?.run_id === mission.id && lifecycle.schedule.state === "scheduled" ? "scheduled"
++		: lifecycle?.schedule?.run_id === mission.id && ["missed","needs_attention"].includes(lifecycle.schedule.state) ? "held"
++		: mission.nodes.some(node => node.role === "reviewer" && ["running","reserved"].includes(node.state)) ? "review"
++		: mission.nodes.some(node => ["running","reserved"].includes(node.state)) ? "running"
+ 		: mission.nodes.some(node => node.state === "held") ? "held"
+ 		: mission.nodes.length > 0 && mission.nodes.every(node => node.state === "finished") ? "finished"
+-		: mission.nodes.length > 0 && mission.nodes.every(node => ["archived", "cancelled"].includes(node.state)) ? "archived" : "pending";
++		: mission.nodes.length > 0 && mission.nodes.every(node => ["archived","cancelled"].includes(node.state)) ? "archived" : "pending";
+ 	const routes = new Map<string, MissionRoute>();
+ 	const sessions = new Set<string>();
+ 	const starts: number[] = [];
+@@ -60,47 +68,44 @@ export function missionCard(mission: Mission, task?: Board["tasks"][number], usa
+ 		}
+ 	}
+ 	const sessionIds = [...sessions];
+-	let totalNanos = 0;
+-	let priced = 0;
+-	let processedTokens = 0;
+-	let tokenSessions = 0;
+-	let partial = nativeWebUsage || otherUnmeteredUsage;
+-	let tokenPartial = partial;
++	let processedTokens = 0, tokenSessions = 0;
++	let tokenPartial = nativeWebUsage || otherUnmeteredUsage;
+ 	for (const id of sessionIds) {
+-		const usage = usageBySession?.get(id);
+-		const tokens = usage?.processedTokens;
+-		if (typeof tokens === "number" && Number.isFinite(tokens) && tokens >= 0) {
+-			processedTokens += tokens;
+-			tokenSessions++;
+-			tokenPartial ||= usage?.incomplete === true;
++		const usage = usageBySession?.get(id), tokens = usage?.processedTokens;
++		if (typeof tokens === "number" && Number.isSafeInteger(tokens) && tokens >= 0) {
++			processedTokens += tokens; tokenSessions++; tokenPartial ||= usage?.incomplete === true;
+ 		} else tokenPartial = true;
+-		const cost = usage?.estimatedCost;
+-		if (usage && cost && formatCostNanos(cost.totalNanos) !== null) {
+-			totalNanos += cost.totalNanos;
+-			priced++;
+-			partial ||= cost.coverage !== "complete" || usage.incomplete;
+-		} else partial = true;
+ 	}
+-	const cost = priced ? formatCostNanos(totalNanos) : null;
+-	// Like AO's session board, retain measured tokens when this provider has no dollar estimate.
++	if (accounting) {
++		processedTokens = accounting.processedTokens ?? 0;
++		tokenSessions = accounting.processedTokens === null ? 0 : 1;
++		tokenPartial = accounting.coverage !== "complete";
++	}
++	// Vendor/AO estimates are never CPA Helper price authority.
++	const cost = accounting?.cost?.source === "CPA Helper" ? formatCostNanos(accounting.cost.totalNanos) : null;
++	const partial = accounting?.cost?.coverage !== "complete";
+ 	const tokens = tokenSessions ? `${formatTokenCount(processedTokens)}${tokenPartial ? " · partial" : ""}` : null;
+ 	const tokenDetail = tokenSessions ? `${processedTokens.toLocaleString("en-US")} recorded tokens${tokenPartial ? " · Partial token coverage" : ""}` : "Token usage not reported";
++	const latest = accounting?.sessions?.some(session => session.measurements.some(value => value.source === "latest_snapshot"));
+ 	const costCoverage = [
+-		sessionIds.length ? `${priced}/${sessionIds.length} AO sessions priced` : null,
++		cost === null ? "CPA Helper price unavailable" : `CPA Helper · ${partial ? "partial" : "complete"} estimate`,
++		`${accounting?.measuredSessions ?? tokenSessions}/${accounting?.requestedSessions ?? sessionIds.length} sessions measured`,
++		latest ? "Latest snapshot only; not cumulative" : null,
++		accounting?.cost.priceUpdatedMs ? `Configured prices updated ${formatTimeCompact(new Date(accounting.cost.priceUpdatedMs).toISOString())}` : null,
+ 		nativeWebUsage ? "Native WebGPT cost unavailable" : null,
+ 		otherUnmeteredUsage ? "Other attempt usage unavailable" : null,
+-	].filter(Boolean).join(" · ") || "No recorded session usage";
++	].filter(Boolean).join(" · ");
+ 	const providers = new Set([...routes.values()].map(route => route.provider));
+-	const elapsed = activeStarts.length ? Math.max(0, Math.floor((now - Math.min(...activeStarts)) / 1000)) : null;
++	const elapsed = ["running","review"].includes(state) && activeStarts.length ? Math.max(0, Math.floor((now - Math.min(...activeStarts)) / 1000)) : null;
+ 	const elapsedLabel = elapsed === null ? null : elapsed >= 3600 ? `${Math.floor(elapsed / 3600)}h ${Math.floor(elapsed % 3600 / 60)}m` : elapsed >= 60 ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s` : `${elapsed}s`;
+ 	return {
+ 		id: mission.id, title: task?.title || mission.id, mission, state, provider: providers.size > 1 ? "mixed" : [...providers][0] || "unknown",
+ 		routes: [...routes.values()], sessionIds, costCoverage,
+-		usage: { compactLabel: cost === null ? tokens ?? "Usage not reported" : `Est. ${cost}${partial ? " · partial" : ""}`, accessibleLabel: `${cost === null ? "USD estimate not reported" : `Estimated cost to date ${cost}${partial ? " · Partial coverage" : ""}`} · ${tokenDetail} · ${costCoverage}` },
++		usage: { compactLabel: cost === null ? tokens ?? "Usage not reported" : `CPA Est. ${cost}${partial ? " · partial" : ""}`, accessibleLabel: `${cost === null ? "USD estimate not reported" : `Estimated cost to date ${cost}${partial ? " · Partial coverage" : ""}`} · ${tokenDetail} · ${costCoverage}` },
+ 		startedAt: starts.length ? new Date(Math.min(...starts)).toISOString() : null, elapsedLabel,
+ 		status: state === "held" ? "needs_input" : ["running", "review"].includes(state) ? "working" : "idle",
+-		kanbanColumn: ["finished", "cancelled", "archived"].includes(state) ? "ready" : ["review", "held"].includes(state) ? "needs_review" : state === "running" ? "validating" : "building",
+-		displayStatus: mission.paused && !mission.cancelled ? "Paused" : state[0].toUpperCase() + state.slice(1),
++		kanbanColumn: ["finished", "cancelled", "archived", "deleted"].includes(state) ? "ready" : ["review", "held"].includes(state) ? "needs_review" : state === "running" ? "validating" : "building",
++		displayStatus: state[0].toUpperCase() + state.slice(1),
+ 		// integrations::board::Task uses Unix seconds; receipt.started_at_ms above is already milliseconds.
+ 		updatedAt: task?.updated_at ? new Date(task.updated_at * 1000).toISOString() : "",
+ 	};
+@@ -122,27 +127,34 @@ export function CodingToolsMissionBoard({ workspaceId }: { workspaceId: string }
+ 	});
+ 	const usageQuery = useQuery({
+ 		...sessionUsageQueryOptions(query.data?.projectId ?? undefined),
+-		enabled: Boolean(query.data?.projectId),
++		enabled: Boolean(query.data?.projectId) && Object.keys(query.data?.accounting ?? {}).length === 0, refetchInterval:3000,
+ 	});
+ 	const labels: Record<string, string> = { building: "Pending", validating: "Running", needs_review: "Review", ready: "Finished" };
+ 	const columns = boardKanbanColumnOrder.map(column => { const view = getKanbanColumnView(column, t); return { ...view, label: labels[column] ?? view.label }; });
+-	const rows = (query.data?.runs ?? []).map(mission => missionCard(mission, query.data?.tasks.find(task => task.id === mission.project_id), query.data?.projectId ? usageQuery.data : undefined, now))
+-		.filter(card => showInactive || !["cancelled", "archived"].includes(card.state));
+-	const hasActiveClock = rows.some(card => card.elapsedLabel !== null);
++	const rows = (query.data?.runs ?? []).map(mission => missionCard(mission, query.data?.tasks.find(task => task.id === mission.project_id), query.data?.projectId ? usageQuery.data : undefined, now, query.data?.accounting?.[mission.id], query.data?.taskLifecycle?.find(item=>item.task_id===mission.project_id)))
++		.filter(card => showInactive || !["cancelled", "archived", "deleted"].includes(card.state));
++	const hasActiveClock = rows.some(card => card.elapsedLabel !== null) || query.data?.taskLifecycle?.some(item=>item.schedule?.state==="scheduled");
+ 	useEffect(() => {
+ 		if (!hasActiveClock) return;
+ 		setNow(Date.now());
+ 		const timer = setInterval(() => setNow(Date.now()), 1000);
+ 		return () => clearInterval(timer);
+ 	}, [hasActiveClock]);
+-	const open = async (card: Card, intent: "open" | "start" | "resume" | "restart") => {
++	const open = async (card: Card, intent: "open" | "chat" | "start" | "resume" | "restart" | "schedule") => {
+ 		if (busy) return;
+ 		setBusy(card.id); setError("");
+ 		try { await openCodingToolsMission(workspaceId, card.id, intent); }
+ 		catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+ 		finally { setBusy(""); }
+ 	};
+-	return <section className="flex h-screen min-h-0 flex-col bg-background text-foreground" aria-label="AO workspace mission board">
++	const act = async (card:Card,action:"archive"|"delete"|"restore") => {
++      if(busy) return; setBusy(card.id);setError("");
++      try {await actionCodingToolsMission(workspaceId,card.id,action);await query.refetch();}
++      catch(cause){setError(cause instanceof Error ? cause.message : String(cause));}
++      finally{setBusy("");}
++    };
++	return <section className="ct-mission-board flex h-screen min-h-0 flex-col bg-background text-foreground" aria-label="AO workspace mission board">
++ <style>{`.ct-mission-board .animate-spin{animation:spin 2s steps(60,end) infinite}.ct-mission-actions{display:flex;gap:2px;opacity:0;pointer-events:none}.ct-mission-row:hover .ct-mission-actions,.ct-mission-row:focus-within .ct-mission-actions{opacity:1;pointer-events:auto}@media(hover:none){.ct-mission-actions{opacity:1;pointer-events:auto}}@media(prefers-reduced-motion:reduce){.ct-mission-board .animate-spin{animation:none!important}}`}</style>
+ 		<div className="flex shrink-0 items-center justify-between gap-3 px-4 py-2 text-xs">
+ 			<strong>Workspace missions</strong>
+ 			<label className="flex items-center gap-2"><input type="checkbox" checked={showInactive} onChange={event => setShowInactive(event.target.checked)} />Show cancelled and archived</label>
+@@ -152,7 +164,7 @@ export function CodingToolsMissionBoard({ workspaceId }: { workspaceId: string }
+ 		{query.isSuccess && rows.length === 0 ? <p className="p-4 text-sm text-muted-foreground">No missions in this workspace. Use New mission to add one.</p> : null}
+ 		<div className="min-h-0 flex-1">
+ 			<SessionsBoardGridView columns={columns} labels={{ columnAria: label => `${label} missions` }} sessions={rows} renderSessionCard={card => (
+-				<div className={["finished", "held"].includes(card.state) ? "opacity-75" : ""} data-mission-id={card.id}>
++				<div className={`ct-mission-row ${["finished", "held"].includes(card.state) ? "opacity-75" : ""}`} data-mission-id={card.id}>
+ 					<SessionCardView session={card} onOpen={() => void open(card, "open")}
+ 						externalLink={ProductExternalLink} renderAvatar={() => <span className="flex shrink-0 items-center gap-1">{[...new Set(card.routes.map(route => route.provider))].map(provider => <AgentAvatar key={provider} provider={provider} className="size-4" />)}</span>}
+ 						usage={card.usage}
+@@ -161,10 +173,20 @@ export function CodingToolsMissionBoard({ workspaceId }: { workspaceId: string }
+ 						footer={<div className="space-y-1.5 px-3.5 pb-2.5 text-2xs text-muted-foreground">
+ 							<div className="space-y-1">{card.routes.map(route => <div key={`${route.harness}:${route.model}:${route.configured}`} className="break-words">{route.label} · {route.model}{route.configured ? " · configured" : ""}</div>)}</div>
+ 							<div>{card.costCoverage}</div>
++                {query.data?.taskLifecycle?.find(item=>item.task_id===card.mission.project_id)?.schedule?.state==="scheduled" ? <div>
++                  Starts at {new Date(query.data.taskLifecycle.find(item=>item.task_id===card.mission.project_id)!.schedule!.due_at_ms).toLocaleString()} · in {Math.max(0,Math.ceil((query.data.taskLifecycle.find(item=>item.task_id===card.mission.project_id)!.schedule!.due_at_ms-now)/1000))}s
++                </div> : null}
+ 							<div title="Start times are reservation times, not completion times. Elapsed covers only the current active attempt.">{card.startedAt ? `Started ${formatTimeCompact(card.startedAt)}` : "Start time unavailable"}{card.elapsedLabel ? ` · Active ${card.elapsedLabel} since reservation` : ""}</div>
+ 							<div>{card.mission.cancelled ? "Future stages cancelled · " : ""}{card.mission.nodes.filter(node => node.state === "finished").length}/{card.mission.nodes.length} stages finished</div>
+ 						</div>}
+-						action={["running", "review"].includes(card.state) ? undefined : <Button size="sm" disabled={Boolean(busy)} onClick={event => { event.stopPropagation(); void open(card, card.mission.paused && !card.mission.cancelled ? "resume" : card.state === "pending" || card.state === "held" ? "start" : "restart"); }}>{card.mission.paused && !card.mission.cancelled ? "Resume mission" : card.state === "pending" ? "Start mission" : card.state === "held" ? "Retry mission" : "Restart mission"}</Button>}
++						action={<div className="ct-mission-actions">
++          <Button size="sm" title="Mission" aria-label="Mission mission" disabled={Boolean(busy)} onClick={event=>{event.stopPropagation();void open(card,"chat");}}><MessageSquareIcon className="size-3.5" /></Button>
++          <Button size="sm" title="Overview" aria-label="Overview mission" disabled={Boolean(busy)} onClick={event=>{event.stopPropagation();void open(card,"open");}}><NetworkIcon className="size-3.5" /></Button>
++          <Button size="sm" title="One-time delayed start" aria-label="Schedule mission" disabled={Boolean(busy)||["running","review"].includes(card.state)} onClick={event=>{event.stopPropagation();void open(card,"schedule");}}><ClockIcon className="size-3.5" /></Button>
++          <Button size="sm" title={["archived","deleted"].includes(card.state) ? "Restore mission" : "Archive mission"} aria-label={["archived","deleted"].includes(card.state) ? "Restore mission" : "Archive mission"} disabled={Boolean(busy)} onClick={event=>{event.stopPropagation();void act(card,["archived","deleted"].includes(card.state) ? "restore" : "archive");}}>{["archived","deleted"].includes(card.state) ? <RotateCcwIcon className="size-3.5" /> : <ArchiveIcon className="size-3.5" />}</Button>
++          <Button size="sm" title="Delete mission (recoverable)" aria-label="Delete mission" disabled={Boolean(busy)} onClick={event=>{event.stopPropagation();void act(card,"delete");}}><Trash2Icon className="size-3.5" /></Button>
++          {!["running","review","scheduled","archived","deleted"].includes(card.state) ? <Button size="sm" disabled={Boolean(busy)} onClick={event=>{event.stopPropagation();void open(card,card.mission.paused && !card.mission.cancelled ? "resume" : ["pending","held"].includes(card.state) ? "start" : "restart");}}>{card.state==="pending" ? "Start" : card.state==="held" ? "Retry" : "Restart"}</Button> : null}
++        </div>}
+ 					/>
+ 				</div>
+ 			)} />
+diff --git a/frontend/src/renderer/lib/coding-tools-bridge.ts b/frontend/src/renderer/lib/coding-tools-bridge.ts
+index e6e06d6..da0adb1 100644
+--- a/frontend/src/renderer/lib/coding-tools-bridge.ts
++++ b/frontend/src/renderer/lib/coding-tools-bridge.ts
+@@ -24,10 +24,14 @@ export function readCodingToolsMissions(workspaceId: string) {
+ 	return hostRequest("mission_board", { workspaceId });
+ }
+ 
+-export function openCodingToolsMission(workspaceId: string, runId: string, intent: "open" | "start" | "resume" | "restart") {
++export function openCodingToolsMission(workspaceId: string, runId: string, intent: "open" | "chat" | "start" | "resume" | "restart" | "schedule") {
+ 	return hostRequest("mission_open", { workspaceId, runId, intent });
+ }
+ 
++export function actionCodingToolsMission(workspaceId:string,runId:string,action:"archive"|"delete"|"restore"|"cancel_schedule") {
++  return hostRequest("mission_action",{workspaceId,runId,action});
++}
++
+ const unavailable = async () => {
+ 	throw new Error("This desktop capability is not exposed by the local-only Coding Tools integration.");
+ };

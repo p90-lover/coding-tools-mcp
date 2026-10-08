@@ -76,6 +76,10 @@ pub struct Team {
     pub workspace_id: String,
     pub name: String,
     pub revision: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_default: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub editable_graph: bool,
     #[serde(default = "default_worker_limit")]
     pub worker_limit: u8,
     /// Rework rounds new missions from this team allow (1 to 10).
@@ -243,7 +247,7 @@ pub fn normalize_roles(nodes: &mut Vec<Node>) {
     for node in nodes.iter_mut() {
         match node.role {
             Role::Planner => node.parents.clear(),
-            Role::Approver => node.parents = vec![planner.clone()],
+            Role::Approver | Role::Retry => node.parents = vec![planner.clone()],
             Role::Worker => {
                 for required in std::iter::once(&planner).chain(approver.as_ref()) {
                     if !node.parents.contains(required) {
@@ -304,6 +308,12 @@ pub fn require_explicit_models(nodes: &[Node]) -> AppResult<()> {
     }
 }
 
+/// Old stores have one unflagged team. Keep it as the default until explicitly promoted.
+pub fn default_team<'a>(data: &'a AppData, workspace_id: &str) -> Option<&'a Team> {
+    let mut teams = data.ao_teams.iter().filter(|team| team.workspace_id == workspace_id);
+    teams.clone().find(|team| team.is_default).or_else(|| teams.next())
+}
+
 pub fn save(
     data: &mut AppData,
     workspace_id: &str,
@@ -335,7 +345,12 @@ pub fn save(
     if !(1..=ao::MAX_REVIEW_ROUNDS).contains(&team.max_review_rounds) {
         return Err(fail("Choose one to ten review rounds"));
     }
-    normalize_roles(&mut team.nodes);
+    if data.ao_teams.iter().any(|item| item.id == team.id && item.workspace_id != workspace_id) {
+        return Err(fail("Team is outside the registered workspace"));
+    }
+    if !team.editable_graph {
+        normalize_roles(&mut team.nodes);
+    }
     normalize_routes(&mut team.nodes);
     require_explicit_models(&team.nodes)?;
     let existing = data
@@ -382,7 +397,22 @@ pub fn save(
         execution_mode: ao::ExecutionMode::Team,
     };
     ao::validate(None, &proposal)?;
-    team.revision = expected_revision + 1;
+    team.revision = expected_revision.checked_add(1)
+        .ok_or_else(|| fail("AO team revision exhausted"))?;
+    let current_default = default_team(data, workspace_id).map(|team| team.id.clone());
+    team.is_default = team.is_default || current_default.as_ref().is_none_or(|id| id == &team.id);
+    // Promotion changes the former default's metadata, so its stale drafts must be rejected.
+    let demoted: Vec<_> = data.ao_teams.iter().enumerate().filter(|(_, item)| {
+        item.workspace_id == workspace_id && item.id != team.id && team.is_default
+            && (item.is_default || current_default.as_deref() == Some(item.id.as_str()))
+    }).map(|(index, item)| {
+        item.revision.checked_add(1).map(|revision| (index, revision))
+            .ok_or_else(|| fail("AO team revision exhausted"))
+    }).collect::<AppResult<_>>()?;
+    for (index, revision) in demoted {
+        data.ao_teams[index].is_default = false;
+        data.ao_teams[index].revision = revision;
+    }
     for node in &mut team.nodes {
         node.settings.revision = team.revision;
         node.template_role_id = None;
@@ -410,11 +440,15 @@ fn selected_team<'a>(
     revision: u64,
 ) -> AppResult<&'a Team> {
     // Never search by revision alone: multiple saved identities may have the same revision.
-    let team = data
-        .ao_teams
-        .iter()
-        .find(|team| team.workspace_id == workspace_id && id.is_none_or(|id| team.id == id))
-        .ok_or_else(|| fail("Saved team was not found in this workspace"))?;
+    // Without an explicit id the workspace's default team is meant, as in saved-team creation.
+    let team = match id {
+        Some(id) => data
+            .ao_teams
+            .iter()
+            .find(|team| team.workspace_id == workspace_id && team.id == id),
+        None => default_team(data, workspace_id),
+    }
+    .ok_or_else(|| fail("Saved team was not found in this workspace"))?;
     if team.revision != revision {
         return Err(fail("Saved team revision changed; refresh"));
     }
@@ -428,6 +462,7 @@ pub fn create_run(
     task_id: String,
     expected_board_revision: u64,
     team_revision: u64,
+    team_id: Option<&str>,
     worker_limit: u8,
 ) -> AppResult<Run> {
     create_selected_run(
@@ -438,6 +473,7 @@ pub fn create_run(
         expected_board_revision,
         worker_limit,
         CreateSelection {
+            team_id: team_id.map(str::to_owned),
             team_revision: Some(team_revision),
             ..Default::default()
         },
@@ -520,6 +556,22 @@ pub fn create_selected_run(
         .team_revision
         .ok_or_else(|| fail("Team execution requires the saved team revision"))?;
     let team = selected_team(data, workspace_id, selection.team_id.as_deref(), revision)?.clone();
+    create_run_with_snapshot(data, workspace_id, run_id, task_id, expected_board_revision, team, worker_limit)
+}
+
+/// Creates from an exact saved snapshot, so an edit in another task cannot change this run.
+pub fn create_run_with_snapshot(
+    data: &mut AppData,
+    workspace_id: &str,
+    run_id: String,
+    task_id: String,
+    expected_board_revision: u64,
+    team: Team,
+    worker_limit: u8,
+) -> AppResult<Run> {
+    if team.workspace_id != workspace_id {
+        return Err(fail("Saved team belongs to another workspace"));
+    }
     if !(1..=24).contains(&worker_limit) {
         return Err(fail("Mission worker limit must be one to 24"));
     }
@@ -573,58 +625,88 @@ pub fn create_selected_run(
     )
 }
 
-pub fn control(
-    data: &mut AppData,
-    workspace_id: &str,
-    run_id: &str,
-    action: &str,
+pub fn control(data: &mut AppData, workspace_id: &str, run_id: &str, action: &str) -> AppResult<Run> {
+    control_selected(data, workspace_id, run_id, action, None)
+}
+
+/// Local-UI control; selecting one failed attempt never restarts or interrupts its siblings.
+pub fn control_selected(
+    data: &mut AppData, workspace_id: &str, run_id: &str, action: &str, node_id: Option<&str>,
 ) -> AppResult<Run> {
-    let run = data
-        .ao_runs
-        .iter_mut()
+    let run = data.ao_runs.iter_mut()
         .find(|run| run.id == run_id && run.workspace_id == workspace_id)
         .ok_or_else(|| fail("AO mission was not found"))?;
-    if run.nodes.iter().all(|node| node.state == State::Finished) {
-        return Ok(run.clone());
+    if node_id.is_some_and(|id| !run.nodes.iter().any(|node| node.id == id)) {
+        return Err(fail("AO control node is outside this mission"));
+    }
+    if action == "retry_auto" {
+        let node = node_id.and_then(|id| run.nodes.iter().find(|node| node.id == id))
+            .ok_or_else(|| fail("Automatic retry requires one saved worker"))?;
+        if node.role != Role::Worker || node.state != State::Held || node.history.len() >= 2 {
+            return Err(fail("Automatic worker retries are exhausted or the saved attempt changed"));
+        }
     }
     match action {
         "pause" => run.paused = true,
         "resume" if !run.cancelled => run.paused = false,
         "stop" => {
-            run.paused = true;
-            run.cancelled = true;
-            run.grant = None;
+            run.paused = true; run.cancelled = true; run.grant = None;
             for node in &mut run.nodes {
-                if node.state == State::Pending {
-                    node.state = State::Cancelled;
-                }
+                if node.state == State::Pending { node.state = State::Cancelled; }
             }
         }
-        // A held card (its turn failed or could not be confirmed) goes back to the queue; the
-        // failed attempt stays in its history. The grant is dropped so the next start re-grants.
-        "retry" if !run.cancelled => {
+        "retry" | "retry_auto" if !run.cancelled => {
+            let recovering = run.nodes.iter().any(|node| node.role == Role::Worker && node.state == State::Held);
             let mut retried = false;
             for node in &mut run.nodes {
-                if node.state != State::Held {
+                if node_id.is_some_and(|id| node.id != id) {
                     continue;
                 }
-                if let Some(receipt) = node.receipt.take() {
-                    node.history.push(receipt);
+                if !matches!(node.state, State::Held | State::Failed)
+                    && !(node_id.is_some()
+                        && node.role == Role::Retry
+                        && node.state == State::Finished
+                        && recovering)
+                {
+                    continue;
                 }
-                if node.history.len() > ao::HISTORY_LIMIT {
-                    let excess = node.history.len() - ao::HISTORY_LIMIT;
-                    node.history.drain(..excess);
-                }
-                node.request_key = None;
-                node.state = State::Pending;
-                bind_future_permission(node, run.team.as_ref());
+                requeue(node, run.team.as_ref());
                 retried = true;
             }
-            if !retried {
-                return Err(fail("This mission has no held card to retry"));
-            }
-            run.grant = None;
+            if !retried { return Err(fail("This mission has no failed card to retry")); }
+            // Only attempt state changed; the signed graph and healthy receipts are unchanged.
             run.paused = false;
+        }
+        "review_failures" if !run.cancelled => {
+            let new_worker_failure = run.nodes.iter().any(|node| node.state == State::Held && node.role == Role::Worker
+                && node_id.is_none_or(|id| node.id == id));
+            let refresh_review = new_worker_failure && run.nodes.iter().any(|node|
+                matches!(node.role, Role::ReviewSplit | Role::SubReviewer | Role::Reviewer)
+                    && node.state != State::Pending && !run.rerun_after.contains(&node.id));
+            if refresh_review && run.review_rounds >= run.max_review_rounds {
+                return Err(fail("Failure review rounds exhausted; local review is required"));
+            }
+            let mut changed = false;
+            for node in &mut run.nodes {
+                if node_id.is_some_and(|id| node.id != id) { continue; }
+                if node.state == State::Held && matches!(node.role, Role::Worker | Role::Retry) {
+                    node.state = State::Failed;
+                    changed = true;
+                }
+            }
+            if !changed { return Err(fail("No held worker or Retry role can be sent for failure review")); }
+            if new_worker_failure {
+                if refresh_review { run.review_rounds += 1; }
+                for node in &mut run.nodes {
+                    if !matches!(node.role, Role::ReviewSplit | Role::SubReviewer | Role::Reviewer) { continue; }
+                    if matches!(node.state, State::Running | State::Reserved) {
+                        run.rerun_after.insert(node.id.clone());
+                    } else if matches!(node.state, State::Finished | State::Held | State::Failed) {
+                        requeue(node, run.team.as_ref());
+                    }
+                }
+                run.review_parts.clear();
+            }
         }
         "stopped" if run.cancelled => {
             for node in &mut run.nodes {
@@ -632,8 +714,7 @@ pub fn control(
                     node.state = State::Cancelled;
                     if let Some(receipt) = node.receipt.as_mut() {
                         receipt.status = "held".into();
-                        receipt.error =
-                            Some("Stopped by the user; this request will not be replayed".into());
+                        receipt.error = Some("Stopped by the user; this request will not be replayed".into());
                     }
                 }
             }
@@ -885,6 +966,8 @@ pub fn apply_selected_config(
                 workspace_id: next.workspace_id.clone(),
                 name: "Mission-only role policy".into(),
                 revision: team_revision,
+                is_default: false,
+                editable_graph: false,
                 worker_limit: next.worker_limit,
                 max_review_rounds: next.max_review_rounds,
                 nodes: next
@@ -1082,7 +1165,7 @@ pub fn queue_rework(
             let redo = match node.role {
                 Role::Worker => targets.is_empty() || targets.contains(&node.id),
                 Role::ReviewSplit | Role::SubReviewer | Role::Reviewer => true,
-                Role::Planner | Role::Approver => false,
+                Role::Planner | Role::Approver | Role::Retry => false,
             };
             if redo && requeue(node, next.team.as_ref()) {
                 next.grant = None;
@@ -1451,6 +1534,300 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn team_presets_create_exact_ids_and_apply_the_mission_snapshot() {
+        let (mut data, first) = team_fixture("first");
+        let first = save(&mut data, "qa", 0, first).unwrap();
+        let (_, second) = team_fixture("second");
+        let mut second = save(&mut data, "qa", 0, second).unwrap();
+        let run = create_run(&mut data, "qa", "selected".into(), "goal".into(), 1, 1, Some("second"), 2).unwrap();
+        assert_eq!(run.team.as_ref().unwrap().id, "second");
+        let granted = ao::grant_run(&mut data, "qa", "selected", run.revision, &"a".repeat(64), 1000).unwrap();
+        let snapshot = serde_json::to_value(&granted).unwrap();
+        let mut first_draft = first.clone();
+        first_draft.name = "Default updated".into();
+        save(&mut data, "qa", first.revision, first_draft).unwrap();
+        assert_eq!(serde_json::to_value(&data.ao_runs[0]).unwrap(), snapshot);
+        second.nodes[1].settings.instructions = "Second revision".into();
+        let second = save(&mut data, "qa", second.revision, second).unwrap();
+        assert_eq!(data.ao_teams[0].revision, second.revision);
+        let applied = apply(&mut data, "qa", "selected", granted.revision, second.revision).unwrap();
+        assert_eq!(applied.team.as_ref().unwrap().id, "second");
+        assert_eq!(applied.nodes[1].settings.instructions, "Second revision");
+        assert!(ao::grant_valid(&data, &applied, 1001, &"a".repeat(64)).is_ok());
+        for id in ["unknown", "foreign"] {
+            assert!(create_run(&mut data, "qa", id.into(), "goal".into(), 1, second.revision, Some(id), 2).is_err());
+        }
+        data.ao_teams.push(Team { id: "foreign".into(), workspace_id: "other".into(), ..second.clone() });
+        assert!(create_run(&mut data, "qa", "foreign".into(), "goal".into(), 1, second.revision, Some("foreign"), 2).is_err());
+        assert!(create_run(&mut data, "qa", "stale".into(), "goal".into(), 1, 1, Some("second"), 2).is_err());
+        let mut promoted = second.clone();
+        promoted.is_default = true;
+        let before_promotion = serde_json::to_value(&data.ao_runs).unwrap();
+        let promoted = save(&mut data, "qa", second.revision, promoted).unwrap();
+        assert_eq!(serde_json::to_value(&data.ao_runs).unwrap(), before_promotion);
+        let default = create_run(&mut data, "qa", "default".into(), "goal".into(), 1, promoted.revision, None, 2).unwrap();
+        assert_eq!(default.team.unwrap().id, "second");
+    }
+
+    #[test]
+    fn team_presets_legacy_unflagged_team_is_the_default() {
+        let (mut data, mut legacy) = team_fixture("legacy");
+        legacy.revision = 7;
+        let serialized = serde_json::to_value(&legacy).unwrap();
+        assert!(serialized.get("is_default").is_none() && serialized.get("editable_graph").is_none());
+        data.ao_teams.push(serde_json::from_value(serialized).unwrap());
+        assert_eq!(default_team(&data, "qa").unwrap().id, "legacy");
+        let run = create_run(&mut data, "qa", "legacy-run".into(), "goal".into(), 1, 7, None, 2).unwrap();
+        assert_eq!(run.team.unwrap(), legacy);
+        assert!(default_team(&data, "other").is_none());
+    }
+
+
+    #[test]
+    fn final_review_requeues_stale_planner_only_review_once_with_preserved_grant() {
+        let mut data = recovery_fixture_review(true);
+        let review = data.ao_runs[0].nodes[2].id.clone();
+        let worker = data.ao_runs[0].nodes[1].id.clone();
+        let revision = data.ao_runs[0].revision;
+        ao::reserve(&mut data, "qa", "recovery", &review, revision, "old-review".into(), Some(1003)).unwrap();
+        ao::record_submission(&mut data, "qa", "recovery", &review, "old-review", Some("review-thread")).unwrap();
+        let old = ao::record_terminal(&mut data, "qa", "recovery", &review, "review-thread",
+            Some("old-review-turn"), Some("APPROVED old evidence"), true, None).unwrap();
+        let fresh = control_selected(&mut data, "qa", "recovery", "review_failures", Some(&worker)).unwrap();
+        assert_eq!(fresh.nodes[2].state, State::Pending);
+        assert_eq!(fresh.nodes[2].history.last().unwrap().answer.as_deref(), Some("APPROVED old evidence"));
+        assert_eq!(fresh.nodes[3], old.nodes[3], "healthy running sibling is unchanged");
+        assert_eq!(fresh.grant, old.grant);
+        assert_eq!(fresh.review_rounds, old.review_rounds + 1);
+        ao::grant_valid(&data, &fresh, 1004, &"a".repeat(64)).unwrap();
+        assert!(control_selected(&mut data, "qa", "recovery", "review_failures", Some(&worker)).is_err());
+        assert_eq!(data.ao_runs[0], fresh, "repeated handoff cannot requeue or charge twice");
+        assert!(ao::parents_finished(&fresh, &review));
+        assert!(ao::prompt_for_node(&data, &fresh, &review).unwrap().contains("Partial worker output"));
+
+        let mut exhausted = recovery_fixture_review(true);
+        exhausted.ao_runs[0].nodes[2].state = State::Finished;
+        exhausted.ao_runs[0].review_rounds = exhausted.ao_runs[0].max_review_rounds;
+        let unchanged = exhausted.ao_runs[0].clone();
+        let worker = unchanged.nodes[1].id.clone();
+        assert!(control_selected(&mut exhausted, "qa", "recovery", "review_failures", Some(&worker)).is_err());
+        assert_eq!(exhausted.ao_runs[0], unchanged, "review budget denial is atomic");
+    }
+
+    #[test]
+    fn final_review_defers_in_flight_review_refresh_until_its_owned_attempt_settles() {
+        let mut data = recovery_fixture_review(true);
+        let review = data.ao_runs[0].nodes[2].id.clone();
+        let worker = data.ao_runs[0].nodes[1].id.clone();
+        let revision = data.ao_runs[0].revision;
+        ao::reserve(&mut data, "qa", "recovery", &review, revision, "live-review".into(), Some(1003)).unwrap();
+        let active = ao::record_submission(&mut data, "qa", "recovery", &review, "live-review", Some("review-thread")).unwrap();
+        let changed = control_selected(&mut data, "qa", "recovery", "review_failures", Some(&worker)).unwrap();
+        assert_eq!(changed.nodes[2], active.nodes[2]);
+        assert!(changed.rerun_after.contains(&review));
+        assert_eq!(changed.grant, active.grant);
+        let settled = ao::record_terminal(&mut data, "qa", "recovery", &review, "review-thread",
+            Some("stale-review-turn"), Some("APPROVED stale evidence"), true, None).unwrap();
+        assert_eq!(settled.nodes[2].state, State::Pending);
+        assert_eq!(settled.nodes[2].history.len(), 1);
+        assert!(!settled.rerun_after.contains(&review));
+        assert_eq!(settled.review_rounds, changed.review_rounds);
+    }
+
+    fn recovery_fixture() -> AppData {
+        recovery_fixture_review(false)
+    }
+
+    fn recovery_fixture_review(planner_only: bool) -> AppData {
+        let (mut data, mut team) = team_fixture("recovery");
+        let mut sibling = team.nodes[1].clone();
+        sibling.id = "healthy".into();
+        team.nodes.push(sibling);
+        if planner_only { team.editable_graph = true; team.nodes[2].parents = vec!["lead".into()]; }
+        let team = save(&mut data, "qa", 0, team).unwrap();
+        let run = create_run(&mut data, "qa", "recovery".into(), "goal".into(), 1, team.revision, None, 2).unwrap();
+        let granted = ao::grant_run(&mut data, "qa", "recovery", run.revision, &"a".repeat(64), 1000).unwrap();
+        let planner = data.ao_runs[0].nodes[0].id.clone();
+        ao::reserve(&mut data, "qa", "recovery", &planner, granted.revision, "planner-attempt".into(), Some(1000)).unwrap();
+        ao::record_submission(&mut data, "qa", "recovery", &planner, "planner-attempt", Some("planner-session")).unwrap();
+        let assignments: Vec<_> = data.ao_runs[0].nodes.iter().filter(|node| node.role == Role::Worker)
+            .map(|node| json!({"worker":node.id,"task":"Fixture assigned work"})).collect();
+        let plan = format!("Plan\n\u{60}\u{60}\u{60}assignments\n{}\n\u{60}\u{60}\u{60}", serde_json::to_string(&assignments).unwrap());
+        let planned = ao::record_terminal(&mut data, "qa", "recovery", &planner, "planner-session",
+            Some("planner-turn"), Some(&plan), true, None).unwrap();
+        assert_eq!(planned.nodes[0].state, State::Finished);
+        let worker = data.ao_runs[0].nodes[1].id.clone();
+        let healthy = data.ao_runs[0].nodes[3].id.clone();
+        let reserved = ao::reserve(&mut data, "qa", "recovery", &worker, planned.revision, "failed-attempt".into(), Some(1001)).unwrap();
+        let held = ao::record_submission(&mut data, "qa", "recovery", &worker, "failed-attempt", None).unwrap();
+        assert!(held.revision > reserved.revision);
+        data.ao_runs[0].nodes[1].receipt.as_mut().unwrap().answer = Some("Partial worker output".into());
+        data.ao_runs[0].nodes[1].receipt.as_mut().unwrap().error = Some("auth_unavailable".into());
+        let reserved = ao::reserve(&mut data, "qa", "recovery", &healthy, held.revision, "healthy-attempt".into(), Some(1002)).unwrap();
+        ao::record_submission(&mut data, "qa", "recovery", &healthy, "healthy-attempt", Some("healthy-session")).unwrap();
+        assert_eq!(reserved.nodes[3].state, State::Reserved);
+        data
+    }
+
+    #[test]
+    fn runtime_recovery_retry_preserves_live_sibling_and_valid_grant() {
+        let mut data = recovery_fixture();
+        let before = data.ao_runs[0].clone();
+        let mut exhausted = data.clone();
+        for n in 0..2 {
+            let mut receipt = exhausted.ao_runs[0].nodes[1].receipt.clone().unwrap();
+            receipt.request_key = format!("previous-{n}");
+            exhausted.ao_runs[0].nodes[1].history.push(receipt);
+        }
+        let unchanged = exhausted.ao_runs[0].clone();
+        assert!(control_selected(&mut exhausted, "qa", "recovery", "retry_auto", Some(&before.nodes[1].id)).is_err());
+        assert_eq!(exhausted.ao_runs[0], unchanged, "exhaustion denial is atomic");
+        let retried = control_selected(&mut data, "qa", "recovery", "retry_auto", Some(&before.nodes[1].id)).unwrap();
+        assert_eq!(retried.nodes[3], before.nodes[3]);
+        assert_eq!(retried.grant, before.grant);
+        assert_eq!(retried.nodes[1].state, State::Pending);
+        assert_eq!(retried.nodes[1].history.last().unwrap().answer.as_deref(), Some("Partial worker output"));
+        ao::grant_valid(&data, &retried, 1003, &"a".repeat(64)).unwrap();
+    }
+
+    #[test]
+    fn runtime_recovery_failure_handoff_keeps_receipts_and_blocks_worker_dependencies() {
+        let mut data = recovery_fixture();
+        let before = data.ao_runs[0].clone();
+        let failed = control(&mut data, "qa", "recovery", "review_failures").unwrap();
+        assert_eq!(serde_json::to_value(&failed.nodes[1].state).unwrap(), "failed");
+        assert_eq!(failed.nodes[1].receipt, before.nodes[1].receipt);
+        assert_eq!(failed.nodes[1].history, before.nodes[1].history);
+        assert_eq!(failed.nodes[3], before.nodes[3]);
+        assert_eq!(failed.grant, before.grant);
+        let mut manual_data = data.clone();
+        let worker = failed.nodes[1].id.clone();
+        let manual = control_selected(&mut manual_data, "qa", "recovery", "retry", Some(&worker)).unwrap();
+        assert_eq!(manual.nodes[1].state, State::Pending, "explicit retry can recover terminal failed work");
+        assert_eq!(manual.nodes[3], before.nodes[3]);
+        assert_eq!(manual.grant, before.grant);
+        ao::grant_valid(&manual_data, &manual, 1003, &"a".repeat(64)).unwrap();
+        assert!(control_selected(&mut manual_data, "qa", "recovery", "retry", Some("foreign")).is_err());
+        let review = failed.nodes[2].id.clone();
+        let healthy = data.ao_runs[0].nodes[3].id.clone();
+        ao::record_terminal(&mut data, "qa", "recovery", &healthy, "healthy-session",
+            Some("healthy-turn"), Some("Healthy worker completed its assigned fixture work"), true, None).unwrap();
+        assert!(ao::parents_finished(&data.ao_runs[0], &review));
+        let prompt = ao::prompt_for_node(&data, &data.ao_runs[0], &review).unwrap();
+        assert!(prompt.contains("auth_unavailable") && prompt.contains("Partial worker output") && prompt.contains("cannot approve"));
+        let mut dependent = data.ao_runs[0].nodes[3].clone();
+        dependent.parents = vec![failed.nodes[1].id.clone()];
+        let id = dependent.id.clone();
+        data.ao_runs[0].nodes[3] = dependent;
+        assert!(!ao::parents_finished(&data.ao_runs[0], &id));
+    }
+
+    #[test]
+    fn runtime_recovery_retry_role_is_dormant_and_optional() {
+        let (mut data, mut team) = team_fixture("retry-role");
+        let mut node = serde_json::to_value(&team.nodes[1]).unwrap();
+        node["id"] = json!("retry");
+        node["role"] = json!("retry");
+        team.nodes.push(serde_json::from_value(node).unwrap());
+        let team = save(&mut data, "qa", 0, team).unwrap();
+        let run = create_run(&mut data, "qa", "retry-role".into(), "goal".into(), 1, team.revision, None, 2).unwrap();
+        let retry_id = run.nodes[3].id.clone();
+        data.ao_runs[0].nodes[0].state = State::Finished;
+        assert!(!ao::parents_finished(&data.ao_runs[0], &retry_id));
+        data.ao_runs[0].nodes[1].state = State::Held;
+        assert!(ao::parents_finished(&data.ao_runs[0], &retry_id));
+        assert_eq!(data.ao_runs[0].nodes[2].parents.len(), 1, "review does not depend on Retry");
+        let mut invalid = team;
+        invalid.editable_graph = true;
+        invalid.nodes[2].parents.push("retry".into());
+        assert!(save(&mut data, "qa", invalid.revision, invalid).is_err());
+    }
+
+    fn team_fixture(id: &str) -> (AppData, Team) {
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../aiTemp")
+            .canonicalize()
+            .unwrap();
+        let data = serde_json::from_value(json!({
+            "profiles":[{"id":"qa","name":"QA","path":workspace.to_string_lossy(),"tunnel":{},"auth":{"type":"bearer"},"runtime":{},"actions":{}}],
+            "control_board":{"revision":1,"tasks":[{"id":"goal","workspace_id":"qa","title":"Preset test","description":"","state":"pending","step":0,"created_at":0,"updated_at":0,"clauses":[],"evidence":[]}]}
+        })).unwrap();
+        let route = json!({"harness_id":"codex-native","provider_id":"chatgpt-web","account_id":"chatgpt-web","model":"chatgpt-web/high","permission_profile":":read-only"});
+        let team = serde_json::from_value(json!({
+            "id":id,"workspace_id":"qa","name":id,"revision":0,"nodes":[
+                {"id":"lead","task_id":"","role":"planner","parents":[],"x":0,"y":0,"state":"pending","route":route},
+                {"id":"worker","task_id":"","role":"worker","parents":["lead"],"x":40,"y":90,"state":"pending","route":route},
+                {"id":"review","task_id":"","role":"reviewer","parents":["worker"],"x":80,"y":180,"state":"pending","route":route}
+            ]
+        })).unwrap();
+        (data, team)
+    }
+
+    #[test]
+    fn team_presets_save_independently_and_promote_one_default() {
+        let (mut data, first) = team_fixture("first");
+        let first = save(&mut data, "qa", 0, first).unwrap();
+        let (_, mut second) = team_fixture("second");
+        second.nodes[1].settings.instructions = "Independent preset".into();
+        let second = save(&mut data, "qa", 0, second).unwrap();
+        assert_eq!(data.ao_teams.len(), 2);
+        assert_eq!(first.revision, second.revision);
+        let encoded = serde_json::to_value(&data.ao_teams).unwrap();
+        assert_eq!(encoded[0]["is_default"], true);
+        assert!(encoded[1].get("is_default").is_none());
+        assert_eq!(serde_json::from_value::<Vec<Team>>(encoded).unwrap(), data.ao_teams);
+        let mut promoted = serde_json::to_value(&second).unwrap();
+        promoted["is_default"] = json!(true);
+        let promoted = save(&mut data, "qa", second.revision, serde_json::from_value(promoted).unwrap()).unwrap();
+        assert_eq!(promoted.revision, 2);
+        assert_eq!(data.ao_teams[0].revision, 2);
+        assert!(save(&mut data, "qa", first.revision, first).is_err());
+        let encoded = serde_json::to_value(&data.ao_teams).unwrap();
+        assert!(encoded[0].get("is_default").is_none());
+        assert_eq!(encoded[1]["is_default"], true);
+        let (_, mut third) = team_fixture("third");
+        third.revision = 1;
+        assert!(save(&mut data, "qa", 1, third).is_err());
+    }
+
+    #[test]
+    fn team_presets_editable_graph_preserves_links_and_rejects_cycles() {
+        let (mut data, team) = team_fixture("editable");
+        let mut value = serde_json::to_value(team).unwrap();
+        value["editable_graph"] = json!(true);
+        value["nodes"][2]["parents"] = json!(["lead"]);
+        let team: Team = serde_json::from_value(value).unwrap();
+        let saved = save(&mut data, "qa", 0, team).unwrap();
+        assert_eq!(saved.nodes[2].parents, vec!["lead"]);
+        assert_eq!((saved.nodes[1].x, saved.nodes[1].y), (40, 90));
+        let mut cycle = saved.clone();
+        cycle.nodes[1].parents = vec!["review".into()];
+        cycle.nodes[2].parents = vec!["worker".into()];
+        assert!(save(&mut data, "qa", saved.revision, cycle).is_err());
+        assert_eq!(data.ao_teams[0], saved);
+        let mut receipt = saved.clone();
+        receipt.nodes[0].request_key = Some("already-executed".into());
+        assert!(save(&mut data, "qa", saved.revision, receipt).is_err());
+    }
+
+    #[test]
+    fn team_presets_refuse_foreign_ids_and_invalid_identities() {
+        let (mut data, team) = team_fixture("owned");
+        data.ao_teams.push(Team { workspace_id: "other".into(), ..team.clone() });
+        assert!(save(&mut data, "qa", 0, team.clone()).is_err());
+        data.ao_teams.clear();
+        for id in ["", " ", "\n"] {
+            let mut invalid = team.clone();
+            invalid.id = id.into();
+            assert!(save(&mut data, "qa", 0, invalid).is_err());
+        }
+        let mut foreign = team;
+        foreign.workspace_id = "other".into();
+        assert!(save(&mut data, "qa", 0, foreign).is_err());
+    }
+
+
+    #[test]
     fn saved_roles_apply_to_queued_work_without_rewriting_the_active_attempt() {
         let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../aiTemp")
@@ -1468,7 +1845,7 @@ mod tests {
             {"id":"review","task_id":"","role":"reviewer","parents":["worker"],"x":0,"y":2,"state":"pending","route":web}
         ]})).unwrap();
         let mut team = save(&mut data, "qa", 0, team).unwrap();
-        let run = create_run(&mut data, "qa", "run".into(), "goal".into(), 1, 1, 2).unwrap();
+        let run = create_run(&mut data, "qa", "run".into(), "goal".into(), 1, 1, None, 2).unwrap();
         let planner = run.nodes[0].id.clone();
         assert_eq!(run.nodes[1].template_role_id.as_deref(), Some("worker"));
         let sha = "a".repeat(64);
@@ -1770,7 +2147,7 @@ mod tests {
         )
         .is_err());
         assert_eq!(data.ao_runs[0].nodes.last().unwrap().state, State::Pending);
-        let second = create_run(&mut data, "qa", "run-two".into(), "goal".into(), 1, 2, 3).unwrap();
+        let second = create_run(&mut data, "qa", "run-two".into(), "goal".into(), 1, 2, None, 3).unwrap();
         let second_planner = second.nodes[0].id.clone();
         ao::reserve(
             &mut data,
@@ -1860,7 +2237,7 @@ mod tests {
             {"id":"review","task_id":"","role":"reviewer","parents":["worker"],"x":0,"y":2,"state":"pending","route":web}
         ]})).unwrap();
         save(&mut data, "qa", 0, team).unwrap();
-        create_run(&mut data, "qa", "run".into(), "goal".into(), 1, 1, 2).unwrap();
+        create_run(&mut data, "qa", "run".into(), "goal".into(), 1, 1, None, 2).unwrap();
         assert!(
             control(&mut data, "qa", "run", "retry").is_err(),
             "nothing is held yet"

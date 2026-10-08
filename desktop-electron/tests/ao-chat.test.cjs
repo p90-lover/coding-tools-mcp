@@ -13,6 +13,33 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 const node = (id, role, state, extra = {}) => ({ id, role, state, x: 0, ...extra });
 const run = (id, taskId, nodes, extra = {}) => ({ id, project_id: taskId, cancelled: false, nodes, ...extra });
 
+test("archived and deleted task metadata hides chats without losing explicit history or scheduled status", () => {
+  const runs=[run("r1","a",[node("p","planner","pending")]),run("r2","b",[]),run("r3","c",[])];
+  const tasks=[{id:"a",title:"A"},{id:"b",title:"B",state:"archived"},{id:"c",title:"C"}];
+  const lifecycle=[{task_id:"a",visibility:"active",schedule:{run_id:"r1",state:"scheduled",due_at_ms:10000}},
+    {task_id:"c",visibility:"deleted"}];
+  const entries=plain(chat.chatList(runs,tasks,lifecycle));
+  assert.equal(entries.length,1);
+  assert.equal(entries[0].status,"scheduled");
+  assert.equal(plain(chat.chatList(runs,tasks,lifecycle,true)).length,3);
+});
+
+test("a cancelled mission never presents its stale running node as still working", () => {
+  const transcript=plain(chat.chatTranscript([run("r","a",[node("p","planner","running")],{cancelled:true})],"go"));
+  assert.ok(!transcript.some(message=>message.kind==="status" && ["running","reserved"].includes(message.state)));
+  assert.equal(transcript.at(-1).text,"Stopped");
+});
+
+test("configuration replacements keep the user's message index rather than consuming a follow-up", () => {
+  const runs=[run("r1","a",[]),run("r2","a",[],{replaces_run_id:"r1"}),
+    run("r3","a",[])];
+  const transcript=plain(chat.chatTranscript(runs,"Original input\n\nFollow-up (2026-10-04 12:00 UTC):\nNew request"));
+  assert.deepEqual(transcript.filter(message=>message.kind==="user").map(message=>[message.key,message.text]),
+    [["r1:user","Original input"],["r3:user","New request"]]);
+  assert.ok(transcript.some(message=>message.key==="r2:reconfigured"));
+});
+
+
 test("the task description splits into the first message and timestamped follow-ups", () => {
   const description = "fix the email dots\n\nFollow-up (2026-09-30 04:10 UTC):\nalso the time zone\n\nFollow-up (2026-09-30 05:00 UTC):\nand tests";
   assert.deepEqual(plain(chat.chatMessagesFromDescription(description)), [
@@ -167,6 +194,69 @@ test("Chat new Single prompt is Ask anything while Team, follow-up and running p
   assert.equal(placeholder({ composer: { mode: "single" }, selectedTaskId: "task" }), "Send a follow-up…");
   assert.equal(placeholder({ composer: { mode: "single" }, selectedTaskId: "task", working: true,
     runs: [run("active", "task", [node("worker", "worker", "running")])] }), "Running — you can send a follow-up when it finishes");
+});
+
+test("mission drafts retain actual role routes and instructions rather than another task's newer global template",()=>{
+  const text=fs.readFileSync(path.resolve(__dirname,"../src/features/AgentOrchestratorRoleEditor.tsx"),"utf8");
+  const roles={};
+  vm.runInNewContext(ts.transpileModule(text,{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX}}).outputText,
+    {exports:roles,require:()=>({}),structuredClone,crypto});
+  const saved={id:"team",workspace_id:"ws",revision:5,name:"Shared",worker_limit:3,nodes:[
+    node("role","planner","pending",{route:{model:"global-new"},settings:{instructions:"Other task"}})]};
+  const mission={id:"old",workspace_id:"ws",worker_limit:2,team:{...saved,revision:2,nodes:[
+    node("role","planner","pending",{route:{model:"mission-old"},settings:{instructions:"Original task"}})]},
+    nodes:[node("current","planner","running",{template_role_id:"role",route:{model:"actual-model"},settings:{instructions:"Actual instructions"}})]};
+  const draft=roles.teamForMission(mission,saved);
+  assert.equal(draft.id,"team");assert.equal(draft.revision,5);
+  assert.equal(draft.nodes[0].route.model,"actual-model");
+  assert.equal(draft.nodes[0].settings.instructions,"Actual instructions");
+  assert.equal(saved.nodes[0].route.model,"global-new");
+});
+
+// The header Team control (#252) opens this chat's own mission graph, whose role inspector edits
+// that mission's captured draft (#256). It must never open another task's shared template or write.
+test("toolbar Team opens this chat's own mission instead of another task's shared template",()=>{
+  const text=fs.readFileSync(path.resolve(__dirname,"../src/features/AgentOrchestratorSurface.tsx"),"utf8");
+  const ast=ts.createSourceFile("surface.tsx",text,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+  let initializer;
+  const visit=node=>{if(ts.isVariableDeclaration(node) && node.name.getText(ast)==="openTeam")initializer=node.initializer.getText(ast);ts.forEachChild(node,visit);};
+  visit(ast);assert.ok(initializer);
+  const exports={}, selected=[], drafts=[];
+  vm.runInNewContext(ts.transpileModule("exports.openTeam = "+initializer,{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText,{
+    exports,chatMission:{id:"a",project_id:"task-a"},
+    setSheet:()=>{},setInspectedId:()=>{},setView:()=>{},setSelectedRunId:id=>selected.push(id),setDraftTeam:value=>drafts.push(value),
+    moduleCall:()=>{throw Error("Opening Team must not write")},
+  });
+  exports.openTeam();
+  assert.deepEqual(selected,["a"],"the chat's own mission is selected");
+  assert.deepEqual(drafts,[null],"no shared template is loaded as the draft");
+});
+
+test("delayed-start labels show a local deadline and a live seconds/minutes countdown",()=>{
+  assert.match(chat.scheduledStartLabel(61000,1000),/1m 0s/);
+  assert.match(chat.scheduledStartLabel(61000,2000),/59s/);
+  assert.match(chat.scheduledStartLabel(1000,2000),/due now/i);
+  assert.match(chat.scheduledStartLabel(61000,1000),/Starts at/);
+});
+
+test("declining a delayed start restores the previously valid pending configuration edit",async()=>{
+  const {createLatestConfigQueue}=await import("../src/features/ao-config.ts");
+  const text=fs.readFileSync(path.resolve(__dirname,"../src/features/AgentOrchestratorSurface.tsx"),"utf8");
+  const ast=ts.createSourceFile("surface.tsx",text,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+  let initializer;const visit=node=>{if(ts.isVariableDeclaration(node) && node.name.getText(ast)==="submitSchedule")initializer=node.initializer.getText(ast);ts.forEachChild(node,visit);};visit(ast);
+  const scope={workspaceId:"ws",taskId:"task",runId:"r"},draft={id:"team",nodes:[]},timers=new Map(),applied=[];
+  const queue=createLatestConfigQueue({apply:async(_scope,value)=>applied.push(value),onState:()=>{},
+    setTimer:fn=>{timers.set(1,fn);return 1},clearTimer:id=>timers.delete(id)});
+  queue.enqueue(scope,draft);const exports={};let operation;
+  vm.runInNewContext(ts.transpileModule("exports.submit = "+initializer,{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText,{
+    exports,run:(_name,fn)=>{operation=fn();return operation},scheduleTarget:scope,
+    draftScopes:{current:new Map([[JSON.stringify(["ws","task"]),scope]])},
+    latestDrafts:{current:new Map([[JSON.stringify(["ws","task"]),draft]])},configuration:{current:queue},
+    startDelay:1,delayUnit:"minutes",moduleCall:async()=>({ok:true,cancelled:true}),
+    selection:{current:scope},setSheet:()=>{},loadMissions:async()=>{},setSelectedRunId:()=>{},
+  });
+  exports.submit();await operation;await queue.flush(scope);
+  assert.equal(applied.length,1);queue.dispose();
 });
 
 function loadSurface(react = {}, globals = {}, imports = {}) {
