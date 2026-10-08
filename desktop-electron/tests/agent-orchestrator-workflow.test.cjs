@@ -1205,6 +1205,20 @@ test("a held card is handed to the recovery helper, which retries it and restart
   assert.match(asked[0], /did not confirm that the prompt was sent/);
 });
 
+test("a card interrupted by an app restart is retried directly, without asking the helper", async () => {
+  const world = heldMissionWorld({ error: "The agent's process ended before it finished (the app restarted); retry this card." });
+  let asked = 0;
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/Codex/codex.exe",
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
+    fetchImpl: async () => { asked += 1; throw new Error("the helper must not be asked"); },
+    webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
+    resolveHarness: async () => ({ expected_sha256: "a".repeat(64), executable: path.resolve("codex.exe") }) });
+  await workflow.call("start_run", { workspaceId: "ws-1", runId: "r1" });
+  await until(() => world.grants >= 2);
+  assert.deepEqual(world.controls, ["retry"]);
+  assert.equal(asked, 0);
+});
+
 test("the helper stops retrying a card that already failed three times", async () => {
   const world = heldMissionWorld({ history: [{}, {}] });
   let asked = 0;

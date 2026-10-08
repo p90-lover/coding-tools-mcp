@@ -18,7 +18,7 @@ import {
 } from "./AgentOrchestratorRoleEditor";
 import "./agent-orchestrator.css";
 import "./codex-chat.css";
-import { pageHidden } from "./page-visibility";
+import { onAoPush, pageHidden } from "./page-visibility";
 
 type Clause = { id: string; title: string; detail?: string; state: string };
 type PlanTask = {
@@ -612,8 +612,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
   useEffect(() => {
     if (!workspaceId) return;
     let live = true;
-    const timer = setInterval(() => {
-      if (pageHidden()) return;
+    let reading = false;
+    const refresh = () => {
+      if (reading || pageHidden()) return;
+      reading = true;
       void moduleCall("runs", { workspaceId }).then((current) => {
         if (live && Array.isArray(current.runs)) {
           setMissions(current.runs as AoMission[]);
@@ -621,9 +623,12 @@ export function AgentOrchestratorSurface({ language, setError }: {
           setSavedTeams(aoSavedTeams(current, workspaceId));
           setTaskLifecycle((current.task_lifecycle as TaskLifecycleView[]) || []);
         }
-      }).catch(() => {});
-    }, 5000);
-    return () => { live = false; clearInterval(timer); };
+      }).catch(() => {}).finally(() => { reading = false; });
+    };
+    const timer = setInterval(refresh, 5000);
+    // A run changing state (a card finished, a new one started) refreshes the tree at once.
+    const stopPush = onAoPush((change) => { if (change.runs.some((key) => key.startsWith(`${workspaceId}:`))) refresh(); });
+    return () => { live = false; clearInterval(timer); stopPush(); };
   }, [workspaceId]);
   useEffect(() => {
     const changed = (event: Event) => {
@@ -884,8 +889,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
       finally { reading = false; }
     };
     const timer = setInterval(() => void refresh(), 3000);
+    const stopPush = onAoPush((change) => { if (change.runs.includes(`${workspaceId}:${selectedRunId}`)) void refresh(); });
     void refresh();
-    return () => { live = false; clearInterval(timer); };
+    return () => { live = false; clearInterval(timer); stopPush(); };
   }, [workspaceId, selectedRunId, setError]);
   const activeNodeIds = JSON.stringify(selectedRun?.nodes.filter(node => ["reserved", "running"].includes(node.state)).map(node => node.id) ?? []);
   useEffect(() => {
@@ -1256,7 +1262,16 @@ export function AgentOrchestratorSurface({ language, setError }: {
     };
     void poll();
     const timer = window.setInterval(() => void poll(), 1000);
-    return () => { live = false; window.clearInterval(timer); };
+    // Any AO session moving (a role streamed text, started a tool, finished) re-reads at once. The
+    // activity read answers from its last frame while it fetches, so read again once that lands.
+    let follow: number | undefined;
+    const stopPush = onAoPush((change) => {
+      if (!change.sessions.length) return;
+      void poll();
+      window.clearTimeout(follow);
+      follow = window.setTimeout(() => void poll(), 300);
+    });
+    return () => { live = false; window.clearInterval(timer); window.clearTimeout(follow); stopPush(); };
   }, [workspaceId, workingRunIds]);
 
   return (

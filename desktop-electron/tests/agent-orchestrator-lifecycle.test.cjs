@@ -166,6 +166,8 @@ function createHarness(hooks = {}) {
         return gateway;
       },
     },
+    // The live session feed is tested on its own; lifecycle tests never subscribe.
+    "./ao-session-events.cjs": { createAoSessionEvents: () => ({ subscribe: () => () => {} }) },
   };
   const loadedModule = { exports: {} };
   vm.runInNewContext(fs.readFileSync(sourcePath, "utf8"), {

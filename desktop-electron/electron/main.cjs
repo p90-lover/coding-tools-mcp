@@ -160,6 +160,8 @@ let upstreamToolController = null;
 let originalUiController = null;
 let appsHost = null;
 let agentOrchestratorUpstream = null;
+/** Stops the AO change push wired up with the current upstream module. */
+let aoChangeWatch = null;
 let missionWorkflowRuntime = null;
 let antigravityReauth = null;
 let antigravityAuthBrowser = null;
@@ -2408,6 +2410,7 @@ async function start() {
     const { createAntigravityReauth } = backendBundles.requireModule(backend, "cpa-antigravity-reauth.cjs");
     const { createAntigravityAuthBrowser } = backendBundles.requireModule(backend, "antigravity-auth-browser.cjs");
     const { createAgentOrchestratorUpstream } = backendBundles.requireModule(backend, "agent-orchestrator-upstream.cjs");
+    const { createChangePulse } = backendBundles.requireModule(backend, "ao-session-events.cjs");
     const { createAgentOrchestratorWorkflow, resolveAoNativeConnection, aoWebCatalogForModel } = backendBundles.requireModule(backend, "agent-orchestrator-workflow.cjs");
     const { HeadlessHost } = backendBundles.requireModule(backend, "headless-host.cjs");
     const createCodingToolsAppsHost = loadCreateCodingToolsAppsHost(backend.appHandlerRoot);
@@ -2483,6 +2486,12 @@ async function start() {
       openAuth: (url) => antigravityAuthBrowser(url),
       WebContentsView, dialog, shell, logger,
     });
+    // Push AO changes to the Mission chat instead of making it poll: AO's session feed (a role's
+    // message, reasoning or tool call moved) and mission run state, batched per 150 ms.
+    aoChangeWatch?.();
+    const aoPulse = createChangePulse((payload) => send("launcher:ao-changed", payload));
+    const stopAoWatch = agentOrchestratorUpstream.harness.watch((change) => aoPulse.session(change.sessionId));
+    aoChangeWatch = () => { stopAoWatch(); aoPulse.stop(); };
     missionWorkflowRuntime?.dispose();
     const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
       requestHeadless: (endpoint, body, options) => {
@@ -2524,7 +2533,7 @@ async function start() {
       resolveHarness: (selection) => resolveAoNativeConnection({ ...selection, userData: app.getPath("userData") }),
       aoHarness: agentOrchestratorUpstream.harness,
       confirm: confirmAoAction,
-      onRunState: (update) => mcpEventMonitor.runState(update),
+      onRunState: (update) => { mcpEventMonitor.runState(update); aoPulse.run(update.workspaceId, update.runId); },
     });
     try {
       appsHost = createCodingToolsAppsHost({

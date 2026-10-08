@@ -129,6 +129,15 @@
 .cx-step-body { margin: 2px 0 8px 22px; color: var(--color-text-primary); }
 .cx-step-detail { margin: 0 0 4px; color: var(--ao-muted); font-size: 12px; overflow-wrap: anywhere; }
 .cx-step-error { margin: 0; color: var(--ao-red); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* A working role's live turn: thinking, tool calls and streamed text, newest last. */
+.cx-live { display: grid; gap: 6px; margin: 4px 0 6px; padding: 0 0 0 10px; list-style: none; border-left: 1px solid var(--ao-line); }
+.cx-live-item { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; min-width: 0; color: var(--ao-muted); font-size: 13px; }
+.cx-live-item.kind-message { display: block; color: var(--color-text-primary); }
+.cx-live-label { flex: 0 0 auto; font-weight: 500; text-transform: capitalize; }
+.cx-live-item.is-running .cx-live-label { animation: cx-pulse 1.4s ease-in-out infinite; }
+.cx-live-item code { min-width: 0; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cx-live-text { min-width: 0; overflow-wrap: anywhere; }
+@media (prefers-reduced-motion: reduce) { .cx-live-item.is-running .cx-live-label { animation: none; } }
 
 .cx-answer { display: grid; gap: 4px; }
 .cx-answer-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--ao-muted); font-size: 12px; }

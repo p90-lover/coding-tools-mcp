@@ -8,6 +8,7 @@ const { spawn, spawnSync } = require("node:child_process");
 const { createAgentOrchestratorGateway } = require("./agent-orchestrator-gateway.cjs");
 const { createAoWorkspaceBoard } = require("./agent-orchestrator-workspace.cjs");
 const { readCpaCatalog, collectMissionAccounting } = require("./agent-orchestrator-accounting.cjs");
+const { createAoSessionEvents } = require("./ao-session-events.cjs");
 
 const API_OPERATIONS = Object.freeze({
   upstream_projects: { method: "GET", endpoint: "/api/v1/projects" },
@@ -42,6 +43,8 @@ function createAgentInventory(api, { now = Date.now, recheckMs = AGENT_RECHECK_M
 }
 
 const TUI_RESULT_FILE = "AO_RESULT.md";
+// AO conversation turn states after which a turn can no longer change.
+const TERMINAL_TURN_STATES = new Set(["completed", "failed", "interrupted", "cancelled", "recovered"]);
 const TUI_RESULT_INSTRUCTION = `When the assignment is finished, write your complete final report (what you did and the evidence) to ${TUI_RESULT_FILE} at the root of your working directory, then stop and wait.`;
 
 const CLIPBOARD_PERMISSIONS = new Set(["clipboard-read", "clipboard-sanitized-write"]);
@@ -144,6 +147,46 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     const code = typeof data?.code === "string" && data.code ? ` (${data.code})` : "";
     return `${message}${code}`.slice(0, 300);
   }
+  /**
+   * Whether the chat host recorded for an AO session (dataRoot/chat-hosts/<id>/host.json) is
+   * gone. A missing or unreadable record is not treated as gone. The recorded loopback address
+   * is probed rather than the PID: Windows reuses PIDs, so a dead host's PID can belong to an
+   * unrelated process (seen: the restarted AO daemon itself).
+   */
+  async function chatHostGone(id) {
+    let address;
+    try { address = JSON.parse(fs.readFileSync(path.join(dataRoot, "chat-hosts", sessionId(id), "host.json"), "utf8")).address; }
+    catch { return false; }
+    const match = /^127\.0\.0\.1:(\d{1,5})$/.exec(String(address));
+    if (!match) return false;
+    return new Promise(resolve => {
+      const socket = net.connect({ host: "127.0.0.1", port: Number(match[1]) });
+      const settle = gone => { socket.destroy(); resolve(gone); };
+      socket.setTimeout(1500, () => settle(false));
+      socket.once("connect", () => settle(false));
+      socket.once("error", error => settle(error?.code === "ECONNREFUSED"));
+    });
+  }
+  /**
+   * The current turn as a Codex-style transcript: assistant messages, reasoning and tool calls
+   * in AO sequence order. Bounded to the newest 40 items so a long turn stays a small IPC frame;
+   * the prompt (user message) is left out because the chat already shows it.
+   */
+  function turnTimeline(conversation, turnId) {
+    if (typeof turnId !== "string") return [];
+    const items = [
+      ...(Array.isArray(conversation?.messages) ? conversation.messages : [])
+        .filter(message => message.turnId === turnId && message.role === "assistant" && typeof message.text === "string" && message.text.trim())
+        .map(message => ({ id: String(message.id), sequence: Number(message.sequence) || 0, kind: "message",
+          status: message.streaming ? "running" : "completed", text: utf8Prefix(message.text.trim(), 4096) })),
+      ...(Array.isArray(conversation?.activities) ? conversation.activities : [])
+        .filter(activity => activity.turnId === turnId && typeof activity.activityKind === "string")
+        .map(activity => ({ id: String(activity.id), sequence: Number(activity.sequence) || 0,
+          kind: activity.activityKind.slice(0, 32), status: String(activity.status || "").slice(0, 32),
+          text: utf8Prefix(String(activity.summary || activity.activityKind), 400) })),
+    ];
+    return items.sort((a, b) => a.sequence - b.sequence).slice(-40);
+  }
   /** The longest prefix of `text` that is at most `maxBytes` of UTF-8 (AO limits prompts in bytes). */
   function utf8Prefix(text, maxBytes) {
     const value = String(text);
@@ -179,7 +222,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     return binding.projectId;
   }
   const agentInventory = createAgentInventory(internalApi);
+  // Watching never starts AO; it connects (with backoff) once the runtime is ready.
+  const sessionEvents = createAoSessionEvents({ port: async () => { if (state !== "ready") throw new Error("AO is not running"); return daemonPort; }, logger });
   const harness = Object.freeze({
+    /** Live AO session changes ({ sessionId, type, conversation }) pushed by the daemon; returns unsubscribe. */
+    watch(listener) { return sessionEvents.subscribe(listener); },
     async catalog() {
       const [inventory, settings] = await Promise.all([agentInventory(), internalApi("GET", "/api/v1/settings")]);
       const chat = new Set(Array.isArray(settings?.chatHarnesses) ? settings.chatHarnesses : []);
@@ -243,10 +290,26 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         .filter(message => message.role === "assistant" && message.turnId === turn.id && typeof message.text === "string")
         .map(message => message.text).join("\n\n").trim();
       const status = session?.session?.status;
+      const timeline = turnTimeline(conversation, turn?.id);
+      // A chat turn whose host process is gone (e.g. killed with the app during an update) stays
+      // "running" in AO forever. Settle it through AO's own interrupt path so the card can retry.
+      // The reason is reported again for a turn already settled that way (a display-only read may
+      // have sent the interrupt), so the card's saved failure says why; a turn the user stopped
+      // keeps its live host and stays a plain interruption.
+      const settling = turn && !TERMINAL_TURN_STATES.has(turn.state);
+      const settled = turn?.state === "interrupted" && !turn.errorMessage;
+      if ((settling || settled) && await chatHostGone(id)) {
+        if (settling) await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/interrupt`, {}).catch(() => undefined);
+        return {
+          status, turnId: turn.id, turnState: "interrupted",
+          error: "The agent's process ended before it finished (the app restarted); retry this card.",
+          needsInput: false, exited: false, answer: "", liveOutput: utf8Prefix(liveOutput, 4096), timeline,
+        };
+      }
       return {
         status, turnId: turn?.id, turnState: turn?.state, error: turn?.errorMessage,
         needsInput: status === "needs_input", exited: ["exited", "terminated"].includes(status),
-        answer: answer.slice(0, 12000), liveOutput: utf8Prefix(liveOutput, 4096),
+        answer: answer.slice(0, 12000), liveOutput: utf8Prefix(liveOutput, 4096), timeline,
       };
     },
     async interrupt(id) {

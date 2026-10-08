@@ -1,8 +1,8 @@
 //! Explicitly opted-in native Codex App Server sessions. No hidden model calls or RPC proxy.
-mod native_command;
-mod permissions;
 mod consent;
 mod form_format;
+mod native_command;
+mod permissions;
 mod process;
 pub use native_command::CommandRequest;
 use process::OwnedProcess;
@@ -1384,12 +1384,18 @@ impl Bridge {
                     bounded(&value.to_string(), 4096)
                 );
             }
-            if value.get("id").is_some() && self.queue_native_request(&value) { return; }
-            if method == "permissions/requestApproval" && !self.explicit_policy() && self.queue_file_approval(&value) {
+            if value.get("id").is_some() && self.queue_native_request(&value) {
+                return;
+            }
+            if method == "permissions/requestApproval"
+                && !self.explicit_policy()
+                && self.queue_file_approval(&value)
+            {
                 return;
             }
             if method == "item/commandExecution/requestApproval"
-                && !self.explicit_policy() && self.queue_command_approval(&value)
+                && !self.explicit_policy()
+                && self.queue_command_approval(&value)
             {
                 return;
             }
@@ -2047,7 +2053,10 @@ mod tests {
         assert!(!ao_permission_allowed(&options));
         options.allow_command_execution = false;
         options.permission_profile = ":danger-full-access".into();
-        assert!(ao_permission_allowed(&options), "exact full-access ID is admitted only subject to runtime metadata and acknowledgement");
+        assert!(
+            ao_permission_allowed(&options),
+            "exact full-access ID is admitted only subject to runtime metadata and acknowledgement"
+        );
         options.permission_profile = ":workspace".into();
         let sandbox = |command: &Command| {
             command
@@ -2208,12 +2217,23 @@ mod tests {
         request.request = json!({"cwd":"C:/outside/exact","command":"echo fixture"});
         assert_eq!(request.display_cwd(), "C:/outside/exact");
         assert_eq!(request.display_path(), "C:/outside/exact");
-        request.request["additionalPermissions"] = json!({"fileSystem":{"read":["C:/exact-requested"]}});
-        request.request["networkApprovalContext"] = json!({"host":"exact.example","protocol":"https"});
+        request.request["additionalPermissions"] =
+            json!({"fileSystem":{"read":["C:/exact-requested"]}});
+        request.request["networkApprovalContext"] =
+            json!({"host":"exact.example","protocol":"https"});
         let scope = command_permissions(&request.request).unwrap();
-        assert_eq!(scope["additionalPermissions"], request.request["additionalPermissions"]);
-        assert_eq!(scope["networkApprovalContext"], request.request["networkApprovalContext"]);
-        assert_eq!(command_permissions(&json!({"command":"no extra scope"})), None);
+        assert_eq!(
+            scope["additionalPermissions"],
+            request.request["additionalPermissions"]
+        );
+        assert_eq!(
+            scope["networkApprovalContext"],
+            request.request["networkApprovalContext"]
+        );
+        assert_eq!(
+            command_permissions(&json!({"command":"no extra scope"})),
+            None
+        );
         request.expires_at = Instant::now() - Duration::from_secs(1);
         assert!(!request.belongs_to("thread-one", "turn-one", Some(&thread), true));
     }
