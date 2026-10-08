@@ -8,7 +8,7 @@ import { ChatMenu, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
   CHAT_DEFAULT_TITLE, chatAcceptsMessage, chatDuration, chatList, chatMessageWithAttachments, chatRunOpen, chatSlashCommand,
   chatSlashMatches, chatTurns,
-  type ChatActivity, type ChatAttachment, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
+  type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -36,13 +36,27 @@ function stepTone(step: ChatStep): string {
   return step.state;
 }
 
+/** A working role's turn so far, as Codex shows it: thinking, tool calls and streamed messages. */
+function LiveTimeline({ items }: { items: ChatLiveItem[] }) {
+  return <ol className="cx-live">
+    {items.map((item) => <li key={item.id} className={`cx-live-item kind-${item.kind} is-${item.status || "done"}`}>
+      {item.kind === "message" ? <ChatMarkdown text={item.text} />
+        : item.kind === "reasoning" ? <span className="cx-live-label">{item.status === "running" ? "Thinking…" : "Thought"}</span>
+        : item.kind === "command" ? <><span className="cx-live-label">{item.status === "running" ? "Running" : "Ran"}</span><code>{item.text}</code></>
+        : <><span className="cx-live-label">{item.kind.replace(/_/g, " ")}</span><span className="cx-live-text">{item.text}</span></>}
+    </li>)}
+  </ol>;
+}
+
 function StepRow({ step, now }: { step: ChatStep; now: number }) {
-  // A failed step opens on its error, as Codex shows failures inline.
-  const [open, setOpen] = useState(() => Boolean(step.error));
-  const body = step.error || step.text;
+  // A failed step opens on its error and a working one on its live turn, as Codex shows them;
+  // once the user toggles a row, their choice wins.
+  const [chosen, setOpen] = useState<boolean | null>(null);
+  const open = chosen ?? Boolean(step.error || step.working?.timeline?.length);
+  const body = step.error || step.text || (step.working?.timeline?.length ? "live" : "");
   const elapsed = step.working && step.startedAtMs ? chatDuration(now - step.startedAtMs) : "";
   return <li className={`cx-step tone-${stepTone(step)}`}>
-    <button type="button" className="cx-step-head" aria-expanded={open} disabled={!body && !step.working} onClick={() => setOpen((value) => !value)}>
+    <button type="button" className="cx-step-head" aria-expanded={open} disabled={!body && !step.working} onClick={() => setOpen(!open)}>
       <span className="cx-step-dot" aria-hidden="true" />
       <span className="cx-step-name">{step.name}</span>
       <span className="cx-step-meta">
@@ -54,6 +68,7 @@ function StepRow({ step, now }: { step: ChatStep; now: number }) {
     {open ? <div className="cx-step-body">
       {step.detail ? <p className="cx-step-detail">{step.detail}</p> : null}
       {step.working ? <p className="cx-step-detail">{step.working.detail}</p> : null}
+      {step.working?.timeline?.length ? <LiveTimeline items={step.working.timeline} /> : null}
       {step.error ? <p className="cx-step-error">{step.error}</p> : step.text ? <ChatMarkdown text={step.text} /> : null}
     </div> : null}
   </li>;

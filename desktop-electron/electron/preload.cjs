@@ -201,6 +201,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   onExternalServicesChanged: (listener) => subscription("launcher:external-services-changed", listener),
   onManagedBootstrapChanged: (listener) => subscription("launcher:managed-bootstrap-changed", listener),
   onProviderNetworkChanged: (listener) => subscription("launcher:provider-network-changed", listener),
+  onAoChanged: (listener) => subscription("launcher:ao-changed", listener),
 });
 
 const { invokeContract } = require("./ipc-schema.cjs");

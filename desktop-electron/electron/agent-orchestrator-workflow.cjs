@@ -618,6 +618,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
                   activity: observed.needsInput ? "waiting for input" : observed.exited ? "exited" : publicText(observed.turnState || "working", 40),
                   step: publicText(observed.activity || observed.turnState || "working", 120),
                   output: currentTurn ? publicText(observed.liveOutput ?? observed.answer) : "",
+                  // The role's reasoning, tool calls and messages, as Codex shows them while it works.
+                  timeline: currentTurn && Array.isArray(observed.timeline) ? observed.timeline.slice(-40).map(item => ({
+                    id: publicText(item.id, 80), kind: publicText(item.kind, 32), status: publicText(item.status, 32),
+                    text: publicText(item.text, item.kind === "message" ? 4096 : 400) })) : [],
                   error: publicText(observed.error, 500) };
               }
             } else {

@@ -3,8 +3,8 @@
 // One chat is one board task. Each message the user sent is one run on that task: the first
 // message is the task description, and every later one is appended to it by chat_send as
 // "\n\nFollow-up (<stamp> UTC):\n<text>". A run's cards (planner, workers, reviewer) become the
-// replies; the backend only keeps each card's final answer, so a card still working shows as a
-// status line rather than streamed text.
+// replies; the backend only keeps each card's final answer. A card still working shows its live
+// turn instead (the workflow's "activity" timeline: messages, reasoning and tool calls so far).
 
 export type ChatNode = {
   id: string;
@@ -25,7 +25,12 @@ export type ChatActivity = {
   activity_at_ms?: number | null;
   last_event_at_ms?: number | null;
   turn_started?: boolean;
+  /** The current turn so far: messages, reasoning and tool calls in order (AO harness cards). */
+  timeline?: ChatLiveItem[];
 };
+
+/** One live entry of a working card's turn. `kind` is "message" or AO's activity kind (reasoning, command, …). */
+export type ChatLiveItem = { id: string; kind: string; status: string; text: string };
 
 export type ChatOptions = {
   /** One line per card: harness · model · effort · context · role. */
@@ -303,7 +308,7 @@ export type ChatStep = {
   verdict?: string;
   error?: string;
   /** For a working card: runtime, current step and when it was last heard. */
-  working?: { detail: string; stalled: boolean; activity?: string };
+  working?: { detail: string; stalled: boolean; activity?: string; timeline?: ChatLiveItem[] };
   startedAtMs?: number;
 };
 
@@ -333,7 +338,8 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
   if (node.state === "running" || node.state === "reserved") {
     const live = options.activity?.[key];
     const working = chatWorkingDetail(node, live, now);
-    step.working = { ...working, ...(live?.activity ? { activity: live.activity } : {}) };
+    step.working = { ...working, ...(live?.activity ? { activity: live.activity } : {}),
+      ...(live?.timeline?.length ? { timeline: live.timeline } : {}) };
   }
   return step;
 }
