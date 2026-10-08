@@ -88,22 +88,23 @@ test("model search filters real catalog choices and WebGPT selection preserves s
   assert.equal(tuning.props.hideModel, true); assert.equal(tuning.props.hidePermissionNote, true);
 });
 
-test("WebGPT locks the harness but its model popup reads real Claude catalog to leave Native", async () => {
+test("WebGPT locks the harness; its model popup offers Native Codex's CPA models, which keep the native permission", async () => {
   const view = renderer("AgentOrchestratorComposerControls.tsx");
   const calls = [], routes = [];
   const route = { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web", model: "chatgpt-web/high", permission_profile: "managed/raw", approval_policy: "on-request", approvals_reviewer: "auto_review" };
-  const props = { mode: "single", onModeChange() {}, route, onRouteChange: next => routes.push(plain(next)), harnesses: [], loadModels: async harness => { calls.push(harness); return harness === "codex-native" ? ["chatgpt-web/high"] : ["cpa/actual-local-model"]; }, teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false };
+  const props = { mode: "single", onModeChange() {}, route, onRouteChange: next => routes.push(plain(next)), harnesses: [], loadModels: async harness => { calls.push(harness); return harness === "codex-native" ? ["chatgpt-web/high", "actual-local-model"] : ["cpa/other-agent-model"]; }, teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false };
   view.render("AgentOrchestratorComposerControls", props, [true, "", null, ""]);
   view.effects[view.effects.length - 1]();
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(calls.sort(), ["ao:claude-code", "codex-native"]);
+  assert.deepEqual(calls, ["codex-native"], "Native Codex lists WebGPT and the CPA pool itself");
   const tree = view.render("AgentOrchestratorComposerControls", props);
   const rows = elements(tree, item => item.type === "button" && item.props.role === "radio");
   assert.equal(rows.length, 2);
   rows.find(row => text(row).includes("actual-local-model")).props.onClick();
-  assert.equal(routes[0].harness_id, "ao:claude-code");
-  assert.equal(routes[0].model, "cpa/actual-local-model");
-  assert.equal(routes[0].native_permission_profile, "managed/raw");
+  assert.equal(routes[0].harness_id, "codex-native");
+  assert.equal(routes[0].provider_id, "cliproxyapi-antigravity");
+  assert.equal(routes[0].model, "actual-local-model");
+  assert.equal(routes[0].permission_profile, "managed/raw");
 });
 
 test("mixed unsupported capabilities disable all presets rather than silently skipping roles", () => {

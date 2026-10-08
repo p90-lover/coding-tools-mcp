@@ -235,7 +235,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     return { baseUrl: url.origin, key: value.proxyApiKey };
   }
 
-  const tuningEfforts = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "auto"]);
+  const tuningEfforts = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "auto"]);
   const reportedEfforts = values => [...new Set((Array.isArray(values) ? values : [])
     .map(value => typeof value === "string" ? value : value?.effort)
     .filter(value => typeof value === "string" && tuningEfforts.has(value)))];
@@ -293,7 +293,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       return { ok: true, harness, models: [...new Set([...items.map(item => item.id), ...cpa])], capabilities };
     }
     if (harness === "codex-native") {
-      return { ok: true, harness, models: [...WEB_TIERS, ...LUNA_TIERS] };
+      // Native Codex runs WebGPT through the bridge and every CPA model through the shared pool.
+      // Without CPA it still offers WebGPT.
+      let pool = { models: [], capabilities: {} };
+      try { pool = await models(); } catch {}
+      const cpa = pool.models.filter(id => !id.startsWith("chatgpt-web/"));
+      return { ok: true, harness, models: [...WEB_TIERS, ...LUNA_TIERS, ...cpa],
+        capabilities: Object.fromEntries(cpa.map(id => [id, pool.capabilities[id]]).filter(([, value]) => value)) };
     }
     const { baseUrl, key } = connection();
     let rows;
@@ -316,7 +322,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       const id = entry?.slug ?? entry?.id;
       if (typeof id !== "string" || !id || id.length > 128 || entry.visibility === "hide" || ids.includes(id)) continue;
       const efforts = reportedEfforts(entry.supported_reasoning_levels ?? entry.thinking?.levels);
-      const limit = entry.context_window ?? entry.context_length;
+      // context_window is the default the client starts with; max_context_window is how far the
+      // model goes (Luna: 272K by default, up to 1M).
+      const limit = entry.max_context_window ?? entry.context_window ?? entry.context_length;
       capabilities[id] = { efforts, ...(!efforts.length ? { effortReason: "CPA did not advertise reasoning levels for this model." } : {}),
         ...(Number.isSafeInteger(limit) && limit > 0 ? { contextLimit: limit } : {}) };
       ids.push(id);

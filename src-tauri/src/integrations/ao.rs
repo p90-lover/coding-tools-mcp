@@ -108,12 +108,13 @@ fn unix_now_ms() -> u64 {
         })
 }
 
-/// Reasoning efforts a card may ask for (Codex's ReasoningEffort names).
-pub const EFFORTS: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
+/// Reasoning efforts a card may ask for on any harness (Codex's names; max and ultra are offered
+/// by the models that support them, e.g. Luna and Sol).
+pub const EFFORTS: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 /// Context windows a card may ask for, in tokens.
 pub const CONTEXT_WINDOWS: std::ops::RangeInclusive<u32> = 4_096..=2_000_000;
 
-/// Native Codex keeps its effort names; AO harnesses may also advertise none, auto or max.
+/// AO harnesses may also advertise none or auto.
 fn route_tuning_valid(route: &Route) -> bool {
     route
         .approval_policy
@@ -132,7 +133,7 @@ fn route_tuning_valid(route: &Route) -> bool {
         && route.effort.as_deref().is_none_or(|effort| {
             EFFORTS.contains(&effort)
                 || (route.harness_id.starts_with("ao:")
-                    && ["none", "auto", "max"].contains(&effort))
+                    && ["none", "auto"].contains(&effort))
         })
         && route
             .context_window
@@ -665,19 +666,9 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
         if web_model_named(&node.route) && !web_route_valid(&node.route) {
             return Err(fail("AO WebGPT runs only on Native Codex"));
         }
-        // Native Codex runs only WebGPT; other models run on an AO harness through the CPA
-        // gateway. Cards that already ran keep their old route so older missions stay usable.
-        if node.state == State::Pending
-            && node.route.harness_id == "codex-native"
-            && !web_route_valid(&node.route)
-        {
-            return Err(fail(
-                "Native Codex runs only WebGPT models; choose an AO harness (Codex or Claude Code) for other models",
-            ));
-        }
         if !route_tuning_valid(&node.route) {
             return Err(fail(if node.route.harness_id.starts_with("ao:") {
-                "AO harness effort must be minimal, low, medium, high, xhigh, none, auto or max, and its context window 4,096 to 2,000,000 tokens"
+                "AO harness effort must be minimal, low, medium, high, xhigh, max, ultra, none or auto, and its context window 4,096 to 2,000,000 tokens"
             } else {
                 "AO card effort must be minimal, low, medium, high or xhigh, and its context window 4,096 to 2,000,000 tokens"
             }));
@@ -2422,9 +2413,9 @@ mod tests {
         assert!(validate(None, &run(web.clone())).is_ok());
         assert!(validate(None, &run(json!({"harness_id":"codex-native","provider_id":"chatgpt-web",
             "account_id":"chatgpt-web","model":"chatgpt-web/other","permission_profile":":read-only"}))).is_err());
-        // Native Codex runs only WebGPT: a CPA model on it is refused for a card yet to start.
+        // Native Codex runs any CPA pool model as well as WebGPT.
         assert!(validate(None, &run(json!({"harness_id":"codex-native","provider_id":"cliproxyapi-antigravity",
-            "account_id":"shared-cpa-pool","model":"claude-sonnet-4-6","permission_profile":":read-only"}))).is_err());
+            "account_id":"shared-cpa-pool","model":"claude-sonnet-4-6","permission_profile":":read-only"}))).is_ok());
         // Every WebGPT tier the bridge serves is allowed, but only on Native Codex.
         assert!(validate(None, &run(json!({"harness_id":"codex-native","provider_id":"chatgpt-web",
             "account_id":"chatgpt-web","model":"chatgpt-web/extra-high","permission_profile":":read-only"}))).is_ok());
@@ -2450,7 +2441,7 @@ mod tests {
                 route.effort = Some((*effort).into());
                 assert!(route_tuning_valid(&route), "{harness} {effort}");
             }
-            for effort in ["none", "auto", "max"] {
+            for effort in ["none", "auto"] {
                 route.effort = Some(effort.into());
                 assert_eq!(
                     route_tuning_valid(&route),
@@ -2498,8 +2489,12 @@ mod tests {
             &run(json!({"effort":"xhigh","context_window":262_144}))
         )
         .is_ok());
+        // Luna and Sol offer max (Sol also ultra) on Native Codex too.
+        for effort in ["max", "ultra"] {
+            assert!(validate(None, &run(json!({ "effort": effort }))).is_ok(), "{effort}");
+        }
         for bad in [
-            json!({"effort":"max"}),
+            json!({"effort":"turbo"}),
             json!({"effort":""}),
             json!({"context_window":1_024}),
             json!({"context_window":4_000_000}),
@@ -2574,8 +2569,9 @@ mod tests {
         };
         assert!(validate(None, &run(json!({"harness_id":"codex-native","provider_id":"chatgpt-web",
             "account_id":"chatgpt-web","model":"chatgpt-web/medium","permission_profile":":read-only"}))).is_ok());
+        // ...or any CPA pool model on Native Codex.
         assert!(validate(None, &run(json!({"harness_id":"codex-native","provider_id":"cliproxyapi-antigravity",
-            "account_id":"shared-cpa-pool","model":"claude-sonnet-4-6","permission_profile":":read-only"}))).is_err());
+            "account_id":"shared-cpa-pool","model":"claude-sonnet-4-6","permission_profile":":read-only"}))).is_ok());
         // The orchestrator and reviewer may also run on an AO harness such as Claude Code.
         assert!(validate(None, &run(json!({"harness_id":"ao:claude-code","provider_id":EXTERNAL_PROVIDER,
             "account_id":EXTERNAL_ACCOUNT,"model":"default","permission_profile":EXTERNAL_PERMISSION}))).is_ok());

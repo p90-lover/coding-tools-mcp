@@ -61,7 +61,8 @@ export function AgentOrchestratorComposerControls({
     let live = true;
     setModels(null); setCaps({}); setError("");
     const none: AoModelCatalog = { models: [] };
-    const web = route.harness_id === NATIVE_HARNESS ? loadModels(DEFAULT_WORKER_HARNESS).catch(() => none)
+    // Native Codex lists WebGPT and the CPA pool itself; other harnesses add the WebGPT models.
+    const web = route.harness_id === NATIVE_HARNESS ? Promise.resolve(none)
       : loadModels(NATIVE_HARNESS).then(items => modelIds(items).filter(isWebModel), () => none);
     void Promise.all([loadModels(route.harness_id), web]).then(([catalog, webCatalog]) => {
       if (!live) return;

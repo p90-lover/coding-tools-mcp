@@ -26,23 +26,29 @@ export const SPECIALTIES = ["planning", "research", "architecture", "frontend", 
   "testing", "performance", "debugging", "refactor", "docs", "ui-ux", "mobile", "data-ml", "implementation", "qa", "review", "delivery", "recovery"];
 
 /**
- * Native Codex runs only WebGPT, through the bridge; every other model runs on an AO harness
- * (CPA pool models through the gateway as "cpa/<model>"). A WebGPT model therefore always gets
- * the Native Codex route, and any other model picked on Native Codex moves to an AO harness:
- * Unspecified non-WebGPT choices default to Claude Code; explicit AO choices stay unchanged.
+ * WebGPT runs only on Native Codex, through the bridge, so a WebGPT model always gets the
+ * Native Codex route. Native Codex also runs every CPA pool model, through the shared pool; an
+ * AO harness runs CPA models through the gateway as "cpa/<model>". Unspecified non-WebGPT
+ * choices default to Claude Code; explicit choices stay on their harness.
  */
 export const isWebModel = (model: string) => model.replace(/^cpa\//, "").startsWith("chatgpt-web/");
 
 export function workerRoute(harness: string, model: string, permission: NativePermission = ":workspace"): AoRoute {
   const bare = model.replace(/^cpa\//, "");
   if (isWebModel(model)) return { ...WEB_ROUTE, model: bare, permission_profile: permission === ":ao-default" ? WEB_ROUTE.permission_profile : permission };
+  if (harness === NATIVE_HARNESS && model && model !== AGENT_DEFAULT_MODEL) {
+    return { harness_id: NATIVE_HARNESS, provider_id: "cliproxyapi-antigravity", account_id: "shared-cpa-pool", model: bare,
+      permission_profile: permission === ":ao-default" ? ":workspace" : permission };
+  }
   const agent = harness.startsWith("ao:") ? harness : DEFAULT_WORKER_HARNESS;
   const routed = harness.startsWith("ao:") || !model ? model : `cpa/${bare}`;
   return { harness_id: agent, provider_id: "agent-orchestrator", account_id: "ao-local", model: routed || "default", permission_profile: ":ao-default" };
 }
 
 /** Reasoning efforts a card may ask for (Codex's names; the engine checks the same list). */
-export const EFFORTS = ["minimal", "low", "medium", "high", "xhigh"] as const;
+export const EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
+/** What Native Codex offers when the model reports no efforts of its own (WebGPT tiers). */
+const NATIVE_DEFAULT_EFFORTS = EFFORTS.slice(0, 5);
 /** Legacy Native-to-agent carry-over policy; AO controls use the selected model capabilities. */
 export const effortApplies = (route: AoRoute) => !(route.harness_id.startsWith("ao:") && route.model.startsWith("cpa/"));
 /** Legacy carry-over policy when entering or leaving Native Codex. */
@@ -79,12 +85,12 @@ export function tokensLabel(tokens: number): string {
   return tokens.toLocaleString("en-US");
 }
 
-const EFFORT_ORDER = ["minimal", "low", "medium", "high", "xhigh", "max"];
+const EFFORT_ORDER: string[] = [...EFFORTS];
 
 /** What a model supports, for model lists: "up to xhigh effort · 272K context". Native Codex accepts
  *  every effort and a 4,096–2M budget; other harnesses show only what their catalog verified. */
 export function capabilityText(capability: AoModelCapabilities | undefined, native = false): string {
-  const efforts = native ? [...EFFORTS] : (capability?.efforts ?? []).filter(effort => EFFORT_ORDER.includes(effort));
+  const efforts = (native && !capability?.efforts?.length ? [...NATIVE_DEFAULT_EFFORTS] : capability?.efforts ?? []).filter(effort => EFFORT_ORDER.includes(effort));
   const top = efforts.sort((a, b) => EFFORT_ORDER.indexOf(a) - EFFORT_ORDER.indexOf(b)).at(-1);
   const limit = capability?.contextLimit ?? (native ? 2_000_000 : capability?.contextWindow?.max);
   // Catalog limits are decimal (272,000), so they read best as "272K" rather than tokensLabel's binary units.
@@ -191,8 +197,10 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
   const known = harnesses.some(item => item.id === harness);
   const native = harness === NATIVE_HARNESS;
   const capability = capabilities?.harness === harness ? capabilities.models[route.model] : undefined;
-  const efforts = native ? [...EFFORTS] : capability?.efforts;
-  const context = native ? { min: 4096, max: 2000000 } : capability?.contextWindow;
+  // Native Codex takes the model's own efforts and context limit when its catalog reports them.
+  const efforts = native ? (capability?.efforts?.length ? capability.efforts : [...NATIVE_DEFAULT_EFFORTS]) : capability?.efforts;
+  const nativeMax = Math.min(2000000, capability?.contextLimit ?? 2000000);
+  const context = native ? { min: 4096, max: nativeMax } : capability?.contextWindow;
   return <>
     <label>Harness<select value={harness} disabled={disabled || isWebModel(route.model)} title={isWebModel(route.model) ? "WebGPT requires Native Codex" : undefined} onChange={event => {
       // Start each harness on an explicit model; an agent without a known one shows "Choose a model".
@@ -212,11 +220,11 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
       {models === null ? <option value={route.model}>{route.model || "Loading"}</option> : null}
       {(models ?? []).map(model => <option key={model} value={model}>
         {modelLabel(model)}{harness !== NATIVE_HARNESS && isWebModel(model) ? " · switches to Native Codex"
-          : capabilities?.harness === harness && capabilityText(capabilities.models[model], native) ? ` · ${capabilityText(capabilities.models[model], native)}` : ""}
+          : capabilities?.harness === harness && capabilityText(capabilities.models[model], native && isWebModel(model)) ? ` · ${capabilityText(capabilities.models[model], native && isWebModel(model))}` : ""}
       </option>)}
     </select></label> : null}
     {!hidePermissionNote ? harness === NATIVE_HARNESS ? <p className="ao-hint">Saved native permission: {nativePermission(route) || "Unknown"}. Change permissions explicitly in the chat composer menu; runtime capabilities are authoritative.</p>
-      : <p className="ao-hint">Native Codex runs only WebGPT: choosing a WebGPT model switches to it, and any other model runs here. Native permissions are retained but unavailable on this adapter.</p> : null}
+      : <p className="ao-hint">WebGPT runs only on Native Codex: choosing a WebGPT model switches to it, and any other model runs here. Native permissions are retained but unavailable on this adapter.</p> : null}
     <fieldset className="ao-route-tuning"><legend>Model tuning</legend>
     <label title={native ? "Reasoning effort for this card" : capability?.effortReason || (efforts ? efforts.length ? "Reasoning efforts advertised for this model" : "This model does not support an effort override" : "Model capabilities have not been verified")}>Reasoning effort
       <select value={route.effort ?? ""} disabled={disabled || !efforts?.length} aria-invalid={!native && Boolean(route.effort) && Boolean(efforts) && !efforts?.includes(route.effort!)}
@@ -225,7 +233,7 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
         {!native && route.effort && !efforts?.includes(route.effort) ? <option value={route.effort} disabled>{route.effort} (saved, unverified or unsupported)</option> : null}
         {(efforts ?? []).map(effort => <option key={effort} value={effort}>{effort}</option>)}
       </select></label>
-    <label title={native ? "Context window in tokens (4,096 to 2,000,000)" : capability?.contextReason || (context ? context.kind === "compaction" ? "Client compaction threshold in tokens, not the model context limit" : "Client context budget in tokens, not a larger provider limit" : "No verified client context override")}>Context window
+    <label title={native ? `Context window in tokens (4,096 to ${nativeMax.toLocaleString("en-US")})` : capability?.contextReason || (context ? context.kind === "compaction" ? "Client compaction threshold in tokens, not the model context limit" : "Client context budget in tokens, not a larger provider limit" : "No verified client context override")}>Context window
       <input type="number" min={context?.min} max={context?.max} step={1} inputMode="numeric" disabled={disabled || !context}
         placeholder={native ? "Model default" : context ? context.kind === "compaction" ? "Client compaction default" : "Client default" : "No verified override"}
         value={route.context_window ?? ""} aria-invalid={!native && Boolean(context) && route.context_window !== undefined && (route.context_window < context!.min || context!.max !== undefined && route.context_window > context!.max)}
@@ -235,7 +243,7 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
         const next = { ...route }; delete next.effort; delete next.context_window; onChange(next);
       }}>Model defaults</button> : null}
     <p className="ao-hint ao-wide">{native
-      ? "Native harness context budget: 4,096–2,000,000 tokens. Blank uses the model default, not a claimed model limit."
+      ? `Native harness context budget: 4,096–${nativeMax.toLocaleString("en-US")} tokens${capability?.contextLimit ? " (this model's limit)" : ""}. Blank uses the model default.`
       : [capability?.effortReason || (!efforts ? "Effort capabilities are unverified." : !efforts.length ? "This model has no effort override." : ""),
           capability?.contextReason || (!context ? "This client has no verified context override." : context.kind === "compaction"
             ? "Context sets the client compaction threshold, not a thinking budget or output limit."
