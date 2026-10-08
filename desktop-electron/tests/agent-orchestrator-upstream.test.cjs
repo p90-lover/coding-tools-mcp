@@ -125,10 +125,11 @@ test("a running turn whose chat host is gone is interrupted, even when its PID w
   const hostFile = path.join(dataRoot, "chat-hosts", "s", "host.json");
   fs.mkdirSync(path.dirname(hostFile), { recursive: true });
   const calls = [];
+  let turnState = "running";
   const upstream = observeHarness({ dataRoot,
     internalApi: async (method, endpoint) => {
       calls.push(`${method} ${endpoint}`);
-      if (endpoint.endsWith("/conversation?limit=100")) return { turns: [{ id: "t", state: "running" }], messages: [] };
+      if (endpoint.endsWith("/conversation?limit=100")) return { turns: [{ id: "t", state: turnState }], messages: [] };
       if (endpoint.endsWith("/interrupt")) return {};
       return { session: { id: "s", mode: "chat", status: "working" } };
     },
@@ -142,6 +143,13 @@ test("a running turn whose chat host is gone is interrupted, even when its PID w
     assert.equal(orphan.turnState, "interrupted");
     assert.match(orphan.error, /retry this card/);
     assert.ok(calls.includes("POST /api/v1/sessions/s/conversation/interrupt"), "AO settles the turn through its own interrupt");
+    // A later read sees the settled turn; it still names the restart and does not interrupt again.
+    turnState = "interrupted"; calls.length = 0;
+    assert.match((await upstream.observe("s")).error, /the app restarted/);
+    assert.ok(!calls.some(call => call.endsWith("/interrupt")));
+    // A turn the user stopped keeps its live host: a plain interruption.
+    fs.writeFileSync(hostFile, JSON.stringify({ pid: process.pid, address: `127.0.0.1:${live.address().port}` }));
+    assert.equal((await upstream.observe("s")).error, undefined);
   } finally {
     live.close();
     fs.rmSync(dataRoot, { recursive: true, force: true });

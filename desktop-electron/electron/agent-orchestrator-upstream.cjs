@@ -293,8 +293,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       const timeline = turnTimeline(conversation, turn?.id);
       // A chat turn whose host process is gone (e.g. killed with the app during an update) stays
       // "running" in AO forever. Settle it through AO's own interrupt path so the card can retry.
-      if (turn && !TERMINAL_TURN_STATES.has(turn.state) && await chatHostGone(id)) {
-        await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/interrupt`, {}).catch(() => undefined);
+      // The reason is reported again for a turn already settled that way (a display-only read may
+      // have sent the interrupt), so the card's saved failure says why; a turn the user stopped
+      // keeps its live host and stays a plain interruption.
+      const settling = turn && !TERMINAL_TURN_STATES.has(turn.state);
+      const settled = turn?.state === "interrupted" && !turn.errorMessage;
+      if ((settling || settled) && await chatHostGone(id)) {
+        if (settling) await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/interrupt`, {}).catch(() => undefined);
         return {
           status, turnId: turn.id, turnState: "interrupted",
           error: "The agent's process ended before it finished (the app restarted); retry this card.",
