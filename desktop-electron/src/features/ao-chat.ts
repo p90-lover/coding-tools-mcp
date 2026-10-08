@@ -8,7 +8,7 @@
 
 export type ChatNode = {
   id: string;
-  role: "planner" | "approver" | "worker" | "review_split" | "sub_reviewer" | "reviewer";
+  role: "planner" | "approver" | "worker" | "review_split" | "sub_reviewer" | "reviewer" | "retry";
   state: string;
   x: number;
   settings?: { name?: string; role_name?: string };
@@ -19,6 +19,8 @@ export type ChatNode = {
 /** What a working card is doing now (the workflow's "activity" operation). */
 export type ChatActivity = {
   activity?: string;
+  output?: string;
+  error?: string;
   started_at_ms?: number | null;
   activity_at_ms?: number | null;
   last_event_at_ms?: number | null;
@@ -106,10 +108,11 @@ export function chatMessagesFromDescription(description: string | undefined): { 
 export function chatRunStatus(run: ChatRun): ChatStatus {
   if (run.cancelled) return "stopped";
   if (run.paused) return "paused";
-  const states = run.nodes.map((node) => node.state);
+  const states = run.nodes.filter(node => node.role !== "retry" || node.state !== "pending").map((node) => node.state);
   if (states.includes("held")) return "attention";
   if (states.length && states.every((state) => SETTLED.includes(state))) return "done";
   if (states.some((state) => state === "running" || state === "reserved")) return "running";
+  if (states.includes("failed")) return "attention";
   return "queued";
 }
 
@@ -151,10 +154,10 @@ export function chatList(runs: ChatRun[], tasks: { id: string; title: string }[]
 }
 
 // Pipeline order: plan, command check, work, review split, sub-reviews, final review.
-const ROLE_ORDER: Record<ChatNode["role"], number> = { planner: 0, approver: 1, worker: 2, review_split: 3, sub_reviewer: 4, reviewer: 5 };
+const ROLE_ORDER: Record<ChatNode["role"], number> = { planner: 0, approver: 1, worker: 2, review_split: 3, sub_reviewer: 4, reviewer: 5, retry: 2.5 };
 const ROLE_NAME: Record<ChatNode["role"], string> = {
   planner: "Orchestrator", approver: "Command approver", worker: "Worker",
-  review_split: "Main reviewer · split", sub_reviewer: "Sub-reviewer", reviewer: "Main reviewer",
+  review_split: "Main reviewer · split", sub_reviewer: "Sub-reviewer", reviewer: "Main reviewer", retry: "Retry",
 };
 
 export function chatNodeName(node: ChatNode): string {
@@ -191,7 +194,7 @@ export function chatTranscript(runs: ChatRun[], description: string | undefined,
       const described = options.describe?.(node);
       const detail = described ? { detail: described } : {};
       if (node.receipt?.error) {
-        messages.push({ kind: "agent", key, role: node.role, name, text: node.receipt.error, tone: "error", ...detail });
+        messages.push({ kind: "agent", key, role: node.role, name, text: [node.receipt.error, node.receipt.answer ? `Partial work:\n${node.receipt.answer}` : ""].filter(Boolean).join("\n\n"), tone: "error", ...detail });
       } else if (node.state === "finished" && node.receipt?.answer) {
         messages.push({
           kind: "agent", key, role: node.role, name,

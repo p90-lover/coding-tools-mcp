@@ -21,6 +21,7 @@ import { WorkspaceAuthPanel } from "./features/WorkspaceAuthPanel";
 import { NativeCodexPanel } from "./features/NativeCodexPanel";
 import { AgentOrchestratorOriginalSurface } from "./features/AgentOrchestratorOriginalSurface";
 import { AgentOrchestratorSurface } from "./features/AgentOrchestratorSurface";
+import { AgentOrchestratorTeamsSurface } from "./features/AgentOrchestratorTeamsSurface";
 import { AntigravityCliSurface } from "./features/AntigravityCliSurface";
 import { ChatGptDesktopSurface } from "./features/ChatGptDesktopSurface";
 import { EmailSurface } from "./features/EmailSurface";
@@ -762,6 +763,7 @@ function LauncherShell({
               </SidebarGroup>
               <SidebarGroup label={copy.runtime}>
                 <SidebarItem active={surface === "agent-orchestrator"} icon="orchestrator" label="Chat" onClick={() => navigateSurface("agent-orchestrator")} />
+                <SidebarItem active={surface === "agent-orchestrator-teams"} icon="orchestrator" label="Orchestrator Team" onClick={() => navigateSurface("agent-orchestrator-teams")} />
                 <SidebarItem active={surface === "activity"} icon="activity" label={copy.activity} onClick={() => navigateSurface("activity")} />
                 <SidebarItem
                   active={surface === "instant-mcp"}
@@ -923,6 +925,9 @@ function LauncherShell({
             ))}
             {keepAlive("agent-orchestrator", () => (
               <AgentOrchestratorSurface language={language} setError={setError} />
+            ))}
+            {keepAlive("agent-orchestrator-teams", () => (
+              <AgentOrchestratorTeamsSurface active={surface === "agent-orchestrator-teams"} setError={setError} />
             ))}
             {keepAlive("agent-orchestrator-original", () => (
               <AgentOrchestratorOriginalSurface openMissions={() => navigateSurface("agent-orchestrator")} />

@@ -26,13 +26,14 @@ export type ChatWorkspaces = {
  * Like Codex's sidebar: workspaces first, each opening to its chats. Only the current workspace
  * is expanded (its chats are the ones loaded); choosing another workspace switches to it.
  */
-export function ChatListPane({ chats, selectedTaskId, onSelect, onNew, tree }: {
-  chats: ChatSummary[]; selectedTaskId: string; onSelect: (taskId: string, view: "chat" | "overview") => void; onNew?: () => void;
+export function ChatListPane({ chats, selectedTaskId, onSelect, onNew, tree, pendingTitle }: {
+  chats: ChatSummary[]; selectedTaskId: string; onSelect: (taskId: string, view: "chat" | "overview") => void; onNew?: () => void; pendingTitle?: string;
   tree?: ChatWorkspaces;
 }) {
   const chatItems = (
     <ul className="ao-chat-items">
       {onNew ? <li><button type="button" className="ao-chat-new" aria-pressed={!selectedTaskId} onClick={onNew}>＋ New chat</button></li> : null}
+      {pendingTitle ? <li className="ao-chat-row"><button type="button" className="ao-chat-select" disabled aria-current="true"><span className="ao-chat-dot status-queued" aria-label="Starting" /><span className="ao-chat-title">{pendingTitle}</span></button></li> : null}
       {chats.map((entry) => (
         <li key={entry.taskId} className="ao-chat-row">
           <button type="button" className="ao-chat-select" title={entry.title} aria-current={entry.taskId === selectedTaskId}
@@ -81,6 +82,7 @@ export function ChatListPane({ chats, selectedTaskId, onSelect, onNew, tree }: {
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute, notice, retryStart, working = false, describeNode, activity, permissions, composer, onOpenTeam, onOpenMissionBoard,
+  pendingMessage, pendingTitle, pendingCreation = false,
 }: {
   /** How each card runs (harness · model · effort · context · role), shown on its messages. */
   describeNode?: (node: ChatNode) => string;
@@ -93,6 +95,7 @@ export function AgentOrchestratorChat({
   busy: boolean;
   /** The chat's latest run is being driven right now (not just left pending). */
   working?: boolean;
+  pendingMessage?: string; pendingTitle?: string; pendingCreation?: boolean;
   loadDescription: (taskId: string) => Promise<string>;
   send: (input: { taskId?: string; title?: string; message: string }) => Promise<void>;
   openStructure: (runId: string) => void;
@@ -136,8 +139,8 @@ export function AgentOrchestratorChat({
     return () => window.clearInterval(timer);
   }, [anyWorking]);
   const transcript: ChatMessage[] = useMemo(
-    () => chatTranscript(chatRuns, descriptions[selectedTaskId], { describe: describeNode, activity, now }),
-    [chatRuns, descriptions, selectedTaskId, describeNode, activity, now],
+    () => chatTranscript(chatRuns, descriptions[selectedTaskId] ?? pendingMessage, { describe: describeNode, activity, now }),
+    [chatRuns, descriptions, selectedTaskId, describeNode, activity, now, pendingMessage],
   );
   useEffect(() => { scroller.current?.scrollTo({ top: scroller.current.scrollHeight }); }, [transcript.length]);
 
@@ -158,10 +161,11 @@ export function AgentOrchestratorChat({
     <div className="ao-chat">
       <section className="ao-chat-main" aria-label={chat?.title || CHAT_DEFAULT_TITLE}>
         <header className="ao-chat-head">
-          {selectedTaskId
-            ? <h2>{chat?.title || CHAT_DEFAULT_TITLE}</h2>
+          {selectedTaskId || pendingCreation
+            ? <h2>{chat?.title || pendingTitle || CHAT_DEFAULT_TITLE}</h2>
             : <input aria-label="Task name" className="ao-chat-name" maxLength={240} placeholder={CHAT_DEFAULT_TITLE}
                 value={title} onChange={(event) => setTitle(event.target.value)} />}
+          {pendingCreation ? <span className="ao-pill status-queued" role="status">Starting</span> : null}
           {chat ? <span className={`ao-pill status-${chat.status}`}><span className="ao-pill-dot" aria-hidden="true" />{STATUS_LABEL[chat.status]}</span> : null}
           <span className="ao-head-spacer" />
           <button type="button" className="ao-chat-nav" disabled={busy || (!onOpenTeam && !latest)}
@@ -189,7 +193,7 @@ export function AgentOrchestratorChat({
                   {message.text}
                   {message.detail ? <span className="ao-msg-detail">{message.detail}</span> : null}
                 </div>)}
-          {notice && latest && chat?.status === "queued" ? (
+          {notice && latest && chat?.status === "queued" && !working ? (
             <div className="ao-msg ao-msg-approval tone-error">
               <span className="ao-msg-meta">The run could not start</span>
               <p>{notice}</p>

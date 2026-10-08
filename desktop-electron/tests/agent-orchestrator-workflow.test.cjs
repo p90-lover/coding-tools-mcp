@@ -831,6 +831,25 @@ function chatWorld({ runs = [], tasks = [] } = {}) {
   return state.requestHeadless = requestHeadless, state;
 }
 
+test("new chats use an explicitly selected saved team and reject an unknown team before creating a task", async () => {
+  const world = chatWorld();
+  const request = async (endpoint, body, options) => {
+    const result = await world.requestHeadless(endpoint, body, options);
+    return endpoint === "/api/v1/ao/read" ? { ...result, teams: [result.team, { id: "team-2", revision: 7, worker_limit: 4 }] } : result;
+  };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: request, findCodexExecutable: () => "D:/tools/codex.exe",
+    resolveHarness: async () => { throw new Error("stop before execution"); },
+  });
+  await workflow.call("chat_send", { workspaceId: "ws-1", message: "build it", teamId: "team-2" });
+  assert.equal(world.updates[0].team_id, "team-2");
+  assert.equal(world.updates[0].team_revision, 7);
+  assert.equal(world.updates[0].worker_limit, 4);
+  const tasksBefore = world.tasks.length;
+  await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", message: "other", teamId: "missing" }), /team.*(changed|found|unavailable)/i);
+  assert.equal(world.tasks.length, tasksBefore);
+});
+
 test("a first chat message creates 'New task' and starts a team run on it with the installed Codex", async () => {
   const world = chatWorld();
   const seen = [];
@@ -1017,6 +1036,150 @@ test("the helper stops retrying a card that already failed three times", async (
   assert.match(JSON.stringify(status), /failed 3 times/);
 });
 
+
+function failedWorkerReviewWorld({ active = false, queued = false, blocked = false, reviewerFailure = null, manual = false } = {}) {
+  const route = { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web",
+    model: "chatgpt-web/high", permission_profile: ":read-only" };
+  const receipt = { status: "held", error: "Worker send timed out", answer: "Partial implementation" };
+  const failed = { id: "failed", role: "worker", state: manual ? "held" : "pending", parents: ["planner"],
+    route, history: [{ ...receipt, error: "First send failed" }, { ...receipt, error: "Second send failed" }], receipt };
+  const reviewer = { id: "reviewer", role: "reviewer", state: "pending", parents: ["failed"], route: { ...route, model: "chatgpt-web/pro" } };
+  const nodes = [{ id: "planner", role: "planner", state: "finished", parents: [], route }, failed];
+  if (active) nodes.push({ id: "active", role: "worker", state: "running", parents: ["planner"], route,
+    receipt: { status: "submitted", request_key: "active-turn" } });
+  if (queued) nodes.push({ id: "queued", role: "worker", state: "pending", parents: [blocked ? "failed" : "planner"], route });
+  reviewer.parents.push(...nodes.filter(node => node.role === "worker" && node.id !== "failed").map(node => node.id));
+  nodes.push(reviewer);
+  const run = { id: "run-failed", workspace_id: "ws-1", project_id: "task-1", revision: 7, nodes,
+    grant: { executable_sha256: "a".repeat(64) } };
+  const world = { nodes, failed, reviewer, run, calls: [], reads: 0, observed: 0, released: !active, confirmations: 0 };
+  world.workflow = createAgentOrchestratorWorkflow({
+    webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
+    requestHeadless: async (endpoint, body, options) => {
+      world.calls.push({ endpoint, body, options });
+      if (endpoint === "/api/v1/ao/read") {
+        if (++world.reads >= 2 && failed.state === "pending") failed.state = "held";
+        return { ok: true, runs: [structuredClone(run)], worker_capacity: { [run.id]: 2 } };
+      }
+      if (endpoint === "/api/v1/ao/grant") return { ok: true, run: structuredClone(run), grant: run.grant };
+      if (endpoint === "/api/v1/ao/control") {
+        assert.equal(body.action, "review_failures");
+        assert.equal(body.confirm, true);
+        assert.deepEqual(options, { localConfirmation: true });
+        const node = nodes.find(node => node.id === body.node_id);
+        assert.equal(node.state, "held"); node.state = "failed";
+        if (node.role === "worker") {
+          for (const review of nodes.filter(item => ["review_split", "sub_reviewer", "reviewer"].includes(item.role))) {
+            if (["finished", "held", "failed"].includes(review.state)) {
+              review.history ||= []; if (review.receipt) review.history.push(review.receipt);
+              review.receipt = null; review.state = "pending";
+            }
+          }
+        }
+        run.revision++;
+        return { ok: true, run: structuredClone(run) };
+      }
+      if (endpoint === "/api/v1/ao/harness/status") return { ok: true, status: {
+        connected: true, model: nodes.find(node => node.id === body.node_id).route.model } };
+      if (endpoint === "/api/v1/ao/harness/execute") {
+        const node = nodes.find(node => node.id === body.node_id);
+        if (node.role === "reviewer") {
+          assert.equal(failed.state, "failed");
+          assert.equal(node.route.model, "chatgpt-web/pro", "use the configured reviewer, not the CPA helper");
+          assert(nodes.filter(item => item.role === "worker" && item !== failed).every(item => item.state === "finished" || (item.state === "pending" && item.parents.includes("failed"))),
+            "both active and queued nonfailed workers must settle before escalation");
+        }
+        assert.equal(node.state, "pending");
+        node.state = "running";
+        node.receipt = { status: "submitted" };
+        run.revision++;
+        return { ok: true, run: structuredClone(run), receipt: node.receipt };
+      }
+      if (endpoint === "/api/v1/ao/harness/observe") {
+        const node = nodes.find(node => node.id === body.node_id);
+        if (node.id === "active") {
+          world.observed++;
+          if (!world.released) return { ok: true, receipt: node.receipt };
+        }
+        if (node.role === "reviewer") {
+          node.state = "held";
+          node.receipt = reviewerFailure ? { status: "held", error: reviewerFailure }
+            : { status: "held", verdict: "CHANGES_REQUIRED", answer: "CHANGES_REQUIRED wait until sign-in is restored",
+              error: "Reviewer requested changes" };
+        } else if (node.state === "running") {
+          node.state = "finished";
+          node.receipt = { status: "completed", answer: "Sibling done", turn_id: node.id + "-done" };
+        }
+        run.revision++;
+        return { ok: true, run: structuredClone(run), receipt: node.receipt };
+      }
+      throw new Error("Unexpected failure-review operation: " + endpoint);
+    },
+    resolveHarness: async () => ({ expected_sha256: "a".repeat(64), executable: path.resolve("codex.exe") }),
+    confirm: async () => { world.confirmations++; return true; },
+    fetchImpl: async () => { throw new Error("Exhausted workers must use the saved reviewer route, not an unconfigured helper"); },
+  });
+  return world;
+}
+
+test("exhausted worker failures drain active and queued siblings before the configured reviewer", async () => {
+  const world = failedWorkerReviewWorld({ active: true, queued: true });
+  const input = { workspaceId: "ws-1", runId: "run-failed", executable: path.resolve("codex.exe") };
+  await world.workflow.call("start_run", input);
+  await until(() => world.observed > 0);
+  assert.equal(world.calls.some(call => call.endpoint.endsWith("/execute") && call.body.node_id === "reviewer"), false, "no escalation while a sibling is active");
+  world.released = true;
+  for (let i = 0; i < 4; i++) {
+    await until(() => world.reviewer.state === "held");
+    if (world.reviewer.state === "held") break;
+  }
+  await until(() => world.calls.some(call => call.endpoint.endsWith("/execute") && call.body.node_id === "reviewer"));
+  const sent = world.calls.filter(call => call.endpoint.endsWith("/execute"));
+  assert.deepEqual(sent.map(call => call.body.node_id), ["queued", "reviewer"]);
+  assert(sent.every(call => call.body.confirm === false && !call.options), "existing grant covers only the saved routes");
+  assert.equal(world.failed.state, "failed");
+  assert.equal(world.failed.history.length, 2);
+  assert.equal(world.failed.receipt.answer, "Partial implementation");
+  const status = await world.workflow.call("run_status", input);
+  assert.equal(status.status, "held", "failed work is never a successful mission");
+  assert.match(status.detail, /reviewer.*sign-in/i);
+  assert.equal(world.calls.some(call => /\/grant$|\/approval$/.test(call.endpoint)), false);
+  assert.equal(world.calls.filter(call => call.endpoint.endsWith("/control")).length, 1);
+});
+
+test("manual advance can review an exhausted worker only after local confirmation", async () => {
+  const world = failedWorkerReviewWorld({ manual: true });
+  await world.workflow.call("advance", { workspaceId: "ws-1", runId: "run-failed", executable: path.resolve("codex.exe") });
+  const sent = world.calls.filter(call => call.endpoint.endsWith("/execute"));
+  assert.deepEqual(sent.map(call => call.body.node_id), ["reviewer"]);
+  assert.equal(world.confirmations, 2, "handoff and manual model execution each require local confirmation");
+  assert.equal(sent[0].body.confirm, true);
+  assert.deepEqual(sent[0].options, { localConfirmation: true });
+  assert.equal(world.failed.state, "failed");
+});
+
+test("reviewer failure is bounded and blocked pending workers are not silently skipped", async () => {
+  for (const blocked of [false, true]) {
+    const world = failedWorkerReviewWorld({ queued: blocked, blocked, reviewerFailure: "Reviewer connection failed" });
+    const input = { workspaceId: "ws-1", runId: "run-failed", executable: path.resolve("codex.exe") };
+    await world.workflow.call("start_run", input);
+    await until(() => world.reads >= 2);
+    for (let i = 0; i < 4; i++) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+      if ((await world.workflow.call("run_status", input)).status === "held") break;
+    }
+    const status = await world.workflow.call("run_status", input);
+    assert.equal(status.status, "held");
+    assert.match(status.detail, /reviewer.*connection failed/i);
+    const sent = world.calls.filter(call => call.endpoint.endsWith("/execute"));
+    assert.deepEqual(sent.map(call => call.body.node_id), ["reviewer"]);
+    assert.equal(world.failed.state, "failed");
+    if (blocked) assert.equal(world.nodes.find(node => node.id === "queued").state, "pending");
+    assert.equal(world.calls.some(call => /\/approval$/.test(call.endpoint)), false);
+    assert.equal(world.calls.filter(call => call.endpoint.endsWith("/control")).length, 1);
+  }
+});
+
 test("missions run on the Codex CLI; the desktop app's bundled codex is only a fallback", () => {
   const { findInstalledCodexExecutable } = require("../electron/agent-orchestrator-workflow.cjs");
   const root = path.resolve(__dirname, "../../aiTemp/codex-cli-discovery", `${process.pid}-${crypto.randomUUID()}`);
@@ -1129,6 +1292,258 @@ test("relinking or removing a working card stops its turn; an idle card is just 
   }
 });
 
+
+
+function retryRoleWorld(failureCount, failure = "socket disconnected") {
+  const route = { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web", model: "chatgpt-web/high", permission_profile: ":read-only" };
+  const run = { id: "policy", workspace_id: "ws-1", revision: 1, nodes: [
+    { id: "lead", role: "planner", state: "finished", parents: [], route },
+    { id: "worker", role: "worker", state: "pending", parents: ["lead"], route, history: [] },
+    { id: "retry", role: "retry", state: "pending", parents: ["lead"], route: { ...route, model: "chatgpt-web/pro" }, history: [] },
+    { id: "review", role: "reviewer", state: "pending", parents: ["worker"], route },
+  ] };
+  const world = { run, workerAttempts: 0, retryAttempts: 0, controls: [], grants: 0, clock: 1 };
+  world.workflow = createAgentOrchestratorWorkflow({
+    webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
+    requestHeadless: async (endpoint, body, options) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [structuredClone(run)], worker_capacity: { policy: 1 - run.nodes.filter(node => node.role === "worker" && node.state === "running").length } };
+      if (endpoint === "/api/v1/ao/grant") {
+        world.grants++;
+        run.grant = { executable_sha256: "a".repeat(64) };
+        return { ok: true, run: structuredClone(run), grant: run.grant };
+      }
+      const node = run.nodes.find(node => node.id === body.node_id);
+      if (endpoint === "/api/v1/ao/harness/status") return { ok: true, status: { connected: true, model: node.route.model } };
+      if (endpoint === "/api/v1/ao/harness/execute") {
+        assert.equal(body.expected_revision, run.revision);
+        assert.equal(body.confirm, false);
+        if (node.role === "retry") {
+          assert.equal(node.route.model, "chatgpt-web/pro", "Retry uses its configured route");
+          assert.equal(run.nodes[1].state, "held", "dormant Retry cannot start early");
+          world.retryAttempts++;
+        }
+        if (node.role === "worker") world.workerAttempts++;
+        node.state = "running";
+        node.receipt = { request_key: node.id + "-" + world.clock, status: "submitted", started_at_ms: world.clock++ };
+        run.revision++;
+        return { ok: true, run: structuredClone(run) };
+      }
+      if (endpoint === "/api/v1/ao/harness/observe") {
+        if (node.role === "worker" && world.workerAttempts <= failureCount) {
+          node.state = "held";
+          Object.assign(node.receipt, { status: "held", answer: "partial " + world.workerAttempts, error: failure });
+        } else if (node.role === "retry") {
+          node.state = "finished";
+          Object.assign(node.receipt, { status: "completed", answer: '{"action":"retry","reason":"transient send failure"}' });
+        } else {
+          node.state = run.nodes[1].state === "failed" && node.role === "reviewer" ? "failed" : "finished";
+          Object.assign(node.receipt, { status: node.state === "failed" ? "held" : "completed",
+            answer: node.state === "failed" ? "CHANGES_REQUIRED partial worker evidence" : "APPROVED" });
+        }
+        run.revision++;
+        return { ok: true, run: structuredClone(run) };
+      }
+      if (endpoint === "/api/v1/ao/control") {
+        assert.deepEqual(options, { localConfirmation: true });
+        const grant = structuredClone(run.grant);
+        world.controls.push({ action: body.action, nodeId: body.node_id });
+        if (body.action === "retry" || body.action === "retry_auto") {
+          if (body.action === "retry_auto") assert.ok(node.role === "worker" && node.state === "held" && node.history.length < 2);
+          node.history.push(node.receipt);
+          node.receipt = null; node.state = "pending";
+        } else if (body.action === "review_failures") node.state = "failed";
+        else throw new Error("unexpected control");
+        assert.deepEqual(run.grant, grant);
+        run.revision++;
+        return { ok: true, run: structuredClone(run) };
+      }
+      throw new Error(endpoint);
+    },
+    resolveHarness: async () => ({ executable: path.resolve("codex.exe"), expected_sha256: "a".repeat(64) }),
+    fetchImpl: async () => { throw new Error("configured Retry must not invoke an unconfigured CPA helper"); },
+  });
+  return world;
+}
+
+test("runtime recovery executes the configured Retry role twice then reviews intact exhausted evidence", async () => {
+  const world = retryRoleWorld(3);
+  const input = { workspaceId: "ws-1", runId: "policy", executable: path.resolve("codex.exe") };
+  await world.workflow.call("start_run", input);
+  await until(() => world.run.nodes[3].state === "failed");
+  assert.equal(world.workerAttempts, 3, "initial attempt plus at most two automatic retries");
+  assert.equal(world.retryAttempts, 2);
+  assert.equal(world.grants, 1);
+  assert.equal(world.controls.filter(item => item.nodeId === "worker" && item.action === "retry_auto").length, 2);
+  assert.equal(world.run.nodes[1].state, "failed");
+  assert.equal(world.run.nodes[1].history.length, 2);
+  assert.equal(world.run.nodes[1].receipt.answer, "partial 3");
+  assert.equal((await world.workflow.call("run_status", input)).status, "failed");
+});
+
+test("runtime recovery account exhaustion goes to review without credential or policy retry", async () => {
+  const world = retryRoleWorld(1, "auth_unavailable: account pool exhausted");
+  const input = { workspaceId: "ws-1", runId: "policy", executable: path.resolve("codex.exe") };
+  await world.workflow.call("start_run", input);
+  await until(() => world.run.nodes[3].state === "failed");
+  assert.equal(world.workerAttempts, 1);
+  assert.equal(world.retryAttempts, 0);
+  assert.equal(world.run.nodes[1].receipt.error, "auth_unavailable: account pool exhausted");
+  assert.deepEqual(world.controls, [{ action: "review_failures", nodeId: "worker" }]);
+});
+
+test("runtime recovery dormant Retry does not block successful completion", async () => {
+  const world = retryRoleWorld(0);
+  const input = { workspaceId: "ws-1", runId: "policy", executable: path.resolve("codex.exe") };
+  await world.workflow.call("start_run", input);
+  await until(() => world.run.nodes[3].state === "finished");
+  assert.equal(world.retryAttempts, 0);
+  assert.equal(world.run.nodes[2].state, "pending");
+  assert.equal((await world.workflow.call("run_status", input)).status, "finished");
+});
+
+
+test("final review independently returns healthy activity and coalesces a slow owned attempt", async () => {
+  let release;
+  const stalled = new Promise(resolve => { release = resolve; });
+  const counts = { slow: 0, healthy: 0 };
+  let generation = 1;
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async endpoint => {
+      assert.equal(endpoint, "/api/v1/ao/read");
+      return { ok: true, runs: [{ id: "frames", workspace_id: "ws-1", nodes: [
+        { id: "slow", state: "running", route: { harness_id: "ao:codex" }, receipt: { request_key: "slow-" + generation, thread_id: "slow-" + generation } },
+        { id: "healthy", state: "running", route: { harness_id: "ao:codex" }, receipt: { request_key: "healthy", thread_id: "healthy" } },
+      ] }] };
+    },
+    aoHarness: { observe: async session => {
+      if (session.startsWith("slow")) { counts.slow++; await stalled; return { turnState: "running", liveOutput: session === "slow-1" ? "old slow output" : "new slow output" }; }
+      counts.healthy++; return { turnState: "running", liveOutput: "healthy current output" };
+    } },
+  });
+  const input = { workspaceId: "ws-1", runId: "frames" };
+  const first = workflow.call("activity", input);
+  try {
+    const frame = await Promise.race([first, new Promise(resolve => setImmediate(() => resolve(null)))]);
+    assert.ok(frame, "slow sibling must not hold the activity response");
+    await new Promise(resolve => setImmediate(resolve));
+    const healthy = await workflow.call("activity", input);
+    assert.equal(healthy.nodes.healthy.output, "healthy current output");
+    await workflow.call("activity", input);
+    assert.equal(counts.slow, 1, "repeat calls coalesce the same in-flight owned attempt");
+    generation = 2;
+    const changed = await workflow.call("activity", input);
+    assert.equal(changed.nodes.slow.output, "", "new attempt must not inherit old output");
+    release(); await first;
+    await new Promise(resolve => setImmediate(resolve));
+    const current = await workflow.call("activity", input);
+    assert.notEqual(current.nodes.slow.output, "old slow output", "a late old-attempt frame cannot repopulate a new owner");
+  } finally { release(); await first; }
+});
+
+test("final review refreshes an old planner-only APPROVED review for newly failed evidence", async () => {
+  const world = failedWorkerReviewWorld();
+  world.reviewer.parents = ["planner"];
+  world.reviewer.state = "finished";
+  world.reviewer.receipt = { request_key: "old-review", status: "completed", verdict: "APPROVED", answer: "APPROVED old evidence" };
+  const input = { workspaceId: "ws-1", runId: "run-failed", executable: path.resolve("codex.exe") };
+  await world.workflow.call("start_run", input);
+  await until(() => world.calls.some(call => call.endpoint.endsWith("/execute") && call.body.node_id === "reviewer"));
+  assert.equal(world.calls.filter(call => call.endpoint.endsWith("/execute") && call.body.node_id === "reviewer").length, 1,
+    "new failure evidence must reach the configured reviewer even with planner-only parents");
+  assert.equal(world.reviewer.history[0].answer, "APPROVED old evidence");
+  assert.equal(world.failed.state, "failed");
+});
+
+test("runtime recovery launches ready siblings before a slow worker observation", async () => {
+  const route = { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web", model: "chatgpt-web/high", permission_profile: ":read-only" };
+  const run = { id: "wave", workspace_id: "ws-1", revision: 1, nodes: [
+    { id: "lead", role: "planner", state: "finished", parents: [], route },
+    { id: "one", role: "worker", state: "pending", parents: ["lead"], route },
+    { id: "two", role: "worker", state: "pending", parents: ["lead"], route },
+    { id: "review", role: "reviewer", state: "pending", parents: ["one", "two"], route },
+  ] };
+  const sent = [];
+  let release;
+  const stalled = new Promise(resolve => { release = resolve; });
+  const workflow = createAgentOrchestratorWorkflow({
+    webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [structuredClone(run)], worker_capacity: { wave: 2 - run.nodes.filter(node => node.role === "worker" && node.state === "running").length } };
+      if (endpoint === "/api/v1/ao/grant") {
+        run.grant = { executable_sha256: "a".repeat(64) };
+        return { ok: true, run: structuredClone(run), grant: run.grant };
+      }
+      if (endpoint === "/api/v1/ao/harness/status") return { ok: true, status: { connected: true, model: route.model } };
+      if (endpoint === "/api/v1/ao/harness/execute") {
+        assert.equal(body.expected_revision, run.revision, "launch revisions are serialized");
+        const node = run.nodes.find(node => node.id === body.node_id);
+        node.state = "running"; run.revision++; sent.push(node.id);
+        return { ok: true, run: structuredClone(run) };
+      }
+      if (endpoint === "/api/v1/ao/harness/observe") {
+        if (body.node_id === "one") await stalled;
+        return { ok: true, run: structuredClone(run) };
+      }
+      if (endpoint === "/api/v1/ao/control") { run.cancelled = true; return { ok: true, run: structuredClone(run) }; }
+      throw new Error(endpoint);
+    },
+    resolveHarness: async () => ({ executable: path.resolve("codex.exe"), expected_sha256: "a".repeat(64) }),
+  });
+  try {
+    await workflow.call("start_run", { workspaceId: "ws-1", runId: "wave", executable: path.resolve("codex.exe") });
+    await until(() => sent.includes("two"));
+    assert.deepEqual(sent, ["one", "two"], "second worker is sent while first observe remains unresolved");
+  } finally {
+    await workflow.call("control_run", { workspaceId: "ws-1", runId: "wave", action: "stop" });
+    release();
+  }
+});
+
+test("runtime recovery defers startup but returns saved chat IDs immediately", async () => {
+  const world = chatWorld();
+  let release;
+  const stalled = new Promise(resolve => { release = resolve; });
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: world.requestHeadless, findCodexExecutable: () => path.resolve("codex.exe"),
+    resolveHarness: async () => { await stalled; throw new Error("approval expired before startup"); },
+  });
+  const sent = workflow.call("chat_send", { workspaceId: "ws-1", message: "build it", teamId: "team-1", teamRevision: 7, deferStart: true });
+  try {
+    const result = await Promise.race([sent, new Promise(resolve => setTimeout(() => resolve(null), 80))]);
+    assert.equal(result?.status, "starting");
+    assert.equal(result.taskId, "task-1");
+    assert.equal(result.run.id, result.runId);
+    assert.equal((await workflow.call("run_status", { workspaceId: "ws-1", runId: result.runId })).status, "starting");
+  } finally { release(); await sent; }
+});
+
+test("runtime recovery rejects a stale selected team revision before task writes", async () => {
+  const world = chatWorld();
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless,
+    findCodexExecutable: () => path.resolve("codex.exe"), resolveHarness: async () => { throw new Error("not reached"); } });
+  await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", message: "build it", teamId: "team-1", teamRevision: 6, deferStart: true }), /team.*revision|team.*changed/i);
+  assert.equal(world.tasks.length, 0);
+  assert.equal(world.updates.length, 0);
+});
+
+test("runtime recovery activity exposes only bounded sanitized current output", async () => {
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async endpoint => {
+      assert.equal(endpoint, "/api/v1/ao/read");
+      return { ok: true, runs: [{ id: "live", workspace_id: "ws-1", nodes: [
+        { id: "worker", state: "running", route: { harness_id: "ao:codex" }, receipt: { thread_id: "session" } },
+      ] }] };
+    },
+    aoHarness: { observe: async () => ({ turnState: "running", answer: "partial answer Bearer SECRET_TOKEN sk-privatekey " + "x".repeat(10_000), error: "oops sk-privatekey" }) },
+  });
+  await workflow.call("activity", { workspaceId: "ws-1", runId: "live" });
+  await new Promise(resolve => setImmediate(resolve));
+  const live = await workflow.call("activity", { workspaceId: "ws-1", runId: "live" });
+  assert.match(live.nodes.worker.output, /partial answer/);
+  assert.ok(live.nodes.worker.output.length <= 4096);
+  assert.doesNotMatch(JSON.stringify(live), /SECRET_TOKEN|sk-privatekey/);
+});
+
 test("activity reports each working card's runtime and current step without advancing the run", async () => {
   const calls = [];
   const native = { id: "w1", role: "worker", state: "running", route: { harness_id: "codex-native", provider_id: "chatgpt-web", model: "chatgpt-web/high" },
@@ -1143,7 +1558,7 @@ test("activity reports each working card's runtime and current step without adva
       calls.push(endpoint);
       if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [done, native, stuck, agent] }] };
       if (endpoint === "/api/v1/ao/harness/status") {
-        return { ok: true, status: { connected: true, threads: body.node_id === "w1"
+        return { ok: true, status: { connected: true, live_output: body.node_id === "w1" ? "native partial Bearer SECRET_TOKEN" : "", threads: body.node_id === "w1"
           ? [{ id: "thread-1", turn_id: "turn-1", activity: "running a command", activity_at_ms: 5_000, last_event_at_ms: 6_000 }]
           : [{ id: "thread-2", turn_id: null, activity: null, started_at_ms: 2_000 }] } };
       }
@@ -1152,9 +1567,13 @@ test("activity reports each working card's runtime and current step without adva
     aoHarness: { observe: async () => ({ turnState: "running", turnId: "t-3" }) },
     confirm: async () => true,
   });
+  await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
+  await new Promise(resolve => setImmediate(resolve));
   const result = await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
   assert.deepEqual(Object.keys(result.nodes).sort(), ["w1", "w2", "w3"], "only working cards");
   assert.equal(result.nodes.w1.activity, "running a command");
+  assert.equal(result.nodes.w1.output, "native partial [redacted]");
+  assert.doesNotMatch(JSON.stringify(result), /SECRET_TOKEN/);
   assert.equal(result.nodes.w1.last_event_at_ms, 6_000);
   assert.equal(result.nodes.w1.started_at_ms, 1_000);
   assert.equal(result.nodes.w2.activity, "waiting for the turn to start");

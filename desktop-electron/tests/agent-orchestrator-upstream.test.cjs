@@ -48,6 +48,43 @@ test("upstream AO gateway runs trusted UI requests automatically and blocks untr
   }
 });
 
+
+test("actual upstream observe exposes bounded current streaming output separately from terminal evidence", async () => {
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("    async observe(id) {");
+  const end = source.indexOf("    async interrupt(id)", start);
+  const method = source.slice(start, end).trim().replace(/,$/, "");
+  const prefix = source.slice(source.indexOf("  function utf8Prefix"), source.indexOf("  // Mission-owned AO calls."));
+  const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
+  let turn = "owned-turn";
+  const messages = [
+    { role: "assistant", turnId: "other-turn", streaming: true, text: "OTHER_TURN_SECRET" },
+    { role: "user", turnId: turn, text: "user message is not output" },
+    { role: "assistant", turnId: turn, streaming: false, text: "verified part" },
+    { role: "assistant", turnId: turn, streaming: true, text: "streaming partial " + "界".repeat(5000) },
+  ];
+  const upstream = vm.runInNewContext(prefix + identity + "({" + method + "})", {
+    Buffer,
+    internalApi: async (method, endpoint) => {
+      assert.equal(method, "GET");
+      if (endpoint === "/api/v1/sessions/owned-session") return { session: { id: "owned-session", mode: "chat", status: "working" } };
+      if (endpoint === "/api/v1/sessions/owned-session/conversation?limit=100") return { turns: [{ id: turn, state: "running" }], messages };
+      throw new Error("Session is not owned");
+    },
+    observeTui: async () => { throw new Error("not a TUI fixture"); },
+  });
+  const observed = await upstream.observe("owned-session");
+  assert.equal(observed.answer, "verified part", "streaming must not become terminal answer evidence");
+  assert.match(observed.liveOutput, /streaming partial/);
+  assert.ok(Buffer.byteLength(observed.liveOutput, "utf8") <= 4096);
+  assert.doesNotMatch(observed.liveOutput, /OTHER_TURN_SECRET|user message/);
+  turn = "new-turn";
+  const current = await upstream.observe("owned-session");
+  assert.equal(current.liveOutput, "", "old turn output is not current output");
+  await assert.rejects(upstream.observe("bad/session"), /valid AO session ID/);
+});
+
 test("AO handler exposes named upstream APIs and keeps absent board detail JSON-safe", async () => {
   assert.equal(handler.isReadOnly("upstream_projects"), true);
   assert.equal(handler.isReadOnly("upstream_create_session"), false);
