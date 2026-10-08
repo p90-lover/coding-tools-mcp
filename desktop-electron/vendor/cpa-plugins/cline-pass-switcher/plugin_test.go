@@ -53,6 +53,11 @@ func TestFullNativeProviderConsoleAndLifecycle(t *testing.T) {
 			http.Error(w, "wrong model", 400)
 			return
 		}
+		if options, ok := body["providerOptions"].(map[string]any); ok && options["gateway"] != nil {
+			w.WriteHeader(500)
+			fmt.Fprint(w, `{"error":"empty response content","success":false}`)
+			return
+		}
 		if stream, _ := body["stream"].(bool); stream {
 			w.Header().Set("Content-Type", "text/event-stream")
 			fmt.Fprint(w, ": keepalive\n\n")
@@ -61,7 +66,7 @@ func TestFullNativeProviderConsoleAndLifecycle(t *testing.T) {
 			fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"OK\",\"reasoning_content\":\"think\"}}]}\n\ndata: [DONE]\n\n")
 		} else {
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"id":"fixture","choices":[{"message":{"role":"assistant","content":"OK"}}],"usage":{"total_tokens":2}}`)
+			fmt.Fprint(w, `{"id":"fixture","choices":[{"message":{"role":"assistant","content":"OK","provider_metadata":{"gateway":{"routing":{"finalProvider":"openai-compatible-private","canonicalSlug":"private/fixture","fallbacksAvailable":[]}}}}}],"usage":{"total_tokens":2}}`)
 		}
 	}))
 	defer upstream.Close()
@@ -88,6 +93,19 @@ func TestFullNativeProviderConsoleAndLifecycle(t *testing.T) {
 	}
 	if !bytes.Contains(result(t, catalog), []byte("cline-pass/fixture")) {
 		t.Fatal("missing live local catalog")
+	}
+	_, _, probeBody, probeErr := readLocal("POST", "/api/probe", []byte(`{"model":"cline-pass/fixture"}`))
+	if probeErr != nil {
+		t.Fatal(probeErr)
+	}
+	var discovered struct {
+		Upstreams []string `json:"upstreams"`
+	}
+	if err := json.Unmarshal(probeBody, &discovered); err != nil {
+		t.Fatal(err)
+	}
+	if len(discovered.Upstreams) != 1 || discovered.Upstreams[0] != "openai-compatible-private" {
+		t.Fatalf("observed successful provider missing: %s", probeBody)
 	}
 	marker := []byte(`{"type":"cline","switcher":true}`)
 	authReq, _ := json.Marshal(map[string]any{"RawJSON": marker, "FileName": "cline-pass-switcher.json"})

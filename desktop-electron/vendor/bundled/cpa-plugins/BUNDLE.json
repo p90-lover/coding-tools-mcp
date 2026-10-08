@@ -127,8 +127,8 @@
     "platforms": {
       "win32/x64": {
         "path": "windows/amd64/cline-pass-switcher-v0.1.0-codingtools.1.dll",
-        "sha256": "7cc601330e14bfcbd1d64bef869dffe85b39baa72d608395c89745ed6192f6e7",
-        "size": 7277056
+        "sha256": "9f06040bda6c8c2a8f0850dedddc306978c487593de0be55f7b237a63247a7fd",
+        "size": 7277568
       }
     }
   }

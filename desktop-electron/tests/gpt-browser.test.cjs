@@ -158,6 +158,87 @@ test("the account email is only read from chatgpt.com itself", async () => {
   assert.equal(browser.status().accounts[0].email, "someone@example.com");
 });
 
+test("overlapping surface activation creates one page and hiding detaches it", async () => {
+  const root = tempRoot();
+  const saved = host(fakeWorld(), root);
+  await saved.addAccount();
+  saved.dispose();
+
+  const world = fakeWorld();
+  const releases = [];
+  const browser = host(world, root, {
+    prepareSession: () => new Promise((resolve) => releases.push(resolve)),
+  });
+  const bounds = { x: 0, y: 40, width: 800, height: 600 };
+  browser.setBounds(bounds);
+  // The mounted pane activates before its slot ref triggers a second layout effect.
+  const first = browser.setSurfaceActive(true);
+  const second = browser.setSurfaceActive(true);
+  releases[0]();
+  await first;
+  releases[1]?.();
+  await second;
+  assert.equal(world.attached.size, 1, "the visible pane has one attached page");
+
+  await browser.setSurfaceActive(false);
+  browser.setBounds(bounds); // A late measurement must not leave an orphan view on top.
+  assert.equal(world.attached.size, 0, "all account views leave the window on navigation");
+  assert.equal(world.views.length, 1, "concurrent activation reuses the in-flight page");
+  browser.dispose();
+});
+
+test("a failed shared page preparation can be retried", async () => {
+  const root = tempRoot();
+  const saved = host(fakeWorld(), root);
+  await saved.addAccount();
+  saved.dispose();
+
+  const world = fakeWorld();
+  let preparations = 0;
+  const browser = host(world, root, {
+    prepareSession: async () => {
+      preparations += 1;
+      if (preparations === 1) throw new Error("routing failed");
+    },
+  });
+  await assert.rejects(Promise.all([
+    browser.setSurfaceActive(true),
+    browser.setSurfaceActive(true),
+  ]), /routing failed/);
+  assert.equal(world.views.length, 0);
+  assert.equal(preparations, 1, "concurrent requests share the failed preparation");
+
+  await browser.setSurfaceActive(true);
+  browser.setBounds({ x: 0, y: 0, width: 800, height: 600 });
+  assert.equal(preparations, 2);
+  assert.equal(world.views.length, 1);
+  assert.equal(world.attached.size, 1);
+  browser.dispose();
+});
+
+test("removal and shutdown cancel pending page creation", async () => {
+  for (const action of ["remove", "dispose"]) {
+    const root = tempRoot();
+    const saved = host(fakeWorld(), root);
+    await saved.addAccount();
+    saved.dispose();
+
+    const world = fakeWorld();
+    let release;
+    const browser = host(world, root, {
+      prepareSession: () => new Promise((resolve) => { release = resolve; }),
+    });
+    const showing = browser.setSurfaceActive(true);
+    const cancelled = assert.rejects(showing, /page creation was cancelled/);
+    if (action === "remove") await browser.remove(browser.status().activeId);
+    else browser.dispose();
+    release();
+    await cancelled;
+    assert.equal(world.views.length, 0, action);
+    assert.equal(world.attached.size, 0, action);
+  }
+});
+
 test("hiding the pane takes the page out of the window", async () => {
   const world = fakeWorld();
   const browser = host(world, tempRoot());
