@@ -114,7 +114,8 @@ test("Surface caches AO model capability catalogs while Native Codex keeps its l
         return { result: { models: ["fixture"], capabilities: { fixture: { efforts: ["high"] } } } };
       } } }) }
       : name === "./ao-chat" ? { chatList: () => [] }
-      : name === "./AgentOrchestratorRoleEditor" ? { workerRoute: () => ({}), NATIVE_HARNESS: "codex-native" } : {},
+      : name === "../i18n" ? { copyFor: () => ({}) }
+      : name === "./AgentOrchestratorRoleEditor" ? { workerRoute: () => ({}), emptyRoleSettings: () => ({}), NATIVE_HARNESS: "codex-native" } : {},
   });
   surface.AgentOrchestratorSurface({ language: "en", setError() {} });
   const loader = callbacks.find(callback => callback.toString().includes("modelCache.current"));

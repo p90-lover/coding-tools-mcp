@@ -61,17 +61,18 @@ test("all AO harnesses receive truthful tuning outcomes; unsupported transport a
     assert.equal(result.capabilities["own-model"].contextWindow, undefined, id);
     assert.match(result.capabilities["own-model"].contextReason, /support|verified|setter/i, id);
   }
-  const unqualified = (await workflow.call("models", { harness: "ao:opencode" })).capabilities["own-model"];
-  assert.equal(unqualified.contextWindow, undefined, "OpenCode needs provider/model for native context overrides");
-  const claude = createAgentOrchestratorWorkflow({ aoHarness: { models: async () => [{ id: "claude-sonnet-4-6", efforts: ["low", "high"] }] }, cpaConnection: () => null });
-  const caps = (await claude.call("models", { harness: "ao:claude-code" })).capabilities["claude-sonnet-4-6"];
+  // Claude Code lists only CPA models; a recognized Claude model through CPA keeps CPA's advertised
+  // efforts but no context override (Claude Code would lose compaction).
+  const claude = createAgentOrchestratorWorkflow({
+    aoHarness: { models: async () => { throw Error("Claude Code's own aliases are not listed"); } },
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-key" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ models: [{ slug: "claude-sonnet-4-6", context_window: 200000,
+      supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }] }] }) }),
+  });
+  const caps = (await claude.call("models", { harness: "ao:claude-code" })).capabilities["cpa/claude-sonnet-4-6"];
   assert.deepEqual(caps.efforts, ["low", "high"]);
   assert.equal(caps.contextWindow, undefined);
   assert.match(caps.contextReason, /compaction|recognized/i);
-  for (const model of ["/model", "provider/   "]) {
-    const edge = createAgentOrchestratorWorkflow({ aoHarness: { models: async () => [{ id: model }] }, cpaConnection: () => null });
-    assert.equal((await edge.call("models", { harness: "ao:opencode" })).capabilities[model].contextWindow, undefined);
-  }
 });
 
 test("Native Codex model response stays unchanged and never reads AO/CPA capability catalogs", async () => {

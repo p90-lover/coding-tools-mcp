@@ -719,7 +719,8 @@ test("AO harness workers run as AO sessions and return their answer as the card 
   // Any installed AO agent is selectable; agents without chat mode run in their terminal UI.
   assert.deepEqual(catalog.harnesses.map((item) => [item.id, item.runnable, item.chat]),
     [["codex-native", true, undefined], ["ao:claude-code", true, true], ["ao:aider", true, false]]);
-  assert.deepEqual((await workflow.call("models", { harness: "ao:claude-code", workspaceId: "ws-1" })).models, ["sonnet"], "\"default\" is never offered");
+  // An agent outside the CPA gateway lists its own models; "default" is never offered.
+  assert.deepEqual((await workflow.call("models", { harness: "ao:agy", workspaceId: "ws-1" })).models, ["sonnet"], "\"default\" is never offered");
   await workflow.call("advance", { workspaceId: "ws-1", runId: "run-1", executable: "C:\codex.exe" });
   assert.equal(spawned.length, 1);
   assert.equal(spawned[0].agent, "claude-code");
@@ -777,8 +778,27 @@ test("CPA models go only to agents that can use them through the gateway", async
   assert.deepEqual((await workflow.call("models", { harness: "ao:aider" })).models, ["own-model"]);
   // agy's gateway mode sends no tools for CPA's model names, so it keeps its own models.
   assert.deepEqual((await workflow.call("models", { harness: "ao:agy" })).models, ["own-model"]);
-  assert.deepEqual((await workflow.call("models", { harness: "ao:claude-code" })).models,
+  // Claude Code and opencode offer only CPA models: their own aliases (fable/haiku/opus/sonnet)
+  // are neither CPA nor WebGPT. Codex keeps its ChatGPT-account models next to CPA's.
+  for (const harness of ["ao:claude-code", "ao:opencode"]) {
+    assert.deepEqual((await workflow.call("models", { harness })).models,
+      ["cpa/gpt-5.5", "cpa/gemini-3.8-flash-high", "cpa/gemini-3.1-pro-low"], harness);
+  }
+  assert.deepEqual((await workflow.call("models", { harness: "ao:codex" })).models,
     ["own-model", "cpa/gpt-5.5", "cpa/gemini-3.8-flash-high", "cpa/gemini-3.1-pro-low"]);
+});
+
+test("a CPA-only agent reports a CPA failure instead of falling back to its own aliases", async () => {
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async () => { throw new Error("no headless call expected"); },
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k".repeat(40) }),
+    fetchImpl: async () => { throw new Error("CPA timed out"); },
+    aoHarness: { catalog: async () => [], models: async () => [{ id: "sonnet" }] },
+    confirm: async () => true,
+  });
+  await assert.rejects(workflow.call("models", { harness: "ao:claude-code" }), /CPA model list is unavailable: CPA timed out/);
+  // Codex still has its own ChatGPT-account models when CPA is down.
+  assert.deepEqual((await workflow.call("models", { harness: "ao:codex" })).models, ["sonnet"]);
 });
 
 // A fake headless service holding one workspace's board, runs and team.

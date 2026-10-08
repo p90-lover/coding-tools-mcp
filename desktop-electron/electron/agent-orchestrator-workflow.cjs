@@ -119,6 +119,8 @@ const CPA_MODEL_PREFIX = "cpa/";
 // its gateway mode sends its tools only for Gemini ids it knows itself, none of which CPA serves
 // under that name, so a CPA model on agy can chat but cannot read or write files.
 const GATEWAY_AGENTS = new Set(["claude-code", "codex", "opencode"]);
+// Gateway agents whose own model catalogs are not CPA or WebGPT models; they list only CPA models.
+const CPA_ONLY_AGENTS = new Set(["claude-code", "opencode"]);
 const webModel = (model) => WEB_TIERS.includes(model) || LUNA_TIERS.includes(model);
 
 // The runtime's `catalog ao-web` returns one WebGPT row: High, or Luna on a Luna-only (Free/Go)
@@ -259,19 +261,26 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   async function models({ harness, workspaceId } = {}) {
     if (typeof harness === "string" && harness.startsWith("ao:")) {
       const agent = harness.slice(3);
-      const items = (await harnessService().models(agent, workspaceId))
+      // Claude Code's and opencode's own catalogs (fable/haiku/opus/opus[1m]/sonnet, provider
+      // aliases) are neither CPA nor WebGPT models, so those agents offer only the CPA pool. Codex
+      // keeps its own ChatGPT-account models. For a CPA-only agent a CPA failure is reported,
+      // never silently replaced by its aliases; the renderer drops a rejected catalog and retries.
+      const cpaOnly = CPA_ONLY_AGENTS.has(agent);
+      const items = cpaOnly ? [] : (await harnessService().models(agent, workspaceId))
         .filter(item => item.id !== "default" && !item.id.startsWith("chatgpt-web/"));
       const capabilities = Object.fromEntries(items.map(item => [item.id, modelCapabilities(agent, item.id, item)]));
       let cpa = [];
       if (GATEWAY_AGENTS.has(agent)) {
-        try {
-          const catalog = await models();
-          cpa = catalog.models.filter(id => !id.startsWith("chatgpt-web/")).map(id => {
-            const routed = `${CPA_MODEL_PREFIX}${id}`;
-            capabilities[routed] = modelCapabilities(agent, id, catalog.capabilities[id], true);
-            return routed;
-          });
-        } catch { /* CPA not running: keep the agent's own catalog. */ }
+        let catalog = null;
+        try { catalog = await models(); }
+        catch (error) {
+          if (cpaOnly) throw new Error(`CPA model list is unavailable: ${String(error?.message || error).slice(0, 200)}`);
+        }
+        if (catalog) cpa = catalog.models.filter(id => !id.startsWith("chatgpt-web/")).map(id => {
+          const routed = `${CPA_MODEL_PREFIX}${id}`;
+          capabilities[routed] = modelCapabilities(agent, id, catalog.capabilities[id], true);
+          return routed;
+        });
       }
       return { ok: true, harness, models: [...new Set([...items.map(item => item.id), ...cpa])], capabilities };
     }

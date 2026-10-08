@@ -335,7 +335,8 @@
 .ao-workflow .ao-model-popup .ao-field-row { display: contents; }
 .ao-workflow .ao-model-popup .ao-field-row > label { order: 2; }
 .ao-workflow .ao-model-popup > h4 { order: 3; margin: 3px 0 -4px; font-size: 12px; }
-.ao-workflow .ao-model-options { order: 4; max-height: 200px; overflow-y: auto; }
+/* The model list keeps its own height (a flex column would squeeze it) and scrolls inside the popover. */
+.ao-workflow .ao-model-options { order: 4; flex: 0 0 auto; max-height: min(320px, 40vh); overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
 .ao-workflow .ao-model-popup .ao-route-tuning { order: 5; display: grid; grid-template-columns: 1fr; gap: 10px; margin: 4px 0 0; padding: 12px 0 0; border: 0; border-top: 1px solid var(--ao-line); }
 .ao-workflow .ao-model-popup .ao-route-tuning legend { display: none; }
 .ao-workflow .ao-model-popup .ao-route-tuning label { display: grid; gap: 7px; }

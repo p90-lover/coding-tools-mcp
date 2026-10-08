@@ -3,13 +3,16 @@ import type { KeyboardEvent, ReactNode } from "react";
 import { Icon } from "../icons";
 import {
   HarnessPicker, NATIVE_HARNESS, DEFAULT_WORKER_HARNESS, isWebModel, modelLabel, nativePermission, workerRoute, withTuning,
-  type AoHarness, type AoRoute, type AoTeam,
+  type AoHarness, type AoModelCatalog, type AoModelLoader, type AoRoute, type AoTeam,
 } from "./AgentOrchestratorRoleEditor";
+
+/** A loader may return a plain id list or a catalog with capabilities; the list needs only ids. */
+const modelIds = (items: string[] | AoModelCatalog) => Array.isArray(items) ? items : items.models;
 
 export type ComposerControlsProps = {
   mode: "single" | "team"; onModeChange: (mode: "single" | "team") => void;
   route: AoRoute; onRouteChange: (route: AoRoute) => void;
-  harnesses: AoHarness[]; loadModels: (harness: string) => Promise<string[]>;
+  harnesses: AoHarness[]; loadModels: AoModelLoader;
   teams: AoTeam[]; teamId: string; onTeamChange: (teamId: string) => void;
   permissions: ReactNode; busy: boolean;
 };
@@ -55,9 +58,9 @@ export function AgentOrchestratorComposerControls({
     if (!popup.open || mode !== "single") return;
     let live = true;
     setModels(null); setError("");
-    const web = route.harness_id === NATIVE_HARNESS ? loadModels(DEFAULT_WORKER_HARNESS).catch(() => [])
-      : loadModels(NATIVE_HARNESS).then(items => items.filter(isWebModel), () => []);
-    void Promise.all([loadModels(route.harness_id), web]).then(([catalog, webCatalog]) => {
+    const web = route.harness_id === NATIVE_HARNESS ? loadModels(DEFAULT_WORKER_HARNESS).then(modelIds, () => [])
+      : loadModels(NATIVE_HARNESS).then(items => modelIds(items).filter(isWebModel), () => []);
+    void Promise.all([loadModels(route.harness_id).then(modelIds), web]).then(([catalog, webCatalog]) => {
       if (live) setModels([...new Set([...catalog, ...webCatalog])]);
     }).catch(cause => { if (live) { setModels([]); setError(cause instanceof Error ? cause.message : String(cause)); } });
     return () => { live = false; };
