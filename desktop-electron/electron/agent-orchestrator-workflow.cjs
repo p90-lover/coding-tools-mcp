@@ -940,6 +940,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         || parent.role === "worker" && parent.state === "pending" && blockedByFailure(mission, parent)))));
   }
   const TRANSIENT_FAILURE = /not confirm|timed out|timeout|disconnected|network|ECONNRESET|socket|502|503|504|stream/i;
+  // The upstream observe() error for a turn whose chat host died with an app restart. Nothing
+  // about the step itself failed, so it is retried directly instead of asking a helper.
+  const RESTART_INTERRUPTED = /process ended before it finished \(the app restarted\)/;
 
   // Requests the command approver may never allow, whatever the model says.
   const HARD_DENY = [
@@ -1103,7 +1106,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     if (state.recoveryWaits.has(workerAttempt)) return { detail: state.recoveryWaits.get(workerAttempt) };
     const retry = workers.length && mission.nodes.find(entry => entry.role === "retry");
     let decision;
-    if (retry) {
+    if (RESTART_INTERRUPTED.test(String(node.receipt?.error || ""))) {
+      decision = { action: "retry", reason: "The app restarted while this step was running" };
+    } else if (retry) {
       if (retry.state === "held" || retry.state === "failed") {
         await controlRun({ workspaceId, runId: mission.id, action: "review_failures", nodeId: node.id });
         if (retry.state === "held") await controlRun({ workspaceId, runId: mission.id, action: "review_failures", nodeId: retry.id });
