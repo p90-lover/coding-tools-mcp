@@ -132,8 +132,7 @@ fn route_tuning_valid(route: &Route) -> bool {
             .is_none_or(|value| text(value, 128) && value != EXTERNAL_PERMISSION)
         && route.effort.as_deref().is_none_or(|effort| {
             EFFORTS.contains(&effort)
-                || (route.harness_id.starts_with("ao:")
-                    && ["none", "auto"].contains(&effort))
+                || (route.harness_id.starts_with("ao:") && ["none", "auto"].contains(&effort))
         })
         && route
             .context_window
@@ -2491,7 +2490,10 @@ mod tests {
         .is_ok());
         // Luna and Sol offer max (Sol also ultra) on Native Codex too.
         for effort in ["max", "ultra"] {
-            assert!(validate(None, &run(json!({ "effort": effort }))).is_ok(), "{effort}");
+            assert!(
+                validate(None, &run(json!({ "effort": effort }))).is_ok(),
+                "{effort}"
+            );
         }
         for bad in [
             json!({"effort":"turbo"}),

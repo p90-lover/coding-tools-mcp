@@ -583,7 +583,7 @@ pub fn create_run_with_snapshot(
         .iter()
         .map(|role| (role.id.clone(), uuid::Uuid::new_v4().to_string()))
         .collect();
-    let mut nodes: Vec<Node> = team
+    let nodes: Vec<Node> = team
         .nodes
         .iter()
         .map(|role| {
