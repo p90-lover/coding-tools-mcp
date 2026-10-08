@@ -46,3 +46,20 @@ test("unavailable, redirected or non-JSON readiness stays unknown", async () => 
   world.host.view.webContents.session.fetch=async()=>{throw new Error("Offline")};
   assert.equal((await world.host.authenticationReadiness()).authenticated,null);
 });
+
+test("a challenged main-process check falls back to the open ChatGPT page, which returns only the session's shape", async () => {
+  const world = fixture({ user: { id: "x" } }, { ok: false, status: 403, headers: { get: () => "text/html" } });
+  const contents = world.host.view.webContents;
+  let script = "";
+  contents.executeJavaScript = async (source) => { script = source; return { status: 200, user: true, error: false, expires: null }; };
+  assert.equal((await world.host.authenticationReadiness()).ready, false, "the idle page is not asked");
+  assert.equal(script, "");
+  contents.getURL = () => "https://chatgpt.com/?temporary-chat=true";
+  assert.deepEqual({ ...(await world.host.authenticationReadiness()) }, { authenticated: true, ready: true });
+  assert.match(script, /fetch\("\/api\/auth\/session"/);
+  assert.doesNotMatch(script, /accessToken|return body\b/, "tokens never leave the page");
+  contents.executeJavaScript = async () => ({ status: 403 });
+  assert.deepEqual({ ...(await world.host.authenticationReadiness()) }, { authenticated: null, ready: false });
+  contents.executeJavaScript = async () => ({ status: 401 });
+  assert.equal((await world.host.authenticationReadiness()).authenticated, false);
+});

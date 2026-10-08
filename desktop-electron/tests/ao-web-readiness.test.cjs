@@ -69,7 +69,10 @@ test("signed-out browser blocks background start before a run grant", async () =
           route: { harness_id: "codex-native", provider_id: "chatgpt-web", model: "chatgpt-web/high" } }] }] };
     },
   });
-  await assert.rejects(workflow.call("start_run", { workspaceId: "ws", runId: "run" }), /sign in.*ChatGPT/i);
+  // Returned, not thrown, so the reason survives IPC (a thrown error arrives as a transport failure).
+  const blocked = await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.reason, /sign in.*ChatGPT/i);
   assert.deepEqual(endpoints, ["/api/v1/ao/read"]);
 });
 

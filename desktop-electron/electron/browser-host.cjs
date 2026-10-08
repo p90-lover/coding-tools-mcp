@@ -2800,11 +2800,41 @@ class BrowserHost {
       if (response.status === 401) return { authenticated: false, ready: true };
       if (!response.ok || response.url !== CHATGPT_ORIGIN + "/api/auth/session"
         || !response.headers.get("content-type")?.includes("application/json")) {
-        return { authenticated: null, ready: false };
+        this.logger?.warn?.("browser.readiness_fetch_unusable", { status: response.status });
+        return await this.pageAuthenticationReadiness(contents);
       }
       return { authenticated: authenticatedChatGptSession(await response.json()), ready: true };
     } catch { return { authenticated: null, ready: false }; }
     finally { clearTimeout(timeout); }
+  }
+
+  // Cloudflare may challenge the main-process request while the open ChatGPT page passes. Ask the
+  // page itself, on chatgpt.com only. Only the session's shape leaves the page, never its tokens.
+  async pageAuthenticationReadiness(contents) {
+    if (!contents.getURL?.().startsWith(CHATGPT_ORIGIN + "/") || typeof contents.executeJavaScript !== "function") {
+      return { authenticated: null, ready: false };
+    }
+    const result = await Promise.race([
+      contents.executeJavaScript(`(async () => {
+        const response = await fetch("/api/auth/session", { credentials: "include", cache: "no-store",
+          redirect: "manual", headers: { accept: "application/json" } });
+        if (response.status === 401) return { status: 401 };
+        if (!response.ok || !(response.headers.get("content-type") || "").includes("application/json")) return { status: response.status };
+        const body = await response.json();
+        const user = body && body.user;
+        return { status: 200, user: Boolean(user && typeof user === "object" && !Array.isArray(user) && Object.keys(user).length),
+          error: Boolean(body && body.error !== undefined && body.error !== null && body.error !== ""),
+          expires: body && typeof body.expires === "string" ? body.expires : null };
+      })()`, true),
+      new Promise(resolve => setTimeout(() => resolve(null), CHATGPT_AUTH_SESSION_TIMEOUT_MS)),
+    ]).catch(() => null);
+    if (result?.status === 401) return { authenticated: false, ready: true };
+    if (result?.status !== 200) {
+      this.logger?.warn?.("browser.readiness_page_unusable", { status: typeof result?.status === "number" ? result.status : null });
+      return { authenticated: null, ready: false };
+    }
+    return { authenticated: authenticatedChatGptSession({ user: result.user ? { present: true } : null,
+      error: result.error ? "error" : undefined, expires: result.expires }), ready: true };
   }
 
   async probeAuthentication() {

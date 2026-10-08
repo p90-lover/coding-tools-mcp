@@ -2227,3 +2227,25 @@ test("AO connects every ready worker's harness together so slow Codex starts do 
   assert.equal((await workflow.call("run_status", input)).status, "finished");
   assert.equal(peakConnecting, 2, "both workers' harnesses start at the same time");
 });
+
+test("a start blocked on the browser returns its reason instead of a generic transport failure", async () => {
+  const web = { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web", model: "chatgpt-web/high", permission_profile: ":read-only" };
+  const run = { id: "run-1", workspace_id: "ws-1", project_id: "p", revision: 1, cancelled: false,
+    nodes: [{ id: "planner", role: "planner", state: "pending", parents: [], route: web }] };
+  let ready = { authenticated: true, ready: false };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [structuredClone(run)], worker_capacity: { "run-1": 1 } };
+      throw new Error(`Unexpected endpoint ${endpoint}`);
+    },
+    webBridgeReadiness: async () => ready,
+    resolveHarness: async () => { throw new Error("must not resolve a harness while the browser is not ready"); },
+    confirm: async () => true,
+  });
+  const input = { workspaceId: "ws-1", runId: "run-1", executable: "C:/codex.exe" };
+  assert.deepEqual({ ...(await workflow.call("start_run", input)) },
+    { ok: false, started: false, reason: "Browser is not ready; open Browser and check the ChatGPT session" });
+  ready = { authenticated: false, ready: true };
+  assert.match((await workflow.call("start_run", input)).reason, /Sign in to ChatGPT/);
+  await assert.rejects(workflow.call("start_run", { ...input, proxyApiKey: "x" }), /refused/, "other start errors still throw");
+});
