@@ -100,7 +100,7 @@ test("unsupported or unverified AO overrides can be explicitly cleared to model 
     "Native Codex controls are unchanged");
 });
 
-test("Surface caches AO model capability catalogs while Native Codex keeps its legacy model array", async () => {
+test("Surface caches model capability catalogs for AO harnesses and Native Codex alike", async () => {
   const surfaceSource = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8");
   const surface = {}, calls = [], callbacks = [];
   const jsx = (type, props) => ({ type, props });
@@ -122,7 +122,8 @@ test("Surface caches AO model capability catalogs while Native Codex keeps its l
   assert.deepEqual(plain(await loader("ao:codex")), { models: ["fixture"], capabilities: { fixture: { efforts: ["high"] } } });
   await loader("ao:codex");
   assert.deepEqual(calls, ["ao:codex"], "cache retains the full catalog and avoids a duplicate capability request");
-  assert.deepEqual(plain(await loader("codex-native")), ["fixture"], "Native model array and behavior stay unchanged");
+  assert.deepEqual(plain(await loader("codex-native")), { models: ["fixture"], capabilities: { fixture: { efforts: ["high"] } } },
+    "Native Codex's CPA models carry their capabilities too");
 });
 
 

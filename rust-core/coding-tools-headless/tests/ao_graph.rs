@@ -22,7 +22,7 @@ fn fixture() -> (AppData, Run) {
         effort: None,
         context_window: None,
     };
-    // Native Codex runs only WebGPT; a CPA model runs on an AO harness through the gateway.
+    // A CPA model on an AO harness runs through the gateway ("cpa/<model>").
     let worker = Route {
         harness_id: "ao:claude-code".into(),
         provider_id: "agent-orchestrator".into(),

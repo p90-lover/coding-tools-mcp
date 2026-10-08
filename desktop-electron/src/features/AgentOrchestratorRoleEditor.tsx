@@ -26,16 +26,20 @@ export const SPECIALTIES = ["planning", "research", "architecture", "frontend", 
   "testing", "performance", "debugging", "refactor", "docs", "ui-ux", "mobile", "data-ml", "implementation", "qa", "review", "delivery", "recovery"];
 
 /**
- * Native Codex runs only WebGPT, through the bridge; every other model runs on an AO harness
- * (CPA pool models through the gateway as "cpa/<model>"). A WebGPT model therefore always gets
- * the Native Codex route, and any other model picked on Native Codex moves to an AO harness:
- * Unspecified non-WebGPT choices default to Claude Code; explicit AO choices stay unchanged.
+ * WebGPT runs only on Native Codex, through the bridge, so a WebGPT model always gets the
+ * Native Codex route. Native Codex also runs every CPA pool model, through the shared pool; an
+ * AO harness runs CPA models through the gateway as "cpa/<model>". Unspecified non-WebGPT
+ * choices default to Claude Code; explicit choices stay on their harness.
  */
 export const isWebModel = (model: string) => model.replace(/^cpa\//, "").startsWith("chatgpt-web/");
 
 export function workerRoute(harness: string, model: string, permission: NativePermission = ":workspace"): AoRoute {
   const bare = model.replace(/^cpa\//, "");
   if (isWebModel(model)) return { ...WEB_ROUTE, model: bare, permission_profile: permission === ":ao-default" ? WEB_ROUTE.permission_profile : permission };
+  if (harness === NATIVE_HARNESS && model && model !== AGENT_DEFAULT_MODEL) {
+    return { harness_id: NATIVE_HARNESS, provider_id: "cliproxyapi-antigravity", account_id: "shared-cpa-pool", model: bare,
+      permission_profile: permission === ":ao-default" ? ":workspace" : permission };
+  }
   const agent = harness.startsWith("ao:") ? harness : DEFAULT_WORKER_HARNESS;
   const routed = harness.startsWith("ao:") || !model ? model : `cpa/${bare}`;
   return { harness_id: agent, provider_id: "agent-orchestrator", account_id: "ao-local", model: routed || "default", permission_profile: ":ao-default" };
@@ -212,11 +216,11 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
       {models === null ? <option value={route.model}>{route.model || "Loading"}</option> : null}
       {(models ?? []).map(model => <option key={model} value={model}>
         {modelLabel(model)}{harness !== NATIVE_HARNESS && isWebModel(model) ? " · switches to Native Codex"
-          : capabilities?.harness === harness && capabilityText(capabilities.models[model], native) ? ` · ${capabilityText(capabilities.models[model], native)}` : ""}
+          : capabilities?.harness === harness && capabilityText(capabilities.models[model], native && isWebModel(model)) ? ` · ${capabilityText(capabilities.models[model], native && isWebModel(model))}` : ""}
       </option>)}
     </select></label> : null}
     {!hidePermissionNote ? harness === NATIVE_HARNESS ? <p className="ao-hint">Saved native permission: {nativePermission(route) || "Unknown"}. Change permissions explicitly in the chat composer menu; runtime capabilities are authoritative.</p>
-      : <p className="ao-hint">Native Codex runs only WebGPT: choosing a WebGPT model switches to it, and any other model runs here. Native permissions are retained but unavailable on this adapter.</p> : null}
+      : <p className="ao-hint">WebGPT runs only on Native Codex: choosing a WebGPT model switches to it, and any other model runs here. Native permissions are retained but unavailable on this adapter.</p> : null}
     <fieldset className="ao-route-tuning"><legend>Model tuning</legend>
     <label title={native ? "Reasoning effort for this card" : capability?.effortReason || (efforts ? efforts.length ? "Reasoning efforts advertised for this model" : "This model does not support an effort override" : "Model capabilities have not been verified")}>Reasoning effort
       <select value={route.effort ?? ""} disabled={disabled || !efforts?.length} aria-invalid={!native && Boolean(route.effort) && Boolean(efforts) && !efforts?.includes(route.effort!)}

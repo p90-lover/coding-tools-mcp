@@ -293,7 +293,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       return { ok: true, harness, models: [...new Set([...items.map(item => item.id), ...cpa])], capabilities };
     }
     if (harness === "codex-native") {
-      return { ok: true, harness, models: [...WEB_TIERS, ...LUNA_TIERS] };
+      // Native Codex runs WebGPT through the bridge and every CPA model through the shared pool.
+      // Without CPA it still offers WebGPT.
+      let pool = { models: [], capabilities: {} };
+      try { pool = await models(); } catch {}
+      const cpa = pool.models.filter(id => !id.startsWith("chatgpt-web/"));
+      return { ok: true, harness, models: [...WEB_TIERS, ...LUNA_TIERS, ...cpa],
+        capabilities: Object.fromEntries(cpa.map(id => [id, pool.capabilities[id]]).filter(([, value]) => value)) };
     }
     const { baseUrl, key } = connection();
     let rows;

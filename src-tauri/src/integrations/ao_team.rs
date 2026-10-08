@@ -268,32 +268,6 @@ pub fn normalize_roles(nodes: &mut Vec<Node>) {
     }
 }
 
-/// Native Codex runs only WebGPT. Every other model runs on an AO harness through the CPA
-/// gateway ("cpa/<model>"): Gemini on Claude Code, the rest on Codex. A Native Codex card with
-/// a CPA model is moved there when a team is saved or a mission is created from it; its effort
-/// is kept, and its context window dropped (AO harnesses have no such setting).
-pub fn normalize_routes(nodes: &mut [Node]) {
-    for node in nodes {
-        let route = &mut node.route;
-        if route.harness_id == "codex-native" && route.provider_id == "cliproxyapi-antigravity" {
-            let agent = if route.model.to_ascii_lowercase().starts_with("gemini") {
-                "ao:claude-code"
-            } else {
-                "ao:codex"
-            };
-            route.model = format!("cpa/{}", route.model);
-            route.harness_id = agent.into();
-            route.provider_id = "agent-orchestrator".into();
-            route.account_id = "ao-local".into();
-            if route.native_permission_profile.is_none() {
-                route.native_permission_profile = Some(route.permission_profile.clone());
-            }
-            route.permission_profile = ":ao-default".into();
-            route.context_window = None;
-        }
-    }
-}
-
 /// Every card must name its model. "default" lets an agent pick, and change, its own model.
 pub fn require_explicit_models(nodes: &[Node]) -> AppResult<()> {
     match nodes
@@ -351,7 +325,6 @@ pub fn save(
     if !team.editable_graph {
         normalize_roles(&mut team.nodes);
     }
-    normalize_routes(&mut team.nodes);
     require_explicit_models(&team.nodes)?;
     let existing = data
         .ao_teams
@@ -596,8 +569,7 @@ pub fn create_run_with_snapshot(
             node
         })
         .collect();
-    // Older saved teams: move Gemini to Claude Code and refuse cards left on "default".
-    normalize_routes(&mut nodes);
+    // Older saved teams: refuse cards left on "default".
     require_explicit_models(&nodes)?;
     ao::create(
         data,
@@ -1410,6 +1382,7 @@ mod tests {
                 "task".into(),
                 1,
                 first.revision,
+                None,
                 1
             )
             .unwrap()
@@ -1497,7 +1470,7 @@ mod tests {
         assert_eq!(nodes[4].route.permission_profile, ":read-only", "an external-only legacy role initializes safe new native scope, never the main reviewer's broader rights");
     }
     #[test]
-    fn gemini_moves_to_claude_code_and_default_models_are_refused() {
+    fn native_codex_keeps_any_cpa_model_and_default_models_are_refused() {
         let node = |route: serde_json::Value| -> Node {
             serde_json::from_value(serde_json::json!({
                 "id": "w", "task_id": "", "role": "worker", "parents": [], "x": 0, "y": 0,
@@ -1515,15 +1488,10 @@ mod tests {
                 "account_id":"shared-cpa-pool","model":"gpt-6-luna","permission_profile":":workspace"}),
             ),
         ];
-        normalize_routes(&mut nodes);
-        assert_eq!(nodes[0].route.harness_id, "ao:claude-code");
-        assert_eq!(nodes[0].route.model, "cpa/gemini-3.8-flash-high");
-        assert_eq!(nodes[0].route.provider_id, "agent-orchestrator");
-        // Native Codex runs only WebGPT: every other CPA model moves to AO's Codex harness.
-        assert_eq!(nodes[1].route.harness_id, "ao:codex");
-        assert_eq!(nodes[1].route.model, "cpa/gpt-6-luna");
-        assert_eq!(nodes[1].route.permission_profile, ":ao-default");
+        // Native Codex runs any CPA model through the shared pool; saving leaves the route alone.
         assert!(require_explicit_models(&nodes).is_ok());
+        assert_eq!(nodes[0].route.harness_id, "codex-native");
+        assert_eq!(nodes[1].route.model, "gpt-6-luna");
         nodes[1].route.model = "default".into();
         let refused = require_explicit_models(&nodes).unwrap_err().to_string();
         assert!(

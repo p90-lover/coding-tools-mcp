@@ -648,16 +648,6 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
         if web_model_named(&node.route) && !web_route_valid(&node.route) {
             return Err(fail("AO WebGPT runs only on Native Codex"));
         }
-        // Native Codex runs only WebGPT; other models run on an AO harness through the CPA
-        // gateway. Cards that already ran keep their old route so older missions stay usable.
-        if node.state == State::Pending
-            && node.route.harness_id == "codex-native"
-            && !web_route_valid(&node.route)
-        {
-            return Err(fail(
-                "Native Codex runs only WebGPT models; choose an AO harness (Codex or Claude Code) for other models",
-            ));
-        }
         if !route_tuning_valid(&node.route) {
             return Err(fail(if node.route.harness_id.starts_with("ao:") {
                 "AO harness effort must be minimal, low, medium, high, xhigh, none, auto or max, and its context window 4,096 to 2,000,000 tokens"
@@ -2344,9 +2334,9 @@ mod tests {
         assert!(validate(None, &run(web.clone())).is_ok());
         assert!(validate(None, &run(json!({"harness_id":"codex-native","provider_id":"chatgpt-web",
             "account_id":"chatgpt-web","model":"chatgpt-web/other","permission_profile":":read-only"}))).is_err());
-        // Native Codex runs only WebGPT: a CPA model on it is refused for a card yet to start.
+        // Native Codex runs any CPA pool model as well as WebGPT.
         assert!(validate(None, &run(json!({"harness_id":"codex-native","provider_id":"cliproxyapi-antigravity",
-            "account_id":"shared-cpa-pool","model":"claude-sonnet-4-6","permission_profile":":read-only"}))).is_err());
+            "account_id":"shared-cpa-pool","model":"claude-sonnet-4-6","permission_profile":":read-only"}))).is_ok());
         // Every WebGPT tier the bridge serves is allowed, but only on Native Codex.
         assert!(validate(None, &run(json!({"harness_id":"codex-native","provider_id":"chatgpt-web",
             "account_id":"chatgpt-web","model":"chatgpt-web/extra-high","permission_profile":":read-only"}))).is_ok());
@@ -2498,8 +2488,9 @@ mod tests {
         };
         assert!(validate(None, &run(json!({"harness_id":"codex-native","provider_id":"chatgpt-web",
             "account_id":"chatgpt-web","model":"chatgpt-web/medium","permission_profile":":read-only"}))).is_ok());
+        // ...or any CPA pool model on Native Codex.
         assert!(validate(None, &run(json!({"harness_id":"codex-native","provider_id":"cliproxyapi-antigravity",
-            "account_id":"shared-cpa-pool","model":"claude-sonnet-4-6","permission_profile":":read-only"}))).is_err());
+            "account_id":"shared-cpa-pool","model":"claude-sonnet-4-6","permission_profile":":read-only"}))).is_ok());
         // The orchestrator and reviewer may also run on an AO harness such as Claude Code.
         assert!(validate(None, &run(json!({"harness_id":"ao:claude-code","provider_id":EXTERNAL_PROVIDER,
             "account_id":EXTERNAL_ACCOUNT,"model":"default","permission_profile":EXTERNAL_PERMISSION}))).is_ok());

@@ -75,7 +75,7 @@ test("all AO harnesses receive truthful tuning outcomes; unsupported transport a
   assert.match(caps.contextReason, /compaction|recognized/i);
 });
 
-test("Native Codex model response stays unchanged and never reads AO/CPA capability catalogs", async () => {
+test("Native Codex lists WebGPT even without CPA and never reads AO catalogs", async () => {
   const workflow = createAgentOrchestratorWorkflow({
     aoHarness: { models: () => { throw Error("must not read AO"); } },
     cpaConnection: () => { throw Error("must not read CPA"); },
@@ -84,7 +84,7 @@ test("Native Codex model response stays unchanged and never reads AO/CPA capabil
   assert.equal(result.harness, "codex-native");
   assert.equal(result.models.length, 7);
   assert.ok(result.models.every(id => id.startsWith("chatgpt-web/")));
-  assert.equal(Object.hasOwn(result, "capabilities"), false);
+  assert.deepEqual({ ...result.capabilities }, {}, "no CPA, so no pool models or capabilities");
 });
 
 async function dispatched(agent, model, tuning) {

@@ -485,10 +485,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
     const key = JSON.stringify([workspaceId, harness]);
     let pending = modelCache.current.get(key);
     if (!pending) {
-      // Native Codex keeps its model array; AO also carries verified model capabilities.
+      // Both catalogs carry model capabilities when their source reports them.
       pending = moduleCall("models", { harness, workspaceId }).then(result => {
         const models = Array.isArray(result.models) ? result.models as string[] : [];
-        return harness.startsWith("ao:") ? { models, capabilities: result.capabilities as AoModelCatalog["capabilities"] } : models;
+        return result.capabilities ? { models, capabilities: result.capabilities as AoModelCatalog["capabilities"] } : models;
       });
       pending.catch(() => modelCache.current.delete(key));
       modelCache.current.set(key, pending);
