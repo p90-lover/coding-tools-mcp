@@ -59,13 +59,13 @@ function StepRow({ step, now }: { step: ChatStep; now: number }) {
   </li>;
 }
 
-function WorkGroup({ turn, now }: { turn: ChatTurn; now: number }) {
+function WorkGroup({ turn, now, idle = false }: { turn: ChatTurn; now: number; idle?: boolean }) {
   const working = turn.steps.find((step) => step.working);
   // Live and failed work opens by itself until the user toggles it; after that their choice holds.
   const [chosen, setChosen] = useState<boolean | null>(null);
   const open = chosen ?? (Boolean(working) || turn.steps.some((step) => step.error));
   if (!turn.steps.length) {
-    return turn.status === "running" || turn.status === "queued"
+    return !idle && (turn.status === "running" || turn.status === "queued")
       ? <div className="cx-work is-live"><span className="cx-shimmer">Starting…</span></div> : null;
   }
   const label = working
@@ -138,6 +138,16 @@ export function AgentOrchestratorChat({
   const chat = chats.find((entry) => entry.taskId === selectedTaskId);
   const chatRuns = useMemo(() => runs.filter((run) => run.project_id === selectedTaskId), [runs, selectedTaskId]);
   const latest = chatRuns[chatRuns.length - 1];
+  // A queued run that nothing is starting (its start failed, or the app restarted mid-start)
+  // offers Start instead of a "Starting…" that never ends; the grace period covers a normal start.
+  const idleQueued = Boolean(latest && chat?.status === "queued" && !working && !pendingCreation);
+  const [notStarted, setNotStarted] = useState(false);
+  useEffect(() => {
+    setNotStarted(false);
+    if (!idleQueued) return;
+    const timer = window.setTimeout(() => setNotStarted(true), 5_000);
+    return () => window.clearTimeout(timer);
+  }, [idleQueued, latest?.id]);
   const [descriptions, setDescriptions] = useState<Record<string, string>>({});
   const [draft, setDraft] = useState("");
   const [title, setTitle] = useState("");
@@ -302,7 +312,7 @@ export function AgentOrchestratorChat({
                 </MessageActions>
                 {turn.user.stamp ? <span className="cx-stamp">{turn.user.stamp} UTC</span> : null}
               </div> : null}
-              <WorkGroup turn={turn} now={now} />
+              <WorkGroup turn={turn} now={now} idle={notStarted && turn.runId === latest?.id} />
               {turn.final ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`}>
                 <div className="cx-answer-meta">
                   <span>{turn.final.name}</span>
@@ -319,11 +329,11 @@ export function AgentOrchestratorChat({
               {turn.status === "stopped" ? <p className="cx-note">Stopped</p> : null}
               {turn.solo ? <p className="cx-note">Answered by the orchestrator alone; no workers ran.</p> : null}
             </article>)}
-            {notice && latest && chat?.status === "queued" && !working ? (
+            {(notice || notStarted) && latest && chat?.status === "queued" && !working ? (
               <div className="cx-card tone-error">
-                <strong>The run could not start</strong>
-                <p>{notice}</p>
-                <div className="cx-card-actions"><button className="button-primary" type="button" disabled={busy} onClick={() => retryStart(latest.id)}>Retry</button></div>
+                <strong>{notice ? "The run could not start" : "This run hasn't started"}</strong>
+                <p>{notice || "Its start stopped before any card ran. Start it again to run the team."}</p>
+                <div className="cx-card-actions"><button className="button-primary" type="button" disabled={busy} onClick={() => retryStart(latest.id)}>{notice ? "Retry" : "Start"}</button></div>
               </div>
             ) : null}
             {latest && chat?.status === "attention" ? (

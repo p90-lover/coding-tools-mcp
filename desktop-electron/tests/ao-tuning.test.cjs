@@ -127,13 +127,15 @@ test("Surface caches model capability catalogs for AO harnesses and Native Codex
 });
 
 
-test("AO-only efforts never cross into Native Codex; valid high and AO-to-AO tuning still carry over", async () => {
+test("AO-only efforts never cross into Native Codex; valid high, max and AO-to-AO tuning still carry over", async () => {
   const p = await picker(route(), ["cpa/gpt"]);
-  for (const effort of ["none", "auto", "max"]) {
+  const maxed = p.editor.withTuning(p.editor.workerRoute("ao:claude-code", "chatgpt-web/high"), { ...route("ao:claude-code", "cpa/fixture"), effort: "max" });
+  assert.equal(maxed.effort, "max", "Native Codex takes max, as Luna and Sol offer it");
+  for (const effort of ["none", "auto"]) {
     const previous = { ...route("ao:claude-code", "cpa/fixture"), effort, context_window: 32768 };
     const native = p.editor.withTuning(p.editor.workerRoute("ao:claude-code", "chatgpt-web/high"), previous);
     assert.equal(native.harness_id, "codex-native");
-    assert.equal(native.effort, undefined, `Native's unchanged five efforts do not accept ${effort}`);
+    assert.equal(native.effort, undefined, `Native Codex does not accept ${effort}`);
     const ao = p.editor.withTuning(route("ao:opencode", "cpa/next"), previous);
     assert.equal(ao.effort, effort, "AO-to-AO requested effort is retained");
     assert.equal(ao.context_window, 32768, "AO-to-AO client context is retained");

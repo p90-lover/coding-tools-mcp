@@ -169,3 +169,21 @@ test("upstream spawn preserves context on Chat/TUI fallback without adding nativ
     assert.equal(body.gateway.model, "gpt-5.5(high)");
   }
 });
+
+test("a CPA model's ceiling is its max context window and its own efforts, up to ultra", async () => {
+  const workflow = createAgentOrchestratorWorkflow({
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-key" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ models: [
+      { slug: "gpt-6-luna", context_window: 272000, max_context_window: 1000000,
+        supported_reasoning_levels: ["low", "medium", "high", "xhigh", "max"].map(effort => ({ effort })) },
+      { slug: "gpt-6-sol", context_window: 272000, max_context_window: 1000000,
+        supported_reasoning_levels: ["low", "xhigh", "max", "ultra"].map(effort => ({ effort })) },
+      { slug: "gpt-5.5", context_window: 272000, supported_reasoning_levels: [{ effort: "high" }] },
+    ] }) }),
+  });
+  const { capabilities } = await workflow.call("models", { harness: "codex-native" });
+  assert.equal(capabilities["gpt-6-luna"].contextLimit, 1000000, "Luna goes past its 272K default to 1M");
+  assert.deepEqual([...capabilities["gpt-6-luna"].efforts], ["low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual([...capabilities["gpt-6-sol"].efforts], ["low", "xhigh", "max", "ultra"]);
+  assert.equal(capabilities["gpt-5.5"].contextLimit, 272000, "without a max, the reported window is the limit");
+});

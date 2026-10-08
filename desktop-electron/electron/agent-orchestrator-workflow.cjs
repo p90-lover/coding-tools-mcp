@@ -235,7 +235,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     return { baseUrl: url.origin, key: value.proxyApiKey };
   }
 
-  const tuningEfforts = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "auto"]);
+  const tuningEfforts = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "auto"]);
   const reportedEfforts = values => [...new Set((Array.isArray(values) ? values : [])
     .map(value => typeof value === "string" ? value : value?.effort)
     .filter(value => typeof value === "string" && tuningEfforts.has(value)))];
@@ -322,7 +322,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       const id = entry?.slug ?? entry?.id;
       if (typeof id !== "string" || !id || id.length > 128 || entry.visibility === "hide" || ids.includes(id)) continue;
       const efforts = reportedEfforts(entry.supported_reasoning_levels ?? entry.thinking?.levels);
-      const limit = entry.context_window ?? entry.context_length;
+      // context_window is the default the client starts with; max_context_window is how far the
+      // model goes (Luna: 272K by default, up to 1M).
+      const limit = entry.max_context_window ?? entry.context_window ?? entry.context_length;
       capabilities[id] = { efforts, ...(!efforts.length ? { effortReason: "CPA did not advertise reasoning levels for this model." } : {}),
         ...(Number.isSafeInteger(limit) && limit > 0 ? { contextLimit: limit } : {}) };
       ids.push(id);

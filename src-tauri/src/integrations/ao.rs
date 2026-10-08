@@ -108,12 +108,13 @@ fn unix_now_ms() -> u64 {
         })
 }
 
-/// Reasoning efforts a card may ask for (Codex's ReasoningEffort names).
-pub const EFFORTS: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
+/// Reasoning efforts a card may ask for on any harness (Codex's names; max and ultra are offered
+/// by the models that support them, e.g. Luna and Sol).
+pub const EFFORTS: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 /// Context windows a card may ask for, in tokens.
 pub const CONTEXT_WINDOWS: std::ops::RangeInclusive<u32> = 4_096..=2_000_000;
 
-/// Native Codex keeps its effort names; AO harnesses may also advertise none, auto or max.
+/// AO harnesses may also advertise none or auto.
 fn route_tuning_valid(route: &Route) -> bool {
     route
         .approval_policy
@@ -132,7 +133,7 @@ fn route_tuning_valid(route: &Route) -> bool {
         && route.effort.as_deref().is_none_or(|effort| {
             EFFORTS.contains(&effort)
                 || (route.harness_id.starts_with("ao:")
-                    && ["none", "auto", "max"].contains(&effort))
+                    && ["none", "auto"].contains(&effort))
         })
         && route
             .context_window
@@ -650,7 +651,7 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
         }
         if !route_tuning_valid(&node.route) {
             return Err(fail(if node.route.harness_id.starts_with("ao:") {
-                "AO harness effort must be minimal, low, medium, high, xhigh, none, auto or max, and its context window 4,096 to 2,000,000 tokens"
+                "AO harness effort must be minimal, low, medium, high, xhigh, max, ultra, none or auto, and its context window 4,096 to 2,000,000 tokens"
             } else {
                 "AO card effort must be minimal, low, medium, high or xhigh, and its context window 4,096 to 2,000,000 tokens"
             }));
@@ -2364,7 +2365,7 @@ mod tests {
                 route.effort = Some((*effort).into());
                 assert!(route_tuning_valid(&route), "{harness} {effort}");
             }
-            for effort in ["none", "auto", "max"] {
+            for effort in ["none", "auto"] {
                 route.effort = Some(effort.into());
                 assert_eq!(
                     route_tuning_valid(&route),
@@ -2412,8 +2413,12 @@ mod tests {
             &run(json!({"effort":"xhigh","context_window":262_144}))
         )
         .is_ok());
+        // Luna and Sol offer max (Sol also ultra) on Native Codex too.
+        for effort in ["max", "ultra"] {
+            assert!(validate(None, &run(json!({ "effort": effort }))).is_ok(), "{effort}");
+        }
         for bad in [
-            json!({"effort":"max"}),
+            json!({"effort":"turbo"}),
             json!({"effort":""}),
             json!({"context_window":1_024}),
             json!({"context_window":4_000_000}),

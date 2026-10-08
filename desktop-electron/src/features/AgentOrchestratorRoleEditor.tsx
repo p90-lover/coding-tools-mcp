@@ -46,7 +46,9 @@ export function workerRoute(harness: string, model: string, permission: NativePe
 }
 
 /** Reasoning efforts a card may ask for (Codex's names; the engine checks the same list). */
-export const EFFORTS = ["minimal", "low", "medium", "high", "xhigh"] as const;
+export const EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
+/** What Native Codex offers when the model reports no efforts of its own (WebGPT tiers). */
+const NATIVE_DEFAULT_EFFORTS = EFFORTS.slice(0, 5);
 /** Legacy Native-to-agent carry-over policy; AO controls use the selected model capabilities. */
 export const effortApplies = (route: AoRoute) => !(route.harness_id.startsWith("ao:") && route.model.startsWith("cpa/"));
 /** Legacy carry-over policy when entering or leaving Native Codex. */
@@ -83,12 +85,12 @@ export function tokensLabel(tokens: number): string {
   return tokens.toLocaleString("en-US");
 }
 
-const EFFORT_ORDER = ["minimal", "low", "medium", "high", "xhigh", "max"];
+const EFFORT_ORDER: string[] = [...EFFORTS];
 
 /** What a model supports, for model lists: "up to xhigh effort · 272K context". Native Codex accepts
  *  every effort and a 4,096–2M budget; other harnesses show only what their catalog verified. */
 export function capabilityText(capability: AoModelCapabilities | undefined, native = false): string {
-  const efforts = native ? [...EFFORTS] : (capability?.efforts ?? []).filter(effort => EFFORT_ORDER.includes(effort));
+  const efforts = (native && !capability?.efforts?.length ? [...NATIVE_DEFAULT_EFFORTS] : capability?.efforts ?? []).filter(effort => EFFORT_ORDER.includes(effort));
   const top = efforts.sort((a, b) => EFFORT_ORDER.indexOf(a) - EFFORT_ORDER.indexOf(b)).at(-1);
   const limit = capability?.contextLimit ?? (native ? 2_000_000 : capability?.contextWindow?.max);
   // Catalog limits are decimal (272,000), so they read best as "272K" rather than tokensLabel's binary units.
@@ -195,8 +197,10 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
   const known = harnesses.some(item => item.id === harness);
   const native = harness === NATIVE_HARNESS;
   const capability = capabilities?.harness === harness ? capabilities.models[route.model] : undefined;
-  const efforts = native ? [...EFFORTS] : capability?.efforts;
-  const context = native ? { min: 4096, max: 2000000 } : capability?.contextWindow;
+  // Native Codex takes the model's own efforts and context limit when its catalog reports them.
+  const efforts = native ? (capability?.efforts?.length ? capability.efforts : [...NATIVE_DEFAULT_EFFORTS]) : capability?.efforts;
+  const nativeMax = Math.min(2000000, capability?.contextLimit ?? 2000000);
+  const context = native ? { min: 4096, max: nativeMax } : capability?.contextWindow;
   return <>
     <label>Harness<select value={harness} disabled={disabled || isWebModel(route.model)} title={isWebModel(route.model) ? "WebGPT requires Native Codex" : undefined} onChange={event => {
       // Start each harness on an explicit model; an agent without a known one shows "Choose a model".
@@ -229,7 +233,7 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
         {!native && route.effort && !efforts?.includes(route.effort) ? <option value={route.effort} disabled>{route.effort} (saved, unverified or unsupported)</option> : null}
         {(efforts ?? []).map(effort => <option key={effort} value={effort}>{effort}</option>)}
       </select></label>
-    <label title={native ? "Context window in tokens (4,096 to 2,000,000)" : capability?.contextReason || (context ? context.kind === "compaction" ? "Client compaction threshold in tokens, not the model context limit" : "Client context budget in tokens, not a larger provider limit" : "No verified client context override")}>Context window
+    <label title={native ? `Context window in tokens (4,096 to ${nativeMax.toLocaleString("en-US")})` : capability?.contextReason || (context ? context.kind === "compaction" ? "Client compaction threshold in tokens, not the model context limit" : "Client context budget in tokens, not a larger provider limit" : "No verified client context override")}>Context window
       <input type="number" min={context?.min} max={context?.max} step={1} inputMode="numeric" disabled={disabled || !context}
         placeholder={native ? "Model default" : context ? context.kind === "compaction" ? "Client compaction default" : "Client default" : "No verified override"}
         value={route.context_window ?? ""} aria-invalid={!native && Boolean(context) && route.context_window !== undefined && (route.context_window < context!.min || context!.max !== undefined && route.context_window > context!.max)}
@@ -239,7 +243,7 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
         const next = { ...route }; delete next.effort; delete next.context_window; onChange(next);
       }}>Model defaults</button> : null}
     <p className="ao-hint ao-wide">{native
-      ? "Native harness context budget: 4,096–2,000,000 tokens. Blank uses the model default, not a claimed model limit."
+      ? `Native harness context budget: 4,096–${nativeMax.toLocaleString("en-US")} tokens${capability?.contextLimit ? " (this model's limit)" : ""}. Blank uses the model default.`
       : [capability?.effortReason || (!efforts ? "Effort capabilities are unverified." : !efforts.length ? "This model has no effort override." : ""),
           capability?.contextReason || (!context ? "This client has no verified context override." : context.kind === "compaction"
             ? "Context sets the client compaction threshold, not a thinking budget or output limit."
