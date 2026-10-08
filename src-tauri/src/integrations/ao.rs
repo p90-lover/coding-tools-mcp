@@ -109,7 +109,7 @@ pub const EFFORTS: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
 /// Context windows a card may ask for, in tokens.
 pub const CONTEXT_WINDOWS: std::ops::RangeInclusive<u32> = 4_096..=2_000_000;
 
-/// The route's tuning is one Codex knows, inside the allowed range.
+/// Native Codex keeps its effort names; AO harnesses may also advertise none, auto or max.
 fn route_tuning_valid(route: &Route) -> bool {
     route
         .approval_policy
@@ -125,10 +125,11 @@ fn route_tuning_valid(route: &Route) -> bool {
             .native_permission_profile
             .as_deref()
             .is_none_or(|value| text(value, 128) && value != EXTERNAL_PERMISSION)
-        && route
-            .effort
-            .as_deref()
-            .is_none_or(|effort| EFFORTS.contains(&effort))
+        && route.effort.as_deref().is_none_or(|effort| {
+            EFFORTS.contains(&effort)
+                || (route.harness_id.starts_with("ao:")
+                    && ["none", "auto", "max"].contains(&effort))
+        })
         && route
             .context_window
             .is_none_or(|tokens| CONTEXT_WINDOWS.contains(&tokens))
@@ -643,9 +644,11 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
             ));
         }
         if !route_tuning_valid(&node.route) {
-            return Err(fail(
-                "AO card effort must be minimal, low, medium, high or xhigh, and its context window 4,096 to 2,000,000 tokens",
-            ));
+            return Err(fail(if node.route.harness_id.starts_with("ao:") {
+                "AO harness effort must be minimal, low, medium, high, xhigh, none, auto or max, and its context window 4,096 to 2,000,000 tokens"
+            } else {
+                "AO card effort must be minimal, low, medium, high or xhigh, and its context window 4,096 to 2,000,000 tokens"
+            }));
         }
         // Any role may run on any harness: WebGPT or a CPA model on Native Codex, or an AO harness.
         if node.role != Role::Worker
@@ -2229,6 +2232,51 @@ mod tests {
             "account_id":"chatgpt-web","model":"chatgpt-web/extra-high","permission_profile":":read-only"}))).is_ok());
         assert!(validate(None, &run(json!({"harness_id":"ao:codex","provider_id":"chatgpt-web",
             "account_id":"chatgpt-web","model":"chatgpt-web/pro","permission_profile":":read-only"}))).is_err());
+    }
+
+    #[test]
+    fn ao_route_tuning_allows_extended_efforts_without_changing_native_codex() {
+        for harness in [
+            "ao:codex",
+            "ao:claude-code",
+            "ao:opencode",
+            "ao:gemini",
+            "codex-native",
+        ] {
+            let mut route: Route = serde_json::from_value(json!({
+                "harness_id": harness, "provider_id": "agent-orchestrator",
+                "account_id": "ao-local", "model": "cpa/fixture", "permission_profile": ":ao-default"
+            })).unwrap();
+            assert!(route_tuning_valid(&route));
+            for effort in EFFORTS {
+                route.effort = Some((*effort).into());
+                assert!(route_tuning_valid(&route), "{harness} {effort}");
+            }
+            for effort in ["none", "auto", "max"] {
+                route.effort = Some(effort.into());
+                assert_eq!(
+                    route_tuning_valid(&route),
+                    harness.starts_with("ao:"),
+                    "{harness} {effort}"
+                );
+            }
+            for effort in ["", "unknown", "1024", "HIGH"] {
+                route.effort = Some(effort.into());
+                assert!(!route_tuning_valid(&route), "{harness} {effort}");
+            }
+            route.effort = None;
+            for tokens in [4_096, 2_000_000] {
+                route.context_window = Some(tokens);
+                assert!(route_tuning_valid(&route), "{harness} context {tokens}");
+            }
+            for tokens in [0, 4_095, 2_000_001] {
+                route.context_window = Some(tokens);
+                assert!(!route_tuning_valid(&route), "{harness} context {tokens}");
+            }
+            route.context_window = None;
+            let plain = serde_json::to_value(&route).unwrap();
+            assert!(plain.get("effort").is_none() && plain.get("context_window").is_none());
+        }
     }
 
     #[test]

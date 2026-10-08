@@ -15,7 +15,7 @@ import { AgentOrchestratorTeam } from "./AgentOrchestratorTeam";
 import { chatList, type ChatActivity, type ChatNode } from "./ao-chat";
 import {
   AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, defaultTeam, emptyRoleSettings,
-  cardMeta, harnessLabel, modelLabel, teamForMission, workerRoute, type AoHarness, type AoRoute, type AoTeam, type RoleSettings,
+  cardMeta, harnessLabel, modelLabel, teamForMission, workerRoute, type AoHarness, type AoModelCatalog, type AoModelLoader, type AoRoute, type AoTeam, type RoleSettings,
 } from "./AgentOrchestratorRoleEditor";
 import "./agent-orchestrator.css";
 import { pageHidden } from "./page-visibility";
@@ -397,13 +397,16 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [missionTitle, setMissionTitle] = useState("");
   const [missionPrompt, setMissionPrompt] = useState("");
 
-  const modelCache = useRef(new Map<string, Promise<string[]>>());
-  const loadModels = useCallback((harness: string) => {
+  const modelCache = useRef(new Map<string, ReturnType<AoModelLoader>>());
+  const loadModels = useCallback<AoModelLoader>((harness: string) => {
     const key = JSON.stringify([workspaceId, harness]);
     let pending = modelCache.current.get(key);
     if (!pending) {
-      // Native Codex lists WebGPT plus every CPA model; AO harnesses list their own catalog.
-      pending = moduleCall("models", { harness, workspaceId }).then(result => (Array.isArray(result.models) ? result.models as string[] : []));
+      // Native Codex keeps its model array; AO also carries verified model capabilities.
+      pending = moduleCall("models", { harness, workspaceId }).then(result => {
+        const models = Array.isArray(result.models) ? result.models as string[] : [];
+        return harness.startsWith("ao:") ? { models, capabilities: result.capabilities as AoModelCatalog["capabilities"] } : models;
+      });
       pending.catch(() => modelCache.current.delete(key));
       modelCache.current.set(key, pending);
     }

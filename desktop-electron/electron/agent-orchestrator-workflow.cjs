@@ -225,38 +225,88 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     return { baseUrl: url.origin, key: value.proxyApiKey };
   }
 
+  const tuningEfforts = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "auto"]);
+  const reportedEfforts = values => [...new Set((Array.isArray(values) ? values : [])
+    .map(value => typeof value === "string" ? value : value?.effort)
+    .filter(value => typeof value === "string" && tuningEfforts.has(value)))];
+
+  function modelCapabilities(agent, model, info, viaCpa = false) {
+    // Operating modes and unimplemented generic Chat effort are not reasoning setters.
+    const nativeEffort = agent === "codex" || agent === "claude-code";
+    const efforts = viaCpa || nativeEffort ? reportedEfforts(info?.efforts) : [];
+    const capabilities = { efforts };
+    if (!efforts.length) capabilities.effortReason = viaCpa
+      ? "CPA did not advertise reasoning levels for this model."
+      : "This harness/model has no verified reasoning-effort transport.";
+    const limit = info?.contextLimit;
+    if (Number.isSafeInteger(limit) && limit > 0) capabilities.contextLimit = limit;
+    const base = model.split("(")[0].trim().toLowerCase();
+    const claudeFixedWindow = agent === "claude-code"
+      && (!base || ["default", "sonnet", "opus", "haiku", "fable"].includes(base) || model.toLowerCase().includes("claude") || model.toLowerCase().includes("[1m]"));
+    const slash = model.indexOf("/");
+    const unqualifiedOpenCode = agent === "opencode" && !viaCpa
+      && (slash < 0 || !model.slice(0, slash).trim() || !model.slice(slash + 1).trim());
+    if (GATEWAY_AGENTS.has(agent) && !claudeFixedWindow && !unqualifiedOpenCode && (!limit || limit >= 4096)) {
+      capabilities.contextWindow = { min: 4096, max: Math.min(2000000, limit || 2000000), kind: "context" };
+      capabilities.contextReason = "Client context declaration, not a larger provider limit. Client version/model applicability is checked again at launch.";
+    } else capabilities.contextReason = claudeFixedWindow
+      ? "Claude Code cannot override this recognized model's window while preserving compaction."
+      : unqualifiedOpenCode ? "OpenCode context requires an explicit provider/model."
+      : "This harness/model has no verified context-window setter.";
+    return capabilities;
+  }
+
   async function models({ harness, workspaceId } = {}) {
     if (typeof harness === "string" && harness.startsWith("ao:")) {
-      const items = await harnessService().models(harness.slice(3), workspaceId);
-      // Every CPA pool model can also run on this agent through the local gateway ("cpa/<model>"),
-      // except WebGPT, which only works through the bridge on Native Codex.
+      const agent = harness.slice(3);
+      const items = (await harnessService().models(agent, workspaceId))
+        .filter(item => item.id !== "default" && !item.id.startsWith("chatgpt-web/"));
+      const capabilities = Object.fromEntries(items.map(item => [item.id, modelCapabilities(agent, item.id, item)]));
       let cpa = [];
-      if (GATEWAY_AGENTS.has(harness.slice(3))) {
+      if (GATEWAY_AGENTS.has(agent)) {
         try {
-          cpa = (await models()).models.filter(id => !id.startsWith("chatgpt-web/"))
-            .map(id => `${CPA_MODEL_PREFIX}${id}`);
-        } catch { /* CPA not running: own models only. */ }
+          const catalog = await models();
+          cpa = catalog.models.filter(id => !id.startsWith("chatgpt-web/")).map(id => {
+            const routed = `${CPA_MODEL_PREFIX}${id}`;
+            capabilities[routed] = modelCapabilities(agent, id, catalog.capabilities[id], true);
+            return routed;
+          });
+        } catch { /* CPA not running: keep the agent's own catalog. */ }
       }
-      // An agent may report WebGPT from the user's Codex config; it cannot run it, so it is left out here.
-      // "default" is not offered: it lets the agent pick, and silently change, its own model.
-      return { ok: true, harness, models: [...items.map(item => item.id).filter(id => id !== "default" && !id.startsWith("chatgpt-web/")), ...cpa] };
+      return { ok: true, harness, models: [...new Set([...items.map(item => item.id), ...cpa])], capabilities };
     }
     if (harness === "codex-native") {
-      // Native Codex runs only WebGPT (every tier, Luna and Think included). CPA pool models run on
-      // an AO harness through the gateway ("cpa/<model>").
       return { ok: true, harness, models: [...WEB_TIERS, ...LUNA_TIERS] };
     }
     const { baseUrl, key } = connection();
-    const response = await fetchImpl(`${baseUrl}/v1/models`, {
-      headers: { Authorization: `Bearer ${key}` },
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!response.ok) throw new Error(`CPA model catalog returned HTTP ${response.status}`);
-    const payload = await response.json();
-    const ids = [...new Set((Array.isArray(payload?.data) ? payload.data : [])
-      .map((entry) => entry?.id).filter((id) => typeof id === "string" && id.length <= 128))].slice(0, 100);
+    let rows;
+    // The classic OpenAI list contains only IDs; the enhanced catalog carries capabilities.
+    for (const suffix of ["?client_version=pi", ""]) {
+      try {
+        const response = await fetchImpl(`${baseUrl}/v1/models${suffix}`, {
+          headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(10_000),
+        });
+        if (!response.ok) throw new Error(`CPA model catalog returned HTTP ${response.status}`);
+        const payload = await response.json();
+        rows = Array.isArray(payload?.models) ? payload.models : Array.isArray(payload?.data) ? payload.data : null;
+        if (rows) break;
+        throw new Error("CPA model catalog has an unsupported shape");
+      } catch (error) { if (!suffix) throw error; }
+    }
+    const capabilities = Object.create(null);
+    const ids = [];
+    for (const entry of rows || []) {
+      const id = entry?.slug ?? entry?.id;
+      if (typeof id !== "string" || !id || id.length > 128 || entry.visibility === "hide" || ids.includes(id)) continue;
+      const efforts = reportedEfforts(entry.supported_reasoning_levels ?? entry.thinking?.levels);
+      const limit = entry.context_window ?? entry.context_length;
+      capabilities[id] = { efforts, ...(!efforts.length ? { effortReason: "CPA did not advertise reasoning levels for this model." } : {}),
+        ...(Number.isSafeInteger(limit) && limit > 0 ? { contextLimit: limit } : {}) };
+      ids.push(id);
+      if (ids.length === 100) break;
+    }
     if (!ids.length) throw new Error("CPA has no available models");
-    return { ok: true, models: ids };
+    return { ok: true, models: ids, capabilities };
   }
 
   // Native Codex runs WebGPT/CPA routes in-process; every other worker harness is AO's own.
@@ -277,6 +327,21 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     if (dispatching.has(key)) return { ok: true, waiting: true, reason: "dispatching" };
     dispatching.add(key);
     try {
+      if (node.route.effort || node.route.context_window != null) {
+        const catalog = await models({ harness: node.route.harness_id, workspaceId });
+        const baseModel = node.route.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max)\)$/i, "");
+        const capability = catalog.capabilities[node.route.model] ?? catalog.capabilities[baseModel];
+        if (node.route.effort && !capability?.efforts?.includes(node.route.effort)) {
+          throw new Error("Reasoning effort is not supported by the current model/harness catalog");
+        }
+        if (node.route.context_window != null) {
+          const setting = capability?.contextWindow, tokens = node.route.context_window;
+          const maximum = Math.min(setting?.max ?? 2000000, capability?.contextLimit ?? 2000000);
+          if (!setting || !Number.isSafeInteger(tokens) || tokens < setting.min || tokens > maximum) {
+            throw new Error("Context limit for this model/harness is " + maximum + " tokens or no override is supported");
+          }
+        }
+      }
       const reserved = await requestHeadless("/api/v1/ao/external/reserve", {
         workspace_id: workspaceId, run_id: runId, node_id: node.id,
         expected_revision: expectedRevision, confirm: !background,
@@ -298,13 +363,20 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         }
         // The gateway serves CPA through OpenAI- and Anthropic-compatible endpoints; opencode names
         // models as provider/model, so a CPA model is its OpenAI provider's "openai/<model>".
-        const agentModel = viaCpa && agent === "opencode" ? `openai/${viaCpa}` : viaCpa ?? node.route.model;
+        let wireModel = viaCpa;
+        if (viaCpa && node.route.effort) {
+          if (!tuningEfforts.has(node.route.effort)) throw new Error("Choose a supported CPA reasoning level");
+          // The suffix is session-local; the saved mission model and account remain unchanged.
+          wireModel = viaCpa.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max)\)$/i, "") + "(" + node.route.effort + ")";
+        }
+        const agentModel = wireModel && agent === "opencode" ? `openai/${wireModel}` : wireModel ?? node.route.model;
         session = await harnessService().spawn({ workspaceId, agent, model: agentModel, prompt: reserved.prompt,
           name: node.settings?.name || "AO worker",
           ...(node.route.approval_policy ? { approvalMode: node.route.approval_policy === "never" ? "bypass-permissions"
             : node.route.approvals_reviewer === "auto_review" ? "auto" : "accept-edits" } : {}),
-          ...(viaCpa ? { gateway: { provider: "cpa", model: viaCpa } } : {}),
-          // AO applies effort to the agent's own models; a gateway model skips AO's effort check by design.
+          ...(viaCpa ? { gateway: { provider: "cpa", model: wireModel } } : {}),
+          ...(node.route.context_window != null ? { contextWindow: node.route.context_window } : {}),
+          // Native effort validation stays skipped for foreign models; CPA reads the suffix.
           ...(!viaCpa && node.route.effort ? { effort: node.route.effort } : {}) });
       } catch (error) { failure = error; }
       const saved = await requestHeadless("/api/v1/ao/external/submitted", {

@@ -84,8 +84,8 @@ test("a WebGPT model always gets the Native Codex route", () => {
 // The model list on every other harness also offers WebGPT (from Native Codex's list), so a
 // WebGPT model can be picked anywhere and the card then moves to Native Codex.
 test("every harness lists the WebGPT models and marks that they switch to Native Codex", () => {
-  assert.match(source, /loadModels\(NATIVE_HARNESS\)\.then\(items => items\.filter\(isWebModel\)/);
-  assert.match(source, /setModels\(\[\.\.\.new Set\(\[\.\.\.items, \.\.\.webItems\]\)\]\)/, "no duplicate WebGPT rows");
+  assert.match(source, /loadModels\(NATIVE_HARNESS\)\.then\(items => \(Array\.isArray\(items\) \? items : items\.models\)\.filter\(isWebModel\)/);
+  assert.match(source, /setModels\(\[\.\.\.new Set\(\[\.\.\.catalog\.models, \.\.\.webItems\]\)\]\)/, "no duplicate WebGPT rows");
   assert.match(source, /isWebModel\(model\) \? " · switches to Native Codex"/);
   assert.match(source, /Native Codex runs only WebGPT: choosing a WebGPT model switches to it/);
   // The model select routes the pick through workerRoute (which forces Native Codex for WebGPT
@@ -110,7 +110,7 @@ test("every card describes how it runs, with a custom role in place of the built
   assert.equal(editor.cardMeta({ role: "planner", route, settings: {} }, []), "Native Codex · WebGPT High · effort xhigh · 1M context · Orchestrator");
   assert.equal(editor.cardMeta({ role: "worker", settings: { role_name: "Security auditor" },
     route: { harness_id: "ao:codex", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default", effort: "high" } },
-  [{ id: "ao:codex", label: "Codex" }]), "Codex · CPA · gpt-6-luna · Security auditor", "gateway models show no effort");
+  [{ id: "ao:codex", label: "Codex" }]), "Codex · CPA · gpt-6-luna · effort high · Security auditor", "AO cards show requested tuning");
   assert.match(source, /<option value="custom:">Custom role…<\/option>/);
 });
 
