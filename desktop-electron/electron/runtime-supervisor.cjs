@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
-const { spawn } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { redactText } = require("./logging.cjs");
 const {
@@ -391,6 +391,37 @@ function validateConfig(config, descriptorPath, platform = process.platform, lau
   return config;
 }
 
+// Executable, command line and parent of a process, or null when unknown. Windows only: elsewhere
+// an unrecognised bridge stays an external owner, as before.
+function windowsProcessInfo(pid) {
+  if (process.platform !== "win32" || !Number.isInteger(pid) || pid < 1) return null;
+  const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT || "C:\\Windows";
+  const powershell = path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const script = `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; `
+    + "if ($p) { [pscustomobject]@{ executablePath = $p.ExecutablePath; commandLine = $p.CommandLine; parentPid = [int]$p.ParentProcessId } | ConvertTo-Json -Compress }";
+  const result = spawnSync(powershell, ["-NoProfile", "-NonInteractive", "-Command", script],
+    { encoding: "utf8", windowsHide: true, timeout: 10_000 });
+  if (result.error || result.status !== 0 || !result.stdout.trim()) return null;
+  try {
+    const info = JSON.parse(result.stdout.trim());
+    return { executablePath: String(info.executablePath || ""), commandLine: String(info.commandLine || ""), parentPid: Number(info.parentPid) };
+  } catch {
+    return null;
+  }
+}
+
+function samePath(left, right) {
+  const real = (value) => {
+    try {
+      return fs.realpathSync.native(value);
+    } catch {
+      return path.resolve(value);
+    }
+  };
+  const key = (value) => (process.platform === "win32" ? real(value).toLowerCase() : real(value));
+  return key(left) === key(right);
+}
+
 class RuntimeSupervisor {
   constructor({
     app,
@@ -405,6 +436,7 @@ class RuntimeSupervisor {
     runtimeInvocationFactory = runtimeInvocation,
     getRuntimeEnvironment = () => ({}),
     persistentBridge = false,
+    processInfo = windowsProcessInfo,
   }) {
     this.app = app;
     this.logger = logger;
@@ -419,6 +451,7 @@ class RuntimeSupervisor {
     this.launcherProfile = launcherProfile;
     this.publishOperation = publishOperation;
     this.runtimeInvocationFactory = runtimeInvocationFactory;
+    this.processInfo = typeof processInfo === "function" ? processInfo : () => null;
     this.getRuntimeEnvironment = typeof getRuntimeEnvironment === "function"
       ? getRuntimeEnvironment
       : () => ({});
@@ -1947,6 +1980,31 @@ class RuntimeSupervisor {
     });
   }
 
+  // True only for this install's own runtime (its bun.exe serving its app/cli.js) whose launcher
+  // is gone. A live parent, another executable or another entrypoint is never ours to stop.
+  isOwnOrphanedBridge(pid) {
+    if (!Number.isInteger(pid) || pid < 1 || pid === process.pid) return false;
+    let expected;
+    try {
+      expected = this.runtimeCommand(["serve"]);
+    } catch {
+      return false;
+    }
+    const info = this.processInfo(pid);
+    if (!info?.executablePath || !info.commandLine) return false;
+    if (Number.isInteger(info.parentPid) && info.parentPid > 0 && processRunning(info.parentPid)) return false;
+    if (!samePath(info.executablePath, expected.executable)) return false;
+    const command = info.commandLine.trim();
+    if (!/(^|\s)serve$/.test(command)) return false;
+    const entry = expected.args[0];
+    const forms = new Set([entry]);
+    try {
+      forms.add(fs.realpathSync.native(entry));
+    } catch {}
+    const haystack = process.platform === "win32" ? command.toLowerCase() : command;
+    return [...forms].some((form) => haystack.includes(process.platform === "win32" ? form.toLowerCase() : form));
+  }
+
   async stopStaleOwnedRuntime(config) {
     const state = this.readState();
     if (!state) return false;
@@ -1962,8 +2020,16 @@ class RuntimeSupervisor {
     const daemonRunning = health?.service === "codex-chatgpt-web"
       && health?.mode === config.mode
       && health?.version === config.releaseVersion;
+    let daemonPid = state.daemonPid;
     if (daemonRunning && health.pid !== state.daemonPid) {
-      throw new Error("The process on the Responses port does not match the stale launcher marker");
+      // A launcher stopped without its shutdown (an install, a crash) leaves its bridge running
+      // under a marker a later launch overwrote. Recover it only when it is provably this
+      // install's own bridge whose launcher is gone; anything else stays an external owner.
+      if (!this.isOwnOrphanedBridge(health.pid)) {
+        throw new Error("The process on the Responses port does not match the stale launcher marker");
+      }
+      this.logger.warn("runtime.orphaned_bridge_detected", { pid: health.pid, markerPid: state.daemonPid ?? null });
+      daemonPid = health.pid;
     }
     if (!daemonRunning && processRunning(state.daemonPid)) {
       throw new Error(
@@ -2002,7 +2068,7 @@ class RuntimeSupervisor {
 
     this.logger.warn("runtime.stale_owner_recovery_started", {
       ownerPid: state.ownerPid,
-      daemonPid: daemonRunning ? state.daemonPid : null,
+      daemonPid: daemonRunning ? daemonPid : null,
       tunnelPid: managedTunnelRunning ? state.tunnelPid : null,
     });
     if (daemonRunning) {
@@ -2011,7 +2077,7 @@ class RuntimeSupervisor {
         drained = await this.acquireDrain(config);
         const shutdown = await this.control(config, "shutdown");
         if (shutdown.status !== "ok") throw new Error("stale daemon did not acknowledge graceful shutdown");
-        await this.waitForProcessExit("stale daemon", state.daemonPid);
+        await this.waitForProcessExit("stale daemon", daemonPid);
         await this.waitForPortRelease(config);
       } catch (error) {
         if (drained) {
