@@ -47,6 +47,15 @@ const TURN_TAB_BOOTSTRAP_TIMEOUT_MS = 120_000;
 const RETAINED_TURN_TAB_TTL_MS = 30 * 60 * 1000;
 const BROWSER_NAVIGATION_TIMEOUT_MS = 60_000;
 const CHATGPT_AUTH_SESSION_TIMEOUT_MS = 5_000;
+function authenticatedChatGptSession(payload, now = Date.now()) {
+  const user = payload?.user;
+  if (!user || typeof user !== "object" || Array.isArray(user) || !Object.keys(user).length) return false;
+  if (payload.error !== undefined && payload.error !== null && payload.error !== "") return false;
+  return payload.expires === undefined || payload.expires === null
+    || (typeof payload.expires === "string" && Number.isFinite(Date.parse(payload.expires))
+      && Date.parse(payload.expires) > now);
+}
+
 const WINDOW_VISIBILITY_EVENTS = ["show", "hide", "minimize", "restore"];
 const CHATGPT_BACKEND_REQUEST_FILTER = { urls: [`${CHATGPT_ORIGIN}/backend-api/*`] };
 const ZOOM_FACTORS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
@@ -2775,6 +2784,29 @@ class BrowserHost {
     return tracked;
   }
 
+  async authenticationReadiness() {
+    requireAutomaticBrowserInspection(this, "ChatGPT authentication readiness");
+    const contents = this.view?.webContents;
+    if (!contents || contents.isDestroyed() || typeof contents.session?.fetch !== "function") {
+      return { authenticated: null, ready: false };
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), CHATGPT_AUTH_SESSION_TIMEOUT_MS);
+    try {
+      const response = await contents.session.fetch(CHATGPT_ORIGIN + "/api/auth/session", {
+        credentials: "include", cache: "no-store", redirect: "manual",
+        headers: { accept: "application/json" }, signal: controller.signal,
+      });
+      if (response.status === 401) return { authenticated: false, ready: true };
+      if (!response.ok || response.url !== CHATGPT_ORIGIN + "/api/auth/session"
+        || !response.headers.get("content-type")?.includes("application/json")) {
+        return { authenticated: null, ready: false };
+      }
+      return { authenticated: authenticatedChatGptSession(await response.json()), ready: true };
+    } catch { return { authenticated: null, ready: false }; }
+    finally { clearTimeout(timeout); }
+  }
+
   async probeAuthentication() {
     requireAutomaticBrowserInspection(this, "ChatGPT authentication probe");
     if (!this.view || this.view.webContents.isDestroyed()) return this.snapshot();
@@ -2824,19 +2856,7 @@ class BrowserHost {
             && response.headers.get("content-type")?.includes("application/json")
             ? await response.json()
             : null;
-          const user = payload?.user && typeof payload.user === "object" && !Array.isArray(payload.user)
-            ? payload.user
-            : null;
-          const sessionHasUser = user !== null && Object.keys(user).length > 0;
-          const sessionHasNoError = payload?.error === undefined || payload.error === null || payload.error === "";
-          const sessionExpiryIsValid = payload?.expires === undefined || payload.expires === null
-            ? true
-            : typeof payload.expires === "string"
-              && Number.isFinite(Date.parse(payload.expires))
-              && Date.parse(payload.expires) > Date.now();
-          sessionAuthenticated = sessionHasUser
-            && sessionHasNoError
-            && sessionExpiryIsValid;
+          sessionAuthenticated = (${authenticatedChatGptSession.toString()})(payload);
         } catch {}
         finally { clearTimeout(timeout); }
       }

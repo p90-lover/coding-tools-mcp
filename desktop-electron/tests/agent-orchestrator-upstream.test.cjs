@@ -2,6 +2,7 @@
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const http = require("node:http");
 const test = require("node:test");
@@ -45,6 +46,113 @@ test("upstream AO gateway runs trusted UI requests automatically and blocks untr
   } finally {
     await gateway.close();
     await new Promise((resolve) => daemon.close(resolve));
+  }
+});
+
+
+/** The real observe() with its helpers, run against a fake AO API. */
+function observeHarness(context) {
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("    async observe(id) {");
+  const end = source.indexOf("    async interrupt(id)", start);
+  const method = source.slice(start, end).trim().replace(/,$/, "");
+  const helpers = source.slice(source.indexOf("  async function chatHostGone"), source.indexOf("  // Mission-owned AO calls."));
+  const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
+  const states = source.match(/const TERMINAL_TURN_STATES = .*;/)[0];
+  return vm.runInNewContext(states + helpers + identity + "({" + method + "})", {
+    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"),
+    observeTui: async () => { throw new Error("not a TUI fixture"); }, ...context,
+  });
+}
+
+test("actual upstream observe exposes bounded current streaming output separately from terminal evidence", async () => {
+  let turn = "owned-turn";
+  const messages = [
+    { role: "assistant", turnId: "other-turn", streaming: true, text: "OTHER_TURN_SECRET" },
+    { role: "user", turnId: turn, text: "user message is not output" },
+    { role: "assistant", turnId: turn, streaming: false, text: "verified part" },
+    { role: "assistant", turnId: turn, streaming: true, text: "streaming partial " + "界".repeat(5000) },
+  ];
+  const upstream = observeHarness({
+    internalApi: async (method, endpoint) => {
+      assert.equal(method, "GET");
+      if (endpoint === "/api/v1/sessions/owned-session") return { session: { id: "owned-session", mode: "chat", status: "working" } };
+      if (endpoint === "/api/v1/sessions/owned-session/conversation?limit=100") return { turns: [{ id: turn, state: "running" }], messages };
+      throw new Error("Session is not owned");
+    },
+  });
+  const observed = await upstream.observe("owned-session");
+  assert.equal(observed.answer, "verified part", "streaming must not become terminal answer evidence");
+  assert.match(observed.liveOutput, /streaming partial/);
+  assert.ok(Buffer.byteLength(observed.liveOutput, "utf8") <= 4096);
+  assert.doesNotMatch(observed.liveOutput, /OTHER_TURN_SECRET|user message/);
+  turn = "new-turn";
+  const current = await upstream.observe("owned-session");
+  assert.equal(current.liveOutput, "", "old turn output is not current output");
+  await assert.rejects(upstream.observe("bad/session"), /valid AO session ID/);
+});
+
+test("observe returns the current turn's reasoning, tool calls and messages in order", async () => {
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100") ? {
+      turns: [{ id: "t", state: "running" }],
+      messages: [
+        { id: "m0", role: "user", turnId: "t", sequence: 1, text: "the prompt" },
+        { id: "m1", role: "assistant", turnId: "t", sequence: 4, text: "Checking the files", streaming: true },
+        { id: "old", role: "assistant", turnId: "earlier", sequence: 0, text: "previous turn" },
+      ],
+      activities: [
+        { id: "a2", turnId: "t", sequence: 3, activityKind: "command", status: "running", summary: "git status" },
+        { id: "a1", turnId: "t", sequence: 2, activityKind: "reasoning", status: "completed", summary: "Reasoning" },
+      ],
+    } : { session: { id: "s", mode: "chat", status: "working" } },
+  });
+  const observed = await upstream.observe("s");
+  assert.deepEqual(JSON.parse(JSON.stringify(observed.timeline)), [
+    { id: "a1", sequence: 2, kind: "reasoning", status: "completed", text: "Reasoning" },
+    { id: "a2", sequence: 3, kind: "command", status: "running", text: "git status" },
+    { id: "m1", sequence: 4, kind: "message", status: "running", text: "Checking the files" },
+  ], "the prompt and earlier turns are left out");
+});
+
+test("a running turn whose chat host is gone is interrupted, even when its PID was reused", async () => {
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ct-ao-host-"));
+  const closed = await new Promise(resolve => { const probe = require("node:net").createServer().listen(0, "127.0.0.1", () => {
+    const { port } = probe.address(); probe.close(() => resolve(port)); }); });
+  const live = require("node:net").createServer().listen(0, "127.0.0.1");
+  await new Promise(resolve => live.once("listening", resolve));
+  const hostFile = path.join(dataRoot, "chat-hosts", "s", "host.json");
+  fs.mkdirSync(path.dirname(hostFile), { recursive: true });
+  const calls = [];
+  let turnState = "running";
+  const upstream = observeHarness({ dataRoot,
+    internalApi: async (method, endpoint) => {
+      calls.push(`${method} ${endpoint}`);
+      if (endpoint.endsWith("/conversation?limit=100")) return { turns: [{ id: "t", state: turnState }], messages: [] };
+      if (endpoint.endsWith("/interrupt")) return {};
+      return { session: { id: "s", mode: "chat", status: "working" } };
+    },
+  });
+  try {
+    // The PID now belongs to this test process, as a reused PID would; only the address counts.
+    fs.writeFileSync(hostFile, JSON.stringify({ pid: process.pid, address: `127.0.0.1:${live.address().port}` }));
+    assert.equal((await upstream.observe("s")).turnState, "running", "a listening host is alive");
+    fs.writeFileSync(hostFile, JSON.stringify({ pid: process.pid, address: `127.0.0.1:${closed}` }));
+    const orphan = await upstream.observe("s");
+    assert.equal(orphan.turnState, "interrupted");
+    assert.match(orphan.error, /retry this card/);
+    assert.ok(calls.includes("POST /api/v1/sessions/s/conversation/interrupt"), "AO settles the turn through its own interrupt");
+    // A later read sees the settled turn; it still names the restart and does not interrupt again.
+    turnState = "interrupted"; calls.length = 0;
+    assert.match((await upstream.observe("s")).error, /the app restarted/);
+    assert.ok(!calls.some(call => call.endsWith("/interrupt")));
+    // A turn the user stopped keeps its live host: a plain interruption.
+    fs.writeFileSync(hostFile, JSON.stringify({ pid: process.pid, address: `127.0.0.1:${live.address().port}` }));
+    assert.equal((await upstream.observe("s")).error, undefined);
+  } finally {
+    live.close();
+    fs.rmSync(dataRoot, { recursive: true, force: true });
   }
 });
 

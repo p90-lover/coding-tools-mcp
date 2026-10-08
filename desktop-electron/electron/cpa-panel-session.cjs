@@ -8,6 +8,8 @@ const CPA_ORIGIN = "http://127.0.0.1:8317";
 const CPA_HELPER_KEY_STORE = "cpaHelper.managementKey";
 const CPA_HELPER_RESOURCE_PREFIX = "/v0/resource/plugins/cpa-helper/";
 const CPA_HELPER_API_PREFIX = "/v0/management/cpa-helper/";
+const CLINE_RESOURCE_PREFIX = "/v0/resource/plugins/cline-pass-switcher/";
+const CLINE_API_PREFIX = "/v0/management/cline-pass-switcher/";
 
 // localStorage entries seeded into the managed CPA origin. Values carry only the
 // opaque session marker; the real key is swapped in by the main-process header hook.
@@ -59,10 +61,11 @@ function installCpaPanelSession({ webContents, webFrameMain, getConnection, logg
       const target = new URL(url);
       return isManagedPanel(frame.parent)
         && location.origin === origin
-        && location.pathname.startsWith(CPA_HELPER_RESOURCE_PREFIX)
+        && (location.pathname.startsWith(CPA_HELPER_RESOURCE_PREFIX) || location.pathname.startsWith(CLINE_RESOURCE_PREFIX))
         && !location.username && !location.password
         && target.origin === origin
-        && target.pathname.startsWith(CPA_HELPER_API_PREFIX);
+        && target.pathname.startsWith(location.pathname.startsWith(CPA_HELPER_RESOURCE_PREFIX)
+          ? CPA_HELPER_API_PREFIX : CLINE_API_PREFIX);
     } catch {
       return false;
     }

@@ -87,6 +87,7 @@ function createGptBrowserHost({
   }
 
   const pages = new Map(); // id -> { view, url, title, loading, usedAt }
+  const pendingPages = new Map(); // id -> shared page creation promise
   let surfaceActive = false;
   let bounds = null;
   let attachedId = null;
@@ -175,22 +176,34 @@ function createGptBrowserHost({
   async function ensurePage(id, initialUrl = HOME_URL) {
     const existing = pages.get(id);
     if (existing && !existing.view.webContents.isDestroyed()) return existing;
-    const partition = partitionFor(id);
-    const browserSession = sessionFor(partition);
-    browserSession.setUserAgent(cleanUserAgent(browserSession.getUserAgent()));
-    await prepareSession(browserSession);
-    const view = createView(partition);
-    const page = { view, url: initialUrl, title: "ChatGPT", loading: true, usedAt: Date.now() };
-    pages.set(id, page);
-    bindPage(id, page);
-    void view.webContents.loadURL(initialUrl).catch((error) => {
-      logger?.warn?.("gpt_browser.load_failed", { message: error instanceof Error ? error.message : String(error) });
-    });
-    trimLiveViews();
-    return page;
+    if (pendingPages.has(id)) return pendingPages.get(id);
+    // Mount and slot-ref layout effects can activate the same account while its proxy is preparing.
+    const pending = (async () => {
+      const partition = partitionFor(id);
+      const browserSession = sessionFor(partition);
+      browserSession.setUserAgent(cleanUserAgent(browserSession.getUserAgent()));
+      await prepareSession(browserSession);
+      if (pendingPages.get(id) !== pending) throw new Error("GPT Browser page creation was cancelled");
+      const view = createView(partition);
+      const page = { view, url: initialUrl, title: "ChatGPT", loading: true, usedAt: Date.now() };
+      pages.set(id, page);
+      bindPage(id, page);
+      void view.webContents.loadURL(initialUrl).catch((error) => {
+        logger?.warn?.("gpt_browser.load_failed", { message: error instanceof Error ? error.message : String(error) });
+      });
+      trimLiveViews();
+      return page;
+    })();
+    pendingPages.set(id, pending);
+    try {
+      return await pending;
+    } finally {
+      if (pendingPages.get(id) === pending) pendingPages.delete(id);
+    }
   }
 
   function unload(id) {
+    pendingPages.delete(id);
     const page = pages.get(id);
     if (!page) return;
     if (attachedId === id) { detachView(page.view); attachedId = null; }
@@ -295,6 +308,7 @@ function createGptBrowserHost({
       place();
     },
     dispose() {
+      pendingPages.clear();
       for (const id of [...pages.keys()]) unload(id);
     },
   };

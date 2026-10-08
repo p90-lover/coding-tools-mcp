@@ -5,6 +5,7 @@ const path = require("node:path");
 const test = require("node:test");
 
 const desktopRoot = path.resolve(__dirname, "..");
+const { setImmediate: nextTurn } = require("node:timers/promises");
 
 function jsonSequenceFixture({ provider, route, created, existing = [], models = [] }) {
   const requests = [];
@@ -176,6 +177,68 @@ test("timed-out CPA OAuth cancels its management session", async () => {
   assert.ok(requests.some((request) => (
     request.pathname === "/v0/management/oauth-session" && request.method === "DELETE"
   )));
+});
+
+test("cancelled CPA OAuth stops polling, deletes its session and closes its browser", async () => {
+  const { startCpaAccountLogin } = require("../electron/cpa-oauth-adapter.cjs");
+  const controller = new AbortController();
+  const requests = [];
+  let closed = 0;
+  const pending = startCpaAccountLogin({
+    adapterId: "cpa-antigravity", signal: controller.signal, timeoutMs: 40, pollIntervalMs: 1,
+    requestJson: async (pathname, options = {}) => {
+      requests.push([pathname, options.method]);
+      if (pathname.endsWith("/auth-files")) return { files: [] };
+      if (pathname.includes("antigravity-auth-url")) return { status: "ok", state: "cancel-state", url: "https://accounts.google.com/o/oauth2/auth" };
+      if (options.method === "DELETE") return { status: "ok" };
+      return { status: "wait" };
+    },
+    openExternal: async (_url, options) => {
+      assert.equal(options?.signal, controller.signal);
+      return { close: () => { closed += 1; } };
+    },
+  });
+  await nextTurn();
+  controller.abort();
+  await assert.rejects(pending, { name: "AbortError" });
+  assert.equal(closed, 1);
+  assert.equal(requests.filter(([pathname, method]) => pathname.includes("cancel-state") && method === "DELETE").length, 1);
+});
+
+test("cancel during OAuth initiation still deletes the session returned by CPA without opening a browser", async () => {
+  const { startCpaAccountLogin } = require("../electron/cpa-oauth-adapter.cjs");
+  const controller = new AbortController();
+  const deleted = [];
+  let finish;
+  const pending = startCpaAccountLogin({
+    adapterId: "cpa-antigravity", signal: controller.signal,
+    requestJson: async (pathname, options = {}) => {
+      if (pathname.endsWith("/auth-files")) return { files: [] };
+      if (pathname.includes("antigravity-auth-url")) return new Promise((resolve, reject) => {
+        finish = () => resolve({ status: "ok", state: "started-after-cancel", url: "https://accounts.google.com/o/oauth2/auth" });
+        options.signal?.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+      });
+      if (options.method === "DELETE") { deleted.push(pathname); return {}; }
+      assert.fail("no polling after cancellation");
+    },
+    openExternal: async () => assert.fail("cancelled initiation cannot open a browser"),
+  });
+  const rejected = assert.rejects(pending, { name: "AbortError" });
+  await nextTurn();
+  controller.abort();
+  finish();
+  await rejected;
+  assert.deepEqual(deleted, ["/v0/management/oauth-session?state=started-after-cancel"]);
+});
+
+test("a browser-open failure also disposes the CPA OAuth session", async () => {
+  const { startCpaAccountLogin } = require("../electron/cpa-oauth-adapter.cjs");
+  const fixture = jsonSequenceFixture({ provider: "codex", route: "codex-auth-url", created: { name: "new.json", provider: "codex" } });
+  await assert.rejects(startCpaAccountLogin({
+    adapterId: "cpa-codex", requestJson: fixture.requestJson,
+    openExternal: async () => { throw new Error("proxy unavailable"); },
+  }), /proxy unavailable/);
+  assert.ok(fixture.requests.some(entry => entry.pathname.endsWith("/oauth-session") && entry.method === "DELETE"));
 });
 
 for (const [adapterId, route, provider] of [

@@ -1,0 +1,48 @@
+"use strict";
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const { BrowserHost } = require("../electron/browser-host.cjs");
+
+function fixture(payload, response = {}) {
+  const calls = [];
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    getBrowserInteractionMode: () => "automatic",
+    state: { authenticated: true, url: "data:text/html,#idle" },
+    view: { webContents: {
+      isDestroyed: () => false,
+      getURL: () => "data:text/html,#idle",
+      loadURL: () => { throw new Error("readiness must not navigate"); },
+      session: { fetch: async (url, options) => {
+        calls.push({ url, options });
+        return { ok: true, status: 200, url, headers: { get: () => "application/json" },
+          json: async () => payload, ...response };
+      } },
+    } },
+  });
+  return { host, calls };
+}
+test("browser readiness freshly checks idle session without navigation or cached authentication", async () => {
+  const world = fixture({ user: { id: "test-user" }, expires: new Date(Date.now()+60_000).toISOString() });
+  assert.equal((await world.host.authenticationReadiness()).authenticated, true);
+  assert.equal(world.calls[0].url, "https://chatgpt.com/api/auth/session");
+  assert.equal(world.calls[0].options.cache, "no-store");
+  assert.equal(world.calls[0].options.redirect, "manual");
+  assert.equal((await fixture({}).host.authenticationReadiness()).authenticated, false);
+});
+test("invalid or expired sessions never become authenticated", async () => {
+  for (const payload of [{user:{}},{user:[]},{user:{id:"x"},error:"expired"},
+    {user:{id:"x"},expires:"invalid"},{user:{id:"x"},expires:"2000-01-01T00:00:00Z"}]) {
+    assert.equal((await fixture(payload).host.authenticationReadiness()).authenticated, false);
+  }
+});
+test("unavailable, redirected or non-JSON readiness stays unknown", async () => {
+  for (const response of [{ok:false,status:503},{url:"https://auth.openai.com/login"},
+    {headers:{get:()=>"text/html"}}]) {
+    const result=await fixture({user:{id:"x"}},response).host.authenticationReadiness();
+    assert.equal(result.authenticated,null);
+    assert.equal(result.ready,false);
+  }
+  const world=fixture({user:{id:"x"}});
+  world.host.view.webContents.session.fetch=async()=>{throw new Error("Offline")};
+  assert.equal((await world.host.authenticationReadiness()).authenticated,null);
+});

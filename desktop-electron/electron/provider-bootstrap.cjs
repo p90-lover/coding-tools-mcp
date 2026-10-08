@@ -91,6 +91,7 @@ function installProviderNetwork({
   const controllerPromise = providerNetworkControllerPromise;
 
   app.on("login", (event, _webContents, _authenticationDetails, authInfo, callback) => {
+    if (_webContents?.__codingToolsAntigravityAuth === true) return;
     controller?.handleProxyLogin(event, authInfo, callback);
   });
 

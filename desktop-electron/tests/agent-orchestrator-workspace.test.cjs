@@ -2,6 +2,25 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const { createAoWorkspaceBoard } = require("../electron/agent-orchestrator-workspace.cjs");
 
+test("read-only board enrichment uses the resolved scope without registering or recursively rereading missions", async () => {
+  const calls=[];
+  const bridge=createAoWorkspaceBoard({platform:"win32",realpath:async value=>value,
+    listWorkspaces:async()=>[{id:"ws",path:"C:\\work\\a"}],
+    listProjects:async()=>[{id:"p",path:"C:\\work\\a"}],
+    createProject:()=>{throw Error("read must not register")},
+    recordDefaultBranch:()=>{throw Error("read must not mutate git")},
+    missionCall:async operation=>{calls.push(operation);return operation==="runs"
+      ? {ok:true,runs:[{id:"r"}],task_lifecycle:[{task_id:"t",revision:3}]}
+      : {ok:true,revision:2,tasks:[{id:"t"}]};},
+    readAccounting:async scope=>{assert.deepEqual(scope,{workspaceId:"ws",projectId:"p",runs:[{id:"r"}]});
+      return {r:{processedTokens:15,cost:{source:"CPA Helper",totalNanos:1}}};}
+  });
+  const board=await bridge.readWorkspace("ws");
+  assert.equal(board.accounting.r.processedTokens,15);
+  assert.equal(board.taskLifecycle[0].revision,3);
+  assert.deepEqual(calls,["board","runs"]);
+});
+
 function fixture(projects = [{ id: "project-a", path: "C:\\work\\a" }], repository = true) {
   const calls = [];
   const bridge = createAoWorkspaceBoard({

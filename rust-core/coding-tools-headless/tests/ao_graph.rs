@@ -2,25 +2,38 @@ use coding_tools_core::{data::AppData, integrations::ao::*};
 use serde_json::json;
 
 fn fixture() -> (AppData, Run) {
-    let mut data = AppData::default();
-    data.control_board = serde_json::from_value(json!({"revision":2,"tasks":[{
-        "id":"task","workspace_id":"qa","title":"Mission","description":"",
-        "state":"backlog","step":0,"created_at":1,"updated_at":1,"evidence":[]
-    }]}))
-    .unwrap();
+    let data = AppData {
+        control_board: serde_json::from_value(json!({"revision":2,"tasks":[{
+            "id":"task","workspace_id":"qa","title":"Mission","description":"",
+            "state":"backlog","step":0,"created_at":1,"updated_at":1,"evidence":[]
+        }]}))
+        .unwrap(),
+        ..AppData::default()
+    };
     let web = Route {
         harness_id: "codex-native".into(),
         provider_id: "chatgpt-web".into(),
         account_id: "web-account".into(),
         model: "chatgpt-web/high".into(),
         permission_profile: ":read-only".into(),
+        native_permission_profile: None,
+        approval_policy: None,
+        approvals_reviewer: None,
+        effort: None,
+        context_window: None,
     };
+    // A CPA model on an AO harness runs through the gateway ("cpa/<model>").
     let worker = Route {
-        harness_id: "codex-native".into(),
-        provider_id: "cliproxyapi-antigravity".into(),
-        account_id: "worker-account".into(),
-        model: "gemini-3.8-flash-high".into(),
-        permission_profile: ":workspace".into(),
+        harness_id: "ao:claude-code".into(),
+        provider_id: "agent-orchestrator".into(),
+        account_id: "ao-local".into(),
+        model: "cpa/gemini-3.8-flash-high".into(),
+        permission_profile: ":ao-default".into(),
+        native_permission_profile: None,
+        approval_policy: None,
+        approvals_reviewer: None,
+        effort: None,
+        context_window: None,
     };
     // Built from JSON so fields added to Node and Run later (all optional) keep this fixture valid.
     let node = |id: &str, role: Role, parents: Vec<&str>, route: Route| -> Node {

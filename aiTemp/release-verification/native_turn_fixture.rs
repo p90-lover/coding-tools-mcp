@@ -276,9 +276,13 @@ fn native_bridge_actual_turns_against_loopback_fixture() {
             allow_model_usage: true,
             allow_command_execution: false,
             permission_profile: default_permission_profile(),
+            approval_policy: None,
+            approvals_reviewer: None,
             model: "mock-model".into(),
             request_limit: 6,
             lifetime_seconds: 120,
+            effort: None,
+            context_window: None,
         },
     )
     .unwrap();

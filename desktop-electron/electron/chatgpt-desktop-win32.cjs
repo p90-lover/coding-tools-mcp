@@ -32,6 +32,7 @@ public static class CgdWin {
   [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
 
   const int GWL_EXSTYLE = -20, GWLP_HWNDPARENT = -8;
+  const int SW_SHOWNOACTIVATE = 4;
   const long WS_EX_APPWINDOW = 0x40000, WS_EX_TOOLWINDOW = 0x80;
   const uint GW_OWNER = 4, WM_CLOSE = 0x10;
   const uint SWP_NOZORDER = 0x4, SWP_NOACTIVATE = 0x10, SWP_FRAMECHANGED = 0x20, SWP_SHOWWINDOW = 0x40;
@@ -66,8 +67,8 @@ public static class CgdWin {
   public static void Dock(long hwnd, long owner) {
     PerMonitor();
     IntPtr h = new IntPtr(hwnd);
+    if (IsZoomed(h) || IsIconic(h)) ShowWindow(h, SW_SHOWNOACTIVATE);
     ShowWindow(h, 0);
-    if (IsZoomed(h) || IsIconic(h)) ShowWindow(h, 9);
     long ex = GetWindowLongPtr(h, GWL_EXSTYLE).ToInt64();
     SetWindowLongPtr(h, GWL_EXSTYLE, new IntPtr((ex & ~WS_EX_APPWINDOW) | WS_EX_TOOLWINDOW));
     SetWindowLongPtr(h, GWLP_HWNDPARENT, new IntPtr(owner));
@@ -89,7 +90,7 @@ public static class CgdWin {
     PerMonitor();
     IntPtr handle = new IntPtr(hwnd);
     if (!IsWindow(handle)) return false;
-    if (IsZoomed(handle) || IsIconic(handle)) ShowWindow(handle, 9);
+    if (IsZoomed(handle) || IsIconic(handle)) ShowWindow(handle, SW_SHOWNOACTIVATE);
     RECT r; GetWindowRect(handle, out r);
     bool same = IsWindowVisible(handle) && r.Left == x && r.Top == y && r.Right - r.Left == w && r.Bottom - r.Top == h;
     if (same) return false;

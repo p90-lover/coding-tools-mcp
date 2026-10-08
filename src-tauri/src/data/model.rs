@@ -21,6 +21,8 @@ pub struct AppData {
     #[serde(default)]
     pub ao_runs: Vec<crate::integrations::ao::Run>,
     #[serde(default)]
+    pub ao_task_lifecycle: Vec<crate::integrations::ao_lifecycle::TaskLifecycle>,
+    #[serde(default)]
     pub ao_teams: Vec<crate::integrations::ao_team::Team>,
     #[serde(default)]
     pub ao_limits: crate::integrations::ao_team::Limits,

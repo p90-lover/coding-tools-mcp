@@ -2,7 +2,7 @@ export type Language = "en" | "zh-CN" | "zh-TW" | "ja";
 export type RefreshPart = "ui" | "bridge" | "mcp" | "agent-orchestrator" | "cpa" | "headless" | "backend" | "all" | "app";
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "gpt-browser" | "chatgpt-desktop" | "email" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "antigravity-cli" | "providers" | "integrations" | "cpa" | "paseo" | "anneal" | "network" | "activity" | "settings";
+export type Surface = "browser" | "gpt-browser" | "chatgpt-desktop" | "email" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "agent-orchestrator-teams" | "antigravity-cli" | "providers" | "integrations" | "cpa" | "paseo" | "anneal" | "network" | "activity" | "settings";
 
 export type ProviderAuth = "oauth" | "api_key" | "browser_session" | "local_proxy";
 export type ProviderAccountStatus = "pending" | "connected" | "expired" | "error" | "disabled";
@@ -652,6 +652,8 @@ export interface LauncherApi {
   setGptBrowserSurfaceActive(active: boolean): Promise<GptBrowserStatus>;
   setGptBrowserBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<boolean>;
   onGptBrowserChanged(listener: (status: GptBrowserStatus) => void): () => void;
+  /** AO pushed a change: session ids whose conversation or state moved, "<workspace>:<run>" run keys. */
+  onAoChanged?(listener: (change: { sessions: string[]; runs: string[] }) => void): () => void;
   chatGptDesktopStatus(): Promise<ChatGptDesktopStatus>;
   openChatGptDesktop(slotId: string): Promise<ChatGptDesktopStatus>;
   newChatGptDesktopSignIn(): Promise<ChatGptDesktopStatus>;
@@ -682,6 +684,10 @@ export interface LauncherApi {
   openSocial(target: "github" | "x"): Promise<LauncherState>;
   completeOnboarding(language: Language, browserInteractionMode: BrowserInteractionMode): Promise<LauncherState>;
   openExternal(url: string): Promise<boolean>;
+  /** The file system path of a dropped or picked file, or "" when unknown. */
+  filePath?(file: File): string;
+  /** Opens an existing folder in the system file manager. */
+  openFolder?(folder: string): Promise<boolean>;
   setBrowserBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<boolean>;
   setBrowserSurfaceActive(active: boolean): Promise<BrowserState | true>;
   showBrowser(): Promise<BrowserState>;

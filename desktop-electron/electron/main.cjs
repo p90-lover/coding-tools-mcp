@@ -25,7 +25,7 @@ const {
 } = require("electron");
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
 const { createChatGptDesktopHost } = require("./chatgpt-desktop.cjs");
-const { createGptBrowserHost } = require("./gpt-browser.cjs");
+const { createGptBrowserHost, cleanUserAgent } = require("./gpt-browser.cjs");
 const { createEmailHost } = require("./email-host.cjs");
 const { installKeysmithIpc } = require("./keysmith-ipc.cjs");
 const { parseMessage, sanitizeHtml } = require("./email-mime.cjs");
@@ -160,7 +160,11 @@ let upstreamToolController = null;
 let originalUiController = null;
 let appsHost = null;
 let agentOrchestratorUpstream = null;
+/** Stops the AO change push wired up with the current upstream module. */
+let aoChangeWatch = null;
+let missionWorkflowRuntime = null;
 let antigravityReauth = null;
+let antigravityAuthBrowser = null;
 // The swappable backend tier (see backend-bundle.cjs): restarted in place, never with the core.
 let backendBundles = null;
 let backendControl = null;
@@ -1331,6 +1335,20 @@ function registerIpc({ logger, stateStore }) {
     return next;
   });
 
+  // Opens a workspace folder in the system file manager (chat list "Open in Explorer"). Only an
+  // existing directory is accepted, so nothing can be launched through it.
+  handle("launcher:open-folder", async (event, folder) => {
+    assertFocusedMainWindow(event, false);
+    if (typeof folder !== "string" || folder.length > 4096 || !path.isAbsolute(folder)) {
+      throw new Error("Choose an absolute folder path");
+    }
+    const resolved = path.resolve(folder);
+    if (!fs.statSync(resolved, { throwIfNoEntry: false })?.isDirectory()) throw new Error("This folder no longer exists");
+    const failure = await shell.openPath(resolved);
+    if (failure) throw new Error(failure);
+    return true;
+  });
+
   handle("launcher:open-external", async (_event, url) => {
     if (!ALLOWED_EXTERNAL_URLS.has(url)) throw new Error("External URL is not allowlisted");
     await openWebUrl(url);
@@ -2166,6 +2184,7 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     backendBundles?.stopWatching();
     await agentOrchestratorUpstream?.stop();
     antigravityReauth?.stop();
+    antigravityAuthBrowser?.closeAll();
     // The embedded ChatGPT instance belongs to this app; its own stop path logs failures.
     await chatgptDesktop?.shutdown().catch(() => {});
     await browserHost?.persistSession();
@@ -2387,9 +2406,11 @@ async function start() {
     logger,
   });
   const startBackendFrom = (backend) => {
-    const { createAntigravityCli, shimProxyEnvironment } = backendBundles.requireModule(backend, "antigravity-cli.cjs");
+    const { createAntigravityCli, shimProxyEnvironment, manualAuthEnvironment } = backendBundles.requireModule(backend, "antigravity-cli.cjs");
     const { createAntigravityReauth } = backendBundles.requireModule(backend, "cpa-antigravity-reauth.cjs");
+    const { createAntigravityAuthBrowser } = backendBundles.requireModule(backend, "antigravity-auth-browser.cjs");
     const { createAgentOrchestratorUpstream } = backendBundles.requireModule(backend, "agent-orchestrator-upstream.cjs");
+    const { createChangePulse } = backendBundles.requireModule(backend, "ao-session-events.cjs");
     const { createAgentOrchestratorWorkflow, resolveAoNativeConnection, aoWebCatalogForModel } = backendBundles.requireModule(backend, "agent-orchestrator-workflow.cjs");
     const { HeadlessHost } = backendBundles.requireModule(backend, "headless-host.cjs");
     const createCodingToolsAppsHost = loadCreateCodingToolsAppsHost(backend.appHandlerRoot);
@@ -2397,13 +2418,13 @@ async function start() {
       toolsRoot: path.join(app.getPath("userData"), "tools"),
       confirm: confirmAoAction, getWorkspaces: listHeadlessWorkspaces, logger,
     });
+    antigravityAuthBrowser = createAntigravityAuthBrowser({
+      BrowserWindow, sessionFor: partition => session.fromPartition(partition),
+      proxyEnvironment: antigravityProxyEnvironment, cleanUserAgent,
+    });
     antigravityReauth = createAntigravityReauth({
       cpaConnection: () => externalServicesController?.cpaConnection(),
-      openExternal: (url) => {
-        const target = new URL(url);
-        if (target.protocol !== "https:" || target.username || target.password) throw new Error("CPA sign-in URL is unsafe");
-        return shell.openExternal(target.toString());
-      },
+      openExternal: (url, options) => antigravityAuthBrowser(url, options),
       notify: ({ title, body }) => { if (Notification.isSupported()) new Notification({ title, body, silent: true }).show(); },
       statePath: path.join(app.getPath("userData"), "tools", "antigravity-reauth.json"),
       logger,
@@ -2423,7 +2444,7 @@ async function start() {
           const env = antigravityProxyEnvironment();
           if (!env.HTTPS_PROXY) throw new Error("Select an HTTP or HTTPS global proxy in Network Proxy first");
           const terminal = await agentOrchestratorUpstream.harness.openTerminal({
-            executable: antigravityCli.executable(), env, workspaceId: args.workspaceId || undefined,
+            executable: antigravityCli.executable(), env: manualAuthEnvironment(env), workspaceId: args.workspaceId || undefined,
           });
           return { ok: true, ...terminal, title: "agy" };
         }
@@ -2432,6 +2453,7 @@ async function start() {
           return { ok: true };
         case "refresh": return antigravityReauth.refresh(args.name);
         case "sign_in": return antigravityReauth.signIn(args.name);
+        case "cancel_sign_in": return antigravityReauth.cancelSignIn(args.name);
         case "sweep": return antigravityReauth.sweep();
         case "set_auto": return antigravityReauth.setAuto(args.auto);
         default: throw new Error("Unknown Antigravity CLI operation");
@@ -2448,6 +2470,9 @@ async function start() {
         : path.join(app.getPath("home"), ".ao", IS_DEV_PROFILE ? "coding-tools-development" : "coding-tools"),
       confirm: confirmAoAction, getWindow: () => mainWindow,
       getWorkspaces: listHeadlessWorkspaces,
+      getCpaPricesPath: () => require("./cpa-managed.cjs").helperPricesPath(
+        path.join(app.getPath("userData"), "integrations", "state", "cpa")),
+
       extraPath: () => antigravityCli.binDir(),
       extraEnv: () => {
         let env = {};
@@ -2458,8 +2483,16 @@ async function start() {
         return typeof cpaKey === "string" && cpaKey ? { ...env, CODING_TOOLS_CPA_KEY: cpaKey } : env;
       },
       missionCall: (operation, args) => agentOrchestratorWorkflow.call(operation, args),
+      openAuth: (url) => antigravityAuthBrowser(url),
       WebContentsView, dialog, shell, logger,
     });
+    // Push AO changes to the Mission chat instead of making it poll: AO's session feed (a role's
+    // message, reasoning or tool call moved) and mission run state, batched per 150 ms.
+    aoChangeWatch?.();
+    const aoPulse = createChangePulse((payload) => send("launcher:ao-changed", payload));
+    const stopAoWatch = agentOrchestratorUpstream.harness.watch((change) => aoPulse.session(change.sessionId));
+    aoChangeWatch = () => { stopAoWatch(); aoPulse.stop(); };
+    missionWorkflowRuntime?.dispose();
     const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
       requestHeadless: (endpoint, body, options) => {
         if (!headlessHost) throw new Error("Local Coding Tools runtime is unavailable");
@@ -2475,6 +2508,18 @@ async function start() {
         }
         return { baseUrl: `http://127.0.0.1:${config.port}/v1` };
       },
+      webBridgeReadiness: async () => {
+        if (!browserHost || !fs.existsSync(browserHost.descriptorPath)) return { authenticated: null, ready: false };
+        const session = await browserHost.authenticationReadiness();
+        if (session.authenticated !== true || session.ready !== true) return session;
+        const snapshot = runtimeHost.runtimeConfigSnapshot();
+        const config = snapshot.config;
+        if (!snapshot.configured || config?.host !== "127.0.0.1"
+          || !Number.isInteger(config.port) || config.port < 1 || config.port > 65535) {
+          return { authenticated: true, ready: false };
+        }
+        return { authenticated: true, ready: await runtimeSupervisor.proxyHealth(config, 2_000, undefined, true) };
+      },
       // The runtime returns Codex's WebGPT High entry (Luna on a Luna-only account); other tiers
       // reuse it under their own slug (the bridge picks the effort from the slug, not this entry).
       webModelCatalog: async ({ executable, model = "chatgpt-web/high" }) => {
@@ -2488,7 +2533,7 @@ async function start() {
       resolveHarness: (selection) => resolveAoNativeConnection({ ...selection, userData: app.getPath("userData") }),
       aoHarness: agentOrchestratorUpstream.harness,
       confirm: confirmAoAction,
-      onRunState: (update) => mcpEventMonitor.runState(update),
+      onRunState: (update) => { mcpEventMonitor.runState(update); aoPulse.run(update.workspaceId, update.runId); },
     });
     try {
       appsHost = createCodingToolsAppsHost({
@@ -2526,6 +2571,9 @@ async function start() {
       binaryRoot: backend.source === "bundle" ? backend.resourcesRoot : null,
     });
     activeBackend = backend;
+    missionWorkflowRuntime = agentOrchestratorWorkflow;
+    void listHeadlessWorkspaces().then(items => agentOrchestratorWorkflow.restoreSchedules(items))
+      .catch(() => logger.warn("ao.schedule_restore_failed", { detail: "Saved delayed starts need inspection; none were replayed." }));
     logger.info("backend.started", { source: backend.source, id: backend.id });
   };
   const startBackend = () => {
@@ -2537,6 +2585,7 @@ async function start() {
       // A broken deployed backend never takes the app down: fall back to the installer's backend.
       logger.error("backend.bundle_start_failed", { id: backend.id, message: error instanceof Error ? error.message : String(error) });
       antigravityReauth?.stop();
+      antigravityAuthBrowser?.closeAll();
       backendBundles.useBuiltin();
       startBackendFrom(backendBundles.current());
       publishOperation({ name: "backend-update", status: "failed", message: `Backend ${backend.id} failed to start; using the installed backend` });
@@ -2544,6 +2593,7 @@ async function start() {
   };
   const stopBackend = async (reason) => {
     antigravityReauth?.stop();
+    antigravityAuthBrowser?.closeAll();
     await agentOrchestratorUpstream?.stop().catch((error) => {
       logger.warn("backend.ao_stop_failed", { message: error instanceof Error ? error.message : String(error) });
     });
@@ -2628,6 +2678,14 @@ async function start() {
     callReadOnlyAppTool: (tool) => appsMcp.callTool(tool, {}),
     callNativeCodexTool: (body) => headlessHost.request("/api/v1/tools/call", body, { timeout: 80_000 }),
     callAgentOrchestrator: (operation, args) => appsHost.call("agent-orchestrator", operation, args),
+    // Installers and patch scripts ask for this instead of killing the app, so the Codex bridge,
+    // MCP tunnel and CPA stay up and the next launcher adopts them (same path as the tray item).
+    requestKeepBridgeQuit: async ({ relaunch }) => {
+      if (shutdownInProgress || exitCommitted) return { ok: false, message: "Launcher shutdown is already in progress" };
+      logger.info("launcher.keep_bridge_quit_requested", { relaunch });
+      setTimeout(() => { void requestQuit({ keepBridge: true, relaunch }); }, 100);
+      return { ok: true, status: relaunch ? "restarting" : "quitting" };
+    },
     onTurnEvent: (event) => {
       if (event.type === "native_fetch_failed") mcpEventMonitor.nativeFetchFailed(event);
       else if (event.type === "native_fetch_ok") mcpEventMonitor.nativeFetchSucceeded();
@@ -2932,6 +2990,7 @@ async function start() {
   startBridgeWatchdog(logger, stateStore);
 
   app.on("activate", () => showMainWindow());
+  app.on("will-quit", () => missionWorkflowRuntime?.dispose());
   app.on("before-quit", (event) => {
     if (exitCommitted) return;
     event.preventDefault();

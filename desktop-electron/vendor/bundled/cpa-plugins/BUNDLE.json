@@ -103,5 +103,33 @@
         "size": 24915456
       }
     }
+  },
+  "cline": {
+    "id": "cline-pass-switcher",
+    "provider": "cline",
+    "version": "0.1.0-codingtools.1",
+    "source": {
+      "repository": "https://github.com/munmunjaklin458-afk/cline-pass-switcher",
+      "commit": "02538a3137a08948a94f26f17dd4aeff8c029ed1",
+      "license": "MIT",
+      "path": "desktop-electron/vendor/cpa-plugins/cline-pass-switcher"
+    },
+    "changes": [
+      "Full pinned upstream switcher console behind authenticated CPA plugin routes",
+      "Native Cline auth/model/executor with OpenAI streaming and original account/upstream failover",
+      "Owned ephemeral-loopback managed runtime; selected outbound proxy; local-only account storage"
+    ],
+    "build": {
+      "go": "1.26.8",
+      "cCompiler": "Zig 0.16.0",
+      "mode": "c-shared"
+    },
+    "platforms": {
+      "win32/x64": {
+        "path": "windows/amd64/cline-pass-switcher-v0.1.0-codingtools.1.dll",
+        "sha256": "9f06040bda6c8c2a8f0850dedddc306978c487593de0be55f7b237a63247a7fd",
+        "size": 7277568
+      }
+    }
   }
 }

@@ -71,6 +71,7 @@ function shimBody(executable, platform = process.platform) {
   if (platform === "win32") {
     return [
       "@echo off",
+      "setlocal",
       "if not defined CODING_TOOLS_AGY_HTTPS_PROXY (",
       "  echo Antigravity CLI runs only through the Coding Tools network proxy. Select a global proxy in Network Proxy, then restart Agent Orchestrator. 1>&2",
       "  exit /b 1",
@@ -79,6 +80,7 @@ function shimBody(executable, platform = process.platform) {
         `if defined CODING_TOOLS_AGY_${key} set "${key}=%CODING_TOOLS_AGY_${key}%"`,
         `if defined CODING_TOOLS_AGY_${key} set "${key.toLowerCase()}=%CODING_TOOLS_AGY_${key}%"`,
       ]),
+      'if not defined SSH_CLIENT set "SSH_CLIENT=coding-tools"',
       `"${executable}" %*`,
       "",
     ].join("\r\n");
@@ -90,9 +92,16 @@ function shimBody(executable, platform = process.platform) {
     "  exit 1",
     "fi",
     ...SHIM_PROXY_KEYS.map(key => `[ -n "$CODING_TOOLS_AGY_${key}" ] && export ${key}="$CODING_TOOLS_AGY_${key}" ${key.toLowerCase()}="$CODING_TOOLS_AGY_${key}"`),
+    'export SSH_CLIENT="${SSH_CLIENT:-coding-tools}"',
     `exec "${executable}" "$@"`,
     "",
   ].join("\n");
+}
+
+// The CLI's documented SSH auth mode prints a sign-in link/code instead of opening the
+// system browser. Keep this local to managed agy; a real SSH session keeps its own value.
+function manualAuthEnvironment(environment, inherited = process.env) {
+  return { ...environment, SSH_CLIENT: environment.SSH_CLIENT || inherited.SSH_CLIENT || "coding-tools" };
 }
 
 /** Map a standard proxy environment to the variables the agy shim reads. */
@@ -238,7 +247,7 @@ function createAntigravityCli({
     return current.executable;
   }
 
-  return Object.freeze({ status, install, executable, binDir: () => (installed() ? binDir : null), manifest });
+  return Object.freeze({ status, install, executable, binDir: () => { if (!installed()) return null; executable(); return binDir; }, manifest });
 }
 
-module.exports = { createAntigravityCli, loadManifest, platformAsset, validateArchive, findExecutable, tarBinary, shimBody, shimProxyEnvironment };
+module.exports = { createAntigravityCli, loadManifest, platformAsset, validateArchive, findExecutable, tarBinary, shimBody, shimProxyEnvironment, manualAuthEnvironment };

@@ -27,7 +27,7 @@ async function recordLocalDefaultBranch(directory) {
 
 // AO project identity and the existing durable mission IDs are shared by both views.
 // No task store, checkout or model process is created by this binding.
-function createAoWorkspaceBoard({ listWorkspaces, listProjects, createProject, missionCall,
+function createAoWorkspaceBoard({ listWorkspaces, listProjects, createProject, missionCall, readAccounting,
   realpath = fs.promises.realpath, platform = process.platform,
   isRepositoryRoot = async directory => fs.existsSync(path.join(directory, ".git")),
   recordDefaultBranch = recordLocalDefaultBranch,
@@ -72,7 +72,13 @@ function createAoWorkspaceBoard({ listWorkspaces, listProjects, createProject, m
       missionCall("runs", { workspaceId: scope.workspaceId, ...(runId ? { runId } : {}) }),
     ]);
     if (!board?.ok || !missions?.ok) throw new Error("AO mission read is unavailable");
-    return { ok: true, ...scope, revision: board.revision, tasks: board.tasks, runs: missions.runs };
+    let accounting = {};
+    if (typeof readAccounting === "function") {
+      try { accounting = await readAccounting({ ...scope, runs: missions.runs }); }
+      catch { /* Price/counter failures must not hide the saved mission board. */ }
+    }
+    return { ok: true, ...scope, revision: board.revision, tasks: board.tasks, runs: missions.runs,
+      taskLifecycle: missions.task_lifecycle || [], accounting };
   }
   return {
     bind(id) {

@@ -38,12 +38,28 @@ function writePrivateFileAtomic(filePath, content, { mode = 0o600, protectDirect
   if (protectDirectory) {
     try { fs.chmodSync(directory, 0o700); } catch {}
   }
-  const temporary = `${filePath}.tmp-${process.pid}-${Date.now()}-${++sequence}`;
+  const payload = Buffer.isBuffer(content)
+    ? content
+    : Buffer.from(String(content).replace(/^\uFEFF/, ""), "utf8");
+  // Windows has reported EEXIST for a temp name that is unique to this process and moment (seen
+  // while a freshly installed app's data folder was being scanned). That name is never ours, so
+  // it is left alone and the write moves to a fresh one.
+  let temporary = null;
+  for (let attempt = 0; temporary === null; attempt += 1) {
+    const candidate = `${filePath}.tmp-${process.pid}-${Date.now()}-${++sequence}`;
+    try {
+      fs.writeFileSync(candidate, payload, { flag: "wx", mode });
+      temporary = candidate;
+    } catch (error) {
+      if (error?.code !== "EEXIST") {
+        // A write that failed after creating the file (e.g. a full disk) leaves no partial temp.
+        fs.rmSync(candidate, { force: true });
+        throw error;
+      }
+      if (attempt >= 4) throw error;
+    }
+  }
   try {
-    const payload = Buffer.isBuffer(content)
-      ? content
-      : Buffer.from(String(content).replace(/^\uFEFF/, ""), "utf8");
-    fs.writeFileSync(temporary, payload, { flag: "wx", mode });
     renameAtomicFile(temporary, filePath);
     try { fs.chmodSync(filePath, mode); } catch {}
   } finally {
