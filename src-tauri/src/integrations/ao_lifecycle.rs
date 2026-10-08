@@ -587,7 +587,9 @@ fn apply_inner(
                             | ScheduleState::Cancelled
                     )
             }) {
-                if job.state == ScheduleState::Claimed { job.state = ScheduleState::NeedsAttention; }
+                if job.state == ScheduleState::Claimed {
+                    job.state = ScheduleState::NeedsAttention;
+                }
                 job.run_id = replacement_run_id;
                 job.team_id = intent.team_id.clone();
                 job.team_revision = intent.team_revision;
@@ -974,7 +976,14 @@ mod tests {
             change(&mut data, finish(json!([]), 2), 200).unwrap();
             let result = serde_json::to_value(&data).unwrap();
             assert_eq!(result["ao_task_lifecycle"][0]["schedule"]["run_id"], "new");
-            assert_eq!(result["ao_task_lifecycle"][0]["schedule"]["state"], if state == "claimed" {"needs_attention"} else {state});
+            assert_eq!(
+                result["ao_task_lifecycle"][0]["schedule"]["state"],
+                if state == "claimed" {
+                    "needs_attention"
+                } else {
+                    state
+                }
+            );
             assert_eq!(
                 result["ao_task_lifecycle"][0]["schedule"]["due_at_ms"],
                 1000
