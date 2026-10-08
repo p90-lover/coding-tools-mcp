@@ -10,20 +10,22 @@
 }
 
 /* ---------- Thread list ---------- */
-.ao-workflow > .cx-threads { position: relative; display: flex; flex: 0 0 248px; flex-direction: column; min-height: 0;
+/* min-width: 0 so long chat titles ellipsize instead of widening the column. */
+.ao-workflow > .cx-threads { position: relative; display: flex; flex: 0 0 248px; flex-direction: column; width: 248px; min-width: 0; min-height: 0; overflow: hidden;
   padding: calc(env(titlebar-area-height, 34px) + 8px) 8px 8px; border-right: 1px solid var(--ao-line); background: var(--cx-sidebar); }
 .cx-new-chat { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 10px; border: 0; border-radius: 8px;
   background: transparent; color: var(--color-text-primary); font-size: 13px; text-align: left; cursor: pointer; }
 .cx-new-chat:hover, .cx-new-chat[aria-pressed="true"] { background: var(--cx-hover); }
-.cx-thread-scroll { flex: 1 1 auto; min-height: 0; margin-top: 8px; overflow: auto; }
+.cx-thread-scroll { flex: 1 1 auto; min-height: 0; margin-top: 8px; overflow-x: hidden; overflow-y: auto; }
 .cx-thread-group { margin-bottom: 12px; }
 .cx-thread-group > h3 { margin: 6px 10px 4px; color: var(--ao-muted); font-size: 11px; font-weight: 500; }
 .cx-thread-group ul { margin: 0; padding: 0; list-style: none; }
 .cx-project { display: flex; align-items: center; gap: 6px; width: 100%; height: 30px; padding: 0 8px; border: 0; border-radius: 8px;
   background: transparent; color: var(--color-text-primary); font-size: 13px; font-weight: 500; text-align: left; cursor: pointer; }
 .cx-project:hover { background: var(--cx-hover); }
-.cx-project svg { flex: 0 0 auto; color: var(--ao-muted); transform: rotate(-90deg); transition: transform var(--duration-micro, 140ms); }
-.cx-project svg.is-open { transform: rotate(0deg); }
+/* The chevron icon points right: right when closed, down when open. */
+.cx-project svg { flex: 0 0 auto; color: var(--ao-muted); transition: transform var(--duration-micro, 140ms); }
+.cx-project svg.is-open { transform: rotate(90deg); }
 .cx-project-pin { margin-left: auto; font-size: 10px; opacity: .7; }
 .cx-projects > li > ul { padding-left: 10px; }
 .cx-thread-row { position: relative; display: flex; align-items: center; border-radius: 8px; }
@@ -106,8 +108,8 @@
 .cx-work { color: var(--ao-muted); font-size: 13px; }
 .cx-work-head { display: inline-flex; align-items: center; gap: 6px; padding: 2px 0; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
 .cx-work-head:hover { color: var(--color-text-primary); }
-.cx-work-head svg, .cx-step-head svg { transform: rotate(-90deg); transition: transform var(--duration-micro, 140ms); }
-.cx-work-head svg.is-open, .cx-step-head svg.is-open { transform: rotate(0deg); }
+.cx-work-head svg, .cx-step-head svg { transition: transform var(--duration-micro, 140ms); }
+.cx-work-head svg.is-open, .cx-step-head svg.is-open { transform: rotate(90deg); }
 .cx-work.is-stalled .cx-work-head { color: var(--ao-amber); }
 .cx-shimmer { background: linear-gradient(90deg, var(--ao-muted) 0%, var(--color-text-primary) 50%, var(--ao-muted) 100%); background-size: 200% 100%;
   -webkit-background-clip: text; background-clip: text; color: transparent; animation: cx-shimmer 2.2s linear infinite; }
@@ -140,6 +142,8 @@
 .cx-card.tone-error { border-color: color-mix(in srgb, var(--ao-red) 40%, var(--ao-line)); }
 .cx-card p { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
 .cx-card-actions { display: flex; gap: 8px; }
+.cx-card-actions button { height: 30px; padding: 0 14px; border: 0; border-radius: 15px; background: var(--color-text-primary); color: var(--color-bg-primary); font-size: 12px; font-weight: 600; cursor: pointer; }
+.cx-card-actions button:disabled { cursor: default; opacity: .4; }
 .cx-to-bottom { position: sticky; bottom: 12px; left: 50%; display: grid; place-items: center; width: 32px; height: 32px; margin: -44px auto 12px; border: 1px solid var(--ao-line);
   border-radius: 50%; background: var(--color-bg-primary); box-shadow: 0 4px 14px rgb(0 0 0 / 12%); color: var(--color-text-primary); cursor: pointer; }
 

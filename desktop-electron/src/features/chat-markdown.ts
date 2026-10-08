@@ -66,7 +66,12 @@ export function parseMarkdown(source: string): MdBlock[] {
   const blocks: MdBlock[] = [];
   let paragraph: string[] = [];
   const endParagraph = () => {
-    if (paragraph.length) blocks.push({ kind: "paragraph", inline: parseInline(paragraph.join("\n")) });
+    if (paragraph.length) {
+      const inline = parseInline(paragraph.join("\n"));
+      const only = inline.filter((part) => !(part.kind === "text" && !part.text.trim()));
+      if (only.length === 1 && only[0].kind === "code" && only[0].text.length > 80) blocks.push({ kind: "code", lang: "", text: only[0].text });
+      else blocks.push({ kind: "paragraph", inline });
+    }
     paragraph = [];
   };
   for (let index = 0; index < lines.length; index += 1) {

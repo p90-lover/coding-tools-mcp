@@ -37,7 +37,8 @@ function stepTone(step: ChatStep): string {
 }
 
 function StepRow({ step, now }: { step: ChatStep; now: number }) {
-  const [open, setOpen] = useState(false);
+  // A failed step opens on its error, as Codex shows failures inline.
+  const [open, setOpen] = useState(() => Boolean(step.error));
   const body = step.error || step.text;
   const elapsed = step.working && step.startedAtMs ? chatDuration(now - step.startedAtMs) : "";
   return <li className={`cx-step tone-${stepTone(step)}`}>
@@ -60,7 +61,7 @@ function StepRow({ step, now }: { step: ChatStep; now: number }) {
 
 function WorkGroup({ turn, now }: { turn: ChatTurn; now: number }) {
   const working = turn.steps.find((step) => step.working);
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(() => turn.steps.some((step) => step.error));
   if (!turn.steps.length) {
     return turn.status === "running" || turn.status === "queued"
       ? <div className="cx-work is-live"><span className="cx-shimmer">Starting…</span></div> : null;
@@ -184,7 +185,7 @@ export function AgentOrchestratorChat({
   const runOpen = Boolean(latest) && chatRunOpen(chat?.status);
   const accepts = chatAcceptsMessage(chat?.status, working);
   const canSend = !busy && !sending && Boolean(draft.trim() || attachments.length) && accepts;
-  const slash = chatSlashMatches(draft, { chat: Boolean(selectedTaskId), run: Boolean(latest) });
+  const slash = chatSlashMatches(draft, { chat: Boolean(selectedTaskId), run: Boolean(latest), open: runOpen });
 
   const submit = async () => {
     if (!canSend) return;

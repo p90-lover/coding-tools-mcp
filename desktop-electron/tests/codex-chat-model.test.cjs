@@ -77,6 +77,7 @@ test("forking keeps the conversation up to the chosen message, in the follow-up 
 test("slash commands offer only what applies, and attachments become paths or inline text", () => {
   assert.deepEqual(plain(chat.chatSlashMatches("/", { chat: false, run: false })).map((command) => command.name), ["new", "model", "board"]);
   assert.deepEqual(plain(chat.chatSlashMatches("/st", { chat: true, run: true })).map((command) => command.name), ["stop", "structure"]);
+  assert.deepEqual(plain(chat.chatSlashMatches("/st", { chat: true, run: true, open: false })).map((command) => command.name), ["structure"], "/stop only while a mission is open");
   assert.deepEqual(plain(chat.chatSlashMatches("/stop now", { chat: true, run: true })), [], "a space ends the command menu");
   assert.equal(chat.chatSlashCommand(" /Stop "), "stop");
   assert.equal(chat.chatSlashCommand("/unknown"), null);
@@ -98,6 +99,9 @@ test("answers render as Markdown data, never HTML, and only web links are clicka
   assert.deepEqual([blocks[4].lang, blocks[4].text], ["js", "const a = 1;"]);
   assert.equal(blocks[7].inline[0].text, "<script>x</script>", "raw HTML is shown as text");
   assert.equal(md.safeHref("file:///C:/x"), null);
+  const flattened = plain(md.parseMarkdown("assignments\n\n`[{\"worker\":\"w1\",\"task\":\"Read-only review of the project root and every top-level file\"}]`"));
+  assert.deepEqual(flattened.map((block) => block.kind), ["paragraph", "code"], "a flattened JSON block reads as code");
+  assert.deepEqual(plain(md.parseMarkdown("Use `npm test` here")).map((block) => block.kind), ["paragraph"], "short inline code stays inline");
   const unclosed = plain(md.parseMarkdown("```\nstill code"));
   assert.deepEqual([unclosed[0].kind, unclosed[0].text], ["code", "still code"]);
 });

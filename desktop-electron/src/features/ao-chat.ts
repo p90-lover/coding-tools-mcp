@@ -356,12 +356,12 @@ export function chatMarkdown(title: string, turns: ChatTurn[]): string {
 // ---------------------------------------------------------------------------------------------
 // Composer: slash commands and attachments.
 
-export type ChatSlashCommand = { name: string; hint: string; needsChat?: boolean; needsRun?: boolean };
+export type ChatSlashCommand = { name: string; hint: string; needsChat?: boolean; needsRun?: boolean; needsOpen?: boolean };
 
 /** Every command maps to a real action in the chat; none is a placeholder. */
 export const CHAT_SLASH_COMMANDS: ChatSlashCommand[] = [
   { name: "new", hint: "Start a new chat" },
-  { name: "stop", hint: "Stop the running mission", needsRun: true },
+  { name: "stop", hint: "Stop the running mission", needsRun: true, needsOpen: true },
   { name: "retry", hint: "Restart the latest mission with the same task", needsRun: true },
   { name: "model", hint: "Choose the model or team" },
   { name: "structure", hint: "Show or hide the cards panel", needsRun: true },
@@ -373,12 +373,12 @@ export const CHAT_SLASH_COMMANDS: ChatSlashCommand[] = [
 ];
 
 /** The commands matching a draft that starts with "/" and has no space yet. */
-export function chatSlashMatches(draft: string, context: { chat: boolean; run: boolean }): ChatSlashCommand[] {
+export function chatSlashMatches(draft: string, context: { chat: boolean; run: boolean; open?: boolean }): ChatSlashCommand[] {
   const match = /^\/([a-z]*)$/i.exec(draft.trim());
   if (!match) return [];
   const prefix = match[1].toLowerCase();
   return CHAT_SLASH_COMMANDS.filter((command) => command.name.startsWith(prefix)
-    && (!command.needsChat || context.chat) && (!command.needsRun || context.run));
+    && (!command.needsChat || context.chat) && (!command.needsRun || context.run) && (!command.needsOpen || context.open !== false));
 }
 
 /** A whole draft that is exactly one known command ("/stop"), or null. */
