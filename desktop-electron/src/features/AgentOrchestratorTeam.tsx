@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+// Controlled draft: polling and autosave responses cannot reset newer edits.
 import type { AoNode } from "./AgentOrchestratorSurface";
 import {
   DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, emptyRoleSettings, workerRoute,
@@ -73,16 +73,18 @@ const MAX_SUB_REVIEWERS = 8;
  * The team lists roles only; the service wires them: the command approver sits between the
  * orchestrator and the workers, and sub-reviewers get the main reviewer's split pass in front.
  */
-export function AgentOrchestratorTeam({ team, harnesses, loadModels, busy, save, close }: {
+export function AgentOrchestratorTeam({ team, harnesses, loadModels, change, status, close, busy = false }: {
   team: AoTeam;
   harnesses: AoHarness[];
   loadModels: AoModelLoader;
-  busy: boolean;
-  save: (team: AoTeam) => void;
+  status?: string;
+  busy?: boolean;
+  change: (team: AoTeam, immediate?: boolean) => void;
   close: () => void;
 }) {
-  const [draft, setDraft] = useState<AoTeam>(() => structuredClone(team));
-  useEffect(() => { setDraft(structuredClone(team)); }, [team.revision]);
+  const draft = team;
+  let immediateChange = false;
+  const setDraft = (update: (current: AoTeam) => AoTeam) => change(update(draft), immediateChange);
   const of = (role: AoNode["role"]) => draft.nodes.filter((node) => node.role === role);
   const [planner] = of("planner");
   const [approver] = of("approver");
@@ -113,19 +115,19 @@ export function AgentOrchestratorTeam({ team, harnesses, loadModels, busy, save,
     });
   const removeRole = (id: string) => setDraft((current) => ({ ...current, nodes: current.nodes.filter((node) => node.id !== id) }));
 
-  const changed = JSON.stringify(draft) !== JSON.stringify(team);
+
   const limitsValid = Number.isInteger(draft.worker_limit) && draft.worker_limit >= 1 && draft.worker_limit <= 24
     && Number.isInteger(rounds) && rounds >= 1 && rounds <= 10;
   return (
-    <form className="ao-sheet ao-team-sheet" aria-label="Team settings" onSubmit={(event) => { event.preventDefault(); save(draft); }}>
-      <p className="ao-hint ao-wide">New chats use this team. Chats that are already running keep the team they started with.</p>
+    <form className="ao-sheet ao-team-sheet" aria-label="Team settings" onSubmit={event => event.preventDefault()} onChangeCapture={event => { const target = event.target; immediateChange = target.tagName === "SELECT" || target.getAttribute("type") === "checkbox"; }}>
+      <p className="ao-hint ao-wide">Changes apply automatically. The selected mission restarts with its original input and visible progress; other missions are unchanged.</p>
       {ordered.map((node) => {
         const settings = { ...emptyRoleSettings(), ...node.settings };
         const removable = node.role === "approver" || node.role === "sub_reviewer" || node.role === "retry" || (node.role === "worker" && workers.length > 1);
         return (
           <fieldset key={node.id} className="ao-team-role ao-wide">
             <legend>{ROLE_TITLE[node.role]}{removable
-              ? <button type="button" className="ao-link" disabled={busy} onClick={() => removeRole(node.id)}>Remove</button> : null}</legend>
+              ? <button type="button" className="ao-link" disabled={false} onClick={() => removeRole(node.id)}>Remove</button> : null}</legend>
             <div className="ao-field-row">
               <label>Name<input maxLength={96} value={settings.name} placeholder={ROLE_TITLE[node.role]}
                 onChange={(event) => updateSettings(node, { name: event.target.value })} /></label>
@@ -137,14 +139,14 @@ export function AgentOrchestratorTeam({ team, harnesses, loadModels, busy, save,
             </div>
             <div className="ao-field-row">
               <HarnessPicker route={node.route} harnesses={harnesses} loadModels={loadModels}
-                disabled={busy} onChange={(route) => update(node.id, { route })} />
+                disabled={false} onChange={(route) => update(node.id, { route })} />
             </div>
             <label>Instructions<textarea maxLength={4096} rows={3} value={settings.instructions} placeholder={PLACEHOLDER[node.role]}
               onChange={(event) => updateSettings(node, { instructions: event.target.value })} /></label>
             <label>Expected output<textarea maxLength={2048} rows={2} value={settings.expected_output}
               onChange={(event) => updateSettings(node, { expected_output: event.target.value })} /></label>
             {node.role === "approver" ? <label className="ao-check" title="Off: the approver only recommends and you decide each tool request. On: it allows or denies on its own (unclear requests and hard-blocked commands still come to you or are denied).">
-              <input type="checkbox" checked={settings.auto_decide === true} disabled={busy}
+              <input type="checkbox" checked={settings.auto_decide === true} disabled={false}
                 onChange={(event) => updateSettings(node, { auto_decide: event.target.checked })} /> Auto-decide tool requests</label> : null}
             {node.role === "reviewer" && subReviewers.length
               ? <p className="ao-hint">Runs twice: first it splits the review across the sub-reviewers, then it confirms their findings.</p> : null}
@@ -152,11 +154,11 @@ export function AgentOrchestratorTeam({ team, harnesses, loadModels, busy, save,
         );
       })}
       <div className="ao-field-row ao-wide">
-        <button type="button" className="button-secondary" disabled={busy || room < 1}
+        <button type="button" className="button-secondary" disabled={false || room < 1}
           onClick={() => addRole("worker", `Worker ${workers.length + 1}`, "implementation")}>＋ Worker</button>
-        <button type="button" className="button-secondary" disabled={busy || room < (subReviewers.length ? 1 : 2) || subReviewers.length >= MAX_SUB_REVIEWERS}
+        <button type="button" className="button-secondary" disabled={false || room < (subReviewers.length ? 1 : 2) || subReviewers.length >= MAX_SUB_REVIEWERS}
           onClick={() => addRole("sub_reviewer", `Sub-reviewer ${subReviewers.length + 1}`, "review", reviewer?.route)}>＋ Sub-reviewer</button>
-        {!approver ? <button type="button" className="button-secondary" disabled={busy || room < 1}
+        {!approver ? <button type="button" className="button-secondary" disabled={false || room < 1}
           onClick={() => addRole("approver", "Command approver", "security", reviewer?.route)}>＋ Command approver</button> : null}
       </div>
       <div className="ao-field-row ao-wide">
@@ -171,7 +173,7 @@ export function AgentOrchestratorTeam({ team, harnesses, loadModels, busy, save,
             onChange={(event) => setDraft((current) => ({ ...current, max_review_rounds: Number(event.target.value) }))} /></label>
       </div>
       <div className="ao-sheet-actions ao-wide">
-        <button className="button-primary" type="submit" disabled={busy || !changed || !limitsValid}>Save team</button>
+        <span role="status">{!limitsValid ? "Choose valid worker and review limits" : status || "Changes apply automatically"}</span>
         <button className="button-secondary" type="button" onClick={close}>Close</button>
       </div>
     </form>

@@ -7,6 +7,7 @@ const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const { createAgentOrchestratorGateway } = require("./agent-orchestrator-gateway.cjs");
 const { createAoWorkspaceBoard } = require("./agent-orchestrator-workspace.cjs");
+const { readCpaCatalog, collectMissionAccounting } = require("./agent-orchestrator-accounting.cjs");
 
 const API_OPERATIONS = Object.freeze({
   upstream_projects: { method: "GET", endpoint: "/api/v1/projects" },
@@ -58,7 +59,7 @@ async function allocatePort() {
   return port;
 }
 
-function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, extraPath = () => null, extraEnv = () => ({}), logger = console }) {
+function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), logger = console }) {
   let child = null;
   let gateway = null;
   let view = null;
@@ -95,6 +96,18 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   const workspaceBoard = typeof getWorkspaces === "function" && typeof missionCall === "function"
     ? createAoWorkspaceBoard({
       listWorkspaces: getWorkspaces, missionCall,
+      readAccounting: async scope => collectMissionAccounting({
+        ...scope, catalog: readCpaCatalog(getCpaPricesPath()),
+        readSession: async id => {
+          const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`);
+          if (record?.session?.id !== id || record.session.projectId !== scope.projectId) return record;
+          const [normalized, conversation] = await Promise.all([
+            internalApi("GET", `/api/v1/usage/sessions/${sessionId(id)}`).catch(() => null),
+            internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=1`).catch(() => null),
+          ]);
+          return { session: record.session, normalized, conversation: { usage: conversation?.usage } };
+        },
+      }),
       listProjects: async () => {
         await start();
         const result = await requestApi("GET", "/api/v1/projects");
@@ -329,8 +342,18 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       if (!workspaceBoard) throw new Error("Coding Tools mission service is unavailable");
       return workspaceBoard.readWorkspace(args.workspaceId, args.runId);
     }
+    if (operation === "mission_action") {
+      if (!workspaceBoard || !["archive","delete","restore","cancel_schedule"].includes(args.action)) throw new Error("Invalid mission action");
+      const board = await workspaceBoard.readWorkspace(args.workspaceId,args.runId);
+      const mission = board.runs.find(run=>run.id===args.runId && run.workspace_id===board.workspaceId);
+      if (!mission) throw new Error("Mission is outside this workspace");
+      const parent=getWindow();
+      if (parent && !parent.isDestroyed() && parent.isVisible() && !parent.isMinimized()) parent.webContents.focus();
+      return missionCall(args.action==="cancel_schedule" ? args.action : `${args.action}_task`,
+        {workspaceId:board.workspaceId,taskId:mission.project_id});
+    }
     if (operation === "mission_open") {
-      if (!workspaceBoard || !["open", "start", "resume", "restart"].includes(args.intent)) throw new Error("Invalid mission navigation request");
+      if (!workspaceBoard || !["open", "chat", "start", "resume", "restart", "schedule"].includes(args.intent)) throw new Error("Invalid mission navigation request");
       const board = await workspaceBoard.readWorkspace(args.workspaceId, args.runId);
       if (!board.runs.some(run => run.id === args.runId)) throw new Error("Mission is outside this workspace");
       // The board owns keyboard focus; return it before the main controller requests consent.

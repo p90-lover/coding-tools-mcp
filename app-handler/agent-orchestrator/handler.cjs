@@ -3,6 +3,13 @@
 const { presentTask } = require("./kanban.cjs");
 
 const SPECS = Object.freeze({
+  archive_task: { readOnly: false, description: "Stop and archive exactly one task; preserve recoverable history." },
+  delete_task: { readOnly: false, description: "Confirm recoverable logical deletion of exactly one task." },
+  restore_task: { readOnly: false, description: "Restore a hidden task without replaying its schedule." },
+  schedule_start: { readOnly: false, description: "Save and authorize one delayed start while the app remains running." },
+  cancel_schedule: { readOnly: false, description: "Revoke the captured task's delayed start." },
+  recover_schedule: { readOnly: false, description: "Explicitly cancel or set a new delay for a missed or uncertain start." },
+  reconfigure_run: { readOnly: false, description: "Apply captured mission configuration after confirmed owned stop; preserve original task and history." },
   upstream_status: { readOnly: true, description: "Inspect the source-built local-only AO daemon." },
   upstream_start: { readOnly: false, description: "Start the bundled source-built AO daemon on loopback." },
   upstream_stop: { readOnly: false, description: "Stop the owned AO daemon after local confirmation." },

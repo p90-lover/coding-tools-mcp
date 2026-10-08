@@ -119,27 +119,23 @@ export function harnessLabel(harnessId: string, harnesses: AoHarness[]): string 
 }
 
 export function teamForMission(mission: AoMission, saved: AoTeam | null): AoTeam {
-  if (saved && (!mission.team || mission.team.id === saved.id)) {
-    const team = structuredClone(saved);
-    if (mission.team?.id === team.id) {
-      // Use this mission's policy snapshot, retaining the revision needed for optimistic save.
-      team.nodes = team.nodes.map(role => {
-        const snapshot = mission.team!.nodes.find(item => item.id === role.id);
-        return snapshot ? { ...role, route: structuredClone(snapshot.route), settings: structuredClone(snapshot.settings) } : role;
-      });
-      const extra = mission.team.nodes.filter(role => !team.nodes.some(existing => existing.id === role.id));
-      team.nodes.push(...structuredClone(extra));
-      const reviewer = team.nodes.find(role => role.role === "reviewer");
-      if (reviewer) reviewer.parents = [...new Set([...reviewer.parents, ...extra.map(role => role.id)])];
-    }
-    return team;
+  if (mission.team) {
+    const draft = structuredClone(mission.team);
+    if (saved?.id === draft.id) draft.revision = saved.revision;
+    draft.worker_limit = mission.worker_limit || draft.worker_limit;
+    draft.nodes = draft.nodes.map(role => {
+      const actual = mission.nodes.find(node => (node.template_role_id || node.id) === role.id);
+      return actual ? { ...role, route: structuredClone(actual.route),
+        settings: structuredClone(actual.settings || role.settings || emptyRoleSettings()) } : role;
+    });
+    return draft;
   }
-  if (mission.team) return structuredClone(mission.team);
   const roleIds = new Map(mission.nodes.map(node => [node.id, node.template_role_id || node.id]));
-  return { id: crypto.randomUUID(), workspace_id: mission.workspace_id, name: "Workspace team", revision: 0, worker_limit: mission.worker_limit || 3,
+  return { id: saved?.id || crypto.randomUUID(), workspace_id: mission.workspace_id, name: saved?.name || "Workspace team",
+    revision: saved?.revision || 0, worker_limit: mission.worker_limit || 3,
     nodes: mission.nodes.map(node => ({ id: roleIds.get(node.id)!, task_id: "", role: node.role, route: { ...node.route },
       parents: node.parents.map(id => roleIds.get(id)!), state: "pending", x: node.x, y: node.y, positioned: node.positioned === true,
-      settings: { ...emptyRoleSettings(), ...node.settings, name: node.settings?.name || ({ planner: "Orchestrator", approver: "Command approver", worker: "Worker", review_split: "Main reviewer · split", sub_reviewer: "Sub-reviewer", reviewer: "Main reviewer", retry: "Retry" } as const)[node.role] },
+      settings: { ...emptyRoleSettings(), ...node.settings, name: node.settings?.name || ROLE_LABELS[node.role] },
     })) };
 }
 
@@ -235,10 +231,10 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
   </>;
 }
 
-export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, loadModels, busy, change, apply, discard, taskName, template = false, activity }: {
-  node: AoNode; mission: AoMission; draft: AoTeam; harnesses: AoHarness[]; busy: boolean; template?: boolean; activity?: Record<string, ChatActivity>;
+export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, loadModels, busy = false, change, apply, status, discard, taskName, template = false, activity }: {
+  node: AoNode; mission: AoMission; draft: AoTeam; harnesses: AoHarness[]; busy?: boolean; status?: string; template?: boolean; activity?: Record<string, ChatActivity>;
   loadModels: AoModelLoader;
-  change: (team: AoTeam) => void; apply: () => void; discard: () => void; taskName: (id: string) => string;
+  change: (team: AoTeam, immediate?: boolean) => void; apply?: () => void; discard: () => void; taskName: (id: string) => string;
 }) {
   const [tab, setTab] = useState<"settings" | "output" | "history">(!template && ["running", "reserved"].includes(node.state) ? "output" : "settings");
   const roleId = node.template_role_id || node.id;
@@ -250,7 +246,8 @@ export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, l
   const live = activity?.[`${mission.id}:${job.id}`];
   const working = !template && ["running", "reserved"].includes(job.state);
   const progress = working ? chatWorkingDetail(job, live, Date.now()).detail : "";
-  const updateRole = (patch: Partial<AoNode>) => change({ ...draft, nodes: draft.nodes.map(item => item.id === roleId ? { ...item, ...patch } : item) });
+  let immediateChange = false;
+  const updateRole = (patch: Partial<AoNode>) => change({ ...draft, nodes: draft.nodes.map(item => item.id === roleId ? { ...item, ...patch } : item) }, immediateChange);
   const updateSettings = (patch: Partial<RoleSettings>) => updateRole({ settings: { ...settings, ...patch } });
   const changeKind = (kind: AoNode["role"]) => {
     // Every role may run on any harness and model, so changing the role keeps its route.
@@ -273,7 +270,8 @@ export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, l
     {!template ? <div className="ao-inspector-tabs" role="tablist" aria-label="Role details">
       {(["settings", "output", "history"] as const).map(name => <button key={name} type="button" role="tab" aria-selected={tab === name} onClick={() => setTab(name)}>{name}</button>)}
     </div> : null}
-    {template || tab === "settings" ? role ? <form onSubmit={event => { event.preventDefault(); apply(); }}>
+    {template || tab === "settings" ? role ? <form onSubmit={event => { event.preventDefault(); if (template) apply?.(); }}
+      onChangeCapture={event => { const target = event.target as HTMLElement; immediateChange = target.tagName === "SELECT" || target.getAttribute("type") === "checkbox"; }}>
       <div className="ao-field-row">
         <label>Name<input maxLength={96} value={settings.name} onChange={event => updateSettings({ name: event.target.value })} /></label>
         <label>Role<select value={typingRole ? "custom:" : roleValue} disabled={!template && role.role === "retry"} title={!template ? "Configure Retry roles in Runtime > Orchestrator Team before starting a chat" : undefined} onChange={event => pickRole(event.target.value)}>
@@ -299,10 +297,13 @@ export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, l
         <label>Expected output<textarea aria-label="Expected output" rows={3} maxLength={2048} value={settings.expected_output} onChange={event => updateSettings({ expected_output: event.target.value })} /></label>
         <label>Working directory<input placeholder="Workspace root" maxLength={512} value={settings.working_directory} onChange={event => updateSettings({ working_directory: event.target.value })} /></label>
       </details>
-      <div className="ao-inspector-actions" title={template ? "Saves this team for new chats. Existing chats keep their team." : "Saves the team and updates queued cards. Running attempts keep their settings."}>
-        <button className="button-primary" type="submit" disabled={busy || !role.route.model}>{template ? "Save team" : "Apply"}</button>
+      {template ? <div className="ao-inspector-actions" title="Saves this team for new chats. Existing chats keep their team.">
+        <button className="button-primary" type="submit" disabled={busy || !role.route.model}>Save team</button>
         <button className="button-secondary" type="button" disabled={busy} onClick={discard}>Reset</button>
-      </div>
+      </div> : <div className="ao-inspector-actions" title="Changes apply automatically to this mission after its owned attempts stop.">
+        <span role="status">{status || "Changes apply automatically"}</span>
+        <button className="button-secondary" type="button" onClick={discard}>Reset to saved</button>
+      </div>}
     </form> : <p className="ao-hint">Not linked to the saved team. Results stay available.</p> : null}
     {!template && tab === "output" ? <div>
       {jobs.length > 1 ? <label>Task<select value={job.id} onChange={event => setJobId(event.target.value)}>{jobs.map(item => <option key={item.id} value={item.id}>{taskName(item.task_id)}</option>)}</select></label> : null}

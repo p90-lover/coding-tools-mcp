@@ -160,6 +160,7 @@ let upstreamToolController = null;
 let originalUiController = null;
 let appsHost = null;
 let agentOrchestratorUpstream = null;
+let missionWorkflowRuntime = null;
 let antigravityReauth = null;
 let antigravityAuthBrowser = null;
 // The swappable backend tier (see backend-bundle.cjs): restarted in place, never with the core.
@@ -2452,6 +2453,9 @@ async function start() {
         : path.join(app.getPath("home"), ".ao", IS_DEV_PROFILE ? "coding-tools-development" : "coding-tools"),
       confirm: confirmAoAction, getWindow: () => mainWindow,
       getWorkspaces: listHeadlessWorkspaces,
+      getCpaPricesPath: () => require("./cpa-managed.cjs").helperPricesPath(
+        path.join(app.getPath("userData"), "integrations", "state", "cpa")),
+
       extraPath: () => antigravityCli.binDir(),
       extraEnv: () => {
         let env = {};
@@ -2465,6 +2469,7 @@ async function start() {
       openAuth: (url) => antigravityAuthBrowser(url),
       WebContentsView, dialog, shell, logger,
     });
+    missionWorkflowRuntime?.dispose();
     const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
       requestHeadless: (endpoint, body, options) => {
         if (!headlessHost) throw new Error("Local Coding Tools runtime is unavailable");
@@ -2543,6 +2548,9 @@ async function start() {
       binaryRoot: backend.source === "bundle" ? backend.resourcesRoot : null,
     });
     activeBackend = backend;
+    missionWorkflowRuntime = agentOrchestratorWorkflow;
+    void listHeadlessWorkspaces().then(items => agentOrchestratorWorkflow.restoreSchedules(items))
+      .catch(() => logger.warn("ao.schedule_restore_failed", { detail: "Saved delayed starts need inspection; none were replayed." }));
     logger.info("backend.started", { source: backend.source, id: backend.id });
   };
   const startBackend = () => {
@@ -2959,6 +2967,7 @@ async function start() {
   startBridgeWatchdog(logger, stateStore);
 
   app.on("activate", () => showMainWindow());
+  app.on("will-quit", () => missionWorkflowRuntime?.dispose());
   app.on("before-quit", (event) => {
     if (exitCommitted) return;
     event.preventDefault();

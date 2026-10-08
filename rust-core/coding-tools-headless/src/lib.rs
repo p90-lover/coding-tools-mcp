@@ -561,6 +561,7 @@ struct AoReadRequest {
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum AoMutation {
+    Lifecycle { change: integrations::ao_lifecycle::LifecycleChange },
     CreateFromTeam {
         run_id: String, task_id: String, expected_board_revision: u64, worker_limit: u8,
         #[serde(default)] team_revision: Option<u64>,
@@ -992,6 +993,15 @@ mod workspace_auth_tests {
         assert!(serde_json::from_value::<AoMutation>(request).is_err());
     }
 
+
+    fn lifecycle_update_accepts_nested_scoped_schedule_change() {
+        let request = json!({"workspace_id":"ws-a","confirm":true,
+            "change":{"operation":"lifecycle","change":{
+                "operation":"cancel_schedule","task_id":"task-a",
+                "intent_id":"job-a","expected_revision":0
+            }}});
+        assert!(serde_json::from_value::<AoUpdateRequest>(request).is_ok());
+    }
 
     #[test]
     fn ao_execute_accepts_only_saved_task_scope() {
@@ -3895,12 +3905,13 @@ async fn ao_read(
                 })?;
                 vec![run.clone()]
             } else {
-                scoped.take(100).cloned().collect()
+                integrations::ao_lifecycle::read_runs(data, &body.workspace_id, None)?
             };
             let teams: Vec<_> = data.ao_teams.iter().filter(|team| team.workspace_id == body.workspace_id).collect();
             let team = integrations::ao_team::default_team(data, &body.workspace_id);
             let capacity: std::collections::HashMap<_, _> = runs.iter().map(|run| (run.id.clone(), integrations::ao_team::available_workers(data, run))).collect();
-            Ok(json!({"ok":true,"runs":runs,"board_revision":data.control_board.revision,"team":team,"teams":teams,"limits":data.ao_limits,"worker_capacity":capacity}))
+            let task_lifecycle = integrations::ao_lifecycle::read_public_lifecycles(data, &body.workspace_id, &runs);
+            Ok(json!({"ok":true,"runs":runs,"board_revision":data.control_board.revision,"team":team,"teams":teams,"limits":data.ao_limits,"worker_capacity":capacity,"task_lifecycle":task_lifecycle}))
         })
         .map_err(text_error)
     })
@@ -4044,6 +4055,7 @@ async fn ao_update(
             .policy_execution_guard()
             .map_err(|error| error.message().to_string())?;
         let mut result = coding_tools_core::data::DataStore::update_file(|data| match body.change {
+            AoMutation::Lifecycle { change } => integrations::ao_lifecycle::apply_change(data, &workspace_id, change, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|time| time.as_millis() as u64).unwrap_or(0)),
             AoMutation::CreateFromTeam { run_id, task_id, expected_board_revision, team_revision, team_id, execution_mode, single_route, worker_limit } =>
                 integrations::ao_team::create_selected_run(data, &workspace_id, run_id, task_id, expected_board_revision, worker_limit,
                     integrations::ao_team::CreateSelection { execution_mode, team_id, team_revision, single_route: single_route.map(|route| *route) })

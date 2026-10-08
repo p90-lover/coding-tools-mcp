@@ -72,11 +72,24 @@ test("preview is scoped to the selected run and waits for all parents", () => {
   assert.match(surfaceExports.aoPreviewText({ ...run, nodes: run.nodes.map((item) => item.id === "plan" ? { ...item, state: "held" } : item) }, tasks), /No ready card/);
 });
 
-const boardSource = fs.readFileSync(path.resolve(__dirname, "../../module/agent-orchestrator/frontend/src/renderer/components/CodingToolsMissionBoard.tsx"), "utf8");
-const costSource = fs.readFileSync(path.resolve(__dirname, "../../module/agent-orchestrator/frontend/src/renderer/lib/format-cost.ts"), "utf8");
+const repoRoot=path.resolve(__dirname,"../..");
+const nativeRoot=process.env.CODING_TOOLS_AO_TEST_SOURCE_ROOT || path.join(repoRoot,"module/agent-orchestrator");
+const {execFileSync}=require("node:child_process");
+const stageRoot=fs.mkdtempSync(path.join(repoRoot,"aiTemp/native-board-unit-"));
+const pin=execFileSync("git",["rev-parse","HEAD:module/agent-orchestrator"],{cwd:repoRoot,encoding:"utf8"}).trim();
+const sourceFiles=["frontend/src/renderer/components/CodingToolsMissionBoard.tsx","frontend/src/renderer/lib/coding-tools-bridge.ts"];
+for(const file of sourceFiles){
+  const destination=path.join(stageRoot,file);fs.mkdirSync(path.dirname(destination),{recursive:true});
+  fs.writeFileSync(destination,execFileSync("git",["show",pin+":"+file],{cwd:nativeRoot,encoding:"utf8"}));
+}
+const patch=path.join(repoRoot,"desktop-electron/patches/agent-orchestrator/mission-live-config-usage.patch");
+if(fs.statSync(patch).size) execFileSync("git",["apply","--directory="+path.relative(repoRoot,stageRoot).split(path.sep).join("/"),patch],{cwd:repoRoot,windowsHide:true});
+test.after(()=>fs.rmSync(stageRoot,{recursive:true,force:true}));
+const boardSource = fs.readFileSync(path.join(stageRoot,sourceFiles[0]),"utf8");
+const costSource = fs.readFileSync(path.join(nativeRoot, "frontend/src/renderer/lib/format-cost.ts"), "utf8");
 const costExports = {};
 vm.runInNewContext(ts.transpileModule(costSource, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { exports: costExports });
-const tokenSource = fs.readFileSync(path.resolve(__dirname, "../../module/agent-orchestrator/packages/product-ui/src/formatting.ts"), "utf8");
+const tokenSource = fs.readFileSync(path.join(nativeRoot, "packages/product-ui/src/formatting.ts"), "utf8");
 const tokenExports = {};
 vm.runInNewContext(ts.transpileModule(tokenSource, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { exports: tokenExports });
 const boardExports = {};
@@ -98,8 +111,8 @@ test("the original AO board projects the same mission IDs and does not hide a se
   const card = boardExports.missionCard({ ...mission, cancelled: true }, { id: "task-1", title: "Real mission" });
   assert.equal(card.id, "mission-1");
   assert.equal(card.title, "Real mission");
-  assert.equal(card.state, "running");
-  assert.equal(card.kanbanColumn, "validating");
+  assert.equal(card.state, "cancelled");
+  assert.equal(card.kanbanColumn, "ready");
   assert.equal(boardExports.missionCard({ ...mission, nodes: [] }).state, "pending");
   assert.equal(boardExports.missionCard({ ...mission, nodes: mission.nodes.map(item => ({ ...item, state: "finished" })) }).state, "finished");
 });
@@ -114,7 +127,7 @@ test("mission timestamps use task Unix seconds without inventing absent receipt 
   assert.equal(card.updatedAt, "2026-10-02T11:28:01.000Z");
   assert.equal(card.startedAt, null, "legacy receipt start cannot be inferred from the task update time");
   assert.equal(card.elapsedLabel, null);
-  assert.equal(card.usage.compactLabel, "Est. $0.13");
+  assert.equal(card.usage.compactLabel, "10 tok", "AO vendor pricing is not CPA authority");
   const current = { ...mission, nodes: [{ ...mission.nodes[0], receipt: { ...attempt, started_at_ms: 1790940481123 } }] };
   assert.equal(boardExports.missionCard(current, task, summaries).startedAt, "2026-10-02T11:28:01.123Z", "receipt times are already milliseconds");
 });
@@ -135,43 +148,46 @@ test("mission metadata names each receipt route, not a changed configuration or 
   assert.equal(unknown.routes[0].configured, false, "missing historic route must not be silently replaced by current configuration");
 });
 
-test("mission cost deduplicates AO session IDs across receipts and histories and exposes missing coverage", () => {
-  const old = receipt("ao:codex", "gpt", "s1");
-  const current = receipt("ao:claude-code", "claude", "s2", 3000);
-  const mission = { id: "cost", nodes: [
-    { ...node("a", "worker", [], "finished"), receipt: current, history: [old, current] },
-    { ...node("b", "reviewer", [], "finished"), receipt: old },
-    { ...node("c", "worker", [], "finished"), receipt: receipt("ao:codex", "gpt", "missing") },
-  ] };
-  const summaries = new Map([["s1", usage("s1", 100_000_000)], ["s2", usage("s2", 200_000_000)]]);
-  const card = boardExports.missionCard(mission, undefined, summaries);
-  assert.ok(Array.isArray(card.sessionIds), "usage must be keyed by real AO session IDs");
-  assert.deepEqual(Array.from(card.sessionIds).sort(), ["missing", "s1", "s2"]);
-  assert.equal(card.usage.compactLabel, "Est. $0.30 · partial");
-  assert.match(card.usage.accessibleLabel, /2\/3 AO sessions priced/);
-  assert.match(card.costCoverage, /2\/3 AO sessions priced/);
-  summaries.set("missing", usage("missing", 0));
-  assert.equal(boardExports.missionCard(mission, undefined, summaries).usage.compactLabel, "Est. $0.30");
-  summaries.set("s1", usage("s1", 100_000_000, "partial"));
-  assert.match(boardExports.missionCard(mission, undefined, summaries).usage.compactLabel, /partial/);
-  summaries.set("s1", usage("s1", 100_000_000, "complete", true));
-  assert.match(boardExports.missionCard(mission, undefined, summaries).usage.compactLabel, /partial/);
+test("mission CPA cost consumes scoped host accounting, deduplicates receipt identities and rejects vendor pricing authority",()=>{
+  const old=receipt("ao:codex","gpt","s1"),current=receipt("ao:claude-code","claude","s2",3000);
+  const mission={id:"cost",nodes:[
+    {...node("a","worker",[],"finished"),receipt:current,history:[old,current]},
+    {...node("b","reviewer",[],"finished"),receipt:old},
+    {...node("c","worker",[],"finished"),receipt:receipt("ao:codex","gpt","missing")}]};
+  const summaries=new Map([["s1",usage("s1",999000000)],["s2",usage("s2",888000000)]]);
+  const accounting={processedTokens:20,coverage:"partial",measuredSessions:2,requestedSessions:3,
+    cost:{source:"CPA Helper",totalNanos:300000000,coverage:"partial"}};
+  const card=boardExports.missionCard(mission,undefined,summaries,10000,accounting);
+  assert.deepEqual(Array.from(card.sessionIds).sort(),["missing","s1","s2"]);
+  assert.equal(card.usage.compactLabel,"CPA Est. $0.30 · partial");
+  assert.match(card.costCoverage,/CPA Helper/);assert.match(card.costCoverage,/2\/3 sessions measured/);
+  assert.equal(boardExports.missionCard(mission,undefined,summaries).usage.compactLabel,"20 tok · partial");
+  accounting.cost.coverage="complete";accounting.coverage="complete";
+  assert.equal(boardExports.missionCard(mission,undefined,summaries,10000,accounting).usage.compactLabel,"CPA Est. $0.30");
 });
 
-test("mission cost distinguishes unavailable from measured zero and never prices native WebGPT as zero", () => {
-  const mission = { id: "zero", nodes: [{ ...node("w", "worker", [], "finished"), receipt: receipt("ao:codex", "gpt", "s1") }] };
-  for (const total of [null, undefined, NaN, -1]) {
-    const card = boardExports.missionCard(mission, undefined, new Map([["s1", usage("s1", total)]]));
-    assert.equal(card.usage?.compactLabel, "10 tok", "missing or invalid prices must not hide measured tokens");
-    assert.match(card.usage.accessibleLabel, /USD estimate not reported/);
+test("missing CPA price keeps tokens; measured CPA zero is distinct from unreported native usage",()=>{
+  const mission={id:"zero",nodes:[{...node("w","worker",[],"finished"),receipt:receipt("ao:codex","gpt","s1")}]};
+  for(const total of [null,undefined,NaN,-1,0]){
+    const card=boardExports.missionCard(mission,undefined,new Map([["s1",usage("s1",total)]]));
+    assert.equal(card.usage.compactLabel,"10 tok");assert.match(card.usage.accessibleLabel,/USD estimate not reported/);
   }
-  assert.equal(boardExports.missionCard(mission, undefined, new Map([["s1", usage("s1", 0)]])).usage.compactLabel, "Est. $0.00");
-  const native = { id: "native", nodes: [{ ...node("p", "planner", [], "finished"), receipt: receipt("codex-native", "chatgpt-web/high", "native-thread") }] };
-  const nativeCard = boardExports.missionCard(native, undefined, new Map([["native-thread", usage("native-thread", 0)]]));
-  assert.equal(nativeCard.usage.compactLabel, "Usage not reported");
-  assert.match(nativeCard.costCoverage, /Native WebGPT cost unavailable/);
-  const mixed = boardExports.missionCard({ ...mission, nodes: [...mission.nodes, ...native.nodes] }, undefined, new Map([["s1", usage("s1", 0)]]));
-  assert.equal(mixed.usage.compactLabel, "Est. $0.00 · partial");
+  const accounting={processedTokens:0,coverage:"complete",measuredSessions:1,requestedSessions:1,
+    cost:{source:"CPA Helper",totalNanos:0,coverage:"complete"}};
+  assert.equal(boardExports.missionCard(mission,undefined,undefined,1000,accounting).usage.compactLabel,"CPA Est. $0.00");
+  const native={id:"native",nodes:[{...node("p","planner",[],"finished"),receipt:receipt("codex-native","chatgpt-web/high","n")}]};
+  assert.equal(boardExports.missionCard(native,undefined,new Map([["n",usage("n",0)]])).usage.compactLabel,"Usage not reported");
+  accounting.cost.totalNanos=null;
+  assert.equal(boardExports.missionCard(mission,undefined,undefined,1000,accounting).usage.compactLabel,"0 tok");
+});
+
+test("scheduled, paused and hidden mission status outranks stale running nodes",()=>{
+  const mission={id:"r",project_id:"t",nodes:[node("p","planner",[],"running")]};
+  assert.equal(boardExports.missionCard({...mission,paused:true}).state,"paused");
+  assert.equal(boardExports.missionCard(mission,undefined,undefined,1000,undefined,
+    {task_id:"t",visibility:"active",schedule:{run_id:"r",state:"scheduled",due_at_ms:2000}}).state,"scheduled");
+  assert.equal(boardExports.missionCard(mission,undefined,undefined,1000,undefined,
+    {task_id:"t",visibility:"deleted"}).state,"deleted");
 });
 
 test("mission usage keeps observed tokens when a CPA dollar estimate is absent", () => {
@@ -199,7 +215,7 @@ test("mission usage keeps observed tokens when a CPA dollar estimate is absent",
 });
 
 test("mission timing uses the reservation of active attempts only and does not grow a finished duration", () => {
-  const mission = { id: "clock", cancelled: true, nodes: [{
+  const mission = { id: "clock", cancelled: false, nodes: [{
     ...node("w", "worker", [], "running"), receipt: receipt("ao:codex", "gpt", "s1", 61_000),
     history: [receipt("ao:codex", "gpt", "old", 1000)],
   }] };
@@ -207,6 +223,7 @@ test("mission timing uses the reservation of active attempts only and does not g
   assert.equal(running.state, "running");
   assert.equal(running.startedAt, "1970-01-01T00:00:01.000Z");
   assert.equal(running.elapsedLabel, "1m 5s");
+  assert.equal(boardExports.missionCard({...mission,cancelled:true},undefined,undefined,127_000).elapsedLabel,null);
   assert.equal(boardExports.missionCard(mission, undefined, undefined, 127_000).elapsedLabel, "1m 6s");
   for (const state of ["finished", "held", "archived", "cancelled", "pending"]) {
     const settled = { ...mission, cancelled: false, nodes: mission.nodes.map(item => ({ ...item, state })) };
@@ -222,13 +239,13 @@ test("mission timing uses the reservation of active attempts only and does not g
 });
 
 test("mission board scopes usage to the AO project, never the task ID or all projects while unresolved", () => {
-  const hookSource = fs.readFileSync(path.resolve(__dirname, "../../module/agent-orchestrator/frontend/src/renderer/hooks/useSessionUsageSummaries.ts"), "utf8");
+  const hookSource = fs.readFileSync(path.join(nativeRoot,"frontend/src/renderer/hooks/useSessionUsageSummaries.ts"), "utf8");
   const hookExports = {};
   vm.runInNewContext(ts.transpileModule(hookSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
     { exports: hookExports, require: () => ({}) });
   const mission = { id: "mission", project_id: "task-not-project", nodes: [{ ...node("w", "worker", [], "finished"), receipt: receipt("ao:codex", "gpt", "real-session") }] };
   for (const projectId of ["ao-project", null, undefined]) {
-    const queries = [];
+    const queries = [], navigation=[], actions=[];
     const view = {};
     const jsx = (type, props) => ({ type, props });
     vm.runInNewContext(ts.transpileModule(boardSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
@@ -244,7 +261,9 @@ test("mission board scopes usage to the AO project, never the task ID or all pro
             : { data: new Map([["real-session", usage("real-session", 200_000_000)]]) };
         } };
         if (name === "../hooks/useSessionUsageSummaries") return hookExports;
+        if (name === "../lib/coding-tools-bridge") return {openCodingToolsMission:async(...args)=>navigation.push(args),actionCodingToolsMission:async(...args)=>actions.push(args)};
         if (name === "../lib/format-cost") return costExports;
+        if (name === "../lib/format-time") return {formatTimeCompact:value=>String(value)};
         if (name === "../lib/format-token-count") return tokenExports;
         if (name === "../lib/session-presentation") return { boardKanbanColumnOrder: [] };
         if (name === "@aoagents/product-ui") return { SessionsBoardGridView: "mission-grid" };
@@ -257,7 +276,21 @@ test("mission board scopes usage to the AO project, never the task ID or all pro
     assert.equal(query.enabled, Boolean(projectId));
     if (projectId) assert.deepEqual(Array.from(query.queryKey), ["session-usage", "ao-project"]);
     const grid = rendered.props.children.at(-1).props.children;
-    if (projectId !== undefined) assert.equal(grid.props.sessions[0].usage.compactLabel, projectId ? "Est. $0.20" : "Usage not reported");
+    if (projectId !== undefined) {
+      assert.equal(grid.props.sessions[0].usage.compactLabel,projectId ? "10 tok" : "Usage not reported");
+      const renderedCard=grid.props.renderSessionCard(grid.props.sessions[0]);
+      const walk=e=>!e || typeof e!=="object" ? [] : Array.isArray(e) ? e.flatMap(walk) : [e,...walk(e.props?.children)];
+      const group=renderedCard.props.children.props.action;
+      assert.equal(group.props.className,"ct-mission-actions");
+      const controls=walk(group).filter(e=>e.props?.["aria-label"]);
+      for(const label of ["Mission","Overview","Schedule","Archive","Delete"]){
+        const button=controls.find(e=>e.props["aria-label"]===label+" mission");
+        assert.ok(button,label+" is available on hover/focus");
+        button.props.onClick({stopPropagation(){}});
+      }
+      assert.deepEqual(navigation.map(args=>args.slice(0,2)),[["workspace","mission"],["workspace","mission"],["workspace","mission"]]);
+      assert.deepEqual(actions,[["workspace","mission","archive"],["workspace","mission","delete"]]);
+    }
   }
 });
 

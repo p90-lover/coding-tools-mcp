@@ -39,6 +39,14 @@ export type ChatOptions = {
 export const STALL_MS = 10 * 60_000;
 
 /** 42_000 -> "42s"; 185_000 -> "3m"; 10_680_000 -> "2h 58m". */
+export function scheduledStartLabel(dueAt: number, now = Date.now()): string {
+  const seconds = Math.max(0, Math.ceil((dueAt-now)/1000));
+  const remaining = !seconds ? "due now" : seconds < 60 ? `in ${seconds}s`
+    : seconds < 3600 ? `in ${Math.floor(seconds/60)}m ${seconds%60}s`
+    : `in ${Math.floor(seconds/3600)}h ${Math.floor(seconds%3600/60)}m`;
+  return `Starts at ${new Date(dueAt).toLocaleString()} · ${remaining}`;
+}
+
 export function chatDuration(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
   if (seconds < 60) return `${seconds}s`;
@@ -64,7 +72,13 @@ export function chatWorkingDetail(node: ChatNode, live: ChatActivity | undefined
   return { detail: parts.filter(Boolean).join(" · "), stalled };
 }
 
+export type TaskLifecycleView = {
+  task_id: string; title?: string; workspace_id?: string; revision?: number; visibility?: "active" | "archived" | "deleted";
+  reconfigure?: { id: string; previous_run_id: string; replacement_run_id?: string | null; phase: string; handoff?: string }[];
+  schedule?: { id: string; run_id: string; due_at_ms: number; state: string; revision: number } | null;
+};
 export type ChatRun = {
+  replaces_run_id?: string;
   id: string;
   project_id: string;
   cancelled: boolean;
@@ -74,9 +88,11 @@ export type ChatRun = {
   nodes: ChatNode[];
 };
 
-export type ChatStatus = "queued" | "running" | "paused" | "attention" | "stopped" | "done";
+export type ChatStatus = "queued" | "scheduled" | "running" | "paused" | "attention" | "stopped" | "done";
 
 export type ChatSummary = {
+  visibility?: "active" | "archived" | "deleted";
+  schedule?: TaskLifecycleView["schedule"];
   taskId: string;
   title: string;
   runIds: string[];
@@ -130,10 +146,14 @@ export function chatRunOpen(status: ChatStatus | undefined): boolean {
 }
 
 /** Chats in a workspace, most recently started first. Runs arrive oldest first. */
-export function chatList(runs: ChatRun[], tasks: { id: string; title: string }[]): ChatSummary[] {
+export function chatList(runs: ChatRun[], tasks: { id: string; title: string; state?: string }[], lifecycle: TaskLifecycleView[] = [], showInactive = false): ChatSummary[] {
+  const lifeByTask = new Map(lifecycle.map(item => [item.task_id, item]));
   const titles = new Map(tasks.map((task) => [task.id, task.title]));
   const byTask = new Map<string, { runs: ChatRun[]; lastIndex: number }>();
   runs.forEach((run, index) => {
+    const life = lifeByTask.get(run.project_id);
+    if (!showInactive && (life?.visibility === "archived" || life?.visibility === "deleted"
+        || tasks.find(task => task.id === run.project_id)?.state === "archived")) return;
     const entry = byTask.get(run.project_id) ?? { runs: [], lastIndex: index };
     entry.runs.push(run);
     entry.lastIndex = index;
@@ -145,10 +165,14 @@ export function chatList(runs: ChatRun[], tasks: { id: string; title: string }[]
       const latest = entry.runs[entry.runs.length - 1];
       return {
         taskId,
-        title: titles.get(taskId) || CHAT_DEFAULT_TITLE,
+        title: titles.get(taskId) || lifeByTask.get(taskId)?.title || CHAT_DEFAULT_TITLE,
         runIds: entry.runs.map((run) => run.id),
         latestRunId: latest.id,
-        status: chatRunStatus(latest),
+        visibility: lifeByTask.get(taskId)?.visibility ?? (tasks.find(task => task.id === taskId)?.state === "archived" ? "archived" : "active"),
+        schedule: lifeByTask.get(taskId)?.schedule,
+        status: lifeByTask.get(taskId)?.schedule?.run_id === latest.id && lifeByTask.get(taskId)?.schedule?.state === "scheduled"
+          ? "scheduled" : ["missed", "needs_attention"].includes(lifeByTask.get(taskId)?.schedule?.state ?? "")
+          ? "attention" : chatRunStatus(latest),
       };
     });
 }
@@ -185,8 +209,11 @@ export function chatTranscript(runs: ChatRun[], description: string | undefined,
   const said = chatMessagesFromDescription(description);
   const now = options.now ?? Date.now();
   const messages: ChatMessage[] = [];
-  runs.forEach((run, index) => {
-    const user = said[index];
+  let messageIndex = 0;
+  runs.forEach((run) => {
+    const user = run.replaces_run_id ? undefined : said[messageIndex++];
+    if (run.replaces_run_id) messages.push({ kind: "status", key: `${run.id}:reconfigured`,
+      text: "Configuration changed; continuing from quoted visible work.", state: "finished" });
     if (user) messages.push({ kind: "user", key: `${run.id}:user`, text: user.text, stamp: user.stamp });
     for (const node of chatNodeOrder(run.nodes)) {
       const name = chatNodeName(node);
@@ -203,7 +230,7 @@ export function chatTranscript(runs: ChatRun[], description: string | undefined,
           ...(node.receipt.verdict ? { verdict: node.receipt.verdict } : {}),
           ...detail,
         });
-      } else if (node.state === "running" || node.state === "reserved") {
+      } else if (!run.cancelled && !run.paused && (node.state === "running" || node.state === "reserved")) {
         const working = chatWorkingDetail(node, options.activity?.[key], now, options.describe);
         messages.push({
           kind: "status", key, state: node.state, detail: working.detail, stalled: working.stalled,
@@ -219,7 +246,7 @@ export function chatTranscript(runs: ChatRun[], description: string | undefined,
     if (run.cancelled) messages.push({ kind: "status", key: `${run.id}:stopped`, text: "Stopped", state: "cancelled" });
   });
   // A message just sent whose run is not visible yet.
-  for (let index = runs.length; index < said.length; index += 1) {
+  for (let index = messageIndex; index < said.length; index += 1) {
     messages.push({ kind: "user", key: `pending:${index}`, text: said[index].text, stamp: said[index].stamp });
   }
   return messages;
