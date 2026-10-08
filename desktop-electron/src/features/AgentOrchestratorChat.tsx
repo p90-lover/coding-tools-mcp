@@ -76,7 +76,9 @@ function StepRow({ step, now }: { step: ChatStep; now: number }) {
 
 function WorkGroup({ turn, now }: { turn: ChatTurn; now: number }) {
   const working = turn.steps.find((step) => step.working);
-  const [open, setOpen] = useState(() => turn.steps.some((step) => step.error));
+  // Live and failed work opens by itself until the user toggles it; after that their choice holds.
+  const [chosen, setChosen] = useState<boolean | null>(null);
+  const open = chosen ?? (Boolean(working) || turn.steps.some((step) => step.error));
   if (!turn.steps.length) {
     return turn.status === "running" || turn.status === "queued"
       ? <div className="cx-work is-live"><span className="cx-shimmer">Starting…</span></div> : null;
@@ -85,11 +87,11 @@ function WorkGroup({ turn, now }: { turn: ChatTurn; now: number }) {
     ? `${working.working!.stalled ? "May be stuck" : "Working"}${turn.startedAtMs ? ` for ${chatDuration(now - turn.startedAtMs)}` : ""} · ${working.name}${working.working!.activity ? ` — ${working.working!.activity}` : ""}`
     : `Worked · ${turn.steps.length} ${turn.steps.length === 1 ? "step" : "steps"}`;
   return <div className={`cx-work${working ? " is-live" : ""}${working?.working?.stalled ? " is-stalled" : ""}`}>
-    <button type="button" className="cx-work-head" aria-expanded={open || Boolean(working)} onClick={() => setOpen((value) => !value)}>
+    <button type="button" className="cx-work-head" aria-expanded={open} onClick={() => setChosen(!open)}>
       <span className={working ? "cx-shimmer" : undefined}>{label}</span>
-      <Icon name="chevron" width="12" height="12" className={open || working ? "is-open" : undefined} />
+      <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
     </button>
-    {open || working ? <ol className="cx-steps">{turn.steps.map((step) => <StepRow key={step.key} step={step} now={now} />)}</ol> : null}
+    {open ? <ol className="cx-steps">{turn.steps.map((step) => <StepRow key={step.key} step={step} now={now} />)}</ol> : null}
   </div>;
 }
 
@@ -292,6 +294,8 @@ export function AgentOrchestratorChat({
           {structure || latest ? <button type="button" className="cx-icon-button" aria-pressed={showStructure} title="Show cards (Structure)" aria-label="Show cards"
             disabled={!latest} onClick={() => structure ? setShowStructure((value) => !value) : latest && openStructure(latest.id)}>
             <Icon name="orchestrator" width="16" height="16" /></button> : null}
+          {onOpenMissionBoard ? <button type="button" className="cx-icon-button" title="Mission Board" aria-label="Open Mission Board" onClick={onOpenMissionBoard}>
+            <Icon name="logs" width="16" height="16" /></button> : null}
           <button type="button" className="cx-icon-button" title="More" aria-label="More chat actions" aria-haspopup="menu"
             onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); setMenu({ x: box.right - 240, y: box.bottom + 4, items: headerMenu(), label: "Chat actions" }); }}>⋯</button>
         </header>

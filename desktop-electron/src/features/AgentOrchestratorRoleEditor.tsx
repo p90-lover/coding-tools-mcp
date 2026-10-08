@@ -79,6 +79,17 @@ export function tokensLabel(tokens: number): string {
   return tokens.toLocaleString("en-US");
 }
 
+const EFFORT_ORDER = ["minimal", "low", "medium", "high", "xhigh", "max"];
+
+/** What a model supports, for model lists: "max xhigh · 400K context". Native Codex accepts
+ *  every effort and a 4,096–2M budget; other harnesses show only what their catalog verified. */
+export function capabilityText(capability: AoModelCapabilities | undefined, native = false): string {
+  const efforts = native ? [...EFFORTS] : (capability?.efforts ?? []).filter(effort => EFFORT_ORDER.includes(effort));
+  const top = efforts.sort((a, b) => EFFORT_ORDER.indexOf(a) - EFFORT_ORDER.indexOf(b)).at(-1);
+  const limit = capability?.contextLimit ?? (native ? 2_000_000 : capability?.contextWindow?.max);
+  return [top ? `max ${top}` : "", limit ? `${tokensLabel(limit)} context` : ""].filter(Boolean).join(" · ");
+}
+
 const ROLE_LABELS = { planner: "Orchestrator", approver: "Command approver", worker: "Worker", review_split: "Main reviewer · split", sub_reviewer: "Sub-reviewer", reviewer: "Main reviewer", retry: "Retry" } as const;
 
 /** The role a card shows: the custom role the user typed, else its built-in role's name. */
@@ -197,7 +208,8 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
         : models && !models.includes(route.model) ? <option value={route.model}>{route.model} (unverified)</option> : null}
       {models === null ? <option value={route.model}>{route.model || "Loading"}</option> : null}
       {(models ?? []).map(model => <option key={model} value={model}>
-        {modelLabel(model)}{harness !== NATIVE_HARNESS && isWebModel(model) ? " · switches to Native Codex" : ""}
+        {modelLabel(model)}{harness !== NATIVE_HARNESS && isWebModel(model) ? " · switches to Native Codex"
+          : capabilities?.harness === harness && capabilityText(capabilities.models[model], native) ? ` · ${capabilityText(capabilities.models[model], native)}` : ""}
       </option>)}
     </select></label> : null}
     {!hidePermissionNote ? harness === NATIVE_HARNESS ? <p className="ao-hint">Saved native permission: {nativePermission(route) || "Unknown"}. Change permissions explicitly in the chat composer menu; runtime capabilities are authoritative.</p>

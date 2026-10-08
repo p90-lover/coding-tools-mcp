@@ -1149,6 +1149,20 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     return { detail };
   }
 
+  // Connects the harnesses of all cards that are ready to run, concurrently, up to the worker
+  // capacity. Failures are left to the launch loop, which reports them for the right card.
+  async function connectReadyHarnesses(workspaceId, runId, mission, saved, executable) {
+    let workers = saved.worker_capacity?.[runId] ?? 0;
+    const ready = mission.nodes.filter((node) => node.state === "pending" && parentsReady(mission, node) && !externalAgent(node)
+      && (node.role !== "worker" || workers-- > 0));
+    if (ready.length < 2) return;
+    await Promise.allSettled(ready.map(async (node) => {
+      const status = await harnessStatus({ workspaceId, runId, nodeId: node.id });
+      if (status.status?.connected) return;
+      await connectAoHarness({ workspaceId, runId, nodeId: node.id, executable }, true);
+    }));
+  }
+
   async function driveRun(workspaceId, runId, executable, state) {
     const pause = () => new Promise(resolve => setTimeout(resolve, 500));
     const observing = new Map();
@@ -1160,6 +1174,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         let mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
         if (!mission) throw new Error("Saved mission is unavailable");
         if (!Number.isInteger(saved.worker_capacity?.[runId])) throw new Error("The installed AO service does not report worker capacity; update the matching runtime");
+        // Start every ready Native Codex card's harness together first. Launching a Codex process
+        // can take minutes on a slow disk; done one card at a time, a sibling worker waited for
+        // it and the workers ran one after another instead of in parallel. The launches below
+        // stay one at a time because each reserves against the latest mission revision.
+        if (!state.stopped && !mission.cancelled && !mission.paused) await connectReadyHarnesses(workspaceId, runId, mission, saved, executable);
         // Reserve and launch with the latest revision; never await sibling output here.
         while (!state.stopped && !mission.cancelled && !mission.paused
           && !(mission.grant?.expires_at_ms && Date.now() >= mission.grant.expires_at_ms)) {
