@@ -682,6 +682,10 @@ export interface LauncherApi {
   openSocial(target: "github" | "x"): Promise<LauncherState>;
   completeOnboarding(language: Language, browserInteractionMode: BrowserInteractionMode): Promise<LauncherState>;
   openExternal(url: string): Promise<boolean>;
+  /** The file system path of a dropped or picked file, or "" when unknown. */
+  filePath?(file: File): string;
+  /** Opens an existing folder in the system file manager. */
+  openFolder?(folder: string): Promise<boolean>;
   setBrowserBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<boolean>;
   setBrowserSurfaceActive(active: boolean): Promise<BrowserState | true>;
   showBrowser(): Promise<BrowserState>;

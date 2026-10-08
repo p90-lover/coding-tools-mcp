@@ -169,46 +169,6 @@ test("Chat new Single prompt is Ask anything while Team, follow-up and running p
     runs: [run("active", "task", [node("worker", "worker", "running")])] }), "Running — you can send a follow-up when it finishes");
 });
 
-test("each task has always-visible Mission and Overview icons that select that task, without project text tabs", () => {
-  const componentSource = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
-  const component = {};
-  vm.runInNewContext(ts.transpileModule(componentSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
-    exports: component,
-    require: name => name === "./ao-chat" ? chat : name === "../icons" ? { Icon: () => null } : name === "./AgentOrchestratorApproval" ? { AgentOrchestratorApproval: () => null } : name === "./AgentOrchestratorComposerControls" ? { AgentOrchestratorComposerControls: () => null }
-      : require(require.resolve(name, { paths: [path.resolve(__dirname, "..")] })),
-  });
-  const selected = [];
-  const pane = component.ChatListPane({
-    chats: [{ taskId: "task-a", title: "Fix app", status: "running" }, { taskId: "task-b", title: "Older task", status: "done" }],
-    selectedTaskId: "task-a", onSelect: (id, view) => selected.push([id, view]), onNew: () => selected.push(["new"]),
-    tree: { workspaces: [{ id: "a", name: "Alpha" }, { id: "b", name: "Beta" }], workspaceId: "a",
-      onWorkspace: id => selected.push(["workspace", id]), view: "overview",
-      labels: { chat: "Mission tab", overview: "Overview board" } },
-  });
-  const walk = element => !element || typeof element !== "object" ? [] : Array.isArray(element)
-    ? element.flatMap(walk) : [element, ...walk(element.props?.children)];
-  const elements = walk(pane);
-  assert.equal(elements.filter(element => element.type === "nav").length, 0, "project-level text tabs are removed");
-  const rows = elements.filter(element => element.type === "li" && element.props.className === "ao-chat-row");
-  assert.equal(rows.length, 2, "each task, including an unselected historical task, gets its own controls");
-  const buttons = walk(rows[1]).filter(element => element.type === "button");
-  assert.equal(buttons.length, 3, "title plus two compact icon buttons");
-  assert.equal(buttons[0].props.title, "Older task", "truncated task titles remain readable");
-  assert.deepEqual(buttons.slice(1).map(button => button.props["aria-label"]), ["Mission tab · Older task", "Overview board · Older task"]);
-  assert.deepEqual(buttons.slice(1).map(button => button.props.title), ["Mission tab · Older task", "Overview board · Older task"]);
-  assert.deepEqual(buttons.slice(1).map(button => button.props.children.props.name), ["mail", "orchestrator"], "reuse existing icons");
-  assert.ok(buttons.slice(1).every(button => !button.props.hidden && button.props.type === "button"));
-  assert.ok(buttons.every(button => walk(button.props.children).every(child => child.type !== "button")), "no nested buttons");
-  buttons[2].props.onClick(); buttons[1].props.onClick(); buttons[0].props.onClick();
-  assert.deepEqual(selected, [["task-b", "overview"], ["task-b", "chat"], ["task-b", "chat"]], "icons select their task, title defaults to Mission");
-  const currentButtons = walk(rows[0]).filter(element => element.type === "button");
-  assert.equal(currentButtons[2].props["aria-pressed"], true);
-  assert.equal(currentButtons[1].props["aria-pressed"], false);
-  elements.find(element => element.props?.className === "ao-chat-new").props.onClick();
-  elements.find(element => element.props?.className === "ao-chat-workspace" && element.props.title === "Beta").props.onClick();
-  assert.deepEqual(selected.slice(-2), [["new"], ["workspace", "b"]], "new chat and project grouping remain");
-});
-
 function loadSurface(react = {}, globals = {}, imports = {}) {
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8");
   const surface = {};

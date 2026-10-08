@@ -206,11 +206,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     return checked(result);
   }
 
-  async function board({ workspaceId, taskId } = {}) {
+  async function board({ workspaceId, taskId, includeArchived = false } = {}) {
     const result = checked(await tool(workspaceId, "workflow_list", {
       ...(taskId ? { task_id: clean(taskId, 128) } : {}),
       limit: 100,
-      include_archived: false,
+      // The chat list asks for archived tasks too, to offer them under "Archived chats".
+      include_archived: includeArchived === true,
     }));
     return { ok: true, revision: result.revision, steps: result.steps, tasks: result.tasks ?? [],
       task: result.task ?? null, workspaceId: result.workspace_id };
@@ -1165,6 +1166,38 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     return board({ workspaceId, taskId: id });
   }
 
+  // Codex thread actions on a chat's task. Renaming keeps the description, which holds the chat's
+  // messages; archiving hides the chat (its runs and answers stay) and restoring brings it back.
+  async function taskRename({ workspaceId, taskId, title } = {}) {
+    const id = clean(taskId, 128);
+    if (typeof title !== "string" || !title.trim()) throw new Error("Give the chat a name");
+    const name = clean(title.trim(), 240);
+    const current = await board({ workspaceId, taskId: id, includeArchived: true });
+    if (!current.task || current.task.id !== id) throw new Error("This chat's task no longer exists");
+    await write(workspaceId, {
+      expected_revision: current.revision,
+      change: { operation: "edit", id, title: name, description: current.task.description ?? "" },
+    });
+    return board({ workspaceId, includeArchived: true });
+  }
+
+  async function taskArchive({ workspaceId, taskId, restore = false } = {}) {
+    const id = clean(taskId, 128);
+    if (!restore) {
+      const saved = await runs({ workspaceId });
+      const open = saved.runs.find((run) => run.project_id === id && !runSettled(run));
+      if (open && open.nodes?.some((node) => node.state === "running" || node.state === "reserved")) {
+        throw new Error("This chat is still running; stop it before archiving");
+      }
+    }
+    const current = await board({ workspaceId, includeArchived: true });
+    await write(workspaceId, {
+      expected_revision: current.revision,
+      change: { operation: restore ? "restore" : "archive", id },
+    });
+    return board({ workspaceId, includeArchived: true });
+  }
+
   async function moveTask({ workspaceId, taskId, state, expectedRevision } = {}) {
     const id = clean(taskId, 128);
     if (!["backlog", "in_progress", "blocked", "done"].includes(state)
@@ -1387,6 +1420,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       case "codex_executable": return { ok: true, executable: findCodexExecutable() };
       case "inspect": return { ok: true, status: "graph_ready", source: "coding-tools-plan", plannerRoute: "webgpt-on-codex-required", execution: "not_connected" };
       case "board": return board(args);
+      case "task_rename": return taskRename(args);
+      case "task_archive": return taskArchive(args);
+      case "task_restore": return taskArchive({ ...args, restore: true });
       case "models": return models(args);
       case "harnesses": return harnesses();
       case "runs": return runs(args);

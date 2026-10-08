@@ -1332,6 +1332,20 @@ function registerIpc({ logger, stateStore }) {
     return next;
   });
 
+  // Opens a workspace folder in the system file manager (chat list "Open in Explorer"). Only an
+  // existing directory is accepted, so nothing can be launched through it.
+  handle("launcher:open-folder", async (event, folder) => {
+    assertFocusedMainWindow(event, false);
+    if (typeof folder !== "string" || folder.length > 4096 || !path.isAbsolute(folder)) {
+      throw new Error("Choose an absolute folder path");
+    }
+    const resolved = path.resolve(folder);
+    if (!fs.statSync(resolved, { throwIfNoEntry: false })?.isDirectory()) throw new Error("This folder no longer exists");
+    const failure = await shell.openPath(resolved);
+    if (failure) throw new Error(failure);
+    return true;
+  });
+
   handle("launcher:open-external", async (_event, url) => {
     if (!ALLOWED_EXTERNAL_URLS.has(url)) throw new Error("External URL is not allowlisted");
     await openWebUrl(url);

@@ -1532,3 +1532,39 @@ test("single restart honors deferred narrowing without rewriting its completed f
     assert.equal(Object.hasOwn(replacement,"team_id"),false);
   }
 });
+
+test("chat thread actions: rename keeps the messages, archive refuses a running chat, restore brings it back", async () => {
+  const task = { id: "task-1", title: "Old name", description: "first message\n\nFollow-up (2026-10-08 01:00 UTC):\nsecond", state: "done" };
+  let revision = 7;
+  const updates = [];
+  let runNodes = [{ id: "p", role: "planner", state: "running" }];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", project_id: "task-1", cancelled: false, nodes: runNodes }] };
+      assert.equal(endpoint, "/api/v1/tools/call");
+      const args = body.arguments;
+      if (body.tool === "workflow_list") {
+        return { ok: true, operation: { state: "completed", result: { ok: true, revision, workspace_id: "ws-1", steps: [],
+          ...(args.task_id ? { task } : { tasks: [task] }), included_archived: args.include_archived } } };
+      }
+      if (body.tool === "workflow_update") {
+        updates.push(args);
+        revision += 1;
+        return { ok: true, operation: { state: "completed", result: { ok: true } } };
+      }
+      throw new Error(`unexpected ${body.tool}`);
+    },
+    confirm: async () => true,
+  });
+  await workflow.call("task_rename", { workspaceId: "ws-1", taskId: "task-1", title: "  New name " });
+  assert.deepEqual(updates[0], { expected_revision: 7, change: { operation: "edit", id: "task-1", title: "New name", description: task.description } },
+    "the description, which holds every message, is kept");
+  await assert.rejects(workflow.call("task_rename", { workspaceId: "ws-1", taskId: "task-1", title: "   " }), /Give the chat a name/);
+  await assert.rejects(workflow.call("task_archive", { workspaceId: "ws-1", taskId: "task-1" }), /still running; stop it before archiving/);
+  runNodes = [{ id: "p", role: "planner", state: "finished" }];
+  await workflow.call("task_archive", { workspaceId: "ws-1", taskId: "task-1" });
+  await workflow.call("task_restore", { workspaceId: "ws-1", taskId: "task-1" });
+  assert.deepEqual(updates.slice(1).map((update) => update.change), [{ operation: "archive", id: "task-1" }, { operation: "restore", id: "task-1" }]);
+  const listed = await workflow.call("board", { workspaceId: "ws-1", includeArchived: true });
+  assert.equal(listed.ok, true);
+});

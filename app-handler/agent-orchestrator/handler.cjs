@@ -43,6 +43,9 @@ const SPECS = Object.freeze({
 
   create: { readOnly: false, description: "Create a task for the Coding Tools mission board at its expected revision." },
   append: { readOnly: false, description: "Append reviewed clauses to the old plan board with its expected revision." },
+  task_rename: { readOnly: false, description: "Rename a chat (its board task); the chat's messages are kept." },
+  task_archive: { readOnly: false, description: "Archive a chat that is not running; its runs and answers are kept and it can be restored." },
+  task_restore: { readOnly: false, description: "Restore an archived chat to the chat list." },
   move_task: { readOnly: false, description: "Move one plan task after local confirmation." },
   move_clause: { readOnly: false, description: "Move one plan clause after local confirmation." },
 });

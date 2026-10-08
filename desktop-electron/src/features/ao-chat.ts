@@ -80,7 +80,29 @@ export type ChatSummary = {
   runIds: string[];
   latestRunId: string;
   status: ChatStatus;
+  /** When the chat's task last changed (Unix ms), for the list's relative age. */
+  updatedAtMs?: number;
+  archived?: boolean;
 };
+
+/** A board task as the chat list sees it. */
+export type ChatTask = { id: string; title: string; state?: string; updated_at?: number };
+
+/** "now", "5m", "3h", "2d", "3w", "4mo", "2y": Codex's compact age. */
+export function chatRelativeTime(ms: number | undefined, now: number): string {
+  if (!ms) return "";
+  const seconds = Math.max(0, Math.floor((now - ms) / 1000));
+  if (seconds < 60) return "now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d`;
+  if (days < 30) return `${Math.floor(days / 7)}w`;
+  if (days < 365) return `${Math.floor(days / 30)}mo`;
+  return `${Math.floor(days / 365)}y`;
+}
 
 export type ChatMessage =
   | { kind: "user"; key: string; text: string; stamp?: string }
@@ -126,9 +148,19 @@ export function chatRunOpen(status: ChatStatus | undefined): boolean {
   return status === "queued" || status === "running" || status === "paused" || status === "attention";
 }
 
-/** Chats in a workspace, most recently started first. Runs arrive oldest first. */
-export function chatList(runs: ChatRun[], tasks: { id: string; title: string }[]): ChatSummary[] {
+/** Chats in a workspace, most recently started first. Runs arrive oldest first. Archived chats are left out. */
+export function chatList(runs: ChatRun[], tasks: ChatTask[]): ChatSummary[] {
+  return chatSummaries(runs, tasks).filter((chat) => !chat.archived);
+}
+
+/** Archived chats, most recently started first, for the list's "Archived" section. */
+export function chatArchived(runs: ChatRun[], tasks: ChatTask[]): ChatSummary[] {
+  return chatSummaries(runs, tasks).filter((chat) => chat.archived);
+}
+
+function chatSummaries(runs: ChatRun[], tasks: ChatTask[]): ChatSummary[] {
   const titles = new Map(tasks.map((task) => [task.id, task.title]));
+  const byId = new Map(tasks.map((task) => [task.id, task]));
   const byTask = new Map<string, { runs: ChatRun[]; lastIndex: number }>();
   runs.forEach((run, index) => {
     const entry = byTask.get(run.project_id) ?? { runs: [], lastIndex: index };
@@ -146,6 +178,8 @@ export function chatList(runs: ChatRun[], tasks: { id: string; title: string }[]
         runIds: entry.runs.map((run) => run.id),
         latestRunId: latest.id,
         status: chatRunStatus(latest),
+        ...(byId.get(taskId)?.updated_at ? { updatedAtMs: byId.get(taskId)!.updated_at! * 1000 } : {}),
+        ...(byId.get(taskId)?.state === "archived" ? { archived: true } : {}),
       };
     });
 }
@@ -220,4 +254,146 @@ export function chatTranscript(runs: ChatRun[], description: string | undefined,
     messages.push({ kind: "user", key: `pending:${index}`, text: said[index].text, stamp: said[index].stamp });
   }
   return messages;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Codex-style turns: each message the user sent, the cards' work collapsed under it, and the
+// answer that closes the turn shown in full.
+
+export type ChatStep = {
+  key: string;
+  nodeId: string;
+  role: ChatNode["role"];
+  name: string;
+  /** How the card runs: harness · model · effort · context · role. */
+  detail: string;
+  state: string;
+  text?: string;
+  verdict?: string;
+  error?: string;
+  /** For a working card: runtime, current step and when it was last heard. */
+  working?: { detail: string; stalled: boolean; activity?: string };
+  startedAtMs?: number;
+};
+
+export type ChatTurn = {
+  key: string;
+  runId: string;
+  user?: { text: string; stamp?: string };
+  /** The cards' work, in pipeline order, without the answer that closes the turn. */
+  steps: ChatStep[];
+  /** The answer shown in full: the final reviewer's, or the orchestrator's when it went solo. */
+  final?: ChatStep;
+  status: ChatStatus;
+  solo: boolean;
+  /** When the earliest card of this run started (Unix ms). */
+  startedAtMs?: number;
+};
+
+function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: number): ChatStep {
+  const key = `${run.id}:${node.id}`;
+  const step: ChatStep = {
+    key, nodeId: node.id, role: node.role, name: chatNodeName(node), detail: options.describe?.(node) ?? "", state: node.state,
+    ...(node.receipt?.started_at_ms ? { startedAtMs: node.receipt.started_at_ms } : {}),
+  };
+  if (node.receipt?.error) step.error = node.receipt.error;
+  if (node.receipt?.answer) step.text = run.solo && node.role === "planner" ? withoutSoloBlock(node.receipt.answer) : node.receipt.answer;
+  if (node.receipt?.verdict) step.verdict = node.receipt.verdict;
+  if (node.state === "running" || node.state === "reserved") {
+    const live = options.activity?.[key];
+    const working = chatWorkingDetail(node, live, now);
+    step.working = { ...working, ...(live?.activity ? { activity: live.activity } : {}) };
+  }
+  return step;
+}
+
+/** The conversation as Codex turns, oldest first, plus a just-sent message whose run is not visible yet. */
+export function chatTurns(runs: ChatRun[], description: string | undefined, options: ChatOptions = {}): ChatTurn[] {
+  const said = chatMessagesFromDescription(description);
+  const now = options.now ?? Date.now();
+  const turns: ChatTurn[] = runs.map((run, index) => {
+    const steps = chatNodeOrder(run.nodes)
+      .filter((node) => node.state !== "pending" || node.receipt)
+      .map((node) => chatStep(run, node, options, now));
+    const closing = run.solo
+      ? steps.find((step) => step.role === "planner" && step.state === "finished" && step.text)
+      : [...steps].reverse().find((step) => step.role === "reviewer" && step.state === "finished" && step.text);
+    const starts = steps.map((step) => step.startedAtMs).filter((value): value is number => Boolean(value));
+    return {
+      key: run.id, runId: run.id,
+      ...(said[index] ? { user: said[index] } : {}),
+      steps: closing ? steps.filter((step) => step !== closing) : steps,
+      ...(closing ? { final: closing } : {}),
+      status: chatRunStatus(run), solo: Boolean(run.solo),
+      ...(starts.length ? { startedAtMs: Math.min(...starts) } : {}),
+    };
+  });
+  for (let index = runs.length; index < said.length; index += 1) {
+    turns.push({ key: `pending:${index}`, runId: "", user: said[index], steps: [], status: "queued", solo: false });
+  }
+  return turns;
+}
+
+/** The description up to and including the user's message at `turnIndex`, for "Fork from here". */
+export function chatDescriptionUpTo(description: string | undefined, turnIndex: number): string {
+  const said = chatMessagesFromDescription(description).slice(0, turnIndex + 1);
+  return said.map((message, index) => index === 0 ? message.text : `Follow-up (${message.stamp ?? "earlier"} UTC):\n${message.text}`).join("\n\n");
+}
+
+/** One chat as Markdown, for "Copy › Conversation". */
+export function chatMarkdown(title: string, turns: ChatTurn[]): string {
+  const parts = [`# ${title}`];
+  for (const turn of turns) {
+    if (turn.user) parts.push(`**You:**\n\n${turn.user.text}`);
+    for (const step of [...turn.steps, ...(turn.final ? [turn.final] : [])]) {
+      const body = step.error ? `Error: ${step.error}` : step.text;
+      if (body) parts.push(`**${step.name}${step.verdict ? ` · ${step.verdict}` : ""}:**\n\n${body}`);
+    }
+  }
+  return parts.join("\n\n");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Composer: slash commands and attachments.
+
+export type ChatSlashCommand = { name: string; hint: string; needsChat?: boolean; needsRun?: boolean };
+
+/** Every command maps to a real action in the chat; none is a placeholder. */
+export const CHAT_SLASH_COMMANDS: ChatSlashCommand[] = [
+  { name: "new", hint: "Start a new chat" },
+  { name: "stop", hint: "Stop the running mission", needsRun: true },
+  { name: "retry", hint: "Restart the latest mission with the same task", needsRun: true },
+  { name: "model", hint: "Choose the model or team" },
+  { name: "structure", hint: "Show or hide the cards panel", needsRun: true },
+  { name: "board", hint: "Open the Mission Board" },
+  { name: "rename", hint: "Rename this chat", needsChat: true },
+  { name: "fork", hint: "Start a new chat from this conversation", needsChat: true },
+  { name: "archive", hint: "Archive this chat", needsChat: true },
+  { name: "copy", hint: "Copy this conversation as Markdown", needsChat: true },
+];
+
+/** The commands matching a draft that starts with "/" and has no space yet. */
+export function chatSlashMatches(draft: string, context: { chat: boolean; run: boolean }): ChatSlashCommand[] {
+  const match = /^\/([a-z]*)$/i.exec(draft.trim());
+  if (!match) return [];
+  const prefix = match[1].toLowerCase();
+  return CHAT_SLASH_COMMANDS.filter((command) => command.name.startsWith(prefix)
+    && (!command.needsChat || context.chat) && (!command.needsRun || context.run));
+}
+
+/** A whole draft that is exactly one known command ("/stop"), or null. */
+export function chatSlashCommand(draft: string): string | null {
+  const match = /^\/([a-z]+)$/i.exec(draft.trim());
+  const name = match?.[1].toLowerCase();
+  return name && CHAT_SLASH_COMMANDS.some((command) => command.name === name) ? name : null;
+}
+
+export type ChatAttachment = { name: string; path?: string; text?: string; image?: boolean };
+
+/** Attachments appended to the message: a file path agents read themselves, or a small text file inline. */
+export function chatMessageWithAttachments(message: string, attachments: ChatAttachment[]): string {
+  const blocks = attachments.map((item) => item.path
+    ? `${item.image ? "Attached image" : "Attached file"}: ${item.path}`
+    : `Attached file \`${item.name}\`:\n\`\`\`\n${(item.text ?? "").replace(/\`\`\`/g, "\`\`\u200b\`")}\n\`\`\``);
+  return [message.trim(), ...blocks].filter(Boolean).join("\n\n");
 }

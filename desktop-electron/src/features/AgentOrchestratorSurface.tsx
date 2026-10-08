@@ -5,24 +5,26 @@ import type { JsonObject, WorkspaceSummary } from "../api/contracts";
 import type { Language } from "../types";
 import { AgentOrchestratorOriginalSurface } from "./AgentOrchestratorOriginalSurface";
 import { AgentOrchestratorCanvas, type CanvasNode } from "./AgentOrchestratorCanvas";
-import { AgentOrchestratorChat, ChatListPane } from "./AgentOrchestratorChat";
+import { AgentOrchestratorChat } from "./AgentOrchestratorChat";
+import { ChatThreadList, type ThreadWorkspace } from "./ChatThreadList";
 import { AgentOrchestratorPermissions, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 
 
 
 import { AgentOrchestratorTeam } from "./AgentOrchestratorTeam";
-import { chatList, type ChatActivity, type ChatNode } from "./ao-chat";
+import { chatArchived, chatList, chatMarkdown, chatMessagesFromDescription, chatTurns, type ChatActivity, type ChatNode, type ChatRun } from "./ao-chat";
 import {
   AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, defaultTeam, emptyRoleSettings,
   cardMeta, harnessLabel, modelLabel, teamForMission, workerRoute, type AoHarness, type AoModelCatalog, type AoModelLoader, type AoRoute, type AoTeam, type RoleSettings,
 } from "./AgentOrchestratorRoleEditor";
 import "./agent-orchestrator.css";
+import "./codex-chat.css";
 import { pageHidden } from "./page-visibility";
 
 type Clause = { id: string; title: string; detail?: string; state: string };
 type PlanTask = {
-  id: string; title: string; description?: string; state: string; step: number;
+  id: string; title: string; description?: string; state: string; step: number; updated_at?: number;
   lane: string; displayStatus: string; clauses: Clause[];
   clauseProgress: { done: number; total: number };
 };
@@ -239,6 +241,20 @@ async function moduleCall(operation: string, args: JsonObject = {}) {
   return result;
 }
 
+/** Per-viewer chat list state (pins, unread, pinned projects), kept on this computer like Codex. */
+function readList(key: string): string[] {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(key) || "[]");
+    return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string").slice(0, 500) : [];
+  } catch { return []; }
+}
+function writeList(key: string, value: string[]) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* Kept for this session only. */ }
+}
+const PINNED_CHATS = "coding-tools:ao:pinned-chats";
+const UNREAD_CHATS = "coding-tools:ao:unread-chats";
+const PINNED_PROJECTS = "coding-tools:ao:pinned-projects";
+
 async function listAllWorkspaces(): Promise<WorkspaceSummary[]> {
   const items: WorkspaceSummary[] = [];
   let cursor: number | null = 0;
@@ -351,6 +367,13 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [chatTaskId, setChatTaskId] = useState<string | null>(null);
   // Why a chat's latest run could not start, by task id; cleared once it starts.
   const [chatNotices, setChatNotices] = useState<Record<string, string>>({});
+  // Codex's thread list: pinned and unread chats and pinned projects stay on this computer.
+  const [chatPins, setChatPins] = useState<string[]>(() => readList(PINNED_CHATS));
+  const [chatUnread, setChatUnread] = useState<string[]>(() => readList(UNREAD_CHATS));
+  const [projectPins, setProjectPins] = useState<string[]>(() => readList(PINNED_PROJECTS));
+  // Archived chats' tasks, for the list's "Archived" section and to keep them out of the main list.
+  const [archivedTasks, setArchivedTasks] = useState<PlanTask[]>([]);
+  const [listNow, setListNow] = useState(() => Date.now());
   const [sheet, setSheet] = useState<Sheet>("");
   const stageRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<HTMLDivElement>(null);
@@ -442,6 +465,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const loadBoard = async (id: string) => {
     const current = await moduleCall("board", { workspaceId: id }) as unknown as Board;
     setBoard(current);
+    void moduleCall("board", { workspaceId: id, includeArchived: true }).then((all) => {
+      setArchivedTasks(((all as unknown as Board).tasks ?? []).filter((task) => task.state === "archived"));
+    }).catch(() => { /* The archived section waits for the next refresh. */ });
     return current;
   };
 
@@ -537,6 +563,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const selectChat = (taskId: string, next: "chat" | "overview" = "chat") => {
     setSheet(""); setInspectedId(""); setView(next);
     setChatTaskId(taskId);
+    if (chatUnread.includes(taskId)) markUnread(taskId, false);
     const latest = chatList(missions, board?.tasks ?? []).find((entry) => entry.taskId === taskId);
     if (latest) setSelectedRunId(latest.latestRunId);
   };
@@ -948,6 +975,76 @@ export function AgentOrchestratorSurface({ language, setError }: {
     setSavedTeams(current => current.some(item => item.id === next.id) ? current.map(item => item.id === next.id ? next : item) : [...current, next]);
     setSheet("");
   });
+  // ---- Codex thread actions (thread list, chat header, slash commands) ----
+  const allTasks = [...(board?.tasks ?? []), ...archivedTasks];
+  const togglePin = (taskId: string) => setChatPins((current) => {
+    const next = current.includes(taskId) ? current.filter((id) => id !== taskId) : [taskId, ...current];
+    writeList(PINNED_CHATS, next);
+    return next;
+  });
+  function markUnread(taskId: string, unread: boolean) {
+    setChatUnread((current) => {
+      const next = unread ? [...new Set([taskId, ...current])] : current.filter((id) => id !== taskId);
+      writeList(UNREAD_CHATS, next);
+      return next;
+    });
+  }
+  const toggleProjectPin = (id: string) => setProjectPins((current) => {
+    const next = current.includes(id) ? current.filter((item) => item !== id) : [id, ...current];
+    writeList(PINNED_PROJECTS, next);
+    return next;
+  });
+  const startNewChat = () => { setChatTaskId(""); setView("chat"); setSheet(""); };
+  const renameChat = (taskId: string, title: string) => new Promise<void>((resolve, reject) => {
+    if (busy) { reject(new Error("Another action is still running")); return; }
+    void run("rename", async () => {
+      try {
+        await moduleCall("task_rename", { workspaceId, taskId, title });
+        await loadBoard(workspaceId);
+        resolve();
+      } catch (cause) { reject(cause); throw cause; }
+    });
+  });
+  const archiveChat = (taskId: string, restore = false) => void run(restore ? "restore" : "archive", async () => {
+    await moduleCall(restore ? "task_restore" : "task_archive", { workspaceId, taskId });
+    if (!restore && chatTaskId === taskId) setChatTaskId("");
+    await loadBoard(workspaceId);
+  });
+  const archiveAllChats = () => void run("archive-all", async () => {
+    const chats = chatList(missions, allTasks).filter((entry) => entry.status !== "running");
+    if (!chats.length || !window.confirm(`Archive ${chats.length} ${chats.length === 1 ? "chat" : "chats"} in this project? Archived chats keep their runs and can be restored.`)) return;
+    for (const entry of chats) await moduleCall("task_archive", { workspaceId, taskId: entry.taskId });
+    setChatTaskId("");
+    await loadBoard(workspaceId);
+  });
+  // Fork: a new chat starting from this chat's messages (all, the first, or up to one of them).
+  const forkChat = (taskId: string, upTo?: number | "first") => void (async () => {
+    const messages = chatMessagesFromDescription(await loadDescription(taskId));
+    const kept = upTo === undefined ? messages : messages.slice(0, upTo === "first" ? 1 : upTo + 1);
+    if (!kept.length) return;
+    await sendChat({ title: `Fork of ${taskName(taskId)}`.slice(0, 240), message: kept.map((message) => message.text).join("\n\n").slice(0, 8192) });
+  })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+  const copyChat = (taskId: string, what: "title" | "conversation" | "answer" | "id") => void (async () => {
+    let text = what === "title" ? taskName(taskId) : what === "id" ? taskId : "";
+    if (what === "conversation" || what === "answer") {
+      const turns = chatTurns(missions.filter((mission) => mission.project_id === taskId) as unknown as ChatRun[], await loadDescription(taskId), { describe: describeChatNode });
+      text = what === "conversation" ? chatMarkdown(taskName(taskId), turns)
+        : [...turns].reverse().map((turn) => turn.final?.text ?? [...turn.steps].reverse().find((step) => step.text)?.text).find(Boolean) ?? "";
+    }
+    if (text) await navigator.clipboard.writeText(text);
+  })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+  const openFolder = (item: ThreadWorkspace) => {
+    if (item.path) void window.codexWebLauncher?.openFolder?.(item.path).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
+  };
+  const restartChatRun = (runId: string) => void run("restart-run", async () => {
+    const result = await moduleCall("restart_run", { workspaceId, runId, ...executableArg() });
+    if (result.cancelled) return;
+    if (typeof result.runId === "string") setSelectedRunId(result.runId);
+    if (result.status === "failed" && typeof result.detail === "string") setError(result.detail);
+    setAutoStatus(typeof result.status === "string" ? result.status : "running");
+    await loadMissions(workspaceId);
+  });
+
   const stopChatRun = (runId: string) => void run("stop", async () => {
     await moduleCall("control_run", { workspaceId, runId, action: "stop" });
     await loadMissions(workspaceId);
@@ -972,10 +1069,19 @@ export function AgentOrchestratorSurface({ language, setError }: {
     setChatTaskId(null);
     try { localStorage.setItem("coding-tools:ao:workspace", id); } catch { /* Selection still works for this session. */ }
   };
-  const chatTree = {
-    workspaces, workspaceId, onWorkspace: chooseWorkspace, view: view === "board" ? undefined : view,
-    labels: { chat: copy.canvas, overview: copy.overview },
-  };
+  // A chat that finishes or needs you while another is open is marked unread, as in Codex.
+  const lastChatStatus = useRef<Record<string, string>>({});
+  useEffect(() => {
+    for (const entry of chatList(missions, allTasks)) {
+      const before = lastChatStatus.current[entry.taskId];
+      if (before && before !== entry.status && ["done", "attention", "stopped"].includes(entry.status) && entry.taskId !== chatTaskId) markUnread(entry.taskId, true);
+      lastChatStatus.current[entry.taskId] = entry.status;
+    }
+  }, [missions]);
+  useEffect(() => {
+    const timer = window.setInterval(() => setListNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
   // Every message names how its card runs; working cards also show runtime and current step.
   const describeChatNode = useCallback((node: ChatNode) => node.route ? cardMeta(node as unknown as AoNode, harnesses) : "", [harnesses]);
   const [chatActivity, setChatActivity] = useState<Record<string, ChatActivity>>({});
@@ -1001,11 +1107,17 @@ export function AgentOrchestratorSurface({ language, setError }: {
 
   return (
     <section className="ao-workflow" aria-label={copy.title} lang={language}>
-      <ChatListPane chats={chatList(missions, board?.tasks ?? [])} selectedTaskId={chatTaskId ?? ""}
-        onSelect={selectChat} onNew={() => { setChatTaskId(""); setView("chat"); setSheet(""); }} tree={chatTree} />
+      <ChatThreadList workspaces={workspaces.map((item) => ({ id: item.id, name: item.name, path: item.path }))} workspaceId={workspaceId} onWorkspace={chooseWorkspace}
+        chats={chatList(missions, allTasks)} archived={chatArchived(missions, allTasks)} selectedTaskId={chatTaskId ?? ""} now={listNow}
+        pinned={chatPins} togglePin={togglePin} unread={chatUnread} setUnread={markUnread}
+        pinnedProjects={projectPins} toggleProjectPin={toggleProjectPin} busy={Boolean(busy)}
+        actions={{ select: (taskId) => selectChat(taskId, "chat"), newChat: startNewChat, rename: renameChat,
+          archive: (taskId) => archiveChat(taskId), restore: (taskId) => archiveChat(taskId, true), archiveAll: archiveAllChats,
+          fork: (taskId, from) => forkChat(taskId, from === "first" ? "first" : undefined), copy: copyChat,
+          openStructure: (taskId) => selectChat(taskId, "overview"), openBoard: () => { setSheet(""); setView("board"); }, openFolder }} />
       <div className="ao-main">
       <div className="ao-dragstrip" aria-hidden="true" />
-      <header className="ao-workspace-head">
+      {view !== "chat" ? <header className="ao-workspace-head">
         <div className="ao-workspace-title">
           <strong>{workspaces.find(workspace => workspace.id === workspaceId)?.name || copy.title}</strong>
           <span>{view === "board" ? "Mission Board" : view === "overview" ? copy.overview : copy.canvas}{selectedRun && (view === "overview" || chatTaskId) ? ` · ${taskName(selectedRun.project_id)}` : ""}</span>
@@ -1024,13 +1136,13 @@ export function AgentOrchestratorSurface({ language, setError }: {
           <ToolButton icon="refresh" label="Restart mission" disabled={!selectedRun || autoStatus === "running" || Boolean(busy)} onClick={restartRun} />
         </div> : null}
         <div className="ao-head-tools" aria-label="Project controls">
-          <ToolButton icon="plus" label={copy.newMission} disabled={!board || Boolean(busy)} pressed={sheet === "mission" || (view === "chat" && chatTaskId === "")}
-            onClick={() => { if (view === "chat") { setSheet(""); setChatTaskId(""); } else openSheet("mission"); }} />
+          <ToolButton icon="plus" label={copy.newMission} disabled={!board || Boolean(busy)} pressed={sheet === "mission"}
+            onClick={() => openSheet("mission")} />
           <button type="button" className="button-secondary" disabled={Boolean(busy) || !workspaceId} onClick={openTeam}>Team</button>
           <ToolButton icon="refresh" label={copy.refresh} disabled={!workspaceId || Boolean(busy)} onClick={() => void run("refresh", async () => { modelCache.current.clear(); await Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]); })} />
           <ToolButton icon="gear" label={copy.settings} pressed={sheet === "settings"} onClick={() => openSheet("settings")} />
         </div>
-      </header>
+      </header> : null}
 
       <div className="ao-stage" ref={stageRef}>
         {sheet === "mission" ? <FloatingSheet stage={stageRef} title={`🚀 ${copy.newMission}`} onClose={closeSheet}>
@@ -1122,7 +1234,21 @@ export function AgentOrchestratorSurface({ language, setError }: {
           !workspaceId && workspaceReady
             ? <div className="ao-empty-state"><p>{copy.noWorkspace}</p><button className="button-primary" type="button" onClick={() => setSheet("settings")}>{copy.settings}</button></div>
             : <AgentOrchestratorChat
-                runs={missions} tasks={board?.tasks ?? []} selectedTaskId={chatTaskId ?? ""}
+                runs={missions} tasks={allTasks} selectedTaskId={chatTaskId ?? ""}
+                projectName={workspaces.find((item) => item.id === workspaceId)?.name}
+                stop={stopChatRun} restart={restartChatRun}
+                thread={chatTaskId ? { newChat: startNewChat, rename: (title) => renameChat(chatTaskId, title), archive: () => archiveChat(chatTaskId),
+                  fork: (turnIndex) => forkChat(chatTaskId, turnIndex), copyConversation: () => copyChat(chatTaskId, "conversation"),
+                  togglePin: () => togglePin(chatTaskId), pinned: chatPins.includes(chatTaskId) } : undefined}
+                onPause={() => controlRun("pause")} onResume={() => controlRun("resume")} onSettings={() => openSheet("settings")}
+                filePath={(file) => window.codexWebLauncher?.filePath?.(file) ?? ""}
+                structure={selectedRun && chatTaskId && selectedRun.project_id === chatTaskId ? <AgentOrchestratorCanvas key={`chat-${selectedRun.id}`}
+                  nodes={visibleNodes} levels={aoLevels(selectedRun).map(level => level.filter(node => visibleNodes.includes(node)))}
+                  selectedId="" busy={Boolean(busy)} describe={describeNode}
+                  onSelect={() => { setSheet(""); setView("overview"); }} onMove={moveCard}
+                  onConnect={addDependency} canConnect={(nodeId, parentId) => Boolean(aoDependencyChange(selectedRun, nodeId, parentId))}
+                  onUnlink={unlink} canUnlink={(nodeId, parentId) => Boolean(aoUnlinkChange(selectedRun, nodeId, parentId))}
+                  onRemove={removeCard} canRemove={(nodeId) => Boolean(aoRemoveChange(selectedRun, nodeId))} /> : undefined}
                 busy={Boolean(busy)} loadDescription={loadDescription} send={sendChat}
                 working={Boolean(selectedRun && chatTaskId && selectedRun.project_id === chatTaskId && autoStatus === "running")}
                 openStructure={(runId) => { setSelectedRunId(runId); setView("overview"); }}

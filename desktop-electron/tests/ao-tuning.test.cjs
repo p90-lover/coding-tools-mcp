@@ -113,7 +113,7 @@ test("Surface caches AO model capability catalogs while Native Codex keeps its l
         calls.push(request.arguments.harness);
         return { result: { models: ["fixture"], capabilities: { fixture: { efforts: ["high"] } } } };
       } } }) }
-      : name === "./ao-chat" ? { chatList: () => [] }
+      : name === "./ao-chat" ? { chatList: () => [], chatArchived: () => [] }
       : name === "../i18n" ? { copyFor: () => ({}) }
       : name === "./AgentOrchestratorRoleEditor" ? { workerRoute: () => ({}), emptyRoleSettings: () => ({}), NATIVE_HARNESS: "codex-native" } : {},
   });

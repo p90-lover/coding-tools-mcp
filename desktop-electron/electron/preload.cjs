@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 let setBrowserSurfaceActive;
 let snapshot;
@@ -28,6 +28,16 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
     browserInteractionMode,
   ),
   openExternal: (url) => ipcRenderer.invoke("launcher:open-external", url),
+  // The path of a file the user dropped or picked (Electron no longer puts it on File), so a chat
+  // can reference it for agents; "" when unknown.
+  filePath: (file) => {
+    try {
+      return webUtils?.getPathForFile(file) || "";
+    } catch {
+      return "";
+    }
+  },
+  openFolder: (folder) => ipcRenderer.invoke("launcher:open-folder", folder),
   setBrowserBounds: (bounds) => ipcRenderer.invoke("launcher:browser-bounds", bounds),
   setBrowserSurfaceActive,
   showBrowser: () => ipcRenderer.invoke("launcher:browser-show"),
