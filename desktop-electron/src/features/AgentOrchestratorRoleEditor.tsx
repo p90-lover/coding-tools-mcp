@@ -81,13 +81,16 @@ export function tokensLabel(tokens: number): string {
 
 const EFFORT_ORDER = ["minimal", "low", "medium", "high", "xhigh", "max"];
 
-/** What a model supports, for model lists: "max xhigh · 400K context". Native Codex accepts
+/** What a model supports, for model lists: "up to xhigh effort · 272K context". Native Codex accepts
  *  every effort and a 4,096–2M budget; other harnesses show only what their catalog verified. */
 export function capabilityText(capability: AoModelCapabilities | undefined, native = false): string {
   const efforts = native ? [...EFFORTS] : (capability?.efforts ?? []).filter(effort => EFFORT_ORDER.includes(effort));
   const top = efforts.sort((a, b) => EFFORT_ORDER.indexOf(a) - EFFORT_ORDER.indexOf(b)).at(-1);
   const limit = capability?.contextLimit ?? (native ? 2_000_000 : capability?.contextWindow?.max);
-  return [top ? `max ${top}` : "", limit ? `${tokensLabel(limit)} context` : ""].filter(Boolean).join(" · ");
+  // Catalog limits are decimal (272,000), so they read best as "272K" rather than tokensLabel's binary units.
+  const size = !limit ? "" : limit >= 1_000_000 && limit % 100_000 === 0 ? `${limit / 1_000_000}M`
+    : limit >= 1_000 && limit % 1_000 === 0 ? `${limit / 1_000}K` : tokensLabel(limit);
+  return [top ? `up to ${top} effort` : "", size ? `${size} context` : ""].filter(Boolean).join(" · ");
 }
 
 const ROLE_LABELS = { planner: "Orchestrator", approver: "Command approver", worker: "Worker", review_split: "Main reviewer · split", sub_reviewer: "Sub-reviewer", reviewer: "Main reviewer", retry: "Retry" } as const;
