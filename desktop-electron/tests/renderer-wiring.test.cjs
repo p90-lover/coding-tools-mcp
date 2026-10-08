@@ -15,6 +15,16 @@ const aoSource = fs.readFileSync(path.join(launcherRoot, "src", "features", "Age
 const servicesSource = fs.readFileSync(path.join(launcherRoot, "src", "features", "ExternalServicesSurface.tsx"), "utf8");
 const proxySource = fs.readFileSync(path.join(launcherRoot, "src", "features", "NetworkProxySurface.tsx"), "utf8");
 
+test("workspace Team picker remains a compact row above the full-width new chat", () => {
+  const css = fs.readFileSync(path.join(launcherRoot, "src/features/agent-orchestrator.css"), "utf8");
+  const stage = /\.ao-stage:has\(>\s*\.ao-new-chat-team\)\s*\{([^}]+)\}/.exec(css)?.[1] || "";
+  assert.match(stage, /flex-direction:\s*column/, "the Team-bearing stage must stack vertically");
+  const picker = /\.ao-new-chat-team\s*\{([^}]+)\}/.exec(css)?.[1] || "";
+  assert.match(picker, /flex:\s*0\s+0\s+auto/, "the Team row must not consume the flexible chat area");
+  const ordinaryStage = /\.ao-stage\s*\{([^}]+)\}/.exec(css)?.[1] || "";
+  assert.doesNotMatch(ordinaryStage, /flex-direction:\s*column/, "overview stages must keep their existing layout");
+});
+
 // Since the Chat redesign (2574a6bd) the "Chat" entry mounts the Coding Tools AO surface; the
 // original upstream AO UI keeps its own destination and links back to Chat.
 test("Chat mounts the AO chat surface and the original AO UI links back to it", () => {

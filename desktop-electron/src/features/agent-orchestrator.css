@@ -53,6 +53,9 @@
 @keyframes ao-pulse { 50% { opacity: .25; } }
 
 .ao-stage { position: relative; display: flex; flex: 1 1 auto; min-height: 0; }
+/* Keep the new-chat Team picker above, rather than beside, the flexible chat. */
+.ao-stage:has(> .ao-new-chat-team) { flex-direction: column; }
+.ao-new-chat-team { flex: 0 0 auto; }
 .ao-overview:not([hidden]) { display: grid; grid-template-rows: minmax(0, .7fr) 8px minmax(0, .3fr); flex: 1 1 auto; min-width: 0; min-height: 0; overflow: hidden; }
 .ao-overview-divider { position: relative; z-index: 9; cursor: row-resize; touch-action: none; user-select: none; background: var(--color-bg-primary); -webkit-app-region: no-drag; }
 .ao-overview-divider::after { content: ""; position: absolute; width: 36px; height: 2px; top: 3px; left: calc(50% - 18px); border-radius: 2px; background: var(--ao-muted); opacity: .5; }
