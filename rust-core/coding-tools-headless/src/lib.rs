@@ -1305,6 +1305,11 @@ mod workspace_auth_tests {
         fs::write(&config, AO_CPA_CONFIG_V1).unwrap();
         prepare_ao_cpa_home(&home, &app_data).unwrap();
         assert_eq!(fs::read_to_string(&config).unwrap(), saved);
+        // Commands run in Codex's unelevated Windows sandbox; a home without it is upgraded.
+        assert!(saved.ends_with("[windows]\nsandbox = \"unelevated\"\n"));
+        fs::write(&config, AO_CPA_CONFIG_V2).unwrap();
+        prepare_ao_cpa_home(&home, &app_data).unwrap();
+        assert_eq!(fs::read_to_string(&config).unwrap(), saved);
         fs::write(&config, "unexpected provider config").unwrap();
         assert!(prepare_ao_cpa_home(&home, &app_data).is_err());
         assert_eq!(
@@ -1328,10 +1333,10 @@ mod workspace_auth_tests {
         assert!(config.contains("base_url = \"http://127.0.0.1:17841/v1\""));
         assert!(!config.contains("SENTINEL_KEY_DO_NOT_LOG"));
         assert!(
-            config.ends_with("[features]\nmulti_agent = false\n"),
+            config.ends_with("[features]\nmulti_agent = false\n\n[windows]\nsandbox = \"unelevated\"\n"),
             "cards must not spawn Codex sub-agents"
         );
-        let legacy = config.trim_end_matches("\n[features]\nmulti_agent = false\n");
+        let legacy = config.trim_end_matches("\n[features]\nmulti_agent = false\n\n[windows]\nsandbox = \"unelevated\"\n");
         fs::write(home.join("config.toml"), legacy).unwrap();
         prepare_ao_web_home(
             &home,
@@ -2411,14 +2416,25 @@ wire_api = \"responses\"\n"
 }
 /// Mission cards are coordinated by Coding Tools, so Codex's own sub-agent tools stay off;
 /// otherwise a card answers "delegate" by spawning copies of itself on the same model.
+/// Commands run in Codex's unelevated Windows sandbox. It must be in the card's own config:
+/// Codex builds each thread from config.toml, so without it a thread had no sandbox and every
+/// command needed an approval that the cards' "never" policy turned into "blocked by policy".
 macro_rules! ao_card_features {
+    () => {
+        "\n[features]\nmulti_agent = false\n\n[windows]\nsandbox = \"unelevated\"\n"
+    };
+}
+/// The previous card settings (sub-agents off, no sandbox setting).
+macro_rules! ao_card_features_v2 {
     () => {
         "\n[features]\nmulti_agent = false\n"
     };
 }
 const AO_CPA_CONFIG: &str = concat!(ao_cpa_provider!(), ao_card_features!());
-/// The previous card config (sub-agents on); recognised so it is upgraded once, not refused.
+/// Earlier card configs (sub-agents on; then no sandbox setting); recognised so they are
+/// upgraded once, not refused.
 const AO_CPA_CONFIG_V1: &str = ao_cpa_provider!();
+const AO_CPA_CONFIG_V2: &str = concat!(ao_cpa_provider!(), ao_card_features_v2!());
 
 fn prepare_ao_home(root: &Path, requested: &Path) -> Result<PathBuf, String> {
     let parent = root.parent().ok_or("AO app data is unavailable")?;
@@ -2481,14 +2497,16 @@ fn prepare_ao_cpa_home(home: &Path, app_data_dir: &Path) -> Result<(), String> {
             .map_err(text_error)?
             .file_type()
             .is_symlink()
-            || (current != AO_CPA_CONFIG.as_bytes() && current != AO_CPA_CONFIG_V1.as_bytes())
+            || ![AO_CPA_CONFIG, AO_CPA_CONFIG_V1, AO_CPA_CONFIG_V2]
+                .iter()
+                .any(|known| current == known.as_bytes())
         {
             return Err("AO CPA provider config changed; inspect before reconnecting".into());
         }
         if current == AO_CPA_CONFIG.as_bytes() {
             return Ok(());
         }
-        // The known previous version is replaced below; the old file is retained in Trash.
+        // A known previous version is replaced below; the old file is retained in Trash.
     }
     write_private_file(
         &config,
@@ -2547,21 +2565,22 @@ supports_websockets = false\n",
         serde_json::to_string(base_url).map_err(text_error)?,
     );
     let config_bytes = format!("{legacy_config_bytes}{}", ao_card_features!());
+    let previous_config_bytes = format!("{legacy_config_bytes}{}", ao_card_features_v2!());
     let config_path = home.join("config.toml");
     let mut upgrade_config = false;
     for (path, expected, legacy) in [
-        (&catalog_path, catalog_bytes.as_slice(), None),
+        (&catalog_path, catalog_bytes.as_slice(), &[][..]),
         (
             &config_path,
             config_bytes.as_bytes(),
-            Some(legacy_config_bytes.as_bytes()),
+            &[legacy_config_bytes.as_bytes(), previous_config_bytes.as_bytes()][..],
         ),
     ] {
         if !path.exists() {
             continue;
         }
         let current = fs::read(path).map_err(text_error)?;
-        let is_legacy = legacy.is_some_and(|legacy| current == legacy);
+        let is_legacy = legacy.iter().any(|legacy| current == *legacy);
         if fs::symlink_metadata(path)
             .map_err(text_error)?
             .file_type()

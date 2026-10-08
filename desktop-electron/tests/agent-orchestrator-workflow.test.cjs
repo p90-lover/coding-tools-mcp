@@ -2171,3 +2171,59 @@ test("chat rename keeps the messages; archive and restore are the lifecycle's ow
   const listed = await workflow.call("board", { workspaceId: "ws-1", includeArchived: true });
   assert.equal(listed.ok, true);
 });
+
+test("AO connects every ready worker's harness together so slow Codex starts do not serialize workers", async () => {
+  const web = { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web", model: "chatgpt-web/high", permission_profile: ":read-only" };
+  const nodes = [
+    { id: "planner", role: "planner", state: "pending", parents: [], route: web },
+    { id: "worker", role: "worker", state: "pending", parents: ["planner"], route: web },
+    { id: "worker-two", role: "worker", state: "pending", parents: ["planner"], route: web },
+    { id: "reviewer", role: "reviewer", state: "pending", parents: ["worker", "worker-two"], route: web },
+  ];
+  const run = { id: "run-1", workspace_id: "ws-1", project_id: "project-1", revision: 3, cancelled: false, nodes };
+  const connected = new Set();
+  let connecting = 0;
+  let peakConnecting = 0;
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [structuredClone(run)], worker_capacity: { "run-1": 2 - nodes.filter(node => node.role === "worker" && node.state === "running").length } };
+      if (endpoint === "/api/v1/ao/grant") return { ok: true, run: structuredClone(run), grant: { executable_sha256: "a".repeat(64) } };
+      if (endpoint === "/api/v1/ao/harness/status") return { ok: true, status: connected.has(body.node_id)
+        ? { connected: true, model: web.model, permission_profile: ":read-only" } : { connected: false } };
+      if (endpoint === "/api/v1/ao/harness/connect") {
+        connecting++; peakConnecting = Math.max(peakConnecting, connecting);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        connecting--; connected.add(body.node_id);
+        return { ok: true, owned: true, status: { connected: true, model: body.connection.model } };
+      }
+      if (endpoint === "/api/v1/ao/harness/execute") {
+        const node = nodes.find((entry) => entry.id === body.node_id);
+        node.state = "running"; node.receipt = { status: "submitted" }; run.revision += 1;
+        return { ok: true, run: structuredClone(run), receipt: node.receipt };
+      }
+      if (endpoint === "/api/v1/ao/harness/observe") {
+        const node = nodes.find((entry) => entry.id === body.node_id);
+        node.state = "finished"; node.receipt = { status: "completed", answer: "READY" }; run.revision += 1;
+        return { ok: true, run: structuredClone(run), receipt: node.receipt };
+      }
+      throw new Error(`Unexpected endpoint ${endpoint}`);
+    },
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "SENTINEL_PRIVATE_KEY_12345678901234567890" }),
+    webBridgeConnection: () => ({ baseUrl: "http://127.0.0.1:17841/v1" }),
+    webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
+    webModelCatalog: async () => ({ models: [{ slug: "chatgpt-web/high" }] }),
+    resolveHarness: async ({ model }) => ({ executable: "C:/codex.exe", expected_sha256: "a".repeat(64),
+      codex_home: "C:/ao-home", model, allow_model_usage: true,
+      allow_command_execution: false, permission_profile: ":read-only", request_limit: 3, lifetime_seconds: 900 }),
+    confirm: async () => { throw new Error("Start mission must not open a second confirmation dialog"); },
+    fetchImpl: async () => ({ ok: true, json: async () => ({ data: [] }) }),
+  });
+  const input = { workspaceId: "ws-1", runId: "run-1", executable: "C:/codex.exe" };
+  assert.equal((await workflow.call("start_run", input)).started, true);
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if ((await workflow.call("run_status", input)).status === "finished") break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal((await workflow.call("run_status", input)).status, "finished");
+  assert.equal(peakConnecting, 2, "both workers' harnesses start at the same time");
+});

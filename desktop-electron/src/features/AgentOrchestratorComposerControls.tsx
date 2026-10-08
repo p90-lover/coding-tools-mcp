@@ -2,12 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import type { KeyboardEvent, ReactNode } from "react";
 import { Icon } from "../icons";
 import {
-  HarnessPicker, NATIVE_HARNESS, DEFAULT_WORKER_HARNESS, isWebModel, modelLabel, nativePermission, workerRoute, withTuning,
-  type AoHarness, type AoModelCatalog, type AoModelLoader, type AoRoute, type AoTeam,
+  HarnessPicker, capabilityText, NATIVE_HARNESS, DEFAULT_WORKER_HARNESS, isWebModel, modelLabel, nativePermission, workerRoute, withTuning,
+  type AoHarness, type AoModelCapabilities, type AoModelCatalog, type AoModelLoader, type AoRoute, type AoTeam,
 } from "./AgentOrchestratorRoleEditor";
 
 /** A loader may return a plain id list or a catalog with capabilities; the list needs only ids. */
 const modelIds = (items: string[] | AoModelCatalog) => Array.isArray(items) ? items : items.models;
+const modelCaps = (items: string[] | AoModelCatalog) => Array.isArray(items) ? {} : items.capabilities ?? {};
 
 export type ComposerControlsProps = {
   mode: "single" | "team"; onModeChange: (mode: "single" | "team") => void;
@@ -52,16 +53,20 @@ export function AgentOrchestratorComposerControls({
   const popup = useComposerPopover();
   const [search, setSearch] = useState("");
   const [models, setModels] = useState<string[] | null>(null);
+  const [caps, setCaps] = useState<Record<string, AoModelCapabilities>>({});
   const [error, setError] = useState("");
   useEffect(() => { popup.setOpen(false); setSearch(""); }, [mode]);
   useEffect(() => {
     if (!popup.open || mode !== "single") return;
     let live = true;
-    setModels(null); setError("");
-    const web = route.harness_id === NATIVE_HARNESS ? loadModels(DEFAULT_WORKER_HARNESS).then(modelIds, () => [])
-      : loadModels(NATIVE_HARNESS).then(items => modelIds(items).filter(isWebModel), () => []);
-    void Promise.all([loadModels(route.harness_id).then(modelIds), web]).then(([catalog, webCatalog]) => {
-      if (live) setModels([...new Set([...catalog, ...webCatalog])]);
+    setModels(null); setCaps({}); setError("");
+    const none: AoModelCatalog = { models: [] };
+    const web = route.harness_id === NATIVE_HARNESS ? loadModels(DEFAULT_WORKER_HARNESS).catch(() => none)
+      : loadModels(NATIVE_HARNESS).then(items => modelIds(items).filter(isWebModel), () => none);
+    void Promise.all([loadModels(route.harness_id), web]).then(([catalog, webCatalog]) => {
+      if (!live) return;
+      setModels([...new Set([...modelIds(catalog), ...modelIds(webCatalog)])]);
+      setCaps({ ...modelCaps(webCatalog), ...modelCaps(catalog) });
     }).catch(cause => { if (live) { setModels([]); setError(cause instanceof Error ? cause.message : String(cause)); } });
     return () => { live = false; };
   }, [popup.open, mode, route.harness_id, loadModels]);
@@ -93,7 +98,8 @@ export function AgentOrchestratorComposerControls({
           <div className="ao-model-options" role="radiogroup" aria-label="Available models">
             {models === null ? <p role="status">Loading models…</p> : matching.map(model => <button key={model} type="button" role="radio" aria-checked={route.model === model}
               className="ao-picker-option" disabled={busy} onClick={() => onRouteChange(withTuning(workerRoute(route.harness_id, model, nativePermission(route)), route))}>
-              <span className="ao-option-radio" aria-hidden="true" /><span>{modelLabel(model)}</span>{route.model === model ? <Icon name="check" width="16" height="16" /> : null}
+              <span className="ao-option-radio" aria-hidden="true" /><span>{modelLabel(model)}
+                {capabilityText(caps[model], route.harness_id === NATIVE_HARNESS && isWebModel(model)) ? <small>{capabilityText(caps[model], route.harness_id === NATIVE_HARNESS && isWebModel(model))}</small> : null}</span>{route.model === model ? <Icon name="check" width="16" height="16" /> : null}
             </button>)}
             {models !== null && !matching.length ? <p role="status">{error || "No matching models available from this runtime."}</p> : null}
           </div>

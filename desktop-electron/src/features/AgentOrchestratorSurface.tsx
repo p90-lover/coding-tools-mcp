@@ -1421,7 +1421,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
                 structure={selectedRun && chatTaskId && selectedRun.project_id === chatTaskId ? <AgentOrchestratorCanvas key={`chat-${selectedRun.id}`}
                   nodes={visibleNodes} levels={aoLevels(selectedRun).map(level => level.filter(node => visibleNodes.includes(node)))}
                   selectedId="" busy={Boolean(busy)} describe={describeNode}
-                  onSelect={() => { setSheet(""); setView("overview"); }} onMove={moveCard}
+                  /* Selecting or dragging a card in the side panel stays in the chat;
+                     the header has its own Mission Board button. */
+                  onSelect={() => {}} onMove={moveCard}
                   onConnect={addDependency} canConnect={(nodeId, parentId) => Boolean(aoDependencyChange(selectedRun, nodeId, parentId))}
                   onUnlink={unlink} canUnlink={(nodeId, parentId) => Boolean(aoUnlinkChange(selectedRun, nodeId, parentId))}
                   onRemove={removeCard} canRemove={(nodeId) => Boolean(aoRemoveChange(selectedRun, nodeId))} /> : undefined}
