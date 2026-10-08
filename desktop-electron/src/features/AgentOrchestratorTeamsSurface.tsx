@@ -99,19 +99,34 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
   const dirty = Boolean(draft && (!saved || JSON.stringify(draft) !== JSON.stringify(saved)));
   const canLeave = () => !dirty || window.confirm("Discard unsaved team changes?");
   const change = (next: AoTeam) => { if (draft) setDraft(prepareTeamGraph(next, draft)); setNotice(""); };
-  const save = async (makeDefault = false) => {
-    if (!draft || busy) return;
-    setBusy(true); setError(null); setNotice("");
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const [saving, setSaving] = useState(false);
+  // The draft that last failed to save; it is not retried until it changes.
+  const [failed, setFailed] = useState("");
+  // An explicit save (Make default) locks the page; an automatic one leaves the inputs live.
+  const save = async (makeDefault = false, automatic = false) => {
+    const sent = draftRef.current;
+    if (!sent || busy || saving) return;
+    (automatic ? setSaving : setBusy)(true); setNotice("");
+    if (!automatic) setError(null);
     try {
-      const result = await moduleCall("team_update", { workspaceId, change: { operation: "save_team", expected_revision: draft.revision,
-        team: { ...draft, name: draft.name.trim(), editable_graph: true, is_default: makeDefault || draft.id === defaultId || !defaultId } as unknown as JsonObject } });
+      const result = await moduleCall("team_update", { workspaceId, change: { operation: "save_team", expected_revision: sent.revision,
+        team: { ...sent, name: sent.name.trim(), editable_graph: true, is_default: makeDefault || sent.id === defaultId || !defaultId } as unknown as JsonObject } });
       if (result.cancelled) return;
       const updated = result.team as AoTeam;
-      accept(await moduleCall("runs", { workspaceId }), updated.id);
-      setNotice(makeDefault ? "Default team saved" : "Team saved");
+      // Edits made while saving stay in the draft, on the new revision, for the next save.
+      const edited = JSON.stringify(draftRef.current) !== JSON.stringify(sent);
+      accept(await moduleCall("runs", { workspaceId }), updated.id, edited);
+      if (edited) setDraft(current => current ? { ...current, revision: updated.revision } : current);
+      setFailed("");
+      setNotice(makeDefault ? "Default team saved" : "All changes saved");
       window.dispatchEvent(new CustomEvent("coding-tools:ao:teams-changed", { detail: { workspaceId } }));
-    } catch (cause) { setError(String(cause instanceof Error ? cause.message : cause)); }
-    finally { setBusy(false); }
+    } catch (cause) {
+      setFailed(JSON.stringify(sent));
+      setError(String(cause instanceof Error ? cause.message : cause));
+    }
+    finally { (automatic ? setSaving : setBusy)(false); }
   };
   const add = (role: "worker" | "approver" | "sub_reviewer" | "retry") => {
     if (!draft) return;
@@ -139,6 +154,11 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
   const mission = draft ? asMission(draft) : null;
   const inspected = draft?.nodes.find(node => node.id === selectedId);
   const locked = busy || loading;
+  useEffect(() => {
+    if (!dirty || locked || saving || !draft?.name.trim() || JSON.stringify(draft) === failed) return;
+    const timer = window.setTimeout(() => void save(false, true), 800);
+    return () => window.clearTimeout(timer);
+  }, [draft, dirty, locked, saving, failed]);
   const subCount = draft?.nodes.filter(node => node.role === "sub_reviewer").length ?? 0;
   const canUnlink = (id: string, parent: string) => Boolean(mission && draft?.nodes.find(node => node.id === id)?.role !== "retry" && aoUnlinkChange(mission, id, parent)
     && !(draft?.nodes.find(node => node.id === id)?.role === "sub_reviewer" && draft.nodes.find(node => node.id === parent)?.role === "review_split"));
@@ -182,8 +202,6 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
           onChange={event => setDraft({ ...draft, worker_limit: Number(event.target.value) })} /></label>
         <label>Review rounds<input aria-label="Team review rounds" type="number" min={1} max={10} value={draft.max_review_rounds ?? 3} disabled={locked}
           onChange={event => setDraft({ ...draft, max_review_rounds: Number(event.target.value) })} /></label>
-        <button type="button" className="button-primary" disabled={locked || !dirty || !draft.name.trim()} onClick={() => void save()}>Save team</button>
-        {dirty ? <button type="button" className="button-secondary" disabled={locked} onClick={() => { setDraft(saved ? structuredClone(saved) : freshTeam(workspaceId, !defaultId)); setSelectedId(""); }}>Reset</button> : null}
         <span className="ao-hint">{draft.id === defaultId ? "Default for new chats" : "Choose this team when starting a chat"}</span>
       </div> : null}
       <div className="ao-teams-stage">
@@ -206,7 +224,7 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
               <div className="ao-teams-inspector-head"><strong>{inspected.settings?.name || ROLE_TITLE[inspected.role]}</strong>
                 <button type="button" className="ao-link" aria-label="Close role editor" onClick={() => setSelectedId("")}>Close</button></div>
               <AgentOrchestratorRoleEditor key={inspected.id} template node={inspected} mission={mission} draft={draft}
-                harnesses={harnesses} loadModels={loadModels} busy={busy} change={change} apply={() => void save()}
+                harnesses={harnesses} loadModels={loadModels} busy={busy} change={change}
                 discard={() => { setDraft(saved ? structuredClone(saved) : freshTeam(workspaceId, !defaultId)); setSelectedId(""); }}
                 taskName={() => "Team template"} />
             </> : <div className="ao-empty-state"><p>Select a role block to edit its role, model and instructions.</p><p>Drag blocks to arrange the team. Shift-click to connect or unlink.</p></div>}
@@ -218,7 +236,7 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
         <button type="button" className="button-secondary" disabled={locked || draft.nodes.some(node => node.role === "approver") || draft.nodes.length >= 24} onClick={() => add("approver")}>＋ Command approver</button>
         <button type="button" className="button-secondary" disabled={locked || subCount >= 8 || draft.nodes.length + (subCount ? 1 : 2) > 24} onClick={() => add("sub_reviewer")}>＋ Sub-reviewer</button>
         <button type="button" className="button-secondary" disabled={locked || draft.nodes.some(node => node.role === "retry") || draft.nodes.length >= 24} onClick={() => add("retry")}>＋ Retry</button>
-        <span role="status" className="ao-hint">{notice || (dirty ? "Unsaved changes" : "Existing chats keep their original team")}</span>
+        <span role="status" className="ao-hint">{saving || dirty && !failed ? "Saving…" : failed && dirty ? "Not saved — fix the error above" : notice || "Changes save automatically · existing chats keep their original team"}</span>
       </footer> : null}
     </div>
   </section>;
