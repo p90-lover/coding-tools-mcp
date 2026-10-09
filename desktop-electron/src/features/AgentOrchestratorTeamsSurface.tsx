@@ -28,6 +28,13 @@ const freshTeam = (workspaceId: string, first = false): AoTeam => ({
   name: "New team", is_default: first, editable_graph: true,
 });
 const native: AoHarness = { id: NATIVE_HARNESS, label: "Native Codex", runnable: true, installed: true };
+/** One-click workers: a worker card already named for its job, with a matching specialty. */
+const QUICK_WORKERS = [
+  { roleName: "Frontend", specialty: "frontend" }, { roleName: "Backend", specialty: "backend" },
+  { roleName: "Tester", specialty: "testing" }, { roleName: "Researcher", specialty: "research" },
+  { roleName: "Security auditor", specialty: "security" }, { roleName: "Docs writer", specialty: "docs" },
+  { roleName: "DevOps", specialty: "devops" },
+] as const;
 
 export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
   active?: boolean; setError: (error: string | null) => void;
@@ -128,7 +135,7 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
     }
     finally { (automatic ? setSaving : setBusy)(false); }
   };
-  const add = (role: "worker" | "approver" | "sub_reviewer" | "retry") => {
+  const add = (role: "worker" | "approver" | "sub_reviewer" | "retry", preset?: { roleName: string; specialty: string }) => {
     if (!draft) return;
     const planner = draft.nodes.find(node => node.role === "planner");
     const reviewer = draft.nodes.find(node => node.role === "reviewer");
@@ -137,7 +144,9 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
     const id = crypto.randomUUID();
     const node: AoNode = { id, task_id: "", role, state: "pending", x: 0, y: 1, parents: [planner.id],
       route: role === "worker" ? workerRoute(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL) : { ...reviewer?.route ?? planner.route },
-      settings: { ...emptyRoleSettings(), name: `${ROLE_TITLE[role]}${role === "approver" ? "" : ` ${count + 1}`}`, specialty: role === "worker" ? "implementation" : role === "retry" ? "recovery" : "review" } };
+      settings: preset
+        ? { ...emptyRoleSettings(), name: preset.roleName, role_name: preset.roleName, specialty: preset.specialty }
+        : { ...emptyRoleSettings(), name: `${ROLE_TITLE[role]}${role === "approver" ? "" : ` ${count + 1}`}`, specialty: role === "worker" ? "implementation" : role === "retry" ? "recovery" : "review" } };
     change({ ...draft, nodes: [...draft.nodes, node] });
     setSelectedId(id);
   };
@@ -160,6 +169,7 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
     return () => window.clearTimeout(timer);
   }, [draft, dirty, locked, saving, failed]);
   const subCount = draft?.nodes.filter(node => node.role === "sub_reviewer").length ?? 0;
+  const full = (draft?.nodes.length ?? 0) >= 24;
   const canUnlink = (id: string, parent: string) => Boolean(mission && draft?.nodes.find(node => node.id === id)?.role !== "retry" && aoUnlinkChange(mission, id, parent)
     && !(draft?.nodes.find(node => node.id === id)?.role === "sub_reviewer" && draft.nodes.find(node => node.id === parent)?.role === "review_split"));
   const parents = (id: string, next: string[]) => {
@@ -192,6 +202,9 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
           if (canLeave()) { setLoading(true); void moduleCall("runs", { workspaceId }).then(result => accept(result, draft?.id))
             .catch(cause => setError(String(cause instanceof Error ? cause.message : cause))).finally(() => setLoading(false)); }
         }}>Refresh</button>
+        {/* Changes also save on their own; this saves now and shows the state at a glance. */}
+        <button type="button" className="button-primary" disabled={locked || saving || !dirty || !draft?.name.trim()} onClick={() => void save()}>
+          {saving ? "Saving…" : dirty ? "Save team" : "Saved"}</button>
       </div>
       {draft ? <div className="ao-teams-settings">
         <label>Team name<input aria-label="Team name" maxLength={128} value={draft.name} disabled={locked} onChange={event => setDraft({ ...draft, name: event.target.value })} /></label>
@@ -203,6 +216,16 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
       </div> : null}
       <div className="ao-teams-stage">
         {loading ? <div className="ao-empty-state"><p>Loading teams…</p></div> : draft && mission ? <>
+          <aside className="ao-teams-palette" aria-label="Add roles">
+            <h3>Roles</h3>
+            <button type="button" disabled={locked || full} onClick={() => add("worker")}><strong>＋ Worker</strong><small>Does a part of the task</small></button>
+            <button type="button" disabled={locked || full || draft.nodes.some(node => node.role === "approver")} onClick={() => add("approver")}><strong>＋ Command approver</strong><small>Screens risky commands</small></button>
+            <button type="button" disabled={locked || subCount >= 8 || draft.nodes.length + (subCount ? 1 : 2) > 24} onClick={() => add("sub_reviewer")}><strong>＋ Sub-reviewer</strong><small>Reviews one part</small></button>
+            <button type="button" disabled={locked || full || draft.nodes.some(node => node.role === "retry")} onClick={() => add("retry")}><strong>＋ Retry</strong><small>Recovers failed work</small></button>
+            <h3>Quick workers</h3>
+            {QUICK_WORKERS.map(preset => <button key={preset.roleName} type="button" disabled={locked || full}
+              onClick={() => add("worker", preset)}><strong>＋ {preset.roleName}</strong><small>Worker · {preset.specialty}</small></button>)}
+          </aside>
           <div className="ao-teams-canvas">
             <AgentOrchestratorCanvas key={draft.id} nodes={draft.nodes} levels={aoLevels(mission)} selectedId={selectedId} busy={busy}
               onSelect={setSelectedId} describe={node => cardMeta(node as AoNode, harnesses)}
@@ -229,10 +252,6 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
         </> : <div className="ao-empty-state"><p>Add a workspace in Chat to configure a team.</p></div>}
       </div>
       {draft ? <footer className="ao-teams-footer">
-        <button type="button" className="button-secondary" disabled={locked || draft.nodes.length >= 24} onClick={() => add("worker")}>＋ Worker</button>
-        <button type="button" className="button-secondary" disabled={locked || draft.nodes.some(node => node.role === "approver") || draft.nodes.length >= 24} onClick={() => add("approver")}>＋ Command approver</button>
-        <button type="button" className="button-secondary" disabled={locked || subCount >= 8 || draft.nodes.length + (subCount ? 1 : 2) > 24} onClick={() => add("sub_reviewer")}>＋ Sub-reviewer</button>
-        <button type="button" className="button-secondary" disabled={locked || draft.nodes.some(node => node.role === "retry") || draft.nodes.length >= 24} onClick={() => add("retry")}>＋ Retry</button>
         <span role="status" className="ao-hint">{saving || dirty && !failed ? "Saving…" : failed && dirty ? "Not saved — fix the error above" : notice || "Changes save automatically · existing chats keep their original team"}</span>
       </footer> : null}
     </div>
