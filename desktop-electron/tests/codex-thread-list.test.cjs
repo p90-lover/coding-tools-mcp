@@ -155,6 +155,43 @@ test("Section › files a chat into a named sidebar section, kept on this comput
   assert.deepEqual(JSON.parse(stored["coding-tools:ao:chat-sections"])[0].taskIds, []);
 });
 
+test("chat order: active chats stay on top, new chats come next, then the order you dragged", () => {
+  const list = compile("ChatThreadList.tsx", (name) => name === "./ao-chat" ? chat : name === "react" ? { useState() {}, useRef() {}, useEffect() {} } : name === "react/jsx-runtime" ? { jsx() {}, jsxs() {} } : {});
+  const chats = [{ taskId: "new", status: "done" }, { taskId: "a", status: "done" }, { taskId: "b", status: "running" }, { taskId: "c", status: "stopped" }];
+  // Arrays from the sandbox have their own prototype; compare them as plain JSON.
+  const ids = (order, manual, keep = true) => JSON.parse(JSON.stringify(list.orderChats(order, manual, keep).map((item) => item.taskId)));
+  const move = (...args) => JSON.parse(JSON.stringify(list.moveChat(...args)));
+  assert.deepEqual(ids(chats, []), ["b", "new", "a", "c"], "running first, then newest first");
+  assert.deepEqual(ids(chats, ["c", "a"]), ["b", "new", "c", "a"], "a chat you haven't placed stays above your order");
+  assert.deepEqual(ids(chats, ["c", "a", "new", "b"], false), ["c", "a", "new", "b"], "without the setting, only your order counts");
+  assert.deepEqual(move(["x", "y", "z"], "z", "x"), ["z", "x", "y"]);
+  assert.deepEqual(move(["x", "y", "z"], "x", null), ["y", "z", "x"]);
+});
+
+test("a long project shows 5 chats and Show more, like Codex; the count is a list setting", () => {
+  delete stored["coding-tools:ao:chat-list-settings"];
+  delete stored["coding-tools:ao:chat-order:a"];
+  const { props } = fixture();
+  props.chats = Array.from({ length: 8 }, (_, index) => ({ taskId: `c${index}`, title: `Chat ${index}`, status: "done", runIds: [], latestRunId: "" }));
+  props.selectedTaskId = "c7";
+  const list = mount("ChatThreadList.tsx", props);
+  const projectRows = (view) => walk(walk(view).find((element) => element.props?.className === "cx-projects"))
+    .filter((element) => element.type === "li" && String(element.props.className).startsWith("cx-thread-row"))
+    .map((row) => text(walk(row).find((element) => element.props?.className === "cx-thread-title")));
+  let view = list.render();
+  assert.deepEqual(projectRows(view), ["Chat 0", "Chat 1", "Chat 2", "Chat 3", "Chat 4", "Chat 7"], "the first five, plus the open chat");
+  const more = () => walk(list.render()).find((element) => element.props?.className === "cx-show-more");
+  assert.equal(text(more()), "Show more");
+  more().props.onClick();
+  assert.equal(projectRows(list.render()).length, 8);
+  assert.equal(text(more()), "Show less");
+  walk(list.render()).find((element) => element.props?.className === "cx-list-settings")
+    .props.onClick({ currentTarget: { getBoundingClientRect: () => ({ bottom: 10, left: 20 }) } });
+  const popover = walk(list.render()).find((element) => element.type === "FloatingLayer" && element.props.className === "cx-popover");
+  walk(popover).find((element) => element.props?.["aria-label"] === "Chats shown per project").props.onChange({ target: { value: "3" } });
+  assert.equal(JSON.parse(stored["coding-tools:ao:chat-list-settings"]).visible, 3);
+});
+
 test("archived chats sit in their own section and can be restored", () => {
   const { props, calls } = fixture();
   const list = mount("ChatThreadList.tsx", props);

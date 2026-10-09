@@ -1468,12 +1468,6 @@ export function AgentOrchestratorSurface({ language, setError }: {
           </div>
         </FloatingSheet> : null}
 
-        {view === "chat" && chatTaskId === "" && savedTeams.length ? <div className="ao-new-chat-team">
-          <label>Team<select aria-label="New chat team" disabled={Boolean(busy)} value={missionTeamId || team?.id || ""}
-            onChange={event => setMissionTeamId(event.target.value)}>
-            {savedTeams.map(item => <option key={item.id} value={item.id}>{item.name}{item.id === team?.id ? " · Default" : ""}</option>)}
-          </select></label><span className="ao-hint">Uses these role blocks for this chat</span>
-        </div> : null}
         {view === "chat" ? (
           !workspaceId && workspaceReady
             ? <div className="ao-empty-state"><p>{copy.noWorkspace}</p><button className="button-primary" type="button" onClick={() => setSheet("settings")}>{copy.settings}</button></div>
@@ -1497,6 +1491,13 @@ export function AgentOrchestratorSurface({ language, setError }: {
                   onUnlink={unlink} canUnlink={(nodeId, parentId) => Boolean(aoUnlinkChange(selectedRun, nodeId, parentId))}
                   onRemove={removeCard} canRemove={(nodeId) => Boolean(aoRemoveChange(selectedRun, nodeId))} /> : undefined}
                 busy={Boolean(busy)} loadDescription={loadDescription} send={sendChat}
+                // A new chat's team sits in the header, as Codex keeps the page free of setting bars.
+                headerExtra={chatTaskId === "" && savedTeams.length ? <label className="cx-head-team" title="Uses these role blocks for this chat">
+                  <span>Team</span>
+                  <select aria-label="New chat team" disabled={Boolean(busy)} value={missionTeamId || team?.id || ""} onChange={event => setMissionTeamId(event.target.value)}>
+                    {savedTeams.map(item => <option key={item.id} value={item.id}>{item.name}{item.id === team?.id ? " · Default" : ""}</option>)}
+                  </select>
+                </label> : undefined}
                 seed={chatSeed && chatSeed.workspaceId === workspaceId && !chatTaskId ? chatSeed : undefined}
                 onSeedUsed={() => setChatSeed(null)}
                 pendingMessage={pendingChat && (!pendingChat.taskId || pendingChat.taskId === chatTaskId) ? pendingChat.message : undefined}

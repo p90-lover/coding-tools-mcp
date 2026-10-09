@@ -4,7 +4,7 @@ import { AgentOrchestratorComposerControls, type ComposerControlsProps } from ".
 import type { ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { ChatMenu, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
+import { ChatGlyph, ChatMenu, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
   CHAT_DEFAULT_TITLE, chatAcceptsMessage, chatDuration, chatList, chatMessageWithAttachments, chatRunOpen, chatSlashCommand,
   chatSlashMatches, chatTurns,
@@ -107,7 +107,7 @@ function MessageActions({ text, children }: { text: string; children?: ReactNode
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, working = false, describeNode, activity, permissions, composer, onOpenTeam, onOpenMissionBoard,
-  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, seed, onSeedUsed,
+  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, seed, onSeedUsed, headerExtra,
   pendingMessage, pendingTitle, pendingCreation = false,
 }: {
   /** A message being sent into a chat that has no run yet (shown at once, as Codex does). */
@@ -151,6 +151,8 @@ export function AgentOrchestratorChat({
   /** A new chat's starting draft ("Continue in project"); taken once, then onSeedUsed clears it. */
   seed?: { key: string; title: string; text: string };
   onSeedUsed?: () => void;
+  /** Extra header controls before the header buttons (the chat's team picker). */
+  headerExtra?: ReactNode;
 }) {
   const chats = useMemo(() => chatList(runs, tasks, [], true), [runs, tasks]);
   const chat = chats.find((entry) => entry.taskId === selectedTaskId);
@@ -300,6 +302,7 @@ export function AgentOrchestratorChat({
     <div className={`cx-chat${showStructure && structure ? " has-structure" : ""}`}>
       <section className="cx-thread" aria-label={chat?.title || CHAT_DEFAULT_TITLE}>
         <header className="cx-thread-head">
+          <span className="cx-head-folder" title={projectName}><ChatGlyph name="folder" size={15} /></span>
           {selectedTaskId || pendingCreation
             ? renaming !== null
               ? <input autoFocus className="cx-title-input" aria-label="Chat name" maxLength={240} value={renaming}
@@ -311,6 +314,7 @@ export function AgentOrchestratorChat({
           {pendingCreation && !chat ? <span className="cx-status status-queued" role="status">Starting</span> : null}
           {chat ? <span className={`cx-status status-${chat.status}`}>{STATUS_LABEL[chat.status]}</span> : null}
           <span className="cx-head-spacer" />
+          {headerExtra}
           {structure || latest ? <button type="button" className="cx-icon-button" aria-pressed={showStructure} title="Show cards (Structure)" aria-label="Show cards"
             disabled={!latest} onClick={() => structure ? setShowStructure((value) => !value) : latest && openStructure(latest.id)}>
             <Icon name="orchestrator" width="16" height="16" /></button> : null}

@@ -15,12 +15,11 @@ const aoSource = fs.readFileSync(path.join(launcherRoot, "src", "features", "Age
 const servicesSource = fs.readFileSync(path.join(launcherRoot, "src", "features", "ExternalServicesSurface.tsx"), "utf8");
 const proxySource = fs.readFileSync(path.join(launcherRoot, "src", "features", "NetworkProxySurface.tsx"), "utf8");
 
-test("workspace Team picker remains a compact row above the full-width new chat", () => {
+test("a new chat's Team picker sits in the chat header, with no setting bar above the chat (Codex)", () => {
+  assert.match(aoSource, /headerExtra=\{chatTaskId === "" && savedTeams\.length \? <label className="cx-head-team"/, "the picker is passed to the chat header");
+  assert.match(aoSource, /aria-label="New chat team"/);
+  assert.doesNotMatch(aoSource, /className="ao-new-chat-team"/, "the full-width Team row is gone");
   const css = fs.readFileSync(path.join(launcherRoot, "src/features/agent-orchestrator.css"), "utf8");
-  const stage = /\.ao-stage:has\(>\s*\.ao-new-chat-team\)\s*\{([^}]+)\}/.exec(css)?.[1] || "";
-  assert.match(stage, /flex-direction:\s*column/, "the Team-bearing stage must stack vertically");
-  const picker = /\.ao-new-chat-team\s*\{([^}]+)\}/.exec(css)?.[1] || "";
-  assert.match(picker, /flex:\s*0\s+0\s+auto/, "the Team row must not consume the flexible chat area");
   const ordinaryStage = /\.ao-stage\s*\{([^}]+)\}/.exec(css)?.[1] || "";
   assert.doesNotMatch(ordinaryStage, /flex-direction:\s*column/, "overview stages must keep their existing layout");
 });

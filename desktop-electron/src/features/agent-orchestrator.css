@@ -22,9 +22,6 @@
 .ao-teams-inspector > .ao-empty-state p { max-width: 260px; }
 .ao-teams-footer { border-top: 1px solid var(--ao-line); border-bottom: 0; }
 .ao-teams button:active:not(:disabled) { transform: translateY(1px); }
-.ao-stage:has(> .ao-new-chat-team) { flex-direction: column; }
-.ao-new-chat-team { display: flex; flex: 0 0 auto; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 16px; border-bottom: 1px solid var(--ao-line); }
-.ao-new-chat-team label { display: flex; align-items: center; gap: 8px; color: var(--ao-muted); font-size: 12px; }
 @media (max-width: 820px) {
   .ao-teams-stage { flex-direction: column; overflow-y: auto; }
   .ao-teams-canvas { flex: 1 0 320px; min-height: 320px; }
@@ -35,7 +32,7 @@
   .ao-teams-bar > label { flex: 1 0 100%; }
   .ao-teams-settings > label:first-child { flex: 1 0 100%; }
   .ao-teams-settings .ao-hint { flex-basis: 100%; margin-left: 0; }
-  .ao-teams-bar select, .ao-new-chat-team select { min-width: 0; max-width: 240px; }
+  .ao-teams-bar select { min-width: 0; max-width: 240px; }
 }
 
 .content-scroll:has(> .ao-workflow) { width: 100%; max-width: none; height: 100%; padding: 0; overflow: hidden; }
@@ -93,9 +90,6 @@
 @keyframes ao-pulse { 50% { opacity: .25; } }
 
 .ao-stage { position: relative; display: flex; flex: 1 1 auto; min-height: 0; }
-/* Keep the new-chat Team picker above, rather than beside, the flexible chat. */
-.ao-stage:has(> .ao-new-chat-team) { flex-direction: column; }
-.ao-new-chat-team { flex: 0 0 auto; }
 .ao-overview:not([hidden]) { display: grid; grid-template-rows: minmax(0, .7fr) 8px minmax(0, .3fr); flex: 1 1 auto; min-width: 0; min-height: 0; overflow: hidden; }
 .ao-overview-divider { position: relative; z-index: 9; cursor: row-resize; touch-action: none; user-select: none; background: var(--color-bg-primary); -webkit-app-region: no-drag; }
 .ao-overview-divider::after { content: ""; position: absolute; width: 36px; height: 2px; top: 3px; left: calc(50% - 18px); border-radius: 2px; background: var(--ao-muted); opacity: .5; }

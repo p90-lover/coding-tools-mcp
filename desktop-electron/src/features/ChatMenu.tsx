@@ -36,6 +36,11 @@ export type ChatMenuState = { x: number; y: number; items: ChatMenuItem[]; label
 
 const actionable = (item: ChatMenuItem) => item.kind !== "separator" && Boolean(item.run || item.items?.length);
 
+/** One of the menu's glyphs, for other Codex chrome (the sidebar's project folders). */
+export function ChatGlyph({ name, size = 14 }: { name: ChatMenuIcon; size?: number }) {
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{MENU_ICONS[name]}</svg>;
+}
+
 function MenuIcon({ name }: { name?: ChatMenuIcon }) {
   return <span className="cx-menu-icon" aria-hidden="true">
     {name ? <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{MENU_ICONS[name]}</svg> : null}

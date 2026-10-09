@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { Icon } from "../icons";
-import { ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
+import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import { chatRelativeTime, scheduledStartLabel, type ChatStatus, type ChatSummary } from "./ao-chat";
 
 const STATUS_LABEL: Record<ChatStatus, string> = {
@@ -64,6 +64,44 @@ export type ThreadListProps = {
 
 const SHORTCUTS = { rename: "Alt+Ctrl+R", pin: "Alt+Ctrl+P", unread: "Ctrl+Shift+U", archive: "Ctrl+Shift+A" };
 
+/** Chats that are doing something or waiting on you; they stay on top while that setting is on. */
+const ACTIVE: ReadonlySet<ChatStatus> = new Set(["running", "queued", "attention"]);
+
+/**
+ * The list's order: active chats first (when keepActiveOnTop); then chats you haven't placed yet,
+ * newest first, so a new chat appears at the top as in Codex; then the order you dragged chats
+ * into. Each group keeps that order, so dragging works among active chats too.
+ */
+export function orderChats<T extends { taskId: string; status: ChatStatus }>(chats: T[], manual: string[], keepActiveOnTop: boolean): T[] {
+  const position = new Map(manual.map((id, index) => [id, index]));
+  const recent = new Map(chats.map((chat, index) => [chat.taskId, index]));
+  const rank = (chat: T) => position.get(chat.taskId) ?? (recent.get(chat.taskId) ?? 0) - chats.length;
+  return [...chats].sort((a, b) =>
+    (keepActiveOnTop ? Number(ACTIVE.has(b.status)) - Number(ACTIVE.has(a.status)) : 0) || rank(a) - rank(b));
+}
+
+/** Moves `id` to just before `before` (or to the end), in the order the list currently shows. */
+export function moveChat(shown: string[], id: string, before: string | null): string[] {
+  const rest = shown.filter((item) => item !== id);
+  const at = before === null ? rest.length : rest.indexOf(before);
+  return at < 0 ? shown : [...rest.slice(0, at), id, ...rest.slice(at)];
+}
+
+type ListSettings = { visible: number; keepActiveOnTop: boolean };
+const SETTINGS_KEY = "coding-tools:ao:chat-list-settings";
+function readListSettings(): ListSettings {
+  try {
+    const value = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
+    const visible = Number.isInteger(value.visible) && value.visible >= 1 && value.visible <= 100 ? value.visible : 5;
+    return { visible, keepActiveOnTop: value.keepActiveOnTop !== false };
+  } catch { return { visible: 5, keepActiveOnTop: true }; }
+}
+const orderKey = (workspaceId: string) => `coding-tools:ao:chat-order:${workspaceId}`;
+function readOrder(workspaceId: string): string[] {
+  try { const value = JSON.parse(localStorage.getItem(orderKey(workspaceId)) || "[]"); return Array.isArray(value) ? value.filter((id) => typeof id === "string") : []; }
+  catch { return []; }
+}
+
 /**
  * Codex's sidebar: New chat, Pinned, then projects that collapse on click, each with its chats.
  * Only the open project's chats are loaded, so opening another project switches to it.
@@ -82,6 +120,22 @@ export function ChatThreadList(props: ThreadListProps) {
   /** Naming a new section (optionally filing a chat into it) or renaming an existing one. */
   const [naming, setNaming] = useState<{ sectionId?: string; taskId?: string; name: string } | null>(null);
   const hoverTimer = useRef<number | undefined>(undefined);
+  const [settings, setSettings] = useState<ListSettings>(readListSettings);
+  const [settingsAt, setSettingsAt] = useState<{ top: number; left: number } | null>(null);
+  const [manualOrder, setManualOrder] = useState<string[]>(() => readOrder(workspaceId));
+  const [orderFor, setOrderFor] = useState(workspaceId);
+  if (orderFor !== workspaceId) { setOrderFor(workspaceId); setManualOrder(readOrder(workspaceId)); }
+  /** Projects showing all their chats ("Show more"); the rest show the first `visible`. */
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [dragging, setDragging] = useState<string | null>(null);
+  const saveSettings = (next: ListSettings) => {
+    setSettings(next);
+    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(next)); } catch { /* per-session only */ }
+  };
+  const saveOrder = (next: string[]) => {
+    setManualOrder(next);
+    try { localStorage.setItem(orderKey(workspaceId), JSON.stringify(next)); } catch { /* per-session only */ }
+  };
   const saveSections = (next: ChatSection[]) => {
     setSections(next);
     try { localStorage.setItem(SECTIONS_KEY, JSON.stringify(next)); } catch { /* per-session only */ }
@@ -211,6 +265,19 @@ export function ChatThreadList(props: ThreadListProps) {
     setMenu({ x: event.clientX, y: event.clientY, items, label });
   };
 
+  // The settings popover closes on a click outside it or Escape.
+  useEffect(() => {
+    if (!settingsAt) return;
+    const outside = (event: PointerEvent) => {
+      const target = event.target as Element | null;
+      if (!target?.closest?.(".cx-popover, .cx-list-settings")) setSettingsAt(null);
+    };
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setSettingsAt(null); };
+    document.addEventListener("pointerdown", outside);
+    window.addEventListener("keydown", escape);
+    return () => { document.removeEventListener("pointerdown", outside); window.removeEventListener("keydown", escape); };
+  }, [settingsAt]);
+
   // Codex's shortcuts act on the open chat.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -222,6 +289,14 @@ export function ChatThreadList(props: ThreadListProps) {
       else if (event.ctrlKey && event.altKey && key === "p") { event.preventDefault(); props.togglePin(chat.taskId); }
       else if (event.ctrlKey && event.shiftKey && key === "u") { event.preventDefault(); props.setUnread(chat.taskId, !unread.includes(chat.taskId)); }
       else if (event.ctrlKey && event.shiftKey && key === "a" && !chatBusy(chat.taskId)) { event.preventDefault(); actions.lifecycle(chat.taskId, "archive"); }
+      else if (event.altKey && event.shiftKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+        // Moves the open chat one place within its project's list.
+        const at = shownOrder.indexOf(chat.taskId);
+        const to = at + (event.key === "ArrowUp" ? -1 : 1);
+        if (at < 0 || to < 0 || to >= shownOrder.length) return;
+        event.preventDefault();
+        saveOrder(moveChat(shownOrder, chat.taskId, event.key === "ArrowUp" ? shownOrder[to] : shownOrder[to + 1] ?? null));
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -238,7 +313,14 @@ export function ChatThreadList(props: ThreadListProps) {
           onBlur={() => void commitRename()} />
       </li>;
     }
-    return <li key={chat.taskId} className={`cx-thread-row${isUnread ? " is-unread" : ""}`}
+    // Codex lets you drag chats into your own order; drop before the row under the pointer.
+    const reorder = shownOrder.includes(chat.taskId);
+    return <li key={chat.taskId} className={`cx-thread-row${isUnread ? " is-unread" : ""}${dragging === chat.taskId ? " is-dragging" : ""}`}
+      draggable={reorder}
+      onDragStart={reorder ? (event) => { setDragging(chat.taskId); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", chat.taskId); } : undefined}
+      onDragOver={reorder && dragging && dragging !== chat.taskId ? (event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } : undefined}
+      onDrop={reorder ? (event) => { event.preventDefault(); if (dragging) saveOrder(moveChat(shownOrder, dragging, chat.taskId)); setDragging(null); } : undefined}
+      onDragEnd={() => setDragging(null)}
       onContextMenu={(event) => openMenu(event, chatMenu(chat), chat.title)}
       onMouseEnter={(event) => {
         const box = event.currentTarget.getBoundingClientRect();
@@ -247,9 +329,9 @@ export function ChatThreadList(props: ThreadListProps) {
       }}
       onMouseLeave={() => { window.clearTimeout(hoverTimer.current); setHover(null); }}>
       <button type="button" className="cx-thread-select" aria-current={chat.taskId === selectedTaskId} onClick={() => actions.select(chat.taskId)}>
-        <span className={`cx-thread-dot status-${chat.status}`} aria-label={STATUS_LABEL[chat.status]} />
         <span className="cx-thread-title">{chat.title}</span>
-        <span className="cx-thread-age">{chat.schedule?.state === "scheduled" ? "◷" : chatRelativeTime(chat.updatedAtMs, now)}</span>
+        {chat.schedule?.state === "scheduled" ? <span className="cx-thread-age" aria-label="Scheduled">◷</span> : null}
+        <span className={`cx-thread-dot status-${chat.status}`} aria-label={STATUS_LABEL[chat.status]} />
       </button>
       <span className="cx-thread-hover">
         <button type="button" aria-label={isPinned ? "Unpin chat" : "Pin chat"} title={isPinned ? "Unpin chat" : "Pin chat"} aria-pressed={isPinned}
@@ -261,6 +343,12 @@ export function ChatThreadList(props: ThreadListProps) {
   };
 
   const pinnedChats = chats.filter((chat) => pinned.includes(chat.taskId));
+  const projectChats = orderChats(chats.filter((chat) => !pinned.includes(chat.taskId) && !sectionOf(chat.taskId)), manualOrder, settings.keepActiveOnTop);
+  const shownOrder = projectChats.map((chat) => chat.taskId);
+  // Like Codex, a long project shows its first chats and "Show more"; the open chat always shows.
+  const showAll = expanded.has(workspaceId);
+  const visibleChats = showAll ? projectChats : projectChats.filter((chat, index) => index < settings.visible || chat.taskId === selectedTaskId);
+  const toggleShowAll = () => setExpanded((current) => { const next = new Set(current); if (next.has(workspaceId)) next.delete(workspaceId); else next.add(workspaceId); return next; });
   const nameInput = (label: string) => <input className="cx-section-input" autoFocus aria-label={label} placeholder={label} maxLength={80}
     value={naming?.name ?? ""} onChange={(event) => setNaming((current) => current && { ...current, name: event.target.value })}
     onKeyDown={(event) => { if (event.key === "Enter") commitNaming(); if (event.key === "Escape") setNaming(null); }}
@@ -293,14 +381,20 @@ export function ChatThreadList(props: ThreadListProps) {
         })}
         {naming && !naming.sectionId ? <section className="cx-thread-group">{nameInput("New section name")}</section> : null}
         <section className="cx-thread-group">
-          <h3>Projects</h3>
+          <div className="cx-group-head">
+            <h3>Projects</h3>
+            <button type="button" className="cx-list-settings" aria-label="Chat list settings" title="Chat list settings" aria-expanded={Boolean(settingsAt)}
+              onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); setSettingsAt(settingsAt ? null : { top: box.bottom + 4, left: box.left }); }}>
+              <Icon name="settings" width="13" height="13" />
+            </button>
+          </div>
           <ul className="cx-projects">
             {projectOrder.map((item) => {
               const open = item.id === workspaceId && !collapsed.has(item.id);
               return <li key={item.id}>
                 <button type="button" className="cx-project" aria-expanded={open} title={item.path || item.name}
                   onClick={() => clickProject(item.id)} onContextMenu={(event) => openMenu(event, projectMenu(item), item.name)}>
-                  <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
+                  <ChatGlyph name="folder" size={15} />
                   <span className="cx-thread-title">{item.name}</span>
                   {props.pinnedProjects.includes(item.id) ? <span className="cx-project-pin" aria-label="Pinned project">📌</span> : null}
                 </button>
@@ -308,7 +402,10 @@ export function ChatThreadList(props: ThreadListProps) {
                   {props.pendingTitle ? <li className="cx-thread-row is-pending"><span className="cx-thread-select" aria-current="true">
                     <span className="cx-thread-dot status-queued" aria-label="Starting" /><span className="cx-thread-title">{props.pendingTitle}</span>
                   </span></li> : null}
-                  {chats.filter((chat) => !pinned.includes(chat.taskId) && !sectionOf(chat.taskId)).map(row)}
+                  {visibleChats.map(row)}
+                  {projectChats.length > settings.visible
+                    ? <li><button type="button" className="cx-show-more" onClick={toggleShowAll}>{showAll ? "Show less" : "Show more"}</button></li>
+                    : null}
                   {!chats.length ? <li className="cx-thread-empty">No chats yet</li> : null}
                 </ul> : null}
               </li>;
@@ -333,6 +430,21 @@ export function ChatThreadList(props: ThreadListProps) {
         <span>📁 {workspace?.name}</span>
         {workspace?.path ? <span className="cx-hover-path">{workspace.path}</span> : null}
         <span>{hover.chat.runIds.length} {hover.chat.runIds.length === 1 ? "run" : "runs"}</span>
+      </FloatingLayer> : null}
+      {settingsAt ? <FloatingLayer className="cx-popover" role="dialog" style={{ top: settingsAt.top, left: settingsAt.left }}>
+        <strong>Chat list</strong>
+        <label className="cx-popover-row">
+          <span>Chats shown per project</span>
+          <input type="number" min={1} max={100} value={settings.visible} aria-label="Chats shown per project"
+            onChange={(event) => { const value = Math.round(Number(event.target.value)); if (value >= 1 && value <= 100) saveSettings({ ...settings, visible: value }); }} />
+        </label>
+        <label className="cx-popover-row">
+          <input type="checkbox" checked={settings.keepActiveOnTop} aria-label="Keep active chats on top"
+            onChange={(event) => saveSettings({ ...settings, keepActiveOnTop: event.target.checked })} />
+          <span>Keep running and waiting chats on top</span>
+        </label>
+        <p className="cx-popover-hint">Drag chats to reorder them, or press Alt+Shift+↑/↓ on the open chat.</p>
+        {manualOrder.length ? <button type="button" className="cx-popover-reset" onClick={() => saveOrder([])}>Reset to newest first</button> : null}
       </FloatingLayer> : null}
       <ChatMenu menu={menu} onClose={() => setMenu(null)} />
     </aside>
