@@ -527,9 +527,11 @@ export function AgentOrchestratorSurface({ language, setError }: {
     setSelectedRunId((selected) => runs.some((run) => run.id === selected) ? selected : runs[0]?.id ?? "");
   };
 
+  /** The project the loaded board belongs to; the board state itself does not say. */
+  const boardWorkspace = useRef("");
   const loadBoard = async (id: string) => {
     const current = await moduleCall("board", { workspaceId: id }) as unknown as Board;
-    if (selection.current.workspaceId === id) setBoard(current);
+    if (selection.current.workspaceId === id) { boardWorkspace.current = id; setBoard(current); }
     return current;
   };
 
@@ -554,6 +556,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
   useEffect(() => {
     if (!workspaceReady || !workspaceId) { setBoard(null); setMissions([]); return; }
     let live = true;
+    boardWorkspace.current = "";
     setBoard(null);
     setMissions([]);
     setSelectedRunId("");
@@ -561,7 +564,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     void (async () => {
       try {
         const current = await moduleCall("board", { workspaceId }) as unknown as Board;
-        if (live) setBoard(current);
+        if (live) { boardWorkspace.current = workspaceId; setBoard(current); }
       } catch (cause) {
         if (live) setError(cause instanceof Error ? cause.message : String(cause));
       }
@@ -615,12 +618,15 @@ export function AgentOrchestratorSurface({ language, setError }: {
     setSheet("");
   });
 
-  useEffect(() => { setChatTaskId(null); }, [workspaceId]);
+  useEffect(() => { setChatTaskId(null); setPendingChat(null); }, [workspaceId]);
   useEffect(() => {
-    if (chatTaskId !== null || !board) return;
+    // Right after a project switch this runs while the previous project's board and runs are
+    // still loaded; picking its "latest chat" re-selected the old project's task under the new
+    // project, so a send went to a task the new workspace refuses. Wait for this project's board.
+    if (chatTaskId !== null || !board || boardWorkspace.current !== workspaceId) return;
     // "Continue in project" switched here to open a new, pre-filled chat, not the latest one.
     if (chatSeed?.workspaceId === workspaceId) { setChatTaskId(""); setView("chat"); return; }
-    const latest = chatList(missions, board.tasks, taskLifecycle)[0];
+    const latest = chatList(missions.filter((mission) => mission.workspace_id === workspaceId), board.tasks, taskLifecycle)[0];
     setChatTaskId(latest?.taskId ?? "");
     if (latest) setSelectedRunId(latest.latestRunId);
   }, [chatTaskId, missions, board]);
@@ -1033,7 +1039,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
       missionBoard = await moduleCall("create", { workspaceId,
         title: missionTitle.trim() || missionPrompt.trim().slice(0, 80), description: missionPrompt.trim(),
         expectedRevision: board.revision }) as unknown as Board;
-      setBoard(missionBoard);
+      boardWorkspace.current = workspaceId; setBoard(missionBoard);
       const added = missionBoard.tasks.filter((task) => !previousIds.has(task.id));
       if (added.length !== 1) throw new Error("Task creation needs review. Refresh and pick the saved task.");
       taskId = added[0].id;
@@ -1100,6 +1106,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
     void run("chat", async () => {
       try {
         if (!workspaceId) throw new Error("Add a workspace first");
+        // A follow-up must go to a task of the open project; anything else is a stale selection.
+        if (input.taskId && !(boardWorkspace.current === workspaceId && board?.tasks.some((task) => task.id === input.taskId))) {
+          throw new Error("This chat belongs to another project. Open it from its own project, or start a new chat here.");
+        }
         const execution = aoChatExecution(composerMode, singleRoute, savedTeams, composerTeamId, workspaceId);
         const result = await moduleCall("chat_send", { workspaceId, message: input.message,
           ...(input.taskId ? { taskId: input.taskId } : input.title ? { title: input.title } : {}),
