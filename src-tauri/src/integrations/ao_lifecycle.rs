@@ -218,12 +218,11 @@ fn active_work(data: &AppData, workspace_id: &str, task_id: &str) -> bool {
                 .any(|n| matches!(n.state, State::Reserved | State::Running))
         })
 }
-fn saved_team(data: &AppData, workspace_id: &str, team_id: &str, revision: u64) -> AppResult<Team> {
+/// Saved teams are shared by every workspace.
+fn saved_team(data: &AppData, team_id: &str, revision: u64) -> AppResult<Team> {
     data.ao_teams
         .iter()
-        .find(|team| {
-            team.workspace_id == workspace_id && team.id == team_id && team.revision == revision
-        })
+        .find(|team| team.id == team_id && team.revision == revision)
         .cloned()
         .ok_or_else(|| err("The selected saved team changed; refresh before retrying"))
 }
@@ -492,7 +491,7 @@ fn apply_inner(
             if run.revision != run_revision {
                 return Err(err("Source mission revision changed"));
             }
-            let team = saved_team(data, workspace_id, &team_id, team_revision)?;
+            let team = saved_team(data, &team_id, team_revision)?;
             let mut required_attempts = vec![];
             for node in run
                 .nodes
@@ -716,7 +715,7 @@ fn apply_inner(
                     "Choose a future deadline and stop conflicting work before scheduling",
                 ));
             }
-            let team = saved_team(data, workspace_id, &team_id, team_revision)?;
+            let team = saved_team(data, &team_id, team_revision)?;
             cancel_pending(data, workspace_id, &task_id);
             let run = ao_team::create_run_with_snapshot(
                 data,

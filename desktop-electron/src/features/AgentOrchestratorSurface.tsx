@@ -632,7 +632,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
   }, [workspaceId]);
   useEffect(() => {
     const changed = (event: Event) => {
-      if ((event as CustomEvent<{ workspaceId: string }>).detail?.workspaceId !== workspaceId) return;
+      // Saved teams are shared by every workspace, so any save refreshes this one.
+      if (!workspaceId) return;
       void loadMissions(workspaceId).catch(cause => setError(cause instanceof Error ? cause.message : String(cause)));
     };
     window.addEventListener("coding-tools:ao:teams-changed", changed);

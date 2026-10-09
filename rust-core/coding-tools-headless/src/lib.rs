@@ -3926,7 +3926,8 @@ async fn ao_read(
             } else {
                 integrations::ao_lifecycle::read_runs(data, &body.workspace_id, None)?
             };
-            let teams: Vec<_> = data.ao_teams.iter().filter(|team| team.workspace_id == body.workspace_id).collect();
+            // Saved teams are shared by every workspace.
+            let teams: Vec<_> = data.ao_teams.iter().collect();
             let team = integrations::ao_team::default_team(data, &body.workspace_id);
             let capacity: std::collections::HashMap<_, _> = runs.iter().map(|run| (run.id.clone(), integrations::ao_team::available_workers(data, run))).collect();
             let task_lifecycle = integrations::ao_lifecycle::read_public_lifecycles(data, &body.workspace_id, &runs);

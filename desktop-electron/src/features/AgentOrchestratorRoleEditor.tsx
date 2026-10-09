@@ -320,9 +320,8 @@ export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, l
         <label>Expected output<textarea aria-label="Expected output" rows={3} maxLength={2048} value={settings.expected_output} onChange={event => updateSettings({ expected_output: event.target.value })} /></label>
         <label>Working directory<input placeholder="Workspace root" maxLength={512} value={settings.working_directory} onChange={event => updateSettings({ working_directory: event.target.value })} /></label>
       </details>
-      {template ? <div className="ao-inspector-actions" title="Saves this team for new chats. Existing chats keep their team.">
-        <button className="button-primary" type="submit" disabled={busy || !role.route.model}>Save team</button>
-        <button className="button-secondary" type="button" disabled={busy} onClick={discard}>Reset</button>
+      {template ? <div className="ao-inspector-actions" title="The team saves itself for new chats. Existing chats keep their team.">
+        <span role="status">Changes save automatically</span>
       </div> : <div className="ao-inspector-actions" title="Changes apply automatically to this mission after its owned attempts stop.">
         <span role="status">{status || "Changes apply automatically"}</span>
         <button className="button-secondary" type="button" onClick={discard}>Reset to saved</button>

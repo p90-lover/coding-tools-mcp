@@ -663,17 +663,21 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     return { ok: true, now_ms: Date.now(), nodes };
   }
 
+  // A start blocked on the browser is reported as the operation's result: errors thrown across
+  // IPC reach the renderer only as a generic transport failure, which hid the reason.
+  const startBlocked = message => Object.assign(new Error(message), { startBlocked: true });
+
   async function requireWebReadiness(node) {
     if (node.route?.provider_id !== "chatgpt-web") return;
     if (typeof webBridgeReadiness !== "function") {
-      throw new Error("Browser readiness is unavailable; open Browser and sign in to ChatGPT");
+      throw startBlocked("Browser readiness is unavailable; open Browser and sign in to ChatGPT");
     }
     let state;
     try { state = await webBridgeReadiness({ nodeId: node.id, role: node.role, model: node.route.model }); }
-    catch { throw new Error("Browser readiness is unavailable; open Browser and check the ChatGPT session"); }
-    if (state?.authenticated === false) throw new Error("Sign in to ChatGPT in Browser before starting this role");
+    catch { throw startBlocked("Browser readiness is unavailable; open Browser and check the ChatGPT session"); }
+    if (state?.authenticated === false) throw startBlocked("Sign in to ChatGPT in Browser before starting this role");
     if (state?.authenticated !== true || state?.ready !== true) {
-      throw new Error("Browser is not ready; open Browser and check the ChatGPT session");
+      throw startBlocked("Browser is not ready; open Browser and check the ChatGPT session");
     }
   }
 
@@ -1965,7 +1969,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       case "stop_harness": return stopAoHarness(args);
       case "observe": return observe(args);
       case "advance": return advance(args);
-      case "start_run": return startRun(args);
+      case "start_run": return startRun(args).catch(error => {
+        if (error?.startBlocked) return { ok: false, started: false, reason: publicText(error.message, 300) };
+        throw error;
+      });
       case "restart_run": return restartRun(args);
       case "reconfigure_run": return reconfigureRun(args);
       case "schedule_start": return scheduleStart(args);
