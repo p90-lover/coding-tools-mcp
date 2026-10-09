@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../icons";
 import { AgentOrchestratorComposerControls, type ComposerControlsProps } from "./AgentOrchestratorComposerControls";
-import type { ReactNode } from "react";
+import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { ChatGlyph, ChatMenu, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
@@ -18,6 +18,8 @@ const STATUS_LABEL: Record<ChatStatus, string> = {
 };
 /** Text files up to this size are attached inline when their path is unknown. */
 const INLINE_ATTACHMENT_BYTES = 200 * 1024;
+/** The cards panel's dragged width (px), kept on this computer. */
+const CARDS_WIDTH_KEY = "coding-tools:ao:cards-panel-width";
 
 /** Thread actions the chat header, its ⋯ menu and its slash commands share with the thread list. */
 export type ChatThreadActions = {
@@ -207,6 +209,33 @@ export function AgentOrchestratorChat({
   );
   const stepCount = turns.reduce((total, turn) => total + turn.steps.length + (turn.final ? 1 : 0), 0);
   useEffect(() => { if (atBottom) scroller.current?.scrollTo({ top: scroller.current.scrollHeight }); }, [turns.length, stepCount, atBottom]);
+  // The cards panel can be dragged wider for more board room; the width is kept per viewer.
+  const [cardsWidth, setCardsWidth] = useState<number | null>(() => {
+    try { const value = Number(localStorage.getItem(CARDS_WIDTH_KEY)); return Number.isFinite(value) && value >= 280 ? value : null; } catch { return null; }
+  });
+  const saveCardsWidth = (value: number | null) => {
+    setCardsWidth(value);
+    try { if (value === null) localStorage.removeItem(CARDS_WIDTH_KEY); else localStorage.setItem(CARDS_WIDTH_KEY, String(value)); } catch { /* per-session only */ }
+  };
+  /** Between 280px and 70% of the chat area, so the conversation always keeps some room. */
+  const clampCardsWidth = (value: number, handle: Element) => {
+    const area = handle.closest(".cx-chat")?.getBoundingClientRect().width ?? window.innerWidth;
+    return Math.round(Math.max(280, Math.min(value, area * 0.7)));
+  };
+  const startCardsResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const handle = event.currentTarget;
+    const right = handle.parentElement!.getBoundingClientRect().right;
+    handle.setPointerCapture(event.pointerId);
+    let latest = cardsWidth;
+    const move = (moveEvent: PointerEvent) => { latest = clampCardsWidth(right - moveEvent.clientX, handle); setCardsWidth(latest); };
+    const end = () => {
+      handle.removeEventListener("pointermove", move); handle.removeEventListener("pointerup", end); handle.removeEventListener("pointercancel", end);
+      saveCardsWidth(latest);
+    };
+    handle.addEventListener("pointermove", move); handle.addEventListener("pointerup", end); handle.addEventListener("pointercancel", end);
+  };
   // A new chat starts at the bottom.
   useEffect(() => { setAtBottom(true); setShowStructure(false); setRenaming(null); }, [selectedTaskId]);
   // Continue in project: the new chat opens with the carried messages, ready to review and send.
@@ -427,7 +456,16 @@ export function AgentOrchestratorChat({
           </div>
         </form>
       </section>
-      {showStructure && structure ? <aside className="cx-structure" aria-label="Cards">
+      {showStructure && structure ? <aside className="cx-structure" aria-label="Cards" style={cardsWidth ? { flexBasis: cardsWidth } : undefined}>
+        <div className="cx-structure-resize" role="separator" aria-orientation="vertical" aria-label="Resize the cards panel" tabIndex={0}
+          aria-valuenow={cardsWidth ?? undefined} title="Drag to resize · double-click to reset"
+          onPointerDown={startCardsResize} onDoubleClick={() => saveCardsWidth(null)}
+          onKeyDown={(event) => {
+            if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+            event.preventDefault();
+            const panel = event.currentTarget.parentElement?.getBoundingClientRect().width ?? 320;
+            saveCardsWidth(clampCardsWidth(panel + (event.key === "ArrowLeft" ? 24 : -24), event.currentTarget));
+          }} />
         <header><strong>Cards</strong><button type="button" className="cx-icon-button" aria-label="Hide cards" onClick={() => setShowStructure(false)}>
           <Icon name="close" width="14" height="14" /></button></header>
         <div className="cx-structure-body">{structure}</div>

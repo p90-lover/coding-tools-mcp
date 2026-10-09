@@ -235,7 +235,10 @@
 .cx-slash small { color: var(--ao-muted); font-size: 12px; }
 
 /* ---------- Cards side panel ---------- */
-.cx-structure { display: flex; flex: 0 0 min(44%, 520px); flex-direction: column; min-width: 280px; min-height: 0; border-left: 1px solid var(--ao-line); background: var(--color-bg-primary); }
+.cx-structure { position: relative; display: flex; flex: 0 0 min(44%, 520px); flex-direction: column; min-width: 280px; max-width: 70%; min-height: 0; border-left: 1px solid var(--ao-line); background: var(--color-bg-primary); }
+/* Drag the panel's left edge to resize it (double-click resets); the canvas refits on its own. */
+.cx-structure-resize { position: absolute; z-index: 2; top: 0; bottom: 0; left: -4px; width: 8px; cursor: col-resize; touch-action: none; }
+.cx-structure-resize:hover, .cx-structure-resize:focus-visible { background: color-mix(in srgb, var(--ao-blue) 35%, transparent); outline: none; }
 .cx-structure > header { display: flex; align-items: center; justify-content: space-between; height: 48px; padding: 0 10px 0 16px; font-size: 13px; }
 .cx-structure-body { position: relative; display: flex; flex: 1 1 auto; min-height: 0; }
 
