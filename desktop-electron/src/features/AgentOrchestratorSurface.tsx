@@ -882,8 +882,12 @@ export function AgentOrchestratorSurface({ language, setError }: {
     const timer = setInterval(() => void pollSelection(), 750);
     return () => { disposed = true; clearInterval(timer); };
   }, [view, workspaceId, executable, setError]);
+  // Poll a run only once it is known in the open project: right after a project switch the
+  // selected run still belongs to the previous one, and asking the new project for it failed
+  // ("AO run not found in this workspace"), surfacing as an error toast.
+  const selectedRunHere = missions.some((mission) => mission.id === selectedRunId && mission.workspace_id === workspaceId);
   useEffect(() => {
-    if (!workspaceId || !selectedRunId) { setAutoStatus("idle"); return; }
+    if (!workspaceId || !selectedRunId || !selectedRunHere) { setAutoStatus("idle"); return; }
     let live = true;
     let reading = false;
     const refresh = async () => {
@@ -909,7 +913,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     const stopPush = onAoPush((change) => { if (change.runs.includes(`${workspaceId}:${selectedRunId}`)) void refresh(); });
     void refresh();
     return () => { live = false; clearInterval(timer); stopPush(); };
-  }, [workspaceId, selectedRunId, setError]);
+  }, [workspaceId, selectedRunId, selectedRunHere, setError]);
   const activeNodeIds = JSON.stringify(selectedRun?.nodes.filter(node => ["reserved", "running"].includes(node.state)).map(node => node.id) ?? []);
   useEffect(() => {
     const ids = JSON.parse(activeNodeIds) as string[];
