@@ -1240,7 +1240,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
     return () => window.clearInterval(timer);
   }, []);
   // Every message names how its card runs; working cards also show runtime and current step.
-  const describeChatNode = useCallback((node: ChatNode) => node.route ? cardMeta(node as unknown as AoNode, harnesses) : "", [harnesses]);
+  // A single-model chat's one card is stored as the planner; it is no orchestrator, so no role is shown.
+  const describeChatNode = useCallback((node: ChatNode, run?: ChatRun) => node.route
+    ? cardMeta(node as unknown as AoNode, harnesses, run?.execution_mode !== "single") : "", [harnesses]);
   const [chatActivity, setChatActivity] = useState<Record<string, ChatActivity>>({});
   const workingRunIds = (view === "overview" && inspectedId && selectedRun ? [selectedRun] : missions.filter(mission => mission.project_id === chatTaskId))
     .filter(mission => mission.nodes.some(node => ["running", "reserved"].includes(node.state))).map(mission => mission.id).join(",");

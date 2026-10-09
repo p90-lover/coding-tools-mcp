@@ -536,3 +536,15 @@ test("a selected historical mission still exposes its graph when every card is i
   assert.deepEqual(plain(surface.aoVisibleNodes([], false)), []);
   assert.equal(stopped[0].state, "cancelled", "inspection never revives or edits a saved card");
 });
+
+test("a single-model chat passes its run to describe, so its one card shows no orchestrator role", () => {
+  const route = { harness_id: "ao:claude-code", model: "cpa/gemini-3.8-flash-high" };
+  const node = { id: "single", role: "planner", state: "running", parents: [], route, settings: { name: "Single assistant" }, receipt: { status: "submitted" } };
+  const seen = [];
+  const describe = (card, run) => { seen.push(run?.execution_mode ?? "none"); return run?.execution_mode === "single" ? "Claude Code · gemini" : "Claude Code · gemini · Orchestrator"; };
+  const single = chat.chatTurns([{ id: "r1", project_id: "t", cancelled: false, execution_mode: "single", nodes: [node] }], "hello", { describe, now: 1 });
+  const team = chat.chatTurns([{ id: "r2", project_id: "t", cancelled: false, nodes: [node] }], "hello", { describe, now: 1 });
+  assert.doesNotMatch(JSON.stringify(single), /Orchestrator/);
+  assert.match(JSON.stringify(team), /Orchestrator/);
+  assert.ok(seen.includes("single") && seen.includes("none"));
+});

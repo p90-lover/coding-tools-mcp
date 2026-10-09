@@ -45,7 +45,11 @@ test("composer mode clicks show only the corresponding real selector without sen
   let tree = view.render("AgentOrchestratorComposerControls", props);
   assert.equal(elements(tree, item => item.type === "button" && item.props["aria-label"] === "Choose model").length, 1);
   assert.equal(elements(tree, item => item.type === "button" && item.props["aria-label"] === "Choose saved team").length, 0);
-  elements(tree, item => item.type === "button" && item.props["aria-label"] === "Switch to Team mode")[0].props.onClick();
+  const option = label => elements(tree, item => item.type === "button" && item.props["aria-pressed"] !== undefined && item.props.children === label)[0];
+  assert.equal(option("Single").props["aria-pressed"], true, "the switch names both modes and marks the active one");
+  option("Single").props.onClick();
+  assert.deepEqual(changes, [], "choosing the active mode changes nothing");
+  option("Team").props.onClick();
   assert.deepEqual(changes, ["team"]);
   tree = view.render("AgentOrchestratorComposerControls", { ...props, mode: "team" });
   assert.equal(elements(tree, item => item.type === "button" && item.props["aria-label"] === "Choose model").length, 0);

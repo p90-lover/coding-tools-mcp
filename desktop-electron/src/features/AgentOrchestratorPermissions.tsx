@@ -53,9 +53,9 @@ export function selectPermissions(team: AoTeam, ids: string[], selection: Permis
 }
 
 export const PERMISSION_MODES = [
-  { label: "Ask for approval", detail: "Ask before additional access", symbol: "✋", profile: ":workspace", policy: "on-request", reviewer: "user" },
-  { label: "Approve for me", detail: "Review requests automatically", symbol: "🛡️", profile: ":workspace", policy: "on-request", reviewer: "auto_review" },
-  { label: "Full access", detail: "Unrestricted file and network access", symbol: "⚡", profile: ":danger-full-access", policy: "never", reviewer: "user" },
+  { label: "Ask for approval", detail: "Ask before additional access", icon: "shield", profile: ":workspace", policy: "on-request", reviewer: "user" },
+  { label: "Approve for me", detail: "Review requests automatically", icon: "check", profile: ":workspace", policy: "on-request", reviewer: "auto_review" },
+  { label: "Full access", detail: "Unrestricted file and network access", icon: "bolt", profile: ":danger-full-access", policy: "never", reviewer: "user" },
 ] as const;
 
 export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles, save, runtimePolicies }: {
@@ -113,14 +113,14 @@ export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles
     <button type="button" className="ao-composer-chip" ref={popup.trigger} aria-expanded={popup.open} aria-haspopup="menu"
       aria-controls="ao-permissions-panel" disabled={busy || saving} title={permissionSummary(nodes) + (effective ? " · " + effective : "") + (notice && !failed ? " · " + notice : "")}
       onClick={() => popup.setOpen(value => !value)}>
-      <span aria-hidden="true">🛡️</span><span>{active?.label || "Custom / Mixed"}</span><span aria-hidden="true">⌄</span>
+      <Icon name={active?.icon ?? "shield"} width="16" height="16" /><span>{active?.label || "Custom / Mixed"}</span><span aria-hidden="true">⌄</span>
     </button>
     {popup.open ? <section ref={popup.panel} id="ao-permissions-panel" className="ao-composer-popover ao-permissions-panel" aria-label="Access permissions" role="menu">
       <header><h3>Access permissions</h3><button type="button" className="ao-popover-close" aria-label="Close permissions" onClick={popup.close}><Icon name="close" width="18" height="18" /></button></header>
       {PERMISSION_MODES.map(mode => <button key={mode.label} type="button" role="menuitemradio" aria-checked={active?.label === mode.label}
         className="ao-permission-option" disabled={busy || saving || !canSelect(mode)} title={canSelect(mode) ? "Applies to queued / future attempts only; running attempts and shared app grants are unchanged." : reason}
         onClick={() => void apply({ profile: mode.profile, policy: mode.policy, reviewer: mode.reviewer })}>
-        <span className="ao-permission-symbol" aria-hidden="true">{mode.symbol}</span>
+        <span className="ao-permission-symbol"><Icon name={mode.icon} width="20" height="20" /></span>
         <span><strong>{mode.label}</strong><small>{mode.detail}</small></span>
         {active?.label === mode.label ? <Icon name="check" width="18" height="18" /> : null}
       </button>)}

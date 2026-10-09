@@ -107,14 +107,14 @@ export function roleLabel(node: Pick<AoNode, "role" | "settings">): string {
 }
 
 /** One line describing how a card runs: harness · model · effort · context · role. */
-export function cardMeta(node: Pick<AoNode, "role" | "settings" | "route">, harnesses: AoHarness[] = []): string {
+export function cardMeta(node: Pick<AoNode, "role" | "settings" | "route">, harnesses: AoHarness[] = [], showRole = true): string {
   const route = node.route;
   return [
     harnessLabel(route.harness_id, harnesses),
     modelLabel(route.model),
     route.effort && (effortApplies(route) || route.harness_id.startsWith("ao:")) ? `effort ${route.effort}` : "",
     route.context_window && (contextApplies(route) || route.harness_id.startsWith("ao:")) ? `${tokensLabel(route.context_window)} context` : "",
-    roleLabel(node),
+    showRole ? roleLabel(node) : "",
   ].filter(Boolean).join(" · ");
 }
 
