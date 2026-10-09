@@ -187,3 +187,29 @@ test("a CPA model's ceiling is its max context window and its own efforts, up to
   assert.deepEqual([...capabilities["gpt-6-sol"].efforts], ["low", "xhigh", "max", "ultra"]);
   assert.equal(capabilities["gpt-5.5"].contextLimit, 272000, "without a max, the reported window is the limit");
 });
+
+test("a single-model run starts its AO session plain; a team card keeps AO's worker prompt", async () => {
+  const spawnFor = async (executionMode) => {
+    const spawned = [];
+    const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-5.5", permission_profile: ":ao-default" };
+    const node = { id: "single", role: "planner", task_id: "task", parents: [], state: "pending", route, settings: { name: "Single assistant" } };
+    const workflow = createAgentOrchestratorWorkflow({
+      aoHarness: { models: async () => [], spawn: async input => { spawned.push(input); return "session-1"; } },
+      cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-key" }),
+      fetchImpl: async () => ({ ok: true, json: async () => ({ models: [{ slug: "gpt-5.5" }] }) }),
+      confirm: async () => true,
+      requestHeadless: async endpoint => {
+        if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run", workspace_id: "ws", revision: 1, cancelled: false,
+          ...(executionMode ? { execution_mode: executionMode } : {}), nodes: [node] }] };
+        if (endpoint === "/api/v1/ao/external/reserve") return { ok: true, request_key: "key", prompt: "Fixture task" };
+        if (endpoint === "/api/v1/ao/external/submitted") return { ok: true, run: { id: "run" } };
+        throw Error("Unexpected endpoint " + endpoint);
+      },
+    });
+    await workflow.call("advance", { workspaceId: "ws", runId: "run" });
+    assert.equal(spawned.length, 1);
+    return spawned[0];
+  };
+  assert.equal((await spawnFor("single")).plain, true);
+  assert.equal(Object.hasOwn(await spawnFor(undefined), "plain"), false);
+});
