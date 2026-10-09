@@ -34,7 +34,7 @@ export type ChatLiveItem = { id: string; kind: string; status: string; text: str
 
 export type ChatOptions = {
   /** One line per card: harness · model · effort · context · role. */
-  describe?: (node: ChatNode) => string;
+  describe?: (node: ChatNode, run?: ChatRun) => string;
   /** Live activity by "<run id>:<card id>". */
   activity?: Record<string, ChatActivity>;
   now?: number;
@@ -66,10 +66,10 @@ export function chatDuration(ms: number): string {
  * step and when it was last heard. Stalled when nothing has been heard for STALL_MS, or the turn
  * has still not started after that long.
  */
-export function chatWorkingDetail(node: ChatNode, live: ChatActivity | undefined, now: number, describe?: (node: ChatNode) => string): { detail: string; stalled: boolean } {
+export function chatWorkingDetail(node: ChatNode, live: ChatActivity | undefined, now: number, describe?: (node: ChatNode, run?: ChatRun) => string, run?: ChatRun): { detail: string; stalled: boolean } {
   const started = live?.started_at_ms ?? node.receipt?.started_at_ms ?? null;
   const heard = live?.last_event_at_ms || live?.activity_at_ms || null;
-  const parts = [describe?.(node) ?? ""];
+  const parts = [describe?.(node, run) ?? ""];
   if (started) parts.push(`running ${chatDuration(now - started)}`);
   if (live?.activity) parts.push(heard ? `${live.activity} (last heard ${chatDuration(now - heard)} ago)` : live.activity);
   const quietSince = heard ?? started;
@@ -90,6 +90,8 @@ export type ChatRun = {
   paused?: boolean;
   /** The orchestrator judged the mission simple and answered it alone; no other card ran. */
   solo?: boolean;
+  /** "single": one model answers alone; its card is not an orchestrator. */
+  execution_mode?: "single" | "team";
   nodes: ChatNode[];
 };
 
@@ -258,7 +260,7 @@ export function chatTranscript(runs: ChatRun[], description: string | undefined,
     for (const node of chatNodeOrder(run.nodes)) {
       const name = chatNodeName(node);
       const key = `${run.id}:${node.id}`;
-      const described = options.describe?.(node);
+      const described = options.describe?.(node, run);
       const detail = described ? { detail: described } : {};
       if (node.receipt?.error) {
         messages.push({ kind: "agent", key, role: node.role, name, text: [node.receipt.error, node.receipt.answer ? `Partial work:\n${node.receipt.answer}` : ""].filter(Boolean).join("\n\n"), tone: "error", ...detail });
@@ -271,7 +273,7 @@ export function chatTranscript(runs: ChatRun[], description: string | undefined,
           ...detail,
         });
       } else if (!run.cancelled && !run.paused && (node.state === "running" || node.state === "reserved")) {
-        const working = chatWorkingDetail(node, options.activity?.[key], now, options.describe);
+        const working = chatWorkingDetail(node, options.activity?.[key], now, options.describe, run);
         messages.push({
           kind: "status", key, state: node.state, detail: working.detail, stalled: working.stalled,
           text: working.stalled ? `${name} may be stuck: nothing heard for a while. Stop or restart the mission if it does not recover.` : `${name} is working…`,
@@ -329,7 +331,7 @@ export type ChatTurn = {
 function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: number): ChatStep {
   const key = `${run.id}:${node.id}`;
   const step: ChatStep = {
-    key, nodeId: node.id, role: node.role, name: chatNodeName(node), detail: options.describe?.(node) ?? "", state: node.state,
+    key, nodeId: node.id, role: node.role, name: chatNodeName(node), detail: options.describe?.(node, run) ?? "", state: node.state,
     ...(node.receipt?.started_at_ms ? { startedAtMs: node.receipt.started_at_ms } : {}),
   };
   if (node.receipt?.error) step.error = node.receipt.error;

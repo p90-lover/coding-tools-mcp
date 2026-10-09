@@ -570,6 +570,9 @@ test("AO harness sends each explicit permission mode to the session API without 
     }
     await h.controller.harness.spawn({ workspaceId: "ws", agent: "codex", model: "model", prompt: "read only" });
     assert.equal(Object.hasOwn(launches.at(-1), "approvalMode"), false);
+    assert.equal(Object.hasOwn(launches.at(-1), "plainPrompt"), false, "AO keeps its worker prompt by default");
+    await h.controller.harness.spawn({ workspaceId: "ws", agent: "claude-code", model: "model", prompt: "hello", plain: true });
+    assert.equal(launches.at(-1).plainPrompt, true, "a single-model chat asks AO for a plain session");
     const count = launches.length;
     await assert.rejects(h.controller.harness.spawn({ workspaceId: "ws", agent: "codex", prompt: "read", approvalMode: "unrecognized" }), /Unsupported AO permission mode/);
     assert.equal(launches.length, count);

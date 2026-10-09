@@ -75,15 +75,17 @@ export function AgentOrchestratorComposerControls({
   const matching = (models ?? []).filter(model => model !== "default" && (model.toLowerCase().includes(search.toLowerCase()) || modelLabel(model).toLowerCase().includes(search.toLowerCase())));
   return <div className="ao-composer-controls">
     {permissions}
-    <button type="button" className={"ao-mode-toggle is-" + mode} disabled={busy}
-      aria-label={mode === "single" ? "Switch to Team mode" : "Switch to Single mode"} aria-pressed={mode === "team"}
-      title={mode === "single" ? "Single model mode — switch to Team" : "Team mode — switch to Single model"}
-      onClick={() => { popup.close(); onModeChange(mode === "single" ? "team" : "single"); }} />
+    <div className="ao-mode-switch" role="group" aria-label="Who answers">
+      {(["single", "team"] as const).map(option => <button key={option} type="button" aria-pressed={mode === option}
+        className={mode === option ? "is-active" : undefined} disabled={busy}
+        title={option === "single" ? "One model answers by itself" : "A saved team (orchestrator, workers, reviewer) works on it"}
+        onClick={() => { popup.close(); if (mode !== option) onModeChange(option); }}>{option === "single" ? "Single" : "Team"}</button>)}
+    </div>
     <div className="ao-composer-picker" ref={popup.root} onKeyDown={popup.onKeyDown}>
       <button type="button" className="ao-composer-chip" ref={popup.trigger} disabled={busy} aria-expanded={popup.open}
         aria-haspopup="dialog" aria-label={mode === "single" ? "Choose model" : "Choose saved team"}
         onClick={() => popup.setOpen(value => !value)}>
-        {mode === "single" ? <Icon name="activity" width="16" height="16" /> : <span aria-hidden="true">🤖</span>}
+        <Icon name={mode === "single" ? "activity" : "orchestrator"} width="16" height="16" />
         <span>{mode === "single" ? modelLabel(route.model) || "Choose model" : selectedTeam?.name || "Choose saved team"}</span>
         <span aria-hidden="true">⌄</span>
       </button>

@@ -346,7 +346,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     }
   }
 
-  async function dispatchExternal(workspaceId, runId, node, expectedRevision, background) {
+  // plain: a single-model run, whose one card is a plain assistant rather than an AO worker.
+  async function dispatchExternal(workspaceId, runId, node, expectedRevision, background, plain = false) {
     const agent = externalAgent(node);
     const key = nodeKey(workspaceId, runId, node.id);
     if (dispatching.has(key)) return { ok: true, waiting: true, reason: "dispatching" };
@@ -354,7 +355,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     try {
       if (node.route.effort || node.route.context_window != null) {
         const catalog = await models({ harness: node.route.harness_id, workspaceId });
-        const baseModel = node.route.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max)\)$/i, "");
+        const baseModel = node.route.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
         const capability = catalog.capabilities[node.route.model] ?? catalog.capabilities[baseModel];
         if (node.route.effort && !capability?.efforts?.includes(node.route.effort)) {
           throw new Error("Reasoning effort is not supported by the current model/harness catalog");
@@ -392,7 +393,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         if (viaCpa && node.route.effort) {
           if (!tuningEfforts.has(node.route.effort)) throw new Error("Choose a supported CPA reasoning level");
           // The suffix is session-local; the saved mission model and account remain unchanged.
-          wireModel = viaCpa.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max)\)$/i, "") + "(" + node.route.effort + ")";
+          wireModel = viaCpa.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "") + "(" + node.route.effort + ")";
         }
         const agentModel = wireModel && agent === "opencode" ? `openai/${wireModel}` : wireModel ?? node.route.model;
         session = await harnessService().spawn({ workspaceId, agent, model: agentModel, prompt: reserved.prompt,
@@ -401,6 +402,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
             : node.route.approvals_reviewer === "auto_review" ? "auto" : "accept-edits" } : {}),
           ...(viaCpa ? { gateway: { provider: "cpa", model: wireModel } } : {}),
           ...(node.route.context_window != null ? { contextWindow: node.route.context_window } : {}),
+          ...(plain ? { plain: true } : {}),
           // Native effort validation stays skipped for foreign models; CPA reads the suffix.
           ...(!viaCpa && node.route.effort ? { effort: node.route.effort } : {}) });
       } catch (error) { failure = error; }
@@ -857,7 +859,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         message: "Run this AO card?",
         detail: `Workspace: ${id}\nRun: ${run}\nNode: ${ready.id}\nHarness: ${ready.route.harness_id}\nModel: ${ready.route.model}\nAO starts a worker session in its own worktree.`.slice(0, 1200),
       })) return { ok: false, cancelled: true };
-      return dispatchExternal(id, run, ready, mission.revision, false);
+      return dispatchExternal(id, run, ready, mission.revision, false, mission.execution_mode === "single");
     }
     const selectedExecutable = clean(executable, 1024);
     const status = await harnessStatus({ workspaceId: id, runId: run, nodeId: ready.id });
@@ -1204,7 +1206,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
           if (!ready) break;
           let sent;
           try {
-            if (externalAgent(ready)) sent = await dispatchExternal(workspaceId, runId, ready, mission.revision, true);
+            if (externalAgent(ready)) sent = await dispatchExternal(workspaceId, runId, ready, mission.revision, true, mission.execution_mode === "single");
             else {
               const status = await harnessStatus({ workspaceId, runId, nodeId: ready.id });
               if (status.status?.connected && status.status.model !== ready.route.model) throw new Error("AO connected harness route changed");
