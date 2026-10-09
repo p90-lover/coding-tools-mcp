@@ -527,6 +527,29 @@ export function AgentOrchestratorSurface({ language, setError }: {
     setSelectedRunId((selected) => runs.some((run) => run.id === selected) ? selected : runs[0]?.id ?? "");
   };
 
+  // A card can be left "running" by a previous app session: its Native Codex harness or AO turn
+  // died with that app, but only an observe records that, and nothing observes a run that is no
+  // longer driven until you open that very chat. Such chats stayed "running" (and on top of the
+  // list). Each run nothing is driving is observed once per session: a dead native harness is
+  // recorded as failed (so it can be retried) and a dead AO chat host settles as interrupted,
+  // while a live AO host just reports that it is still working.
+  const settledRuns = useRef(new Set<string>());
+  useEffect(() => {
+    if (!workspaceId) return;
+    for (const mission of missions) {
+      const running = mission.nodes.filter((node) => node.state === "running");
+      const key = `${workspaceId}:${mission.id}`;
+      if (mission.workspace_id !== workspaceId || mission.cancelled || !running.length || settledRuns.current.has(key)) continue;
+      settledRuns.current.add(key);
+      void (async () => {
+        const status = await moduleCall("run_status", { workspaceId, runId: mission.id });
+        if (status.driven !== false) return;
+        for (const node of running) await moduleCall("observe", { workspaceId, runId: mission.id, nodeId: node.id }).catch(() => undefined);
+        if (selection.current.workspaceId === workspaceId) await loadMissions(workspaceId);
+      })().catch(() => undefined);
+    }
+  }, [missions, workspaceId]);
+
   /** The project the loaded board belongs to; the board state itself does not say. */
   const boardWorkspace = useRef("");
   const loadBoard = async (id: string) => {

@@ -699,7 +699,8 @@ test("AO restart sees a reserved turn as held and never resubmits it", async () 
     confirm: async () => { throw new Error("Do not request another grant for a reserved turn"); },
   });
   const input = { workspaceId: "ws-1", runId: "run-1", executable: "C:\\codex.exe" };
-  assert.deepEqual(await workflow.call("run_status", input), { ok: true, status: "held" });
+  assert.deepEqual(await workflow.call("run_status", input), { ok: true, status: "held", driven: false },
+    "after a restart nothing drives the run; the chat settles its cards by observing them");
   await assert.rejects(workflow.call("start_run", input), /active or unresolved card/i);
   assert.deepEqual(calls, ["/api/v1/ao/read", "/api/v1/ao/read"]);
 });
