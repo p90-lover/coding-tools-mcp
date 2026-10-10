@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { JsonObject, WorkspaceSummary } from "../api/contracts";
 import { AgentOrchestratorCanvas } from "./AgentOrchestratorCanvas";
 import { aoDependencyChange, aoLevels, aoUnlinkChange, listAllWorkspaces, moduleCall, type AoMission, type AoNode } from "./AgentOrchestratorSurface";
@@ -89,7 +89,9 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
     const chosen = saved.find(team => team.id === chosenId) || savedDefault || saved[0];
     if (!preserveDraft) {
       setDraft(chosen ? structuredClone(chosen) : freshTeam(workspaceId, true));
-      setSelectedId("");
+      // An automatic save lands here too: keep the open role while its block still exists, or its
+      // details vanished moments after the click.
+      setSelectedId(current => chosen?.nodes.some(node => node.id === current) ? current : "");
       return;
     }
     // Unsaved edits are kept, but on the stored team's current revision: a draft that kept its old
@@ -202,6 +204,31 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
   };
   const mission = draft ? asMission(draft) : null;
   const inspected = draft?.nodes.find(node => node.id === selectedId);
+  // The role editor opens as a popover beside the clicked block; a press outside it (other than on
+  // another block, which opens that one), Escape, or a wheel over the canvas closes it.
+  const stage = useRef<HTMLDivElement>(null);
+  const [popoverAt, setPopoverAt] = useState<{ left: number; top: number; width: number; maxHeight: number } | null>(null);
+  useLayoutEffect(() => {
+    const box = stage.current?.getBoundingClientRect();
+    const card = selectedId ? stage.current?.querySelector(`[data-ao-node="${CSS.escape(selectedId)}"]`)?.getBoundingClientRect() : null;
+    if (!box || !card) { setPopoverAt(null); return; }
+    const width = Math.min(380, box.width - 16), gap = 12;
+    const after = card.right - box.left + gap;
+    const left = after + width <= box.width - 8 ? after : card.left - box.left - gap - width;
+    const top = Math.max(8, Math.min(card.top - box.top, box.height - 8 - Math.min(480, box.height - 16)));
+    setPopoverAt({ left: Math.max(8, Math.min(left, box.width - width - 8)), top, width, maxHeight: box.height - top - 8 });
+  }, [selectedId, Boolean(inspected)]);
+  useEffect(() => {
+    if (!selectedId) return;
+    const inside = (target: EventTarget | null) => target instanceof Element && Boolean(target.closest(".ao-team-popover, [data-ao-node]"));
+    const press = (event: PointerEvent) => { if (!inside(event.target)) setSelectedId(""); };
+    const wheel = (event: WheelEvent) => { if (!(event.target instanceof Element && event.target.closest(".ao-team-popover"))) setSelectedId(""); };
+    const key = (event: KeyboardEvent) => { if (event.key === "Escape") setSelectedId(""); };
+    document.addEventListener("pointerdown", press);
+    document.addEventListener("wheel", wheel, { passive: true });
+    document.addEventListener("keydown", key);
+    return () => { document.removeEventListener("pointerdown", press); document.removeEventListener("wheel", wheel); document.removeEventListener("keydown", key); };
+  }, [selectedId]);
   const locked = busy || loading;
   useEffect(() => {
     if (!dirty || locked || saving || !draft?.name.trim() || JSON.stringify(draft) === failed) return;
@@ -256,7 +283,7 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
           onChange={event => setDraft({ ...draft, max_review_rounds: Number(event.target.value) })} /></label>
         <span className="ao-hint">{draft.id === defaultId ? "Default for new chats" : "Choose this team when starting a chat"}</span>
       </div> : null}
-      <div className="ao-teams-stage">
+      <div className="ao-teams-stage" ref={stage}>
         {loading ? <div className="ao-empty-state"><p>Loading teams…</p></div> : draft && mission ? <>
           <aside className="ao-teams-palette" aria-label="Add roles">
             <h3>Roles</h3>
@@ -281,16 +308,16 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
               canUnlink={canUnlink} onUnlink={(id, parent) => { const unlinked = aoUnlinkChange(mission, id, parent); if (unlinked && canUnlink(id, parent)) parents(id, unlinked.parents as string[]); }}
               canRemove={canRemove} onRemove={remove} />
           </div>
-          <aside className="ao-teams-inspector" aria-label="Team role editor">
-            {inspected ? <>
-              <div className="ao-teams-inspector-head"><strong>{inspected.settings?.name || ROLE_TITLE[inspected.role]}</strong>
-                <button type="button" className="ao-link" aria-label="Close role editor" onClick={() => setSelectedId("")}>Close</button></div>
-              <AgentOrchestratorRoleEditor key={inspected.id} template node={inspected} mission={mission} draft={draft}
-                harnesses={harnesses} loadModels={loadModels} busy={busy} change={change}
-                discard={() => { setDraft(saved ? structuredClone(saved) : freshTeam(workspaceId, !defaultId)); setSelectedId(""); }}
-                taskName={() => "Team template"} />
-            </> : <div className="ao-empty-state"><p>Select a role block to edit its role, model and instructions.</p><p>Drag blocks to arrange the team. Shift-click to connect or unlink.</p></div>}
-          </aside>
+          {inspected && popoverAt ? <div className="ao-team-popover" role="dialog" aria-label="Team role editor"
+            style={{ left: popoverAt.left, top: popoverAt.top, width: popoverAt.width, maxHeight: popoverAt.maxHeight }}>
+            <div className="ao-teams-inspector-head"><strong>{inspected.settings?.name || ROLE_TITLE[inspected.role]}</strong>
+              <button type="button" className="ao-link" aria-label="Close role editor" onClick={() => setSelectedId("")}>Close</button></div>
+            <AgentOrchestratorRoleEditor key={inspected.id} template node={inspected} mission={mission} draft={draft}
+              harnesses={harnesses} loadModels={loadModels} busy={busy} change={change}
+              discard={() => { setDraft(saved ? structuredClone(saved) : freshTeam(workspaceId, !defaultId)); setSelectedId(""); }}
+              taskName={() => "Team template"} />
+          </div> : null}
+          {!inspected ? <p className="ao-teams-hint">Click a block to edit its role, model and instructions · drag to arrange · Shift-click to connect or unlink</p> : null}
         </> : <div className="ao-empty-state"><p>Add a workspace in Chat to configure a team.</p></div>}
       </div>
       {draft ? <footer className="ao-teams-footer">
