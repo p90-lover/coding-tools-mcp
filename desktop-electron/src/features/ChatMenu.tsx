@@ -20,6 +20,11 @@ const MENU_ICONS = {
   folder: <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9L9.6 3.9A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />,
   edit: <path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />,
   plus: <path d="M12 5v14M5 12h14" />,
+  more: <><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></>,
+  spark: <path d="M12 3l1.9 5.6L19.5 10.5l-5.6 1.9L12 18l-1.9-5.6L4.5 10.5l5.6-1.9Z" />,
+  monitor: <><rect x="2" y="3" width="20" height="14" rx="2" /><path d="M8 21h8M12 17v4" /></>,
+  settings: <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h0a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v0a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" /></>,
+  repo: <><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" /></>,
 } satisfies Record<string, ReactNode>;
 
 export type ChatMenuIcon = keyof typeof MENU_ICONS;
@@ -148,13 +153,15 @@ export function ChatMenu({ menu, onClose }: { menu: ChatMenuState; onClose: () =
 }
 
 /** Palette variables the menu's CSS reads; defined on .ao-workflow for the dark and light themes. */
-const THEME_VARIABLES = ["--color-bg-primary", "--color-text-primary", "--ao-line", "--ao-muted", "--ao-red", "--cx-hover"] as const;
+const THEME_VARIABLES = ["--color-bg-primary", "--color-text-primary", "--ao-line", "--ao-muted", "--ao-red", "--ao-blue", "--ao-green", "--ao-amber", "--cx-hover", "--cx-active"] as const;
 
 /**
  * A position:fixed layer (e.g. a hover card) rendered on <body> with the chat surface's palette,
  * so it sits exactly at the window coordinates it is given. See ChatMenu for why.
  */
-export function FloatingLayer({ className, style, children, role }: { className: string; style: CSSProperties; children: ReactNode; role?: string }) {
+export function FloatingLayer({ className, style, children, role, onMouseEnter, onMouseLeave }: {
+  className: string; style: CSSProperties; children: ReactNode; role?: string; onMouseEnter?: () => void; onMouseLeave?: () => void;
+}) {
   const anchor = useRef<HTMLSpanElement>(null);
   const [theme, setTheme] = useState<CSSProperties>({});
   useLayoutEffect(() => {
@@ -163,6 +170,6 @@ export function FloatingLayer({ className, style, children, role }: { className:
   }, []);
   return <>
     <span ref={anchor} hidden />
-    {createPortal(<div className={className} role={role} style={{ ...theme, ...style }}>{children}</div>, document.body)}
+    {createPortal(<div className={className} role={role} style={{ ...theme, ...style }} onMouseEnter={onMouseEnter} onMouseLeave={onMouseLeave}>{children}</div>, document.body)}
   </>;
 }

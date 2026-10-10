@@ -28,6 +28,7 @@ const { createChatGptDesktopHost } = require("./chatgpt-desktop.cjs");
 const { createGptBrowserHost, cleanUserAgent } = require("./gpt-browser.cjs");
 const { createEmailHost } = require("./email-host.cjs");
 const { createChatWindows } = require("./chat-windows.cjs");
+const { readRemote } = require("./git-remote.cjs");
 const { installKeysmithIpc } = require("./keysmith-ipc.cjs");
 const { parseMessage, sanitizeHtml } = require("./email-mime.cjs");
 const { createConfiguredConnector } = require("./mcp-connector-setup.cjs");
@@ -1348,6 +1349,13 @@ function registerIpc({ logger, stateStore }) {
     const failure = await shell.openPath(resolved);
     if (failure) throw new Error(failure);
     return true;
+  });
+
+  // The chat list's project card shows a project's git remote as "owner/repo" (read-only; the
+  // remote URL itself, which can hold credentials, never leaves the main process).
+  handle("launcher:project-remote", async (event, folder) => {
+    assertFocusedMainWindow(event, false);
+    return readRemote(folder);
   });
 
   // "Open in new window" for a Mission chat. Only the main window sends content; the chat

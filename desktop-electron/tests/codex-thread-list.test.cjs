@@ -192,6 +192,19 @@ test("a long project shows 5 chats and Show more, like Codex; the count is a lis
   assert.equal(JSON.parse(stored["coding-tools:ao:chat-list-settings"]).visible, 3);
 });
 
+test("a project row has Codex's hover actions (its menu and a new chat there), and Edit opens the project", () => {
+  const { props, calls } = fixture();
+  const list = mount("ChatThreadList.tsx", props);
+  const button = (label) => walk(list.render()).find((element) => element.type === "button" && element.props["aria-label"] === label);
+  assert.ok(button("Alpha actions") && button("New chat in Alpha") && button("New chat in Beta"));
+  button("New chat in Beta").props.onClick();
+  button("Alpha actions").props.onClick({ currentTarget: { getBoundingClientRect: () => ({ left: 5, bottom: 9 }) } });
+  const menu = walk(list.render()).find((element) => element.type === "ChatMenu").props.menu;
+  assert.deepEqual([menu.x, menu.y], [5, 13], "the menu opens under the button");
+  menu.items.find((item) => item.label === "Edit").run();
+  assert.deepEqual(calls, [["newChatIn", "b"], ["editProject", "a"]]);
+});
+
 test("archived chats sit in their own section and can be restored", () => {
   const { props, calls } = fixture();
   const list = mount("ChatThreadList.tsx", props);

@@ -23,6 +23,10 @@ export type ThreadActions = {
   openStructure: (taskId: string) => void;
   openBoard: () => void;
   openFolder?: (workspace: ThreadWorkspace) => void;
+  /** A new chat in that project (the project row's pencil, as in Codex). */
+  newChatIn: (workspaceId: string) => void;
+  /** Opens that project's settings. */
+  editProject: (workspaceId: string) => void;
   /** A new chat in another project, its composer holding this chat's messages. */
   continueIn: (taskId: string, workspaceId: string) => void;
   /** Saves the conversation as a Markdown file. */
@@ -60,6 +64,8 @@ export type ThreadListProps = {
   /** A new chat being created, shown at once at the top of its project. */
   pendingTitle?: string;
   actions: ThreadActions;
+  /** A project folder's git remote as "owner/repo" (for the project card), when the app can tell. */
+  projectRemote?: (folder: string) => Promise<string | null>;
 };
 
 const SHORTCUTS = { rename: "Alt+Ctrl+R", pin: "Alt+Ctrl+P", unread: "Ctrl+Shift+U", archive: "Ctrl+Shift+A" };
@@ -128,6 +134,24 @@ export function ChatThreadList(props: ThreadListProps) {
   /** Projects showing all their chats ("Show more"); the rest show the first `visible`. */
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [dragging, setDragging] = useState<string | null>(null);
+  // Codex's project card: shown after a short hover beside the row, kept open while the pointer is
+  // on the row or the card (it has a pin toggle and Edit project), closed shortly after leaving.
+  const [projectCard, setProjectCard] = useState<{ item: ThreadWorkspace; top: number; left: number } | null>(null);
+  const [remotes, setRemotes] = useState<Record<string, string | null>>({});
+  const cardTimer = useRef<number | undefined>(undefined);
+  const hoverProject = (item: ThreadWorkspace, row: HTMLElement) => {
+    window.clearTimeout(cardTimer.current);
+    if (menu) return;
+    const box = row.getBoundingClientRect();
+    cardTimer.current = window.setTimeout(() => {
+      setProjectCard({ item, top: box.top, left: box.right + 8 });
+      if (item.path && props.projectRemote && !(item.path in remotes)) {
+        void props.projectRemote(item.path).then((remote) => setRemotes((current) => ({ ...current, [item.path!]: remote })), () => undefined);
+      }
+    }, 500);
+  };
+  const leaveProject = () => { window.clearTimeout(cardTimer.current); cardTimer.current = window.setTimeout(() => setProjectCard(null), 200); };
+  const keepProjectCard = () => window.clearTimeout(cardTimer.current);
   const saveSettings = (next: ListSettings) => {
     setSettings(next);
     try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(next)); } catch { /* per-session only */ }
@@ -245,7 +269,7 @@ export function ChatThreadList(props: ThreadListProps) {
     const current = item.id === workspaceId;
     return [
       { label: props.pinnedProjects.includes(item.id) ? "Unpin" : "Pin", icon: "pin", run: () => props.toggleProjectPin(item.id) },
-      { label: "Edit", icon: "edit", reason: "Rename and configure projects on the Workspace page" },
+      { label: "Edit", icon: "edit", run: () => actions.editProject(item.id) },
       { label: "New section…", icon: "section", run: () => setNaming({ name: "" }) },
       item.path && actions.openFolder
         ? { label: "Open in Explorer", icon: "folder", run: () => actions.openFolder!(item) }
@@ -392,12 +416,22 @@ export function ChatThreadList(props: ThreadListProps) {
             {projectOrder.map((item) => {
               const open = item.id === workspaceId && !collapsed.has(item.id);
               return <li key={item.id}>
-                <button type="button" className="cx-project" aria-expanded={open} title={item.path || item.name}
-                  onClick={() => clickProject(item.id)} onContextMenu={(event) => openMenu(event, projectMenu(item), item.name)}>
-                  <ChatGlyph name="folder" size={15} />
-                  <span className="cx-thread-title">{item.name}</span>
-                  {props.pinnedProjects.includes(item.id) ? <span className="cx-project-pin" aria-label="Pinned project">📌</span> : null}
-                </button>
+                <div className="cx-project-row" onMouseEnter={(event) => hoverProject(item, event.currentTarget)} onMouseLeave={leaveProject}>
+                  <button type="button" className="cx-project" aria-expanded={open}
+                    onClick={() => clickProject(item.id)} onContextMenu={(event) => openMenu(event, projectMenu(item), item.name)}>
+                    <ChatGlyph name="folder" size={15} />
+                    <span className="cx-thread-title">{item.name}</span>
+                    {props.pinnedProjects.includes(item.id) ? <span className="cx-project-pin" aria-label="Pinned project">📌</span> : null}
+                  </button>
+                  {/* Codex's project row actions: its menu and a new chat in this project. */}
+                  <span className="cx-project-hover">
+                    <button type="button" aria-label={`${item.name} actions`} title="More"
+                      onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); setProjectCard(null); setMenu({ x: box.left, y: box.bottom + 4, items: projectMenu(item), label: item.name }); }}>
+                      <ChatGlyph name="more" size={14} /></button>
+                    <button type="button" aria-label={`New chat in ${item.name}`} title="New chat in this project" onClick={() => actions.newChatIn(item.id)}>
+                      <ChatGlyph name="edit" size={14} /></button>
+                  </span>
+                </div>
                 {open ? <ul>
                   {props.pendingTitle ? <li className="cx-thread-row is-pending"><span className="cx-thread-select" aria-current="true">
                     <span className="cx-thread-dot status-queued" aria-label="Starting" /><span className="cx-thread-title">{props.pendingTitle}</span>
@@ -431,6 +465,28 @@ export function ChatThreadList(props: ThreadListProps) {
         {workspace?.path ? <span className="cx-hover-path">{workspace.path}</span> : null}
         <span>{hover.chat.runIds.length} {hover.chat.runIds.length === 1 ? "run" : "runs"}</span>
       </FloatingLayer> : null}
+      {projectCard && !menu ? (() => {
+        const { item } = projectCard;
+        const isOpen = item.id === workspaceId;
+        const active = isOpen ? chats.filter((chat) => ACTIVE.has(chat.status)).length : 0;
+        const remote = item.path ? remotes[item.path] : null;
+        return <FloatingLayer className="cx-project-card" role="dialog" style={{ top: projectCard.top, left: projectCard.left }}
+          onMouseEnter={keepProjectCard} onMouseLeave={leaveProject}>
+          <div className="cx-project-card-head">
+            <strong>{item.name}</strong>
+            <button type="button" aria-pressed={props.pinnedProjects.includes(item.id)} aria-label={props.pinnedProjects.includes(item.id) ? "Unpin project" : "Pin project"}
+              title={props.pinnedProjects.includes(item.id) ? "Unpin project" : "Pin project"} onClick={() => props.toggleProjectPin(item.id)}>
+              <ChatGlyph name="pin" size={13} /></button>
+          </div>
+          {isOpen ? <span className="cx-project-card-line"><span className={`cx-thread-dot status-${active ? "running" : "done"}`} aria-hidden="true" />
+            {chats.length} {chats.length === 1 ? "task" : "tasks"} · {active} active</span> : null}
+          {remote ? <span className="cx-project-card-line"><ChatGlyph name="repo" size={13} />{remote}</span> : null}
+          {item.path ? <span className="cx-project-card-line is-path"><ChatGlyph name="folder" size={13} />{item.path}</span> : null}
+          <hr />
+          <button type="button" className="cx-project-card-action" onClick={() => { setProjectCard(null); actions.editProject(item.id); }}>
+            <ChatGlyph name="settings" size={13} />Edit project</button>
+        </FloatingLayer>;
+      })() : null}
       {settingsAt ? <FloatingLayer className="cx-popover" role="dialog" style={{ top: settingsAt.top, left: settingsAt.left }}>
         <strong>Chat list</strong>
         <label className="cx-popover-row">

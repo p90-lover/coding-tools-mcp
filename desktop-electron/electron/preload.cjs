@@ -39,6 +39,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   },
   openFolder: (folder) => ipcRenderer.invoke("launcher:open-folder", folder),
   showChatWindow: (input) => ipcRenderer.invoke("launcher:chat-window", input),
+  projectRemote: (folder) => ipcRenderer.invoke("launcher:project-remote", folder),
   setBrowserBounds: (bounds) => ipcRenderer.invoke("launcher:browser-bounds", bounds),
   setBrowserSurfaceActive,
   showBrowser: () => ipcRenderer.invoke("launcher:browser-show"),

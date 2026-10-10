@@ -109,7 +109,7 @@ function MessageActions({ text, children }: { text: string; children?: ReactNode
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, working = false, describeNode, activity, permissions, composer, onOpenTeam, onOpenMissionBoard,
-  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, seed, onSeedUsed, headerExtra,
+  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, seed, onSeedUsed, headerExtra, onOpenProject,
   pendingMessage, pendingTitle, pendingCreation = false,
 }: {
   /** A message being sent into a chat that has no run yet (shown at once, as Codex does). */
@@ -155,6 +155,8 @@ export function AgentOrchestratorChat({
   onSeedUsed?: () => void;
   /** Extra header controls before the header buttons (the chat's team picker). */
   headerExtra?: ReactNode;
+  /** Opens the open project's folder (the new chat's project name is a link, as in Codex). */
+  onOpenProject?: () => void;
 }) {
   const chats = useMemo(() => chatList(runs, tasks, [], true), [runs, tasks]);
   const chat = chats.find((entry) => entry.taskId === selectedTaskId);
@@ -358,7 +360,10 @@ export function AgentOrchestratorChat({
           <div className="cx-column">
             {!turns.length ? <div className="cx-empty">
               {selectedTaskId ? <p>Loading…</p> : <>
-                <h1>What should we work on{projectName ? <> in <span>{projectName}</span></> : null}?</h1>
+                <span className="cx-empty-glyph" aria-hidden="true"><ChatGlyph name="spark" size={28} /></span>
+                <h1>What should we build{projectName ? <> in {onOpenProject
+                  ? <button type="button" className="cx-empty-project" title="Open the project folder" onClick={onOpenProject}>{projectName}</button>
+                  : <span className="cx-empty-project">{projectName}</span>}</> : null}?</h1>
                 <p>{composer?.mode === "single" ? "Sending starts the selected model." : "Sending starts the chosen team: orchestrator, workers and reviewer."}</p>
               </>}
             </div> : null}
@@ -407,6 +412,13 @@ export function AgentOrchestratorChat({
             onClick={() => { setAtBottom(true); scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" }); }}>↓</button> : null}
         </div>
 
+        {!selectedTaskId ? <div className="cx-context-strip" aria-label="Where this chat runs">
+          <span className="cx-chip" title={projectName}><ChatGlyph name="folder" size={13} />{projectName || "No project"}</span>
+          <span className="cx-chip"><ChatGlyph name="monitor" size={13} />This computer</span>
+          <span className="cx-head-spacer" />
+          {onSettings ? <button type="button" className="cx-chip-icon" aria-label="Chat settings" title="Chat settings" onClick={onSettings}>
+            <ChatGlyph name="settings" size={14} /></button> : null}
+        </div> : null}
         <form className="cx-composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}
           onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
           onDrop={(event) => { if (event.dataTransfer.files.length) { event.preventDefault(); void addFiles(event.dataTransfer.files); } }}>
@@ -424,7 +436,7 @@ export function AgentOrchestratorChat({
             {attachNote ? <span className="cx-attach-note" role="status">{attachNote}</span> : null}
           </div> : null}
           <textarea ref={input} aria-label="Message" maxLength={8192} rows={1} value={draft}
-            placeholder={!accepts ? "Running — you can send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : composer?.mode === "single" ? "Ask anything…" : "What should the team do?"}
+            placeholder={!accepts ? "Running — you can send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : "Do anything"}
             onChange={(event) => { setDraft(event.target.value); setSlashIndex(0); }}
             onPaste={(event) => { if (event.clipboardData.files.length) { event.preventDefault(); void addFiles(event.clipboardData.files); } }}
             onKeyDown={(event) => {

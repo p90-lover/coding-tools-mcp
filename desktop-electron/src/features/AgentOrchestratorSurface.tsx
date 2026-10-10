@@ -1375,7 +1375,11 @@ export function AgentOrchestratorSurface({ language, setError }: {
           lifecycle: missionAction, archiveAll: archiveAllChats,
           fork: (taskId, from) => forkChat(taskId, from === "first" ? "first" : undefined), copy: copyChat,
           openStructure: (taskId) => selectChat(taskId, "overview"), openBoard: () => { setSheet(""); setView("board"); }, openFolder,
-          continueIn: continueInProject, share: shareChat, openWindow: openChatWindow }} />
+          continueIn: continueInProject, share: shareChat, openWindow: openChatWindow,
+          // Another project's new chat goes through the same seed as "Continue in", with an empty draft.
+          newChatIn: (id) => { if (id === workspaceId) startNewChat(); else { setChatSeed({ key: crypto.randomUUID(), workspaceId: id, title: "", text: "" }); chooseWorkspace(id); } },
+          editProject: (id) => { if (id !== workspaceId) chooseWorkspace(id); openSheet("settings"); } }}
+        projectRemote={window.codexWebLauncher?.projectRemote ? (folder) => window.codexWebLauncher!.projectRemote!(folder) : undefined} />
       <div className="ao-main">
       <div className="ao-dragstrip" aria-hidden="true" />
       {view !== "chat" ? <header className="ao-workspace-head">
@@ -1517,6 +1521,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
                   fork: (turnIndex) => forkChat(chatTaskId, turnIndex), copyConversation: () => copyChat(chatTaskId, "conversation"),
                   togglePin: () => togglePin(chatTaskId), pinned: chatPins.includes(chatTaskId) } : undefined}
                 onPause={() => controlRun("pause")} onResume={() => controlRun("resume")} onSettings={() => openSheet("settings")}
+                onOpenProject={(() => { const open = workspaces.find((item) => item.id === workspaceId); return open?.path ? () => openFolder(open) : undefined; })()}
                 filePath={(file) => window.codexWebLauncher?.filePath?.(file) ?? ""}
                 structure={selectedRun && chatTaskId && selectedRun.project_id === chatTaskId ? <AgentOrchestratorCanvas key={`chat-${selectedRun.id}`}
                   nodes={visibleNodes} levels={aoLevels(selectedRun).map(level => level.filter(node => visibleNodes.includes(node)))}
