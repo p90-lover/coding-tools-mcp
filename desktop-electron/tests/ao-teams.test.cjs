@@ -110,3 +110,25 @@ test("a saved team can be deleted from the team page; the last team stays and ch
   const workflow = fs.readFileSync(path.resolve(__dirname, "../electron/agent-orchestrator-workflow.cjs"), "utf8");
   assert.ok(workflow.includes('["save_team", "delete_team", "apply_team", "set_limits"]'));
 });
+
+test("links go around cards: a direct orchestrator-to-reviewer link no longer runs through a worker", () => {
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorCanvas.tsx"), "utf8");
+  const start = source.indexOf("export type WireBox"), end = source.indexOf("export function AgentOrchestratorCanvas");
+  const code = ts.transpileModule(source.slice(start, end), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
+  const canvas = {}; new Function("exports", code)(canvas);
+  const card = (x, y) => ({ x, y, w: 212, h: 76 });
+  const lead = card(400, 0), workers = [card(0, 200), card(400, 200), card(800, 200)], reviewer = card(400, 420);
+  const numbers = d => d.match(/-?\d+(\.\d+)?/g).map(Number);
+  // Straight down past the middle worker: detour to a side lane clear of it.
+  const around = canvas.wirePath(lead, reviewer, workers);
+  assert.match(around, /Q/, "a detour with rounded corners");
+  const points = []; const all = numbers(around); for (let i = 0; i + 1 < all.length; i += 2) points.push([all[i], all[i + 1]]);
+  const inside = (box, [x, y]) => x > box.x && x < box.x + box.w && y > box.y && y < box.y + box.h;
+  assert.ok(points.every(point => workers.every(worker => !inside(worker, point))), "no point of the link is inside a worker");
+  const lane = points.find(([x, y], i) => y < 200 && points[i + 1]?.[0] === x && points[i + 1][1] > 276);
+  assert.ok(lane && workers.every(worker => lane[0] < worker.x || lane[0] > worker.x + worker.w), "a side lane passes the worker row between cards");
+  // Nothing in the way: the usual curve.
+  assert.match(canvas.wirePath(lead, workers[1], []), /^M506,76 C/);
+  // A child above its parent (a link back up): routed around, never a straight crossing.
+  assert.match(canvas.wirePath(reviewer, lead, workers), /Q/);
+});
