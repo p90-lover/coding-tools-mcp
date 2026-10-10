@@ -342,7 +342,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   async function harnesses() {
     const native = { id: "codex-native", label: "Native Codex", runnable: true, installed: true, authStatus: "configured" };
     try {
-      const catalog = await harnessService().catalog();
+      // Shares the permission menu's minute-old catalog, so opening that menu doesn't probe again.
+      const catalog = await recentHarnessCatalog();
       return { ok: true, harnesses: [native, ...catalog.map(item => ({ id: `ao:${item.id}`, label: item.label,
         installed: item.installed, authStatus: item.authStatus, chat: item.chat, runnable: item.installed }))] };
     } catch (error) {
@@ -413,6 +414,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       const saved = await requestHeadless("/api/v1/ao/external/submitted", {
         workspace_id: workspaceId, run_id: runId, node_id: node.id, request_key: reserved.request_key,
         ...(session ? { session_id: session } : {}),
+        // The held card says why: a first chat's start runs detached, so this is the only place it shows.
+        ...(!session && failure ? { error: String(failure?.message || failure).slice(0, 400) } : {}),
       });
       if (failure) throw failure;
       if (saved?.ok !== true) throw new Error("AO harness session outcome is unknown");
@@ -533,6 +536,21 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       ? { ...response, status: { ...response.status, pending_approvals: withAdvice(response.status.pending_approvals) } } : response;
   }
 
+  // AO probes every agent CLI to build its catalog, which takes seconds; the permission menu reads
+  // it each time it opens. After the first read the last answer is served at once and refreshed in
+  // the background once it is a minute old (installs are rare). A failed read is never kept.
+  let permissionCatalog = null;
+  function recentHarnessCatalog() {
+    const current = permissionCatalog;
+    if (current && Date.now() - current.at <= 60_000) return current.value ? Promise.resolve(current.value) : current.promise;
+    const promise = harnessService().catalog();
+    const entry = { at: Date.now(), promise, value: current?.value };
+    permissionCatalog = entry;
+    promise.then(value => { entry.value = value; },
+      () => { if (permissionCatalog === entry) permissionCatalog = current?.value ? { ...current, at: 0 } : null; });
+    return current?.value ? Promise.resolve(current.value) : promise;
+  }
+
   async function permissionProfiles({ workspaceId, runId, nodeId, route } = {}) {
     const id = clean(workspaceId, 128);
     const unavailable = reason => ({ ok: true, capability: { supported: false, profiles: [], reason } });
@@ -547,7 +565,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       if (route.harness_id !== "codex-native") {
         const agent = externalAgent({ route });
         if (!["claude-code", "codex"].includes(agent)) return unavailable("This adapter does not support the three permission modes.");
-        const catalog = await harnessService().catalog();
+        const catalog = await recentHarnessCatalog();
         const adapter = catalog.find(item => item.id === agent && item.installed);
         if (!adapter) return unavailable("This harness is not installed.");
         // The bundled AO adapters accept approvalMode per session. This is not Native Codex
@@ -1606,7 +1624,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       const previous = taskId ? saved.runs.filter(run => run.project_id === taskId).at(-1) : null;
       const selectedId = (teamId === undefined ? "" : clean(teamId, 80)) || previous?.team?.id;
       team = selectedId ? (saved.teams ?? (saved.team ? [saved.team] : [])).find(item => item?.id === selectedId) : saved.team;
-      if (!team?.id || !Number.isSafeInteger(team.revision) || (team.workspace_id && team.workspace_id !== id)) throw new Error("Saved team changed or was not found; refresh before starting");
+      // Saved teams are shared by every project; workspace_id only records where one was first saved.
+      if (!team?.id || !Number.isSafeInteger(team.revision)) throw new Error("Saved team changed or was not found; refresh before starting");
       if (teamRevision !== undefined && (!Number.isSafeInteger(teamRevision) || teamRevision < 0 || teamRevision !== team.revision)) {
         throw new Error("Saved team revision changed; refresh before starting");
       }

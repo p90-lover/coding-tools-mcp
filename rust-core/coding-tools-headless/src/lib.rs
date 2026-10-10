@@ -483,6 +483,24 @@ struct WorkspaceCreateRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct WorkspaceUpdateRequest {
+    workspace_id: String,
+    name: String,
+    path: String,
+    #[serde(default)]
+    linked_paths: Vec<String>,
+    confirm: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceRemoveRequest {
+    workspace_id: String,
+    confirm: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WorkspacePolicyUpdateRequest {
     workspace_id: String,
     permission_mode: String,
@@ -658,6 +676,9 @@ struct AoExternalSubmittedRequest {
     request_key: String,
     #[serde(default)]
     session_id: Option<String>,
+    /// Why the launch failed, when it returned no session; shown on the held card.
+    #[serde(default)]
+    error: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -925,6 +946,113 @@ fn apply_workspace_auth_update(
     }))
 }
 
+fn workspace_view(
+    outcome: &coding_tools_core::data::workspace_edit::WorkspaceEditOutcome,
+) -> Value {
+    let profile = &outcome.profile;
+    json!({
+        "id": profile.id,
+        "name": profile.name,
+        "path": profile.path,
+        "linked_projects": tools::Workspace::new(PathBuf::from(&profile.path))
+            .map(|workspace| workspace.linked_projects())
+            .unwrap_or_default(),
+    })
+}
+
+/// Renames a project and changes its primary and extra source folders. The folders are
+/// validated like workspace creation (absolute, existing, not another project's folder).
+fn apply_workspace_update(
+    core: &CoreState,
+    body: &WorkspaceUpdateRequest,
+) -> Result<Value, String> {
+    if !body.confirm {
+        return Err("Local confirmation is required to edit a project".into());
+    }
+    let edit = coding_tools_core::data::workspace_edit::WorkspaceEdit {
+        workspace_id: body.workspace_id.clone(),
+        name: body.name.clone(),
+        path: body.path.clone(),
+        linked_paths: body.linked_paths.clone(),
+    };
+    let previous = core
+        .with_data(|store| {
+            Ok(store
+                .get(&body.workspace_id)
+                .map(|profile| profile.path.clone()))
+        })
+        .map_err(text_error)?;
+    let outcome = core
+        .with_data(|store| coding_tools_core::data::workspace_edit::edit_workspace(store, &edit))
+        .map_err(text_error)?;
+    if outcome.root_changed {
+        if let Some(Ok(workspace)) = previous.map(|root| tools::Workspace::new(PathBuf::from(root)))
+        {
+            tools::computer::stop_workspace(workspace.root());
+        }
+    }
+    Ok(json!({
+        "ok": true,
+        "workspace_id": body.workspace_id,
+        "workspace": workspace_view(&outcome),
+        "root_changed": outcome.root_changed,
+        "linked_added": outcome.linked_added,
+        "linked_removed": outcome.linked_removed,
+        "applies_on_next_listener_start": true,
+    }))
+}
+
+/// Removes a project from the app's list only: no file on disk is deleted and its saved
+/// missions stay in the data file. Refused while its missions run or its listeners are up.
+fn apply_workspace_remove(
+    core: &CoreState,
+    body: &WorkspaceRemoveRequest,
+) -> Result<Value, String> {
+    if !body.confirm {
+        return Err("Local confirmation is required to remove a project".into());
+    }
+    let profile = core
+        .with_data(|store| {
+            store.get(&body.workspace_id).cloned().ok_or_else(|| {
+                coding_tools_core::error::AppError::Message("Workspace was not found".into())
+            })
+        })
+        .map_err(text_error)?;
+    let listening = core
+        .with_runtime(|runtime| {
+            Ok([
+                runtime.mcp_status(&profile),
+                runtime.actions_status(&profile),
+            ]
+            .iter()
+            .any(|status| !matches!(status.state.as_str(), "stopped" | "error")))
+        })
+        .map_err(text_error)?;
+    if listening {
+        return Err(
+            "Can't remove this project while its MCP or Actions listener is running; stop it first"
+                .into(),
+        );
+    }
+    let removed = core
+        .with_data(|store| {
+            coding_tools_core::data::workspace_edit::remove_local_workspace(
+                store,
+                &body.workspace_id,
+            )
+        })
+        .map_err(text_error)?;
+    if let Ok(workspace) = tools::Workspace::new(PathBuf::from(&removed.path)) {
+        tools::computer::stop_workspace(workspace.root());
+    }
+    Ok(json!({
+        "ok": true,
+        "workspace_id": removed.id,
+        "removed": true,
+        "files_deleted": false,
+    }))
+}
+
 fn apply_workspace_policy_update(
     core: &CoreState,
     body: &WorkspacePolicyUpdateRequest,
@@ -994,7 +1122,7 @@ mod workspace_auth_tests {
         assert!(serde_json::from_value::<AoMutation>(request).is_err());
     }
 
-
+    #[test]
     fn lifecycle_update_accepts_nested_scoped_schedule_change() {
         let request = json!({"workspace_id":"ws-a","confirm":true,
             "change":{"operation":"lifecycle","change":{
@@ -1712,6 +1840,65 @@ mod workspace_auth_tests {
         assert!(prepare_ao_web_home(&home, &app_data, "http://127.0.0.1:17841/v1", &catalog, "chatgpt-web/x\"y").is_err());
     }
 
+    fn edit_fixture(root: &Path) -> CoreState {
+        let data = serde_json::from_value(serde_json::json!({
+            "profiles": [{
+                "id": "ws-1", "name": "Demo", "path": root.to_string_lossy(),
+                "tunnel": {}, "auth": {"type": "bearer"},
+                "runtime": {}, "actions": {}
+            }]
+        }))
+        .unwrap();
+        CoreState::from_data(data).unwrap()
+    }
+
+    #[test]
+    fn workspace_update_requires_confirmation_and_rejects_unknown_fields() {
+        let root = tempfile::tempdir().unwrap();
+        let moved = tempfile::tempdir().unwrap();
+        let core = edit_fixture(root.path());
+        let mut request = WorkspaceUpdateRequest {
+            workspace_id: "ws-1".into(),
+            name: "Renamed".into(),
+            path: moved.path().to_string_lossy().into_owned(),
+            linked_paths: vec![],
+            confirm: false,
+        };
+        assert!(apply_workspace_update(&core, &request).is_err());
+        request.confirm = true;
+        let value = apply_workspace_update(&core, &request).unwrap();
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["root_changed"], true);
+        assert_eq!(value["workspace"]["name"], "Renamed");
+        request.path = "relative".into();
+        assert!(apply_workspace_update(&core, &request).is_err());
+        assert!(serde_json::from_value::<WorkspaceUpdateRequest>(serde_json::json!({
+            "workspace_id": "ws-1", "name": "x", "path": "C:\\x", "confirm": true, "delete_files": true
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn workspace_remove_drops_only_the_record() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("keep.txt"), "kept").unwrap();
+        let core = edit_fixture(root.path());
+        let mut request = WorkspaceRemoveRequest {
+            workspace_id: "ws-1".into(),
+            confirm: false,
+        };
+        assert!(apply_workspace_remove(&core, &request).is_err());
+        request.confirm = true;
+        let value = apply_workspace_remove(&core, &request).unwrap();
+        assert_eq!(value["removed"], true);
+        assert_eq!(value["files_deleted"], false);
+        assert!(root.path().join("keep.txt").exists());
+        assert!(core
+            .with_data(|store| Ok(store.get("ws-1").is_none()))
+            .unwrap());
+        assert!(apply_workspace_remove(&core, &request).is_err());
+    }
+
     #[test]
     fn policy_update_requires_confirmation_and_preserves_authentication() {
         let data = serde_json::from_value(serde_json::json!({
@@ -2297,6 +2484,74 @@ async fn workspace_auth_update(
             StatusCode::BAD_REQUEST,
             "WORKSPACE_AUTH_UPDATE_FAILED",
             error,
+        ),
+    }
+}
+
+async fn workspace_update(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(body): Json<WorkspaceUpdateRequest>,
+) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let _lease = match admit(&state, "workspace_update") {
+        Ok(lease) => lease,
+        Err(response) => return *response,
+    };
+    if !body.confirm || !local_ui_authorized(&headers, &state) {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "LOCAL_CONFIRMATION_REQUIRED",
+            "Confirm the project edit in Coding Tools",
+        );
+    }
+    let core = state.core.clone();
+    match tokio::task::spawn_blocking(move || apply_workspace_update(&core, &body)).await {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(error)) => json_error(StatusCode::BAD_REQUEST, "WORKSPACE_UPDATE_FAILED", error),
+        Err(_) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "WORKSPACE_UPDATE_UNKNOWN",
+            "Project edit outcome unknown; refresh before retrying",
+        ),
+    }
+}
+
+async fn workspace_remove(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(body): Json<WorkspaceRemoveRequest>,
+) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let _lease = match admit(&state, "workspace_remove") {
+        Ok(lease) => lease,
+        Err(response) => return *response,
+    };
+    if !body.confirm || !local_ui_authorized(&headers, &state) {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "LOCAL_CONFIRMATION_REQUIRED",
+            "Confirm removing the project in Coding Tools",
+        );
+    }
+    let core = state.core.clone();
+    let workspace_id = body.workspace_id.clone();
+    match tokio::task::spawn_blocking(move || apply_workspace_remove(&core, &body)).await {
+        Ok(Ok(value)) => {
+            if let Ok(mut contexts) = state.contexts.lock() {
+                contexts.remove(&workspace_id);
+            }
+            Json(value).into_response()
+        }
+        Ok(Err(error)) => json_error(StatusCode::BAD_REQUEST, "WORKSPACE_REMOVE_FAILED", error),
+        Err(_) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "WORKSPACE_REMOVE_UNKNOWN",
+            "Project removal outcome unknown; refresh before retrying",
         ),
     }
 }
@@ -3659,14 +3914,24 @@ async fn ao_external_submitted(
     }
     let saved = tokio::task::spawn_blocking(move || {
         coding_tools_core::data::DataStore::update_file(|data| {
-            integrations::ao::record_submission(
-                data,
-                &body.workspace_id,
-                &body.run_id,
-                &body.node_id,
-                &body.request_key,
-                body.session_id.as_deref(),
-            )
+            match (body.session_id.as_deref(), body.error.as_deref()) {
+                (None, Some(reason)) => integrations::ao::record_failed_submission(
+                    data,
+                    &body.workspace_id,
+                    &body.run_id,
+                    &body.node_id,
+                    &body.request_key,
+                    reason,
+                ),
+                (session, _) => integrations::ao::record_submission(
+                    data,
+                    &body.workspace_id,
+                    &body.run_id,
+                    &body.node_id,
+                    &body.request_key,
+                    session,
+                ),
+            }
         })
         .map_err(text_error)
     })
@@ -4606,6 +4871,8 @@ fn router(state: ServiceState) -> Router {
         )
         .route("/api/v1/workspaces/auth", post(workspace_auth_update))
         .route("/api/v1/workspaces/policy", post(workspace_policy_update))
+        .route("/api/v1/workspaces/update", post(workspace_update))
+        .route("/api/v1/workspaces/remove", post(workspace_remove))
         .route("/api/v1/native-codex/status", post(native_codex_status))
         .route("/api/v1/native-codex/approval", post(native_codex_approval))
         .route("/api/v1/native-codex/connect", post(native_codex_connect))

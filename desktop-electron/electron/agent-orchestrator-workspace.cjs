@@ -57,10 +57,13 @@ function createAoWorkspaceBoard({ listWorkspaces, listProjects, createProject, m
     const projects = await matching(await listProjects(), root);
     if (projects.length > 1) throw new Error("Workspace matches multiple AO projects; select one explicitly in AO first");
     let project = projects[0];
+    // A workspace created from a canonicalized folder is saved as "\\?\C:\...": AO and git need
+    // the plain drive path, so it is never handed the long-path prefix.
+    const folder = platform === "win32" ? item.path.replace(/^\\\\\?\\/, "") : item.path;
     // Before AO starts a session in a local-only repository, give it a default branch.
-    if (register && await isRepositoryRoot(item.path)) await recordDefaultBranch(item.path);
-    if (!project && register && await isRepositoryRoot(item.path)) {
-      project = await createProject({ path: item.path });
+    if (register && await isRepositoryRoot(folder)) await recordDefaultBranch(folder);
+    if (!project && register && await isRepositoryRoot(folder)) {
+      project = await createProject({ path: folder });
       if (!project || await canonical(project.path) !== root) throw new Error("AO project registration changed the workspace scope");
     }
     return { workspaceId: item.id, projectId: project?.id ?? null };

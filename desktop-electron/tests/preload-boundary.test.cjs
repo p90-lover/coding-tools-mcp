@@ -133,6 +133,24 @@ test("workspace creation has an exact confirmed IPC contract with no renderer se
   assert.equal(invocations.length, 1);
 });
 
+test("project edit and removal have exact confirmed IPC contracts", async () => {
+  const { api, invocations } = loadPreload(() => ({ ok: true }));
+  const edit = { workspaceId: "ws-1", name: "Coding Tools", path: "G:\\Projects\\coding-tools-mcp", linkedPaths: ["G:\\Projects\\shared"], confirm: true };
+  assert.deepEqual(await api.workspaces.update(edit), { ok: true });
+  assert.deepEqual(await api.workspaces.remove({ workspaceId: "ws-1", confirm: true }), { ok: true });
+  assert.deepEqual(invocations, [
+    { channel: "coding-tools:workspaces:update", payload: edit },
+    { channel: "coding-tools:workspaces:remove", payload: { workspaceId: "ws-1", confirm: true } },
+  ]);
+  await assert.rejects(api.workspaces.update({ ...edit, confirm: false }), /IPC_REQUEST_SCHEMA_INVALID/);
+  await assert.rejects(api.workspaces.update({ ...edit, name: "" }), /IPC_REQUEST_SCHEMA_INVALID/);
+  await assert.rejects(api.workspaces.update({ ...edit, linkedPaths: Array.from({ length: 33 }, (_, index) => `C:\\f${index}`) }), /IPC_REQUEST_SCHEMA_INVALID/);
+  await assert.rejects(api.workspaces.update({ ...edit, deleteFiles: true }), /IPC_REQUEST_SCHEMA_INVALID/);
+  await assert.rejects(api.workspaces.remove({ workspaceId: "ws-1" }), /IPC_REQUEST_SCHEMA_INVALID/);
+  await assert.rejects(api.workspaces.remove({ workspaceId: "ws-1", confirm: true, deleteFiles: true }), /IPC_REQUEST_SCHEMA_INVALID/);
+  assert.equal(invocations.length, 2);
+});
+
 test("a typed apps catalog call uses its exact channel", async () => {
   const response = { version: 1, host: "coding-tools-apps", modules: [] };
   const { api, invocations } = loadPreload(() => response);

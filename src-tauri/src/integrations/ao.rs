@@ -1987,6 +1987,42 @@ pub fn record_submission(
     Ok(run.clone())
 }
 
+/// A harness launch that failed before it returned a session. The card is held exactly as
+/// `record_submission` holds it, but keeps the launcher's own reason so the chat can say what
+/// went wrong instead of a generic failure.
+pub fn record_failed_submission(
+    data: &mut AppData,
+    workspace_id: &str,
+    run_id: &str,
+    node_id: &str,
+    request_key: &str,
+    reason: &str,
+) -> AppResult<Run> {
+    record_submission(data, workspace_id, run_id, node_id, request_key, None)?;
+    let reason: String = reason
+        .trim()
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(400)
+        .collect();
+    let run = data
+        .ao_runs
+        .iter_mut()
+        .find(|run| run.id == run_id && run.workspace_id == workspace_id)
+        .ok_or_else(|| fail("AO run not found"))?;
+    if !reason.is_empty() {
+        if let Some(receipt) = run
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == node_id)
+            .and_then(|node| node.receipt.as_mut())
+        {
+            receipt.error = Some(format!("Launch failed: {reason}"));
+        }
+    }
+    Ok(run.clone())
+}
+
 // One terminal receipt names its run, node and turn plus the outcome fields; keeping them as
 // explicit parameters matches the other AO receipt recorders.
 #[allow(clippy::too_many_arguments)]
@@ -2958,6 +2994,27 @@ mod tests {
         assert_eq!(run.nodes[0].receipt.as_ref().unwrap().status, "reserved");
         assert!(reserve(&mut data, "qa", "run", "planner", 2, "two".into(), None).is_err());
         assert!(reserve(&mut data, "qa", "run", "worker", 2, "three".into(), None).is_err());
+        // A launch that fails before returning a session holds the card with the launcher's reason.
+        let mut refused = data.clone();
+        let held = record_failed_submission(
+            &mut refused,
+            "qa",
+            "run",
+            "planner",
+            "one",
+            " unsupported contextWindow:\nClaude Code only ",
+        )
+        .unwrap();
+        let receipt = held.nodes[0].receipt.as_ref().unwrap();
+        assert_eq!(receipt.status, "held");
+        assert_eq!(
+            receipt.error.as_deref(),
+            Some("Launch failed: unsupported contextWindow: Claude Code only")
+        );
+        assert!(
+            record_failed_submission(&mut refused, "qa", "run", "planner", "one", "again").is_err(),
+            "a held card is not submitted twice"
+        );
         record_submission(&mut data, "qa", "run", "planner", "one", Some("thread-one")).unwrap();
         let mut failed = data.clone();
         let failed_run = record_terminal(

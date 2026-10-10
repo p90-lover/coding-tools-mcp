@@ -21,6 +21,23 @@ test("read-only board enrichment uses the resolved scope without registering or 
   assert.deepEqual(calls,["board","runs"]);
 });
 
+test("a workspace saved with the \\\\?\\ long-path prefix registers in AO under its plain drive path", async () => {
+  const created = [], branches = [], checked = [];
+  const bridge = createAoWorkspaceBoard({
+    platform: "win32", realpath: async value => value.replace(/^\\\\\?\\/, ""),
+    isRepositoryRoot: async folder => { checked.push(folder); return true; },
+    recordDefaultBranch: async folder => { branches.push(folder); },
+    listWorkspaces: async () => [{ id: "reg", path: "\\\\?\\C:\\Users\\me\\reg-machine" }],
+    listProjects: async () => [],
+    createProject: async body => { created.push(body); return { id: "p-reg", path: body.path }; },
+    missionCall: async () => ({ ok: true }),
+  });
+  assert.deepEqual(await bridge.bind("reg"), { workspaceId: "reg", projectId: "p-reg" });
+  assert.deepEqual(created, [{ path: "C:\\Users\\me\\reg-machine" }]);
+  assert.deepEqual(branches, ["C:\\Users\\me\\reg-machine"]);
+  assert.ok(checked.every(folder => !folder.startsWith("\\\\?\\")), "git is never asked about the prefixed path");
+});
+
 function fixture(projects = [{ id: "project-a", path: "C:\\work\\a" }], repository = true) {
   const calls = [];
   const bridge = createAoWorkspaceBoard({

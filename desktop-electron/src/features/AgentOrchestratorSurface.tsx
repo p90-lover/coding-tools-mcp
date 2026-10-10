@@ -7,7 +7,8 @@ import { AgentOrchestratorOriginalSurface } from "./AgentOrchestratorOriginalSur
 import { AgentOrchestratorCanvas, type CanvasNode } from "./AgentOrchestratorCanvas";
 import { AgentOrchestratorChat } from "./AgentOrchestratorChat";
 import { ChatThreadList, type ThreadWorkspace } from "./ChatThreadList";
-import { AgentOrchestratorPermissions, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
+import { ProjectEditDialog } from "./ProjectEditDialog";
+import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
 import { chatArchived, chatList, chatMarkdown, chatMessagesFromDescription, chatTurns, type ChatActivity, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
@@ -333,19 +334,25 @@ export function aoPreviewText(run: Pick<AoMission, "cancelled" | "nodes">, tasks
   return `${node.role}: ${task?.title ?? node.task_id}\n${task?.description ?? ""}`.trim();
 }
 
-/** Catalog data is authoritative; legacy servers expose only one real saved team. */
-export function aoSavedTeams(result: { teams?: unknown; team?: unknown }, workspaceId: string): AoTeam[] {
+/** Catalog data is authoritative; legacy servers expose only one real saved team. Saved teams are
+ *  shared by every project: a team's workspace_id only records where it was first saved. */
+export function aoSavedTeams(result: { teams?: unknown; team?: unknown }): AoTeam[] {
   const items = Array.isArray(result.teams) ? result.teams : result.team ? [result.team] : [];
   return items.filter((item): item is AoTeam => Boolean(item && typeof item === "object" &&
-    typeof (item as AoTeam).id === "string" && (item as AoTeam).workspace_id === workspaceId &&
+    typeof (item as AoTeam).id === "string" &&
     Number.isSafeInteger((item as AoTeam).revision) && Array.isArray((item as AoTeam).nodes)));
 }
-export function aoChatExecution(mode: "single" | "team", route: AoRoute, teams: AoTeam[], teamId: string, workspaceId: string): JsonObject {
+/** The team the composer starts on: the one still chosen, else the project's default, else the first. */
+export function aoComposerTeam(selected: string, teams: AoTeam[], fallback?: AoTeam | null): string {
+  if (selected && teams.some(team => team.id === selected)) return selected;
+  return (fallback?.id && teams.some(team => team.id === fallback.id) ? fallback.id : teams[0]?.id) || "";
+}
+export function aoChatExecution(mode: "single" | "team", route: AoRoute, teams: AoTeam[], teamId: string): JsonObject {
   if (mode === "single") {
     if (!route.model || route.model === "default") throw new Error("Choose one explicit model first.");
     return { executionMode: "single", singleRoute: { ...route } };
   }
-  const selected = teams.find(team => team.id === teamId && team.workspace_id === workspaceId);
+  const selected = teams.find(team => team.id === teamId);
   if (!selected || !Number.isSafeInteger(selected.revision)) throw new Error("Selected saved team is unavailable; refresh and choose its current configuration.");
   return { executionMode: "team", teamId: selected.id, teamRevision: selected.revision };
 }
@@ -372,6 +379,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [projectPins, setProjectPins] = useState<string[]>(() => readList(PINNED_PROJECTS));
   const [listNow, setListNow] = useState(() => Date.now());
   const [sheet, setSheet] = useState<Sheet>("");
+  // The sidebar's Edit project dialog (or its remove confirmation) for one project.
+  const [projectEdit, setProjectEdit] = useState<{ id: string; step: "edit" | "remove" } | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<HTMLDivElement>(null);
   const [overviewResizing, setOverviewResizing] = useState(false);
@@ -520,8 +529,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
     if (selection.current.workspaceId !== id) return;
     setTaskLifecycle((current.task_lifecycle as TaskLifecycleView[]) || []);
     setMissions(runs);
-    const setups = aoSavedTeams(current, id);
-    setSavedTeams(setups); setComposerTeamId(selected => selected || setups[0]?.id || "");
+    const setups = aoSavedTeams(current);
+    setSavedTeams(setups); setComposerTeamId(selected => aoComposerTeam(selected, setups, current.team as AoTeam | null));
     setTeam(current.team as AoTeam | null ?? setups[0] ?? null);
     if (current.limits) { setLimits(current.limits as typeof limits); setGlobalLimit((current.limits as typeof limits).max_workers); }
     setSelectedRunId((selected) => runs.some((run) => run.id === selected) ? selected : runs[0]?.id ?? "");
@@ -597,8 +606,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
           const runs = Array.isArray(current.runs) ? current.runs as AoMission[] : [];
           setTaskLifecycle((current.task_lifecycle as TaskLifecycleView[]) || []);
           setMissions(runs);
-          const setups = aoSavedTeams(current, workspaceId);
-          setSavedTeams(setups); setComposerTeamId(selected => selected || setups[0]?.id || "");
+          const setups = aoSavedTeams(current);
+          setSavedTeams(setups); setComposerTeamId(selected => aoComposerTeam(selected, setups, current.team as AoTeam | null));
           setTeam(current.team as AoTeam | null ?? setups[0] ?? null);
           if (current.limits) { setLimits(current.limits as typeof limits); setGlobalLimit((current.limits as typeof limits).max_workers); }
           setSelectedRunId(runs[0]?.id ?? "");
@@ -641,6 +650,20 @@ export function AgentOrchestratorSurface({ language, setError }: {
     setChatSeed({ key: crypto.randomUUID(), workspaceId: result.id, title: "", text: "" });
     chooseWorkspace(result.id);
   })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+  // The Edit project dialog saves the name and folders; errors stay in the dialog.
+  const saveProjectEdit = async (id: string, change: { name: string; path: string; linkedPaths: string[] }) => {
+    await getCodingToolsClient().workspaces.update({ workspaceId: id, ...change, confirm: true });
+    setWorkspaces(await listAllWorkspaces());
+  };
+  // "Remove local project" drops it from the list only (no file is deleted). If it was open,
+  // another project opens, or the empty state when it was the last one.
+  const removeProject = async (id: string) => {
+    await getCodingToolsClient().workspaces.remove({ workspaceId: id, confirm: true });
+    const items = await listAllWorkspaces();
+    setWorkspaces(items);
+    setProjectPins((current) => { const next = current.filter((item) => item !== id); writeList(PINNED_PROJECTS, next); return next; });
+    if (id === workspaceId) chooseWorkspace(items[0]?.id ?? "");
+  };
   const createWorkspace = () => void run("workspace", async () => {
     const result = await getCodingToolsClient().workspaces.create({
       path: workspacePath.trim(), ...(workspaceName.trim() ? { name: workspaceName.trim() } : {}), confirm: true,
@@ -686,7 +709,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
         if (live && Array.isArray(current.runs)) {
           setMissions(current.runs as AoMission[]);
           setTeam(current.team as AoTeam | null ?? null);
-          setSavedTeams(aoSavedTeams(current, workspaceId));
+          setSavedTeams(aoSavedTeams(current));
           setTaskLifecycle((current.task_lifecycle as TaskLifecycleView[]) || []);
         }
       }).catch(() => {}).finally(() => { reading = false; });
@@ -805,7 +828,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     setSheet("");
   });
   const chatMission = [...missions].reverse().find(mission => mission.project_id === chatTaskId);
-  const selectedSetup = savedTeams.find(setup => setup.id === composerTeamId && setup.workspace_id === workspaceId);
+  const selectedSetup = savedTeams.find(setup => setup.id === composerTeamId);
   // Reading a saved chat restores its own raw policy, once. Polling never resets explicit draft choices.
   useEffect(() => {
     if (chatTaskId === null || (chatTaskId && !chatMission)) return;
@@ -847,7 +870,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
     const role = permissionTeam?.nodes.find(node => node.id === roleId);
     if (!role) return { supported: false, profiles: [], reason: "Choose a model or saved team first." };
     const node = [...(permissionMission?.nodes ?? [])].reverse().find(item => (item.template_role_id || item.id) === roleId);
-    if (role.route.harness_id === NATIVE_HARNESS && !node) return { supported: false, profiles: [], reason: "Native permissions require an actual connected role; menu opening does not connect it." };
+    // A native role that hasn't connected yet has no runtime to ask. The choice is saved as its
+    // route and the connection refuses a route its permissions don't match, so the menu stays usable.
+    if (role.route.harness_id === NATIVE_HARNESS && !node) return draftPermissionCapability();
     const result = await moduleCall("permission_profiles", { workspaceId, route: role.route as unknown as JsonObject,
       ...(node && permissionMission ? { runId: permissionMission.id, nodeId: node.id } : {}) });
     return result.capability as PermissionCapability ?? { supported: false, profiles: [], reason: "Runtime permission metadata unavailable" };
@@ -873,7 +898,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     }
     if (!selectedSetup) throw new Error("Selected saved team unavailable; refresh before applying.");
     const latest = await moduleCall("runs", { workspaceId });
-    const saved = aoSavedTeams(latest, workspaceId).find(setup => setup.id === selectedSetup.id);
+    const saved = aoSavedTeams(latest).find(setup => setup.id === selectedSetup.id);
     if (!saved || saved.revision !== selectedSetup.revision) throw new Error("Saved team revision changed; refresh and select permissions again.");
     const reusableIds = selectedRoleIds.filter(id => saved.nodes.some(node => node.id === id));
     if (reusableIds.length) return persistTeam(mergeSavedPermissions(saved, reusableIds, selection), permissionMission, revision, scope);
@@ -1075,7 +1100,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
 
   const createRun = () => void run("new-run", async () => {
     if (!board || !workspaceId || (!runTaskId && !missionPrompt.trim())) return;
-    const execution = aoChatExecution(composerMode, workerRouteDraft, savedTeams, composerTeamId, workspaceId);
+    const execution = aoChatExecution(composerMode, workerRouteDraft, savedTeams, composerTeamId);
     let missionBoard = board;
     let taskId = runTaskId;
     if (!taskId) {
@@ -1154,7 +1179,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
         if (input.taskId && !(boardWorkspace.current === workspaceId && board?.tasks.some((task) => task.id === input.taskId))) {
           throw new Error("This chat belongs to another project. Open it from its own project, or start a new chat here.");
         }
-        const execution = aoChatExecution(composerMode, singleRoute, savedTeams, composerTeamId, workspaceId);
+        const execution = aoChatExecution(composerMode, singleRoute, savedTeams, composerTeamId);
         const result = await moduleCall("chat_send", { workspaceId, message: input.message,
           ...(input.taskId ? { taskId: input.taskId } : input.title ? { title: input.title } : {}),
           ...execution, ...executableArg() });
@@ -1401,7 +1426,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
           continueIn: continueInProject, share: shareChat, openWindow: openChatWindow,
           // Another project's new chat goes through the same seed as "Continue in", with an empty draft.
           newChatIn: (id) => { if (id === workspaceId) startNewChat(); else { setChatSeed({ key: crypto.randomUUID(), workspaceId: id, title: "", text: "" }); chooseWorkspace(id); } },
-          editProject: (id) => { if (id !== workspaceId) chooseWorkspace(id); openSheet("settings"); } }}
+          editProject: (id) => setProjectEdit({ id, step: "edit" }),
+          removeProject: (id) => setProjectEdit({ id, step: "remove" }) }}
         projectRemote={(folder) => window.codexWebLauncher?.projectRemote?.(folder) ?? Promise.resolve(null)} />
       <div className="ao-main">
       <div className="ao-dragstrip" aria-hidden="true" />
@@ -1589,7 +1615,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
         {view === "board" ? <section className="ao-board-view" aria-label="Mission Board">
           <header><strong>Mission Board</strong><button type="button" className="button-secondary" onClick={() => setView("chat")}>Back to chat</button>
             <button type="button" className="button-secondary" onClick={() => setView("overview")}>Team graph</button></header>
-          {workspaceReady && workspaceId && !sheet
+          {workspaceReady && workspaceId && !sheet && !projectEdit
             ? <AgentOrchestratorOriginalSurface projectBoard hostbar={false} workspaceId={workspaceId} openMissions={() => setView("overview")} />
             : <div className="ao-empty-state">{copy.noWorkspace}</div>}
         </section> : null}
@@ -1621,13 +1647,21 @@ export function AgentOrchestratorSurface({ language, setError }: {
           </div>
           {/* Collapse native bounds during a drag without unmounting and reopening the board. */}
           <div className="ao-workspace-board" style={{ display: overviewResizing ? "none" : undefined }}>
-            {view === "overview" && workspaceReady && workspaceId && !sheet
+            {view === "overview" && workspaceReady && workspaceId && !sheet && !projectEdit
               ? <AgentOrchestratorOriginalSurface projectBoard hostbar={false} workspaceId={workspaceId} openMissions={() => setView("overview")} />
-              : sheet ? <div className="ao-empty-state">Mission board resumes when this dialog closes.</div> : null}
+              : sheet || projectEdit ? <div className="ao-empty-state">Mission board resumes when this dialog closes.</div> : null}
           </div>
         </OverviewSplit>
       </div>
       </div>
+      {(() => {
+        const project = projectEdit && workspaces.find((item) => item.id === projectEdit.id);
+        if (!projectEdit || !project) return null;
+        return <ProjectEditDialog key={`${project.id}:${projectEdit.step}`} project={project} initialStep={projectEdit.step}
+          chooseFolder={window.codexWebLauncher?.chooseFolder ? () => window.codexWebLauncher!.chooseFolder!() : undefined}
+          onSave={(change) => saveProjectEdit(project.id, change)} onRemove={() => removeProject(project.id)}
+          onClose={() => setProjectEdit(null)} />;
+      })()}
     </section>
   );
 }

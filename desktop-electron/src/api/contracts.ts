@@ -58,6 +58,16 @@ export interface CodingToolsApi {
   readonly workspaces: {
     list(input?: PageRequest): Promise<Page<WorkspaceSummary>>;
     create(input: { readonly path: string; readonly name?: string; readonly confirm: true }): Promise<{ readonly cancelled: boolean; readonly id: string | null; readonly name: string | null; readonly path: string | null }>;
+    /** Renames a project and sets its primary folder (`path`) and extra source folders. */
+    update(input: {
+      readonly workspaceId: string;
+      readonly name: string;
+      readonly path: string;
+      readonly linkedPaths: readonly string[];
+      readonly confirm: true;
+    }): Promise<JsonObject>;
+    /** Removes the project from the app's list only; no file on disk is deleted. */
+    remove(input: { readonly workspaceId: string; readonly confirm: true }): Promise<JsonObject>;
     updatePolicy(input: {
       readonly workspaceId: string;
       readonly permissionMode: "read-only" | "workspace-write";

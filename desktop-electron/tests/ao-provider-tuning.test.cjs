@@ -129,6 +129,46 @@ test("CPA effort becomes exactly one session-local wire suffix and context is fo
   assert.equal(Object.hasOwn(own, "gateway"), false);
 });
 
+test("the permission menu reuses the agent catalog instead of probing every CLI on each open", async () => {
+  let reads = 0, fail = true;
+  const workflow = createAgentOrchestratorWorkflow({
+    aoHarness: { catalog: async () => { reads++; if (fail) { fail = false; throw new Error("AO busy"); } return [{ id: "claude-code", label: "Claude Code", installed: true, chat: true }]; } },
+    requestHeadless: async () => { throw Error("must not reach headless"); },
+  });
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-5.5", permission_profile: ":ao-default" };
+  await assert.rejects(workflow.call("permission_profiles", { workspaceId: "ws", route }), /AO busy/);
+  for (let i = 0; i < 3; i++) {
+    const { capability } = await workflow.call("permission_profiles", { workspaceId: "ws", route });
+    assert.equal(capability.supported, true);
+  }
+  assert.equal(reads, 2, "a failed read is not kept; a good one serves the next opens");
+  await workflow.call("harnesses", {});
+  assert.equal(reads, 2, "the harness list shares the same answer");
+});
+
+test("a launch that fails before returning a session saves the launcher's reason on the held card", async () => {
+  const submitted = [];
+  const worker = { id: "worker", role: "worker", task_id: "task", parents: ["planner"], state: "pending",
+    route: { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-5.5", permission_profile: ":ao-default" } };
+  const workflow = createAgentOrchestratorWorkflow({
+    aoHarness: { models: async () => [], spawn: async () => { throw new Error("unsupported contextWindow: Claude Code only"); } },
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-key" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ models: [] }) }),
+    confirm: async () => true,
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run", workspace_id: "ws", revision: 1, cancelled: false,
+        nodes: [{ id: "planner", role: "planner", parents: [], state: "finished", route: { model: "chatgpt-web/high" } }, worker] }] };
+      if (endpoint === "/api/v1/ao/external/reserve") return { ok: true, request_key: "key", prompt: "Fixture task" };
+      if (endpoint === "/api/v1/ao/external/submitted") { submitted.push({ ...body }); return { ok: true, run: { id: "run" } }; }
+      throw Error("Unexpected endpoint " + endpoint);
+    },
+  });
+  await assert.rejects(workflow.call("advance", { workspaceId: "ws", runId: "run" }), /unsupported contextWindow/);
+  assert.equal(submitted.length, 1);
+  assert.equal(Object.hasOwn(submitted[0], "session_id"), false);
+  assert.equal(submitted[0].error, "unsupported contextWindow: Claude Code only");
+});
+
 test("persisted CPA tuning is checked against the current model capabilities before dispatch", async () => {
   await assert.rejects(dispatched("codex", "cpa/gpt-5.5", { effort: "xhigh" }), /reasoning.*not.*support|unsupported.*effort/i);
   await assert.rejects(dispatched("codex", "cpa/gpt-5.5", { context_window: 1048576 }), /context.*262144|context.*limit/i);

@@ -25,8 +25,10 @@ export type ThreadActions = {
   openFolder?: (workspace: ThreadWorkspace) => void;
   /** A new chat in that project (the project row's pencil, as in Codex). */
   newChatIn: (workspaceId: string) => void;
-  /** Opens that project's settings. */
+  /** Opens the Edit project dialog (name and source folders). */
   editProject: (workspaceId: string) => void;
+  /** Asks to remove the project from this app's list; its files are never deleted. */
+  removeProject?: (workspaceId: string) => void;
   /** A new chat in another project, its composer holding this chat's messages. */
   continueIn: (taskId: string, workspaceId: string) => void;
   /** Saves the conversation as a Markdown file. */
@@ -278,7 +280,9 @@ export function ChatThreadList(props: ThreadListProps) {
         ? { label: "Archive chats", icon: "archive", run: () => actions.archiveAll() }
         : { label: "Archive chats", icon: "archive", reason: current ? "This project has no chats" : "Open this project first" },
       { kind: "separator" },
-      { label: "Remove project", icon: "delete", danger: true, reason: "Remove projects on the Workspace page" },
+      actions.removeProject
+        ? { label: "Remove project", icon: "delete", danger: true, run: () => actions.removeProject!(item.id) }
+        : { label: "Remove project", icon: "delete", danger: true, reason: "Remove projects on the Workspace page" },
     ];
   };
   const openMenu = (event: ReactMouseEvent, items: ChatMenuItem[], label: string) => {
