@@ -9,6 +9,8 @@ import {
 /** A loader may return a plain id list or a catalog with capabilities; the list needs only ids. */
 const modelIds = (items: string[] | AoModelCatalog) => Array.isArray(items) ? items : items.models;
 const modelCaps = (items: string[] | AoModelCatalog) => Array.isArray(items) ? {} : items.capabilities ?? {};
+/** The effort word Codex dims after the model name ("High", "Extra high"). */
+const effortWord = (effort?: string) => !effort ? "" : effort === "xhigh" ? "Extra high" : effort[0].toUpperCase() + effort.slice(1);
 
 export type ComposerControlsProps = {
   mode: "single" | "team"; onModeChange: (mode: "single" | "team") => void;
@@ -87,7 +89,8 @@ export function AgentOrchestratorComposerControls({
         aria-haspopup="dialog" aria-label={mode === "single" ? "Choose model" : "Choose saved team"}
         onClick={() => popup.setOpen(value => !value)}>
         <Icon name={mode === "single" ? "activity" : "orchestrator"} width="16" height="16" />
-        <span>{mode === "single" ? modelLabel(route.model, route.provider_id === "cliproxyapi-antigravity") || "Choose model" : selectedTeam?.name || "Choose saved team"}</span>
+        <span>{mode === "single" ? modelLabel(route.model, route.provider_id === "cliproxyapi-antigravity") || "Choose model" : selectedTeam?.name || "Choose saved team"}
+          {mode === "single" && route.model && route.effort ? <span className="ao-chip-effort"> {effortWord(route.effort)}</span> : null}</span>
         <span aria-hidden="true">⌄</span>
       </button>
       {popup.open ? <section ref={popup.panel} role="dialog" aria-label={mode === "single" ? "Model" : "Orchestrator / Team"}

@@ -426,7 +426,8 @@ export function ChatThreadList(props: ThreadListProps) {
                   {/* Codex's project row actions: its menu and a new chat in this project. */}
                   <span className="cx-project-hover">
                     <button type="button" aria-label={`${item.name} actions`} title="More"
-                      onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); setProjectCard(null); setMenu({ x: box.left, y: box.bottom + 4, items: projectMenu(item), label: item.name }); }}>
+                      onClick={(event) => { const owner = event.currentTarget, box = owner.getBoundingClientRect(); setProjectCard(null);
+                        setMenu((current) => current?.owner === owner ? null : { x: box.left, y: box.bottom + 4, items: projectMenu(item), label: item.name, owner }); }}>
                       <ChatGlyph name="more" size={14} /></button>
                     <button type="button" aria-label={`New chat in ${item.name}`} title="New chat in this project" onClick={() => actions.newChatIn(item.id)}>
                       <ChatGlyph name="edit" size={14} /></button>

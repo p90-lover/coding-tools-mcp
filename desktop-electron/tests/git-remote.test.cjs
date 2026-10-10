@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const os = require("node:os");
-const { readRemote, repoSlug } = require("../electron/git-remote.cjs");
+const { readBranch, readRemote, repoSlug } = require("../electron/git-remote.cjs");
 
 test("a git remote becomes owner/repo, and credentials in the URL never come back", () => {
   assert.equal(repoSlug("https://github.com/lxf746/any-auto-register.git"), "lxf746/any-auto-register");
@@ -23,4 +23,14 @@ test("only an existing absolute folder is asked, and failures read as no remote"
   assert.equal(await readRemote(os.tmpdir(), { run }), "a/b");
   assert.deepEqual(calls[0].slice(2), ["remote", "get-url", "origin"]);
   assert.equal(await readRemote(os.tmpdir(), { run: (c, a, o, callback) => callback(new Error("no origin")) }), null);
+});
+
+test("the branch is the checked-out name; detached HEAD, odd names and failures read as none", async () => {
+  const answer = (stdout) => (command, args, options, callback) => callback(null, stdout);
+  assert.equal(await readBranch(os.tmpdir(), { run: answer("main\n") }), "main");
+  assert.equal(await readBranch(os.tmpdir(), { run: answer("feat/codex-composer-look\n") }), "feat/codex-composer-look");
+  assert.equal(await readBranch(os.tmpdir(), { run: answer("HEAD\n") }), null);
+  assert.equal(await readBranch(os.tmpdir(), { run: answer("bad name; rm\n") }), null);
+  assert.equal(await readBranch("relative/path", { run: answer("main\n") }), null);
+  assert.equal(await readBranch(os.tmpdir(), { run: (c, a, o, callback) => callback(new Error("not a repo")) }), null);
 });

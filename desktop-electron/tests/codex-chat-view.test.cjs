@@ -81,6 +81,25 @@ test("the new chat's project chip opens Codex's project picker: search, projects
     [["New project", true], ["✕Don't work in a project", true]], "New project needs onAddProject; a project is always required");
 });
 
+test("the new chat is Codex's: no subtitle, a mic, and the gear opens the environment popover with the branch", () => {
+  const { props } = base({ composer: { mode: "single" }, projectBranch: "main", onSettings() {} });
+  const view = mount(props);
+  const empty = walk(view.render()).find((element) => element.props?.className === "cx-empty");
+  assert.equal(walk(empty).filter((element) => element.type === "p").length, 0, "Codex has no subtitle under the question");
+  assert.equal(walk(view.render()).find((element) => element.props?.["aria-label"] === "Voice input").props.disabled, true);
+  const gear = { getBoundingClientRect: () => ({ right: 600, top: 500 }) };
+  const pressGear = () => walk(view.render()).find((element) => element.props?.["aria-label"] === "Configure local environment").props.onClick({ currentTarget: gear });
+  const menuOf = () => walk(view.render()).find((element) => element.type === "ChatMenu").props.menu;
+  pressGear();
+  const menu = menuOf();
+  assert.equal(menu.owner, gear, "the menu knows its button, so ChatMenu leaves presses on it to the button");
+  assert.deepEqual(JSON.parse(JSON.stringify(menu.items.map((item) => [item.label, item.detail ?? null, item.toggle ?? null]))),
+    [["New worktree", null, false], ["Branch", "main", null], ["Environment", "No environment", null]],
+    "orchestrator settings stay in the header's ⋯ menu, not the environment popover");
+  pressGear();
+  assert.equal(menuOf(), null, "pressing the gear again closes its menu rather than reopening it");
+});
+
 test("a turn shows the user bubble, the live work line and a stop button; Esc stops", () => {
   const now = Date.now();
   const { props, calls } = base({

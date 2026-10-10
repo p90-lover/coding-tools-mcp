@@ -653,6 +653,16 @@ export function AgentOrchestratorSurface({ language, setError }: {
   });
 
   useEffect(() => { setChatTaskId(null); setPendingChat(null); }, [workspaceId]);
+  // The open project's checked-out branch, for the new chat's environment popover (as Codex shows it).
+  const openProjectPath = workspaces.find((item) => item.id === workspaceId)?.path ?? "";
+  const [projectBranch, setProjectBranch] = useState("");
+  useEffect(() => {
+    setProjectBranch("");
+    if (!openProjectPath) return;
+    let live = true;
+    void window.codexWebLauncher?.projectBranch?.(openProjectPath).then((branch) => { if (live) setProjectBranch(branch ?? ""); }, () => undefined);
+    return () => { live = false; };
+  }, [openProjectPath]);
   useEffect(() => {
     // Right after a project switch this runs while the previous project's board and runs are
     // still loaded; picking its "latest chat" re-selected the old project's task under the new
@@ -1528,7 +1538,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
             : <AgentOrchestratorChat
                 runs={missions.map(mission => ({...mission, replaces_run_id: taskLifecycle.flatMap(item=>item.reconfigure || []).find(intent=>intent.replacement_run_id===mission.id)?.previous_run_id}))}
                 tasks={allTasks} selectedTaskId={chatTaskId ?? ""}
-                projectName={workspaces.find((item) => item.id === workspaceId)?.name}
+                projectName={workspaces.find((item) => item.id === workspaceId)?.name} projectBranch={projectBranch}
                 stop={stopChatRun} restart={restartChatRun}
                 thread={chatTaskId ? { newChat: startNewChat, rename: (title) => renameChat(chatTaskId, title), archive: () => missionAction(chatTaskId, "archive"),
                   fork: (turnIndex) => forkChat(chatTaskId, turnIndex), copyConversation: () => copyChat(chatTaskId, "conversation"),

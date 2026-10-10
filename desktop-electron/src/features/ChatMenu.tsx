@@ -22,6 +22,9 @@ const MENU_ICONS = {
   plus: <path d="M12 5v14M5 12h14" />,
   more: <><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></>,
   spark: <path d="M12 3l1.9 5.6L19.5 10.5l-5.6 1.9L12 18l-1.9-5.6L4.5 10.5l5.6-1.9Z" />,
+  // Codex's new-chat mark: a speech bubble holding a terminal prompt.
+  codex: <><path d="M21 12a8.5 8.5 0 0 1-12.4 7.6L3 21l1.4-5.4A8.5 8.5 0 1 1 21 12Z" /><path d="m8.5 10 2.5 2-2.5 2M13 14h3" /></>,
+  mic: <><rect x="9" y="2" width="6" height="12" rx="3" /><path d="M5 10a7 7 0 0 0 14 0M12 17v5" /></>,
   monitor: <><rect x="2" y="3" width="20" height="14" rx="2" /><path d="M8 21h8M12 17v4" /></>,
   settings: <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h0a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v0a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" /></>,
   repo: <><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" /></>,
@@ -34,10 +37,13 @@ export type ChatMenuIcon = keyof typeof MENU_ICONS;
  * `reason` as the tooltip: every entry either does something real or says why it can't.
  */
 export type ChatMenuItem =
-  | { kind?: "item"; label: string; icon?: ChatMenuIcon; shortcut?: string; run?: () => void; items?: ChatMenuItem[]; reason?: string; danger?: boolean; checked?: boolean }
+  | { kind?: "item"; label: string; icon?: ChatMenuIcon; shortcut?: string; run?: () => void; items?: ChatMenuItem[]; reason?: string; danger?: boolean; checked?: boolean;
+      /** A dimmed value on the right ("main", "No environment"), and an on/off switch drawn after it. */
+      detail?: string; toggle?: boolean }
   | { kind: "separator" };
 
-export type ChatMenuState = { x: number; y: number; items: ChatMenuItem[]; label: string } | null;
+/** `owner` is the button that opened the menu: a press on it is left to the button, which toggles. */
+export type ChatMenuState = { x: number; y: number; items: ChatMenuItem[]; label: string; owner?: Element | null } | null;
 
 const actionable = (item: ChatMenuItem) => item.kind !== "separator" && Boolean(item.run || item.items?.length);
 
@@ -101,6 +107,8 @@ function MenuList({ items, label, onClose, autoFocus, style }: {
             }}>
             {withIcons ? <MenuIcon name={item.icon} /> : null}
             <span className="cx-menu-label">{item.checked ? "✓ " : ""}{item.label}</span>
+            {item.detail ? <span className="cx-menu-detail">{item.detail}</span> : null}
+            {item.toggle !== undefined ? <span className={"cx-menu-toggle" + (item.toggle ? " is-on" : "")} aria-hidden="true" /> : null}
             {item.shortcut ? <kbd>{item.shortcut}</kbd> : null}
             {item.items?.length ? <span className="cx-menu-more" aria-hidden="true">›</span> : null}
           </button>
@@ -133,7 +141,10 @@ export function ChatMenu({ menu, onClose }: { menu: ChatMenuState; onClose: () =
   }, [menu]);
   useEffect(() => {
     if (!menu) return;
-    const outside = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) onClose(); };
+    const outside = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!root.current?.contains(target) && !menu.owner?.contains(target)) onClose();
+    };
     const blur = () => onClose();
     document.addEventListener("pointerdown", outside);
     window.addEventListener("blur", blur);
