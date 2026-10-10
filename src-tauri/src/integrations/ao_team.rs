@@ -1035,7 +1035,9 @@ pub fn apply_selected_config(
         }
         let role_id = node.template_role_id.as_deref().unwrap_or(&node.id);
         if let (Some(ids), Some(selection)) = (selected_role_ids, permission_selection) {
-            if ids.iter().any(|id| id == role_id) && node.route.harness_id == "codex-native" {
+            // Every harness that honours the three modes takes the choice now, as a requeue would;
+            // an AO Claude Code / Codex card reads it from its route when it is dispatched.
+            if ids.iter().any(|id| id == role_id) && policy_supported_route(&node.route) {
                 selection.apply(&mut node.route);
             }
             continue;
@@ -1302,6 +1304,31 @@ mod tests {
         assert_eq!(created.nodes[0].route, route);
         assert!(data.ao_teams.is_empty() && created.team.is_none());
         let id = created.nodes[0].id.clone();
+        // A queued AO Claude Code card takes a new permission at once, keeping its AO sentinel.
+        let mut queued = data.clone();
+        let staged = apply_selected_config(
+            &mut queued,
+            "qa",
+            "one",
+            created.revision,
+            ApplySelection {
+                selected_role_ids: Some(vec![id.clone()]),
+                permission_selection: Some(PermissionSelection {
+                    permission_profile: Some(":danger-full-access".into()),
+                    approval_policy: Some("never".into()),
+                    approvals_reviewer: Some("user".into()),
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let staged_route = &staged.nodes[0].route;
+        assert_eq!(
+            staged_route.native_permission_profile.as_deref(),
+            Some(":danger-full-access")
+        );
+        assert_eq!(staged_route.approval_policy.as_deref(), Some("never"));
+        assert_eq!(staged_route.permission_profile, ":ao-default");
         let sha = "a".repeat(64);
         let granted = ao::grant_run(&mut data, "qa", "one", created.revision, &sha, 100).unwrap();
         assert_eq!(granted.grant.as_ref().unwrap().max_turns, 1);
