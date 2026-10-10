@@ -3,7 +3,7 @@ import type { JsonObject, WorkspaceSummary } from "../api/contracts";
 import { AgentOrchestratorCanvas } from "./AgentOrchestratorCanvas";
 import { aoDependencyChange, aoLevels, aoUnlinkChange, listAllWorkspaces, moduleCall, type AoMission, type AoNode } from "./AgentOrchestratorSurface";
 import { AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, NATIVE_HARNESS, cardMeta,
-  defaultTeam, emptyRoleSettings, workerRoute, type AoHarness, type AoTeam } from "./AgentOrchestratorRoleEditor";
+  defaultTeam, emptyRoleSettings, workerRoute, type AoHarness, type AoModelCatalog, type AoModelLoader, type AoTeam } from "./AgentOrchestratorRoleEditor";
 import { ROLE_TITLE, prepareTeamGraph } from "./AgentOrchestratorTeam";
 import "./agent-orchestrator.css";
 
@@ -51,12 +51,17 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState("");
-  const modelCache = useRef(new Map<string, Promise<string[]>>());
-  const loadModels = useCallback((harness: string) => {
+  const modelCache = useRef(new Map<string, ReturnType<AoModelLoader>>());
+  const loadModels = useCallback<AoModelLoader>((harness: string) => {
     const key = JSON.stringify([workspaceId, harness]);
     let models = modelCache.current.get(key);
     if (!models) {
-      models = moduleCall("models", { workspaceId, harness }).then(result => Array.isArray(result.models) ? result.models as string[] : []);
+      // Keep the catalog's capabilities, as the chat does: without them the role editor shows
+      // "Capabilities unverified" and offers no effort or context window.
+      models = moduleCall("models", { workspaceId, harness }).then(result => {
+        const names = Array.isArray(result.models) ? result.models as string[] : [];
+        return result.capabilities ? { models: names, capabilities: result.capabilities as AoModelCatalog["capabilities"] } : names;
+      });
       models.catch(() => modelCache.current.delete(key));
       modelCache.current.set(key, models);
     }
@@ -85,7 +90,15 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
     if (!preserveDraft) {
       setDraft(chosen ? structuredClone(chosen) : freshTeam(workspaceId, true));
       setSelectedId("");
+      return;
     }
+    // Unsaved edits are kept, but on the stored team's current revision: a draft that kept its old
+    // revision was refused by every later save ("AO team revision changed; refresh before
+    // applying"), so the Team page stopped saving. The edits on this page are the latest intent.
+    setDraft(current => {
+      const stored = current && saved.find(team => team.id === current.id);
+      return current && stored && stored.revision !== current.revision ? { ...current, revision: stored.revision } : current;
+    });
   };
   useEffect(() => {
     if (!active || !workspaceId) return;
@@ -125,13 +138,22 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
       // Edits made while saving stay in the draft, on the new revision, for the next save.
       const edited = JSON.stringify(draftRef.current) !== JSON.stringify(sent);
       accept(await moduleCall("runs", { workspaceId }), updated.id, edited);
-      if (edited) setDraft(current => current ? { ...current, revision: updated.revision } : current);
       setFailed("");
       setNotice(makeDefault ? "Default team saved" : "All changes saved");
       window.dispatchEvent(new CustomEvent("coding-tools:ao:teams-changed", { detail: { workspaceId } }));
     } catch (cause) {
+      const message = String(cause instanceof Error ? cause.message : cause);
+      // Saved elsewhere since this page loaded it: move the draft onto the stored revision (which
+      // changes it, so the automatic save goes again) instead of failing every later save.
+      if (/revision changed/i.test(message)) {
+        try {
+          const latest = await moduleCall("runs", { workspaceId });
+          const stored = (Array.isArray(latest.teams) ? latest.teams as AoTeam[] : []).find(team => team.id === sent.id);
+          if (stored && stored.revision !== sent.revision) { accept(latest, sent.id, true); return; }
+        } catch { /* report the original error */ }
+      }
       setFailed(JSON.stringify(sent));
-      setError(String(cause instanceof Error ? cause.message : cause));
+      setError(message);
     }
     finally { (automatic ? setSaving : setBusy)(false); }
   };
@@ -247,7 +269,7 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
               onClick={() => add("worker", preset)}><strong>＋ {preset.roleName}</strong><small>Worker · {preset.specialty}</small></button>)}
           </aside>
           <div className="ao-teams-canvas">
-            <AgentOrchestratorCanvas key={draft.id} nodes={draft.nodes} levels={aoLevels(mission)} selectedId={selectedId} busy={busy}
+            <AgentOrchestratorCanvas key={draft.id} nodes={draft.nodes} levels={aoLevels(mission)} selectedId={selectedId} busy={busy} showState={false}
               onSelect={setSelectedId} describe={node => cardMeta(node as AoNode, harnesses)}
               onMove={async positions => change({ ...draft, nodes: draft.nodes.map(node => {
                 const moved = positions.find(position => position.id === node.id);
