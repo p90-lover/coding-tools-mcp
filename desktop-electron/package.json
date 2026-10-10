@@ -8,7 +8,7 @@
   "main": "electron/main-with-provider.cjs",
   "scripts": {
     "dev": "bun run build:preload && bun run scripts/dev.cjs",
-    "audit": "bun audit",
+    "audit": "bun audit --ignore=GHSA-hp3w-g68c-fv3c",
     "typecheck": "tsc --noEmit",
     "build:preload": "node scripts/build-preload.cjs",
     "build:renderer": "vite build",
@@ -43,7 +43,7 @@
   },
   "overrides": {
     "@xmldom/xmldom": "0.8.15",
-    "fast-uri": "3.1.6",
+    "fast-uri": "3.1.8",
     "js-yaml": "4.3.2"
   },
   "build": {

@@ -197,7 +197,9 @@ test("normal shutdown persists the ChatGPT session before closing browser views"
     electronMain,
     /runtimeSupervisor\?\.shutdown\(\{ cancelActiveTurns: true, force: true \}\)/,
   );
-  const persist = electronMain.indexOf("await browserHost?.persistSession()");
+  // The save is an awaited quit step with a generous deadline (a hung save must not keep the app
+  // running forever), and the views close only after it.
+  const persist = electronMain.indexOf('await step("browser-session", () => browserHost?.persistSession(), 30_000)');
   const destroy = electronMain.indexOf("browserHost?.destroy()", persist);
   assert.ok(persist >= 0, "shutdown must persist the ChatGPT session");
   assert.ok(destroy > persist, "browser views must close only after session persistence completes");
