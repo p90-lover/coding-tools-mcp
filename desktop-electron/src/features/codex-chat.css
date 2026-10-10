@@ -285,6 +285,8 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .ao-workflow .cx-composer .ao-composer-chip:hover:not(:disabled), .ao-workflow .cx-composer .ao-composer-chip[aria-expanded="true"] {
   border: 0; background: var(--cx-hover); color: var(--color-text-primary); }
 .ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:last-child { margin-left: auto; }
+/* The controls take the free space themselves, so the bar's spacer would only split it in two. */
+.cx-composer-bar .ao-composer-controls + .cx-head-spacer { display: none; }
 .ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:last-child .ao-composer-chip { color: var(--color-text-primary); }
 .ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:last-child .ao-composer-chip > svg:first-child { display: none; }
 .ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:last-child .ao-composer-popover { left: auto; right: 0; }
