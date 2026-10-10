@@ -688,6 +688,12 @@ export interface LauncherApi {
   filePath?(file: File): string;
   /** Opens an existing folder in the system file manager. */
   openFolder?(folder: string): Promise<boolean>;
+  /** Opens or refreshes a chat's read-only window; `open: false` once the user has closed it. */
+  showChatWindow?(input: { key: string; title: string; page: string; body: string; mode: "open" | "update" }): Promise<{ open: boolean }>;
+  /** A project folder's git origin as "owner/repo", or null. */
+  projectRemote?(folder: string): Promise<string | null>;
+  /** The system folder picker; the chosen absolute path, or null when cancelled. */
+  chooseFolder?(): Promise<string | null>;
   setBrowserBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<boolean>;
   setBrowserSurfaceActive(active: boolean): Promise<BrowserState | true>;
   showBrowser(): Promise<BrowserState>;
