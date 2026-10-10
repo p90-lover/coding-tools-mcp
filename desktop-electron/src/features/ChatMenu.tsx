@@ -42,7 +42,8 @@ export type ChatMenuItem =
       detail?: string; toggle?: boolean }
   | { kind: "separator" };
 
-export type ChatMenuState = { x: number; y: number; items: ChatMenuItem[]; label: string } | null;
+/** `owner` is the button that opened the menu: a press on it is left to the button, which toggles. */
+export type ChatMenuState = { x: number; y: number; items: ChatMenuItem[]; label: string; owner?: Element | null } | null;
 
 const actionable = (item: ChatMenuItem) => item.kind !== "separator" && Boolean(item.run || item.items?.length);
 
@@ -140,7 +141,10 @@ export function ChatMenu({ menu, onClose }: { menu: ChatMenuState; onClose: () =
   }, [menu]);
   useEffect(() => {
     if (!menu) return;
-    const outside = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) onClose(); };
+    const outside = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!root.current?.contains(target) && !menu.owner?.contains(target)) onClose();
+    };
     const blur = () => onClose();
     document.addEventListener("pointerdown", outside);
     window.addEventListener("blur", blur);

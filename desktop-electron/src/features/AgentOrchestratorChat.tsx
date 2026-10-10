@@ -191,6 +191,9 @@ export function AgentOrchestratorChat({
   const [showStructure, setShowStructure] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [menu, setMenu] = useState<ChatMenuState>(null);
+  // A menu button toggles its menu: pressing it again closes the menu instead of reopening it.
+  const toggleMenu = (owner: HTMLElement, open: (box: DOMRect) => Omit<NonNullable<ChatMenuState>, "owner">) =>
+    setMenu((current) => current?.owner === owner ? null : { ...open(owner.getBoundingClientRect()), owner });
   // The project chip's picker, anchored just above the chip.
   const [projectPicker, setProjectPicker] = useState<{ left: number; bottom: number } | null>(null);
   const [pickerQuery, setPickerQuery] = useState("");
@@ -372,7 +375,7 @@ export function AgentOrchestratorChat({
           {onOpenMissionBoard ? <button type="button" className="cx-icon-button" title="Mission Board" aria-label="Open Mission Board" onClick={onOpenMissionBoard}>
             <Icon name="logs" width="16" height="16" /></button> : null}
           <button type="button" className="cx-icon-button" title="More" aria-label="More chat actions" aria-haspopup="menu"
-            onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); setMenu({ x: box.right - 240, y: box.bottom + 4, items: headerMenu(), label: "Chat actions" }); }}>⋯</button>
+            onClick={(event) => toggleMenu(event.currentTarget, (box) => ({ x: box.right - 240, y: box.bottom + 4, items: headerMenu(), label: "Chat actions" }))}>⋯</button>
         </header>
 
         <div className="cx-scroll" ref={scroller}
@@ -437,19 +440,19 @@ export function AgentOrchestratorChat({
             onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); setProjectPicker(projectPicker ? null : { left: box.left, bottom: window.innerHeight - box.top + 6 }); setPickerQuery(""); }}>
             <ChatGlyph name="folder" size={13} />{projectName || "No project"}<span className="cx-chip-caret" aria-hidden="true">⌄</span></button>
           <button type="button" className="cx-chip" aria-haspopup="menu"
-            onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); setMenu({ x: box.left, y: box.top - 96, label: "Work in", items: [
+            onClick={(event) => toggleMenu(event.currentTarget, (box) => ({ x: box.left, y: box.top - 96, label: "Work in", items: [
               { label: "This computer", icon: "monitor", checked: true, run: () => undefined },
               { label: "Cloud", icon: "share", reason: "No cloud runner is set up; chats run on this computer" },
-            ] }); }}>
+            ] }))}>
             <ChatGlyph name="monitor" size={13} />This computer<span className="cx-chip-caret" aria-hidden="true">⌄</span></button>
           <span className="cx-head-spacer" />
           <button type="button" className="cx-chip-icon" aria-label="Configure local environment" title="Configure local environment" aria-haspopup="menu"
-            onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); setMenu({ x: box.right - 260, y: box.top - 116, label: "Configure local environment", items: [
+            onClick={(event) => toggleMenu(event.currentTarget, (box) => ({ x: box.right - 260, y: box.top - 116, label: "Configure local environment", items: [
               // Codex's environment popover. Orchestrator settings live in the header's ⋯ menu, not here.
               { label: "New worktree", icon: "fork", toggle: false, reason: "Chats run in the project folder itself; separate worktrees aren't available yet" },
               { label: "Branch", icon: "repo", detail: branch || "current", reason: "Chats use whatever branch the project folder has checked out" },
               { label: "Environment", icon: "settings", detail: "No environment", reason: "Saved environments aren't available yet" },
-            ] }); }}>
+            ] }))}>
             <ChatGlyph name="settings" size={14} /></button>
         </div> : null}
         {projectPicker ? <FloatingLayer className="cx-project-picker" role="dialog" style={{ left: projectPicker.left, bottom: projectPicker.bottom }}>

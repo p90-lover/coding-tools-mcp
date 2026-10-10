@@ -87,12 +87,17 @@ test("the new chat is Codex's: no subtitle, a mic, and the gear opens the enviro
   const empty = walk(view.render()).find((element) => element.props?.className === "cx-empty");
   assert.equal(walk(empty).filter((element) => element.type === "p").length, 0, "Codex has no subtitle under the question");
   assert.equal(walk(view.render()).find((element) => element.props?.["aria-label"] === "Voice input").props.disabled, true);
-  walk(view.render()).find((element) => element.props?.["aria-label"] === "Configure local environment")
-    .props.onClick({ currentTarget: { getBoundingClientRect: () => ({ right: 600, top: 500 }) } });
-  const menu = walk(view.render()).find((element) => element.type === "ChatMenu").props.menu;
+  const gear = { getBoundingClientRect: () => ({ right: 600, top: 500 }) };
+  const pressGear = () => walk(view.render()).find((element) => element.props?.["aria-label"] === "Configure local environment").props.onClick({ currentTarget: gear });
+  const menuOf = () => walk(view.render()).find((element) => element.type === "ChatMenu").props.menu;
+  pressGear();
+  const menu = menuOf();
+  assert.equal(menu.owner, gear, "the menu knows its button, so ChatMenu leaves presses on it to the button");
   assert.deepEqual(JSON.parse(JSON.stringify(menu.items.map((item) => [item.label, item.detail ?? null, item.toggle ?? null]))),
     [["New worktree", null, false], ["Branch", "main", null], ["Environment", "No environment", null]],
     "orchestrator settings stay in the header's ⋯ menu, not the environment popover");
+  pressGear();
+  assert.equal(menuOf(), null, "pressing the gear again closes its menu rather than reopening it");
 });
 
 test("a turn shows the user bubble, the live work line and a stop button; Esc stops", () => {
