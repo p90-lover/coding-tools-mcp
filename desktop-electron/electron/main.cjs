@@ -146,6 +146,8 @@ let shutdownInProgress = false;
 let exitCommitted = false;
 /** The launcher's logger, for the quit path (which runs outside start's scope). */
 let quitLogger = null;
+/** How long Electron may linger after app.quit() once every stop has run (app.relaunch still applies). */
+const QUIT_EXIT_GRACE_MS = 10_000;
 let codexBridgeConnectInFlight = null;
 let runtimeStartupInFlight = null;
 let smokePassedThisSession = false;
@@ -2201,6 +2203,12 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     exitCommitted = true;
     if (relaunch) app.relaunch();
     app.quit();
+    // Every stop above has run. Electron itself has still lingered after app.quit() (over a minute
+    // on 2026-10-10, after browser-control overran), holding the install folder; end the process.
+    setTimeout(() => {
+      quitLogger?.warn("launcher.quit_forced_exit", { afterMs: QUIT_EXIT_GRACE_MS });
+      app.exit(0);
+    }, QUIT_EXIT_GRACE_MS).unref?.();
     return { ok: true };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
