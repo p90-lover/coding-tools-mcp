@@ -811,7 +811,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     setSheet("");
   });
   const chatMission = [...missions].reverse().find(mission => mission.project_id === chatTaskId);
-  const selectedSetup = savedTeams.find(setup => setup.id === composerTeamId && setup.workspace_id === workspaceId);
+  const selectedSetup = savedTeams.find(setup => setup.id === composerTeamId);
   // Reading a saved chat restores its own raw policy, once. Polling never resets explicit draft choices.
   useEffect(() => {
     if (chatTaskId === null || (chatTaskId && !chatMission)) return;

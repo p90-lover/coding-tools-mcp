@@ -333,6 +333,20 @@ test("Surface defaults to red Single and sends only one explicit route without s
   assert.equal(fixture.calls.some(call => call.operation === "team_update"), false);
 });
 
+test("a team saved from another project drives Team mode's permission menu and send here", async () => {
+  const lead = { id: "lead", role: "planner", parents: [], x: 0, y: 0, state: "pending", settings: {},
+    route: { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web", model: "chatgpt-web/high", permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" } };
+  const team = { id: "shared", workspace_id: "other-project", revision: 3, name: "Shared team", nodes: [lead] };
+  const fixture = surfaceComposer({ savedTeams: [team], composerMode: "team", composerTeamId: "shared" });
+  const permissions = fixture.currentChat().props.permissions;
+  assert.equal(permissions.props.team?.id, "shared", "the permission menu gets the selected team's roles");
+  const capability = await permissions.props.loadProfiles("lead");
+  assert.equal(capability.supported, true, "a role that hasn't run yet can still choose a mode");
+  await fixture.currentChat().props.send({ message: "Use the shared team" });
+  const sent = fixture.calls.find(call => call.operation === "chat_send").arguments;
+  assert.equal(sent.teamId, "shared"); assert.equal(sent.teamRevision, 3);
+});
+
 test("Surface Team selection passes actual identity/revision and rejects missing setups before sending", async () => {
   const team = { id: "actual", workspace_id: "w", revision: 9, name: "Actual setup", nodes: [] };
   const fixture = surfaceComposer({ savedTeams: [team], composerTeamId: "actual" });
