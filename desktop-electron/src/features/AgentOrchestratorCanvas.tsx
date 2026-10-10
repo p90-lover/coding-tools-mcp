@@ -36,8 +36,16 @@ function rounded(points: [number, number][], radius: number): string {
  * shorter side clear of every card it would cross, and into the child from above (a reviewer
  * linking back to the orchestrator loops around instead of running through the workers).
  */
-export function wirePath(from: WireBox, to: WireBox, others: WireBox[], bend = 0): string {
+export function wirePath(from: WireBox, to: WireBox, others: WireBox[], bend = 0, via?: Point | null): string {
   const x1 = from.x + from.w / 2, y1 = from.y + from.h, x2 = to.x + to.w / 2, y2 = to.y;
+  // A link the user pulled to a point passes through it: out of the parent, through the point
+  // along the line between the two ends, and into the child from above.
+  if (via) {
+    const length = Math.hypot(x2 - x1, y2 - y1) || 1, pull = Math.min(140, length / 4);
+    const ux = (x2 - x1) / length * pull, uy = (y2 - y1) / length * pull;
+    const outReach = Math.max(48, Math.abs(via.y - y1) * .5), inReach = Math.max(48, Math.abs(y2 - via.y) * .5);
+    return `M${x1},${y1} C${x1},${y1 + outReach} ${via.x - ux},${via.y - uy} ${via.x},${via.y} S${x2},${y2 - inReach} ${x2},${y2}`;
+  }
   const reach = Math.max(60, Math.abs(y2 - y1) * .45);
   const blocked = others.filter(other => Array.from({ length: 19 }, (_, i) => (i + 1) / 20)
     .some(t => crosses(other, cubicAt(t, x1, x1 + bend, x2 + bend, x2), cubicAt(t, y1, y1 + reach, y2 - reach, y2))));
@@ -70,6 +78,14 @@ export function moveCanvasSelection(points: Map<string, Point>, dx: number, dy: 
 
 export type LinkAction = { kind: "connect" | "disconnect"; id: string; parentId: string };
 
+/** How a team stores the point a link is pulled through: "parent>child", or "loop". */
+export const linkPointKey = (parentId: string, id: string) => `${parentId}>${id}`;
+export const LOOP_LINK = "loop";
+/** A scene point from a pointer position, under the canvas camera. */
+export function scenePoint(clientX: number, clientY: number, bounds: { left: number; top: number }, view: { x: number; y: number; scale: number }): Point {
+  return { x: Math.round((clientX - bounds.left - view.x) / view.scale), y: Math.round((clientY - bounds.top - view.y) / view.scale) };
+}
+
 /**
  * What shift-clicking `target` does while `starter` is the active card: an existing removable link
  * between them (either direction) is removed, otherwise the target is linked below the starter, or
@@ -99,7 +115,13 @@ export function canvasLayout(nodes: CanvasNode[], levels: CanvasNode[][], height
   return result;
 }
 
-export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSelect, onMove, onConnect, canConnect, onUnlink, canUnlink, onRemove, canRemove, describe, children, showState = true }: {
+export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSelect, onMove, onConnect, canConnect, onUnlink, canUnlink, onRemove, canRemove, describe, children, showState = true, loop = null, points, onBend }: {
+  /** The reviewer's way back to the orchestrator, drawn as a dashed link (not a dependency). */
+  loop?: { from: string; to: string } | null;
+  /** Points links are pulled through, keyed by `linkPointKey` (or `LOOP_LINK`). */
+  points?: Record<string, Point>;
+  /** Shift-drag a link to pull it through a point; Shift-double-click resets it (point null). */
+  onBend?: (key: string, point: Point | null) => void;
   nodes: CanvasNode[]; levels: CanvasNode[][]; selectedId: string; busy: boolean;
   /** A saved team is a template that never runs: its cards show no run state. */
   showState?: boolean;
@@ -130,8 +152,12 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
   const wind = useRef(0);
   const frame = useRef(0);
   const reducedMotion = useRef(false);
-  const current = useRef({ nodes, levels, canConnect, onMove });
-  current.current = { nodes, levels, canConnect, onMove };
+  const current = useRef({ nodes, levels, canConnect, onMove, loop, points });
+  current.current = { nodes, levels, canConnect, onMove, loop, points };
+  // A link being pulled: its key and where it is now, ahead of the saved point. A point just
+  // released is kept here until the page's saved points catch up, so the link doesn't snap back.
+  const bending = useRef<{ key: string; point: Point | null } | null>(null);
+  const released = useRef(new Map<string, Point | null>());
   const [parentId, setParentId] = useState("");
   const [dropTarget, setDropTarget] = useState("");
   const [draggingId, setDraggingId] = useState("");
@@ -184,17 +210,21 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
       const point = positions.current.get(id);
       return point ? { x: point.x, y: point.y, w: width, h: heights.current.get(id) || height } : null;
     };
-    for (const node of current.current.nodes) for (const parent of node.parents) {
-      const from = box(parent), to = box(node.id);
+    const pulled = (key: string) => bending.current?.key === key ? bending.current.point
+      : released.current.has(key) ? released.current.get(key)! : current.current.points?.[key] ?? null;
+    const links = current.current.nodes.flatMap(node => node.parents.map(parent => ({ parent, id: node.id, key: JSON.stringify([parent, node.id]), point: linkPointKey(parent, node.id) })));
+    const loopLink = current.current.loop;
+    if (loopLink) links.push({ parent: loopLink.from, id: loopLink.to, key: LOOP_LINK, point: LOOP_LINK });
+    for (const { parent, id, key, point } of links) {
+      const from = box(parent), to = box(id);
       if (!from || !to) continue;
       const x1 = from.x + width / 2, y1 = from.y + from.h, x2 = to.x + width / 2, y2 = to.y;
       const dragged = drag.current?.id ? positions.current.get(drag.current.id) : null;
       const influence = dragged ? Math.max(0, 1 - Math.hypot((x1 + x2) / 2 - dragged.x - width / 2, (y1 + y2) / 2 - dragged.y - height / 2) / 400) : 1;
       const bend = reducedMotion.current ? 0 : wind.current * influence;
-      const others = current.current.nodes.filter(other => other.id !== parent && other.id !== node.id)
+      const others = current.current.nodes.filter(other => other.id !== parent && other.id !== id)
         .map(other => box(other.id)).filter((other): other is WireBox => Boolean(other));
-      const shape = wirePath(from, to, others, bend);
-      const key = JSON.stringify([parent, node.id]);
+      const shape = wirePath(from, to, others, bend, pulled(point));
       paths.current.get(key)?.setAttribute("d", shape);
       paths.current.get(`${key}#hit`)?.setAttribute("d", shape);
     }
@@ -236,6 +266,9 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
     positions.current = next;
     if (!initialized.current) initialized.current = fit(); else schedule();
   }, [nodes, levels]);
+
+  // New saved points (or a loop switched on or off) redraw the links; a released point gives way.
+  useLayoutEffect(() => { released.current.clear(); schedule(); }, [points, loop?.from, loop?.to]);
 
   // Automatic views refit on pane/window resize. Manual navigation keeps its world centre
   // unless resizing would leave every card offscreen, in which case restore an inspectable view.
@@ -288,9 +321,13 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
     };
     surface.addEventListener("wheel", wheel, { passive: false });
     const observer = new ResizeObserver(schedule); observer.observe(surface);
+    // Shift held: links show they can be pulled rather than removed.
+    const shift = (event: KeyboardEvent) => surface.classList.toggle("is-shift", event.shiftKey);
+    window.addEventListener("keydown", shift); window.addEventListener("keyup", shift);
     return () => {
       cancelAnimationFrame(frame.current); observer.disconnect();
       surface.removeEventListener("wheel", wheel); preference.removeEventListener("change", motionChanged);
+      window.removeEventListener("keydown", shift); window.removeEventListener("keyup", shift);
     };
   }, []);
 
@@ -306,7 +343,21 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
     drag.current = { id, start: { x: event.clientX, y: event.clientY }, last: { x: event.clientX, y: event.clientY }, original: id ? positions.current.get(id)! : { ...camera.current }, group, moved: false };
     if (id) { setSelected(new Set(ids)); onSelect(id); setDraggingId(id); }
   };
+  // Shift-drag on a link pulls it through the pointer; the point is saved when the drag ends.
+  const startBend = (event: ReactPointerEvent, key: string) => {
+    if (!onBend || busy || event.button !== 0 || !event.shiftKey) return false;
+    event.preventDefault(); event.stopPropagation();
+    viewport.current!.setPointerCapture(event.pointerId);
+    bending.current = { key, point: scenePoint(event.clientX, event.clientY, viewport.current!.getBoundingClientRect(), camera.current) };
+    schedule();
+    return true;
+  };
   const move = (event: ReactPointerEvent) => {
+    if (bending.current) {
+      bending.current.point = scenePoint(event.clientX, event.clientY, viewport.current!.getBoundingClientRect(), camera.current);
+      schedule();
+      return;
+    }
     const active = drag.current;
     if (!active) return;
     const dx = event.clientX - active.start.x, dy = event.clientY - active.start.y;
@@ -327,6 +378,13 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
     active.last = { x: event.clientX, y: event.clientY }; schedule();
   };
   const end = (cancelled: boolean) => {
+    const pulling = bending.current;
+    if (pulling) {
+      bending.current = null;
+      if (!cancelled && pulling.point) { released.current.set(pulling.key, pulling.point); onBend?.(pulling.key, pulling.point); }
+      schedule();
+      return;
+    }
     const active = drag.current;
     if (!active) return;
     drag.current = null; setDraggingId(""); setDropTarget("");
@@ -373,10 +431,21 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
       <svg className="ao-canvas-wires" aria-hidden="true">{nodes.flatMap(node => node.parents.flatMap(parent => [<path key={JSON.stringify([parent, node.id])}
         ref={element => { const key = JSON.stringify([parent, node.id]); if (element) paths.current.set(key, element); else paths.current.delete(key); }}
         className={["running", "reserved"].includes(node.state) ? "is-running" : ""} />,
-        // A wide invisible twin makes the thin link easy to click.
-        onUnlink ? <path key={`${JSON.stringify([parent, node.id])}#hit`} className="ao-wire-hit"
+        // A wide invisible twin makes the thin link easy to click (or Shift-drag to pull it).
+        onUnlink || onBend ? <path key={`${JSON.stringify([parent, node.id])}#hit`} className="ao-wire-hit"
           ref={element => { const key = `${JSON.stringify([parent, node.id])}#hit`; if (element) paths.current.set(key, element); else paths.current.delete(key); }}
-          onClick={() => { if (!busy) onUnlink(node.id, parent); }}><title>Click to remove this link</title></path> : null]))}</svg>
+          onPointerDown={event => { startBend(event, linkPointKey(parent, node.id)); }}
+          onDoubleClick={event => { if (event.shiftKey && !busy) { released.current.set(linkPointKey(parent, node.id), null); onBend?.(linkPointKey(parent, node.id), null); schedule(); } }}
+          onClick={event => { if (!busy && !event.shiftKey) onUnlink?.(node.id, parent); }}>
+          <title>{[onUnlink ? "Click to remove this link" : "", onBend ? "Shift-drag to bend it, Shift-double-click to straighten it" : ""].filter(Boolean).join("; ")}</title></path> : null]))}
+        {loop ? <>
+          <path key={LOOP_LINK} className="is-loop" ref={element => { if (element) paths.current.set(LOOP_LINK, element); else paths.current.delete(LOOP_LINK); }} />
+          {onBend ? <path key={`${LOOP_LINK}#hit`} className="ao-wire-hit"
+            ref={element => { if (element) paths.current.set(`${LOOP_LINK}#hit`, element); else paths.current.delete(`${LOOP_LINK}#hit`); }}
+            onPointerDown={event => { startBend(event, LOOP_LINK); }}
+            onDoubleClick={event => { if (event.shiftKey && !busy) { released.current.set(LOOP_LINK, null); onBend(LOOP_LINK, null); schedule(); } }}>
+            <title>The reviewer reports back to the orchestrator. Shift-drag to bend it, Shift-double-click to straighten it</title></path> : null}
+        </> : null}</svg>
       {nodes.map(node => <div key={node.id} data-ao-node={node.id} ref={element => { if (element) elements.current.set(node.id, element); else elements.current.delete(node.id); }}
         className={`ao-canvas-card ao-node-${node.state}${selected.has(node.id) ? " is-selected" : ""}${draggingId && selected.has(node.id) ? " is-dragging" : ""}${dropTarget === node.id ? " is-target" : ""}`}>
         <button type="button" className="ao-card-handle" aria-label={showState ? `Edit ${node.settings?.name || node.role}, ${node.state}` : `Edit ${node.settings?.name || node.role}`}

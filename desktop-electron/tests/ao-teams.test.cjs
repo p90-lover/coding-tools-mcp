@@ -17,7 +17,15 @@ function load(file, imports = {}) {
 }
 const roles = load("AgentOrchestratorRoleEditor.tsx");
 const teamEditor = load("AgentOrchestratorTeam.tsx", { "./AgentOrchestratorRoleEditor": roles });
-const teams = load("AgentOrchestratorTeamsSurface.tsx", { "./AgentOrchestratorRoleEditor": roles, "./AgentOrchestratorTeam": teamEditor });
+// The canvas's pure helpers (link routing, link points), without its React component.
+function canvasHelpers() {
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorCanvas.tsx"), "utf8");
+  const start = source.indexOf("export type WireBox"), end = source.indexOf("export function AgentOrchestratorCanvas");
+  const code = ts.transpileModule(source.slice(start, end), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
+  const helpers = {}; new Function("exports", code)(helpers);
+  return helpers;
+}
+const teams = load("AgentOrchestratorTeamsSurface.tsx", { "./AgentOrchestratorRoleEditor": roles, "./AgentOrchestratorTeam": teamEditor, "./AgentOrchestratorCanvas": canvasHelpers() });
 const fixture = () => roles.defaultTeam("workspace-a", roles.workerRoute(roles.DEFAULT_WORKER_HARNESS, roles.DEFAULT_WORKER_MODEL));
 
 test("a mission editor never replaces its own snapshot with an unrelated default team", () => {
@@ -131,6 +139,38 @@ test("links go around cards: a direct orchestrator-to-reviewer link no longer ru
   assert.match(canvas.wirePath(lead, workers[1], []), /^M506,76 C/);
   // A child above its parent (a link back up): routed around, never a straight crossing.
   assert.match(canvas.wirePath(reviewer, lead, workers), /Q/);
+});
+
+test("a Shift-dragged link passes through its point, and a loop back to the orchestrator goes around the cards", () => {
+  const canvas = canvasHelpers();
+  const card = (x, y) => ({ x, y, w: 212, h: 76 });
+  const lead = card(400, 0), workers = [card(0, 200), card(400, 200), card(800, 200)], reviewer = card(400, 420);
+  const pulled = canvas.wirePath(lead, workers[1], [], 0, { x: 300, y: 150 });
+  assert.match(pulled, /^M506,76 C506,/);
+  assert.match(pulled, / 300,150 S/, "the link reaches the pulled point, then continues to its child");
+  assert.match(pulled, / 506,200$/);
+  // The loop from the reviewer up to the orchestrator: no point of it inside a worker.
+  const loop = canvas.wirePath(reviewer, lead, workers);
+  const all = loop.match(/-?\d+(\.\d+)?/g).map(Number); const points = [];
+  for (let i = 0; i + 1 < all.length; i += 2) points.push([all[i], all[i + 1]]);
+  assert.ok(points.every(([x, y]) => workers.every(w => !(x > w.x && x < w.x + w.w && y > w.y && y < w.y + w.h))));
+  assert.deepEqual(canvas.scenePoint(250, 180, { left: 50, top: 30 }, { x: 100, y: 50, scale: 2 }), { x: 50, y: 50 });
+  assert.equal(canvas.linkPointKey("lead", "worker"), "lead>worker");
+});
+
+test("a looping team draws the reviewer's way back, and link points follow the team's links", () => {
+  const team = fixture();
+  const planner = team.nodes.find(node => node.role === "planner"), reviewer = team.nodes.find(node => node.role === "reviewer");
+  assert.equal(teams.teamLoop(team), null, "no loop until the team turns it on");
+  team.review_loop = true;
+  assert.deepEqual({ ...teams.teamLoop(team) }, { from: reviewer.id, to: planner.id });
+  const worker = team.nodes.find(node => node.role === "worker" && node.parents.includes(planner.id));
+  const key = `${planner.id}>${worker.id}`;
+  team.link_points = { "gone>link": { x: 1, y: 1 }, loop: { x: 9, y: 9 } };
+  const bent = teams.bentLinks(team, key, { x: 10.4, y: -3.6 });
+  assert.deepEqual(JSON.parse(JSON.stringify(bent)), { loop: { x: 9, y: 9 }, [key]: { x: 10, y: -4 } }, "stale points drop; the new one is rounded");
+  assert.deepEqual(JSON.parse(JSON.stringify(teams.bentLinks({ ...team, link_points: bent }, key, null))), { loop: { x: 9, y: 9 } }, "Shift-double-click resets a link");
+  assert.deepEqual(JSON.parse(JSON.stringify(teams.bentLinks(team, "not>a-link", { x: 1, y: 1 }))), { loop: { x: 9, y: 9 } }, "a point for a missing link is not kept");
 });
 
 test("a block's role editor opens as a popover beside it, survives autosaves and closes on a press outside", () => {

@@ -85,10 +85,34 @@ pub struct Team {
     /// Rework rounds new missions from this team allow (1 to 10).
     #[serde(default = "ao::default_review_rounds")]
     pub max_review_rounds: u8,
+    /// The main reviewer reports back to the orchestrator: on CHANGES_REQUIRED the orchestrator
+    /// runs again with the review and either plans another round or ends the mission.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub review_loop: bool,
+    /// Canvas layout only: the point a drawn link is pulled through, keyed "parent>child" (or
+    /// "loop" for the reviewer's way back to the orchestrator).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub link_points: BTreeMap<String, LinkPoint>,
     pub nodes: Vec<Node>,
     /// Explicit mission-only future intent; never persisted as a reusable team's grant.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub permission_selections: BTreeMap<String, PermissionSelection>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkPoint {
+    pub x: i32,
+    pub y: i32,
+}
+
+/// The most link points one team keeps, and how far from the origin one may sit.
+const MAX_LINK_POINTS: usize = 96;
+const LINK_POINT_RANGE: i32 = 20_000;
+
+/// Whether a run's team sends the main reviewer's verdict back to the orchestrator.
+pub fn review_loops(run: &Run) -> bool {
+    run.team.as_ref().is_some_and(|team| team.review_loop)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -324,6 +348,17 @@ pub fn save(
     }
     if !(1..=ao::MAX_REVIEW_ROUNDS).contains(&team.max_review_rounds) {
         return Err(fail("Choose one to ten review rounds"));
+    }
+    if team.link_points.len() > MAX_LINK_POINTS
+        || team.link_points.iter().any(|(key, point)| {
+            key.is_empty()
+                || key.len() > 200
+                || key.chars().any(char::is_control)
+                || point.x.abs() > LINK_POINT_RANGE
+                || point.y.abs() > LINK_POINT_RANGE
+        })
+    {
+        return Err(fail("A team's link points are out of range"));
     }
     if !team.editable_graph {
         normalize_roles(&mut team.nodes);
@@ -1061,6 +1096,8 @@ pub fn apply_selected_config(
                 editable_graph: false,
                 worker_limit: next.worker_limit,
                 max_review_rounds: next.max_review_rounds,
+                review_loop: false,
+                link_points: BTreeMap::new(),
                 nodes: next
                     .nodes
                     .iter()
@@ -1252,11 +1289,15 @@ pub fn queue_rework(
             return Ok(None);
         }
         let targets = ao::parse_rework_targets(&answer, &next);
+        // A looping team hands the review back to the orchestrator, which re-plans every worker
+        // (or ends the mission); otherwise only the workers the reviewer named are redone.
+        let to_orchestrator = review_loops(&next);
         for node in &mut next.nodes {
             let redo = match node.role {
-                Role::Worker => targets.is_empty() || targets.contains(&node.id),
+                Role::Worker => to_orchestrator || targets.is_empty() || targets.contains(&node.id),
                 Role::ReviewSplit | Role::SubReviewer | Role::Reviewer => true,
-                Role::Planner | Role::Approver | Role::Retry => false,
+                Role::Planner | Role::Approver => to_orchestrator,
+                Role::Retry => false,
             };
             if redo && requeue(node, next.team.as_ref()) {
                 next.grant = None;
