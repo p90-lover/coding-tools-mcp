@@ -1,5 +1,5 @@
 import { ROLE_TITLE } from "./AgentOrchestratorTeam";
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 
 export type CanvasNode = {
@@ -10,6 +10,52 @@ export type CanvasNode = {
 type Point = { x: number; y: number };
 const width = 212;
 const height = 76;
+
+export type WireBox = { x: number; y: number; w: number; h: number };
+const cubicAt = (t: number, a: number, b: number, c: number, d: number) =>
+  (1 - t) ** 3 * a + 3 * (1 - t) ** 2 * t * b + 3 * (1 - t) * t * t * c + t ** 3 * d;
+const crosses = (box: WireBox, x: number, y: number, pad = 10) =>
+  x > box.x - pad && x < box.x + box.w + pad && y > box.y - pad && y < box.y + box.h + pad;
+
+/** Polyline with rounded corners, so a detour reads as one smooth link. */
+function rounded(points: [number, number][], radius: number): string {
+  let d = `M${points[0][0]},${points[0][1]}`;
+  for (let i = 1; i < points.length - 1; i++) {
+    const [px, py] = points[i - 1], [cx, cy] = points[i], [nx, ny] = points[i + 1];
+    const into = Math.hypot(cx - px, cy - py) || 1, out = Math.hypot(nx - cx, ny - cy) || 1;
+    const r = Math.min(radius, into / 2, out / 2);
+    d += ` L${cx + (px - cx) / into * r},${cy + (py - cy) / into * r} Q${cx},${cy} ${cx + (nx - cx) / out * r},${cy + (ny - cy) / out * r}`;
+  }
+  const [lx, ly] = points[points.length - 1];
+  return `${d} L${lx},${ly}`;
+}
+
+/**
+ * A link from the bottom of `from` to the top of `to`. The usual curve is kept when the child is
+ * below and nothing is in the way; otherwise the link goes around: out of the parent, along the
+ * shorter side clear of every card it would cross, and into the child from above (a reviewer
+ * linking back to the orchestrator loops around instead of running through the workers).
+ */
+export function wirePath(from: WireBox, to: WireBox, others: WireBox[], bend = 0): string {
+  const x1 = from.x + from.w / 2, y1 = from.y + from.h, x2 = to.x + to.w / 2, y2 = to.y;
+  const reach = Math.max(60, Math.abs(y2 - y1) * .45);
+  const blocked = others.filter(other => Array.from({ length: 19 }, (_, i) => (i + 1) / 20)
+    .some(t => crosses(other, cubicAt(t, x1, x1 + bend, x2 + bend, x2), cubicAt(t, y1, y1 + reach, y2 - reach, y2))));
+  if (y2 > y1 + 24 && !blocked.length) return `M${x1},${y1} C${x1 + bend},${y1 + reach} ${x2 + bend},${y2 - reach} ${x2},${y2}`;
+  const out = y1 + 24, into = y2 - 24, gap = 36;
+  const span = [from, to, ...blocked];
+  const left = Math.min(...span.map(item => item.x)) - gap, right = Math.max(...span.map(item => item.x + item.w)) + gap;
+  const goLeft = Math.abs(x1 - left) + Math.abs(x2 - left) <= Math.abs(right - x1) + Math.abs(right - x2);
+  let side = goLeft ? left : right;
+  // Step further out while the side lane still runs through a card.
+  const top = Math.min(out, into), bottom = Math.max(out, into);
+  for (let guard = 0; guard < 24; guard++) {
+    const hit = others.find(other => side > other.x - 10 && side < other.x + other.w + 10 && other.y < bottom && other.y + other.h > top);
+    if (!hit) break;
+    side = goLeft ? hit.x - gap : hit.x + hit.w + gap;
+  }
+  return rounded([[x1, y1], [x1, out], [side, out], [side, into], [x2, into], [x2, y2]], 14);
+}
 const gapX = 252;
 const gapY = 56;
 const arrowMoves: Record<string, [number, number]> = { ArrowLeft: [-16, 0], ArrowRight: [16, 0], ArrowUp: [0, -16], ArrowDown: [0, 16] };
@@ -53,8 +99,10 @@ export function canvasLayout(nodes: CanvasNode[], levels: CanvasNode[][], height
   return result;
 }
 
-export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSelect, onMove, onConnect, canConnect, onUnlink, canUnlink, onRemove, canRemove, describe, children }: {
+export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSelect, onMove, onConnect, canConnect, onUnlink, canUnlink, onRemove, canRemove, describe, children, showState = true }: {
   nodes: CanvasNode[]; levels: CanvasNode[][]; selectedId: string; busy: boolean;
+  /** A saved team is a template that never runs: its cards show no run state. */
+  showState?: boolean;
   describe: (node: CanvasNode) => string;
   children?: ReactNode;
   onSelect: (id: string) => void;
@@ -88,6 +136,8 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
   const [dropTarget, setDropTarget] = useState("");
   const [draggingId, setDraggingId] = useState("");
   const [selected, setSelected] = useState(new Set(selectedId ? [selectedId] : []));
+  // When the page clears its selection (the Team page's role popover closing), drop the highlight too.
+  useEffect(() => { if (!selectedId) setSelected(current => current.size ? new Set() : current); }, [selectedId]);
   const [notice, setNotice] = useState("");
   const noticeTimer = useRef(0);
   const initialized = useRef(false);
@@ -130,15 +180,20 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
       if (element) element.style.transform = `translate(${point.x}px, ${point.y}px)`;
     }
     // ponytail: the graph is capped at 24 cards; one bounded scan per drag frame is enough.
+    const box = (id: string): WireBox | null => {
+      const point = positions.current.get(id);
+      return point ? { x: point.x, y: point.y, w: width, h: heights.current.get(id) || height } : null;
+    };
     for (const node of current.current.nodes) for (const parent of node.parents) {
-      const from = positions.current.get(parent), to = positions.current.get(node.id);
+      const from = box(parent), to = box(node.id);
       if (!from || !to) continue;
-      const x1 = from.x + width / 2, y1 = from.y + (heights.current.get(parent) || height), x2 = to.x + width / 2, y2 = to.y;
+      const x1 = from.x + width / 2, y1 = from.y + from.h, x2 = to.x + width / 2, y2 = to.y;
       const dragged = drag.current?.id ? positions.current.get(drag.current.id) : null;
       const influence = dragged ? Math.max(0, 1 - Math.hypot((x1 + x2) / 2 - dragged.x - width / 2, (y1 + y2) / 2 - dragged.y - height / 2) / 400) : 1;
       const bend = reducedMotion.current ? 0 : wind.current * influence;
-      const reach = Math.max(60, Math.abs(y2 - y1) * .45);
-      const shape = `M${x1},${y1} C${x1 + bend},${y1 + reach} ${x2 + bend},${y2 - reach} ${x2},${y2}`;
+      const others = current.current.nodes.filter(other => other.id !== parent && other.id !== node.id)
+        .map(other => box(other.id)).filter((other): other is WireBox => Boolean(other));
+      const shape = wirePath(from, to, others, bend);
       const key = JSON.stringify([parent, node.id]);
       paths.current.get(key)?.setAttribute("d", shape);
       paths.current.get(`${key}#hit`)?.setAttribute("d", shape);
@@ -324,7 +379,7 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
           onClick={() => { if (!busy) onUnlink(node.id, parent); }}><title>Click to remove this link</title></path> : null]))}</svg>
       {nodes.map(node => <div key={node.id} data-ao-node={node.id} ref={element => { if (element) elements.current.set(node.id, element); else elements.current.delete(node.id); }}
         className={`ao-canvas-card ao-node-${node.state}${selected.has(node.id) ? " is-selected" : ""}${draggingId && selected.has(node.id) ? " is-dragging" : ""}${dropTarget === node.id ? " is-target" : ""}`}>
-        <button type="button" className="ao-card-handle" aria-label={`Edit ${node.settings?.name || node.role}, ${node.state}`}
+        <button type="button" className="ao-card-handle" aria-label={showState ? `Edit ${node.settings?.name || node.role}, ${node.state}` : `Edit ${node.settings?.name || node.role}`}
           aria-pressed={selected.has(node.id)}
           title="Shift-click another card to link or unlink it with this one; Ctrl-click to select several; arrow keys move the selection"
           onPointerDown={event => { event.stopPropagation(); begin(event, node.id); }} onClick={event => {
@@ -343,9 +398,9 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
             for (const [id, point] of moveCanvasSelection(before, delta[0], delta[1])) positions.current.set(id, point);
             wind.current = 0; schedule(); persist(before);
           }}>
-          <span className="ao-card-title"><span className={`ao-dot ao-dot-${node.state}`} title={node.state} aria-hidden="true" />
+          <span className="ao-card-title">{showState ? <span className={`ao-dot ao-dot-${node.state}`} title={node.state} aria-hidden="true" /> : null}
             <strong>{node.settings?.name || ROLE_TITLE[node.role as keyof typeof ROLE_TITLE] || "Worker"}</strong>
-            <span className="ao-canvas-state">{node.role === "reviewer" && node.state === "running" ? "reviewing" : node.state}</span></span>
+            {showState ? <span className="ao-canvas-state">{node.role === "reviewer" && node.state === "running" ? "reviewing" : node.state}</span> : null}</span>
           <span className="ao-card-route">{describe(node)}</span>
         </button>
         <button type="button" className="ao-port ao-port-in" aria-label={`Connect dependency to ${node.settings?.name || node.role}`}

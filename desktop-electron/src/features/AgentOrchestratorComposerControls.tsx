@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { KeyboardEvent, ReactNode } from "react";
 import { Icon } from "../icons";
 import {
-  HarnessPicker, capabilityText, NATIVE_HARNESS, DEFAULT_WORKER_HARNESS, isWebModel, modelLabel, nativePermission, workerRoute, withTuning,
+  HarnessPicker, capabilityText, rememberCpaProviders, NATIVE_HARNESS, DEFAULT_WORKER_HARNESS, isWebModel, modelLabel, nativePermission, workerRoute, withTuning,
   type AoHarness, type AoModelCapabilities, type AoModelCatalog, type AoModelLoader, type AoRoute, type AoTeam,
 } from "./AgentOrchestratorRoleEditor";
 
@@ -68,6 +68,7 @@ export function AgentOrchestratorComposerControls({
       if (!live) return;
       setModels([...new Set([...modelIds(catalog), ...modelIds(webCatalog)])]);
       setCaps({ ...modelCaps(webCatalog), ...modelCaps(catalog) });
+      rememberCpaProviders({ ...modelCaps(webCatalog), ...modelCaps(catalog) });
     }).catch(cause => { if (live) { setModels([]); setError(cause instanceof Error ? cause.message : String(cause)); } });
     return () => { live = false; };
   }, [popup.open, mode, route.harness_id, loadModels]);
@@ -86,7 +87,7 @@ export function AgentOrchestratorComposerControls({
         aria-haspopup="dialog" aria-label={mode === "single" ? "Choose model" : "Choose saved team"}
         onClick={() => popup.setOpen(value => !value)}>
         <Icon name={mode === "single" ? "activity" : "orchestrator"} width="16" height="16" />
-        <span>{mode === "single" ? modelLabel(route.model) || "Choose model" : selectedTeam?.name || "Choose saved team"}</span>
+        <span>{mode === "single" ? modelLabel(route.model, route.provider_id === "cliproxyapi-antigravity") || "Choose model" : selectedTeam?.name || "Choose saved team"}</span>
         <span aria-hidden="true">⌄</span>
       </button>
       {popup.open ? <section ref={popup.panel} role="dialog" aria-label={mode === "single" ? "Model" : "Orchestrator / Team"}
@@ -101,7 +102,7 @@ export function AgentOrchestratorComposerControls({
           <div className="ao-model-options" role="radiogroup" aria-label="Available models">
             {models === null ? <p role="status">Loading models…</p> : matching.map(model => <button key={model} type="button" role="radio" aria-checked={route.model === model}
               className="ao-picker-option" disabled={busy} onClick={() => onRouteChange(withTuning(workerRoute(route.harness_id, model, nativePermission(route)), route))}>
-              <span className="ao-option-radio" aria-hidden="true" /><span>{modelLabel(model)}
+              <span className="ao-option-radio" aria-hidden="true" /><span>{modelLabel(model, route.harness_id === NATIVE_HARNESS && !isWebModel(model))}
                 {capabilityText(caps[model], route.harness_id === NATIVE_HARNESS && isWebModel(model)) ? <small>{capabilityText(caps[model], route.harness_id === NATIVE_HARNESS && isWebModel(model))}</small> : null}</span>{route.model === model ? <Icon name="check" width="16" height="16" /> : null}
             </button>)}
             {models !== null && !matching.length ? <p role="status">{error || "No matching models available from this runtime."}</p> : null}

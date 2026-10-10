@@ -8,6 +8,8 @@ export type AoHarness = { id: string; label: string; runnable: boolean; installe
 export type AoRoute = AoNode["route"];
 export type AoModelCapabilities = {
   efforts?: string[];
+  /** The upstream CPA serves this model through, as CPA reports it (e.g. "antigravity"). */
+  provider?: string;
   contextWindow?: { min: number; max?: number; kind?: "context" | "compaction" };
   contextLimit?: number; effortReason?: string; contextReason?: string;
 };
@@ -111,7 +113,7 @@ export function cardMeta(node: Pick<AoNode, "role" | "settings" | "route">, harn
   const route = node.route;
   return [
     harnessLabel(route.harness_id, harnesses),
-    modelLabel(route.model),
+    modelLabel(route.model, route.provider_id === "cliproxyapi-antigravity"),
     route.effort && (effortApplies(route) || route.harness_id.startsWith("ao:")) ? `effort ${route.effort}` : "",
     route.context_window && (contextApplies(route) || route.harness_id.startsWith("ao:")) ? `${tokensLabel(route.context_window)} context` : "",
     showRole ? roleLabel(node) : "",
@@ -126,9 +128,38 @@ export type NativePermission = string;
 export const nativePermission = (route: AoRoute): NativePermission => route.harness_id === NATIVE_HARNESS ? route.permission_profile : route.native_permission_profile ?? route.permission_profile;
 
 /** "chatgpt-web/extra-high" -> "WebGPT Extra High"; other model ids are shown as-is. */
-export function modelLabel(model: string): string {
+// Providers CPA reported for its models, remembered as catalogs load so every label can use them.
+const cpaProviders = new Map<string, string>();
+export function rememberCpaProviders(capabilities?: Record<string, AoModelCapabilities>) {
+  for (const [id, capability] of Object.entries(capabilities ?? {})) {
+    if (capability?.provider) cpaProviders.set(id.replace(/^cpa\//, ""), capability.provider);
+  }
+}
+const PROVIDER_NAMES: Record<string, string> = {
+  antigravity: "Antigravity", "gemini-cli": "Gemini CLI", gemini: "Gemini", google: "Google", vertex: "Vertex",
+  codex: "Codex", openai: "OpenAI", claude: "Claude", anthropic: "Anthropic", "cline-pass": "Cline Pass", cline: "Cline",
+  qwen: "Qwen", iflow: "iFlow", kimi: "Kimi", moonshot: "Moonshot", deepseek: "DeepSeek", xai: "xAI", grok: "Grok",
+  zhipu: "Zhipu", glm: "Zhipu", openrouter: "OpenRouter", commandcode: "CommandCode",
+};
+const providerName = (provider: string) => PROVIDER_NAMES[provider.toLowerCase()] ?? provider;
+/** "CPA · <provider> · <model>": the provider CPA reported, else the model id's own prefix or family. */
+function cpaLabel(id: string): string {
+  const slash = id.indexOf("/");
+  const prefix = slash > 0 ? id.slice(0, slash) : "";
+  const name = prefix ? id.slice(slash + 1) : id;
+  const lower = name.toLowerCase();
+  const family = lower.startsWith("gemini") ? "gemini" : lower.startsWith("claude") ? "claude"
+    : /^(gpt|o\d|codex)/.test(lower) ? "openai" : lower.startsWith("grok") ? "grok" : lower.startsWith("deepseek") ? "deepseek"
+    : lower.startsWith("glm") ? "zhipu" : lower.startsWith("qwen") ? "qwen" : lower.startsWith("kimi") ? "kimi" : "";
+  const provider = cpaProviders.get(id) ?? (prefix || family);
+  return provider ? `CPA · ${providerName(provider)} · ${name}` : `CPA · ${name}`;
+}
+
+/** cpaPool: a bare id that Native Codex runs through the shared CPA pool. */
+export function modelLabel(model: string, cpaPool = false): string {
   // On an AO harness, "cpa/<model>" runs that CPA pool model through the local gateway.
-  if (model.startsWith("cpa/")) return `CPA · ${model.slice(4)}`;
+  if (model.startsWith("cpa/")) return cpaLabel(model.slice(4));
+  if (cpaPool && model && !model.startsWith("chatgpt-web/")) return cpaLabel(model);
   if (!model.startsWith("chatgpt-web/")) return model;
   return `WebGPT ${model.slice("chatgpt-web/".length).split("-").map(part => part[0]?.toUpperCase() + part.slice(1)).join(" ")}`;
 }
@@ -190,10 +221,15 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
       const catalog = Array.isArray(items) ? { models: items } : items;
       setModels([...new Set([...catalog.models, ...webItems])]);
       setCapabilities({ harness, models: catalog.capabilities ?? {} });
+      rememberCpaProviders(catalog.capabilities);
     })
       .catch(cause => { if (live) { setModels([]); setNotice(cause instanceof Error ? cause.message : String(cause)); } });
     return () => { live = false; };
   }, [harness, loadModels]);
+  const [query, setQuery] = useState("");
+  // The current model always stays listed, whatever the search.
+  const shown = (models ?? []).filter(model => model === route.model || !query.trim()
+    || `${model} ${modelLabel(model, harness === NATIVE_HARNESS && !isWebModel(model))}`.toLowerCase().includes(query.trim().toLowerCase()));
   const known = harnesses.some(item => item.id === harness);
   const native = harness === NATIVE_HARNESS;
   const capability = capabilities?.harness === harness ? capabilities.models[route.model] : undefined;
@@ -213,13 +249,15 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
         {item.label}{!item.runnable ? " · not installed" : item.authStatus === "unauthorized" ? " · sign in" : item.chat === false ? " · terminal" : ""}
       </option>)}
     </select></label>
+    {!hideModel && (models?.length ?? 0) > 6 ? <label>Find a model<input type="search" aria-label="Search models" placeholder="Search models…"
+      value={query} onChange={event => setQuery(event.target.value)} /></label> : null}
     {!hideModel ? <label>Model<select value={route.model} disabled={disabled || models === null} onChange={event => onChange(withTuning(workerRoute(route.harness_id, event.target.value, nativePermission(route)), route))}>
       {!route.model || route.model === AGENT_DEFAULT_MODEL
         ? <option value={route.model} disabled>Choose a model{route.model ? " (\"default\" is not allowed)" : ""}</option>
         : models && !models.includes(route.model) ? <option value={route.model}>{route.model} (unverified)</option> : null}
       {models === null ? <option value={route.model}>{route.model || "Loading"}</option> : null}
-      {(models ?? []).map(model => <option key={model} value={model}>
-        {modelLabel(model)}{harness !== NATIVE_HARNESS && isWebModel(model) ? " · switches to Native Codex"
+      {shown.map(model => <option key={model} value={model}>
+        {modelLabel(model, native && !isWebModel(model))}{harness !== NATIVE_HARNESS && isWebModel(model) ? " · switches to Native Codex"
           : capabilities?.harness === harness && capabilityText(capabilities.models[model], native && isWebModel(model)) ? ` · ${capabilityText(capabilities.models[model], native && isWebModel(model))}` : ""}
       </option>)}
     </select></label> : null}

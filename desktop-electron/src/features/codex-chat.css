@@ -44,12 +44,55 @@
 /* Codex shows Pin and Archive in place of the age while a row is hovered. */
 .cx-thread-hover { position: absolute; right: 4px; display: none; gap: 2px; }
 .cx-thread-row:hover .cx-thread-hover, .cx-thread-row:focus-within .cx-thread-hover { display: flex; }
-.cx-thread-row:hover .cx-thread-age, .cx-thread-row:focus-within .cx-thread-age { visibility: hidden; }
+.cx-thread-row:hover .cx-thread-age, .cx-thread-row:focus-within .cx-thread-age,
+.cx-thread-row:hover .cx-thread-dot, .cx-thread-row:focus-within .cx-thread-dot { visibility: hidden; }
 .cx-thread-hover button { width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px; background: transparent; font-size: 12px; cursor: pointer; opacity: .75; }
 .cx-thread-hover button:hover:not(:disabled) { background: var(--cx-active); opacity: 1; }
 .cx-thread-hover button:disabled { cursor: not-allowed; opacity: .3; }
 .cx-thread-row.is-renaming input { width: 100%; height: 28px; padding: 0 8px; border: 1px solid var(--ao-blue); border-radius: 8px; background: var(--color-bg-primary); color: inherit; font: inherit; font-size: 13px; }
 .cx-thread-empty { padding: 4px 10px; color: var(--ao-muted); font-size: 12px; }
+/* Codex: "Show more" under a long project, the list's settings button beside "Projects", drag to reorder. */
+/* Codex's project row: hover reveals its menu and a new-chat pencil; a card opens beside it. */
+.cx-project-row { position: relative; display: flex; align-items: center; }
+.cx-project-hover { position: absolute; right: 4px; display: none; gap: 2px; }
+.cx-project-row:hover .cx-project-hover, .cx-project-row:focus-within .cx-project-hover { display: flex; }
+.cx-project-row:hover .cx-project-pin { visibility: hidden; }
+.cx-project-hover button { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: 0;
+  border-radius: 6px; background: transparent; color: var(--ao-muted); cursor: pointer; }
+.cx-project-hover button:hover { background: var(--cx-active); color: var(--color-text-primary); }
+.cx-project-card { position: fixed; z-index: 65; display: grid; gap: 6px; width: 280px; padding: 12px; border: 1px solid var(--ao-line); border-radius: 12px;
+  background: var(--color-bg-primary); box-shadow: 0 12px 36px rgb(0 0 0 / 16%); color: var(--color-text-primary); font-size: 12px; }
+.cx-project-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.cx-project-card-head strong { min-width: 0; overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.cx-project-card-head button { display: inline-flex; padding: 4px; border: 0; border-radius: 6px; background: transparent; color: var(--ao-muted); cursor: pointer; }
+.cx-project-card-head button[aria-pressed="true"] { color: var(--color-text-primary); }
+.cx-project-card-line { display: flex; align-items: flex-start; gap: 6px; color: var(--ao-muted); }
+.cx-project-card-line svg, .cx-project-card-line .cx-thread-dot { flex: 0 0 auto; margin-top: 2px; }
+.cx-project-card-line.is-path { overflow-wrap: anywhere; font-family: var(--font-mono, ui-monospace, Consolas, monospace); font-size: 11px; }
+.cx-project-card hr { width: 100%; margin: 2px 0; border: 0; border-top: 1px solid var(--ao-line); }
+.cx-project-card-action { display: flex; align-items: center; gap: 6px; padding: 4px 2px; border: 0; background: transparent; color: var(--color-text-primary);
+  font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.cx-project-card-action:hover { color: var(--ao-blue); }
+.cx-show-more { width: 100%; height: 26px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: var(--ao-muted);
+  font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.cx-show-more:hover { background: var(--cx-hover); color: var(--color-text-primary); }
+.cx-group-head { display: flex; align-items: center; justify-content: space-between; margin: 6px 6px 4px 10px; }
+.cx-group-head h3 { margin: 0; color: var(--ao-muted); font-size: 11px; font-weight: 500; }
+.cx-list-settings { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; border: 0;
+  border-radius: 6px; background: transparent; color: var(--ao-muted); cursor: pointer; }
+.cx-list-settings:hover, .cx-list-settings[aria-expanded="true"] { background: var(--cx-hover); color: var(--color-text-primary); }
+.cx-thread-row[draggable="true"] { cursor: grab; }
+.cx-thread-row.is-dragging { opacity: .45; }
+.cx-popover { position: fixed; z-index: 70; display: grid; gap: 10px; width: 260px; padding: 12px; border: 1px solid var(--ao-line); border-radius: 10px;
+  background: var(--color-bg-primary); box-shadow: 0 12px 36px rgb(0 0 0 / 18%); color: var(--color-text-primary); font-size: 13px; }
+.cx-popover strong { font-size: 13px; }
+.cx-popover-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.cx-popover-row input[type="number"] { width: 64px; height: 26px; padding: 0 6px; border: 1px solid var(--ao-line); border-radius: 6px;
+  background: var(--color-bg-primary); color: inherit; font: inherit; }
+.cx-popover-row input[type="checkbox"] + span { flex: 1 1 auto; }
+.cx-popover-hint { margin: 0; color: var(--ao-muted); font-size: 12px; }
+.cx-popover-reset { justify-self: start; height: 26px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 6px; background: transparent;
+  color: inherit; font: inherit; font-size: 12px; cursor: pointer; }
 .cx-archived-toggle { width: 100%; height: 28px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: var(--ao-muted); font-size: 12px; text-align: left; cursor: pointer; }
 .cx-archived-toggle:hover { background: var(--cx-hover); }
 .cx-thread-row.is-archived { gap: 6px; padding: 2px 6px 2px 10px; color: var(--ao-muted); font-size: 12px; }
@@ -58,6 +101,9 @@
   background: var(--color-bg-primary); box-shadow: 0 10px 30px rgb(0 0 0 / 14%); color: var(--ao-muted); font-size: 12px; pointer-events: none; }
 .cx-hover-card strong { color: var(--color-text-primary); font-size: 13px; overflow-wrap: anywhere; }
 .cx-hover-path { font-family: var(--font-mono, ui-monospace, Consolas, monospace); font-size: 11px; overflow-wrap: anywhere; }
+
+.cx-section-input { width: calc(100% - 12px); height: 28px; margin: 2px 6px; padding: 0 8px; border: 1px solid var(--ao-line); border-radius: 6px;
+  background: var(--color-bg-primary); color: var(--color-text-primary); font: inherit; font-size: 13px; }
 
 /* ---------- Context menu ---------- */
 .cx-menu-root { position: fixed; z-index: 80; }
@@ -70,6 +116,9 @@
 .cx-menu button[aria-disabled="true"] { color: var(--ao-muted); cursor: default; opacity: .6; }
 .cx-menu button.is-danger:not([aria-disabled="true"]) { color: var(--ao-red); }
 .cx-menu-label { flex: 1 1 auto; }
+.cx-menu-icon { display: inline-flex; flex: 0 0 14px; align-items: center; justify-content: center; width: 14px; color: var(--ao-muted); }
+.cx-menu button.is-danger:not([aria-disabled="true"]) .cx-menu-icon { color: inherit; }
+.cx-menu-more { color: var(--ao-muted); font-size: 14px; line-height: 1; }
 .cx-menu kbd { color: var(--ao-muted); font-family: inherit; font-size: 11px; }
 .cx-menu-sep { height: 1px; margin: 4px 6px; background: var(--ao-line); }
 
@@ -77,6 +126,10 @@
 .ao-workflow .cx-chat { position: relative; display: flex; flex: 1 1 auto; width: 100%; min-width: 0; min-height: 0; background: var(--color-bg-primary); }
 .cx-thread { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; min-height: 0; }
 .cx-thread-head { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: calc(env(titlebar-area-height, 0px)) 16px 0 20px; }
+.cx-head-folder { display: inline-flex; flex: 0 0 auto; color: var(--ao-muted); }
+.cx-head-team { display: inline-flex; align-items: center; gap: 6px; color: var(--ao-muted); font-size: 12px; }
+.cx-head-team select { max-width: 200px; height: 26px; padding: 0 6px; border: 1px solid var(--ao-line); border-radius: 6px;
+  background: var(--color-bg-primary); color: var(--color-text-primary); font: inherit; font-size: 12px; }
 .cx-thread-head h2 { min-width: 0; margin: 0; overflow: hidden; font-size: 14px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; cursor: text; }
 .cx-title-input { min-width: 0; max-width: 420px; height: 30px; padding: 0 8px; border: 1px solid var(--ao-line); border-radius: 8px; background: var(--color-bg-primary); color: inherit; font: inherit; font-size: 14px; font-weight: 600; }
 .cx-title-input.is-new { border-color: transparent; padding-left: 0; }
@@ -93,6 +146,33 @@
 .cx-empty { display: grid; gap: 6px; margin: 18vh auto 0; text-align: center; }
 .cx-empty h1 { margin: 0; font-size: 26px; font-weight: 600; letter-spacing: -0.01em; }
 .cx-empty h1 span { color: var(--ao-blue); }
+/* Codex's new chat: a glyph over the question, the project as an underlined link, and a strip of
+   context chips (project, this computer, settings) just above the composer. */
+.cx-empty-glyph { justify-self: center; display: inline-flex; margin-bottom: 6px; color: var(--color-text-primary); }
+.cx-empty h1 .cx-empty-project { padding: 0; border: 0; background: none; color: var(--ao-blue); font: inherit; text-decoration: underline;
+  text-decoration-thickness: 1px; text-underline-offset: 4px; cursor: pointer; }
+.cx-context-strip { display: flex; align-items: center; gap: 6px; width: calc(100% - 48px); max-width: 780px; margin: 0 auto 6px; padding: 0 2px; }
+.cx-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 260px; height: 26px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 999px;
+  color: var(--ao-muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+button.cx-chip { background: transparent; font: inherit; font-size: 12px; cursor: pointer; }
+button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--cx-hover); color: var(--color-text-primary); }
+.cx-chip-caret { margin-left: 2px; font-size: 10px; opacity: .7; }
+.cx-project-picker { position: fixed; z-index: 70; display: grid; gap: 4px; width: 300px; max-height: min(420px, 60vh); padding: 6px; border: 1px solid var(--ao-line);
+  border-radius: 12px; background: var(--color-bg-primary); box-shadow: 0 12px 36px rgb(0 0 0 / 18%); color: var(--color-text-primary); font-size: 13px; }
+.cx-project-picker input { height: 30px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 8px; background: transparent; color: inherit; font: inherit; }
+.cx-project-picker ul { margin: 0; padding: 0; overflow-y: auto; list-style: none; }
+.cx-project-picker li > button, .cx-picker-action { display: flex; align-items: center; gap: 8px; width: 100%; height: 30px; padding: 0 8px; border: 0;
+  border-radius: 6px; background: transparent; color: inherit; font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.cx-project-picker li > button:hover, .cx-picker-action:hover:not(:disabled) { background: var(--cx-hover); }
+.cx-project-picker svg { flex: 0 0 auto; color: var(--ao-muted); }
+.cx-picker-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cx-picker-base { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--ao-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.cx-picker-check { margin-left: auto; color: var(--color-text-primary); }
+.cx-picker-action:disabled { color: var(--ao-muted); cursor: default; opacity: .6; }
+.cx-project-picker hr { width: 100%; margin: 2px 0; border: 0; border-top: 1px solid var(--ao-line); }
+.cx-chip-icon { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 999px;
+  background: transparent; color: var(--ao-muted); cursor: pointer; }
+.cx-chip-icon:hover { background: var(--cx-hover); color: var(--color-text-primary); }
 .cx-empty p { margin: 0; color: var(--ao-muted); font-size: 13px; }
 .cx-turn { display: flex; flex-direction: column; gap: 10px; }
 .cx-user { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
@@ -179,6 +259,9 @@
 .cx-composer { position: relative; flex: 0 0 auto; width: calc(100% - 48px); max-width: 780px; margin: 0 auto 16px; padding: 10px 12px 8px;
   border: 1px solid var(--ao-line); border-radius: 22px; background: var(--color-bg-primary); box-shadow: 0 2px 12px rgb(0 0 0 / 6%); }
 .cx-composer:focus-within { border-color: color-mix(in srgb, var(--color-text-primary) 25%, var(--ao-line)); }
+/* Codex shows focus on the composer's own border, not a second box around the text:
+   outranks the orchestrator's `.ao-workflow textarea:focus-visible` outline. */
+.ao-workflow .cx-composer textarea:focus-visible { outline: none; }
 .cx-composer textarea { display: block; width: 100%; min-height: 24px; max-height: 240px; padding: 4px 4px 6px; border: 0; outline: none; resize: none;
   background: transparent; color: var(--color-text-primary); font: inherit; font-size: 14px; line-height: 1.5; }
 .cx-composer-bar { display: flex; align-items: center; gap: 6px; min-width: 0; }
@@ -200,7 +283,10 @@
 .cx-slash small { color: var(--ao-muted); font-size: 12px; }
 
 /* ---------- Cards side panel ---------- */
-.cx-structure { display: flex; flex: 0 0 min(44%, 520px); flex-direction: column; min-width: 280px; min-height: 0; border-left: 1px solid var(--ao-line); background: var(--color-bg-primary); }
+.cx-structure { position: relative; display: flex; flex: 0 0 min(44%, 520px); flex-direction: column; min-width: 280px; max-width: 70%; min-height: 0; border-left: 1px solid var(--ao-line); background: var(--color-bg-primary); }
+/* Drag the panel's left edge to resize it (double-click resets); the canvas refits on its own. */
+.cx-structure-resize { position: absolute; z-index: 2; top: 0; bottom: 0; left: -4px; width: 8px; cursor: col-resize; touch-action: none; }
+.cx-structure-resize:hover, .cx-structure-resize:focus-visible { background: color-mix(in srgb, var(--ao-blue) 35%, transparent); outline: none; }
 .cx-structure > header { display: flex; align-items: center; justify-content: space-between; height: 48px; padding: 0 10px 0 16px; font-size: 13px; }
 .cx-structure-body { position: relative; display: flex; flex: 1 1 auto; min-height: 0; }
 

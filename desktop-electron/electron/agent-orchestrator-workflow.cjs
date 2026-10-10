@@ -245,6 +245,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const nativeEffort = agent === "codex" || agent === "claude-code";
     const efforts = viaCpa || nativeEffort ? reportedEfforts(info?.efforts) : [];
     const capabilities = { efforts };
+    if (viaCpa && typeof info?.provider === "string") capabilities.provider = info.provider;
     if (!efforts.length) capabilities.effortReason = viaCpa
       ? "CPA did not advertise reasoning levels for this model."
       : "This harness/model has no verified reasoning-effort transport.";
@@ -325,7 +326,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       // context_window is the default the client starts with; max_context_window is how far the
       // model goes (Luna: 272K by default, up to 1M).
       const limit = entry.max_context_window ?? entry.context_window ?? entry.context_length;
+      // CPA names the upstream that serves the model (e.g. antigravity, codex, cline-pass).
+      const provider = [entry.provider, entry.owned_by, entry.ownedBy].find(value => typeof value === "string" && value.trim());
       capabilities[id] = { efforts, ...(!efforts.length ? { effortReason: "CPA did not advertise reasoning levels for this model." } : {}),
+        ...(provider ? { provider: String(provider).trim().slice(0, 64) } : {}),
         ...(Number.isSafeInteger(limit) && limit > 0 ? { contextLimit: limit } : {}) };
       ids.push(id);
       if (ids.length === 100) break;
@@ -508,7 +512,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   }
   async function teamUpdate({ workspaceId, change } = {}) {
     if (!change || typeof change !== "object" || Array.isArray(change)
-      || !["save_team", "apply_team", "set_limits"].includes(change.operation)) {
+      || !["save_team", "delete_team", "apply_team", "set_limits"].includes(change.operation)) {
       throw new Error("Choose a supported local team setting");
     }
     const response = await requestHeadless("/api/v1/ao/update", {
@@ -892,13 +896,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const id = clean(workspaceId, 128);
     const run = clean(runId, 80);
     const current = backgroundRuns.get(runKey(id, run));
-    if (current) return { ok: true, status: current.status, ...(current.detail ? { detail: current.detail } : {}) };
+    // `driven`: this app session's loop is observing the run right now. A card a previous session
+    // left "running" is only ever settled by an observe, so callers need to tell the two apart.
+    if (current) return { ok: true, status: current.status, driven: current.driving === true, ...(current.detail ? { detail: current.detail } : {}) };
     const saved = await runs({ workspaceId: id, runId: run });
     const mission = saved.runs.find((entry) => entry.id === run && entry.workspace_id === id);
     if (!mission) throw new Error("AO run unavailable");
     const status = mission.paused && !mission.cancelled ? "paused" : mission.cancelled || mission.nodes.some((node) => ["held", "cancelled", "archived", "reserved", "running"].includes(node.state))
       ? "held" : mission.nodes.every((node) => node.state === "finished") ? "finished" : "idle";
-    return { ok: true, status };
+    return { ok: true, status, driven: false };
   }
 
   async function controlRun({ workspaceId, runId, action, executable, nodeId } = {}) {
