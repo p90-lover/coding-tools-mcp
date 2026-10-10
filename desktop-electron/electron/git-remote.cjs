@@ -22,15 +22,24 @@ function repoSlug(url) {
   return /^[\w.-]{1,100}\/[\w.-]{1,100}$/.test(slug) ? slug : null;
 }
 
-/** The origin remote of an existing local folder as "owner/repo", or null (no git, no origin). */
-function readRemote(folder, { run = execFile, timeoutMs = 3000 } = {}) {
+/** A read-only git command's output in an existing absolute folder, or null on any failure. */
+function gitOutput(folder, args, { run = execFile, timeoutMs = 3000 } = {}) {
   if (typeof folder !== "string" || folder.length > 4096 || !path.isAbsolute(folder)) return Promise.resolve(null);
   if (!fs.statSync(folder, { throwIfNoEntry: false })?.isDirectory()) return Promise.resolve(null);
   return new Promise((resolve) => {
-    run("git", ["-C", folder, "remote", "get-url", "origin"], { windowsHide: true, timeout: timeoutMs }, (error, stdout) => {
-      resolve(error ? null : repoSlug(String(stdout)));
-    });
+    run("git", ["-C", folder, ...args], { windowsHide: true, timeout: timeoutMs }, (error, stdout) => resolve(error ? null : String(stdout)));
   });
 }
 
-module.exports = { readRemote, repoSlug };
+/** The origin remote of an existing local folder as "owner/repo", or null (no git, no origin). */
+async function readRemote(folder, options) {
+  return repoSlug(await gitOutput(folder, ["remote", "get-url", "origin"], options));
+}
+
+/** The folder's checked-out branch ("main"), or null when it isn't a repo or HEAD is detached. */
+async function readBranch(folder, options) {
+  const name = (await gitOutput(folder, ["rev-parse", "--abbrev-ref", "HEAD"], options))?.trim();
+  return name && name !== "HEAD" && /^[\w./-]{1,200}$/.test(name) ? name : null;
+}
+
+module.exports = { readBranch, readRemote, repoSlug };

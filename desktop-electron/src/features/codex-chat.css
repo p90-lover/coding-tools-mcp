@@ -7,6 +7,7 @@
   --cx-active: color-mix(in srgb, var(--color-text-primary) 9%, transparent);
   --cx-bubble: color-mix(in srgb, var(--color-text-primary) 6%, var(--color-bg-primary));
   --cx-radius: 12px;
+  --cx-tray: color-mix(in srgb, var(--color-text-primary) 5%, var(--color-bg-primary));
 }
 
 /* ---------- Thread list ---------- */
@@ -119,6 +120,13 @@
 .cx-menu-icon { display: inline-flex; flex: 0 0 14px; align-items: center; justify-content: center; width: 14px; color: var(--ao-muted); }
 .cx-menu button.is-danger:not([aria-disabled="true"]) .cx-menu-icon { color: inherit; }
 .cx-menu-more { color: var(--ao-muted); font-size: 14px; line-height: 1; }
+.cx-menu-detail { color: var(--ao-muted); font-size: 12px; white-space: nowrap; }
+.cx-menu-detail::after { content: " ›"; }
+.cx-menu-toggle { position: relative; flex: 0 0 auto; width: 26px; height: 16px; border-radius: 999px; background: var(--cx-active); }
+.cx-menu-toggle::after { content: ""; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: var(--color-bg-primary);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 20%); }
+.cx-menu-toggle.is-on { background: var(--ao-blue); }
+.cx-menu-toggle.is-on::after { left: 12px; }
 .cx-menu kbd { color: var(--ao-muted); font-family: inherit; font-size: 11px; }
 .cx-menu-sep { height: 1px; margin: 4px 6px; background: var(--ao-line); }
 
@@ -144,15 +152,18 @@
 .cx-scroll { position: relative; flex: 1 1 auto; min-height: 0; overflow: auto; }
 .cx-column { display: flex; flex-direction: column; gap: 18px; width: 100%; max-width: 780px; margin: 0 auto; padding: 16px 24px 32px; }
 .cx-empty { display: grid; gap: 6px; margin: 18vh auto 0; text-align: center; }
-.cx-empty h1 { margin: 0; font-size: 26px; font-weight: 600; letter-spacing: -0.01em; }
-.cx-empty h1 span { color: var(--ao-blue); }
+.cx-empty h1 { margin: 0; font-size: 26px; font-weight: 400; letter-spacing: -0.01em; }
 /* Codex's new chat: a glyph over the question, the project as an underlined link, and a strip of
    context chips (project, this computer, settings) just above the composer. */
-.cx-empty-glyph { justify-self: center; display: inline-flex; margin-bottom: 6px; color: var(--color-text-primary); }
-.cx-empty h1 .cx-empty-project { padding: 0; border: 0; background: none; color: var(--ao-blue); font: inherit; text-decoration: underline;
-  text-decoration-thickness: 1px; text-underline-offset: 4px; cursor: pointer; }
-.cx-context-strip { display: flex; align-items: center; gap: 6px; width: calc(100% - 48px); max-width: 780px; margin: 0 auto 6px; padding: 0 2px; }
-.cx-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 260px; height: 26px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 999px;
+.cx-empty-glyph { justify-self: center; display: inline-flex; margin-bottom: 10px; color: var(--ao-muted); }
+.cx-empty h1 .cx-empty-project { padding: 0; border: 0; background: none; color: inherit; font: inherit; text-decoration: underline dotted;
+  text-decoration-thickness: 1.5px; text-underline-offset: 5px; cursor: pointer; }
+/* Codex's context tray: a grey strip with rounded top corners that the composer overlaps,
+   holding flat chips (project, where it runs) and the environment gear. */
+.cx-context-strip { display: flex; align-items: center; gap: 2px; width: calc(100% - 48px); max-width: 780px; margin: 0 auto -20px; padding: 5px 8px 25px;
+  border-radius: 20px 20px 0 0; background: var(--cx-tray); }
+.cx-context-strip + .cx-composer, .cx-context-strip ~ .cx-composer { z-index: 1; }
+.cx-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 260px; height: 26px; padding: 0 8px; border: 0; border-radius: 8px;
   color: var(--ao-muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 button.cx-chip { background: transparent; font: inherit; font-size: 12px; cursor: pointer; }
 button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--cx-hover); color: var(--color-text-primary); }
@@ -170,7 +181,7 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-picker-check { margin-left: auto; color: var(--color-text-primary); }
 .cx-picker-action:disabled { color: var(--ao-muted); cursor: default; opacity: .6; }
 .cx-project-picker hr { width: 100%; margin: 2px 0; border: 0; border-top: 1px solid var(--ao-line); }
-.cx-chip-icon { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 999px;
+.cx-chip-icon { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 8px;
   background: transparent; color: var(--ao-muted); cursor: pointer; }
 .cx-chip-icon:hover { background: var(--cx-hover); color: var(--color-text-primary); }
 .cx-empty p { margin: 0; color: var(--ao-muted); font-size: 13px; }
@@ -257,7 +268,8 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 
 /* ---------- Composer ---------- */
 .cx-composer { position: relative; flex: 0 0 auto; width: calc(100% - 48px); max-width: 780px; margin: 0 auto 16px; padding: 10px 12px 8px;
-  border: 1px solid var(--ao-line); border-radius: 22px; background: var(--color-bg-primary); box-shadow: 0 2px 12px rgb(0 0 0 / 6%); }
+  border: 1px solid color-mix(in srgb, var(--ao-line) 70%, transparent); border-radius: 20px; background: var(--color-bg-primary);
+  box-shadow: 0 4px 18px rgb(0 0 0 / 7%); }
 .cx-composer:focus-within { border-color: color-mix(in srgb, var(--color-text-primary) 25%, var(--ao-line)); }
 /* Codex shows focus on the composer's own border, not a second box around the text:
    outranks the orchestrator's `.ao-workflow textarea:focus-visible` outline. */
@@ -265,11 +277,28 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-composer textarea { display: block; width: 100%; min-height: 24px; max-height: 240px; padding: 4px 4px 6px; border: 0; outline: none; resize: none;
   background: transparent; color: var(--color-text-primary); font: inherit; font-size: 14px; line-height: 1.5; }
 .cx-composer-bar { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.cx-composer-bar .ao-composer-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
+.cx-composer-bar .ao-composer-controls { display: flex; flex: 1 1 auto; flex-wrap: nowrap; align-items: center; gap: 2px; min-width: 0; }
+/* Codex's bottom row is plain text: permission and Single|Team on the left, the model (effort dimmed)
+   on the right before the mic and the blue send. These override the orchestrator's bordered chips. */
+.ao-workflow .cx-composer .ao-composer-chip { height: 30px; gap: 5px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent;
+  color: var(--ao-muted); font-size: 13px; }
+.ao-workflow .cx-composer .ao-composer-chip:hover:not(:disabled), .ao-workflow .cx-composer .ao-composer-chip[aria-expanded="true"] {
+  border: 0; background: var(--cx-hover); color: var(--color-text-primary); }
+.ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:last-child { margin-left: auto; }
+.ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:last-child .ao-composer-chip { color: var(--color-text-primary); }
+.ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:last-child .ao-composer-chip > svg:first-child { display: none; }
+.ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:last-child .ao-composer-popover { left: auto; right: 0; }
+.ao-chip-effort { color: var(--ao-muted); }
+.ao-workflow .cx-composer .ao-mode-switch { gap: 0; padding: 0; border: 0; background: transparent; }
+.ao-workflow .cx-composer .ao-mode-switch button { height: 30px; padding: 0 6px; border-radius: 8px; color: var(--ao-muted); font-size: 13px; }
+.ao-workflow .cx-composer .ao-mode-switch button.is-active { background: transparent; box-shadow: none; color: var(--color-text-primary); }
+.ao-workflow .cx-composer .ao-mode-switch button:hover:not(:disabled) { background: var(--cx-hover); }
+.ao-workflow .cx-composer .ao-mode-switch button + button::before { content: "|"; margin-right: 6px; color: var(--ao-line); }
 .cx-send { display: grid; place-items: center; flex: 0 0 auto; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 50%;
-  background: var(--color-text-primary); color: var(--color-bg-primary); cursor: pointer; }
+  background: var(--ao-blue); color: #fff; cursor: pointer; }
 .cx-send svg { transform: rotate(-90deg); }
-.cx-send:disabled { cursor: default; opacity: .25; }
+.cx-send:disabled { background: var(--cx-active); color: var(--ao-muted); cursor: default; }
+.cx-send.is-stop { background: var(--color-text-primary); }
 .cx-send.is-stop span { width: 11px; height: 11px; border-radius: 2px; background: var(--color-bg-primary); }
 .cx-attachments { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 6px; }
 .cx-attachment { display: inline-flex; align-items: center; gap: 4px; max-width: 260px; height: 26px; padding: 0 4px 0 8px; border: 1px solid var(--ao-line); border-radius: 8px; font-size: 12px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }

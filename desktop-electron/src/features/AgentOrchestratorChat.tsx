@@ -109,7 +109,7 @@ function MessageActions({ text, children }: { text: string; children?: ReactNode
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, working = false, describeNode, activity, permissions, composer, onOpenTeam, onOpenMissionBoard,
-  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject,
+  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject, projectBranch: branch,
   pendingMessage, pendingTitle, pendingCreation = false,
 }: {
   /** A message being sent into a chat that has no run yet (shown at once, as Codex does). */
@@ -155,6 +155,8 @@ export function AgentOrchestratorChat({
   onSeedUsed?: () => void;
   /** Extra header controls before the header buttons (the chat's team picker). */
   headerExtra?: ReactNode;
+  /** The project folder's checked-out branch, shown in the environment popover. */
+  projectBranch?: string;
   /** Opens the open project's folder (the new chat's project name is a link, as in Codex). */
   onOpenProject?: () => void;
   /** The project picker on the new chat's project chip: every project, the open one, and its actions. */
@@ -378,11 +380,10 @@ export function AgentOrchestratorChat({
           <div className="cx-column">
             {!turns.length ? <div className="cx-empty">
               {selectedTaskId ? <p>Loading…</p> : <>
-                <span className="cx-empty-glyph" aria-hidden="true"><ChatGlyph name="spark" size={28} /></span>
+                <span className="cx-empty-glyph" aria-hidden="true"><ChatGlyph name="codex" size={40} /></span>
                 <h1>What should we build{projectName ? <> in {onOpenProject
                   ? <button type="button" className="cx-empty-project" title="Open the project folder" onClick={onOpenProject}>{projectName}</button>
                   : <span className="cx-empty-project">{projectName}</span>}</> : null}?</h1>
-                <p>{composer?.mode === "single" ? "Sending starts the selected model." : "Sending starts the chosen team: orchestrator, workers and reviewer."}</p>
               </>}
             </div> : null}
             {turns.map((turn, turnIndex) => <article key={turn.key} className="cx-turn">
@@ -443,11 +444,11 @@ export function AgentOrchestratorChat({
             <ChatGlyph name="monitor" size={13} />This computer<span className="cx-chip-caret" aria-hidden="true">⌄</span></button>
           <span className="cx-head-spacer" />
           <button type="button" className="cx-chip-icon" aria-label="Configure local environment" title="Configure local environment" aria-haspopup="menu"
-            onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); setMenu({ x: box.right - 260, y: box.top - 170, label: "Configure local environment", items: [
-              { label: "New worktree", icon: "fork", reason: "Chats run in the project folder itself; separate worktrees aren't available yet" },
-              { label: "Branch: the project's current branch", icon: "repo", reason: "Chats use whatever branch the project folder has checked out" },
-              { label: "Environment: none", icon: "settings", reason: "Saved environments aren't available yet" },
-              ...(onSettings ? [{ kind: "separator" } as const, { label: "Chat settings…", icon: "settings", run: onSettings } as ChatMenuItem] : []),
+            onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); setMenu({ x: box.right - 260, y: box.top - 116, label: "Configure local environment", items: [
+              // Codex's environment popover. Orchestrator settings live in the header's ⋯ menu, not here.
+              { label: "New worktree", icon: "fork", toggle: false, reason: "Chats run in the project folder itself; separate worktrees aren't available yet" },
+              { label: "Branch", icon: "repo", detail: branch || "current", reason: "Chats use whatever branch the project folder has checked out" },
+              { label: "Environment", icon: "settings", detail: "No environment", reason: "Saved environments aren't available yet" },
             ] }); }}>
             <ChatGlyph name="settings" size={14} /></button>
         </div> : null}
@@ -513,6 +514,8 @@ export function AgentOrchestratorChat({
             <input ref={picker} type="file" multiple hidden onChange={(event) => { if (event.target.files) void addFiles(event.target.files); event.target.value = ""; }} />
             {composer ? <AgentOrchestratorComposerControls {...composer} permissions={permissions} busy={busy || sending} /> : permissions}
             <span className="cx-head-spacer" />
+            <button type="button" className="cx-icon-button cx-mic" aria-label="Voice input" title="Voice input isn't available yet" disabled>
+              <ChatGlyph name="mic" size={16} /></button>
             {latest && runOpen && stop && !accepts
               ? <button className="cx-send is-stop" type="button" aria-label="Stop (Esc)" title="Stop (Esc)" onClick={() => stop(latest.id)}><span aria-hidden="true" /></button>
               : <button className="cx-send" type="submit" aria-label={sending ? "Starting…" : "Send message"} title="Send (Enter)" disabled={!canSend}>
