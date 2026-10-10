@@ -413,6 +413,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       const saved = await requestHeadless("/api/v1/ao/external/submitted", {
         workspace_id: workspaceId, run_id: runId, node_id: node.id, request_key: reserved.request_key,
         ...(session ? { session_id: session } : {}),
+        // The held card says why: a first chat's start runs detached, so this is the only place it shows.
+        ...(!session && failure ? { error: String(failure?.message || failure).slice(0, 400) } : {}),
       });
       if (failure) throw failure;
       if (saved?.ok !== true) throw new Error("AO harness session outcome is unknown");
@@ -1606,7 +1608,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       const previous = taskId ? saved.runs.filter(run => run.project_id === taskId).at(-1) : null;
       const selectedId = (teamId === undefined ? "" : clean(teamId, 80)) || previous?.team?.id;
       team = selectedId ? (saved.teams ?? (saved.team ? [saved.team] : [])).find(item => item?.id === selectedId) : saved.team;
-      if (!team?.id || !Number.isSafeInteger(team.revision) || (team.workspace_id && team.workspace_id !== id)) throw new Error("Saved team changed or was not found; refresh before starting");
+      // Saved teams are shared by every project; workspace_id only records where one was first saved.
+      if (!team?.id || !Number.isSafeInteger(team.revision)) throw new Error("Saved team changed or was not found; refresh before starting");
       if (teamRevision !== undefined && (!Number.isSafeInteger(teamRevision) || teamRevision < 0 || teamRevision !== team.revision)) {
         throw new Error("Saved team revision changed; refresh before starting");
       }

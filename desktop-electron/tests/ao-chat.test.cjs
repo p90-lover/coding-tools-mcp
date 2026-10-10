@@ -387,8 +387,8 @@ test("draft permission capability lookup is a read-only route query and never co
   fixture.currentChat().props.composer.onRouteChange({ harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web", model: "chatgpt-web/high", permission_profile: ":workspace" });
   permissions = fixture.currentChat().props.permissions;
   const native = await permissions.props.loadProfiles(permissions.props.team.nodes[0].id);
-  assert.equal(native.supported, false);
-  assert.equal(fixture.calls.length, 1, "opening the native draft menu neither connects nor requests fabricated metadata");
+  assert.equal(native.supported, true, "a native draft can still choose a mode; the connection checks it at launch");
+  assert.equal(fixture.calls.length, 1, "opening the native draft menu neither connects nor asks the runtime");
 });
 
 test("Team and Mission Board header callbacks open the existing graph/board separately without writes", () => {
@@ -401,23 +401,35 @@ test("Team and Mission Board header callbacks open the existing graph/board sepa
   assert.equal(fixture.calls.length, 0, "navigation does not create a saved team or run");
 });
 
-test("composer execution binds only the explicit single route or a real scoped saved-team revision", () => {
+test("composer execution binds only the explicit single route or a real saved-team revision", () => {
   const surface = loadSurface();
   const route = { harness_id: "ao:claude-code", model: "cpa/gemini-flash", permission_profile: ":ao-default" };
-  const teams = [{ id: "saved", workspace_id: "w", revision: 8, nodes: [] }];
-  assert.deepEqual(plain(surface.aoChatExecution("single", route, teams, "saved", "w")), { executionMode: "single", singleRoute: route });
-  assert.deepEqual(plain(surface.aoChatExecution("team", route, teams, "saved", "w")), { executionMode: "team", teamId: "saved", teamRevision: 8 });
-  assert.throws(() => surface.aoChatExecution("team", route, teams, "deleted", "w"), /saved team/i);
-  assert.throws(() => surface.aoChatExecution("team", route, teams, "saved", "wrong-workspace"), /saved team/i);
+  const teams = [{ id: "saved", workspace_id: "w", revision: 8, nodes: [] }, { id: "elsewhere", workspace_id: "other", revision: 2, nodes: [] }];
+  assert.deepEqual(plain(surface.aoChatExecution("single", route, teams, "saved")), { executionMode: "single", singleRoute: route });
+  assert.deepEqual(plain(surface.aoChatExecution("team", route, teams, "saved")), { executionMode: "team", teamId: "saved", teamRevision: 8 });
+  assert.deepEqual(plain(surface.aoChatExecution("team", route, teams, "elsewhere")), { executionMode: "team", teamId: "elsewhere", teamRevision: 2 },
+    "a team saved from another project runs here too");
+  assert.throws(() => surface.aoChatExecution("team", route, teams, "deleted"), /saved team/i);
 });
 
 test("saved team list accepts authoritative teams and legacy team without manufactured presets", () => {
   const surface = loadSurface();
   const team = { id: "real", workspace_id: "w", revision: 3, nodes: [] };
-  assert.deepEqual(plain(surface.aoSavedTeams({ teams: [team] }, "w")), [team]);
-  assert.deepEqual(plain(surface.aoSavedTeams({ team }, "w")), [team]);
-  assert.deepEqual(plain(surface.aoSavedTeams({ teams: [], team }, "w")), [], "explicit empty catalog is not replaced");
-  assert.deepEqual(plain(surface.aoSavedTeams({ teams: [team] }, "wrong")), []);
+  const shared = { id: "shared", workspace_id: "other", revision: 1, nodes: [] };
+  assert.deepEqual(plain(surface.aoSavedTeams({ teams: [team] })), [team]);
+  assert.deepEqual(plain(surface.aoSavedTeams({ team })), [team]);
+  assert.deepEqual(plain(surface.aoSavedTeams({ teams: [], team })), [], "explicit empty catalog is not replaced");
+  assert.deepEqual(plain(surface.aoSavedTeams({ teams: [team, shared] })), [team, shared], "every project sees every saved team");
+  assert.deepEqual(plain(surface.aoSavedTeams({ teams: [{ id: "broken", nodes: [] }] })), [], "malformed entries are still dropped");
+});
+
+test("the composer keeps the chosen team, else the project's default, else the first", () => {
+  const surface = loadSurface();
+  const teams = [{ id: "a", revision: 1, nodes: [] }, { id: "b", revision: 1, nodes: [] }];
+  assert.equal(surface.aoComposerTeam("b", teams, teams[0]), "b");
+  assert.equal(surface.aoComposerTeam("gone", teams, teams[1]), "b");
+  assert.equal(surface.aoComposerTeam("", teams, null), "a");
+  assert.equal(surface.aoComposerTeam("", [], null), "");
 });
 
 test("overview defaults to 70/30 and clamps both panes to usable sizes on short screens", () => {

@@ -148,9 +148,30 @@ test("permission popup renders exactly three mode rows with no scope or shared g
   const tree = view.render("AgentOrchestratorPermissions", props, [true, cap, "", false]);
   const rows = elements(tree, item => item.type === "button" && item.props.role === "menuitemradio");
   assert.equal(rows.length, 3);
-  assert.deepEqual(rows.map(row => text(row).replace(/^.*?(Ask for approval|Approve for me|Full access)/, "$1")), ["Ask for approvalAsk before additional access", "Approve for meReview requests automatically", "Full accessUnrestricted file and network access"]);
+  assert.deepEqual(rows.map(row => text(row).replace(/^.*?(Ask for approval|Approve for me|Full access)/, "$1")), [
+    "Ask for approvalAlways ask to edit external files and use the internet",
+    "Approve for meOnly ask for actions detected as potentially unsafe",
+    "Full accessUnrestricted access to the internet and any file on your computer"]);
+  assert.deepEqual(rows.map(row => /is-danger/.test(row.props.className)), [false, false, true], "Full access is drawn as a warning, as in Codex");
   assert.equal(elements(tree, item => item.type === "select").length, 0);
   assert.ok(!text(tree).includes("SHARED MUST NOT RENDER"));
+});
+
+test("a role that hasn't connected yet can still choose Ask for approval or Approve for me", async () => {
+  const view = renderer("AgentOrchestratorPermissions.tsx");
+  const draft = view.exports.draftPermissionCapability();
+  assert.equal(draft.supported, true);
+  const modes = view.exports.PERMISSION_MODES;
+  for (const profile of draft.profiles) assert.ok(modes.some(mode => mode.profile === profile.id), `draft offers only Codex's modes, not ${profile.id}`);
+  const calls = [];
+  const props = { team: { id: "single", revision: 0, nodes: [node("single-draft")] }, busy: false, loadProfiles: async () => draft, save: async (...args) => { calls.push(args); return "Saved for the first start"; } };
+  const tree = view.render("AgentOrchestratorPermissions", props, [true, { "single-draft": draft }, "", false]);
+  const rows = elements(tree, item => item.type === "button" && item.props.role === "menuitemradio");
+  assert.equal(rows[0].props.disabled, false);
+  assert.equal(rows[1].props.disabled, false);
+  rows[1].props.onClick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(plain(calls[0][3]), { profile: ":workspace", policy: "on-request", reviewer: "auto_review" });
 });
 
 test("explicit all-role selection updates every native role only, preserving unrelated raw rights", () => {

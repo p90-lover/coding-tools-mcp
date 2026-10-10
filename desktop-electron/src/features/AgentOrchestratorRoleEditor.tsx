@@ -273,9 +273,13 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
       </select></label>
     <label title={native ? `Context window in tokens (4,096 to ${nativeMax.toLocaleString("en-US")})` : capability?.contextReason || (context ? context.kind === "compaction" ? "Client compaction threshold in tokens, not the model context limit" : "Client context budget in tokens, not a larger provider limit" : "No verified client context override")}>Context window
       <input type="number" min={context?.min} max={context?.max} step={1} inputMode="numeric" disabled={disabled || !context}
-        placeholder={native ? "Model default" : context ? context.kind === "compaction" ? "Client compaction default" : "Client default" : "No verified override"}
+        placeholder={!context ? "No verified override" : `${native ? "Model default" : context.kind === "compaction" ? "Client compaction default" : "Client default"}${context.max ? ` · up to ${tokensLabel(context.max)}` : ""}`}
         value={route.context_window ?? ""} aria-invalid={!native && Boolean(context) && route.context_window !== undefined && (route.context_window < context!.min || context!.max !== undefined && route.context_window > context!.max)}
-        onChange={event => { const next = { ...route }; const tokens = Math.round(Number(event.target.value)); if (event.target.value && Number.isFinite(tokens)) next.context_window = tokens; else delete next.context_window; onChange(next); }} /></label>
+        onChange={event => { const next = { ...route }; const tokens = Math.round(Number(event.target.value)); if (event.target.value && Number.isFinite(tokens)) next.context_window = tokens; else delete next.context_window; onChange(next); }}
+        // A typed value past the model's range would only be refused at launch; settle it here instead.
+        onBlur={() => { const tokens = route.context_window; if (!context || tokens === undefined) return;
+          const settled = Math.max(context.min, context.max !== undefined ? Math.min(context.max, tokens) : tokens);
+          if (settled !== tokens) onChange({ ...route, context_window: settled }); }} /></label>
     {!native && (route.effort !== undefined || route.context_window !== undefined) ? <button type="button" className="button-secondary ao-wide"
       disabled={disabled} title="Clear requested effort and client context budget" onClick={() => {
         const next = { ...route }; delete next.effort; delete next.context_window; onChange(next);

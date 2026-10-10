@@ -118,7 +118,7 @@ export function AgentOrchestratorComposerControls({
               <span className="ao-option-radio" aria-hidden="true" /><span><strong>{team.name}</strong><small>{team.nodes.length} {team.nodes.length === 1 ? "agent" : "agents"}</small></span>
               {team.id === teamId ? <Icon name="check" width="16" height="16" /> : null}
             </button>)}
-            {!teams.length ? <p role="status">No saved teams in this workspace.</p> : null}
+            {!teams.length ? <p role="status">No saved teams yet. Build one on the Orchestrator Team page.</p> : null}
           </div>
         </>}
       </section> : null}

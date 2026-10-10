@@ -14,6 +14,7 @@ export type IconName =
   | "forward"
   | "github"
   | "globe"
+  | "hand"
   | "info"
   | "logs"
   | "mail"
@@ -26,6 +27,8 @@ export type IconName =
   | "settings"
   | "setup"
   | "shield"
+  | "shieldPrompt"
+  | "warning"
   | "sidebar"
   | "update"
   | "x";
@@ -37,6 +40,9 @@ export function Icon({ name, ...props }: { name: IconName } & SVGProps<SVGSVGEle
       {name === "activity" ? <><path {...common} d="M3 12h4l2.2-6 4.1 12 2.3-6H21" /></> : null}
       {name === "alert" ? <><path {...common} d="M10.3 4.2 2.8 17.1A2 2 0 0 0 4.5 20h15a2 2 0 0 0 1.7-2.9L13.7 4.2a2 2 0 0 0-3.4 0Z" /><path {...common} d="M12 9v4M12 16.5h.01" /></> : null}
       {name === "back" ? <path {...common} d="m14.5 6-6 6 6 6" /> : null}
+      {name === "hand" ? <><path {...common} d="M18 11V6a2 2 0 0 0-4 0v5" /><path {...common} d="M14 10V4a2 2 0 0 0-4 0v6" /><path {...common} d="M10 10.5V6a2 2 0 0 0-4 0v8" /><path {...common} d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.9-6-2.4l-3.6-3.6a2 2 0 0 1 2.8-2.8L7 15" /></> : null}
+      {name === "shieldPrompt" ? <><path {...common} d="M12 3 5 6v5.5c0 4.3 2.9 8 7 9.5 4.1-1.5 7-5.2 7-9.5V6l-7-3Z" /><path {...common} d="m9 10 2 2-2 2M13 14h2.5" /></> : null}
+      {name === "warning" ? <><circle {...common} cx="12" cy="12" r="9" /><path {...common} d="M12 7.5v5M12 16h.01" /></> : null}
       {name === "bolt" ? <path {...common} d="M13 3 5 13.5h6L10 21l8-10.5h-6L13 3Z" /> : null}
       {name === "browser" ? <><rect {...common} x="3" y="4" width="18" height="16" rx="3" /><path {...common} d="M3 9h18M7 6.5h.01M10 6.5h.01" /></> : null}
       {name === "check" ? <path {...common} d="m5 12.5 4.2 4.2L19 7" /> : null}
