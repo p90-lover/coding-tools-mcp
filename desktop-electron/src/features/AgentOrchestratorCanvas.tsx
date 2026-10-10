@@ -1,5 +1,5 @@
 import { ROLE_TITLE } from "./AgentOrchestratorTeam";
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 
 export type CanvasNode = {
@@ -136,6 +136,8 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
   const [dropTarget, setDropTarget] = useState("");
   const [draggingId, setDraggingId] = useState("");
   const [selected, setSelected] = useState(new Set(selectedId ? [selectedId] : []));
+  // When the page clears its selection (the Team page's role popover closing), drop the highlight too.
+  useEffect(() => { if (!selectedId) setSelected(current => current.size ? new Set() : current); }, [selectedId]);
   const [notice, setNotice] = useState("");
   const noticeTimer = useRef(0);
   const initialized = useRef(false);

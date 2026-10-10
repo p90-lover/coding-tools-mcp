@@ -29,6 +29,7 @@ const { createGptBrowserHost, cleanUserAgent } = require("./gpt-browser.cjs");
 const { createEmailHost } = require("./email-host.cjs");
 const { createChatWindows } = require("./chat-windows.cjs");
 const { readBranch, readRemote } = require("./git-remote.cjs");
+const { boundedQuitStep } = require("./quit-steps.cjs");
 const { installKeysmithIpc } = require("./keysmith-ipc.cjs");
 const { parseMessage, sanitizeHtml } = require("./email-mime.cjs");
 const { createConfiguredConnector } = require("./mcp-connector-setup.cjs");
@@ -145,6 +146,10 @@ let tray = null;
 let quitting = false;
 let shutdownInProgress = false;
 let exitCommitted = false;
+/** The launcher's logger, for the quit path (which runs outside start's scope). */
+let quitLogger = null;
+/** How long Electron may linger after app.quit() once every stop has run (app.relaunch still applies). */
+const QUIT_EXIT_GRACE_MS = 10_000;
 let codexBridgeConnectInFlight = null;
 let runtimeStartupInFlight = null;
 let smokePassedThisSession = false;
@@ -2247,21 +2252,32 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     }) : null;
     if (detached?.status !== "detached") await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
     stopBridgeWatchdog();
-    await headlessHost?.shutdown("launcher-quit");
+    // Each awaited stop has a deadline: one that never settled left the app running after the
+    // bridge was already detached, with nothing logged. An overrun is logged and the quit goes on.
+    const step = (name, work, ms) => boundedQuitStep(name, work, { ms,
+      onTimeout: (stepName, limit) => quitLogger?.warn("launcher.quit_step_timeout", { step: stepName, ms: limit }) });
+    await step("headless", () => headlessHost?.shutdown("launcher-quit"));
     stopCatalogVerificationMonitor();
     updateController?.stopPeriodicChecks?.();
     backendBundles?.stopWatching();
-    await agentOrchestratorUpstream?.stop();
+    await step("agent-orchestrator", () => agentOrchestratorUpstream?.stop(), 20_000);
     antigravityReauth?.stop();
     antigravityAuthBrowser?.closeAll();
     // The embedded ChatGPT instance belongs to this app; its own stop path logs failures.
-    await chatgptDesktop?.shutdown().catch(() => {});
-    await browserHost?.persistSession();
+    await step("chatgpt-desktop", () => chatgptDesktop?.shutdown().catch(() => {}));
+    // Generous: closing views before the ChatGPT session is saved could cost the sign-in.
+    await step("browser-session", () => browserHost?.persistSession(), 30_000);
     browserHost?.destroy();
-    await browserControl?.close();
+    await step("browser-control", () => browserControl?.close(), 5_000);
     exitCommitted = true;
     if (relaunch) app.relaunch();
     app.quit();
+    // Every stop above has run. Electron itself has still lingered after app.quit() (over a minute
+    // on 2026-10-10, after browser-control overran), holding the install folder; end the process.
+    setTimeout(() => {
+      quitLogger?.warn("launcher.quit_forced_exit", { afterMs: QUIT_EXIT_GRACE_MS });
+      app.exit(0);
+    }, QUIT_EXIT_GRACE_MS).unref?.();
     return { ok: true };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -2349,6 +2365,7 @@ async function start() {
     filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
     publish: (record) => send("launcher:log", record),
   });
+  quitLogger = logger;
   if (autostartStartupError) logger.warn("launcher.autostart_unavailable", { message: autostartStartupError });
   const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
   updateController = createGuiUpdateController({
