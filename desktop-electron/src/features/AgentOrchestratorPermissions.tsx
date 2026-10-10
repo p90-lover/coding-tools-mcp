@@ -52,11 +52,26 @@ export function selectPermissions(team: AoTeam, ids: string[], selection: Permis
   }) };
 }
 
+// Codex's three approval modes, in its order, glyphs and wording; Full access is drawn as a warning.
 export const PERMISSION_MODES = [
-  { label: "Ask for approval", detail: "Ask before additional access", icon: "shield", profile: ":workspace", policy: "on-request", reviewer: "user" },
-  { label: "Approve for me", detail: "Review requests automatically", icon: "check", profile: ":workspace", policy: "on-request", reviewer: "auto_review" },
-  { label: "Full access", detail: "Unrestricted file and network access", icon: "bolt", profile: ":danger-full-access", policy: "never", reviewer: "user" },
+  { label: "Ask for approval", detail: "Always ask to edit external files and use the internet", icon: "hand", profile: ":workspace", policy: "on-request", reviewer: "user", danger: false },
+  { label: "Approve for me", detail: "Only ask for actions detected as potentially unsafe", icon: "shieldPrompt", profile: ":workspace", policy: "on-request", reviewer: "auto_review", danger: false },
+  { label: "Full access", detail: "Unrestricted access to the internet and any file on your computer", icon: "warning", profile: ":danger-full-access", policy: "never", reviewer: "user", danger: true },
 ] as const;
+
+/**
+ * The permission choices a role may take before it has connected, when there is no runtime yet
+ * to report its capabilities. The choice is only saved on the role's route: the connection is
+ * refused later if that route's permissions don't match what the runtime grants.
+ */
+export function draftPermissionCapability(): PermissionCapability {
+  // Every Codex mode, Full access included: apply() still asks before arming it.
+  const unique = (values: string[]) => [...new Set(values)];
+  return { supported: true,
+    profiles: unique(PERMISSION_MODES.map(mode => mode.profile)).map(id => ({ id, allowed: true })),
+    approval_policies: unique(PERMISSION_MODES.map(mode => mode.policy)),
+    approvals_reviewers: unique(PERMISSION_MODES.map(mode => mode.reviewer)) };
+}
 
 export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles, save, runtimePolicies }: {
   team: AoTeam | null; mission?: AoMission; busy: boolean;
@@ -116,13 +131,13 @@ export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles
       <Icon name={active?.icon ?? "shield"} width="16" height="16" /><span>{active?.label || "Custom / Mixed"}</span><span aria-hidden="true">⌄</span>
     </button>
     {popup.open ? <section ref={popup.panel} id="ao-permissions-panel" className="ao-composer-popover ao-permissions-panel" aria-label="Access permissions" role="menu">
-      <header><h3>Access permissions</h3><button type="button" className="ao-popover-close" aria-label="Close permissions" onClick={popup.close}><Icon name="close" width="18" height="18" /></button></header>
+      <header><h3>How should actions be approved?</h3><button type="button" className="ao-popover-close" aria-label="Close permissions" onClick={popup.close}><Icon name="close" width="14" height="14" /></button></header>
       {PERMISSION_MODES.map(mode => <button key={mode.label} type="button" role="menuitemradio" aria-checked={active?.label === mode.label}
-        className="ao-permission-option" disabled={busy || saving || !canSelect(mode)} title={canSelect(mode) ? "Applies to queued / future attempts only; running attempts and shared app grants are unchanged." : reason}
+        className={"ao-permission-option" + (mode.danger ? " is-danger" : "")} disabled={busy || saving || !canSelect(mode)} title={canSelect(mode) ? "Applies to queued / future attempts only; running attempts and shared app grants are unchanged." : reason}
         onClick={() => void apply({ profile: mode.profile, policy: mode.policy, reviewer: mode.reviewer })}>
-        <span className="ao-permission-symbol"><Icon name={mode.icon} width="20" height="20" /></span>
+        <span className="ao-permission-symbol"><Icon name={mode.icon} width="17" height="17" /></span>
         <span><strong>{mode.label}</strong><small>{mode.detail}</small></span>
-        {active?.label === mode.label ? <Icon name="check" width="18" height="18" /> : null}
+        {active?.label === mode.label ? <Icon name="check" width="16" height="16" /> : null}
       </button>)}
     </section> : null}
     {notice ? <span className="ao-permission-notice" role={failed ? "alert" : "status"}

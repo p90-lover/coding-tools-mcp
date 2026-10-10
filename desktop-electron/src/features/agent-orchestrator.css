@@ -394,17 +394,23 @@
 .ao-workflow .ao-model-popup .ao-route-tuning legend { display: none; }
 .ao-workflow .ao-model-popup .ao-route-tuning label { display: grid; gap: 7px; }
 .ao-workflow .ao-picker-option { display: flex; align-items: center; width: 100%; gap: 10px; margin: 3px 0; padding: 9px 8px; border: 0; border-radius: 7px; background: #fff; color: #27384f; text-align: left; cursor: pointer; }
-.ao-workflow .ao-picker-option[aria-checked="true"], .ao-workflow .ao-permission-option[aria-checked="true"] { background: #edf6ff; color: #122742; }
+.ao-workflow .ao-picker-option[aria-checked="true"] { background: #edf6ff; color: #122742; }
 .ao-workflow .ao-picker-option > span:nth-child(2) { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .ao-workflow .ao-option-radio { flex: 0 0 14px; width: 14px; height: 14px; border: 1px solid #8496ac; border-radius: 50%; }
 .ao-workflow .ao-picker-option[aria-checked="true"] .ao-option-radio { border-color: #1677ff; box-shadow: inset 0 0 0 3px #fff; background: #1677ff; }
 .ao-workflow .ao-picker-option small { display: block; margin-top: 5px; color: #7b899e; font-size: 11px; }
-.ao-workflow .ao-permissions-panel { width: min(330px, calc(100vw - 40px)); }
-.ao-workflow .ao-permission-option { display: flex; align-items: center; width: 100%; gap: 14px; margin: 7px 0 0; padding: 13px 12px; border: 1px solid var(--ao-line); border-radius: 8px; background: #fff; color: #1c2d46; text-align: left; cursor: pointer; }
+.ao-workflow .ao-permissions-panel { width: min(390px, calc(100vw - 40px)); padding: 8px 6px 6px; border-radius: 14px; }
+.ao-workflow .ao-permissions-panel > header { display: flex; align-items: center; justify-content: space-between; margin: 0 8px 4px; }
+.ao-workflow .ao-permissions-panel > header h3 { margin: 0; color: #8a8f98; font-size: 12.5px; font-weight: 400; }
+.ao-workflow .ao-permissions-panel .ao-popover-close { width: 22px; height: 22px; color: #8a8f98; }
+.ao-workflow .ao-permission-option { display: flex; align-items: flex-start; width: 100%; gap: 10px; margin: 0; padding: 7px 10px; border: 0; border-radius: 9px; background: transparent; color: #1f2329; text-align: left; cursor: pointer; }
+.ao-workflow .ao-permission-option:hover:not(:disabled), .ao-workflow .ao-permission-option:focus-visible { background: #f3f4f6; outline: none; }
+.ao-workflow .ao-permission-option > svg:last-child { align-self: center; color: #1f2329; }
 .ao-workflow .ao-permission-option > span:nth-child(2) { flex: 1; }
-.ao-workflow .ao-permission-option strong { display: block; font-size: 12px; font-weight: 600; }
-.ao-workflow .ao-permission-option small { display: block; margin-top: 5px; color: #7b899e; font-size: 11px; line-height: 1.4; }
-.ao-workflow .ao-permission-symbol { display: grid; place-items: center; width: 30px; color: #3c5a85; }
+.ao-workflow .ao-permission-option strong { display: block; font-size: 13px; font-weight: 400; }
+.ao-workflow .ao-permission-option small { display: block; margin-top: 1px; color: #8a8f98; font-size: 11.5px; line-height: 1.4; }
+.ao-workflow .ao-permission-option.is-danger, .ao-workflow .ao-permission-option.is-danger small, .ao-workflow .ao-permission-option.is-danger .ao-permission-symbol { color: #e2571e; }
+.ao-workflow .ao-permission-symbol { display: grid; place-items: center; width: 18px; height: 18px; margin-top: 1px; color: #1f2329; }
 .ao-workflow .ao-permission-option:disabled { opacity: .42; cursor: not-allowed; }
 .ao-workflow .ao-permission-notice { position: absolute; bottom: calc(100% + 4px); left: 0; min-width: 220px; max-width: 360px; padding: 8px 10px; border: 1px solid var(--ao-line); border-radius: 8px; background: #fff; color: #46536b; box-shadow: 0 3px 12px rgb(31 54 86 / 8%); font-size: 11px; z-index: 41; }
 .ao-workflow .ao-canvas { background-image: radial-gradient(#d9e4f0 1px, transparent 1px); }
