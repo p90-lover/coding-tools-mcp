@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../icons";
 import { AgentOrchestratorComposerControls, type ComposerControlsProps } from "./AgentOrchestratorComposerControls";
-import type { ReactNode } from "react";
+import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { ChatMenu, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
+import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
   CHAT_DEFAULT_TITLE, chatAcceptsMessage, chatDuration, chatList, chatMessageWithAttachments, chatRunOpen, chatSlashCommand,
   chatSlashMatches, chatTurns,
@@ -18,6 +18,8 @@ const STATUS_LABEL: Record<ChatStatus, string> = {
 };
 /** Text files up to this size are attached inline when their path is unknown. */
 const INLINE_ATTACHMENT_BYTES = 200 * 1024;
+/** The cards panel's dragged width (px), kept on this computer. */
+const CARDS_WIDTH_KEY = "coding-tools:ao:cards-panel-width";
 
 /** Thread actions the chat header, its ⋯ menu and its slash commands share with the thread list. */
 export type ChatThreadActions = {
@@ -107,7 +109,7 @@ function MessageActions({ text, children }: { text: string; children?: ReactNode
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, working = false, describeNode, activity, permissions, composer, onOpenTeam, onOpenMissionBoard,
-  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath,
+  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject,
   pendingMessage, pendingTitle, pendingCreation = false,
 }: {
   /** A message being sent into a chat that has no run yet (shown at once, as Codex does). */
@@ -148,6 +150,20 @@ export function AgentOrchestratorChat({
   onSettings?: () => void;
   /** The path of a dropped or picked file, when the app can tell. */
   filePath?: (file: File) => string;
+  /** A new chat's starting draft ("Continue in project"); taken once, then onSeedUsed clears it. */
+  seed?: { key: string; title: string; text: string };
+  onSeedUsed?: () => void;
+  /** Extra header controls before the header buttons (the chat's team picker). */
+  headerExtra?: ReactNode;
+  /** Opens the open project's folder (the new chat's project name is a link, as in Codex). */
+  onOpenProject?: () => void;
+  /** The project picker on the new chat's project chip: every project, the open one, and its actions. */
+  projects?: { id: string; name: string; path?: string }[];
+  projectId?: string;
+  /** Switches the new chat to that project, carrying what has been typed so far. */
+  onPickProject?: (projectId: string, draft: { title: string; text: string }) => void;
+  /** "+ New project": choose a folder and add it as a project. */
+  onAddProject?: () => void;
 }) {
   const chats = useMemo(() => chatList(runs, tasks, [], true), [runs, tasks]);
   const chat = chats.find((entry) => entry.taskId === selectedTaskId);
@@ -173,6 +189,17 @@ export function AgentOrchestratorChat({
   const [showStructure, setShowStructure] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [menu, setMenu] = useState<ChatMenuState>(null);
+  // The project chip's picker, anchored just above the chip.
+  const [projectPicker, setProjectPicker] = useState<{ left: number; bottom: number } | null>(null);
+  const [pickerQuery, setPickerQuery] = useState("");
+  useEffect(() => {
+    if (!projectPicker) return;
+    const outside = (event: PointerEvent) => {
+      if (!(event.target as Element | null)?.closest?.(".cx-project-picker, .cx-context-strip")) setProjectPicker(null);
+    };
+    document.addEventListener("pointerdown", outside);
+    return () => document.removeEventListener("pointerdown", outside);
+  }, [projectPicker]);
   const [atBottom, setAtBottom] = useState(true);
   const scroller = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
@@ -202,8 +229,42 @@ export function AgentOrchestratorChat({
   );
   const stepCount = turns.reduce((total, turn) => total + turn.steps.length + (turn.final ? 1 : 0), 0);
   useEffect(() => { if (atBottom) scroller.current?.scrollTo({ top: scroller.current.scrollHeight }); }, [turns.length, stepCount, atBottom]);
+  // The cards panel can be dragged wider for more board room; the width is kept per viewer.
+  const [cardsWidth, setCardsWidth] = useState<number | null>(() => {
+    try { const value = Number(localStorage.getItem(CARDS_WIDTH_KEY)); return Number.isFinite(value) && value >= 280 ? value : null; } catch { return null; }
+  });
+  const saveCardsWidth = (value: number | null) => {
+    setCardsWidth(value);
+    try { if (value === null) localStorage.removeItem(CARDS_WIDTH_KEY); else localStorage.setItem(CARDS_WIDTH_KEY, String(value)); } catch { /* per-session only */ }
+  };
+  /** Between 280px and 70% of the chat area, so the conversation always keeps some room. */
+  const clampCardsWidth = (value: number, handle: Element) => {
+    const area = handle.closest(".cx-chat")?.getBoundingClientRect().width ?? window.innerWidth;
+    return Math.round(Math.max(280, Math.min(value, area * 0.7)));
+  };
+  const startCardsResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const handle = event.currentTarget;
+    const right = handle.parentElement!.getBoundingClientRect().right;
+    handle.setPointerCapture(event.pointerId);
+    let latest = cardsWidth;
+    const move = (moveEvent: PointerEvent) => { latest = clampCardsWidth(right - moveEvent.clientX, handle); setCardsWidth(latest); };
+    const end = () => {
+      handle.removeEventListener("pointermove", move); handle.removeEventListener("pointerup", end); handle.removeEventListener("pointercancel", end);
+      saveCardsWidth(latest);
+    };
+    handle.addEventListener("pointermove", move); handle.addEventListener("pointerup", end); handle.addEventListener("pointercancel", end);
+  };
   // A new chat starts at the bottom.
   useEffect(() => { setAtBottom(true); setShowStructure(false); setRenaming(null); }, [selectedTaskId]);
+  // Continue in project: the new chat opens with the carried messages, ready to review and send.
+  useEffect(() => {
+    if (!seed || selectedTaskId) return;
+    setDraft(seed.text); setTitle(seed.title);
+    onSeedUsed?.();
+    window.setTimeout(() => input.current?.focus(), 0);
+  }, [seed?.key]);
   // The composer grows with its text, like Codex, up to a cap.
   useEffect(() => {
     const box = input.current;
@@ -290,6 +351,7 @@ export function AgentOrchestratorChat({
     <div className={`cx-chat${showStructure && structure ? " has-structure" : ""}`}>
       <section className="cx-thread" aria-label={chat?.title || CHAT_DEFAULT_TITLE}>
         <header className="cx-thread-head">
+          <span className="cx-head-folder" title={projectName}><ChatGlyph name="folder" size={15} /></span>
           {selectedTaskId || pendingCreation
             ? renaming !== null
               ? <input autoFocus className="cx-title-input" aria-label="Chat name" maxLength={240} value={renaming}
@@ -301,6 +363,7 @@ export function AgentOrchestratorChat({
           {pendingCreation && !chat ? <span className="cx-status status-queued" role="status">Starting</span> : null}
           {chat ? <span className={`cx-status status-${chat.status}`}>{STATUS_LABEL[chat.status]}</span> : null}
           <span className="cx-head-spacer" />
+          {headerExtra}
           {structure || latest ? <button type="button" className="cx-icon-button" aria-pressed={showStructure} title="Show cards (Structure)" aria-label="Show cards"
             disabled={!latest} onClick={() => structure ? setShowStructure((value) => !value) : latest && openStructure(latest.id)}>
             <Icon name="orchestrator" width="16" height="16" /></button> : null}
@@ -315,7 +378,10 @@ export function AgentOrchestratorChat({
           <div className="cx-column">
             {!turns.length ? <div className="cx-empty">
               {selectedTaskId ? <p>Loading…</p> : <>
-                <h1>What should we work on{projectName ? <> in <span>{projectName}</span></> : null}?</h1>
+                <span className="cx-empty-glyph" aria-hidden="true"><ChatGlyph name="spark" size={28} /></span>
+                <h1>What should we build{projectName ? <> in {onOpenProject
+                  ? <button type="button" className="cx-empty-project" title="Open the project folder" onClick={onOpenProject}>{projectName}</button>
+                  : <span className="cx-empty-project">{projectName}</span>}</> : null}?</h1>
                 <p>{composer?.mode === "single" ? "Sending starts the selected model." : "Sending starts the chosen team: orchestrator, workers and reviewer."}</p>
               </>}
             </div> : null}
@@ -364,6 +430,47 @@ export function AgentOrchestratorChat({
             onClick={() => { setAtBottom(true); scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" }); }}>↓</button> : null}
         </div>
 
+        {!selectedTaskId ? <div className="cx-context-strip" aria-label="Where this chat runs">
+          {/* Codex's context chips are menus: the project picker, where it runs, and its environment. */}
+          <button type="button" className="cx-chip" title={projectName} aria-haspopup="dialog" aria-expanded={Boolean(projectPicker)}
+            onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); setProjectPicker(projectPicker ? null : { left: box.left, bottom: window.innerHeight - box.top + 6 }); setPickerQuery(""); }}>
+            <ChatGlyph name="folder" size={13} />{projectName || "No project"}<span className="cx-chip-caret" aria-hidden="true">⌄</span></button>
+          <button type="button" className="cx-chip" aria-haspopup="menu"
+            onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); setMenu({ x: box.left, y: box.top - 96, label: "Work in", items: [
+              { label: "This computer", icon: "monitor", checked: true, run: () => undefined },
+              { label: "Cloud", icon: "share", reason: "No cloud runner is set up; chats run on this computer" },
+            ] }); }}>
+            <ChatGlyph name="monitor" size={13} />This computer<span className="cx-chip-caret" aria-hidden="true">⌄</span></button>
+          <span className="cx-head-spacer" />
+          <button type="button" className="cx-chip-icon" aria-label="Configure local environment" title="Configure local environment" aria-haspopup="menu"
+            onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); setMenu({ x: box.right - 260, y: box.top - 170, label: "Configure local environment", items: [
+              { label: "New worktree", icon: "fork", reason: "Chats run in the project folder itself; separate worktrees aren't available yet" },
+              { label: "Branch: the project's current branch", icon: "repo", reason: "Chats use whatever branch the project folder has checked out" },
+              { label: "Environment: none", icon: "settings", reason: "Saved environments aren't available yet" },
+              ...(onSettings ? [{ kind: "separator" } as const, { label: "Chat settings…", icon: "settings", run: onSettings } as ChatMenuItem] : []),
+            ] }); }}>
+            <ChatGlyph name="settings" size={14} /></button>
+        </div> : null}
+        {projectPicker ? <FloatingLayer className="cx-project-picker" role="dialog" style={{ left: projectPicker.left, bottom: projectPicker.bottom }}>
+          <input autoFocus aria-label="Search projects" placeholder="Search projects" value={pickerQuery}
+            onChange={(event) => setPickerQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") setProjectPicker(null); }} />
+          <ul role="listbox" aria-label="Projects">
+            {(projects ?? []).filter((item) => `${item.name} ${item.path ?? ""}`.toLowerCase().includes(pickerQuery.trim().toLowerCase())).map((item) => {
+              const base = item.path?.split(/[\\/]/).filter(Boolean).pop() ?? "";
+              return <li key={item.id}><button type="button" role="option" aria-selected={item.id === projectId}
+                onClick={() => { setProjectPicker(null); if (item.id !== projectId) onPickProject?.(item.id, { title, text: draft }); }}>
+                <ChatGlyph name="folder" size={13} /><span className="cx-picker-name">{item.name}</span>
+                {base && base.toLowerCase() !== item.name.toLowerCase() ? <span className="cx-picker-base">{base}</span> : null}
+                {item.id === projectId ? <span className="cx-picker-check" aria-hidden="true">✓</span> : null}
+              </button></li>;
+            })}
+          </ul>
+          <hr />
+          <button type="button" className="cx-picker-action" disabled={!onAddProject} onClick={() => { setProjectPicker(null); onAddProject?.(); }}>
+            <ChatGlyph name="plus" size={13} />New project</button>
+          <button type="button" className="cx-picker-action" disabled title="Chats run in a project's folder, so a project is required">
+            <span aria-hidden="true">✕</span>Don't work in a project</button>
+        </FloatingLayer> : null}
         <form className="cx-composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}
           onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
           onDrop={(event) => { if (event.dataTransfer.files.length) { event.preventDefault(); void addFiles(event.dataTransfer.files); } }}>
@@ -381,7 +488,7 @@ export function AgentOrchestratorChat({
             {attachNote ? <span className="cx-attach-note" role="status">{attachNote}</span> : null}
           </div> : null}
           <textarea ref={input} aria-label="Message" maxLength={8192} rows={1} value={draft}
-            placeholder={!accepts ? "Running — you can send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : composer?.mode === "single" ? "Ask anything…" : "What should the team do?"}
+            placeholder={!accepts ? "Running — you can send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : "Do anything"}
             onChange={(event) => { setDraft(event.target.value); setSlashIndex(0); }}
             onPaste={(event) => { if (event.clipboardData.files.length) { event.preventDefault(); void addFiles(event.clipboardData.files); } }}
             onKeyDown={(event) => {
@@ -413,7 +520,16 @@ export function AgentOrchestratorChat({
           </div>
         </form>
       </section>
-      {showStructure && structure ? <aside className="cx-structure" aria-label="Cards">
+      {showStructure && structure ? <aside className="cx-structure" aria-label="Cards" style={cardsWidth ? { flexBasis: cardsWidth } : undefined}>
+        <div className="cx-structure-resize" role="separator" aria-orientation="vertical" aria-label="Resize the cards panel" tabIndex={0}
+          aria-valuenow={cardsWidth ?? undefined} title="Drag to resize · double-click to reset"
+          onPointerDown={startCardsResize} onDoubleClick={() => saveCardsWidth(null)}
+          onKeyDown={(event) => {
+            if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+            event.preventDefault();
+            const panel = event.currentTarget.parentElement?.getBoundingClientRect().width ?? 320;
+            saveCardsWidth(clampCardsWidth(panel + (event.key === "ArrowLeft" ? 24 : -24), event.currentTarget));
+          }} />
         <header><strong>Cards</strong><button type="button" className="cx-icon-button" aria-label="Hide cards" onClick={() => setShowStructure(false)}>
           <Icon name="close" width="14" height="14" /></button></header>
         <div className="cx-structure-body">{structure}</div>

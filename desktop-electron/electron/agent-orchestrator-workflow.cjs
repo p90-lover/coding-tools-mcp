@@ -896,13 +896,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const id = clean(workspaceId, 128);
     const run = clean(runId, 80);
     const current = backgroundRuns.get(runKey(id, run));
-    if (current) return { ok: true, status: current.status, ...(current.detail ? { detail: current.detail } : {}) };
+    // `driven`: this app session's loop is observing the run right now. A card a previous session
+    // left "running" is only ever settled by an observe, so callers need to tell the two apart.
+    if (current) return { ok: true, status: current.status, driven: current.driving === true, ...(current.detail ? { detail: current.detail } : {}) };
     const saved = await runs({ workspaceId: id, runId: run });
     const mission = saved.runs.find((entry) => entry.id === run && entry.workspace_id === id);
     if (!mission) throw new Error("AO run unavailable");
     const status = mission.paused && !mission.cancelled ? "paused" : mission.cancelled || mission.nodes.some((node) => ["held", "cancelled", "archived", "reserved", "running"].includes(node.state))
       ? "held" : mission.nodes.every((node) => node.state === "finished") ? "finished" : "idle";
-    return { ok: true, status };
+    return { ok: true, status, driven: false };
   }
 
   async function controlRun({ workspaceId, runId, action, executable, nodeId } = {}) {
