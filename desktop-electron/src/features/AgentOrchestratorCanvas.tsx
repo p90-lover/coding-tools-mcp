@@ -53,8 +53,10 @@ export function canvasLayout(nodes: CanvasNode[], levels: CanvasNode[][], height
   return result;
 }
 
-export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSelect, onMove, onConnect, canConnect, onUnlink, canUnlink, onRemove, canRemove, describe, children }: {
+export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSelect, onMove, onConnect, canConnect, onUnlink, canUnlink, onRemove, canRemove, describe, children, showState = true }: {
   nodes: CanvasNode[]; levels: CanvasNode[][]; selectedId: string; busy: boolean;
+  /** A saved team is a template that never runs: its cards show no run state. */
+  showState?: boolean;
   describe: (node: CanvasNode) => string;
   children?: ReactNode;
   onSelect: (id: string) => void;
@@ -324,7 +326,7 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
           onClick={() => { if (!busy) onUnlink(node.id, parent); }}><title>Click to remove this link</title></path> : null]))}</svg>
       {nodes.map(node => <div key={node.id} data-ao-node={node.id} ref={element => { if (element) elements.current.set(node.id, element); else elements.current.delete(node.id); }}
         className={`ao-canvas-card ao-node-${node.state}${selected.has(node.id) ? " is-selected" : ""}${draggingId && selected.has(node.id) ? " is-dragging" : ""}${dropTarget === node.id ? " is-target" : ""}`}>
-        <button type="button" className="ao-card-handle" aria-label={`Edit ${node.settings?.name || node.role}, ${node.state}`}
+        <button type="button" className="ao-card-handle" aria-label={showState ? `Edit ${node.settings?.name || node.role}, ${node.state}` : `Edit ${node.settings?.name || node.role}`}
           aria-pressed={selected.has(node.id)}
           title="Shift-click another card to link or unlink it with this one; Ctrl-click to select several; arrow keys move the selection"
           onPointerDown={event => { event.stopPropagation(); begin(event, node.id); }} onClick={event => {
@@ -343,9 +345,9 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
             for (const [id, point] of moveCanvasSelection(before, delta[0], delta[1])) positions.current.set(id, point);
             wind.current = 0; schedule(); persist(before);
           }}>
-          <span className="ao-card-title"><span className={`ao-dot ao-dot-${node.state}`} title={node.state} aria-hidden="true" />
+          <span className="ao-card-title">{showState ? <span className={`ao-dot ao-dot-${node.state}`} title={node.state} aria-hidden="true" /> : null}
             <strong>{node.settings?.name || ROLE_TITLE[node.role as keyof typeof ROLE_TITLE] || "Worker"}</strong>
-            <span className="ao-canvas-state">{node.role === "reviewer" && node.state === "running" ? "reviewing" : node.state}</span></span>
+            {showState ? <span className="ao-canvas-state">{node.role === "reviewer" && node.state === "running" ? "reviewing" : node.state}</span> : null}</span>
           <span className="ao-card-route">{describe(node)}</span>
         </button>
         <button type="button" className="ao-port ao-port-in" aria-label={`Connect dependency to ${node.settings?.name || node.role}`}

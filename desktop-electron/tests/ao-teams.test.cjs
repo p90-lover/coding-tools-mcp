@@ -87,6 +87,21 @@ test("the team page has a left palette of roles and preset workers, and an expli
   assert.match(source, /\{saving \? "Saving…" : dirty \? "Save team" : "Saved"\}/);
 });
 
+test("the team page keeps saving after a reload or a save elsewhere, shows no run state, and offers real model tuning", () => {
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorTeamsSurface.tsx"), "utf8");
+  // A kept draft moves onto the stored revision; a stale one was refused by every later save.
+  assert.match(source, /stored && stored\.revision !== current\.revision \? \{ \.\.\.current, revision: stored\.revision \} : current/);
+  // A conflict reloads and rebases (the automatic save then goes again) only when the stored revision moved.
+  assert.match(source, /\/revision changed\/i\.test\(message\)/);
+  assert.match(source, /if \(stored && stored\.revision !== sent\.revision\) \{ accept\(latest, sent\.id, true\); return; \}/);
+  // A saved team is a template: no "Pending" on its cards.
+  assert.match(source, /<AgentOrchestratorCanvas [^>]*showState=\{false\}/);
+  const canvas = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorCanvas.tsx"), "utf8");
+  assert.match(canvas, /\{showState \? <span className="ao-canvas-state">/);
+  // The model catalog keeps its capabilities, so effort and context window are offered.
+  assert.match(source, /result\.capabilities \? \{ models: names, capabilities: result\.capabilities/);
+});
+
 test("a saved team can be deleted from the team page; the last team stays and chats keep their copy", () => {
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorTeamsSurface.tsx"), "utf8");
   assert.ok(source.includes('operation: "delete_team", team_id: saved.id, expected_revision: saved.revision'));
