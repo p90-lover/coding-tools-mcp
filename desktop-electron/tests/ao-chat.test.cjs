@@ -177,7 +177,7 @@ test("a card that is silent, or whose turn never started, for ten minutes is sho
 });
 
 
-test("Chat new Single prompt is Ask anything while Team, follow-up and running prompts stay unchanged", () => {
+test("a new chat's prompt is Codex's \"Do anything\" in either mode; follow-up and running prompts stay unchanged", () => {
   const component = {};
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
   const jsx = (type, props) => ({ type, props: props || {} });
@@ -189,8 +189,8 @@ test("Chat new Single prompt is Ask anything while Team, follow-up and running p
   const walk = item => !item || typeof item !== "object" ? [] : Array.isArray(item) ? item.flatMap(walk) : [item, ...walk(item.props?.children)];
   const base = { runs: [], tasks: [], selectedTaskId: "", busy: false, loadDescription: async () => "", send: async () => {}, openStructure() {}, approvals: [], approve() {}, describeRoute: () => "", retryStart() {} };
   const placeholder = extra => walk(component.AgentOrchestratorChat({ ...base, ...extra })).find(item => item.type === "textarea").props.placeholder;
-  assert.equal(placeholder({ composer: { mode: "single" } }), "Ask anything…");
-  assert.equal(placeholder({ composer: { mode: "team" } }), "What should the team do?");
+  assert.equal(placeholder({ composer: { mode: "single" } }), "Do anything");
+  assert.equal(placeholder({ composer: { mode: "team" } }), "Do anything");
   assert.equal(placeholder({ composer: { mode: "single" }, selectedTaskId: "task" }), "Send a follow-up…");
   assert.equal(placeholder({ composer: { mode: "single" }, selectedTaskId: "task", working: true,
     runs: [run("active", "task", [node("worker", "worker", "running")])] }), "Running — you can send a follow-up when it finishes");

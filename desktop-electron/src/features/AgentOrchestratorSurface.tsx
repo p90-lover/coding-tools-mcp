@@ -1379,7 +1379,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
           // Another project's new chat goes through the same seed as "Continue in", with an empty draft.
           newChatIn: (id) => { if (id === workspaceId) startNewChat(); else { setChatSeed({ key: crypto.randomUUID(), workspaceId: id, title: "", text: "" }); chooseWorkspace(id); } },
           editProject: (id) => { if (id !== workspaceId) chooseWorkspace(id); openSheet("settings"); } }}
-        projectRemote={window.codexWebLauncher?.projectRemote ? (folder) => window.codexWebLauncher!.projectRemote!(folder) : undefined} />
+        projectRemote={(folder) => window.codexWebLauncher?.projectRemote?.(folder) ?? Promise.resolve(null)} />
       <div className="ao-main">
       <div className="ao-dragstrip" aria-hidden="true" />
       {view !== "chat" ? <header className="ao-workspace-head">

@@ -58,8 +58,8 @@ test("a new chat greets with the project name, Codex-style", () => {
   const { props } = base({ composer: { mode: "team" } });
   const view = mount(props).render();
   const heading = walk(view).find((element) => element.type === "h1");
-  assert.equal(text(heading), "What should we work on in Alpha?");
-  assert.equal(walk(view).find((element) => element.type === "textarea").props.placeholder, "What should the team do?");
+  assert.equal(text(heading), "What should we build in Alpha?");
+  assert.equal(walk(view).find((element) => element.type === "textarea").props.placeholder, "Do anything");
 });
 
 test("a turn shows the user bubble, the live work line and a stop button; Esc stops", () => {
