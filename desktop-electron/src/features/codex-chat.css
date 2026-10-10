@@ -154,6 +154,22 @@
 .cx-context-strip { display: flex; align-items: center; gap: 6px; width: calc(100% - 48px); max-width: 780px; margin: 0 auto 6px; padding: 0 2px; }
 .cx-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 260px; height: 26px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 999px;
   color: var(--ao-muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+button.cx-chip { background: transparent; font: inherit; font-size: 12px; cursor: pointer; }
+button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--cx-hover); color: var(--color-text-primary); }
+.cx-chip-caret { margin-left: 2px; font-size: 10px; opacity: .7; }
+.cx-project-picker { position: fixed; z-index: 70; display: grid; gap: 4px; width: 300px; max-height: min(420px, 60vh); padding: 6px; border: 1px solid var(--ao-line);
+  border-radius: 12px; background: var(--color-bg-primary); box-shadow: 0 12px 36px rgb(0 0 0 / 18%); color: var(--color-text-primary); font-size: 13px; }
+.cx-project-picker input { height: 30px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 8px; background: transparent; color: inherit; font: inherit; }
+.cx-project-picker ul { margin: 0; padding: 0; overflow-y: auto; list-style: none; }
+.cx-project-picker li > button, .cx-picker-action { display: flex; align-items: center; gap: 8px; width: 100%; height: 30px; padding: 0 8px; border: 0;
+  border-radius: 6px; background: transparent; color: inherit; font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.cx-project-picker li > button:hover, .cx-picker-action:hover:not(:disabled) { background: var(--cx-hover); }
+.cx-project-picker svg { flex: 0 0 auto; color: var(--ao-muted); }
+.cx-picker-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cx-picker-base { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--ao-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.cx-picker-check { margin-left: auto; color: var(--color-text-primary); }
+.cx-picker-action:disabled { color: var(--ao-muted); cursor: default; opacity: .6; }
+.cx-project-picker hr { width: 100%; margin: 2px 0; border: 0; border-top: 1px solid var(--ao-line); }
 .cx-chip-icon { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 999px;
   background: transparent; color: var(--ao-muted); cursor: pointer; }
 .cx-chip-icon:hover { background: var(--cx-hover); color: var(--color-text-primary); }

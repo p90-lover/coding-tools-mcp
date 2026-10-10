@@ -35,7 +35,7 @@ function mount(props) {
   const jsx = (type, props) => typeof type === "function" ? type(props || {}) : ({ type, props: props || {} });
   const module = transpile("AgentOrchestratorChat.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
     : name === "./ao-chat" ? chat : name === "../icons" ? { Icon: "Icon" } : name === "./ChatMarkdown" ? { ChatMarkdown: "Markdown" }
-      : name === "./ChatMenu" ? { ChatMenu: "ChatMenu" } : name === "./AgentOrchestratorComposerControls" ? { AgentOrchestratorComposerControls: "Controls" }
+      : name === "./ChatMenu" ? { ChatMenu: "ChatMenu", ChatGlyph: "Glyph", FloatingLayer: "FloatingLayer" } : name === "./AgentOrchestratorComposerControls" ? { AgentOrchestratorComposerControls: "Controls" }
         : name === "./AgentOrchestratorApproval" ? { AgentOrchestratorApproval: "Approval" } : {},
   { window: { setTimeout: () => 0, setInterval: () => 0, clearInterval() {} }, document: { querySelector: () => null }, navigator: {} });
   return { render: (next = {}) => { cursor = 0; return module.AgentOrchestratorChat({ ...props, ...next }); } };
@@ -60,6 +60,25 @@ test("a new chat greets with the project name, Codex-style", () => {
   const heading = walk(view).find((element) => element.type === "h1");
   assert.equal(text(heading), "What should we build in Alpha?");
   assert.equal(walk(view).find((element) => element.type === "textarea").props.placeholder, "Do anything");
+});
+
+test("the new chat's project chip opens Codex's project picker: search, projects, New project", () => {
+  const picked = [];
+  const { props } = base({ projectId: "a", onPickProject: (id, draft) => picked.push([id, draft]),
+    projects: [{ id: "a", name: "Alpha", path: "C:\\alpha" }, { id: "b", name: "coding tools", path: "G:\\Projects\\coding-tools-mcp" }] });
+  const view = mount(props);
+  const chip = walk(view.render()).find((element) => element.type === "button" && element.props["aria-haspopup"] === "dialog");
+  chip.props.onClick({ currentTarget: { getBoundingClientRect: () => ({ left: 10, top: 500 }) } });
+  const pickerOf = () => walk(view.render()).find((element) => element.type === "FloatingLayer" && element.props.className === "cx-project-picker");
+  const options = walk(pickerOf()).filter((element) => element.props?.role === "option");
+  assert.deepEqual(options.map((option) => [text(option).replace(/\s+/g, " ").trim(), option.props["aria-selected"]]),
+    [["Alpha✓", true], ["coding toolscoding-tools-mcp", false]], "the folder name shows when it differs, and the open project is checked");
+  options[1].props.onClick();
+  assert.deepEqual(JSON.parse(JSON.stringify(picked)), [["b", { title: "", text: "" }]], "picking a project carries the typed draft");
+  chip.props.onClick({ currentTarget: { getBoundingClientRect: () => ({ left: 10, top: 500 }) } });
+  const actions = walk(pickerOf()).filter((element) => element.type === "button" && String(element.props.className).includes("cx-picker-action"));
+  assert.deepEqual(actions.map((action) => [text(action).trim(), Boolean(action.props.disabled)]),
+    [["New project", true], ["✕Don't work in a project", true]], "New project needs onAddProject; a project is always required");
 });
 
 test("a turn shows the user bubble, the live work line and a stop button; Esc stops", () => {

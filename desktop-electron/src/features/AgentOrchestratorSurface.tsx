@@ -630,6 +630,17 @@ export function AgentOrchestratorSurface({ language, setError }: {
       .finally(() => { chatBusyIds.current.delete(taskId); setChatBusy([...chatBusyIds.current]); });
   });
 
+  // "+ New project" on the new chat's project chip: pick a folder, add it (the app asks to confirm),
+  // then open a new chat there.
+  const addProjectFromFolder = () => void (async () => {
+    const folder = await window.codexWebLauncher?.chooseFolder?.();
+    if (!folder) return;
+    const result = await getCodingToolsClient().workspaces.create({ path: folder, confirm: true });
+    if (result.cancelled || !result.id) return;
+    setWorkspaces(await listAllWorkspaces());
+    setChatSeed({ key: crypto.randomUUID(), workspaceId: result.id, title: "", text: "" });
+    chooseWorkspace(result.id);
+  })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
   const createWorkspace = () => void run("workspace", async () => {
     const result = await getCodingToolsClient().workspaces.create({
       path: workspacePath.trim(), ...(workspaceName.trim() ? { name: workspaceName.trim() } : {}), confirm: true,
@@ -1522,6 +1533,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
                   togglePin: () => togglePin(chatTaskId), pinned: chatPins.includes(chatTaskId) } : undefined}
                 onPause={() => controlRun("pause")} onResume={() => controlRun("resume")} onSettings={() => openSheet("settings")}
                 onOpenProject={(() => { const open = workspaces.find((item) => item.id === workspaceId); return open?.path ? () => openFolder(open) : undefined; })()}
+                projects={workspaces.map((item) => ({ id: item.id, name: item.name, path: item.path }))} projectId={workspaceId}
+                onPickProject={(id, carried) => { setChatSeed({ key: crypto.randomUUID(), workspaceId: id, title: carried.title, text: carried.text }); chooseWorkspace(id); }}
+                onAddProject={addProjectFromFolder}
                 filePath={(file) => window.codexWebLauncher?.filePath?.(file) ?? ""}
                 structure={selectedRun && chatTaskId && selectedRun.project_id === chatTaskId ? <AgentOrchestratorCanvas key={`chat-${selectedRun.id}`}
                   nodes={visibleNodes} levels={aoLevels(selectedRun).map(level => level.filter(node => visibleNodes.includes(node)))}

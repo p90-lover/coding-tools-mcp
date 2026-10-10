@@ -4,7 +4,7 @@ import { AgentOrchestratorComposerControls, type ComposerControlsProps } from ".
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { ChatGlyph, ChatMenu, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
+import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
   CHAT_DEFAULT_TITLE, chatAcceptsMessage, chatDuration, chatList, chatMessageWithAttachments, chatRunOpen, chatSlashCommand,
   chatSlashMatches, chatTurns,
@@ -109,7 +109,7 @@ function MessageActions({ text, children }: { text: string; children?: ReactNode
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, working = false, describeNode, activity, permissions, composer, onOpenTeam, onOpenMissionBoard,
-  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, seed, onSeedUsed, headerExtra, onOpenProject,
+  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject,
   pendingMessage, pendingTitle, pendingCreation = false,
 }: {
   /** A message being sent into a chat that has no run yet (shown at once, as Codex does). */
@@ -157,6 +157,13 @@ export function AgentOrchestratorChat({
   headerExtra?: ReactNode;
   /** Opens the open project's folder (the new chat's project name is a link, as in Codex). */
   onOpenProject?: () => void;
+  /** The project picker on the new chat's project chip: every project, the open one, and its actions. */
+  projects?: { id: string; name: string; path?: string }[];
+  projectId?: string;
+  /** Switches the new chat to that project, carrying what has been typed so far. */
+  onPickProject?: (projectId: string, draft: { title: string; text: string }) => void;
+  /** "+ New project": choose a folder and add it as a project. */
+  onAddProject?: () => void;
 }) {
   const chats = useMemo(() => chatList(runs, tasks, [], true), [runs, tasks]);
   const chat = chats.find((entry) => entry.taskId === selectedTaskId);
@@ -182,6 +189,17 @@ export function AgentOrchestratorChat({
   const [showStructure, setShowStructure] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [menu, setMenu] = useState<ChatMenuState>(null);
+  // The project chip's picker, anchored just above the chip.
+  const [projectPicker, setProjectPicker] = useState<{ left: number; bottom: number } | null>(null);
+  const [pickerQuery, setPickerQuery] = useState("");
+  useEffect(() => {
+    if (!projectPicker) return;
+    const outside = (event: PointerEvent) => {
+      if (!(event.target as Element | null)?.closest?.(".cx-project-picker, .cx-context-strip")) setProjectPicker(null);
+    };
+    document.addEventListener("pointerdown", outside);
+    return () => document.removeEventListener("pointerdown", outside);
+  }, [projectPicker]);
   const [atBottom, setAtBottom] = useState(true);
   const scroller = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
@@ -413,12 +431,46 @@ export function AgentOrchestratorChat({
         </div>
 
         {!selectedTaskId ? <div className="cx-context-strip" aria-label="Where this chat runs">
-          <span className="cx-chip" title={projectName}><ChatGlyph name="folder" size={13} />{projectName || "No project"}</span>
-          <span className="cx-chip"><ChatGlyph name="monitor" size={13} />This computer</span>
+          {/* Codex's context chips are menus: the project picker, where it runs, and its environment. */}
+          <button type="button" className="cx-chip" title={projectName} aria-haspopup="dialog" aria-expanded={Boolean(projectPicker)}
+            onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); setProjectPicker(projectPicker ? null : { left: box.left, bottom: window.innerHeight - box.top + 6 }); setPickerQuery(""); }}>
+            <ChatGlyph name="folder" size={13} />{projectName || "No project"}<span className="cx-chip-caret" aria-hidden="true">⌄</span></button>
+          <button type="button" className="cx-chip" aria-haspopup="menu"
+            onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); setMenu({ x: box.left, y: box.top - 96, label: "Work in", items: [
+              { label: "This computer", icon: "monitor", checked: true, run: () => undefined },
+              { label: "Cloud", icon: "share", reason: "No cloud runner is set up; chats run on this computer" },
+            ] }); }}>
+            <ChatGlyph name="monitor" size={13} />This computer<span className="cx-chip-caret" aria-hidden="true">⌄</span></button>
           <span className="cx-head-spacer" />
-          {onSettings ? <button type="button" className="cx-chip-icon" aria-label="Chat settings" title="Chat settings" onClick={onSettings}>
-            <ChatGlyph name="settings" size={14} /></button> : null}
+          <button type="button" className="cx-chip-icon" aria-label="Configure local environment" title="Configure local environment" aria-haspopup="menu"
+            onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); setMenu({ x: box.right - 260, y: box.top - 170, label: "Configure local environment", items: [
+              { label: "New worktree", icon: "fork", reason: "Chats run in the project folder itself; separate worktrees aren't available yet" },
+              { label: "Branch: the project's current branch", icon: "repo", reason: "Chats use whatever branch the project folder has checked out" },
+              { label: "Environment: none", icon: "settings", reason: "Saved environments aren't available yet" },
+              ...(onSettings ? [{ kind: "separator" } as const, { label: "Chat settings…", icon: "settings", run: onSettings } as ChatMenuItem] : []),
+            ] }); }}>
+            <ChatGlyph name="settings" size={14} /></button>
         </div> : null}
+        {projectPicker ? <FloatingLayer className="cx-project-picker" role="dialog" style={{ left: projectPicker.left, bottom: projectPicker.bottom }}>
+          <input autoFocus aria-label="Search projects" placeholder="Search projects" value={pickerQuery}
+            onChange={(event) => setPickerQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") setProjectPicker(null); }} />
+          <ul role="listbox" aria-label="Projects">
+            {(projects ?? []).filter((item) => `${item.name} ${item.path ?? ""}`.toLowerCase().includes(pickerQuery.trim().toLowerCase())).map((item) => {
+              const base = item.path?.split(/[\\/]/).filter(Boolean).pop() ?? "";
+              return <li key={item.id}><button type="button" role="option" aria-selected={item.id === projectId}
+                onClick={() => { setProjectPicker(null); if (item.id !== projectId) onPickProject?.(item.id, { title, text: draft }); }}>
+                <ChatGlyph name="folder" size={13} /><span className="cx-picker-name">{item.name}</span>
+                {base && base.toLowerCase() !== item.name.toLowerCase() ? <span className="cx-picker-base">{base}</span> : null}
+                {item.id === projectId ? <span className="cx-picker-check" aria-hidden="true">✓</span> : null}
+              </button></li>;
+            })}
+          </ul>
+          <hr />
+          <button type="button" className="cx-picker-action" disabled={!onAddProject} onClick={() => { setProjectPicker(null); onAddProject?.(); }}>
+            <ChatGlyph name="plus" size={13} />New project</button>
+          <button type="button" className="cx-picker-action" disabled title="Chats run in a project's folder, so a project is required">
+            <span aria-hidden="true">✕</span>Don't work in a project</button>
+        </FloatingLayer> : null}
         <form className="cx-composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}
           onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
           onDrop={(event) => { if (event.dataTransfer.files.length) { event.preventDefault(); void addFiles(event.dataTransfer.files); } }}>

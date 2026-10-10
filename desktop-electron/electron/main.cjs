@@ -1351,6 +1351,14 @@ function registerIpc({ logger, stateStore }) {
     return true;
   });
 
+  // The chat's project picker ("+ New project"): the system folder dialog, over the main window.
+  // It only returns the chosen path; registering it as a workspace still asks for confirmation.
+  handle("launcher:choose-folder", async (event) => {
+    assertFocusedMainWindow(event, true);
+    const picked = await dialog.showOpenDialog(mainWindow, { title: "Add a project", properties: ["openDirectory"] });
+    return picked.canceled || !picked.filePaths[0] ? null : picked.filePaths[0];
+  });
+
   // The chat list's project card shows a project's git remote as "owner/repo" (read-only; the
   // remote URL itself, which can hold credentials, never leaves the main process).
   handle("launcher:project-remote", async (event, folder) => {
