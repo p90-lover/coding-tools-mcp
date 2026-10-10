@@ -537,16 +537,18 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   }
 
   // AO probes every agent CLI to build its catalog, which takes seconds; the permission menu reads
-  // it each time it opens. A minute-old answer is fine there (installs are rare) and a failed read
-  // is never kept.
+  // it each time it opens. After the first read the last answer is served at once and refreshed in
+  // the background once it is a minute old (installs are rare). A failed read is never kept.
   let permissionCatalog = null;
   function recentHarnessCatalog() {
-    if (!permissionCatalog || Date.now() - permissionCatalog.at > 60_000) {
-      const promise = harnessService().catalog();
-      permissionCatalog = { at: Date.now(), promise };
-      promise.catch(() => { if (permissionCatalog?.promise === promise) permissionCatalog = null; });
-    }
-    return permissionCatalog.promise;
+    const current = permissionCatalog;
+    if (current && Date.now() - current.at <= 60_000) return current.value ? Promise.resolve(current.value) : current.promise;
+    const promise = harnessService().catalog();
+    const entry = { at: Date.now(), promise, value: current?.value };
+    permissionCatalog = entry;
+    promise.then(value => { entry.value = value; },
+      () => { if (permissionCatalog === entry) permissionCatalog = current?.value ? { ...current, at: 0 } : null; });
+    return current?.value ? Promise.resolve(current.value) : promise;
   }
 
   async function permissionProfiles({ workspaceId, runId, nodeId, route } = {}) {

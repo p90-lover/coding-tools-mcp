@@ -129,6 +129,23 @@ test("CPA effort becomes exactly one session-local wire suffix and context is fo
   assert.equal(Object.hasOwn(own, "gateway"), false);
 });
 
+test("the permission menu reuses the agent catalog instead of probing every CLI on each open", async () => {
+  let reads = 0, fail = true;
+  const workflow = createAgentOrchestratorWorkflow({
+    aoHarness: { catalog: async () => { reads++; if (fail) { fail = false; throw new Error("AO busy"); } return [{ id: "claude-code", label: "Claude Code", installed: true, chat: true }]; } },
+    requestHeadless: async () => { throw Error("must not reach headless"); },
+  });
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-5.5", permission_profile: ":ao-default" };
+  await assert.rejects(workflow.call("permission_profiles", { workspaceId: "ws", route }), /AO busy/);
+  for (let i = 0; i < 3; i++) {
+    const { capability } = await workflow.call("permission_profiles", { workspaceId: "ws", route });
+    assert.equal(capability.supported, true);
+  }
+  assert.equal(reads, 2, "a failed read is not kept; a good one serves the next opens");
+  await workflow.call("harnesses", {});
+  assert.equal(reads, 2, "the harness list shares the same answer");
+});
+
 test("a launch that fails before returning a session saves the launcher's reason on the held card", async () => {
   const submitted = [];
   const worker = { id: "worker", role: "worker", task_id: "task", parents: ["planner"], state: "pending",
