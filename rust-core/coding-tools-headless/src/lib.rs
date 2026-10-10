@@ -1327,17 +1327,28 @@ mod workspace_auth_tests {
         let home = app_data.join("ao-homes/planner");
         let catalog =
             serde_json::json!({"models":[{"slug":"chatgpt-web/high","visibility":"list"}]});
-        prepare_ao_web_home(&home, &app_data, "http://127.0.0.1:17841/v1", &catalog, "chatgpt-web/high").unwrap();
+        prepare_ao_web_home(
+            &home,
+            &app_data,
+            "http://127.0.0.1:17841/v1",
+            &catalog,
+            "chatgpt-web/high",
+        )
+        .unwrap();
         let config = fs::read_to_string(home.join("config.toml")).unwrap();
         assert!(config.contains("model = \"chatgpt-web/high\""));
         assert!(config.contains("env_key = \"CODING_TOOLS_AO_WEB_KEY\""));
         assert!(config.contains("base_url = \"http://127.0.0.1:17841/v1\""));
         assert!(!config.contains("SENTINEL_KEY_DO_NOT_LOG"));
         assert!(
-            config.ends_with("[features]\nmulti_agent = false\n\n[windows]\nsandbox = \"unelevated\"\n"),
+            config.ends_with(
+                "[features]\nmulti_agent = false\n\n[windows]\nsandbox = \"unelevated\"\n"
+            ),
             "cards must not spawn Codex sub-agents"
         );
-        let legacy = config.trim_end_matches("\n[features]\nmulti_agent = false\n\n[windows]\nsandbox = \"unelevated\"\n");
+        let legacy = config.trim_end_matches(
+            "\n[features]\nmulti_agent = false\n\n[windows]\nsandbox = \"unelevated\"\n",
+        );
         fs::write(home.join("config.toml"), legacy).unwrap();
         prepare_ao_web_home(
             &home,
@@ -1359,13 +1370,80 @@ mod workspace_auth_tests {
             .unwrap(),
             catalog
         );
+        assert!(prepare_ao_web_home(
+            &home,
+            &app_data,
+            "http://127.0.0.1:17841/v1",
+            &catalog,
+            "chatgpt-web/high"
+        )
+        .is_ok());
+        // The card follows the managed bridge it is started with (still loopback-only, checked above).
+        prepare_ao_web_home(
+            &home,
+            &app_data,
+            "http://127.0.0.1:17842/v1",
+            &catalog,
+            "chatgpt-web/high",
+        )
+        .unwrap();
+        assert!(fs::read_to_string(home.join("config.toml"))
+            .unwrap()
+            .contains("base_url = \"http://127.0.0.1:17842/v1\""));
+        assert!(prepare_ao_web_home(
+            &home,
+            &app_data,
+            "http://example.com/v1",
+            &catalog,
+            "chatgpt-web/high"
+        )
+        .is_err());
         assert!(
-            prepare_ao_web_home(&home, &app_data, "http://127.0.0.1:17841/v1", &catalog, "chatgpt-web/high").is_ok()
+            fs::read_to_string(home.join("config.toml"))
+                .unwrap()
+                .contains("127.0.0.1:17842"),
+            "a refused bridge never touches the card's config"
         );
+    }
+
+    #[test]
+    fn ao_web_home_takes_a_newer_catalog_and_a_changed_tier_instead_of_refusing_the_card() {
+        let app_data = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../aiTemp/ao-web-home-tests")
+            .join(uuid::Uuid::new_v4().to_string());
+        let home = app_data.join("ao-homes/reviewer");
+        let bridge = "http://127.0.0.1:17841/v1";
+        let old =
+            serde_json::json!({"models":[{"slug":"chatgpt-web/high","context_window":272000}]});
+        prepare_ao_web_home(&home, &app_data, bridge, &old, "chatgpt-web/high").unwrap();
+        // A later app version's catalog (e.g. real model limits) replaces the generated one.
+        let newer =
+            serde_json::json!({"models":[{"slug":"chatgpt-web/high","context_window":1000000}]});
+        prepare_ao_web_home(&home, &app_data, bridge, &newer, "chatgpt-web/high").unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &fs::read(home.join("models.json")).unwrap()
+            )
+            .unwrap(),
+            newer
+        );
+        // The card's tier changed in live configuration: the config follows it.
+        let tier = serde_json::json!({"models":[{"slug":"chatgpt-web/extra-high"}]});
+        prepare_ao_web_home(&home, &app_data, bridge, &tier, "chatgpt-web/extra-high").unwrap();
+        assert!(fs::read_to_string(home.join("config.toml"))
+            .unwrap()
+            .contains("model = \"chatgpt-web/extra-high\""));
+        // Anything edited into the generated config is replaced by the managed provider.
+        fs::write(
+            home.join("config.toml"),
+            "base_url = \"http://evil.example/v1\"\n",
+        )
+        .unwrap();
+        prepare_ao_web_home(&home, &app_data, bridge, &tier, "chatgpt-web/extra-high").unwrap();
+        let config = fs::read_to_string(home.join("config.toml")).unwrap();
         assert!(
-            prepare_ao_web_home(&home, &app_data, "http://127.0.0.1:17842/v1", &catalog, "chatgpt-web/high").is_err()
+            config.contains("base_url = \"http://127.0.0.1:17841/v1\"") && !config.contains("evil")
         );
-        assert!(prepare_ao_web_home(&home, &app_data, "http://example.com/v1", &catalog, "chatgpt-web/high").is_err());
     }
 
     #[test]
@@ -2566,47 +2644,33 @@ supports_websockets = false\n",
         serde_json::to_string(base_url).map_err(text_error)?,
     );
     let config_bytes = format!("{legacy_config_bytes}{}", ao_card_features!());
-    let previous_config_bytes = format!("{legacy_config_bytes}{}", ao_card_features_v2!());
     let config_path = home.join("config.toml");
-    let mut upgrade_config = false;
-    for (path, expected, legacy) in [
-        (&catalog_path, catalog_bytes.as_slice(), &[][..]),
-        (
-            &config_path,
-            config_bytes.as_bytes(),
-            &[legacy_config_bytes.as_bytes(), previous_config_bytes.as_bytes()][..],
-        ),
+    // Both files are generated here for this one card. They used to be accepted only when they
+    // matched byte for byte, so a newer bridge catalog (model limits change between app versions)
+    // or the card's tier changing in live configuration left the card unable to start ("AO WebGPT
+    // bridge catalog is unavailable or changed"). A differing regular file is rewritten with the
+    // expected content (the old one is preserved), which also replaces anything edited in it with
+    // the managed loopback provider. A symlink is still refused: writing through it could clobber
+    // a file elsewhere.
+    for (path, expected, name) in [
+        (&catalog_path, catalog_bytes.as_slice(), "ao-web-catalog"),
+        (&config_path, config_bytes.as_bytes(), "ao-web-provider"),
     ] {
-        if !path.exists() {
-            continue;
+        if path.exists() {
+            if fs::symlink_metadata(path)
+                .map_err(text_error)?
+                .file_type()
+                .is_symlink()
+            {
+                return Err(
+                    "AO WebGPT provider config is a link; inspect before reconnecting".into(),
+                );
+            }
+            if fs::read(path).map_err(text_error)? == expected {
+                continue;
+            }
         }
-        let current = fs::read(path).map_err(text_error)?;
-        let is_legacy = legacy.iter().any(|legacy| current == *legacy);
-        if fs::symlink_metadata(path)
-            .map_err(text_error)?
-            .file_type()
-            .is_symlink()
-            || (current != expected && !is_legacy)
-        {
-            return Err("AO WebGPT provider config changed; inspect before reconnecting".into());
-        }
-        upgrade_config |= is_legacy;
-    }
-    if !catalog_path.exists() {
-        write_private_file(
-            &catalog_path,
-            &catalog_bytes,
-            app_data_dir,
-            "ao-web-catalog",
-        )?;
-    }
-    if !config_path.exists() || upgrade_config {
-        write_private_file(
-            &config_path,
-            config_bytes.as_bytes(),
-            app_data_dir,
-            "ao-web-provider",
-        )?;
+        write_private_file(path, expected, app_data_dir, name)?;
     }
     Ok(())
 }
