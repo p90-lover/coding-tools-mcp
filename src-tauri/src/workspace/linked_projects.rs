@@ -139,6 +139,43 @@ pub fn quick_add_linked_project_for_root(
     Ok(project)
 }
 
+/// Unlinks `alias` from this workspace root by deleting its `.mcp-paths/<alias>.txt` mapping
+/// record. Only the mapping record is removed; the linked folder itself is never touched.
+/// Returns whether a mapping record was found.
+pub fn remove_linked_project_mapping(workspace_root: &Path, alias: &str) -> AppResult<bool> {
+    let alias = alias.trim();
+    if alias.is_empty() || alias.contains(['/', '\\']) || alias.chars().any(char::is_control) {
+        return Err(AppError::Message("Linked project alias is invalid".into()));
+    }
+    let mappings_dir = workspace_root.join(LINKED_PROJECTS_DIR);
+    let Ok(entries) = fs::read_dir(&mappings_dir) else {
+        return Ok(false);
+    };
+    let mut removed = false;
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        let is_mapping = entry
+            .file_type()
+            .map(|kind| kind.is_file())
+            .unwrap_or(false)
+            && path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case("txt"))
+            && path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .is_some_and(|stem| stem.trim() == alias);
+        if is_mapping {
+            fs::remove_file(&path).map_err(|error| {
+                AppError::Message(format!("Could not unlink source folder {alias}: {error}"))
+            })?;
+            removed = true;
+        }
+    }
+    Ok(removed)
+}
+
 fn parse_mapping_file(mapping_path: &Path) -> Option<LinkedProject> {
     let alias = mapping_path
         .file_stem()

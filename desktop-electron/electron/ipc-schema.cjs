@@ -340,6 +340,31 @@ const workspacePolicyUpdateRequest = Object.freeze({
   additionalProperties: false,
 });
 
+// The Edit project dialog: a name, the primary folder and the extra source folders.
+const workspaceUpdateRequest = Object.freeze({
+  type: "object",
+  required: Object.freeze(["workspaceId", "name", "path", "linkedPaths", "confirm"]),
+  properties: Object.freeze({
+    workspaceId: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    name: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    path: Object.freeze({ type: "string", minLength: 1, maxLength: 4096 }),
+    linkedPaths: Object.freeze({ type: "array", items: Object.freeze({ type: "string", minLength: 1, maxLength: 4096 }), maxItems: 32 }),
+    confirm: Object.freeze({ type: "boolean", enum: Object.freeze([true]) }),
+  }),
+  additionalProperties: false,
+});
+
+// Removes the project from the app's list only; no file is deleted.
+const workspaceRemoveRequest = Object.freeze({
+  type: "object",
+  required: Object.freeze(["workspaceId", "confirm"]),
+  properties: Object.freeze({
+    workspaceId: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    confirm: Object.freeze({ type: "boolean", enum: Object.freeze([true]) }),
+  }),
+  additionalProperties: false,
+});
+
 const workspaceCreateRequest = Object.freeze({
   type: "object",
   required: Object.freeze(["path", "confirm"]),
@@ -606,6 +631,16 @@ const CONTRACTS = Object.freeze({
   "workspaces.updatePolicy": Object.freeze({
     channel: "coding-tools:workspaces:policy-update",
     request: workspacePolicyUpdateRequest,
+    response: genericObject,
+  }),
+  "workspaces.update": Object.freeze({
+    channel: "coding-tools:workspaces:update",
+    request: workspaceUpdateRequest,
+    response: genericObject,
+  }),
+  "workspaces.remove": Object.freeze({
+    channel: "coding-tools:workspaces:remove",
+    request: workspaceRemoveRequest,
     response: genericObject,
   }),
   "workspaces.create": Object.freeze({

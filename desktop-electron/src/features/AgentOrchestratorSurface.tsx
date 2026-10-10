@@ -7,6 +7,7 @@ import { AgentOrchestratorOriginalSurface } from "./AgentOrchestratorOriginalSur
 import { AgentOrchestratorCanvas, type CanvasNode } from "./AgentOrchestratorCanvas";
 import { AgentOrchestratorChat } from "./AgentOrchestratorChat";
 import { ChatThreadList, type ThreadWorkspace } from "./ChatThreadList";
+import { ProjectEditDialog } from "./ProjectEditDialog";
 import { AgentOrchestratorPermissions, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
@@ -372,6 +373,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [projectPins, setProjectPins] = useState<string[]>(() => readList(PINNED_PROJECTS));
   const [listNow, setListNow] = useState(() => Date.now());
   const [sheet, setSheet] = useState<Sheet>("");
+  // The sidebar's Edit project dialog (or its remove confirmation) for one project.
+  const [projectEdit, setProjectEdit] = useState<{ id: string; step: "edit" | "remove" } | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<HTMLDivElement>(null);
   const [overviewResizing, setOverviewResizing] = useState(false);
@@ -641,6 +644,20 @@ export function AgentOrchestratorSurface({ language, setError }: {
     setChatSeed({ key: crypto.randomUUID(), workspaceId: result.id, title: "", text: "" });
     chooseWorkspace(result.id);
   })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+  // The Edit project dialog saves the name and folders; errors stay in the dialog.
+  const saveProjectEdit = async (id: string, change: { name: string; path: string; linkedPaths: string[] }) => {
+    await getCodingToolsClient().workspaces.update({ workspaceId: id, ...change, confirm: true });
+    setWorkspaces(await listAllWorkspaces());
+  };
+  // "Remove local project" drops it from the list only (no file is deleted). If it was open,
+  // another project opens, or the empty state when it was the last one.
+  const removeProject = async (id: string) => {
+    await getCodingToolsClient().workspaces.remove({ workspaceId: id, confirm: true });
+    const items = await listAllWorkspaces();
+    setWorkspaces(items);
+    setProjectPins((current) => { const next = current.filter((item) => item !== id); writeList(PINNED_PROJECTS, next); return next; });
+    if (id === workspaceId) chooseWorkspace(items[0]?.id ?? "");
+  };
   const createWorkspace = () => void run("workspace", async () => {
     const result = await getCodingToolsClient().workspaces.create({
       path: workspacePath.trim(), ...(workspaceName.trim() ? { name: workspaceName.trim() } : {}), confirm: true,
@@ -1401,7 +1418,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
           continueIn: continueInProject, share: shareChat, openWindow: openChatWindow,
           // Another project's new chat goes through the same seed as "Continue in", with an empty draft.
           newChatIn: (id) => { if (id === workspaceId) startNewChat(); else { setChatSeed({ key: crypto.randomUUID(), workspaceId: id, title: "", text: "" }); chooseWorkspace(id); } },
-          editProject: (id) => { if (id !== workspaceId) chooseWorkspace(id); openSheet("settings"); } }}
+          editProject: (id) => setProjectEdit({ id, step: "edit" }),
+          removeProject: (id) => setProjectEdit({ id, step: "remove" }) }}
         projectRemote={(folder) => window.codexWebLauncher?.projectRemote?.(folder) ?? Promise.resolve(null)} />
       <div className="ao-main">
       <div className="ao-dragstrip" aria-hidden="true" />
@@ -1589,7 +1607,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
         {view === "board" ? <section className="ao-board-view" aria-label="Mission Board">
           <header><strong>Mission Board</strong><button type="button" className="button-secondary" onClick={() => setView("chat")}>Back to chat</button>
             <button type="button" className="button-secondary" onClick={() => setView("overview")}>Team graph</button></header>
-          {workspaceReady && workspaceId && !sheet
+          {workspaceReady && workspaceId && !sheet && !projectEdit
             ? <AgentOrchestratorOriginalSurface projectBoard hostbar={false} workspaceId={workspaceId} openMissions={() => setView("overview")} />
             : <div className="ao-empty-state">{copy.noWorkspace}</div>}
         </section> : null}
@@ -1621,13 +1639,21 @@ export function AgentOrchestratorSurface({ language, setError }: {
           </div>
           {/* Collapse native bounds during a drag without unmounting and reopening the board. */}
           <div className="ao-workspace-board" style={{ display: overviewResizing ? "none" : undefined }}>
-            {view === "overview" && workspaceReady && workspaceId && !sheet
+            {view === "overview" && workspaceReady && workspaceId && !sheet && !projectEdit
               ? <AgentOrchestratorOriginalSurface projectBoard hostbar={false} workspaceId={workspaceId} openMissions={() => setView("overview")} />
-              : sheet ? <div className="ao-empty-state">Mission board resumes when this dialog closes.</div> : null}
+              : sheet || projectEdit ? <div className="ao-empty-state">Mission board resumes when this dialog closes.</div> : null}
           </div>
         </OverviewSplit>
       </div>
       </div>
+      {(() => {
+        const project = projectEdit && workspaces.find((item) => item.id === projectEdit.id);
+        if (!projectEdit || !project) return null;
+        return <ProjectEditDialog key={`${project.id}:${projectEdit.step}`} project={project} initialStep={projectEdit.step}
+          chooseFolder={window.codexWebLauncher?.chooseFolder ? () => window.codexWebLauncher!.chooseFolder!() : undefined}
+          onSave={(change) => saveProjectEdit(project.id, change)} onRemove={() => removeProject(project.id)}
+          onClose={() => setProjectEdit(null)} />;
+      })()}
     </section>
   );
 }

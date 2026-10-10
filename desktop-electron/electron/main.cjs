@@ -1029,6 +1029,45 @@ function registerIpc({ logger, stateStore }) {
     }, { localConfirmation: true });
     return { cancelled: false, id: created.id, name: created.name, path: created.path };
   });
+  // The chat's Edit project dialog. Its Save is the user's confirmation; the folders were picked
+  // with the system folder dialog, and the service validates them like a new project's.
+  handle("coding-tools:workspaces:update", async (event, input) => {
+    assertFocusedMainWindow(event, true);
+    const folderText = (value) => typeof value === "string" && value.length > 0 && value.length <= 4096 && path.isAbsolute(value);
+    if (!headlessHost || !input || Object.keys(input).some((key) => !["workspaceId", "name", "path", "linkedPaths", "confirm"].includes(key))
+      || input.confirm !== true || typeof input.workspaceId !== "string" || !input.workspaceId || input.workspaceId.length > 128
+      || typeof input.name !== "string" || !input.name.trim() || input.name.length > 128 || !folderText(input.path)
+      || !Array.isArray(input.linkedPaths) || input.linkedPaths.length > 32 || !input.linkedPaths.every(folderText)) {
+      throw new Error("Give the project a name and absolute folders, then save");
+    }
+    const folders = [input.path, ...input.linkedPaths];
+    const canonical = [];
+    for (const folder of folders) {
+      const resolved = await fs.promises.realpath(folder).catch(() => null);
+      if (!resolved || !(await fs.promises.stat(resolved)).isDirectory()) throw new Error(`This folder no longer exists: ${folder}`);
+      canonical.push(resolved);
+    }
+    return headlessHost.request("/api/v1/workspaces/update", {
+      workspace_id: input.workspaceId,
+      name: input.name.trim(),
+      path: canonical[0],
+      linked_paths: canonical.slice(1),
+      confirm: true,
+    }, { localConfirmation: true });
+  });
+  // "Remove local project": drops the project from the list only. The dialog asks first; the
+  // service refuses while the project's missions or listeners are running.
+  handle("coding-tools:workspaces:remove", async (event, input) => {
+    assertFocusedMainWindow(event, true);
+    if (!headlessHost || !input || Object.keys(input).some((key) => !["workspaceId", "confirm"].includes(key))
+      || input.confirm !== true || typeof input.workspaceId !== "string" || !input.workspaceId || input.workspaceId.length > 128) {
+      throw new Error("Confirm removing the project");
+    }
+    return headlessHost.request("/api/v1/workspaces/remove", {
+      workspace_id: input.workspaceId,
+      confirm: true,
+    }, { localConfirmation: true });
+  });
   handle("coding-tools:workspaces:auth-update", async (event, input) => {
     assertFocusedMainWindow(event, true);
     const catalog = await headlessHost.request("/api/v1/workspaces", null, { method: "GET" });

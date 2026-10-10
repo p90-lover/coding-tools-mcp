@@ -128,6 +128,21 @@ test("right-click menus match Codex: its order and glyphs, and every chat item d
   for (const item of projectMenu) assert.ok(item.run || item.reason, `${item.label} is wired or explains why not`);
   projectMenu.find((item) => item.label === "Open in Explorer").run();
   assert.deepEqual(plain(calls.at(-1)), ["openFolder", { id: "a", name: "Alpha", path: "C:\\alpha" }]);
+  // Remove project opens the Edit project dialog's confirmation (files are never deleted).
+  projectMenu.find((item) => item.label === "Remove project").run();
+  assert.deepEqual(plain(calls.at(-1)), ["removeProject", "a"]);
+});
+
+test("without a remove action, Remove project stays disabled and says where to remove projects", () => {
+  const { props } = fixture();
+  const actions = props.actions;
+  props.actions = new Proxy({}, { get: (_target, name) => name === "removeProject" ? undefined : actions[name] });
+  const list = mount("ChatThreadList.tsx", props);
+  const event = { preventDefault() {}, clientX: 1, clientY: 2 };
+  walk(list.render()).find((element) => element.props?.className === "cx-project" && text(element).includes("Alpha")).props.onContextMenu(event);
+  const remove = walk(list.render()).find((element) => element.type === "ChatMenu").props.menu.items.find((item) => item.label === "Remove project");
+  assert.equal(remove.run, undefined);
+  assert.equal(remove.reason, "Remove projects on the Workspace page");
 });
 
 test("Section › files a chat into a named sidebar section, kept on this computer", () => {

@@ -1,6 +1,7 @@
 mod migrate;
 mod model;
 mod store;
+pub mod workspace_edit;
 
 pub use model::{AppData, OAuthRefreshTokenRecord};
 pub use store::DataStore;

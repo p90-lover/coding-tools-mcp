@@ -129,3 +129,17 @@ test("workspace credential IPC accepts only known local credential keys", async 
   );
   assert.equal(calls[0].channel, "coding-tools:workspaces:copy-secret");
 });
+
+test("project edit and removal IPC go through the focused main window to the local-UI service routes", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const main = fs.readFileSync(path.join(__dirname, "..", "electron", "main.cjs"), "utf8");
+  for (const [channel, route] of [["coding-tools:workspaces:update", "/api/v1/workspaces/update"], ["coding-tools:workspaces:remove", "/api/v1/workspaces/remove"]]) {
+    const start = main.indexOf(`handle("${channel}"`);
+    assert.ok(start > 0, `${channel} is handled`);
+    const body = main.slice(start, main.indexOf("\n  });", start));
+    assert.match(body, /assertFocusedMainWindow\(event, true\)/, `${channel} needs the focused main window`);
+    assert.ok(body.includes(`"${route}"`), `${channel} calls ${route}`);
+    assert.match(body, /confirm: true,\s*\}, \{ localConfirmation: true \}\)/, `${channel} sends the local UI confirmation`);
+  }
+});

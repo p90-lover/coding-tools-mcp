@@ -217,6 +217,8 @@ const codingToolsApi = Object.freeze({
   workspaces: Object.freeze({
     list: (input = {}) => invokeContract(ipcRenderer, "workspaces.list", input),
     create: (input) => invokeContract(ipcRenderer, "workspaces.create", input),
+    update: (input) => invokeContract(ipcRenderer, "workspaces.update", input),
+    remove: (input) => invokeContract(ipcRenderer, "workspaces.remove", input),
     updatePolicy: (input) => invokeContract(ipcRenderer, "workspaces.updatePolicy", input),
     updateAuth: (input) => invokeContract(ipcRenderer, "workspaces.updateAuth", input),
     service: (input) => invokeContract(ipcRenderer, "workspaces.service", input),
