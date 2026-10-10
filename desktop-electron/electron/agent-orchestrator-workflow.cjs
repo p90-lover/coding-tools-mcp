@@ -245,6 +245,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const nativeEffort = agent === "codex" || agent === "claude-code";
     const efforts = viaCpa || nativeEffort ? reportedEfforts(info?.efforts) : [];
     const capabilities = { efforts };
+    if (viaCpa && typeof info?.provider === "string") capabilities.provider = info.provider;
     if (!efforts.length) capabilities.effortReason = viaCpa
       ? "CPA did not advertise reasoning levels for this model."
       : "This harness/model has no verified reasoning-effort transport.";
@@ -325,7 +326,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       // context_window is the default the client starts with; max_context_window is how far the
       // model goes (Luna: 272K by default, up to 1M).
       const limit = entry.max_context_window ?? entry.context_window ?? entry.context_length;
+      // CPA names the upstream that serves the model (e.g. antigravity, codex, cline-pass).
+      const provider = [entry.provider, entry.owned_by, entry.ownedBy].find(value => typeof value === "string" && value.trim());
       capabilities[id] = { efforts, ...(!efforts.length ? { effortReason: "CPA did not advertise reasoning levels for this model." } : {}),
+        ...(provider ? { provider: String(provider).trim().slice(0, 64) } : {}),
         ...(Number.isSafeInteger(limit) && limit > 0 ? { contextLimit: limit } : {}) };
       ids.push(id);
       if (ids.length === 100) break;

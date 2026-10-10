@@ -213,3 +213,16 @@ test("a single-model run starts its AO session plain; a team card keeps AO's wor
   assert.equal((await spawnFor("single")).plain, true);
   assert.equal(Object.hasOwn(await spawnFor(undefined), "plain"), false);
 });
+
+test("the CPA catalog's provider for each model reaches the model capabilities", async () => {
+  const workflow = createAgentOrchestratorWorkflow({
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-key" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ data: [
+      { id: "gemini-3.8-flash-high", owned_by: "antigravity" }, { id: "gpt-5.5", owned_by: "codex" }, { id: "plain-model" },
+    ] }) }),
+  });
+  const { capabilities } = await workflow.call("models", { harness: "codex-native" });
+  assert.equal(capabilities["gemini-3.8-flash-high"].provider, "antigravity");
+  assert.equal(capabilities["gpt-5.5"].provider, "codex");
+  assert.equal(capabilities["plain-model"]?.provider, undefined);
+});
