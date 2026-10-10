@@ -135,6 +135,24 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
     }
     finally { (automatic ? setSaving : setBusy)(false); }
   };
+  // Deleting removes the saved team only; chats keep their own copy. The last team stays.
+  const removeTeam = async () => {
+    if (!draft || busy || saving) return;
+    if (!saved) { // An unsaved new team is just dropped.
+      const fallback = teams.find(team => team.id === defaultId) ?? teams[0];
+      setDraft(fallback ? structuredClone(fallback) : freshTeam(workspaceId, true));
+      setSelectedId(""); return;
+    }
+    if (!window.confirm(`Delete the team "${saved.name}"? Existing chats keep their own copy of it.`)) return;
+    setBusy(true); setError(null); setNotice("");
+    try {
+      await moduleCall("team_update", { workspaceId, change: { operation: "delete_team", team_id: saved.id, expected_revision: saved.revision } });
+      accept(await moduleCall("runs", { workspaceId }));
+      setNotice(`Deleted "${saved.name}"`);
+      window.dispatchEvent(new CustomEvent("coding-tools:ao:teams-changed", { detail: { workspaceId } }));
+    } catch (cause) { setError(String(cause instanceof Error ? cause.message : cause)); }
+    finally { setBusy(false); }
+  };
   const add = (role: "worker" | "approver" | "sub_reviewer" | "retry", preset?: { roleName: string; specialty: string }) => {
     if (!draft) return;
     const planner = draft.nodes.find(node => node.role === "planner");
@@ -198,6 +216,8 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
           if (draft && canLeave()) { setDraft(duplicateTeam(draft)); setSelectedId(""); setNotice(""); }
         }}>Duplicate</button>
         <button type="button" className="button-secondary" disabled={locked || !draft || draft.id === defaultId} onClick={() => void save(true)}>Make default</button>
+        <button type="button" className="button-secondary" disabled={locked || saving || !draft || (Boolean(saved) && teams.length < 2)}
+          title={saved && teams.length < 2 ? "Keep at least one team" : "Delete this team; chats keep their own copy"} onClick={() => void removeTeam()}>Delete team</button>
         <button type="button" className="button-secondary" disabled={locked || !workspaceId} onClick={() => {
           if (canLeave()) { setLoading(true); void moduleCall("runs", { workspaceId }).then(result => accept(result, draft?.id))
             .catch(cause => setError(String(cause instanceof Error ? cause.message : cause))).finally(() => setLoading(false)); }

@@ -413,6 +413,49 @@ pub fn save(
     Ok(team)
 }
 
+/// Deletes a saved team. Missions keep their own snapshot of the team, so they are unaffected.
+/// The last team cannot be deleted. When the default goes, the first remaining team becomes the
+/// default, and its revision moves on so open drafts of it are refreshed before saving.
+pub fn delete(
+    data: &mut AppData,
+    workspace_id: &str,
+    team_id: &str,
+    expected_revision: u64,
+) -> AppResult<()> {
+    if !data
+        .profiles
+        .iter()
+        .any(|profile| profile.id == workspace_id)
+    {
+        return Err(fail("Team is outside the registered workspace"));
+    }
+    let index = data
+        .ao_teams
+        .iter()
+        .position(|team| team.id == team_id)
+        .ok_or_else(|| fail("Saved team was not found"))?;
+    if data.ao_teams[index].revision != expected_revision {
+        return Err(fail("AO team revision changed; refresh before deleting"));
+    }
+    if data.ao_teams.len() == 1 {
+        return Err(fail(
+            "Keep at least one team; create another before deleting this one",
+        ));
+    }
+    let was_default = default_team(data, workspace_id).is_some_and(|team| team.id == team_id)
+        || data.ao_teams[index].is_default;
+    data.ao_teams.remove(index);
+    if was_default && !data.ao_teams.iter().any(|team| team.is_default) {
+        let next = &mut data.ao_teams[0];
+        next.is_default = true;
+        next.revision = next
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| fail("AO team revision exhausted"))?;
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct CreateSelection {
     pub execution_mode: Option<ao::ExecutionMode>,
@@ -2133,6 +2176,34 @@ mod tests {
             ]
         })).unwrap();
         (data, team)
+    }
+
+    #[test]
+    fn deleting_a_team_keeps_one_default_and_refuses_the_last_or_a_stale_revision() {
+        let (mut data, first) = team_fixture("first");
+        let first = save(&mut data, "qa", 0, first).unwrap();
+        let (_, second) = team_fixture("second");
+        let second = save(&mut data, "qa", 0, second).unwrap();
+        assert!(first.is_default && !second.is_default);
+        assert!(
+            delete(&mut data, "qa", "first", first.revision + 1).is_err(),
+            "stale revision"
+        );
+        assert!(delete(&mut data, "qa", "missing", 0).is_err());
+        assert!(delete(&mut data, "unregistered", "first", first.revision).is_err());
+        delete(&mut data, "qa", "first", first.revision).unwrap();
+        assert_eq!(data.ao_teams.len(), 1);
+        let promoted = data.ao_teams[0].clone();
+        assert!(
+            promoted.is_default,
+            "the remaining team becomes the default"
+        );
+        assert_eq!(promoted.revision, second.revision + 1);
+        assert_eq!(default_team(&data, "qa").unwrap().id, "second");
+        let refused = delete(&mut data, "qa", "second", promoted.revision)
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("at least one team"), "{refused}");
     }
 
     #[test]

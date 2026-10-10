@@ -583,6 +583,7 @@ enum AoMutation {
         expected_revision: u64,
     },
     SaveTeam { expected_revision: u64, team: integrations::ao_team::Team },
+    DeleteTeam { team_id: String, expected_revision: u64 },
     ApplyTeam {
         run_id: String, expected_revision: u64,
         #[serde(default)] team_revision: Option<u64>,
@@ -4082,6 +4083,8 @@ async fn ao_update(
                     .map(|run| json!({"ok":true,"run":run})),
             AoMutation::SaveTeam { expected_revision, team } => integrations::ao_team::save(data, &workspace_id, expected_revision, team)
                 .map(|team| json!({"ok":true,"team":team})),
+            AoMutation::DeleteTeam { team_id, expected_revision } => integrations::ao_team::delete(data, &workspace_id, &team_id, expected_revision)
+                .map(|()| json!({"ok":true,"deleted":team_id})),
             AoMutation::ApplyTeam { run_id, expected_revision, team_revision, team_id, selected_role_ids, permission_selection } => integrations::ao_team::apply_selected_config(data, &workspace_id, &run_id, expected_revision,
                 integrations::ao_team::ApplySelection { team_id, team_revision, selected_role_ids, permission_selection })
                 .map(|run| json!({"ok":true,"run":run})),
