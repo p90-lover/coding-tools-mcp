@@ -1326,17 +1326,28 @@ mod workspace_auth_tests {
         let home = app_data.join("ao-homes/planner");
         let catalog =
             serde_json::json!({"models":[{"slug":"chatgpt-web/high","visibility":"list"}]});
-        prepare_ao_web_home(&home, &app_data, "http://127.0.0.1:17841/v1", &catalog, "chatgpt-web/high").unwrap();
+        prepare_ao_web_home(
+            &home,
+            &app_data,
+            "http://127.0.0.1:17841/v1",
+            &catalog,
+            "chatgpt-web/high",
+        )
+        .unwrap();
         let config = fs::read_to_string(home.join("config.toml")).unwrap();
         assert!(config.contains("model = \"chatgpt-web/high\""));
         assert!(config.contains("env_key = \"CODING_TOOLS_AO_WEB_KEY\""));
         assert!(config.contains("base_url = \"http://127.0.0.1:17841/v1\""));
         assert!(!config.contains("SENTINEL_KEY_DO_NOT_LOG"));
         assert!(
-            config.ends_with("[features]\nmulti_agent = false\n\n[windows]\nsandbox = \"unelevated\"\n"),
+            config.ends_with(
+                "[features]\nmulti_agent = false\n\n[windows]\nsandbox = \"unelevated\"\n"
+            ),
             "cards must not spawn Codex sub-agents"
         );
-        let legacy = config.trim_end_matches("\n[features]\nmulti_agent = false\n\n[windows]\nsandbox = \"unelevated\"\n");
+        let legacy = config.trim_end_matches(
+            "\n[features]\nmulti_agent = false\n\n[windows]\nsandbox = \"unelevated\"\n",
+        );
         fs::write(home.join("config.toml"), legacy).unwrap();
         prepare_ao_web_home(
             &home,
@@ -1358,15 +1369,38 @@ mod workspace_auth_tests {
             .unwrap(),
             catalog
         );
-        assert!(
-            prepare_ao_web_home(&home, &app_data, "http://127.0.0.1:17841/v1", &catalog, "chatgpt-web/high").is_ok()
-        );
+        assert!(prepare_ao_web_home(
+            &home,
+            &app_data,
+            "http://127.0.0.1:17841/v1",
+            &catalog,
+            "chatgpt-web/high"
+        )
+        .is_ok());
         // The card follows the managed bridge it is started with (still loopback-only, checked above).
-        prepare_ao_web_home(&home, &app_data, "http://127.0.0.1:17842/v1", &catalog, "chatgpt-web/high").unwrap();
-        assert!(fs::read_to_string(home.join("config.toml")).unwrap().contains("base_url = \"http://127.0.0.1:17842/v1\""));
-        assert!(prepare_ao_web_home(&home, &app_data, "http://example.com/v1", &catalog, "chatgpt-web/high").is_err());
+        prepare_ao_web_home(
+            &home,
+            &app_data,
+            "http://127.0.0.1:17842/v1",
+            &catalog,
+            "chatgpt-web/high",
+        )
+        .unwrap();
+        assert!(fs::read_to_string(home.join("config.toml"))
+            .unwrap()
+            .contains("base_url = \"http://127.0.0.1:17842/v1\""));
+        assert!(prepare_ao_web_home(
+            &home,
+            &app_data,
+            "http://example.com/v1",
+            &catalog,
+            "chatgpt-web/high"
+        )
+        .is_err());
         assert!(
-            fs::read_to_string(home.join("config.toml")).unwrap().contains("127.0.0.1:17842"),
+            fs::read_to_string(home.join("config.toml"))
+                .unwrap()
+                .contains("127.0.0.1:17842"),
             "a refused bridge never touches the card's config"
         );
     }
@@ -1378,21 +1412,37 @@ mod workspace_auth_tests {
             .join(uuid::Uuid::new_v4().to_string());
         let home = app_data.join("ao-homes/reviewer");
         let bridge = "http://127.0.0.1:17841/v1";
-        let old = serde_json::json!({"models":[{"slug":"chatgpt-web/high","context_window":272000}]});
+        let old =
+            serde_json::json!({"models":[{"slug":"chatgpt-web/high","context_window":272000}]});
         prepare_ao_web_home(&home, &app_data, bridge, &old, "chatgpt-web/high").unwrap();
         // A later app version's catalog (e.g. real model limits) replaces the generated one.
-        let newer = serde_json::json!({"models":[{"slug":"chatgpt-web/high","context_window":1000000}]});
+        let newer =
+            serde_json::json!({"models":[{"slug":"chatgpt-web/high","context_window":1000000}]});
         prepare_ao_web_home(&home, &app_data, bridge, &newer, "chatgpt-web/high").unwrap();
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(&fs::read(home.join("models.json")).unwrap()).unwrap(), newer);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &fs::read(home.join("models.json")).unwrap()
+            )
+            .unwrap(),
+            newer
+        );
         // The card's tier changed in live configuration: the config follows it.
         let tier = serde_json::json!({"models":[{"slug":"chatgpt-web/extra-high"}]});
         prepare_ao_web_home(&home, &app_data, bridge, &tier, "chatgpt-web/extra-high").unwrap();
-        assert!(fs::read_to_string(home.join("config.toml")).unwrap().contains("model = \"chatgpt-web/extra-high\""));
+        assert!(fs::read_to_string(home.join("config.toml"))
+            .unwrap()
+            .contains("model = \"chatgpt-web/extra-high\""));
         // Anything edited into the generated config is replaced by the managed provider.
-        fs::write(home.join("config.toml"), "base_url = \"http://evil.example/v1\"\n").unwrap();
+        fs::write(
+            home.join("config.toml"),
+            "base_url = \"http://evil.example/v1\"\n",
+        )
+        .unwrap();
         prepare_ao_web_home(&home, &app_data, bridge, &tier, "chatgpt-web/extra-high").unwrap();
         let config = fs::read_to_string(home.join("config.toml")).unwrap();
-        assert!(config.contains("base_url = \"http://127.0.0.1:17841/v1\"") && !config.contains("evil"));
+        assert!(
+            config.contains("base_url = \"http://127.0.0.1:17841/v1\"") && !config.contains("evil")
+        );
     }
 
     #[test]
