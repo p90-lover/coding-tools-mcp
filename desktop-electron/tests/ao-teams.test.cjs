@@ -132,3 +132,18 @@ test("links go around cards: a direct orchestrator-to-reviewer link no longer ru
   // A child above its parent (a link back up): routed around, never a straight crossing.
   assert.match(canvas.wirePath(reviewer, lead, workers), /Q/);
 });
+
+test("a block's role editor opens as a popover beside it, survives autosaves and closes on a press outside", () => {
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorTeamsSurface.tsx"), "utf8");
+  // An automatic save reloads the team; the open role stays open while its block still exists.
+  assert.match(source, /setSelectedId\(current => chosen\?\.nodes\.some\(node => node\.id === current\) \? current : ""\)/);
+  // A popover anchored to the clicked block, inside the page (so the orchestrator's styles still apply).
+  assert.match(source, /querySelector\(`\[data-ao-node="\$\{CSS\.escape\(selectedId\)\}"\]`\)/);
+  assert.match(source, /<div className="ao-team-popover" role="dialog" aria-label="Team role editor"/);
+  assert.ok(!source.includes('<aside className="ao-teams-inspector"'), "the fixed side panel is gone");
+  // Outside presses close it; presses on another block switch to that block; Escape closes.
+  assert.match(source, /target\.closest\("\.ao-team-popover, \[data-ao-node\]"\)/);
+  assert.match(source, /if \(event\.key === "Escape"\) setSelectedId\(""\)/);
+  const canvas = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorCanvas.tsx"), "utf8");
+  assert.match(canvas, /if \(!selectedId\) setSelected\(current => current\.size \? new Set\(\) : current\)/);
+});

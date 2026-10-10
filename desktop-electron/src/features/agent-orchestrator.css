@@ -13,7 +13,13 @@
 .ao-teams-settings input { min-width: 0; width: 76px; }
 .ao-teams-settings input[aria-label="Team name"] { width: 180px; }
 .ao-teams-settings .ao-hint { margin: 0; margin-left: auto; }
-.ao-teams-stage { display: flex; flex: 1 1 auto; min-width: 0; min-height: 0; }
+.ao-teams-stage { position: relative; display: flex; flex: 1 1 auto; min-width: 0; min-height: 0; }
+/* The role editor opens beside the clicked block and closes on a press outside it. */
+.ao-team-popover { position: absolute; z-index: 30; display: flex; flex-direction: column; min-height: 0; overflow-y: auto; border: 1px solid var(--ao-line);
+  border-radius: 12px; background: var(--color-bg-secondary); box-shadow: 0 14px 40px rgb(15 23 42 / 18%); }
+.ao-team-popover .ao-teams-inspector-head { position: sticky; top: 0; z-index: 1; background: inherit; }
+.ao-team-popover .ao-role-inspector { padding: 12px; }
+.ao-teams-hint { position: absolute; right: 14px; bottom: 12px; max-width: 420px; margin: 0; color: var(--ao-muted); font-size: 11px; text-align: right; pointer-events: none; }
 .ao-teams-canvas { display: flex; flex: 1 1 auto; min-width: 0; min-height: 0; }
 .ao-teams-palette { display: flex; flex: 0 0 196px; flex-direction: column; gap: 6px; width: 196px; min-width: 0; padding: 12px 10px; overflow-y: auto; border-right: 1px solid var(--ao-line); background: var(--color-bg-secondary); }
 .ao-teams-palette h3 { margin: 6px 4px 2px; color: #6b7a90; font-size: 11px; font-weight: 600; letter-spacing: .02em; text-transform: uppercase; }
