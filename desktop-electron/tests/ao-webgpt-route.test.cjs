@@ -110,7 +110,7 @@ test("every card describes how it runs, with a custom role in place of the built
   assert.equal(editor.cardMeta({ role: "planner", route, settings: {} }, []), "Native Codex · WebGPT High · effort xhigh · 1M context · Orchestrator");
   assert.equal(editor.cardMeta({ role: "worker", settings: { role_name: "Security auditor" },
     route: { harness_id: "ao:codex", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default", effort: "high" } },
-  [{ id: "ao:codex", label: "Codex" }]), "Codex · CPA · gpt-6-luna · effort high · Security auditor", "AO cards show requested tuning");
+  [{ id: "ao:codex", label: "Codex" }]), "Codex · CPA · OpenAI · gpt-6-luna · effort high · Security auditor", "AO cards show requested tuning");
   assert.match(source, /<option value="custom:">Custom role…<\/option>/);
 });
 
@@ -122,4 +122,14 @@ test("new non-WebGPT picks default to Claude Code, stay on Native Codex there, a
   assert.equal(editor.workerRoute("ao:opencode", "gpt-6-luna").harness_id, "ao:opencode", "explicit valid harness choice is retained");
   assert.match(source, /disabled=\{disabled \|\| isWebModel\(route\.model\)\}/, "WebGPT disables harness switching");
   assert.match(source, /WebGPT requires Native Codex/);
+});
+
+test("CPA models are labelled CPA, then their provider, then the model name", () => {
+  assert.equal(editor.modelLabel("cpa/cline-pass/glm-5.2"), "CPA · Cline Pass · glm-5.2", "an id's own provider prefix");
+  assert.equal(editor.modelLabel("cpa/claude-sonnet-4-6"), "CPA · Claude · claude-sonnet-4-6", "a model family");
+  assert.equal(editor.modelLabel("gpt-6-luna", true), "CPA · OpenAI · gpt-6-luna", "a Native Codex pool id");
+  assert.equal(editor.modelLabel("gpt-6-luna"), "gpt-6-luna", "an agent's own model is not a CPA model");
+  assert.equal(editor.modelLabel("chatgpt-web/high", true), "WebGPT High");
+  editor.rememberCpaProviders({ "cpa/gemini-3.8-flash-high": { provider: "antigravity" } });
+  assert.equal(editor.modelLabel("cpa/gemini-3.8-flash-high"), "CPA · Antigravity · gemini-3.8-flash-high", "the provider CPA reported wins");
 });
