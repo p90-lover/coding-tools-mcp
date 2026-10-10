@@ -508,7 +508,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   }
   async function teamUpdate({ workspaceId, change } = {}) {
     if (!change || typeof change !== "object" || Array.isArray(change)
-      || !["save_team", "apply_team", "set_limits"].includes(change.operation)) {
+      || !["save_team", "delete_team", "apply_team", "set_limits"].includes(change.operation)) {
       throw new Error("Choose a supported local team setting");
     }
     const response = await requestHeadless("/api/v1/ao/update", {

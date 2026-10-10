@@ -86,3 +86,12 @@ test("the team page has a left palette of roles and preset workers, and an expli
   assert.match(source, /role_name: preset\.roleName, specialty: preset\.specialty/, "a preset worker carries its role name and specialty");
   assert.match(source, /\{saving \? "Saving…" : dirty \? "Save team" : "Saved"\}/);
 });
+
+test("a saved team can be deleted from the team page; the last team stays and chats keep their copy", () => {
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorTeamsSurface.tsx"), "utf8");
+  assert.ok(source.includes('operation: "delete_team", team_id: saved.id, expected_revision: saved.revision'));
+  assert.ok(source.includes("teams.length < 2"), "the last team cannot be deleted");
+  assert.ok(source.includes("Existing chats keep their own copy of it."), "deletion is confirmed");
+  const workflow = fs.readFileSync(path.resolve(__dirname, "../electron/agent-orchestrator-workflow.cjs"), "utf8");
+  assert.ok(workflow.includes('["save_team", "delete_team", "apply_team", "set_limits"]'));
+});
