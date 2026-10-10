@@ -76,7 +76,12 @@ function requestJson({ endpoint, token, localUiToken = null, pathname, method = 
         try {
           value = text ? JSON.parse(text) : {};
         } catch {
-          reject(new Error("Headless service returned invalid JSON"));
+          // A refused request body (e.g. an unknown field) comes back as plain text: say so with
+          // the status and the service's own words instead of only "invalid JSON".
+          const status = response.statusCode || 500;
+          const said = text.replace(/\s+/g, " ").trim().slice(0, 200);
+          reject(new Error(status >= 200 && status < 300 ? "Headless service returned invalid JSON"
+            : safeErrorMessage(`Headless service rejected the request (HTTP ${status})${said ? `: ${said}` : ""}`)));
           return;
         }
         if ((response.statusCode || 500) < 200 || (response.statusCode || 500) >= 300) {

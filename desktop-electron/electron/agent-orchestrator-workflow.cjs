@@ -342,7 +342,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   async function harnesses() {
     const native = { id: "codex-native", label: "Native Codex", runnable: true, installed: true, authStatus: "configured" };
     try {
-      const catalog = await harnessService().catalog();
+      // Shares the permission menu's minute-old catalog, so opening that menu doesn't probe again.
+      const catalog = await recentHarnessCatalog();
       return { ok: true, harnesses: [native, ...catalog.map(item => ({ id: `ao:${item.id}`, label: item.label,
         installed: item.installed, authStatus: item.authStatus, chat: item.chat, runnable: item.installed }))] };
     } catch (error) {
@@ -535,6 +536,19 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       ? { ...response, status: { ...response.status, pending_approvals: withAdvice(response.status.pending_approvals) } } : response;
   }
 
+  // AO probes every agent CLI to build its catalog, which takes seconds; the permission menu reads
+  // it each time it opens. A minute-old answer is fine there (installs are rare) and a failed read
+  // is never kept.
+  let permissionCatalog = null;
+  function recentHarnessCatalog() {
+    if (!permissionCatalog || Date.now() - permissionCatalog.at > 60_000) {
+      const promise = harnessService().catalog();
+      permissionCatalog = { at: Date.now(), promise };
+      promise.catch(() => { if (permissionCatalog?.promise === promise) permissionCatalog = null; });
+    }
+    return permissionCatalog.promise;
+  }
+
   async function permissionProfiles({ workspaceId, runId, nodeId, route } = {}) {
     const id = clean(workspaceId, 128);
     const unavailable = reason => ({ ok: true, capability: { supported: false, profiles: [], reason } });
@@ -549,7 +563,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       if (route.harness_id !== "codex-native") {
         const agent = externalAgent({ route });
         if (!["claude-code", "codex"].includes(agent)) return unavailable("This adapter does not support the three permission modes.");
-        const catalog = await harnessService().catalog();
+        const catalog = await recentHarnessCatalog();
         const adapter = catalog.find(item => item.id === agent && item.installed);
         if (!adapter) return unavailable("This harness is not installed.");
         // The bundled AO adapters accept approvalMode per session. This is not Native Codex
