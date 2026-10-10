@@ -997,7 +997,7 @@ mod workspace_auth_tests {
         assert!(serde_json::from_value::<AoMutation>(request).is_err());
     }
 
-
+    #[test]
     fn lifecycle_update_accepts_nested_scoped_schedule_change() {
         let request = json!({"workspace_id":"ws-a","confirm":true,
             "change":{"operation":"lifecycle","change":{
