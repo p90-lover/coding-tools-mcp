@@ -396,6 +396,8 @@ function createUpdateController({
 
         const workerPath = path.join(tempRoot, "update-worker.cjs");
         fs.copyFileSync(path.join(__dirname, "update-worker.cjs"), workerPath);
+        // The worker sets running agents' executables aside before installing (see in-use-files.cjs).
+        fs.copyFileSync(path.join(__dirname, "in-use-files.cjs"), path.join(tempRoot, "in-use-files.cjs"));
         const job = buildJob({
           version: available.version,
           platform,
