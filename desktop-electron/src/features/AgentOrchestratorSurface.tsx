@@ -554,7 +554,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
   // longer driven until you open that very chat. Such chats stayed "running" (and on top of the
   // list). Each run nothing is driving is observed once per session: a dead native harness is
   // recorded as failed (so it can be retried) and a dead AO chat host settles as interrupted,
-  // while a live AO host just reports that it is still working.
+  // while a live AO host just reports that it is still working. That one keeps working with nothing
+  // watching it, so its card would stay "running" after the turn ends and the chat could never take
+  // another message: it is observed again every few seconds until its turn ends and the card settles.
+  // (Observing needs no consent; resuming the run would need the focused window's approval.)
   const settledRuns = useRef(new Set<string>());
   useEffect(() => {
     if (!workspaceId) return;
@@ -566,7 +569,19 @@ export function AgentOrchestratorSurface({ language, setError }: {
       void (async () => {
         const status = await moduleCall("run_status", { workspaceId, runId: mission.id });
         if (status.driven !== false) return;
-        for (const node of running) await moduleCall("observe", { workspaceId, runId: mission.id, nodeId: node.id }).catch(() => undefined);
+        let nodes = running;
+        for (;;) {
+          for (const node of nodes) await moduleCall("observe", { workspaceId, runId: mission.id, nodeId: node.id }).catch(() => undefined);
+          const after = await moduleCall("runs", { workspaceId, runId: mission.id }).catch(() => null);
+          const still = (after?.runs as AoMission[] | undefined)?.find((run) => run.id === mission.id);
+          nodes = still && !still.cancelled ? still.nodes.filter((node) => node.state === "running" && node.route?.harness_id?.startsWith("ao:")) : [];
+          // Done once nothing is left running here, another project is open, or a loop took the run over.
+          if (!nodes.length || selection.current.workspaceId !== workspaceId
+            || (await moduleCall("run_status", { workspaceId, runId: mission.id }).catch(() => null))?.driven !== false) break;
+          await new Promise((resolve) => setTimeout(resolve, 5000));
+        }
+        // Left for another project with the card still running: watch it again when it is back.
+        if (nodes.length && selection.current.workspaceId !== workspaceId) settledRuns.current.delete(key);
         if (selection.current.workspaceId === workspaceId) await loadMissions(workspaceId);
       })().catch(() => undefined);
     }
