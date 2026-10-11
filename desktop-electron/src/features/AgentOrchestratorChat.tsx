@@ -43,7 +43,8 @@ function stepTone(step: ChatStep): string {
 function LiveTimeline({ items }: { items: ChatLiveItem[] }) {
   return <ol className="cx-live">
     {items.map((item) => <li key={item.id} className={`cx-live-item kind-${item.kind} is-${item.status || "done"}`}>
-      {item.kind === "message" ? <ChatMarkdown text={item.text} />
+      {item.kind === "steer" ? <div className="cx-user cx-steer"><div className="cx-bubble"><p>{item.text}</p></div></div>
+        : item.kind === "message" ? <ChatMarkdown text={item.text} />
         : item.kind === "reasoning" ? <span className="cx-live-label">{item.status === "running" ? "Thinking…" : "Thought"}</span>
         : item.kind === "command" ? <><span className="cx-live-label">{item.status === "running" ? "Running" : "Ran"}</span><code>{item.text}</code></>
         : <><span className="cx-live-label">{item.kind.replace(/_/g, " ")}</span><span className="cx-live-text">{item.text}</span></>}
@@ -531,6 +532,13 @@ export function AgentOrchestratorChat({
                 </MessageActions>
                 {turn.user.stamp ? <span className="cx-stamp">{turn.user.stamp} UTC</span> : null}
               </div> : null}
+              {/* Messages steered into this turn. While it works they show in its live timeline, where
+                  they were sent; once it is done, here under the turn's message. */}
+              {turn.user?.steers?.length && !turn.steps.some((step) => step.working?.timeline?.some((item) => item.kind === "steer"))
+                ? turn.user.steers.map((steer, index) => <div key={`steer:${index}`} className="cx-user cx-steer">
+                  <div className="cx-bubble"><p>{steer.text}</p></div>
+                  <span className="cx-stamp">Steered · {steer.stamp} UTC</span>
+                </div>) : null}
               <WorkGroup turn={turn} now={now} idle={notStarted && turn.runId === latest?.id} />
               {turn.final ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`}>
                 <div className="cx-answer-meta">

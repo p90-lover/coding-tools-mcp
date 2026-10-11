@@ -139,13 +139,25 @@ export const CHAT_DEFAULT_TITLE = "New task";
 const FOLLOW_UP = /\n\nFollow-up \(([^)]+) UTC\):\n/;
 const SETTLED = ["finished", "cancelled", "archived"];
 
+// A message handed to the working agent mid-turn ("steer"), saved under the turn's message by chat_steer.
+const STEER = /\n\n↳ Steer \(([^)]+) UTC\): /;
+export type ChatSteer = { text: string; stamp: string };
+
+/** Splits the steers off a message: the message itself, then each steer in the order they were sent. */
+function withSteers(raw: string): { text: string; steers?: ChatSteer[] } {
+  const parts = raw.split(STEER);
+  const steers: ChatSteer[] = [];
+  for (let index = 1; index < parts.length; index += 2) steers.push({ stamp: parts[index], text: (parts[index + 1] ?? "").trim() });
+  return { text: parts[0].trim(), ...(steers.length ? { steers } : {}) };
+}
+
 /** The user's messages in a chat, oldest first: the task description plus each follow-up. */
-export function chatMessagesFromDescription(description: string | undefined): { text: string; stamp?: string }[] {
+export function chatMessagesFromDescription(description: string | undefined): { text: string; stamp?: string; steers?: ChatSteer[] }[] {
   const parts = (description ?? "").split(FOLLOW_UP);
-  const messages: { text: string; stamp?: string }[] = [];
-  if (parts[0]?.trim()) messages.push({ text: parts[0].trim() });
+  const messages: { text: string; stamp?: string; steers?: ChatSteer[] }[] = [];
+  if (parts[0]?.trim()) messages.push(withSteers(parts[0]));
   for (let index = 1; index < parts.length; index += 2) {
-    messages.push({ stamp: parts[index], text: (parts[index + 1] ?? "").trim() });
+    messages.push({ stamp: parts[index], ...withSteers(parts[index + 1] ?? "") });
   }
   return messages;
 }
@@ -317,7 +329,7 @@ export type ChatStep = {
 export type ChatTurn = {
   key: string;
   runId: string;
-  user?: { text: string; stamp?: string };
+  user?: { text: string; stamp?: string; steers?: ChatSteer[] };
   /** The cards' work, in pipeline order, without the answer that closes the turn. */
   steps: ChatStep[];
   /** The answer shown in full: the final reviewer's, or the orchestrator's when it went solo. */
@@ -376,7 +388,9 @@ export function chatTurns(runs: ChatRun[], description: string | undefined, opti
 /** The description up to and including the user's message at `turnIndex`, for "Fork from here". */
 export function chatDescriptionUpTo(description: string | undefined, turnIndex: number): string {
   const said = chatMessagesFromDescription(description).slice(0, turnIndex + 1);
-  return said.map((message, index) => index === 0 ? message.text : `Follow-up (${message.stamp ?? "earlier"} UTC):\n${message.text}`).join("\n\n");
+  const full = (message: { text: string; steers?: ChatSteer[] }) =>
+    [message.text, ...(message.steers ?? []).map((steer) => `↳ Steer (${steer.stamp} UTC): ${steer.text}`)].join("\n\n");
+  return said.map((message, index) => index === 0 ? full(message) : `Follow-up (${message.stamp ?? "earlier"} UTC):\n${full(message)}`).join("\n\n");
 }
 
 /** One chat as Markdown, for "Copy › Conversation". */
