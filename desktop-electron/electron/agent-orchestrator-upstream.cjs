@@ -277,13 +277,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         .slice(0, 100).map(model => ({ id: model.id, label: String(model.label || model.id).slice(0, 128), isDefault: model.isDefault === true,
           efforts: Array.isArray(model.efforts) ? model.efforts.filter(value => typeof value === "string" && value.length <= 32).slice(0, 16) : [] }));
     },
-    async spawn({ workspaceId, agent, model, prompt, name, gateway = null, effort = null, contextWindow = null, approvalMode = null, plain = false }) {
+    async spawn({ workspaceId, agent, model, prompt, name, gateway = null, effort = null, contextWindow = null, approvalMode = null, plain = false, warm = false }) {
       if (approvalMode !== null && !["default", "accept-edits", "auto", "bypass-permissions"].includes(approvalMode)) throw new Error("Unsupported AO permission mode");
       const projectId = await projectFor(workspaceId);
       const settings = await internalApi("GET", "/api/v1/settings");
       // Chat-capable agents return their answer as a conversation turn. Every other
       // installed agent runs in its own terminal UI and hands back a result file.
       const chat = Array.isArray(settings?.chatHarnesses) && settings.chatHarnesses.includes(agentId(agent));
+      // A pre-warmed session must be a chat: it takes its first message later, which a terminal session cannot.
+      if (warm && !chat) throw new Error("Only a chat agent can be pre-warmed");
       const codexWorkspace = agent === "codex" && ["accept-edits", "auto"].includes(approvalMode);
       if (codexWorkspace && !chat) throw new Error("Codex workspace permissions require its capable chat driver; TUI sandbox settings cannot be verified.");
       // AO caps prompts at 16 KiB of UTF-8; leave room for the TUI result instruction.
@@ -291,7 +293,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       const launch = (mode) => internalApi("POST", "/api/v1/sessions", {
         projectId, kind: "worker", harness: agentId(agent), mode,
         ...(approvalMode ? { approvalMode } : {}),
-        prompt: mode === "chat" ? brief : `${brief}\n\n${TUI_RESULT_INSTRUCTION}`,
+        ...(brief ? { prompt: mode === "chat" ? brief : `${brief}\n\n${TUI_RESULT_INSTRUCTION}` } : {}),
         ...(model && model !== "default" ? { model: String(model).slice(0, 256) } : {}),
         ...(effort && !gateway ? { effort: String(effort).slice(0, 32) } : {}),
         ...(contextWindow != null ? { contextWindow } : {}),
@@ -308,6 +310,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // Chat mode needs AO's packaged ACP runtime (Claude's chat driver). Without it the agent
         // still runs in its own terminal and hands back a result file.
         if (!chat || codexWorkspace || !/CHAT_DRIVER_UNAVAILABLE/.test(String(error?.message))) throw error;
+        if (warm) throw error;
         if (TRANSIENT_CHAT_START.test(String(error?.message))) {
           // A chat host that was merely slow to start (a busy machine) is retried as chat: a terminal
           // session cannot show progress, take approvals or be steered. A second failure is reported.
@@ -391,6 +394,25 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         if (/CHAT_NO_ACTIVE_TURN|no turn in flight|no active turn/i.test(String(error?.message))) return { steered: false };
         throw error;
       }
+    },
+    /** Ends a session and its agent (a pre-warmed one nobody used). */
+    async kill(id) {
+      await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/kill`, {});
+      return { ok: true };
+    },
+    /**
+     * Live sessions with this display name that never ran a turn: pre-warmed ones nobody used,
+     * e.g. left from an earlier run. One that took a chat keeps the name but has turns.
+     */
+    async warmSessions(name) {
+      const list = await internalApi("GET", "/api/v1/sessions");
+      const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
+      const candidates = sessions.filter(session => session?.displayName === name && !session.isTerminated && session.status !== "working");
+      const unused = await Promise.all(candidates.map(async session => {
+        const conversation = await internalApi("GET", `/api/v1/sessions/${sessionId(session.id)}/conversation?limit=1`).catch(() => null);
+        return conversation && Array.isArray(conversation.turns) && conversation.turns.length === 0 ? String(session.id) : null;
+      }));
+      return unused.filter(Boolean);
     },
     /** Answers one parked tool request with one of the decisions AO offered for it. */
     async resolveApproval(id, requestId, decisionId) {

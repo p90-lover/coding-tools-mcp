@@ -192,6 +192,104 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   const dispatching = new Set();
   // runId -> { session, text }: a single-model follow-up that continues its chat's live AO session.
   const continuations = new Map();
+  // Everything that decides how an agent is launched; two routes alike in these share a session.
+  const ROUTE_IDENTITY = ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile",
+    "approval_policy", "approvals_reviewer", "effort", "context_window"];
+  /** The AO spawn arguments for a card, without its prompt; throws when the route cannot be honored. */
+  function aoLaunchArgs(workspaceId, node, plain) {
+    const agent = externalAgent(node);
+    const profile = node.route.native_permission_profile ?? node.route.permission_profile;
+    if ((node.route.approval_policy !== undefined || node.route.native_permission_profile !== undefined) && (!["claude-code", "codex"].includes(agent)
+      || !(profile === ":workspace" && node.route.approval_policy === "on-request" && ["user", "auto_review"].includes(node.route.approvals_reviewer ?? "user")
+        || profile === ":danger-full-access" && node.route.approval_policy === "never" && (node.route.approvals_reviewer ?? "user") === "user"))) {
+      throw new Error("This adapter cannot honor the saved permission tuple; choose a supported mode explicitly.");
+    }
+    const viaCpa = node.route.model.startsWith(CPA_MODEL_PREFIX) ? node.route.model.slice(CPA_MODEL_PREFIX.length) : null;
+    if (viaCpa && !GATEWAY_AGENTS.has(agent)) {
+      throw new Error(`${node.settings?.name || "This card"}: ${agent} cannot use CPA models (${node.route.model}); choose one of its own models`);
+    }
+    // The gateway serves CPA through OpenAI- and Anthropic-compatible endpoints; opencode names
+    // models as provider/model, so a CPA model is its OpenAI provider's "openai/<model>".
+    let wireModel = viaCpa;
+    if (viaCpa && node.route.effort) {
+      if (!tuningEfforts.has(node.route.effort)) throw new Error("Choose a supported CPA reasoning level");
+      // The suffix is session-local; the saved mission model and account remain unchanged.
+      wireModel = viaCpa.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "") + "(" + node.route.effort + ")";
+    }
+    const agentModel = wireModel && agent === "opencode" ? `openai/${wireModel}` : wireModel ?? node.route.model;
+    return { workspaceId, agent, model: agentModel, name: node.settings?.name || "AO worker",
+      // "Approve for me" is Codex's auto-review: Codex runs its own reviewer, but Claude Code's
+      // "auto" mode exists only for Claude models and otherwise falls back to asking for every
+      // edit. Claude Code therefore accepts edits and its tool requests go to our reviewer.
+      ...(node.route.approval_policy ? { approvalMode: node.route.approval_policy === "never" ? "bypass-permissions"
+        : node.route.approvals_reviewer === "auto_review" && agent !== "claude-code" ? "auto" : "accept-edits" } : {}),
+      ...(viaCpa ? { gateway: { provider: "cpa", model: wireModel } } : {}),
+      ...(node.route.context_window != null ? { contextWindow: node.route.context_window } : {}),
+      ...(plain ? { plain: true } : {}),
+      // Native effort validation stays skipped for foreign models; CPA reads the suffix.
+      ...(!viaCpa && node.route.effort ? { effort: node.route.effort } : {}) };
+  }
+
+  // Pre-warming: a chat's first launch (its worktree, the agent process and its handshake) took
+  // half a minute before the model even started. While the user is on a new chat, one AO session
+  // per project and route is started with no prompt and kept ready; the first message becomes its
+  // first turn. An unused one is ended after a while; ones left from an earlier app run are found
+  // by their name and ended.
+  const WARM_NAME = "Coding Tools · ready";
+  const WARM_TTL_MS = 15 * 60_000;
+  const warm = new Map(); // key -> { promise, session?, timer }
+  const warmKey = (workspaceId, route, plain) => JSON.stringify([workspaceId, Boolean(plain), ...ROUTE_IDENTITY.map(field => route?.[field] ?? null)]);
+  // Listed once, before this run starts any warm session of its own, so none of ours is in the list.
+  let sweep = null;
+  const sweepStaleWarm = () => sweep ??= (async () => {
+    const stale = await harnessService().warmSessions?.(WARM_NAME).catch(() => []) ?? [];
+    for (const id of stale) void harnessService().kill?.(id).catch(() => undefined);
+  })();
+  async function chatPrewarmRoute(workspaceId, route, plain) {
+    const node = { route, settings: { name: WARM_NAME } };
+    if (!externalAgent(node)) return { ok: true, warmed: false, reason: "Only AO agents are pre-warmed" };
+    const key = warmKey(workspaceId, route, plain);
+    if (warm.has(key)) return { ok: true, warmed: true };
+    const args = aoLaunchArgs(workspaceId, node, plain);
+    const entry = {};
+    entry.promise = sweepStaleWarm().then(() => harnessService().spawn({ ...args, prompt: "", warm: true })).then(session => {
+      entry.session = session;
+      // Unused for a while: end it rather than keep an idle agent around.
+      entry.timer = setTimeout(() => {
+        if (warm.get(key) !== entry) return;
+        warm.delete(key);
+        void harnessService().kill?.(session).catch(() => undefined);
+      }, WARM_TTL_MS);
+      entry.timer.unref?.();
+      return session;
+    }, error => { if (warm.get(key) === entry) warm.delete(key); throw error; });
+    warm.set(key, entry);
+    entry.promise.catch(() => undefined);
+    return { ok: true, warmed: true, starting: true };
+  }
+  /** Hands the warm session for this route to a launch (waiting for one still starting), or null. */
+  async function takeWarm(workspaceId, route, plain) {
+    const key = warmKey(workspaceId, route, plain);
+    const entry = warm.get(key);
+    if (!entry) return null;
+    warm.delete(key);
+    clearTimeout(entry.timer);
+    const session = await entry.promise.catch(() => null);
+    return session && await harnessService().continuable?.(session).catch(() => false) ? session : null;
+  }
+  /** chat_prewarm: keep an agent ready for the new chat's selected model, or its team's orchestrator. */
+  async function chatPrewarm({ workspaceId, executionMode, singleRoute, teamId } = {}) {
+    const id = clean(workspaceId, 128);
+    if (executionMode === "single") {
+      if (!singleRoute || typeof singleRoute !== "object") throw new Error("Choose a model route to pre-warm");
+      return chatPrewarmRoute(id, singleRoute, true);
+    }
+    const saved = await runs({ workspaceId: id });
+    const team = (saved.teams ?? (saved.team ? [saved.team] : [])).find(item => item?.id === teamId) ?? saved.team;
+    const planner = team?.nodes?.find(node => node.role === "planner");
+    if (!planner?.route) return { ok: true, warmed: false, reason: "The team has no orchestrator to pre-warm" };
+    return chatPrewarmRoute(id, planner.route, false);
+  }
   // AO session -> the turn its latest follow-up started, so the previous turn is not read as its answer.
   const expectedTurns = new Map();
   const nodeKey = (workspaceId, runId, nodeId) => JSON.stringify([workspaceId, runId, nodeId]);
@@ -408,25 +506,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       let session = null;
       let failure = null;
       try {
-        const profile = node.route.native_permission_profile ?? node.route.permission_profile;
-        if ((node.route.approval_policy !== undefined || node.route.native_permission_profile !== undefined) && (!["claude-code", "codex"].includes(agent)
-          || !(profile === ":workspace" && node.route.approval_policy === "on-request" && ["user", "auto_review"].includes(node.route.approvals_reviewer ?? "user")
-            || profile === ":danger-full-access" && node.route.approval_policy === "never" && (node.route.approvals_reviewer ?? "user") === "user"))) {
-          throw new Error("This adapter cannot honor the saved permission tuple; choose a supported mode explicitly.");
-        }
-        const viaCpa = node.route.model.startsWith(CPA_MODEL_PREFIX) ? node.route.model.slice(CPA_MODEL_PREFIX.length) : null;
-        if (viaCpa && !GATEWAY_AGENTS.has(agent)) {
-          throw new Error(`${node.settings?.name || "This card"}: ${agent} cannot use CPA models (${node.route.model}); choose one of its own models`);
-        }
-        // The gateway serves CPA through OpenAI- and Anthropic-compatible endpoints; opencode names
-        // models as provider/model, so a CPA model is its OpenAI provider's "openai/<model>".
-        let wireModel = viaCpa;
-        if (viaCpa && node.route.effort) {
-          if (!tuningEfforts.has(node.route.effort)) throw new Error("Choose a supported CPA reasoning level");
-          // The suffix is session-local; the saved mission model and account remain unchanged.
-          wireModel = viaCpa.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "") + "(" + node.route.effort + ")";
-        }
-        const agentModel = wireModel && agent === "opencode" ? `openai/${wireModel}` : wireModel ?? node.route.model;
+        const launch = aoLaunchArgs(workspaceId, node, plain);
         // A single-model follow-up continues the chat's live session as its next turn: no new
         // session, worktree or replayed prompt, and the agent keeps what it already read and ran.
         const continued = continuations.get(runId);
@@ -434,22 +514,19 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         // A session that is gone, or refuses the message, falls back to a fresh start.
         const sent = continued && await harnessService().continuable?.(continued.session).catch(() => false)
           ? await harnessService().send(continued.session, continued.text, reserved.request_key).catch(() => null) : null;
-        if (sent?.turnId) {
-          expectedTurns.set(continued.session, sent.turnId);
+        // Otherwise a pre-warmed session for exactly this route takes the first prompt as its first
+        // turn: it already has its worktree and a running agent, so nothing is launched now.
+        const warmed = sent?.turnId ? null : await takeWarm(workspaceId, node.route, plain);
+        const first = warmed ? await harnessService().send(warmed, reserved.prompt, reserved.request_key).catch(() => null) : null;
+        if (warmed && !first?.turnId) void harnessService().kill?.(warmed).catch(() => undefined);
+        if (sent?.turnId || first?.turnId) {
+          const live = sent?.turnId ? continued.session : warmed;
+          expectedTurns.set(live, (sent ?? first).turnId);
           if (expectedTurns.size > 500) expectedTurns.delete(expectedTurns.keys().next().value);
-          session = continued.session;
-        } else session = await harnessService().spawn({ workspaceId, agent, model: agentModel, prompt: reserved.prompt,
-          name: node.settings?.name || "AO worker",
-          // "Approve for me" is Codex's auto-review: Codex runs its own reviewer, but Claude Code's
-          // "auto" mode exists only for Claude models and otherwise falls back to asking for every
-          // edit. Claude Code therefore accepts edits and its tool requests go to our reviewer.
-          ...(node.route.approval_policy ? { approvalMode: node.route.approval_policy === "never" ? "bypass-permissions"
-            : node.route.approvals_reviewer === "auto_review" && agent !== "claude-code" ? "auto" : "accept-edits" } : {}),
-          ...(viaCpa ? { gateway: { provider: "cpa", model: wireModel } } : {}),
-          ...(node.route.context_window != null ? { contextWindow: node.route.context_window } : {}),
-          ...(plain ? { plain: true } : {}),
-          // Native effort validation stays skipped for foreign models; CPA reads the suffix.
-          ...(!viaCpa && node.route.effort ? { effort: node.route.effort } : {}) });
+          session = live;
+        } else session = await harnessService().spawn({ ...launch, prompt: reserved.prompt });
+        // The next chat on this route finds a session waiting too.
+        if (warmed) void chatPrewarmRoute(workspaceId, node.route, plain).catch(() => undefined);
       } catch (error) { failure = error; }
       // A card stopped while its launch was in flight has no session to stop yet; once the launch
       // returns one, end it, or it keeps working (and waiting for input) where no chat shows it.
@@ -1797,8 +1874,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // The session keeps the permission mode, effort and context it was started with, so only an
       // unchanged route continues it; any change starts a fresh session with the new settings. A Team
       // follow-up has no single route and never continues the single card's session.
-      const sameRoute = executionMode === "single" && singleRoute && card && ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile",
-        "approval_policy", "approvals_reviewer", "effort", "context_window"].every(field => (card.route?.[field] ?? null) === (singleRoute[field] ?? null));
+      const sameRoute = executionMode === "single" && singleRoute && card && ROUTE_IDENTITY.every(field => (card.route?.[field] ?? null) === (singleRoute[field] ?? null));
       if (executionMode === "single" && card && externalAgent(card) && card.receipt?.thread_id
         && ["finished", "failed"].includes(card.state) && sameRoute) {
         continuation = { session: card.receipt.thread_id, text };
@@ -2286,6 +2362,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     switch (operation) {
       case "chat_send": return chatSend(args);
       case "chat_steer": return chatSteer(args);
+      case "chat_prewarm": return chatPrewarm(args);
       case "codex_executable": return { ok: true, executable: findCodexExecutable() };
       case "inspect": return { ok: true, status: "graph_ready", source: "coding-tools-plan", plannerRoute: "webgpt-on-codex-required", execution: "not_connected" };
       case "board": return board(args);
