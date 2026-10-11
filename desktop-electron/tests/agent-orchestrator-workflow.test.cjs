@@ -2723,3 +2723,30 @@ test("a follow-up that would overflow a long chat compacts it first instead of r
   assert.match(final, /^Summary of the earlier conversation \(compacted [^)]+ UTC\):\nDid the first half; next: the second half\.\n\nFollow-up \([^)]+ UTC\):\nkeep going$/);
   assert.ok(final.length < 8192);
 });
+
+test("a card stopped while its agent launched also stops that agent once its session arrives", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
+  const mission = { id: "run", workspace_id: "ws", revision: 1, execution_mode: "single", cancelled: false, grant: { executable_sha256: "a".repeat(64) },
+    nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+  const interrupted = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    requestHeadless: async (endpoint) => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+      if (endpoint.endsWith("/grant")) return { ok: true, run: mission, grant: { executable_sha256: "a".repeat(64) } };
+      if (endpoint.endsWith("/external/reserve")) { mission.nodes[0].state = "reserved"; return { ok: true, request_key: "k", prompt: "task" }; }
+      if (endpoint.endsWith("/external/submitted")) throw new Error("AO node is not reserved");
+      return { ok: true, run: mission };
+    },
+    aoHarness: {
+      // The user stops the card while AO is still launching its agent.
+      spawn: async () => { mission.cancelled = true; mission.nodes[0].state = "cancelled"; return "late-session"; },
+      interrupt: async (id) => { interrupted.push(id); },
+      observe: async () => ({ status: "idle", turnState: "completed" }),
+    },
+  });
+  await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  for (let tries = 0; tries < 200 && !interrupted.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.deepEqual(interrupted, ["late-session"], "the agent launched for a stopped card is not left running unseen");
+});

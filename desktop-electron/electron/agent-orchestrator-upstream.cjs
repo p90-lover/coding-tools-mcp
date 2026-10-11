@@ -218,6 +218,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       })
       .filter(approval => approval.decisions.length);
   }
+  /** A chat start that failed only for time (the persistent host's startup window, a deadline). */
+  const TRANSIENT_CHAT_START = /persistent (ACP )?host|timed out|timeout|deadline exceeded|context canceled/i;
+  const CHAT_RETRY_PAUSE_MS = 2000;
   /** The longest prefix of `text` that is at most `maxBytes` of UTF-8 (AO limits prompts in bytes). */
   function utf8Prefix(text, maxBytes) {
     const value = String(text);
@@ -305,7 +308,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // Chat mode needs AO's packaged ACP runtime (Claude's chat driver). Without it the agent
         // still runs in its own terminal and hands back a result file.
         if (!chat || codexWorkspace || !/CHAT_DRIVER_UNAVAILABLE/.test(String(error?.message))) throw error;
-        data = await launch("tui");
+        if (TRANSIENT_CHAT_START.test(String(error?.message))) {
+          // A chat host that was merely slow to start (a busy machine) is retried as chat: a terminal
+          // session cannot show progress, take approvals or be steered. A second failure is reported.
+          await new Promise((resolve) => setTimeout(resolve, CHAT_RETRY_PAUSE_MS));
+          data = await launch("chat");
+        } else data = await launch("tui");
       }
       return sessionId(data?.session?.id);
     },
