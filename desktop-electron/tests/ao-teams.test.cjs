@@ -237,3 +237,14 @@ test("a block's role editor opens as a popover beside it, survives autosaves and
   const canvas = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorCanvas.tsx"), "utf8");
   assert.match(canvas, /if \(!selectedId\) setSelected\(current => current\.size \? new Set\(\) : current\)/);
 });
+test("the chat and Team pages keep asking for the harness list while AO is still starting", () => {
+  const read = name => fs.readFileSync(path.resolve(__dirname, "../src/features", name), "utf8");
+  const surface = read("AgentOrchestratorSurface.tsx");
+  const watch = surface.slice(surface.indexOf("export function watchHarnesses"), surface.indexOf("/** Per-viewer chat list state"));
+  assert.ok(watch.includes("if (!notice) return;"), "it stops once AO answers without a notice");
+  assert.ok(watch.includes("attempt < 20"), "and gives up after a few minutes");
+  for (const page of ["AgentOrchestratorSurface.tsx", "AgentOrchestratorTeamsSurface.tsx"]) {
+    assert.ok(read(page).includes("const stopHarnesses = watchHarnesses("), page);
+    assert.ok(read(page).includes("stopHarnesses(); };"), page + " stops asking when it closes");
+  }
+});

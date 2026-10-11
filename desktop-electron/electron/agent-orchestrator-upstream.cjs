@@ -42,6 +42,36 @@ function createAgentInventory(api, { now = Date.now, recheckMs = AGENT_RECHECK_M
   };
 }
 
+// AO install checks that ended "unknown" without proving anything: still running, never run, timed
+// out, failed, or found a binary whose identity isn't confirmed yet. ("install_check_unsupported"
+// is left out: AO can never tell, so those harnesses are not offered.)
+const UNPROVEN_INSTALL_CHECKS = new Set(["checking", "not_checked", "install_check_timeout", "install_check_failed", "install_identity_pending"]);
+
+/**
+ * The harness list from AO's inventory. AO lists only agents its latest check proved installed; a
+ * check still running, timed out or failed leaves an agent "unknown", which AO calls advisory, not
+ * missing. Such an agent is offered when its check was unproven or it was installed last time
+ * (`lastInstalled`: id → auth status), until AO actually reports it not installed.
+ */
+function agentCatalog({ inventory, settings, readiness = null, lastInstalled = new Map() }) {
+  const chat = new Set(Array.isArray(settings?.chatHarnesses) ? settings.chatHarnesses : []);
+  const installed = new Map((inventory?.installed ?? []).map(item => [item?.id, item]));
+  const checks = new Map((Array.isArray(readiness?.agents) ? readiness.agents : []).map(agent => [agent?.id, agent?.installation ?? {}]));
+  const present = id => {
+    if (installed.has(id)) return true;
+    const check = checks.get(id);
+    if (check?.state === "not_installed") return false;
+    return lastInstalled.has(id) || (check?.state === "unknown" && UNPROVEN_INSTALL_CHECKS.has(check.reasonCode));
+  };
+  return (inventory?.supported ?? []).filter(item => typeof item?.id === "string" && /^[a-z0-9-]{1,40}$/.test(item.id)).map(item => {
+    const offered = present(item.id);
+    return {
+      id: item.id, label: String(item.label || item.id).slice(0, 80), installed: offered,
+      authStatus: installed.get(item.id)?.authStatus || (offered && lastInstalled.get(item.id)) || "unknown", chat: chat.has(item.id),
+    };
+  });
+}
+
 const TUI_RESULT_FILE = "AO_RESULT.md";
 // AO conversation turn states after which a turn can no longer change.
 const TERMINAL_TURN_STATES = new Set(["completed", "failed", "interrupted", "cancelled", "recovered"]);
@@ -253,6 +283,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     return binding.projectId;
   }
   const agentInventory = createAgentInventory(internalApi);
+  // Agents the last catalog listed as installed, with their auth status.
+  let lastInstalled = new Map();
   // Watching never starts AO; it connects (with backoff) once the runtime is ready.
   const sessionEvents = createAoSessionEvents({ port: async () => { if (state !== "ready") throw new Error("AO is not running"); return daemonPort; }, logger });
   const harness = Object.freeze({
@@ -260,12 +292,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     watch(listener) { return sessionEvents.subscribe(listener); },
     async catalog() {
       const [inventory, settings] = await Promise.all([agentInventory(), internalApi("GET", "/api/v1/settings")]);
-      const chat = new Set(Array.isArray(settings?.chatHarnesses) ? settings.chatHarnesses : []);
-      const installed = new Map((inventory?.installed ?? []).map(item => [item.id, item]));
-      return (inventory?.supported ?? []).filter(item => typeof item?.id === "string" && /^[a-z0-9-]{1,40}$/.test(item.id)).map(item => ({
-        id: item.id, label: String(item.label || item.id).slice(0, 80),
-        installed: installed.has(item.id), authStatus: installed.get(item.id)?.authStatus || "unknown", chat: chat.has(item.id),
-      }));
+      const proven = new Set((inventory?.installed ?? []).map(item => item?.id));
+      // AO's readiness (its cached snapshots; no new checks) tells an unproven agent from a missing one.
+      const readiness = (inventory?.supported ?? []).some(item => !proven.has(item?.id))
+        ? await internalApi("GET", "/api/v1/agents/readiness").catch(() => null) : null;
+      const catalog = agentCatalog({ inventory, settings, readiness, lastInstalled });
+      lastInstalled = new Map(catalog.filter(item => item.installed).map(item => [item.id, item.authStatus]));
+      return catalog;
     },
     async models(agent, workspaceId) {
       const projectId = workspaceId ? await projectFor(workspaceId).catch(() => "") : "";
@@ -727,4 +760,4 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   return { call, start, stop, show, hide, snapshot, harness };
 }
 
-module.exports = { createAgentOrchestratorUpstream, createAgentInventory, API_OPERATIONS };
+module.exports = { agentCatalog, createAgentOrchestratorUpstream, createAgentInventory, API_OPERATIONS };

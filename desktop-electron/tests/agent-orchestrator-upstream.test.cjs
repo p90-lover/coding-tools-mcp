@@ -214,6 +214,26 @@ test("closing the AO gateway cancels a backend request stalled before response h
   }
 });
 
+test("an AO harness whose install check is only unproven stays offered; one AO reports missing does not", () => {
+  const { agentCatalog } = require("../electron/agent-orchestrator-upstream.cjs");
+  const supported = ["claude-code", "codex", "aider", "goose"].map(id => ({ id, label: id }));
+  const inventory = { supported, installed: [{ id: "codex", authStatus: "authorized" }] };
+  const readiness = { agents: [
+    { id: "claude-code", installation: { state: "unknown", reasonCode: "checking" } },
+    { id: "aider", installation: { state: "not_installed", reasonCode: "not_installed" } },
+    { id: "goose", installation: { state: "unknown", reasonCode: "install_check_unsupported" } },
+  ] };
+  const offered = list => Object.fromEntries(list.map(item => [item.id, item.installed]));
+  // Claude Code's check is still running (AO lists it nowhere): it is not reported missing.
+  assert.deepEqual(offered(agentCatalog({ inventory, readiness })), { "claude-code": true, codex: true, aider: false, goose: false });
+  // Installed last time and the readiness read failed: still offered, with its last auth status.
+  const kept = agentCatalog({ inventory, readiness: null, lastInstalled: new Map([["claude-code", "authorized"]]) });
+  assert.deepEqual(kept.find(item => item.id === "claude-code"), { id: "claude-code", label: "claude-code", installed: true, authStatus: "authorized", chat: false });
+  // AO saying it is not installed wins over the memory.
+  const gone = { agents: [{ id: "claude-code", installation: { state: "not_installed", reasonCode: "not_installed" } }] };
+  assert.equal(agentCatalog({ inventory, readiness: gone, lastInstalled: new Map([["claude-code", "authorized"]]) })[0].installed, false);
+});
+
 test("the AO harness list waits for fresh install checks and re-checks after a minute", async () => {
   const { createAgentInventory } = require("../electron/agent-orchestrator-upstream.cjs");
   let clock = 0;
