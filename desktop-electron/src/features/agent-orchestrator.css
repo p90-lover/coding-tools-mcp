@@ -211,6 +211,9 @@
 .ao-canvas-controls button { min-width: 28px; height: 28px; border: 0; border-radius: 5px; padding: 0 6px; background: transparent; color: var(--color-text-primary); }
 .ao-canvas-controls button:hover { background: rgb(255 255 255 / 8%); }
 .ao-canvas-controls span { min-width: 38px; color: var(--ao-muted); font-size: 11px; font-variant-numeric: tabular-nums; text-align: center; }
+.ao-canvas-help { position: absolute; z-index: 4; left: 12px; bottom: 54px; width: min(360px, calc(100% - 24px)); max-height: calc(100% - 80px); overflow: auto; padding: 12px 14px; border: 1px solid var(--ao-line); border-radius: 10px; background: var(--color-bg-secondary); box-shadow: 0 8px 24px rgb(0 0 0 / 28%); font-size: 12px; line-height: 1.45; }
+.ao-canvas-help ul { margin: 8px 0 10px; padding-left: 18px; color: var(--color-text-secondary, var(--ao-muted)); }
+.ao-canvas-help li + li { margin-top: 5px; }
 .ao-connect-hint { position: absolute; z-index: 3; left: 50%; bottom: 14px; transform: translateX(-50%); padding: 6px 12px; border-radius: 14px; background: var(--color-bg-secondary); font-size: 12px; }
 .ao-fab { position: absolute; z-index: 3; left: 12px; top: 12px; display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 14px 0 11px; border: 1px solid var(--ao-line); border-radius: 17px; background: var(--color-bg-secondary); color: var(--color-text-primary); font-size: 12px; box-shadow: 0 6px 18px rgb(0 0 0 / 30%); }
 .ao-fab:hover:not(:disabled) { background: color-mix(in srgb, var(--color-bg-secondary) 80%, white); }
