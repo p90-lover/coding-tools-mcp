@@ -24,6 +24,27 @@ function clausesFrom(value) {
   }));
 }
 
+// The native executable's SHA-256, pinned into every run grant. Hashing a ~100 MiB codex.exe on
+// each run start cost seconds, so the digest is reused while the file is unchanged: any replacement
+// changes its size, modification or change time (ctime cannot be set by the replacer), which
+// re-hashes it.
+const executableDigests = new Map(); // "<path>|<size>|<mtimeMs>|<ctimeMs>" -> hex
+async function executableSha256(resolved, metadata) {
+  const key = [resolved, metadata.size, metadata.mtimeMs, metadata.ctimeMs].join("|");
+  if (executableDigests.has(key)) return executableDigests.get(key);
+  const hash = createHash("sha256");
+  await new Promise((resolve, reject) => {
+    const stream = fs.createReadStream(resolved);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", resolve);
+    stream.on("error", reject);
+  });
+  const digest = hash.digest("hex");
+  for (const stale of [...executableDigests.keys()].filter((entry) => entry.startsWith(resolved + "|"))) executableDigests.delete(stale);
+  executableDigests.set(key, digest);
+  return digest;
+}
+
 // Keep the actual native profile ID. The consented runtime's profile metadata enforces
 // availability/managed policy; the standalone command grant is independent and stays off.
 async function resolveAoNativeConnection({ workspaceId, runId, nodeId, executable, model, permissionProfile = ":read-only",
@@ -42,18 +63,11 @@ async function resolveAoNativeConnection({ workspaceId, runId, nodeId, executabl
     || process.platform === "win32" && !resolved.toLowerCase().endsWith(".exe")) {
     throw new Error("Select a native codex.exe within the 512 MiB inspection limit");
   }
-  const hash = createHash("sha256");
-  await new Promise((resolve, reject) => {
-    const stream = fs.createReadStream(resolved);
-    stream.on("data", (chunk) => hash.update(chunk));
-    stream.on("end", resolve);
-    stream.on("error", reject);
-  });
   const nodeHash = createHash("sha256").update(JSON.stringify([
     clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80),
   ])).digest("hex");
   return {
-    executable: resolved, expected_sha256: hash.digest("hex"),
+    executable: resolved, expected_sha256: await executableSha256(resolved, metadata),
     codex_home: path.join(userData, "headless", "ao-homes", nodeHash),
     allow_model_usage: true, allow_command_execution: false,
     permission_profile: permissionProfile, model: clean(model, 128),

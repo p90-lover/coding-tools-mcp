@@ -2313,3 +2313,16 @@ test("a single AO card set to Approve for me has its parked tool requests review
     "allowed once by the reviewer, git push denied by the hard rules, the unclear write left for the person; never an always-grant");
   assert.ok(advised.length >= 1 && advised.every(model => model === "test-model"), "the card's own CPA model reviews");
 });
+
+test("the pinned executable digest is reused only while the file is unchanged", async () => {
+  const dir = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "ct-exe-digest-"));
+  const exe = path.join(dir, "codex.exe");
+  const sha = (text) => crypto.createHash("sha256").update(text).digest("hex");
+  const resolve = () => resolveAoNativeConnection({ workspaceId: "ws", runId: "run", nodeId: "n", executable: exe, model: "gemini-3.8-flash-high", userData: path.join(dir, "user-data") });
+  fs.writeFileSync(exe, "first-binary");
+  assert.equal((await resolve()).expected_sha256, sha("first-binary"));
+  assert.equal((await resolve()).expected_sha256, sha("first-binary"));
+  await new Promise((done) => setTimeout(done, 20));
+  fs.writeFileSync(exe, "other-binary"); // same size, new content
+  assert.equal((await resolve()).expected_sha256, sha("other-binary"), "a replaced executable is hashed again");
+});
