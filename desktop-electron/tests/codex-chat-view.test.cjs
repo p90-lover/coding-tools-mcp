@@ -312,10 +312,32 @@ test("while the agent works, /review and /init steer it; a new goal waits for th
   assert.ok(walk(view.render()).some((element) => element.props?.["aria-label"] === "Rewind to this message"), "each message offers Rewind");
 });
 
-test("a working chat on a non-AO model is not offered steering", () => {
-  const { props } = base({ selectedTaskId: "t", working: true,
+test("a working chat on a non-AO model is not offered steering; a message typed meanwhile is queued, not refused", async () => {
+  const { props, calls } = base({ selectedTaskId: "t", working: true,
     runs: [run("r1", "t", [node("w", "planner", "running", { route: { harness_id: "codex-native", model: "chatgpt-web/high" } })], { execution_mode: "single" })],
-    steer: async () => true });
-  const textarea = walk(mount(props).render()).find((element) => element.type === "textarea");
-  assert.equal(textarea.props.placeholder, "Running — you can send a follow-up when it finishes");
+    steer: async () => { throw new Error("not steerable"); } });
+  const view = mount(props);
+  const textarea = () => walk(view.render()).find((element) => element.type === "textarea");
+  assert.equal(textarea().props.placeholder, "Running — a message now is sent when it finishes");
+  textarea().props.onChange({ target: { value: "also check the logs" } });
+  const button = walk(view.render()).find((element) => element.props?.["aria-label"] === "Queue message");
+  assert.ok(button && !button.props.disabled, "Send queues instead of being replaced by Stop");
+  await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+  assert.equal(calls.filter(([kind]) => kind === "send").length, 0, "nothing is sent while the turn runs");
+  assert.equal(textarea().props.value, "", "the composer is free for the next message");
+  assert.match(text(walk(view.render()).find((element) => String(element.props?.className).includes("cx-command-card"))), /^QueuedIt's sent when the current turn finishes/);
+});
+
+test("after an app restart a running AO card is still steered, though the page isn't driving its run", async () => {
+  const steered = [];
+  // working is false: the page's run loop isn't attached to this chat's run, which goes on in AO.
+  const { props } = base({ selectedTaskId: "t", working: false,
+    runs: [run("r1", "t", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/m" } })], { execution_mode: "single" })],
+    steer: async (input) => { steered.push(input); return true; } });
+  const view = mount(props);
+  const textarea = () => walk(view.render()).find((element) => element.type === "textarea");
+  assert.equal(textarea().props.placeholder, "Steer the agent — sent to it right away");
+  textarea().props.onChange({ target: { value: "have you done it?" } });
+  await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+  assert.deepEqual(JSON.parse(JSON.stringify(steered)), [{ taskId: "t", message: "have you done it?" }]);
 });
