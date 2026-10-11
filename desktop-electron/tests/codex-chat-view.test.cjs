@@ -341,3 +341,12 @@ test("after an app restart a running AO card is still steered, though the page i
   await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
   assert.deepEqual(JSON.parse(JSON.stringify(steered)), [{ taskId: "t", message: "have you done it?" }]);
 });
+
+test("a queued message belongs to its chat: switching chats keeps it, and it's sent only into that chat", () => {
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
+  const queue = source.slice(source.indexOf("const [queued, setQueued]"), source.indexOf("const dispatch = async"));
+  assert.ok(queue.includes("queued.taskId !== selectedTaskId"), "it waits until its own chat is open and free");
+  assert.ok(!queue.includes("setQueued(null); }, [selectedTaskId]"), "opening another chat no longer drops it");
+  assert.ok(queue.includes("setDraft(next.message)"), "a queued message that can't be sent goes back into the composer");
+  assert.ok(source.includes("setQueued({ what, message, goal, taskId: selectedTaskId })"), "commands queue for their chat too");
+});

@@ -356,7 +356,8 @@ export function AgentOrchestratorChat({
     const text = commands?.planMode ? planMessage(message) : message;
     if (queueing) {
       // Several messages typed during one turn go together, in order.
-      setQueued((current) => current && !current.goal ? { ...current, message: `${current.message}\n\n${text}` } : { what: "Message", message: text });
+      setQueued((current) => current && !current.goal && current.taskId === selectedTaskId
+        ? { ...current, message: `${current.message}\n\n${text}` } : { what: "Message", message: text, taskId: selectedTaskId });
       setDraft(""); setAttachments([]); setAttachNote("");
       say("Queued", `It's sent when the current turn finishes.${latest && runOpen && stop ? " Send /stop to end the turn now." : ""}`);
       return;
@@ -364,17 +365,24 @@ export function AgentOrchestratorChat({
     await deliver(text);
   };
 
-  // A command's message waiting for the working turn to end (Codex queues the same way).
-  const [queued, setQueued] = useState<{ what: string; message: string; goal?: string } | null>(null);
-  useEffect(() => { setQueued(null); }, [selectedTaskId]);
+  // A message (or command's message) waiting for its chat's turn to end (Codex queues the same way).
+  // It belongs to its chat: opening another chat keeps it, and it is sent once its own chat is open
+  // again and free, so it never lands in the wrong conversation.
+  const [queued, setQueued] = useState<{ what: string; message: string; goal?: string; taskId: string } | null>(null);
   useEffect(() => {
-    if (!queued || !accepts || busy || sending) return;
+    if (queued && queued.taskId === selectedTaskId) say("Queued", "A message is waiting for this chat's turn to finish; it's sent then.");
+  }, [selectedTaskId]);
+  useEffect(() => {
+    if (!queued || queued.taskId !== selectedTaskId || !accepts || busy || sending) return;
     const next = queued;
     setQueued(null);
     void deliver(next.message, next.goal).then((sent) => {
-      if (sent) setCard(null); else say(next.what, "The queued message couldn't be sent; run the command again.");
+      if (sent) { setCard(null); return; }
+      // Nothing is lost: a plain message goes back into the composer to send again.
+      if (next.what === "Message") setDraft(next.message);
+      say(next.what, next.what === "Message" ? "The queued message couldn't be sent; it's back in the composer." : "The queued message couldn't be sent; run the command again.");
     });
-  }, [queued, accepts, busy, sending]);
+  }, [queued, selectedTaskId, accepts, busy, sending]);
   /**
    * Sends a command's message now when the chat is free, steers it into the working agent when it
    * can be steered (never a goal), and otherwise queues it for when the current turn finishes.
@@ -382,7 +390,7 @@ export function AgentOrchestratorChat({
   const dispatch = async (what: string, message: string, goal?: string): Promise<"sent" | "queued" | false> => {
     if (busy || sending) { say(what, "Another action is still running; try again in a moment."); return false; }
     if (accepts || (steering && !goal)) return await deliver(message, goal) ? "sent" : false;
-    setQueued({ what, message, goal });
+    setQueued({ what, message, goal, taskId: selectedTaskId });
     say(what, `Queued: it's sent when the current turn finishes.${latest && runOpen && stop ? " Send /stop to end the turn now." : ""}`);
     return "queued";
   };
