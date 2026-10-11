@@ -341,3 +341,15 @@ test("after an app restart a running AO card is still steered, though the page i
   await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
   assert.deepEqual(JSON.parse(JSON.stringify(steered)), [{ taskId: "t", message: "have you done it?" }]);
 });
+
+test("each chat has its own queue: queuing in another chat never replaces one, and the view closing keeps them", () => {
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
+  // The store lives at module level, outside the component, keyed by the chat's task id.
+  assert.ok(source.includes("const CHAT_QUEUES = new Map<string, QueuedChatMessage[]>();"));
+  assert.ok(source.indexOf("const CHAT_QUEUES") < source.indexOf("export function AgentOrchestratorChat"), "it outlives the chat view");
+  const queue = source.slice(source.indexOf("const [queueVersion, setQueueVersion]"), source.indexOf("const dispatch = async"));
+  assert.ok(queue.includes("queueOf(task)") && queue.includes("setQueue(task, rest)"), "a chat's queue is sent only into that chat, one item at a time");
+  assert.ok(queue.includes("sentWhileFree.current"), "one item per finished turn, never two into the same free spell");
+  assert.ok(queue.includes("setDraft(next.message)"), "a queued message that can't be sent goes back into the composer");
+  assert.ok(source.includes("setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what, message,"), "commands queue in their own chat too");
+});

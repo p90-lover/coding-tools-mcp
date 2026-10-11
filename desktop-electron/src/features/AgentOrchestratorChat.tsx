@@ -8,8 +8,8 @@ import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, chatAcceptsMessage, chatDuration, chatList, chatMessageWithAttachments, chatRunOpen,
-  chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
-  type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
+  chatQueueAdd, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
+  type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -19,6 +19,11 @@ const STATUS_LABEL: Record<ChatStatus, string> = {
 };
 /** Text files up to this size are attached inline when their path is unknown. */
 const INLINE_ATTACHMENT_BYTES = 200 * 1024;
+/**
+ * Each chat's queued messages (task id → queue), kept for the app's lifetime outside the chat view so
+ * they survive the view closing (another page, the board) and switching chats.
+ */
+const CHAT_QUEUES = new Map<string, QueuedChatMessage[]>();
 /** The cards panel's dragged width (px), kept on this computer. */
 const CARDS_WIDTH_KEY = "coding-tools:ao:cards-panel-width";
 
@@ -356,7 +361,7 @@ export function AgentOrchestratorChat({
     const text = commands?.planMode ? planMessage(message) : message;
     if (queueing) {
       // Several messages typed during one turn go together, in order.
-      setQueued((current) => current && !current.goal ? { ...current, message: `${current.message}\n\n${text}` } : { what: "Message", message: text });
+      setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what: "Message", message: text }));
       setDraft(""); setAttachments([]); setAttachNote("");
       say("Queued", `It's sent when the current turn finishes.${latest && runOpen && stop ? " Send /stop to end the turn now." : ""}`);
       return;
@@ -364,17 +369,35 @@ export function AgentOrchestratorChat({
     await deliver(text);
   };
 
-  // A command's message waiting for the working turn to end (Codex queues the same way).
-  const [queued, setQueued] = useState<{ what: string; message: string; goal?: string } | null>(null);
-  useEffect(() => { setQueued(null); }, [selectedTaskId]);
+  // Messages (or commands' messages) waiting for their chat's turn to end, as Codex queues them. Each
+  // chat has its own queue in CHAT_QUEUES, outside this component, so opening another chat or another
+  // view keeps it; a queue is sent only into its own chat, one item per finished turn.
+  const [queueVersion, setQueueVersion] = useState(0);
+  const queueOf = (taskId: string) => CHAT_QUEUES.get(taskId) ?? [];
+  const setQueue = (taskId: string, queue: QueuedChatMessage[]) => {
+    if (queue.length) CHAT_QUEUES.set(taskId, queue); else CHAT_QUEUES.delete(taskId);
+    setQueueVersion((value) => value + 1);
+  };
+  const queued = queueOf(selectedTaskId);
   useEffect(() => {
-    if (!queued || !accepts || busy || sending) return;
-    const next = queued;
-    setQueued(null);
+    if (queued.length) say("Queued", `${queued.length === 1 ? "A message is" : `${queued.length} messages are`} waiting for this chat's turn to finish; sent then.`);
+  }, [selectedTaskId]);
+  // One queued item per free spell: right after a send the chat may still read as free for a moment,
+  // and the next item must wait for the turn that send started.
+  const sentWhileFree = useRef(false);
+  useEffect(() => { sentWhileFree.current = false; }, [accepts, selectedTaskId]);
+  useEffect(() => {
+    const task = selectedTaskId, [next, ...rest] = queueOf(task);
+    if (!task || !next || !accepts || busy || sending || sentWhileFree.current) return;
+    sentWhileFree.current = true;
+    setQueue(task, rest);
     void deliver(next.message, next.goal).then((sent) => {
-      if (sent) setCard(null); else say(next.what, "The queued message couldn't be sent; run the command again.");
+      if (sent) { if (!rest.length) setCard(null); return; }
+      // Nothing is lost: a plain message goes back into the composer to send again.
+      if (next.what === "Message") setDraft(next.message);
+      say(next.what, next.what === "Message" ? "The queued message couldn't be sent; it's back in the composer." : "The queued message couldn't be sent; run the command again.");
     });
-  }, [queued, accepts, busy, sending]);
+  }, [queueVersion, selectedTaskId, accepts, busy, sending]);
   /**
    * Sends a command's message now when the chat is free, steers it into the working agent when it
    * can be steered (never a goal), and otherwise queues it for when the current turn finishes.
@@ -382,7 +405,7 @@ export function AgentOrchestratorChat({
   const dispatch = async (what: string, message: string, goal?: string): Promise<"sent" | "queued" | false> => {
     if (busy || sending) { say(what, "Another action is still running; try again in a moment."); return false; }
     if (accepts || (steering && !goal)) return await deliver(message, goal) ? "sent" : false;
-    setQueued({ what, message, goal });
+    setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what, message, ...(goal ? { goal } : {}) }));
     say(what, `Queued: it's sent when the current turn finishes.${latest && runOpen && stop ? " Send /stop to end the turn now." : ""}`);
     return "queued";
   };
@@ -405,7 +428,9 @@ export function AgentOrchestratorChat({
             break;
           }
           if (["pause", "resume", "clear"].includes(action)) {
-            if (action === "clear" && queued?.goal) { setQueued(null); say("Goal", "The queued goal was dropped."); break; }
+            if (action === "clear" && queued.some((item) => item.goal)) {
+              setQueue(selectedTaskId, queued.filter((item) => !item.goal)); say("Goal", "The queued goal was dropped."); break;
+            }
             if (!commands) break;
             if (!goal) { say("Goal", "No goal is currently set."); break; }
             await commands.goalAction(action as "pause" | "resume" | "clear");

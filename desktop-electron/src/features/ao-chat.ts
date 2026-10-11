@@ -471,6 +471,17 @@ export type ChatGoal = {
 export const GOAL_SUMMARY: Record<ChatGoal["status"], string> = {
   active: "Pursuing goal", paused: "Paused goal", achieved: "Goal achieved", stalled: "Goal stalled", limited: "Goal limited",
 };
+/** Something typed while a chat's turn runs, sent when the turn finishes: a message, or a command's message. */
+export type QueuedChatMessage = { what: string; message: string; goal?: string };
+/**
+ * Adds to one chat's queue. A plain message joins a plain message queued just before it (they are
+ * sent together); anything else (a command, a goal) waits for a turn of its own. Nothing is replaced.
+ */
+export function chatQueueAdd(queue: QueuedChatMessage[], item: QueuedChatMessage): QueuedChatMessage[] {
+  const last = queue[queue.length - 1];
+  if (last && item.what === "Message" && last.what === "Message") return [...queue.slice(0, -1), { ...last, message: `${last.message}\n\n${item.message}` }];
+  return [...queue, item];
+}
 /** What a command shows above the composer: a few facts, a block of text, or a list to pick from. */
 export type ChatCommandCard = {
   title: string; rows?: [string, string][]; text?: string; mono?: boolean;
