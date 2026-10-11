@@ -406,6 +406,33 @@ async function refreshPart(part, logger) {
 
 const AUTHENTICATION_RETRY_DELAYS_MS = [30_000, 60_000, 120_000, 300_000];
 const STARTUP_AUTH_WAIT_MS = 20_000;
+const PROXY_STARTUP_WAIT_MS = 10_000;
+/**
+ * Resolves once the proxy in HTTPS_PROXY/HTTP_PROXY accepts a connection, or after `timeoutMs`
+ * (the caller's navigation then reports the real error). No proxy, or a malformed one: at once.
+ */
+async function waitForProxyRoute(timeoutMs) {
+  let target;
+  try {
+    const route = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || "";
+    if (!route) return;
+    target = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(route) ? route : `http://${route}`);
+  } catch { return; }
+  const port = Number(target.port) || (target.protocol === "https:" ? 443 : 80);
+  const host = target.hostname.replace(/^\[|\]$/g, "");
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const open = await new Promise((resolve) => {
+      const socket = net.connect({ host, port });
+      const done = (ok) => { socket.destroy(); resolve(ok); };
+      socket.setTimeout(1_000, () => done(false));
+      socket.once("connect", () => done(true));
+      socket.once("error", () => done(false));
+    });
+    if (open) return;
+    await delay(500);
+  }
+}
 const delay = (ms) => new Promise((resolve) => { setTimeout(resolve, ms).unref?.(); });
 function scheduleAuthenticationRetry(logger, attempt = 0) {
   if (attempt >= AUTHENTICATION_RETRY_DELAYS_MS.length) return;
@@ -2860,7 +2887,9 @@ async function start() {
     });
   }
   if (!launcherSmokeTest && stateStore.read().browserInteractionMode === "automatic") {
-    startupAuthenticationRefresh = browserHost.refreshAuthentication().catch((error) => {
+    // The local proxy (ProxyBridge) can still be starting when the app opens: loading chatgpt.com
+    // through it then fails at once and the saved sign-in reads as signed out until the 30 s retry.
+    startupAuthenticationRefresh = waitForProxyRoute(PROXY_STARTUP_WAIT_MS).then(() => browserHost.refreshAuthentication()).catch((error) => {
       logger.warn("browser.session_refresh_failed", {
         ...navigationErrorForLog(error),
       });
