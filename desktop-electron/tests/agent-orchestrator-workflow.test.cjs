@@ -1076,6 +1076,20 @@ test("a follow-up waits for the chat's run, then extends the same task and start
   assert.equal(done.updates[0].task_id, "task-1");
 });
 
+test("a Team follow-up in a chat whose last turn was a single model starts the team run", async () => {
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const single = { id: "r1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "finished", route: { harness_id: "ao:claude-code", model: "cpa/m" }, receipt: { thread_id: "sess-1" } }] };
+  const world = chatWorld({ tasks: [task], runs: [single] });
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:\c.exe",
+    resolveHarness: async () => { throw new Error("stop before the background loop"); } });
+  // It used to compare the single card's route with the (absent) single route and throw
+  // "Cannot read properties of undefined (reading 'harness_id')" on every Team send.
+  const result = await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "now as a team", executionMode: "team", teamId: "team-1", teamRevision: 7 });
+  assert.equal(result.status, "failed", "the team run was created (it stops at the stubbed harness)");
+  assert.equal(world.edits.length, 1);
+});
+
 test("without an installed Codex a chat send explains what to set", async () => {
   const world = chatWorld();
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => null });
