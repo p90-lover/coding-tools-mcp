@@ -352,6 +352,8 @@
 
 /* Approved Codex light surface: isolated to the orchestrator, never the launcher theme. */
 .ao-workflow {
+  /* Native controls (checkboxes, selects, scrollbars) follow the light surface, not the launcher theme. */
+  color-scheme: light; accent-color: #1677ff;
   --color-bg-primary: #fff; --color-bg-secondary: #fff;
   --color-background-surface: #fff; --color-background-elevated: #fff;
   --color-text-primary: #16243a; --color-text-secondary: #748198;
