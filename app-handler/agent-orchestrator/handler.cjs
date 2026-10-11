@@ -47,6 +47,9 @@ const SPECS = Object.freeze({
   next: { readOnly: true, description: "Return the next actionable plan clause for the active Codex harness." },
   chat_send: { readOnly: false, description: "Send a chat message: create the chat's task (or append a follow-up) and start a team run on it." },
   chat_steer: { readOnly: false, description: "Hand a message to the chat's running AO agent at once (steer), without waiting for its turn to end." },
+  chat_goal: { readOnly: false, description: "Pause, resume, edit or clear a chat's goal (/goal); a resumed goal starts its next round." },
+  compact_chat: { readOnly: false, description: "Replace a settled chat's context with a handoff summary (/compact)." },
+  chat_diff: { readOnly: true, description: "Read the project's uncommitted git changes (/diff)." },
   codex_executable: { readOnly: true, description: "Locate the installed Codex desktop app's codex.exe used to run missions." },
 
   create: { readOnly: false, description: "Create a task for the Coding Tools mission board at its expected revision." },

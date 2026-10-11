@@ -156,6 +156,20 @@ test("a running turn whose chat host is gone is interrupted, even when its PID w
   }
 });
 
+test("every operation the renderer calls is one the AO module accepts (the chat's commands included)", () => {
+  const features = path.resolve(__dirname, "../src/features");
+  const called = new Set();
+  for (const file of fs.readdirSync(features).filter(name => /\.tsx?$/.test(name))) {
+    for (const match of fs.readFileSync(path.join(features, file), "utf8").matchAll(/moduleCall\("([a-z_]+)"/g)) called.add(match[1]);
+  }
+  for (const operation of ["chat_send", "chat_goal", "compact_chat", "chat_diff", "runs"]) assert.ok(called.has(operation), `${operation} is called`);
+  const unknown = [...called].filter(operation => !handler.operations.includes(operation));
+  assert.deepEqual(unknown, [], "an operation missing here fails in the app as \"Unknown Agent Orchestrator operation\"");
+  assert.equal(handler.isReadOnly("chat_diff"), true);
+  assert.equal(handler.isReadOnly("chat_goal"), false);
+  assert.equal(handler.isReadOnly("compact_chat"), false);
+});
+
 test("AO handler exposes named upstream APIs and keeps absent board detail JSON-safe", async () => {
   assert.equal(handler.isReadOnly("upstream_projects"), true);
   assert.equal(handler.isReadOnly("upstream_create_session"), false);

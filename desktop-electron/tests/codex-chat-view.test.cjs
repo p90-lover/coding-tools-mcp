@@ -15,6 +15,7 @@ const transpile = (file, require, globals = {}) => {
   return exports;
 };
 const chat = transpile("ao-chat.ts", () => ({}));
+const prompts = transpile("codex-prompts.ts", () => ({}));
 const walk = (item) => !item || typeof item !== "object" ? [] : Array.isArray(item) ? item.flatMap(walk) : [item, ...walk(item.props?.children)];
 const text = (item) => item === null || item === undefined || typeof item === "boolean" ? "" : typeof item !== "object" ? String(item)
   : Array.isArray(item) ? item.map(text).join("") : text(item.props?.children);
@@ -34,10 +35,10 @@ function mount(props) {
   // Function components render inline, so their output (work lines, steps, actions) is visible.
   const jsx = (type, props) => typeof type === "function" ? type(props || {}) : ({ type, props: props || {} });
   const module = transpile("AgentOrchestratorChat.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
-    : name === "./ao-chat" ? chat : name === "../icons" ? { Icon: "Icon" } : name === "./ChatMarkdown" ? { ChatMarkdown: "Markdown" }
+    : name === "./ao-chat" ? chat : name === "./codex-prompts" ? prompts : name === "../icons" ? { Icon: "Icon" } : name === "./ChatMarkdown" ? { ChatMarkdown: "Markdown" }
       : name === "./ChatMenu" ? { ChatMenu: "ChatMenu", ChatGlyph: "Glyph", FloatingLayer: "FloatingLayer" } : name === "./AgentOrchestratorComposerControls" ? { AgentOrchestratorComposerControls: "Controls" }
         : name === "./AgentOrchestratorApproval" ? { AgentOrchestratorApproval: "Approval" } : {},
-  { window: { setTimeout: () => 0, setInterval: () => 0, clearInterval() {} }, document: { querySelector: () => null }, navigator: {} });
+  { window: { setTimeout: () => 0, setInterval: () => 0, clearInterval() {}, confirm: () => true }, document: { querySelector: () => null }, navigator: {} });
   return { render: (next = {}) => { cursor = 0; return module.AgentOrchestratorChat({ ...props, ...next }); } };
 }
 
@@ -142,8 +143,11 @@ test("slash commands open a menu and run on Enter; attachments are sent with the
   walk(view).find((element) => element.type === "textarea").props.onChange({ target: { value: "/st" } });
   view = chatView.render();
   const options = walk(view).filter((element) => element.props?.role === "option");
-  assert.deepEqual(options.map((option) => text(option)), ["/stopStop the running mission", "/structureShow or hide the cards panel"]);
+  assert.deepEqual(options.map((option) => text(option)), ["/statusShow chat ID, context usage, cards and goal", "/stopStop the running mission", "/structureShow or hide the cards panel"]);
+  walk(view).find((element) => element.type === "textarea").props.onChange({ target: { value: "/sto" } });
+  view = chatView.render();
   walk(view).find((element) => element.type === "textarea").props.onKeyDown({ key: "Enter", shiftKey: false, preventDefault() {} });
+  await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(calls, [["stop", "r1"]]);
 
   const sending = mount({ ...props, runs: [run("r1", "t", [node("p", "planner", "finished", { receipt: { answer: "ok" } })])] });
@@ -156,6 +160,99 @@ test("slash commands open a menu and run on Enter; attachments are sent with the
   view = sending.render();
   await walk(view).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
   assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), ["send", { taskId: "t", message: "look at this\n\nAttached image: C:\\shots\\shot.png" }]);
+});
+
+test("Codex slash commands run from the composer in a Single chat or a team, with their real actions", async () => {
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  const actions = [];
+  let planMode = false, goal = null;
+  const commands = () => ({
+    goal, planMode,
+    setPlanMode: (on) => { actions.push(["plan", on]); planMode = on; },
+    goalAction: async (action) => { actions.push(["goal", action]); },
+    goalEdit: async (objective) => { actions.push(["edit", objective]); },
+    compact: async () => { actions.push(["compact"]); return "Compacted this chat's context from 7,000 to 900 characters (11% full)."; },
+    diff: async () => ({ title: "Changes · 1 file", mono: true, text: "diff --git a/x b/x" }),
+    mcp: async () => ({ title: "MCP", rows: [["Server", "running"]] }),
+    status: () => ({ title: "Status", rows: [["Chat ID", "t"], ["Mode", "Team · Workspace team"]] }),
+    recent: () => ({ title: "Resume a chat", items: [{ label: "Older chat", detail: "done", run: () => actions.push(["open", "older"]) }] }),
+  });
+  const type = (view, value) => walk(view.render({ commands: commands() })).find((element) => element.type === "textarea").props.onChange({ target: { value } });
+  const enter = async (view) => {
+    walk(view.render({ commands: commands() })).find((element) => element.type === "textarea").props.onKeyDown({ key: "Enter", shiftKey: false, preventDefault() {} });
+    await settle(); await settle();
+  };
+  const cardOf = (view) => walk(view.render({ commands: commands() })).find((element) => String(element.props?.className).includes("cx-command-card"));
+
+  // A new chat: /goal starts it with the goal; /review and /init send Codex's prompts.
+  const fresh = base({});
+  const newChat = mount(fresh.props);
+  type(newChat, "/goal make every test pass"); await enter(newChat);
+  assert.deepEqual(JSON.parse(JSON.stringify(fresh.calls.at(-1))), ["send", { message: "make every test pass", goal: "make every test pass" }]);
+  type(newChat, "/review the auth changes"); await enter(newChat);
+  assert.match(fresh.calls.at(-1)[1].message, /^Review the current code changes \(staged, unstaged, and untracked files\)\. Do not change any files\.\nFocus: the auth changes/);
+  assert.match(fresh.calls.at(-1)[1].message, /\[P0\][\s\S]*patch is correct/);
+  type(newChat, "/init"); await enter(newChat);
+  assert.match(fresh.calls.at(-1)[1].message, /^Generate a file named AGENTS\.md that serves as a contributor guide for this repository\./);
+  // /plan turns plan mode on; a message then asks for a plan instead of the change.
+  type(newChat, "/plan"); await enter(newChat);
+  assert.deepEqual(actions.at(-1), ["plan", true]);
+  type(newChat, "add dark mode"); await enter(newChat);
+  assert.match(fresh.calls.at(-1)[1].message, /^\[Plan mode\] Do not change anything[\s\S]*Request:\nadd dark mode$/);
+  planMode = false;
+  // The menu fills in a command that takes an argument instead of running it bare.
+  type(newChat, "/go");
+  const option = walk(newChat.render({ commands: commands() })).find((element) => element.props?.role === "option");
+  walk(option).find((element) => element.type === "button").props.onClick();
+  assert.equal(walk(newChat.render({ commands: commands() })).find((element) => element.type === "textarea").props.value, "/goal ");
+
+  // A working team chat: /status, /goal pause and /compact's refusal still run; a goal shows its pill.
+  goal = { objective: "ship the release", status: "active", round: 2, rounds: 6, startedAt: Date.now() - 5 * 60_000, updatedAt: Date.now(), note: "" };
+  const busy = base({ selectedTaskId: "t", runs: [run("r1", "t", [node("p", "planner", "running")])], working: true });
+  const teamChat = mount(busy.props);
+  type(teamChat, "/status"); await enter(teamChat);
+  assert.match(text(cardOf(teamChat)), /StatusChat IDtModeTeam · Workspace team/);
+  type(teamChat, "/goal pause"); await enter(teamChat);
+  assert.deepEqual(actions.at(-1), ["goal", "pause"]);
+  type(teamChat, "/compact"); await enter(teamChat);
+  assert.match(text(cardOf(teamChat)), /Compact is disabled while a chat is in progress/);
+  type(teamChat, "/review"); await enter(teamChat);
+  assert.match(text(cardOf(teamChat)), /still working/, "a command that sends waits for the chat like any message");
+  assert.equal(busy.calls.filter((call) => call[0] === "send").length, 0);
+  const pill = walk(teamChat.render({ commands: commands() })).find((element) => String(element.props?.className).startsWith("cx-goal "));
+  assert.match(text(pill), /^Pursuing goalship the release5m \d+s$/, "Codex's goal bar: state, objective, running time");
+  assert.deepEqual(walk(pill).filter((element) => element.type === "button").map((button) => button.props.title), ["Clear goal", "Pause goal", "Edit goal"]);
+  walk(pill).find((element) => element.type === "button" && element.props.title === "Pause goal").props.onClick();
+  await settle(); await settle();
+  assert.deepEqual(actions.at(-1), ["goal", "pause"]);
+  // Edit goal opens an editor; Save sends the new objective and closes it.
+  walk(pill).find((element) => element.type === "button" && element.props.title === "Edit goal").props.onClick();
+  await settle(); await settle();
+  const editor = () => walk(teamChat.render({ commands: commands() })).find((element) => element.type === "section" && element.props?.["aria-label"] === "Edit goal");
+  assert.equal(walk(editor()).find((element) => element.type === "textarea").props.value, "ship the release");
+  walk(editor()).find((element) => element.type === "textarea").props.onChange({ target: { value: "ship the release with notes" } });
+  walk(editor()).find((element) => element.type === "button" && text(element) === "Save").props.onClick();
+  await settle(); await settle();
+  assert.deepEqual(actions.at(-1), ["edit", "ship the release with notes"]);
+  assert.equal(editor(), undefined, "the editor closes after saving");
+  // A paused goal offers Resume instead of Pause.
+  goal = { ...goal, status: "paused" };
+  const pausedPill = walk(teamChat.render({ commands: commands() })).find((element) => String(element.props?.className).startsWith("cx-goal "));
+  assert.match(text(pausedPill), /^Paused goal/);
+  assert.ok(walk(pausedPill).some((element) => element.type === "button" && element.props.title === "Resume goal"));
+
+  // A finished chat: /compact compacts, /resume lists other chats to open.
+  const done = base({ selectedTaskId: "t", runs: [run("r1", "t", [node("p", "planner", "finished", { receipt: { answer: "ok" } })])] });
+  const idle = mount(done.props);
+  type(idle, "/compact"); await enter(idle);
+  assert.deepEqual(actions.at(-1), ["compact"]);
+  assert.match(text(cardOf(idle)), /from 7,000 to 900 characters/);
+  type(idle, "/resume"); await enter(idle);
+  walk(cardOf(idle)).find((element) => element.type === "button" && text(element).startsWith("Older chat")).props.onClick();
+  assert.deepEqual(actions.at(-1), ["open", "older"]);
+  type(idle, "/goal replace it with this"); await enter(idle);
+  assert.deepEqual(JSON.parse(JSON.stringify(done.calls.at(-1))), ["send", { taskId: "t", message: "replace it with this", goal: "replace it with this" }],
+    "a new objective replaces the chat's goal after confirmation");
 });
 
 test("while the agent works, a typed message steers it at once; Esc on an empty composer still stops", async () => {

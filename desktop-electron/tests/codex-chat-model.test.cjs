@@ -75,12 +75,28 @@ test("forking keeps the conversation up to the chosen message, in the follow-up 
 });
 
 test("slash commands offer only what applies, and attachments become paths or inline text", () => {
-  assert.deepEqual(plain(chat.chatSlashMatches("/", { chat: false, run: false })).map((command) => command.name), ["new", "model", "board"]);
-  assert.deepEqual(plain(chat.chatSlashMatches("/st", { chat: true, run: true })).map((command) => command.name), ["stop", "structure"]);
-  assert.deepEqual(plain(chat.chatSlashMatches("/st", { chat: true, run: true, open: false })).map((command) => command.name), ["structure"], "/stop only while a mission is open");
+  assert.deepEqual(plain(chat.chatSlashMatches("/", { chat: false, run: false })).map((command) => command.name),
+    ["goal", "plan", "review", "init", "status", "diff", "mcp", "model", "new", "resume", "board"], "Codex's commands first; chat-only ones need a chat");
+  assert.deepEqual(plain(chat.chatSlashMatches("/st", { chat: true, run: true })).map((command) => command.name), ["status", "stop", "structure"]);
+  assert.deepEqual(plain(chat.chatSlashMatches("/st", { chat: true, run: true, open: false })).map((command) => command.name), ["status", "structure"], "/stop only while a mission is open");
+  assert.deepEqual(plain(chat.chatSlashMatches("/co", { chat: true, run: true })).map((command) => command.name), ["compact", "copy"]);
   assert.deepEqual(plain(chat.chatSlashMatches("/stop now", { chat: true, run: true })), [], "a space ends the command menu");
   assert.equal(chat.chatSlashCommand(" /Stop "), "stop");
   assert.equal(chat.chatSlashCommand("/unknown"), null);
+  // Commands with an argument, as Codex takes them: /goal <objective>|pause|resume|edit|clear, /review [focus].
+  assert.deepEqual(plain(chat.chatSlashParse("/goal make every test pass")), { name: "goal", arg: "make every test pass" });
+  assert.deepEqual(plain(chat.chatSlashParse("/Goal pause")), { name: "goal", arg: "pause" });
+  assert.deepEqual(plain(chat.chatSlashParse("/goal\nship the release\nwith notes")), { name: "goal", arg: "ship the release\nwith notes" });
+  assert.deepEqual(plain(chat.chatSlashParse("/review the auth changes")), { name: "review", arg: "the auth changes" });
+  assert.deepEqual(plain(chat.chatSlashParse("/status")), { name: "status", arg: "" });
+  assert.equal(chat.chatSlashParse("/status now"), null, "a command without arguments followed by text is just a message");
+  assert.equal(chat.chatSlashParse("/etc/hosts is broken"), null, "a path is a message, not a command");
+  assert.equal(chat.chatSlashParse("please /goal x"), null);
+  assert.equal(chat.chatSlashTyping("/goal fix")?.name, "goal");
+  assert.equal(chat.chatSlashTyping("/status x"), null);
+  assert.equal(chat.goalElapsed(0, 50_000), "50s");
+  assert.equal(chat.goalElapsed(0, 4 * 60_000), "4m 0s");
+  assert.equal(chat.goalElapsed(0, ((7 * 24 + 4) * 60 + 4) * 60_000 + 50_000), "7d 4h 4m 50s", "Codex's goal timer");
   assert.equal(chat.chatMessageWithAttachments("look", [
     { name: "a.png", path: "C:\\shots\\a.png", image: true },
     { name: "notes.txt", text: "x ``` y" },

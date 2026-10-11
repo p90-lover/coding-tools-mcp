@@ -2580,6 +2580,8 @@ async function start() {
     aoChangeWatch = () => { stopAoWatch(); aoPulse.stop(); };
     missionWorkflowRuntime?.dispose();
     const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
+      // Chat goals (/goal) survive an app restart.
+      goalsFile: path.join(app.getPath("userData"), "integrations", "chat-goals.json"),
       requestHeadless: (endpoint, body, options) => {
         if (!headlessHost) throw new Error("Local Coding Tools runtime is unavailable");
         return headlessHost.request(endpoint, body, options);

@@ -3,6 +3,7 @@
 const { createHash, randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
+const { DEFAULT_GOAL_ROUNDS, goalPrompt, goalVerdict, closingAnswers, cleanObjective, createGoalStore } = require("./chat-goals.cjs");
 
 function clean(value, limit, required = true) {
   if (typeof value !== "string") throw new Error("Expected text");
@@ -159,7 +160,8 @@ function delayToMilliseconds(value, unit) {
   }
   return ms;
 }
-function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
+function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null }) {
+  const goals = createGoalStore({ file: goalsFile, now });
   // A saved path goes stale when the Codex app updates itself (it replaces bin\<build>\), so a
   // chosen executable that no longer exists falls back to the currently installed one.
   function codexExecutable(chosen) {
@@ -176,6 +178,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   // Background-run observations for MCP event incidents (stall, held, approval waits).
   // An observer failure must never affect the run it watches.
   function reportRun(workspaceId, runId, state, mission, attention = null) {
+    // A settled round of a chat with a goal decides what the goal does next.
+    if (["finished", "failed", "held"].includes(state.status)) void goalAfterRun(workspaceId, runId, state.status, attention).catch(() => undefined);
     if (!onRunState) return;
     try {
       onRunState({
@@ -1696,9 +1700,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return { ok: true, steered: true, runId: run.id, nodeId: card.id };
   }
 
-  async function chatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart } = {}) {
+  async function chatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal } = {}) {
     const id = clean(workspaceId, 128);
-    const text = clean(message, 8192, false);
+    // /goal <objective>: the first round asks for the objective; the chat keeps going from there.
+    const objective = goal === undefined ? null : cleanObjective(goal);
+    const asked = clean(message, 8192, false);
+    const text = objective ? goalPrompt(objective, 1, DEFAULT_GOAL_ROUNDS) : asked;
+    const naming = objective ?? asked;
     if (!text.trim()) throw new Error("Type a message to start the chat");
     const selectedExecutable = codexExecutable(executable);
     const saved = await runs({ workspaceId: id });
@@ -1760,7 +1768,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const before = await board({ workspaceId: id });
       const known = new Set(before.tasks.map((entry) => entry.id));
       await write(id, { expected_revision: before.revision, change: {
-        operation: "create", title: clean(title && String(title).trim() ? title : executionMode === "single" ? fallbackChatTitle(text) : CHAT_TASK_TITLE, 240), description: text,
+        operation: "create", title: clean(title && String(title).trim() ? title : executionMode === "single" ? fallbackChatTitle(naming) : CHAT_TASK_TITLE, 240), description: text,
       } });
       const added = (await board({ workspaceId: id })).tasks.filter((entry) => !known.has(entry.id));
       if (added.length !== 1) throw new Error("The new chat's task needs review; refresh the board");
@@ -1772,21 +1780,145 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       continuations.set(runId, continuation);
       if (continuations.size > 200) continuations.delete(continuations.keys().next().value);
     }
+    if (objective) { goals.set(id, task, objective); goals.update(id, task, { round: 1, lastRunId: runId }); }
     if (deferStart === true) {
       // Keep the normal authorization path: an expired/missing local approval fails visibly.
       void startRun({ workspaceId: id, runId, executable: selectedExecutable }).then(() => {
-        if (!taskId) void nameChat(id, task, text).catch(() => undefined);
+        if (!taskId) void nameChat(id, task, naming).catch(() => undefined);
       }).catch(() => undefined);
       return { ok: true, taskId: task, runId, run: createdRun, status: "starting" };
     }
     // The chat exists from here on: report a failed start inside it instead of losing the chat.
     try {
       const started = await startRun({ workspaceId: id, runId, executable: selectedExecutable });
-      if (!taskId && executionMode !== "single") void nameChat(id, task, text).catch(() => undefined);
+      if (!taskId && executionMode !== "single") void nameChat(id, task, naming).catch(() => undefined);
       return { ok: true, taskId: task, runId, status: started.status };
     } catch (error) {
       return { ok: true, taskId: task, runId, status: "failed", detail: error instanceof Error ? error.message : String(error) };
     }
+  }
+
+  // ---- Chat commands (/goal, /compact, /diff) ----
+
+  // A chat is working when its latest run is being driven or has a card running.
+  function chatWorking(id, task, runsOfWorkspace) {
+    return runsOfWorkspace.filter(run => run.project_id === task && !runSettled(run)).some(run => {
+      const live = backgroundRuns.get(runKey(id, run.id));
+      return Boolean(live && (live.starting || live.driving || live.status === "running"))
+        || (run.nodes ?? []).some(node => ["running", "reserved"].includes(node.state));
+    });
+  }
+
+  // The next round runs as the last one did: the same Single model route, or the chat's team.
+  const SINGLE_ROUTE_FIELDS = ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile", "approval_policy", "approvals_reviewer", "effort", "context_window"];
+  async function continueGoal(id, task, goal, previous) {
+    const round = goal.round + 1;
+    const selection = previous?.execution_mode === "single" && previous.nodes?.[0]?.route
+      ? { executionMode: "single", singleRoute: Object.fromEntries(Object.entries(previous.nodes[0].route).filter(([name, value]) => SINGLE_ROUTE_FIELDS.includes(name) && value !== undefined && value !== null)) }
+      : {};
+    goals.update(id, task, { round, note: "" });
+    try {
+      // Started in the background: a failed start settles the run, which marks the goal stalled.
+      const result = await chatSend({ workspaceId: id, taskId: task, message: goalPrompt(goal.objective, round, goal.rounds), ...selection, deferStart: true });
+      if (result?.ok === false) { goals.update(id, task, { status: "stalled", note: String(result.reason || "The next round could not start") }); return; }
+      goals.update(id, task, { lastRunId: String(result.runId || ""), note: result.status === "failed" ? String(result.detail || "The next round could not start") : "" });
+      if (result.status === "failed") goals.update(id, task, { status: "stalled" });
+    } catch (error) {
+      const message = String(error?.message || error);
+      goals.update(id, task, { status: "stalled", note: /chat is full/.test(message) ? "This chat is full; use /compact, then /goal resume" : message.slice(0, 300) });
+    }
+  }
+
+  const goalChecks = new Set();
+  // When a chat's latest run settles, its goal is achieved, stalled, limited, or goes another round.
+  async function goalAfterRun(workspaceId, runId, status, attention) {
+    // Most projects have no goal: nothing to read then.
+    if (!Object.values(goals.forWorkspace(workspaceId)).some(goal => goal.status === "active")) return;
+    const guard = runKey(workspaceId, runId);
+    if (goalChecks.has(guard)) return;
+    goalChecks.add(guard);
+    try {
+      const saved = await runs({ workspaceId });
+      const mission = saved.runs.find(run => run.id === runId && run.workspace_id === workspaceId);
+      const task = mission?.project_id;
+      const goal = task ? goals.get(workspaceId, task) : null;
+      if (!goal || goal.status !== "active" || goal.evaluatedRunId === runId) return;
+      const latest = saved.runs.filter(run => run.project_id === task).at(-1);
+      if (latest?.id !== runId) return;
+      goals.update(workspaceId, task, { evaluatedRunId: runId });
+      if (attention === "stopped") { goals.update(workspaceId, task, { status: "paused", note: "Stopped; /goal resume picks it up again" }); return; }
+      if (status === "failed") { goals.update(workspaceId, task, { status: "stalled", note: "The last round failed; retry it, then /goal resume" }); return; }
+      if (status === "held") { goals.update(workspaceId, task, { status: "stalled", note: "The last round needs you; answer it, then /goal resume" }); return; }
+      const verdict = goalVerdict(closingAnswers(mission));
+      if (verdict === "achieved") { goals.update(workspaceId, task, { status: "achieved", note: "" }); return; }
+      if (goal.round >= goal.rounds) { goals.update(workspaceId, task, { status: "limited", note: `Stopped after ${goal.rounds} rounds; /goal resume allows more` }); return; }
+      await continueGoal(workspaceId, task, goal, mission);
+    } finally { goalChecks.delete(guard); }
+  }
+
+  // /goal clear | pause | resume (setting one goes through chat_send with `goal`).
+  async function chatGoal({ workspaceId, taskId, action, objective } = {}) {
+    const id = clean(workspaceId, 128), task = clean(taskId, 128);
+    const goal = goals.get(id, task);
+    if (action === "clear") return { ok: true, cleared: goals.clear(id, task) };
+    if (!goal) throw new Error("No goal is currently set");
+    if (action === "pause") return { ok: true, goal: goals.update(id, task, { status: "paused", note: "" }) };
+    // Edit goal: a new objective for the rounds still to come; the running round is left alone.
+    if (action === "edit") return { ok: true, goal: goals.update(id, task, { objective: cleanObjective(objective) }) };
+    if (action !== "resume") throw new Error("Choose clear, pause, resume or edit");
+    // Resuming a goal that ran out of rounds allows it as many more rounds again.
+    const rounds = goal.status === "limited" ? goal.round + goal.rounds : goal.rounds;
+    goals.update(id, task, { status: "active", rounds, note: "" });
+    const saved = await runs({ workspaceId: id });
+    if (chatWorking(id, task, saved.runs)) return { ok: true, goal: goals.get(id, task) };
+    const latest = saved.runs.filter(run => run.project_id === task).at(-1);
+    await continueGoal(id, task, goals.get(id, task), latest);
+    return { ok: true, goal: goals.get(id, task) };
+  }
+
+  // Codex's own compaction instruction (codex-rs core/src/tasks/compact.rs).
+  const COMPACT_PROMPT = "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.\n\nInclude:\n- Current progress and key decisions made\n- Important context, constraints, or user preferences\n- What remains to be done (clear next steps)\n- Any critical data, examples, or references needed to continue\n\nBe concise, structured, and focused on helping the next LLM seamlessly continue the work.";
+  // /compact: a chat's context is its task text (every follow-up is appended to it, up to 8,192
+  // characters). Replace it with a handoff summary so the chat can keep going.
+  async function compactChat({ workspaceId, taskId } = {}) {
+    const id = clean(workspaceId, 128), task = clean(taskId, 128);
+    const saved = await runs({ workspaceId: id });
+    if (chatWorking(id, task, saved.runs)) throw new Error("Compact is disabled while a chat is in progress");
+    const detail = await board({ workspaceId: id, taskId: task });
+    if (!detail.task) throw new Error("This chat's task no longer exists");
+    const before = String(detail.task.description || "");
+    if (before.length < 800) return { ok: true, compacted: false, before: before.length, after: before.length };
+    let summary = "";
+    try {
+      const { baseUrl, key } = connection();
+      const model = (await models()).models[0];
+      const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ model, temperature: 0, max_tokens: 1600, messages: [
+          { role: "system", content: COMPACT_PROMPT }, { role: "user", content: before }] }),
+        signal: AbortSignal.timeout(120_000),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      summary = String((await response.json())?.choices?.[0]?.message?.content ?? "").trim();
+    } catch (error) {
+      throw new Error(`Compacting needs a CPA model and none answered (${String(error?.message || error).slice(0, 160)})`);
+    }
+    if (!summary) throw new Error("The model returned no summary; the chat is unchanged");
+    const stamp = new Date(now()).toISOString().replace("T", " ").slice(0, 16);
+    const description = clean(`Summary of the earlier conversation (compacted ${stamp} UTC):\n${summary}`, 6000, false);
+    if (description.length >= before.length) return { ok: true, compacted: false, before: before.length, after: before.length };
+    const fresh = await board({ workspaceId: id, taskId: task });
+    if (!fresh.task || String(fresh.task.description || "") !== before) throw new Error("The chat changed while compacting; try again");
+    await write(id, { expected_revision: fresh.revision, change: { operation: "edit", id: task, title: fresh.task.title, description } });
+    return { ok: true, compacted: true, before: before.length, after: description.length };
+  }
+
+  // /diff: the project's uncommitted changes (staged and unstaged), through the workspace git tool.
+  async function chatDiff({ workspaceId } = {}) {
+    const result = checked(await tool(workspaceId, "git_diff", { staged: true, unstaged: true, max_bytes: 120_000 }));
+    return { ok: true, diff: String(result.diff || ""), files: Array.isArray(result.files) ? result.files : [],
+      truncated: result.truncated === true, warnings: Array.isArray(result.warnings) ? result.warnings : [] };
   }
 
   const configurationJobs = new Map();
@@ -2098,7 +2230,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "task_rename": return taskRename(args);
       case "models": return models(args);
       case "harnesses": return harnesses();
-      case "runs": return runs(args);
+      case "runs": return { ...(await runs(args)), goals: goals.forWorkspace(clean(args.workspaceId, 128)) };
+      case "chat_goal": return chatGoal(args);
+      case "compact_chat": return compactChat(args);
+      case "chat_diff": return chatDiff(args);
       case "update_run": return updateRun(args);
       case "team_update": return teamUpdate(args);
       case "harness_status": return harnessStatus(args);
@@ -2132,7 +2267,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
   }
 
-  return Object.freeze({ call, restoreSchedules, dispose });
+  // goalAfterRun runs on its own when a run settles (reportRun); it is exposed for tests and recovery.
+  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun });
 }
 
 module.exports = { createAgentOrchestratorWorkflow, delayToMilliseconds, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

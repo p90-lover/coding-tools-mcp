@@ -11,7 +11,7 @@ import { ProjectEditDialog } from "./ProjectEditDialog";
 import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
-import { chatArchived, chatList, chatMarkdown, chatMessagesFromDescription, chatTurns, type ChatActivity, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
+import { GOAL_SUMMARY, chatArchived, chatList, chatMarkdown, chatMessagesFromDescription, chatTurns, goalElapsed, type ChatActivity, type ChatCommands, type ChatGoal, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
 import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { createLatestConfigQueue } from "./ao-config";
 import {
@@ -352,6 +352,13 @@ export function missionLoop(run: AoMission, shown: AoNode[]): { from: string; to
   const planner = shown.find(node => node.role === "planner"), reviewer = shown.find(node => node.role === "reviewer");
   return run.team?.review_loop && planner && reviewer ? { from: reviewer.id, to: planner.id } : null;
 }
+/** The chat goals (/goal) a runs read carries, by chat. */
+export function chatGoals(result: { goals?: unknown }): Record<string, ChatGoal> {
+  const goals = result.goals;
+  return goals && typeof goals === "object" && !Array.isArray(goals) ? goals as Record<string, ChatGoal> : {};
+}
+/** How full a chat's context (its task text, capped at 8,192 characters) is. */
+export const CHAT_CONTEXT_LIMIT = 8192;
 export function aoChatExecution(mode: "single" | "team", route: AoRoute, teams: AoTeam[], teamId: string): JsonObject {
   if (mode === "single") {
     if (!route.model || route.model === "default") throw new Error("Choose one explicit model first.");
@@ -534,6 +541,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     if (selection.current.workspaceId !== id) return;
     setTaskLifecycle((current.task_lifecycle as TaskLifecycleView[]) || []);
     setMissions(runs);
+    setGoals(chatGoals(current));
     const setups = aoSavedTeams(current);
     setSavedTeams(setups); setComposerTeamId(selected => aoComposerTeam(selected, setups, current.team as AoTeam | null));
     setTeam(current.team as AoTeam | null ?? setups[0] ?? null);
@@ -611,6 +619,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
           const runs = Array.isArray(current.runs) ? current.runs as AoMission[] : [];
           setTaskLifecycle((current.task_lifecycle as TaskLifecycleView[]) || []);
           setMissions(runs);
+          setGoals(chatGoals(current));
           const setups = aoSavedTeams(current);
           setSavedTeams(setups); setComposerTeamId(selected => aoComposerTeam(selected, setups, current.team as AoTeam | null));
           setTeam(current.team as AoTeam | null ?? setups[0] ?? null);
@@ -684,6 +693,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
   // The open project's checked-out branch, for the new chat's environment popover (as Codex shows it).
   const openProjectPath = workspaces.find((item) => item.id === workspaceId)?.path ?? "";
   const [projectBranch, setProjectBranch] = useState("");
+  // /goal state per chat, from the bridge, and /plan (a composer mode, kept for this session).
+  const [goals, setGoals] = useState<Record<string, ChatGoal>>({});
+  const [planMode, setPlanMode] = useState(false);
   useEffect(() => {
     setProjectBranch("");
     if (!openProjectPath) return;
@@ -713,6 +725,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
       void moduleCall("runs", { workspaceId }).then((current) => {
         if (live && Array.isArray(current.runs)) {
           setMissions(current.runs as AoMission[]);
+          setGoals(chatGoals(current));
           setTeam(current.team as AoTeam | null ?? null);
           setSavedTeams(aoSavedTeams(current));
           setTaskLifecycle((current.task_lifecycle as TaskLifecycleView[]) || []);
@@ -1174,7 +1187,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     await loadMissions(workspaceId);
   });
 
-  const sendChat = (input: { taskId?: string; title?: string; message: string }) => new Promise<void>((resolve, reject) => {
+  const sendChat = (input: { taskId?: string; title?: string; message: string; goal?: string }) => new Promise<void>((resolve, reject) => {
     // run() skips its action while another one is in flight; never leave the chat waiting on it.
     if (busy) { reject(new Error("Another action is still running")); return; }
     void run("chat", async () => {
@@ -1187,7 +1200,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
         const execution = aoChatExecution(composerMode, singleRoute, savedTeams, composerTeamId);
         const result = await moduleCall("chat_send", { workspaceId, message: input.message,
           ...(input.taskId ? { taskId: input.taskId } : input.title ? { title: input.title } : {}),
-          ...execution, ...executableArg() });
+          ...execution, ...executableArg(), ...(input.goal ? { goal: input.goal } : {}) });
         if (result.cancelled) throw new Error("Message start cancelled; no new attempt confirmed.");
         await Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]);
         const taskId = String(result.taskId);
@@ -1427,6 +1440,65 @@ export function AgentOrchestratorSurface({ language, setError }: {
     return () => window.clearTimeout(timer);
   }, [missions, chatActivity, chatWindowIds]);
 
+  const chatRunsHere = missions.filter(mission => mission.workspace_id === workspaceId && mission.project_id === chatTaskId);
+  const chatCommands: ChatCommands = {
+    goal: chatTaskId ? goals[chatTaskId] ?? null : null,
+    goalAction: async (action) => {
+      if (!chatTaskId) throw new Error("Open a chat first");
+      await moduleCall("chat_goal", { workspaceId, taskId: chatTaskId, action });
+      await loadMissions(workspaceId);
+    },
+    goalEdit: async (objective) => {
+      if (!chatTaskId) throw new Error("Open a chat first");
+      await moduleCall("chat_goal", { workspaceId, taskId: chatTaskId, action: "edit", objective });
+      await loadMissions(workspaceId);
+    },
+    compact: async () => {
+      if (!chatTaskId) throw new Error("Open a chat first");
+      const result = await moduleCall("compact_chat", { workspaceId, taskId: chatTaskId });
+      await loadBoard(workspaceId);
+      const full = (size: number) => Math.round(size / CHAT_CONTEXT_LIMIT * 100);
+      return result.compacted
+        ? `Compacted this chat's context from ${Number(result.before).toLocaleString("en-US")} to ${Number(result.after).toLocaleString("en-US")} characters (${full(Number(result.after))}% full).`
+        : `Nothing to compact yet: the chat's context is ${Number(result.before).toLocaleString("en-US")} characters (${full(Number(result.before))}% full).`;
+    },
+    diff: async () => {
+      const result = await moduleCall("chat_diff", { workspaceId });
+      const files = Array.isArray(result.files) ? result.files.length : 0;
+      const diff = String(result.diff || "");
+      if (!diff.trim()) return { title: "Changes", text: (Array.isArray(result.warnings) && result.warnings[0] ? String(result.warnings[0]) : "No uncommitted changes.") + " (New, untracked files aren't listed.)" };
+      return { title: `Changes · ${files} ${files === 1 ? "file" : "files"}`, mono: true, text: diff + (result.truncated ? "\n… (more changes not shown)" : "") };
+    },
+    mcp: async () => {
+      const items = await listAllWorkspaces();
+      const open = items.find(item => item.id === workspaceId);
+      if (!open) return { title: "MCP", text: "No project is open." };
+      return { title: "MCP", rows: [["Project", open.name], ["Server", open.mcpState], ...(open.mcpLocalPort ? [["Port", `127.0.0.1:${open.mcpLocalPort}`] as [string, string]] : []),
+        ["Auth", open.mcpAuthType], ["Tools", open.toolProfile], ["Permissions", `${open.permissionMode} · ${open.approvalMode}`]] };
+    },
+    status: () => {
+      const latestRun = chatRunsHere.at(-1);
+      const description = board?.tasks.find(task => task.id === chatTaskId)?.description ?? "";
+      const goal = chatTaskId ? goals[chatTaskId] : undefined;
+      const rows: [string, string][] = [["Chat ID", chatTaskId || "New chat (not sent yet)"]];
+      if (latestRun) {
+        rows.push(["Run", `${latestRun.id.slice(0, 8)} · ${chatRunsHere.length} ${chatRunsHere.length === 1 ? "run" : "runs"}`]);
+        rows.push(["Mode", latestRun.execution_mode === "single" ? "Single model" : `Team · ${latestRun.team?.name ?? "saved team"}`]);
+        for (const node of latestRun.nodes) rows.push([node.settings?.name || node.role, `${describeChatNode(node as unknown as ChatNode, latestRun as unknown as ChatRun)} · ${node.state}`]);
+      } else rows.push(["Mode", composerMode === "single" ? `Single model · ${singleRoute.model}` : "Team"]);
+      if (chatTaskId) rows.push(["Context", `${description.length.toLocaleString("en-US")} of ${CHAT_CONTEXT_LIMIT.toLocaleString("en-US")} characters (${Math.round(description.length / CHAT_CONTEXT_LIMIT * 100)}% full)`]);
+      rows.push(["Goal", goal ? `${GOAL_SUMMARY[goal.status]} · round ${goal.round} of ${goal.rounds} · ${goalElapsed(goal.startedAt)} · ${goal.objective}` : "None"]);
+      rows.push(["Plan mode", planMode ? "On" : "Off"]);
+      return { title: "Status", rows };
+    },
+    recent: () => {
+      const recent = chatList(missions.filter(mission => mission.workspace_id === workspaceId), board?.tasks ?? [], taskLifecycle).filter(entry => entry.taskId !== chatTaskId).slice(0, 12);
+      return recent.length ? { title: "Resume a chat", items: recent.map(entry => ({ label: entry.title, detail: entry.status, run: () => selectChat(entry.taskId, "chat") })) }
+        : { title: "Resume a chat", text: "No other chats in this project yet." };
+    },
+    planMode, setPlanMode,
+  };
+
   return (
     <section className="ao-workflow" aria-label={copy.title} lang={language}>
       <ChatThreadList workspaces={workspaces.map((item) => ({ id: item.id, name: item.name, path: item.path }))} workspaceId={workspaceId} onWorkspace={chooseWorkspace}
@@ -1600,7 +1672,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
                   onConnect={addDependency} canConnect={(nodeId, parentId) => Boolean(aoDependencyChange(selectedRun, nodeId, parentId))}
                   onUnlink={unlink} canUnlink={(nodeId, parentId) => Boolean(aoUnlinkChange(selectedRun, nodeId, parentId))}
                   onRemove={removeCard} canRemove={(nodeId) => Boolean(aoRemoveChange(selectedRun, nodeId))} /> : undefined}
-                busy={Boolean(busy)} loadDescription={loadDescription} send={sendChat} steer={steerChat}
+                busy={Boolean(busy)} loadDescription={loadDescription} send={sendChat} steer={steerChat} commands={chatCommands}
                 // A new chat's team sits in the header, as Codex keeps the page free of setting bars.
                 headerExtra={chatTaskId === "" && savedTeams.length ? <label className="cx-head-team" title="Uses these role blocks for this chat">
                   <span>Team</span>
