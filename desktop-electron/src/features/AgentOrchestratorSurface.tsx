@@ -1211,6 +1211,16 @@ export function AgentOrchestratorSurface({ language, setError }: {
       } catch (cause) { if (!input.taskId) setPendingChat(null); reject(cause); throw cause; }
     });
   });
+  // Steering goes straight to the running agent, outside run()'s one-action-at-a-time lock: it must
+  // not wait behind another action, and it changes no run state the surface tracks.
+  const steerChat = async (input: { taskId: string; message: string }) => {
+    if (!workspaceId) throw new Error("Add a workspace first");
+    try {
+      const result = await moduleCall("chat_steer", { workspaceId, taskId: input.taskId, message: input.message });
+      if (result.steered) void loadBoard(workspaceId).catch(() => undefined);
+      return result.steered === true;
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); throw cause; }
+  };
   const retryChatStart = (runId: string) => void run("start-run", async () => {
     const taskId = missions.find((mission) => mission.id === runId)?.project_id ?? "";
     try {
@@ -1590,7 +1600,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
                   onConnect={addDependency} canConnect={(nodeId, parentId) => Boolean(aoDependencyChange(selectedRun, nodeId, parentId))}
                   onUnlink={unlink} canUnlink={(nodeId, parentId) => Boolean(aoUnlinkChange(selectedRun, nodeId, parentId))}
                   onRemove={removeCard} canRemove={(nodeId) => Boolean(aoRemoveChange(selectedRun, nodeId))} /> : undefined}
-                busy={Boolean(busy)} loadDescription={loadDescription} send={sendChat}
+                busy={Boolean(busy)} loadDescription={loadDescription} send={sendChat} steer={steerChat}
                 // A new chat's team sits in the header, as Codex keeps the page free of setting bars.
                 headerExtra={chatTaskId === "" && savedTeams.length ? <label className="cx-head-team" title="Uses these role blocks for this chat">
                   <span>Team</span>

@@ -157,3 +157,19 @@ test("slash commands open a menu and run on Enter; attachments are sent with the
   await walk(view).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
   assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), ["send", { taskId: "t", message: "look at this\n\nAttached image: C:\\shots\\shot.png" }]);
 });
+
+test("while the agent works, a typed message steers it at once; Esc on an empty composer still stops", async () => {
+  const steered = [];
+  const { props, calls } = base({ selectedTaskId: "t", working: true,
+    runs: [run("r1", "t", [node("w", "worker", "running")])],
+    steer: async (input) => { steered.push(input); return true; } });
+  const view = mount(props);
+  const textarea = () => walk(view.render()).find((element) => element.type === "textarea");
+  assert.equal(textarea().props.placeholder, "Steer the agent — sent to it right away");
+  textarea().props.onChange({ target: { value: "use pnpm" } });
+  const button = walk(view.render()).find((element) => element.props?.["aria-label"] === "Steer the agent");
+  assert.ok(button && !button.props.disabled, "with a message typed, Send steers instead of showing Stop");
+  await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+  assert.deepEqual(JSON.parse(JSON.stringify(steered)), [{ taskId: "t", message: "use pnpm" }]);
+  assert.equal(calls.filter(([kind]) => kind === "send").length, 0, "a delivered steer is not also sent as a follow-up");
+});

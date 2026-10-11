@@ -185,6 +185,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     } catch { /* observational only */ }
   }
   const dispatching = new Set();
+  // runId -> { session, text }: a single-model follow-up that continues its chat's live AO session.
+  const continuations = new Map();
+  // AO session -> the turn its latest follow-up started, so the previous turn is not read as its answer.
+  const expectedTurns = new Map();
   const nodeKey = (workspaceId, runId, nodeId) => JSON.stringify([workspaceId, runId, nodeId]);
   // Any card (orchestrator, worker or reviewer) on an AO harness runs as an AO session.
   const externalAgent = (node) => typeof node?.route?.harness_id === "string"
@@ -415,7 +419,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
           wireModel = viaCpa.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "") + "(" + node.route.effort + ")";
         }
         const agentModel = wireModel && agent === "opencode" ? `openai/${wireModel}` : wireModel ?? node.route.model;
-        session = await harnessService().spawn({ workspaceId, agent, model: agentModel, prompt: reserved.prompt,
+        // A single-model follow-up continues the chat's live session as its next turn: no new
+        // session, worktree or replayed prompt, and the agent keeps what it already read and ran.
+        const continued = continuations.get(runId);
+        continuations.delete(runId);
+        if (continued && await harnessService().continuable?.(continued.session).catch(() => false)) {
+          const sent = await harnessService().send(continued.session, continued.text, reserved.request_key);
+          expectedTurns.set(continued.session, sent.turnId);
+          if (expectedTurns.size > 500) expectedTurns.delete(expectedTurns.keys().next().value);
+          session = continued.session;
+        } else session = await harnessService().spawn({ workspaceId, agent, model: agentModel, prompt: reserved.prompt,
           name: node.settings?.name || "AO worker",
           // "Approve for me" is Codex's auto-review: Codex runs its own reviewer, but Claude Code's
           // "auto" mode exists only for Claude models and otherwise falls back to asking for every
@@ -451,7 +464,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       return { ok: true, run: held?.run, pending_approvals: [] };
     }
     if (node.state !== "running" || !session) return { ok: true, pending_approvals: [] };
-    const observed = await harnessService().observe(session);
+    const observed = await harnessService().observe(session, expectedTurns.get(session));
     const terminal = TERMINAL_TURNS.has(observed.turnState) || observed.exited;
     if (!terminal) {
       // The agent's parked tool requests, answerable from the chat or by the reviewer.
@@ -1658,6 +1671,31 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
   }
 
+  /**
+   * Steers the chat's running AO agent: the message reaches its current turn at once (ACP
+   * steering), like Codex's steer. It is kept in the chat under the latest message. If the turn
+   * ended before it arrived, `steered` is false and the caller sends it as a normal follow-up.
+   */
+  async function chatSteer({ workspaceId, taskId, message } = {}) {
+    const id = clean(workspaceId, 128), task = clean(taskId, 128);
+    const text = clean(message, 8192, false);
+    if (!text.trim()) throw new Error("Type a message to steer the agent");
+    const saved = await runs({ workspaceId: id });
+    const run = saved.runs.filter(entry => entry.project_id === task && !entry.cancelled).at(-1);
+    const card = run?.nodes.find(node => node.state === "running" && externalAgent(node) && node.receipt?.thread_id);
+    if (!card) return { ok: true, steered: false, reason: "No AO agent is working in this chat" };
+    const result = await harnessService().steer(card.receipt.thread_id, text, `steer-${randomUUID()}`);
+    if (!result.steered) return { ok: true, steered: false, reason: "The agent's turn already ended" };
+    const detail = await board({ workspaceId: id, taskId: task });
+    const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
+    const description = `${detail.task?.description || ""}\n\n↳ Steer (${stamp} UTC): ${text}`.trim();
+    if (detail.task && description.length <= 8192) {
+      await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } })
+        .catch(() => undefined); // the steer itself was delivered; the transcript note is best-effort
+    }
+    return { ok: true, steered: true, runId: run.id, nodeId: card.id };
+  }
+
   async function chatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart } = {}) {
     const id = clean(workspaceId, 128);
     const text = clean(message, 8192, false);
@@ -1694,8 +1732,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
 
     let task;
+    let continuation = null;
     if (taskId) {
       task = clean(taskId, 128);
+      // The chat's last single-model turn ran in an AO session; a follow-up on the same model
+      // continues it (see dispatchExternal), carrying only the new message.
+      const previous = saved.runs.filter(run => run.project_id === task).at(-1);
+      const card = previous?.execution_mode === "single" ? previous.nodes?.[0] : null;
+      if (executionMode === "single" && card && externalAgent(card) && card.receipt?.thread_id
+        && ["finished", "failed"].includes(card.state) && card.route?.harness_id === singleRoute.harness_id && card.route?.model === singleRoute.model) {
+        continuation = { session: card.receipt.thread_id, text };
+      }
       try {
         await retireOpenRuns(id, task, saved.runs);
       } catch (error) {
@@ -1721,6 +1768,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
 
     const { runId, run: createdRun } = await createTeamRun(id, task, team, { executionMode, singleRoute }, true);
+    if (continuation) {
+      continuations.set(runId, continuation);
+      if (continuations.size > 200) continuations.delete(continuations.keys().next().value);
+    }
     if (deferStart === true) {
       // Keep the normal authorization path: an expired/missing local approval fails visibly.
       void startRun({ workspaceId: id, runId, executable: selectedExecutable }).then(() => {
@@ -2040,6 +2091,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function call(operation, args = {}) {
     switch (operation) {
       case "chat_send": return chatSend(args);
+      case "chat_steer": return chatSteer(args);
       case "codex_executable": return { ok: true, executable: findCodexExecutable() };
       case "inspect": return { ok: true, status: "graph_ready", source: "coding-tools-plan", plannerRoute: "webgpt-on-codex-required", execution: "not_connected" };
       case "board": return board(args);

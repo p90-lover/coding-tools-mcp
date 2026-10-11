@@ -54,7 +54,7 @@ test("upstream AO gateway runs trusted UI requests automatically and blocks untr
 function observeHarness(context) {
   const vm = require("node:vm");
   const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
-  const start = source.indexOf("    async observe(id) {");
+  const start = source.indexOf("    async observe(id");
   const end = source.indexOf("    async interrupt(id)", start);
   const method = source.slice(start, end).trim().replace(/,$/, "");
   const helpers = source.slice(source.indexOf("  async function chatHostGone"), source.indexOf("  // Mission-owned AO calls."));
@@ -247,4 +247,33 @@ test("observe lists the agent's parked tool requests with AO's offered decisions
   await upstream.resolveApproval("s", "req-1", "allow");
   assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), ["POST", "/api/v1/sessions/s/conversation/approvals/req-1/resolve", { decisionId: "allow" }]);
   await assert.rejects(upstream.resolveApproval("s", "req-1", ""), /offered decision/);
+});
+
+test("a follow-up turn is observed only once AO shows it; send and steer use AO's conversation routes", async () => {
+  const calls = [];
+  let turns = [{ id: "old", state: "completed" }];
+  let steerError = null;
+  const upstream = observeHarness({
+    internalApi: async (method, endpoint, body) => {
+      calls.push([method, endpoint, body]);
+      if (endpoint.endsWith("/conversation?limit=100")) return { turns,
+        messages: [{ id: "m", role: "assistant", turnId: "old", sequence: 1, text: "the previous answer" }], activities: [] };
+      if (endpoint.endsWith("/conversation/messages")) return { turnId: "new", state: "running" };
+      if (endpoint.endsWith("/conversation/steer")) { if (steerError) throw steerError; return { providerTurnId: "new" }; }
+      return { session: { id: "s", mode: "chat", status: "working" } };
+    },
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(await upstream.send("s", "and now the tests", "key-1"))), { turnId: "new", state: "running" });
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), ["POST", "/api/v1/sessions/s/conversation/messages", { text: "and now the tests", clientMessageId: "key-1" }]);
+  const early = await upstream.observe("s", "new");
+  assert.equal(early.turnState, "queued", "the completed previous turn is not this follow-up's answer");
+  assert.equal(early.answer, "");
+  turns = [...turns, { id: "new", state: "running" }];
+  assert.equal((await upstream.observe("s", "new")).turnState, "running");
+  assert.equal((await upstream.observe("s")).turnId, "new", "without a pin the latest turn is read");
+  assert.deepEqual(JSON.parse(JSON.stringify(await upstream.steer("s", "use pnpm", "k2"))), { steered: true, turnId: "new" });
+  steerError = new Error("there is no turn in flight to interrupt (CHAT_NO_ACTIVE_TURN)");
+  assert.deepEqual(JSON.parse(JSON.stringify(await upstream.steer("s", "too late", "k3"))), { steered: false });
+  steerError = new Error("AO is down");
+  await assert.rejects(upstream.steer("s", "x", "k4"), /AO is down/, "other failures are not mistaken for an ended turn");
 });

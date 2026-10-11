@@ -2326,3 +2326,63 @@ test("the pinned executable digest is reused only while the file is unchanged", 
   fs.writeFileSync(exe, "other-binary"); // same size, new content
   assert.equal((await resolve()).expected_sha256, sha("other-binary"), "a replaced executable is hashed again");
 });
+
+test("a single-model follow-up continues the chat's live AO session with just the new message", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const previous = { id: "r1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "finished", parents: [], route, receipt: { thread_id: "sess-1" } }] };
+  const world = chatWorld({ tasks: [task], runs: [previous] });
+  const created = new Map();
+  const spawned = [], sent = [], observedWith = [];
+  const request = async (endpoint, body, options) => {
+    if (endpoint === "/api/v1/ao/read" && body.run_id) {
+      const run = created.get(body.run_id) ?? { id: body.run_id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1,
+        grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+      created.set(body.run_id, run);
+      return { ok: true, runs: [run], worker_capacity: { [body.run_id]: 1 } };
+    }
+    const latest = [...created.values()].at(-1);
+    if (endpoint === "/api/v1/ao/grant") return { ok: true, run: latest, grant: { executable_sha256: "a".repeat(64) } };
+    if (endpoint === "/api/v1/ao/external/reserve") { latest.nodes[0].state = "reserved"; return { ok: true, request_key: "key-1", prompt: "first ask\n\nFollow-up: now run the tests" }; }
+    if (endpoint === "/api/v1/ao/external/submitted") { latest.nodes[0].state = "running"; latest.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run: latest }; }
+    if (endpoint === "/api/v1/ao/external/terminal") { latest.nodes[0].state = "finished"; return { ok: true, run: latest }; }
+    return world.requestHeadless(endpoint, body, options);
+  };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: request, findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    aoHarness: {
+      spawn: async input => { spawned.push(input); return "new-session"; },
+      continuable: async id => id === "sess-1",
+      send: async (id, text, key) => { sent.push([id, text, key]); return { turnId: "turn-2", state: "running" }; },
+      observe: async (id, expected) => { observedWith.push([id, expected]); return { status: "idle", turnId: expected, turnState: "completed", answer: "tests pass" }; },
+    },
+  });
+  await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "now run the tests", executionMode: "single", singleRoute: route });
+  for (let tries = 0; tries < 200 && !observedWith.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(spawned.length, 0, "no new session or worktree");
+  assert.deepEqual(JSON.parse(JSON.stringify(sent)), [["sess-1", "now run the tests", "key-1"]], "only the new message, idempotent by its request key");
+  assert.deepEqual(JSON.parse(JSON.stringify(observedWith[0])), ["sess-1", "turn-2"], "observed on the follow-up's own turn");
+  assert.match(world.edits[0].description, /Follow-up \([^)]+ UTC\):\nnow run the tests$/, "the chat still records the follow-up");
+});
+
+test("steering hands the message to the running AO agent and notes it in the chat", async () => {
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  const steered = [];
+  let ended = false;
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless,
+    aoHarness: { steer: async (id, text) => { steered.push([id, text]); return { steered: !ended }; } } });
+  const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "use pnpm, not npm" });
+  assert.equal(result.steered, true);
+  assert.deepEqual(steered, [["sess-1", "use pnpm, not npm"]]);
+  assert.match(world.edits[0].description, /^first ask\n\n↳ Steer \([^)]+ UTC\): use pnpm, not npm$/);
+  ended = true;
+  assert.equal((await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "late" })).steered, false,
+    "a turn that already ended is reported, so the chat sends it as a follow-up");
+  assert.equal(world.edits.length, 1, "nothing is noted for an undelivered steer");
+});

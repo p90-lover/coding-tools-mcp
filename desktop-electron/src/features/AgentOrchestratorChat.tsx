@@ -109,7 +109,7 @@ function MessageActions({ text, children }: { text: string; children?: ReactNode
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, working = false, describeNode, activity, permissions, composer, onOpenTeam, onOpenMissionBoard,
-  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject, projectBranch: branch,
+  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject, projectBranch: branch, steer,
   pendingMessage, pendingTitle, pendingCreation = false,
 }: {
   /** A message being sent into a chat that has no run yet (shown at once, as Codex does). */
@@ -127,6 +127,8 @@ export function AgentOrchestratorChat({
   working?: boolean;
   loadDescription: (taskId: string) => Promise<string>;
   send: (input: { taskId?: string; title?: string; message: string }) => Promise<void>;
+  /** Hands a message to the running agent at once (Codex's steer); false when its turn already ended. */
+  steer?: (input: { taskId: string; message: string }) => Promise<boolean>;
   openStructure: (runId: string) => void;
   approvals: ChatApproval[];
   approve: (approval: ChatApproval, reply: ApprovalReply) => void;
@@ -280,7 +282,14 @@ export function AgentOrchestratorChat({
 
   const runOpen = Boolean(latest) && chatRunOpen(chat?.status);
   const accepts = chatAcceptsMessage(chat?.status, working);
-  const canSend = !busy && !sending && Boolean(draft.trim() || attachments.length) && accepts;
+  // "Steer while working": a message typed while the agent works goes to it right away.
+  const [steerOn, setSteerOn] = useState(() => { try { return localStorage.getItem("coding-tools:ao:steer") !== "off"; } catch { return true; } });
+  const toggleSteer = () => setSteerOn((current) => {
+    try { localStorage.setItem("coding-tools:ao:steer", current ? "off" : "on"); } catch { /* the choice still applies now */ }
+    return !current;
+  });
+  const steering = !accepts && working && steerOn && Boolean(steer && selectedTaskId);
+  const canSend = !busy && !sending && Boolean(draft.trim() || attachments.length) && (accepts || steering);
   const slash = chatSlashMatches(draft, { chat: Boolean(selectedTaskId), run: Boolean(latest), open: runOpen });
 
   const submit = async () => {
@@ -288,7 +297,9 @@ export function AgentOrchestratorChat({
     const message = chatMessageWithAttachments(draft, attachments);
     setSending(true);
     try {
-      await send(selectedTaskId ? { taskId: selectedTaskId, message } : { title: title.trim() || undefined, message });
+      // A steer the turn outran (it ended first) is sent as an ordinary follow-up instead.
+      const steered = steering && steer && selectedTaskId ? await steer({ taskId: selectedTaskId, message }) : false;
+      if (!steered) await send(selectedTaskId ? { taskId: selectedTaskId, message } : { title: title.trim() || undefined, message });
       setDraft(""); setTitle(""); setAttachments([]); setAttachNote(""); setAtBottom(true);
     } catch {
       // The surface already shows the error; keep the message so it can be sent again.
@@ -333,6 +344,7 @@ export function AgentOrchestratorChat({
       { label: "Fork", run: () => thread.fork() },
       { label: "Copy conversation", run: thread.copyConversation },
     ] as ChatMenuItem[] : []),
+    ...(steer ? [{ label: "Steer while working", checked: steerOn, run: toggleSteer } as ChatMenuItem] : []),
     { kind: "separator" },
     latest && chat?.status === "paused" && onResume ? { label: "Resume mission", run: onResume }
       : { label: "Pause mission", ...(latest && chat?.status === "running" && onPause ? { run: onPause } : { reason: "Only a running mission can be paused" }) },
@@ -492,7 +504,7 @@ export function AgentOrchestratorChat({
             {attachNote ? <span className="cx-attach-note" role="status">{attachNote}</span> : null}
           </div> : null}
           <textarea ref={input} aria-label="Message" maxLength={8192} rows={1} value={draft}
-            placeholder={!accepts ? "Running — you can send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : "Do anything"}
+            placeholder={steering ? "Steer the agent — sent to it right away" : !accepts ? "Running — you can send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : "Do anything"}
             onChange={(event) => { setDraft(event.target.value); setSlashIndex(0); }}
             onPaste={(event) => { if (event.clipboardData.files.length) { event.preventDefault(); void addFiles(event.clipboardData.files); } }}
             onKeyDown={(event) => {
@@ -519,9 +531,9 @@ export function AgentOrchestratorChat({
             <span className="cx-head-spacer" />
             <button type="button" className="cx-icon-button cx-mic" aria-label="Voice input" title="Voice input isn't available yet" disabled>
               <ChatGlyph name="mic" size={16} /></button>
-            {latest && runOpen && stop && !accepts
+            {latest && runOpen && stop && !accepts && !(steering && canSend)
               ? <button className="cx-send is-stop" type="button" aria-label="Stop (Esc)" title="Stop (Esc)" onClick={() => stop(latest.id)}><span aria-hidden="true" /></button>
-              : <button className="cx-send" type="submit" aria-label={sending ? "Starting…" : "Send message"} title="Send (Enter)" disabled={!canSend}>
+              : <button className="cx-send" type="submit" aria-label={sending ? "Starting…" : steering ? "Steer the agent" : "Send message"} title={steering ? "Steer — sent to the working agent now (Enter)" : "Send (Enter)"} disabled={!canSend}>
                   <Icon name="forward" width="18" height="18" /></button>}
           </div>
         </form>

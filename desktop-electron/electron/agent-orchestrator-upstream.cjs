@@ -305,12 +305,18 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       }
       return sessionId(data?.session?.id);
     },
-    async observe(id) {
+    async observe(id, expectedTurn) {
       const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`);
       if (record?.session?.mode === "tui") return observeTui(id, record.session.status);
       const [session, conversation] = [record, await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=100`)];
       const turns = Array.isArray(conversation?.turns) ? conversation.turns : [];
-      const turn = turns[turns.length - 1];
+      // A follow-up sent into a live session is pinned to its own turn: until AO shows it, the
+      // previous, completed turn must not be read as this card's answer.
+      const turn = typeof expectedTurn === "string" && expectedTurn ? turns.find(entry => entry.id === expectedTurn) : turns[turns.length - 1];
+      if (typeof expectedTurn === "string" && expectedTurn && !turn) {
+        return { status: session?.session?.status, turnId: expectedTurn, turnState: "queued", needsInput: false, exited: false,
+          answer: "", liveOutput: "", timeline: [], approvals: [] };
+      }
       const answer = (Array.isArray(conversation?.messages) ? conversation.messages : [])
         .filter(message => message.role === "assistant" && message.turnId === turn?.id && !message.streaming)
         .map(message => message.text).join("\n\n").trim();
@@ -341,6 +347,38 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         answer: answer.slice(0, 12000), liveOutput: utf8Prefix(liveOutput, 4096), timeline,
         approvals: pendingApprovals(conversation),
       };
+    },
+    /**
+     * Whether a chat session can take another turn: it exists, runs as a chat, and its host is up.
+     * A follow-up then continues it instead of starting a new session and worktree.
+     */
+    async continuable(id) {
+      const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`).catch(() => null);
+      const status = record?.session?.status;
+      if (!record?.session || record.session.mode === "tui" || ["exited", "terminated", "killed", "errored"].includes(status)) return false;
+      return !(await chatHostGone(id));
+    },
+    /** Sends a follow-up as a new turn of the same session; AO de-duplicates by client message id. */
+    async send(id, text, clientMessageId) {
+      const data = await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/messages`,
+        { text: utf8Prefix(String(text), 64 * 1024), ...(clientMessageId ? { clientMessageId: String(clientMessageId).slice(0, 200) } : {}) });
+      if (typeof data?.turnId !== "string" || !data.turnId) throw new Error("AO did not start a turn for the follow-up");
+      return { turnId: data.turnId, state: data.state };
+    },
+    /**
+     * Hands guidance to the running turn at once (ACP steering). If the turn already ended, AO
+     * returns the text instead of starting a detached turn, and this reports `steered: false`.
+     */
+    async steer(id, text, clientMessageId) {
+      try {
+        const data = await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/steer`,
+          { text: utf8Prefix(String(text), 64 * 1024), ...(clientMessageId ? { clientMessageId: String(clientMessageId).slice(0, 200) } : {}) });
+        return { steered: true, turnId: data?.providerTurnId ?? null };
+      } catch (error) {
+        // AO answers CHAT_NO_ACTIVE_TURN when the turn ended before the guidance arrived.
+        if (/CHAT_NO_ACTIVE_TURN|no turn in flight|no active turn/i.test(String(error?.message))) return { steered: false };
+        throw error;
+      }
     },
     /** Answers one parked tool request with one of the decisions AO offered for it. */
     async resolveApproval(id, requestId, decisionId) {
