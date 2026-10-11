@@ -3,7 +3,7 @@ import type { AoMission, AoNode } from "./AgentOrchestratorSurface";
 import { chatWorkingDetail, type ChatActivity } from "./ao-chat";
 
 export type RoleSettings = { name: string; specialty: string; instructions: string; expected_output: string; working_directory: string; revision: number; auto_decide?: boolean; role_name?: string };
-export type AoTeam = { id: string; workspace_id: string; name: string; revision: number; worker_limit: number; max_review_rounds?: number; is_default?: boolean; editable_graph?: boolean; nodes: AoNode[]; permission_selections?: Record<string, { permission_profile?: string; approval_policy?: string; approvals_reviewer?: string }> };
+export type AoTeam = { id: string; workspace_id: string; name: string; revision: number; worker_limit: number; max_review_rounds?: number; review_loop?: boolean; link_points?: Record<string, { x: number; y: number }>; is_default?: boolean; editable_graph?: boolean; nodes: AoNode[]; permission_selections?: Record<string, { permission_profile?: string; approval_policy?: string; approvals_reviewer?: string }> };
 export type AoHarness = { id: string; label: string; runnable: boolean; installed: boolean; authStatus?: string; chat?: boolean };
 export type AoRoute = AoNode["route"];
 export type AoModelCapabilities = {

@@ -899,9 +899,14 @@ pub fn grant_run(
     super::ao_lifecycle::ensure_execution_allowed(data, run)?;
     let fingerprint = graph_sha256(data, run)?;
     let remaining_reworks = usize::from(run.max_review_rounds.saturating_sub(run.review_rounds));
-    // The planner and approver re-run only when the approver sends the plan back.
+    // The planner and approver re-run when the approver sends the plan back, and once per
+    // rework round when the team's reviewer reports back to the orchestrator.
     let replans = if run.nodes.iter().any(|node| node.role == Role::Approver) {
         usize::from(MAX_PLAN_ROUNDS.saturating_sub(run.plan_rounds))
+    } else {
+        0
+    } + if super::ao_team::review_loops(run) {
+        remaining_reworks
     } else {
         0
     };
@@ -1431,15 +1436,28 @@ Do not edit the implementation; send needed changes back to the workers.",
         run.review_rounds, run.max_review_rounds
     ));
     match node.role {
-        Role::Planner if run.plan_rounds > 0 => {
-            if let Some(feedback) = last_answer(run, Role::Approver) {
-                prompt.push_str(&format!(
-                    "\nThe command approver sent your previous plan back (quoted task data):\n{}\n",
-                    serde_json::to_string(&clip(feedback, 3_000))?
-                ));
+        Role::Planner => {
+            if run.plan_rounds > 0 {
+                if let Some(feedback) = last_answer(run, Role::Approver) {
+                    prompt.push_str(&format!(
+                        "\nThe command approver sent your previous plan back (quoted task data):\n{}\n",
+                        serde_json::to_string(&clip(feedback, 3_000))?
+                    ));
+                }
+            }
+            if run.review_rounds > 0 && super::ao_team::review_loops(run) {
+                if let Some(feedback) = last_answer(run, Role::Reviewer) {
+                    prompt.push_str(&format!(
+                        "\nThe reviewer checked the last round and requested changes (quoted task data):\n{}\n\
+You decide what happens next. To run another round, give the worker cards new assignments that address the review. \
+To end the mission instead (the remaining points are not worth another round, or cannot be fixed by the team), \
+give the final answer yourself and end with the solo block.\n",
+                        serde_json::to_string(&clip(feedback, 3_000))?
+                    ));
+                }
             }
         }
-        Role::Planner | Role::Approver => {}
+        Role::Approver => {}
         _ => {
             if let Some(feedback) = last_answer(run, Role::Reviewer) {
                 prompt.push_str(&format!(
@@ -3239,6 +3257,38 @@ mod tests {
             run.nodes[2].receipt.as_ref().unwrap().verdict.as_deref(),
             Some("CHANGES_REQUIRED")
         );
+        // A team whose reviewer reports back to the orchestrator re-runs the orchestrator with the
+        // review, and every worker after it, instead of only the workers the reviewer named.
+        let mut looped = successful.clone();
+        looped.ao_runs[0].team = Some(
+            serde_json::from_value(json!({"id":"looping","workspace_id":"qa","name":"Looping",
+                "revision":1,"review_loop":true,"nodes":[]}))
+            .unwrap(),
+        );
+        let fingerprint = graph_sha256(&looped, &looped.ao_runs[0]).unwrap();
+        looped.ao_runs[0].grant = Some(RunGrant {
+            graph_sha256: fingerprint,
+            executable_sha256: sha.clone(),
+            granted_at_ms: 1000,
+            expires_at_ms: 3_601_000,
+            max_turns: 7,
+            turns_started: 3,
+        });
+        let back = crate::integrations::ao_team::queue_rework(
+            &mut looped,
+            "qa",
+            "run",
+            "reviewer",
+            "four",
+            1001,
+        )
+        .unwrap()
+        .expect("the loop requeues the orchestrator");
+        assert!(back.nodes.iter().all(|node| node.state == State::Pending));
+        assert_eq!(back.review_rounds, 1);
+        let replan = prompt_for_node(&looped, &back, "planner").unwrap();
+        assert!(replan.contains("requested changes") && replan.contains("revise"));
+        assert!(replan.contains("end with the solo block"));
         let mut rework = successful.clone();
         let fingerprint = graph_sha256(&rework, &rework.ao_runs[0]).unwrap();
         rework.ao_runs[0].grant = Some(RunGrant {

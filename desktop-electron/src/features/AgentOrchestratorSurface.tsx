@@ -347,6 +347,11 @@ export function aoComposerTeam(selected: string, teams: AoTeam[], fallback?: AoT
   if (selected && teams.some(team => team.id === selected)) return selected;
   return (fallback?.id && teams.some(team => team.id === fallback.id) ? fallback.id : teams[0]?.id) || "";
 }
+/** A looping team draws its reviewer’s way back to the orchestrator on the mission canvas too. */
+export function missionLoop(run: AoMission, shown: AoNode[]): { from: string; to: string } | null {
+  const planner = shown.find(node => node.role === "planner"), reviewer = shown.find(node => node.role === "reviewer");
+  return run.team?.review_loop && planner && reviewer ? { from: reviewer.id, to: planner.id } : null;
+}
 export function aoChatExecution(mode: "single" | "team", route: AoRoute, teams: AoTeam[], teamId: string): JsonObject {
   if (mode === "single") {
     if (!route.model || route.model === "default") throw new Error("Choose one explicit model first.");
@@ -1578,6 +1583,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
                 structure={selectedRun && chatTaskId && selectedRun.project_id === chatTaskId ? <AgentOrchestratorCanvas key={`chat-${selectedRun.id}`}
                   nodes={visibleNodes} levels={aoLevels(selectedRun).map(level => level.filter(node => visibleNodes.includes(node)))}
                   selectedId="" busy={Boolean(busy)} describe={describeNode}
+                  loop={missionLoop(selectedRun, visibleNodes)} points={selectedRun.team?.link_points}
                   /* Selecting or dragging a card in the side panel stays in the chat;
                      the header has its own Mission Board button. */
                   onSelect={() => {}} onMove={moveCard}
@@ -1627,6 +1633,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
               nodes={visibleNodes}
               levels={aoLevels(selectedRun).map(level => level.filter(node => visibleNodes.includes(node)))}
               selectedId={inspectedId} busy={Boolean(busy)} onSelect={inspectRole} onMove={moveCard} describe={describeNode}
+              loop={missionLoop(selectedRun, visibleNodes)} points={selectedRun.team?.link_points}
               onConnect={addDependency} canConnect={(nodeId, parentId) => Boolean(aoDependencyChange(selectedRun, nodeId, parentId))}
               onUnlink={unlink} canUnlink={(nodeId, parentId) => Boolean(aoUnlinkChange(selectedRun, nodeId, parentId))}
               onRemove={removeCard} canRemove={(nodeId) => Boolean(aoRemoveChange(selectedRun, nodeId))}>

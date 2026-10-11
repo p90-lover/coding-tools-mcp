@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { JsonObject, WorkspaceSummary } from "../api/contracts";
-import { AgentOrchestratorCanvas } from "./AgentOrchestratorCanvas";
+import { AgentOrchestratorCanvas, LOOP_LINK, linkPointKey } from "./AgentOrchestratorCanvas";
 import { aoDependencyChange, aoLevels, aoUnlinkChange, listAllWorkspaces, moduleCall, type AoMission, type AoNode } from "./AgentOrchestratorSurface";
 import { AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, NATIVE_HARNESS, cardMeta,
   defaultTeam, emptyRoleSettings, workerRoute, type AoHarness, type AoModelCatalog, type AoModelLoader, type AoTeam } from "./AgentOrchestratorRoleEditor";
@@ -19,6 +19,22 @@ export function duplicateTeam(team: AoTeam): AoTeam {
 }
 
 export { prepareTeamGraph } from "./AgentOrchestratorTeam";
+
+/** The reviewer's way back to the orchestrator, when the team loops and has both cards. */
+export function teamLoop(team: AoTeam): { from: string; to: string } | null {
+  const planner = team.nodes.find(node => node.role === "planner");
+  const reviewer = team.nodes.find(node => node.role === "reviewer");
+  return team.review_loop && planner && reviewer ? { from: reviewer.id, to: planner.id } : null;
+}
+
+/** The team's link points with one link pulled to `point` (or reset), dropping points of links that are gone. */
+export function bentLinks(team: AoTeam, key: string, point: { x: number; y: number } | null): Record<string, { x: number; y: number }> {
+  const live = new Set([...team.nodes.flatMap(node => node.parents.map(parent => linkPointKey(parent, node.id))), LOOP_LINK]);
+  const next: Record<string, { x: number; y: number }> = {};
+  for (const [name, saved] of Object.entries(team.link_points ?? {})) if (live.has(name) && name !== key) next[name] = saved;
+  if (point && live.has(key)) next[key] = { x: Math.round(point.x), y: Math.round(point.y) };
+  return next;
+}
 
 const asMission = (team: AoTeam): AoMission => ({
   id: team.id, project_id: "", workspace_id: team.workspace_id, revision: team.revision, cancelled: false, nodes: team.nodes,
@@ -78,6 +94,18 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
       const available = result.harnesses as AoHarness[] | undefined;
       setHarnesses(available?.length ? available : [native]);
       if (!items.length) { setLoading(false); setDraft(null); }
+      // Right after the app starts, AO may still be starting and only Native Codex is listed (with a
+      // notice); ask again a few times so the cards name their harnesses instead of their ids.
+      if (result.notice) void (async () => {
+        for (let attempt = 0; attempt < 6 && live; attempt++) {
+          await new Promise(resolve => setTimeout(resolve, 3000));
+          if (!live) return;
+          const again = await moduleCall("harnesses").catch(() => null);
+          const list = again?.harnesses as AoHarness[] | undefined;
+          if (live && list?.length) setHarnesses(list);
+          if (again && !again.notice) return;
+        }
+      })();
     }).catch(cause => { if (live) { setError(String(cause instanceof Error ? cause.message : cause)); setLoading(false); } });
     return () => { live = false; };
   }, [active, setError]);
@@ -281,6 +309,9 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
           onChange={event => setDraft({ ...draft, worker_limit: Number(event.target.value) })} /></label>
         <label>Review rounds<input aria-label="Team review rounds" type="number" min={1} max={10} value={draft.max_review_rounds ?? 3} disabled={locked}
           onChange={event => setDraft({ ...draft, max_review_rounds: Number(event.target.value) })} /></label>
+        <label className="ao-teams-loop" title="When the reviewer asks for changes, the orchestrator gets the review and decides: plan another round for the workers, or end the mission. Review rounds caps the loop.">
+          <input type="checkbox" aria-label="Reviewer reports back to the orchestrator" checked={Boolean(draft.review_loop)} disabled={locked}
+            onChange={event => setDraft({ ...draft, review_loop: event.target.checked })} />Reviewer reports back to the orchestrator</label>
         <span className="ao-hint">{draft.id === defaultId ? "Default for new chats" : "Choose this team when starting a chat"}</span>
       </div> : null}
       <div className="ao-teams-stage" ref={stage}>
@@ -306,7 +337,9 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
                 && draft.nodes.find(node => node.id === parent)?.role !== "retry" && Boolean(aoDependencyChange(mission, id, parent))}
               onConnect={(id, parent) => { const linked = aoDependencyChange(mission, id, parent); if (linked) parents(id, linked.parents as string[]); }}
               canUnlink={canUnlink} onUnlink={(id, parent) => { const unlinked = aoUnlinkChange(mission, id, parent); if (unlinked && canUnlink(id, parent)) parents(id, unlinked.parents as string[]); }}
-              canRemove={canRemove} onRemove={remove} />
+              canRemove={canRemove} onRemove={remove}
+              loop={teamLoop(draft)} points={draft.link_points}
+              onBend={(key, point) => void change({ ...draft, link_points: bentLinks(draft, key, point) })} />
           </div>
           {inspected && popoverAt ? <div className="ao-team-popover" role="dialog" aria-label="Team role editor"
             style={{ left: popoverAt.left, top: popoverAt.top, width: popoverAt.width, maxHeight: popoverAt.maxHeight }}>

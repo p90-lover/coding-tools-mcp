@@ -12,6 +12,8 @@
 .ao-teams-bar select { min-width: 140px; max-width: 280px; }
 .ao-teams-settings input { min-width: 0; width: 76px; }
 .ao-teams-settings input[aria-label="Team name"] { width: 180px; }
+.ao-teams-settings .ao-teams-loop { cursor: pointer; }
+.ao-teams-settings .ao-teams-loop input { width: auto; margin: 0; }
 .ao-teams-settings .ao-hint { margin: 0; margin-left: auto; }
 .ao-teams-stage { position: relative; display: flex; flex: 1 1 auto; min-width: 0; min-height: 0; }
 /* The role editor opens beside the clicked block and closes on a press outside it. */
@@ -172,6 +174,15 @@
 .ao-canvas-wires path.is-running { stroke: var(--ao-green); stroke-opacity: .9; stroke-dasharray: 8 6; animation: ao-wire-flow 1.1s linear infinite; }
 .ao-canvas-wires path.ao-wire-hit { stroke: transparent; stroke-width: 14; pointer-events: stroke; cursor: pointer; }
 .ao-canvas-wires path.ao-wire-hit:hover { stroke: var(--ao-red); stroke-opacity: .35; }
+/* The reviewer reporting back to the orchestrator: a dashed loop, not a dependency. */
+.ao-canvas-wires path.is-loop { stroke: var(--ao-blue, #1677ff); stroke-opacity: .55; stroke-dasharray: 6 5; }
+/* A hovered card: its own links stand out, the rest fade back. */
+.ao-canvas-wires.has-hover path:not(.ao-wire-hit):not(.is-related) { stroke-opacity: .14; }
+.ao-canvas-wires path.is-related { stroke-opacity: .95; stroke-width: 2; }
+.ao-canvas-wires path.is-loop.is-related { stroke-opacity: .95; }
+/* Shift held over a link: it can be pulled, not removed. */
+.ao-canvas.is-shift .ao-canvas-wires path.ao-wire-hit { cursor: grab; }
+.ao-canvas.is-shift .ao-canvas-wires path.ao-wire-hit:hover { stroke: var(--ao-blue, #1677ff); stroke-opacity: .25; }
 @keyframes ao-wire-flow { to { stroke-dashoffset: -28; } }
 .ao-canvas-card { position: absolute; top: 0; left: 0; width: 212px; min-height: 76px; border-radius: 10px; border: 1px solid rgb(255 255 255 / 10%); background: var(--color-bg-secondary); box-shadow: 0 1px 2px rgb(0 0 0 / 25%); }
 .ao-canvas-card.is-selected, .ao-canvas-card.is-target { outline: 2px solid var(--ao-blue); outline-offset: 2px; }
@@ -341,6 +352,8 @@
 
 /* Approved Codex light surface: isolated to the orchestrator, never the launcher theme. */
 .ao-workflow {
+  /* Native controls (checkboxes, selects, scrollbars) follow the light surface, not the launcher theme. */
+  color-scheme: light; accent-color: #1677ff;
   --color-bg-primary: #fff; --color-bg-secondary: #fff;
   --color-background-surface: #fff; --color-background-elevated: #fff;
   --color-text-primary: #16243a; --color-text-secondary: #748198;

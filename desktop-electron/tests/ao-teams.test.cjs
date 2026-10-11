@@ -17,7 +17,15 @@ function load(file, imports = {}) {
 }
 const roles = load("AgentOrchestratorRoleEditor.tsx");
 const teamEditor = load("AgentOrchestratorTeam.tsx", { "./AgentOrchestratorRoleEditor": roles });
-const teams = load("AgentOrchestratorTeamsSurface.tsx", { "./AgentOrchestratorRoleEditor": roles, "./AgentOrchestratorTeam": teamEditor });
+// The canvas's pure helpers (link routing, link points), without its React component.
+function canvasHelpers() {
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorCanvas.tsx"), "utf8");
+  const start = source.indexOf("export type WireBox"), end = source.indexOf("export function AgentOrchestratorCanvas");
+  const code = ts.transpileModule(source.slice(start, end), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
+  const helpers = {}; new Function("exports", code)(helpers);
+  return helpers;
+}
+const teams = load("AgentOrchestratorTeamsSurface.tsx", { "./AgentOrchestratorRoleEditor": roles, "./AgentOrchestratorTeam": teamEditor, "./AgentOrchestratorCanvas": canvasHelpers() });
 const fixture = () => roles.defaultTeam("workspace-a", roles.workerRoute(roles.DEFAULT_WORKER_HARNESS, roles.DEFAULT_WORKER_MODEL));
 
 test("a mission editor never replaces its own snapshot with an unrelated default team", () => {
@@ -131,6 +139,99 @@ test("links go around cards: a direct orchestrator-to-reviewer link no longer ru
   assert.match(canvas.wirePath(lead, workers[1], []), /^M506,76 C/);
   // A child above its parent (a link back up): routed around, never a straight crossing.
   assert.match(canvas.wirePath(reviewer, lead, workers), /Q/);
+});
+
+test("routed links keep clear of every card, take their own lanes and fan into a card side by side", () => {
+  const canvas = canvasHelpers();
+  const card = (x, y) => ({ x, y, w: 212, h: 76 });
+  // The team from the user's screenshot: three workers, a review split with a sub-reviewer, a reviewer.
+  const boxes = new Map(Object.entries({ orch: card(470, 40), w1: card(240, 270), w2: card(510, 290), w3: card(730, 300),
+    split: card(495, 430), sub: card(460, 690), rev: card(810, 660) }));
+  const links = [["orch", "w1"], ["orch", "w2"], ["orch", "w3"], ["w1", "split"], ["w2", "split"], ["w3", "split"], ["split", "sub"],
+    ["w1", "rev"], ["w2", "rev"], ["w3", "rev"], ["sub", "rev"], ["orch", "rev"]].map(([from, to]) => ({ key: `${from}>${to}`, from, to }));
+  links.push({ key: "loop", from: "rev", to: "orch" });
+  const ports = canvas.linkPorts(boxes, links);
+  const intoReviewer = links.filter(link => link.to === "rev").map(link => [link.from, ports.get(link.key).into]);
+  assert.equal(new Set(intoReviewer.map(([, x]) => x)).size, intoReviewer.length, "each link into the reviewer has its own point");
+  const byX = [...intoReviewer].sort((a, b) => a[1] - b[1]).map(([from]) => from);
+  const centre = id => boxes.get(id).x + 106;
+  assert.deepEqual(byX, [...byX].sort((a, b) => centre(a) - centre(b)), "points are ordered by where each link comes from");
+
+  const started = Date.now();
+  const shapes = canvas.routeLinks(boxes, links);
+  assert.ok(Date.now() - started < 1000, "routing a team this size is quick");
+  assert.equal(shapes.size, links.length);
+  const numbers = d => d.match(/-?\d+(\.\d+)?/g).map(Number);
+  const pairs = d => { const all = numbers(d), out = []; for (let i = 0; i + 1 < all.length; i += 2) out.push([all[i], all[i + 1]]); return out; };
+  for (const link of links) {
+    for (const [x, y] of pairs(shapes.get(link.key))) for (const [id, box] of boxes) {
+      if (id === link.from || id === link.to) continue;
+      assert.ok(!(x > box.x && x < box.x + box.w && y > box.y && y < box.y + box.h), `${link.key} passes through ${id}`);
+    }
+  }
+  // A routed link's corners are its Q control points: rebuild each polyline and check lanes.
+  const routed = links.filter(link => shapes.get(link.key).includes("Q")).map(link => {
+    const d = shapes.get(link.key), corners = [...d.matchAll(/Q(-?[\d.]+),(-?[\d.]+)/g)].map(m => [Number(m[1]), Number(m[2])]);
+    const start = pairs(d)[0], end = pairs(d).at(-1);
+    return { key: link.key, points: [start, ...corners, end] };
+  });
+  assert.ok(routed.length >= 3, "links that would cross cards are routed around them");
+  const runs = routed.flatMap(({ key, points }) => points.slice(1, -2).map((a, i) => ({ key, a, b: points[i + 2] })));
+  for (const one of runs) for (const other of runs) {
+    if (one.key === other.key) continue;
+    const vertical = one.a[0] === one.b[0] && other.a[0] === other.b[0] && one.a[0] === other.a[0];
+    const horizontal = one.a[1] === one.b[1] && other.a[1] === other.b[1] && one.a[1] === other.a[1];
+    const span = (s, axis) => [Math.min(s.a[axis], s.b[axis]), Math.max(s.a[axis], s.b[axis])];
+    if (vertical) { const [a1, a2] = span(one, 1), [b1, b2] = span(other, 1); assert.ok(Math.min(a2, b2) - Math.max(a1, b1) <= 0, `${one.key} and ${other.key} share a lane`); }
+    if (horizontal) { const [a1, a2] = span(one, 0), [b1, b2] = span(other, 0); assert.ok(Math.min(a2, b2) - Math.max(a1, b1) <= 0, `${one.key} and ${other.key} share a lane`); }
+  }
+  // Nothing in the way: the usual curve, between the spread points.
+  assert.match(shapes.get("orch>w1"), /^M\d+,116 C/);
+  // A pulled link keeps its point.
+  const pulled = canvas.routeLinks(boxes, [{ key: "orch>rev", from: "orch", to: "rev", via: { x: 1100, y: 400 } }]);
+  assert.match(pulled.get("orch>rev"), / 1100,400 S/);
+});
+
+test("a card's right-click menu names why it can't be removed", () => {
+  const canvas = canvasHelpers();
+  const node = (id, role) => ({ id, role, parents: [], state: "pending", x: 0, y: 0, task_id: "", route: { model: "" } });
+  const nodes = [node("lead", "planner"), node("w", "worker"), node("rev", "reviewer"), node("split", "review_split")];
+  assert.match(canvas.removalReason(nodes[0], nodes), /orchestrator/);
+  assert.match(canvas.removalReason(nodes[2], nodes), /main reviewer/);
+  assert.match(canvas.removalReason(nodes[3], nodes), /sub-reviewers/);
+  assert.match(canvas.removalReason(nodes[1], nodes), /at least one worker/);
+});
+
+test("a Shift-dragged link passes through its point, and a loop back to the orchestrator goes around the cards", () => {
+  const canvas = canvasHelpers();
+  const card = (x, y) => ({ x, y, w: 212, h: 76 });
+  const lead = card(400, 0), workers = [card(0, 200), card(400, 200), card(800, 200)], reviewer = card(400, 420);
+  const pulled = canvas.wirePath(lead, workers[1], [], 0, { x: 300, y: 150 });
+  assert.match(pulled, /^M506,76 C506,/);
+  assert.match(pulled, / 300,150 S/, "the link reaches the pulled point, then continues to its child");
+  assert.match(pulled, / 506,200$/);
+  // The loop from the reviewer up to the orchestrator: no point of it inside a worker.
+  const loop = canvas.wirePath(reviewer, lead, workers);
+  const all = loop.match(/-?\d+(\.\d+)?/g).map(Number); const points = [];
+  for (let i = 0; i + 1 < all.length; i += 2) points.push([all[i], all[i + 1]]);
+  assert.ok(points.every(([x, y]) => workers.every(w => !(x > w.x && x < w.x + w.w && y > w.y && y < w.y + w.h))));
+  assert.deepEqual(canvas.scenePoint(250, 180, { left: 50, top: 30 }, { x: 100, y: 50, scale: 2 }), { x: 50, y: 50 });
+  assert.equal(canvas.linkPointKey("lead", "worker"), "lead>worker");
+});
+
+test("a looping team draws the reviewer's way back, and link points follow the team's links", () => {
+  const team = fixture();
+  const planner = team.nodes.find(node => node.role === "planner"), reviewer = team.nodes.find(node => node.role === "reviewer");
+  assert.equal(teams.teamLoop(team), null, "no loop until the team turns it on");
+  team.review_loop = true;
+  assert.deepEqual({ ...teams.teamLoop(team) }, { from: reviewer.id, to: planner.id });
+  const worker = team.nodes.find(node => node.role === "worker" && node.parents.includes(planner.id));
+  const key = `${planner.id}>${worker.id}`;
+  team.link_points = { "gone>link": { x: 1, y: 1 }, loop: { x: 9, y: 9 } };
+  const bent = teams.bentLinks(team, key, { x: 10.4, y: -3.6 });
+  assert.deepEqual(JSON.parse(JSON.stringify(bent)), { loop: { x: 9, y: 9 }, [key]: { x: 10, y: -4 } }, "stale points drop; the new one is rounded");
+  assert.deepEqual(JSON.parse(JSON.stringify(teams.bentLinks({ ...team, link_points: bent }, key, null))), { loop: { x: 9, y: 9 } }, "Shift-double-click resets a link");
+  assert.deepEqual(JSON.parse(JSON.stringify(teams.bentLinks(team, "not>a-link", { x: 1, y: 1 }))), { loop: { x: 9, y: 9 } }, "a point for a missing link is not kept");
 });
 
 test("a block's role editor opens as a popover beside it, survives autosaves and closes on a press outside", () => {
