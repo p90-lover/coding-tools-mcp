@@ -29,20 +29,21 @@ function clausesFrom(value) {
 // each run start cost seconds, so the digest is reused while the file is unchanged: any replacement
 // changes its size, modification or change time (ctime cannot be set by the replacer), which
 // re-hashes it.
-const executableDigests = new Map(); // "<path>|<size>|<mtimeMs>|<ctimeMs>" -> hex
-async function executableSha256(resolved, metadata) {
+const executableDigests = new Map(); // "<path>|<size>|<mtimeMs>|<ctimeMs>" -> Promise<hex>
+function executableSha256(resolved, metadata) {
   const key = [resolved, metadata.size, metadata.mtimeMs, metadata.ctimeMs].join("|");
+  // Concurrent starts share one in-flight hash rather than each reading the whole file.
   if (executableDigests.has(key)) return executableDigests.get(key);
-  const hash = createHash("sha256");
-  await new Promise((resolve, reject) => {
+  for (const stale of [...executableDigests.keys()].filter((entry) => entry.startsWith(resolved + "|"))) executableDigests.delete(stale);
+  const digest = new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
     const stream = fs.createReadStream(resolved);
     stream.on("data", (chunk) => hash.update(chunk));
-    stream.on("end", resolve);
+    stream.on("end", () => resolve(hash.digest("hex")));
     stream.on("error", reject);
   });
-  const digest = hash.digest("hex");
-  for (const stale of [...executableDigests.keys()].filter((entry) => entry.startsWith(resolved + "|"))) executableDigests.delete(stale);
   executableDigests.set(key, digest);
+  digest.catch(() => { if (executableDigests.get(key) === digest) executableDigests.delete(key); });
   return digest;
 }
 
@@ -194,6 +195,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   // AO session -> the turn its latest follow-up started, so the previous turn is not read as its answer.
   const expectedTurns = new Map();
   const nodeKey = (workspaceId, runId, nodeId) => JSON.stringify([workspaceId, runId, nodeId]);
+  // nodeKey -> { at, pending }: the run loop's latest view of an AO card's parked tool requests.
+  const pendingFrames = new Map();
+  const aoPending = (node, session, observed) => (observed?.approvals || []).map(approval => ({ ...approval, nodeId: node.id, thread_id: session }));
   // Any card (orchestrator, worker or reviewer) on an AO harness runs as an AO session.
   const externalAgent = (node) => typeof node?.route?.harness_id === "string"
     && node.route.harness_id.startsWith("ao:") ? node.route.harness_id.slice(3) : null;
@@ -427,8 +431,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         // session, worktree or replayed prompt, and the agent keeps what it already read and ran.
         const continued = continuations.get(runId);
         continuations.delete(runId);
-        if (continued && await harnessService().continuable?.(continued.session).catch(() => false)) {
-          const sent = await harnessService().send(continued.session, continued.text, reserved.request_key);
+        // A session that is gone, or refuses the message, falls back to a fresh start.
+        const sent = continued && await harnessService().continuable?.(continued.session).catch(() => false)
+          ? await harnessService().send(continued.session, continued.text, reserved.request_key).catch(() => null) : null;
+        if (sent?.turnId) {
           expectedTurns.set(continued.session, sent.turnId);
           if (expectedTurns.size > 500) expectedTurns.delete(expectedTurns.keys().next().value);
           session = continued.session;
@@ -472,7 +478,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const terminal = TERMINAL_TURNS.has(observed.turnState) || observed.exited;
     if (!terminal) {
       // The agent's parked tool requests, answerable from the chat or by the reviewer.
-      const pending = (observed.approvals || []).map(approval => ({ ...approval, nodeId: node.id, thread_id: session }));
+      const pending = aoPending(node, session, observed);
+      pendingFrames.set(nodeKey(workspaceId, runId, node.id), { at: Date.now(), pending });
+      if (pendingFrames.size > 500) pendingFrames.delete(pendingFrames.keys().next().value);
       return { ok: true, pending_approvals: withAdvice(pending), needs_input: observed.needsInput && !pending.length, session_id: session };
     }
     const completed = observed.turnState === "completed";
@@ -571,12 +579,18 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     });
     if (response?.ok !== true) throw new Error("AO harness status unavailable");
     if (response.status?.connected === false) {
-      // No native hub: an AO card's tool requests live in its AO session instead.
+      // No native hub: an AO card's tool requests live in its AO session instead. This is a read:
+      // it never records a result (observeExternal does that for the run loop), and it reuses the
+      // run loop's latest frame while it is fresh instead of asking AO again.
+      const key = nodeKey(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80));
+      const frame = pendingFrames.get(key);
+      if (frame && Date.now() - frame.at < 1500) return { ok: true, status: { connected: true, pending_approvals: withAdvice(frame.pending) } };
       const found = await savedNode(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80)).catch(() => null);
       if (found && externalAgent(found.node)) {
-        const observed = found.node.state === "running" && found.node.receipt?.thread_id
-          ? await observeExternal(workspaceId, runId, found.node) : { pending_approvals: [] };
-        return { ok: true, status: { connected: true, pending_approvals: observed.pending_approvals ?? [] } };
+        const session = found.node.receipt?.thread_id;
+        const observed = found.node.state === "running" && session
+          ? await harnessService().observe(session, expectedTurns.get(session)).catch(() => ({})) : {};
+        return { ok: true, status: { connected: true, pending_approvals: withAdvice(aoPending(found.node, session, observed)) } };
       }
     }
     return response.status?.pending_approvals
@@ -1107,12 +1121,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    */
   async function screenApprovals(workspaceId, runId, mission, active, observed) {
     const teamApprover = mission.nodes.find((node) => node.role === "approver" && node.state === "finished" && node.receipt?.verdict === "APPROVED");
+    // A team with a Command approver leaves screening to it; until it approves, requests wait for the person.
+    const teamHasApprover = mission.nodes.some((node) => node.role === "approver");
     let note = null;
     for (const [index, result] of observed.entries()) {
       // A team's Command approver screens its workers; otherwise a card set to "Approve for me"
       // has its AO tool requests reviewed and answered for it, like Codex's auto-review.
       const own = active[index];
-      const approver = teamApprover ?? (own?.route?.approvals_reviewer === "auto_review" && externalAgent(own)
+      const approver = teamApprover ?? (!teamHasApprover && own?.route?.approvals_reviewer === "auto_review" && externalAgent(own)
         ? { route: own.route, settings: { instructions: "", auto_decide: true } } : null);
       if (!approver) continue;
       for (const approval of result?.pending_approvals ?? []) {
@@ -1695,8 +1711,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!text.trim()) throw new Error("Type a message to steer the agent");
     const saved = await runs({ workspaceId: id });
     const run = saved.runs.filter(entry => entry.project_id === task && !entry.cancelled).at(-1);
-    const card = run?.nodes.find(node => node.state === "running" && externalAgent(node) && node.receipt?.thread_id);
-    if (!card) return { ok: true, steered: false, reason: "No AO agent is working in this chat" };
+    // A single chat steers its one card; a team steers its orchestrator, never an arbitrary worker.
+    const card = run?.nodes.find(node => node.state === "running" && externalAgent(node) && node.receipt?.thread_id
+      && (run.execution_mode === "single" || node.role === "planner"));
+    if (!card) return { ok: true, steered: false, reason: "No AO agent you can steer is working in this chat" };
     const result = await harnessService().steer(card.receipt.thread_id, text, `steer-${randomUUID()}`);
     if (!result.steered) return { ok: true, steered: false, reason: "The agent's turn already ended" };
     const detail = await board({ workspaceId: id, taskId: task });
@@ -1756,8 +1774,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // continues it (see dispatchExternal), carrying only the new message.
       const previous = saved.runs.filter(run => run.project_id === task).at(-1);
       const card = previous?.execution_mode === "single" ? previous.nodes?.[0] : null;
+      // The session keeps the permission mode, effort and context it was started with, so only an
+      // unchanged route continues it; any change starts a fresh session with the new settings.
+      const sameRoute = card && ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile",
+        "approval_policy", "approvals_reviewer", "effort", "context_window"].every(field => (card.route?.[field] ?? null) === (singleRoute[field] ?? null));
       if (executionMode === "single" && card && externalAgent(card) && card.receipt?.thread_id
-        && ["finished", "failed"].includes(card.state) && card.route?.harness_id === singleRoute.harness_id && card.route?.model === singleRoute.model) {
+        && ["finished", "failed"].includes(card.state) && sameRoute) {
         continuation = { session: card.receipt.thread_id, text };
       }
       try {

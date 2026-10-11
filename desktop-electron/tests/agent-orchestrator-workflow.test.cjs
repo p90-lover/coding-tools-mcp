@@ -2587,3 +2587,123 @@ test("a run waiting on input reports it steadily, not on and off with each obser
   assert.ok(first >= 0, "the wait was reported: " + JSON.stringify(reported));
   assert.deepEqual([...new Set(reported.slice(first))], ["needs_input"], "never flips back to no attention while it still waits: " + JSON.stringify(reported));
 });
+
+test("a follow-up after a permission change starts a fresh session; a refused send falls back to one", async () => {
+  const base = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":danger-full-access", approval_policy: "never", approvals_reviewer: "user" };
+  const scenario = async ({ followRoute, sendFails }) => {
+    const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+    const previous = { id: "r1", project_id: "task-1", execution_mode: "single", cancelled: false,
+      nodes: [{ id: "one", role: "planner", state: "finished", parents: [], route: base, receipt: { thread_id: "sess-1" } }] };
+    const world = chatWorld({ tasks: [task], runs: [previous] });
+    const created = new Map();
+    const spawned = [], sent = [];
+    const request = async (endpoint, body, options) => {
+      if (endpoint === "/api/v1/ao/read" && body.run_id) {
+        const run = created.get(body.run_id) ?? { id: body.run_id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1,
+          grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route: followRoute }] };
+        created.set(body.run_id, run);
+        return { ok: true, runs: [run], worker_capacity: { [body.run_id]: 1 } };
+      }
+      const latest = [...created.values()].at(-1);
+      if (endpoint === "/api/v1/ao/grant") return { ok: true, run: latest, grant: { executable_sha256: "a".repeat(64) } };
+      if (endpoint === "/api/v1/ao/external/reserve") { latest.nodes[0].state = "reserved"; return { ok: true, request_key: "key-1", prompt: "full prompt" }; }
+      if (endpoint === "/api/v1/ao/external/submitted") { latest.nodes[0].state = "running"; latest.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run: latest }; }
+      if (endpoint === "/api/v1/ao/external/terminal") { latest.nodes[0].state = "finished"; return { ok: true, run: latest }; }
+      return world.requestHeadless(endpoint, body, options);
+    };
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless: request, findCodexExecutable: () => process.execPath,
+      resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+      aoHarness: {
+        spawn: async input => { spawned.push(input); return "fresh-session"; },
+        continuable: async () => true,
+        send: async (id, text) => { sent.push([id, text]); if (sendFails) throw new Error("CHAT_TURN_RUNNING"); return { turnId: "turn-2" }; },
+        observe: async (id, expected) => ({ status: "idle", turnId: expected ?? "t1", turnState: "completed", answer: "ok" }),
+      },
+    });
+    await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "now run the tests", executionMode: "single", singleRoute: followRoute });
+    for (let tries = 0; tries < 200 && !spawned.length && !(sent.length && !sendFails); tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    return { spawned, sent };
+  };
+  const tightened = await scenario({ followRoute: { ...base, native_permission_profile: ":workspace", approval_policy: "on-request" } });
+  assert.equal(tightened.sent.length, 0, "a session started with full access is not reused once the user asks for approval");
+  assert.equal(tightened.spawned.length, 1);
+  assert.equal(tightened.spawned[0].approvalMode, "accept-edits", "the fresh session gets the new permission mode");
+  const refused = await scenario({ followRoute: base, sendFails: true });
+  assert.equal(refused.sent.length, 1);
+  assert.equal(refused.spawned.length, 1, "a refused follow-up starts a fresh session instead of failing the card");
+});
+
+test("reading an AO card's status never records its result, and team steering goes to the orchestrator", async () => {
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
+  const mission = { id: "run", workspace_id: "ws", revision: 1, execution_mode: "team", nodes: [
+    { id: "lead", role: "planner", state: "running", route, receipt: { thread_id: "lead-session" } },
+    { id: "w1", role: "worker", state: "running", route, receipt: { thread_id: "worker-session" } }] };
+  const posted = [], steered = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint) => {
+      if (endpoint.endsWith("/harness/status")) return { ok: true, status: { connected: false } };
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [mission] };
+      posted.push(endpoint);
+      return { ok: true, run: mission };
+    },
+    aoHarness: {
+      observe: async () => ({ status: "idle", turnId: "t", turnState: "completed", answer: "done",
+        approvals: [] }),
+      steer: async (id, text) => { steered.push([id, text]); return { steered: true }; },
+    },
+  });
+  const status = await workflow.call("harness_status", { workspaceId: "ws", runId: "run", nodeId: "w1" });
+  assert.equal(status.status.connected, true);
+  assert.deepEqual(posted, [], "a status read must not post the finished turn's result");
+});
+
+test("a team with a Command approver never falls back to card-level auto-review", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once" }, { id: "no", kind: "reject_once" }];
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "team", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+    { id: "approver", role: "approver", state: "running", parents: [], route },
+    { id: "w1", role: "worker", state: "running", parents: [], route, receipt: { thread_id: "worker-session" } }] };
+  const resolved = [];
+  let asked = 0;
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) };
+      asked++;
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"allow","reason":"fixture"}' } }] }) };
+    },
+    requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 2 } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async (id) => ({ status: "working", turnId: "t", turnState: "running",
+        approvals: id === "worker-session" ? [{ approval_id: "req", source: "ao", kind: "command", command: "npm test", tool: "Bash", decisions }] : [] }),
+      resolveApproval: async (...args) => { resolved.push(args); return { ok: true }; },
+    },
+  });
+  await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  await new Promise(resolve => setTimeout(resolve, 600));
+  mission.nodes.forEach(node => { node.state = "finished"; });
+  for (let tries = 0; tries < 100; tries++) {
+    if ((await workflow.call("run_status", { workspaceId: "ws", runId: "run" })).status !== "running") break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(resolved.length, 0, "the request waits for the team's approver (or the person), not the card's own reviewer");
+  assert.equal(asked, 0);
+});
+
+test("steering a team chat reaches its orchestrator, not a worker", async () => {
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", execution_mode: "team", cancelled: false, nodes: [
+    { id: "w1", role: "worker", state: "running", route, receipt: { thread_id: "worker-session" } },
+    { id: "lead", role: "planner", state: "running", route, receipt: { thread_id: "lead-session" } }] }] });
+  const steered = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless,
+    aoHarness: { steer: async (id, text) => { steered.push([id, text]); return { steered: true }; } } });
+  await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "focus on the UI" });
+  assert.deepEqual(steered, [["lead-session", "focus on the UI"]]);
+});

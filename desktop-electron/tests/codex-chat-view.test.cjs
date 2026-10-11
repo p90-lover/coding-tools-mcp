@@ -258,7 +258,7 @@ test("Codex slash commands run from the composer in a Single chat or a team, wit
 test("while the agent works, a typed message steers it at once; Esc on an empty composer still stops", async () => {
   const steered = [];
   const { props, calls } = base({ selectedTaskId: "t", working: true,
-    runs: [run("r1", "t", [node("w", "worker", "running")])],
+    runs: [run("r1", "t", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/m" } })], { execution_mode: "single" })],
     steer: async (input) => { steered.push(input); return true; } });
   const view = mount(props);
   const textarea = () => walk(view.render()).find((element) => element.type === "textarea");
@@ -269,4 +269,12 @@ test("while the agent works, a typed message steers it at once; Esc on an empty 
   await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
   assert.deepEqual(JSON.parse(JSON.stringify(steered)), [{ taskId: "t", message: "use pnpm" }]);
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0, "a delivered steer is not also sent as a follow-up");
+});
+
+test("a working chat on a non-AO model is not offered steering", () => {
+  const { props } = base({ selectedTaskId: "t", working: true,
+    runs: [run("r1", "t", [node("w", "planner", "running", { route: { harness_id: "codex-native", model: "chatgpt-web/high" } })], { execution_mode: "single" })],
+    steer: async () => true });
+  const textarea = walk(mount(props).render()).find((element) => element.type === "textarea");
+  assert.equal(textarea.props.placeholder, "Running — you can send a follow-up when it finishes");
 });

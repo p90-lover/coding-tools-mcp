@@ -303,7 +303,10 @@ export function AgentOrchestratorChat({
     try { localStorage.setItem("coding-tools:ao:steer", current ? "off" : "on"); } catch { /* the choice still applies now */ }
     return !current;
   });
-  const steering = !accepts && working && steerOn && Boolean(steer && selectedTaskId);
+  // Only an AO agent can be steered: a single chat's card, or a team's orchestrator (see chat_steer).
+  const steerable = Boolean(latest?.nodes.some((node) => node.state === "running" && node.route?.harness_id?.startsWith("ao:")
+    && (latest.execution_mode === "single" || node.role === "planner")));
+  const steering = !accepts && working && steerOn && steerable && Boolean(steer && selectedTaskId);
   const canSend = !busy && !sending && Boolean(draft.trim() || attachments.length) && (accepts || steering);
   const slash = chatSlashMatches(draft, { chat: Boolean(selectedTaskId), run: Boolean(latest), open: runOpen });
 
