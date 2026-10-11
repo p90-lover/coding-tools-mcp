@@ -574,3 +574,12 @@ test("a single-model chat passes its run to describe, so its one card shows no o
   assert.match(JSON.stringify(team), /Orchestrator/);
   assert.ok(seen.includes("single") && seen.includes("none"));
 });
+
+test("a steer saved under a message is its own message, and a fork keeps it", () => {
+  const description = "first ask\n\n↳ Steer (2026-10-11 05:30 UTC): use pnpm\n\nFollow-up (2026-10-11 05:40 UTC):\nnow tests\n\n↳ Steer (2026-10-11 05:41 UTC): only unit tests";
+  assert.deepEqual(plain(chat.chatMessagesFromDescription(description)), [
+    { text: "first ask", steers: [{ stamp: "2026-10-11 05:30", text: "use pnpm" }] },
+    { stamp: "2026-10-11 05:40", text: "now tests", steers: [{ stamp: "2026-10-11 05:41", text: "only unit tests" }] },
+  ]);
+  assert.equal(chat.chatDescriptionUpTo(description, 1), description, "a fork reproduces the steers it contains");
+});

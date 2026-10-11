@@ -181,9 +181,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           status: message.streaming ? "running" : "completed", text: utf8Prefix(message.text.trim(), 4096) })),
       ...(Array.isArray(conversation?.activities) ? conversation.activities : [])
         .filter(activity => activity.turnId === turnId && typeof activity.activityKind === "string")
-        .map(activity => ({ id: String(activity.id), sequence: Number(activity.sequence) || 0,
-          kind: activity.activityKind.slice(0, 32), status: String(activity.status || "").slice(0, 32),
-          text: utf8Prefix(String(activity.summary || activity.activityKind), 400) })),
+        .map(activity => activity.activityKind === "system" && activity.detail?.event === "steer" && typeof activity.detail.text === "string"
+          // AO records a steer as a system row tagged event "steer"; it is the user's own words.
+          ? { id: String(activity.id), sequence: Number(activity.sequence) || 0, kind: "steer", status: "completed",
+            text: utf8Prefix(activity.detail.text.trim(), 4096) }
+          : { id: String(activity.id), sequence: Number(activity.sequence) || 0,
+            kind: activity.activityKind.slice(0, 32), status: String(activity.status || "").slice(0, 32),
+            text: utf8Prefix(String(activity.summary || activity.activityKind), 400) }),
     ];
     return items.sort((a, b) => a.sequence - b.sequence).slice(-40);
   }
