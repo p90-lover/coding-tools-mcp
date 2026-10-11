@@ -20,6 +20,33 @@ export function duplicateTeam(team: AoTeam): AoTeam {
 
 export { prepareTeamGraph } from "./AgentOrchestratorTeam";
 
+/**
+ * Removing a card from a team. Optional cards go, and their children take their links. The review
+ * split goes with its sub-reviewers. A card the team can't run without (the orchestrator, the main
+ * reviewer, the last worker) is replaced by a fresh default card in its place, keeping its links.
+ * `confirm` is the question to ask first, when there is one.
+ */
+export function removeFromTeam(team: AoTeam, id: string, defaults: AoTeam): { team: AoTeam; confirm?: string } | null {
+  const node = team.nodes.find(item => item.id === id);
+  if (!node) return null;
+  const name = node.settings?.name || node.role;
+  const lastWorker = node.role === "worker" && team.nodes.filter(item => item.role === "worker").length < 2;
+  if (node.role === "planner" || node.role === "reviewer" || lastWorker) {
+    const fresh = defaults.nodes.find(item => item.role === node.role);
+    if (!fresh) return null;
+    const what = node.role === "planner" ? "an orchestrator" : node.role === "reviewer" ? "a main reviewer" : "at least one worker";
+    return { team: { ...team, nodes: team.nodes.map(item => item.id === id
+      ? { ...item, route: structuredClone(fresh.route), settings: structuredClone(fresh.settings) } : item) },
+      confirm: `A team needs ${what}, so removing "${name}" puts a fresh ${fresh.settings?.name || node.role} in its place, keeping its links. Continue?` };
+  }
+  if (node.role === "review_split") {
+    const subs = team.nodes.filter(item => item.role === "sub_reviewer");
+    return { team: { ...team, nodes: team.nodes.filter(item => item.id !== id && item.role !== "sub_reviewer") },
+      ...(subs.length ? { confirm: `The review split only feeds its sub-reviewers, so removing it removes ${subs.length === 1 ? "the sub-reviewer" : `all ${subs.length} sub-reviewers`} too. Continue?` } : {}) };
+  }
+  return { team: { ...team, nodes: team.nodes.filter(item => item.id !== id) } };
+}
+
 /** The reviewer's way back to the orchestrator, when the team loops and has both cards. */
 export function teamLoop(team: AoTeam): { from: string; to: string } | null {
   const planner = team.nodes.find(node => node.role === "planner");
@@ -220,14 +247,13 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
     change({ ...draft, nodes: [...draft.nodes, node] });
     setSelectedId(id);
   };
-  const canRemove = (id: string) => {
-    const node = draft?.nodes.find(node => node.id === id);
-    return Boolean(node && !["planner", "reviewer", "review_split"].includes(node.role)
-      && (node.role !== "worker" || draft!.nodes.filter(item => item.role === "worker").length > 1));
-  };
+  // Every card can be removed. One a team can't run without is replaced by a fresh one, after asking.
+  const canRemove = (id: string) => Boolean(draft?.nodes.some(node => node.id === id));
   const remove = (id: string) => {
-    if (!draft || !canRemove(id)) return;
-    change({ ...draft, nodes: draft.nodes.filter(node => node.id !== id) });
+    if (!draft) return;
+    const outcome = removeFromTeam(draft, id, freshTeam(draft.workspace_id));
+    if (!outcome || (outcome.confirm && !window.confirm(outcome.confirm))) return;
+    change(outcome.team);
     setSelectedId("");
   };
   const mission = draft ? asMission(draft) : null;

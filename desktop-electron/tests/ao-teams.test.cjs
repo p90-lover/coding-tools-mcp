@@ -185,11 +185,59 @@ test("routed links keep clear of every card, take their own lanes and fan into a
     if (vertical) { const [a1, a2] = span(one, 1), [b1, b2] = span(other, 1); assert.ok(Math.min(a2, b2) - Math.max(a1, b1) <= 0, `${one.key} and ${other.key} share a lane`); }
     if (horizontal) { const [a1, a2] = span(one, 0), [b1, b2] = span(other, 0); assert.ok(Math.min(a2, b2) - Math.max(a1, b1) <= 0, `${one.key} and ${other.key} share a lane`); }
   }
-  // Nothing in the way: the usual curve, between the spread points.
-  assert.match(shapes.get("orch>w1"), /^M\d+,116 C/);
+  // Every link is drawn the same way: right angles with rounded corners, never a free curve.
+  for (const link of links) assert.doesNotMatch(shapes.get(link.key), / C/, `${link.key} is orthogonal`);
+  // A link whose ends nearly line up runs straight down, both ends on one x.
+  const straight = canvas.routeLinks(new Map([["a", card(400, 0)], ["b", card(420, 200)]]), [{ key: "a>b", from: "a", to: "b" }]);
+  assert.match(straight.get("a>b"), /^M(\d+),76 L\1,200$/);
+  // A link going down (its child starts below its parent) never climbs back up on the way (no loops).
+  const below = link => boxes.get(link.to).y > boxes.get(link.from).y + boxes.get(link.from).h + 40;
+  for (const link of links.filter(below)) {
+    const ys = pairs(shapes.get(link.key)).map(([, y]) => y);
+    for (let i = 1; i < ys.length; i++) assert.ok(ys[i] >= ys[i - 1] - 1, `${link.key} climbs from ${ys[i - 1]} to ${ys[i]}`);
+  }
   // A pulled link keeps its point.
   const pulled = canvas.routeLinks(boxes, [{ key: "orch>rev", from: "orch", to: "rev", via: { x: 1100, y: 400 } }]);
   assert.match(pulled.get("orch>rev"), / 1100,400 S/);
+});
+
+test("every card can be removed: optional ones go, required ones are replaced, the split takes its sub-reviewers", () => {
+  const team = fixture();
+  const planner = team.nodes.find(node => node.role === "planner"), worker = team.nodes.find(node => node.role === "worker");
+  const reviewer = team.nodes.find(node => node.role === "reviewer");
+  const defaults = fixture();
+  // A sub-reviewer brings the split pass; removing the last one drops the split and the main reviewer
+  // goes back to the workers (it used to fall back to the orchestrator, which the service refuses).
+  const sub = { ...structuredClone(worker), id: "sub-1", role: "sub_reviewer", parents: [planner.id], settings: { ...worker.settings, name: "Sub-reviewer 1" } };
+  const withSub = teamEditor.prepareTeamGraph({ ...team, nodes: [...team.nodes, sub] }, team);
+  const split = withSub.nodes.find(node => node.role === "review_split");
+  assert.ok(split, "a split pass comes with the first sub-reviewer");
+  const removedSub = teams.removeFromTeam(withSub, "sub-1", defaults);
+  assert.equal(removedSub.confirm, undefined, "an optional card goes without asking");
+  const after = teamEditor.prepareTeamGraph(removedSub.team, withSub);
+  assert.equal(after.nodes.some(node => node.role === "review_split" || node.role === "sub_reviewer"), false);
+  const reviewerParents = [...after.nodes.find(node => node.id === reviewer.id).parents];
+  assert.ok(reviewerParents.includes(worker.id), "the main reviewer reconnects to the workers through the removed split");
+  assert.ok(reviewerParents.every(id => after.nodes.some(node => node.id === id)), "no link to a removed card is left behind");
+  // The split goes with all of its sub-reviewers, after asking.
+  const splitRemoval = teams.removeFromTeam(withSub, split.id, defaults);
+  assert.match(splitRemoval.confirm, /removes the sub-reviewer too/);
+  assert.equal(splitRemoval.team.nodes.some(node => ["review_split", "sub_reviewer"].includes(node.role)), false);
+  // A card the team can't run without is replaced by a fresh default in its place, keeping its links.
+  for (const id of [planner.id, reviewer.id, worker.id]) {
+    const changed = structuredClone(team);
+    changed.nodes.find(node => node.id === id).settings.name = "Customised";
+    const outcome = teams.removeFromTeam(changed, id, defaults);
+    assert.match(outcome.confirm, /A team needs (an orchestrator|a main reviewer|at least one worker)/);
+    const fresh = outcome.team.nodes.find(node => node.id === id);
+    assert.notEqual(fresh.settings.name, "Customised");
+    assert.deepEqual([...fresh.parents], [...changed.nodes.find(node => node.id === id).parents]);
+    assert.equal(outcome.team.nodes.length, changed.nodes.length);
+  }
+  // A second worker is optional.
+  const twoWorkers = { ...team, nodes: [...team.nodes, { ...structuredClone(worker), id: "w2" }] };
+  assert.equal(teams.removeFromTeam(twoWorkers, "w2", defaults).confirm, undefined);
+  assert.equal(teams.removeFromTeam(team, "missing", defaults), null);
 });
 
 test("a card's right-click menu names why it can't be removed", () => {
