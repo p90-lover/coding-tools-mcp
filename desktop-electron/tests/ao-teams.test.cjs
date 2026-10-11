@@ -141,6 +141,67 @@ test("links go around cards: a direct orchestrator-to-reviewer link no longer ru
   assert.match(canvas.wirePath(reviewer, lead, workers), /Q/);
 });
 
+test("routed links keep clear of every card, take their own lanes and fan into a card side by side", () => {
+  const canvas = canvasHelpers();
+  const card = (x, y) => ({ x, y, w: 212, h: 76 });
+  // The team from the user's screenshot: three workers, a review split with a sub-reviewer, a reviewer.
+  const boxes = new Map(Object.entries({ orch: card(470, 40), w1: card(240, 270), w2: card(510, 290), w3: card(730, 300),
+    split: card(495, 430), sub: card(460, 690), rev: card(810, 660) }));
+  const links = [["orch", "w1"], ["orch", "w2"], ["orch", "w3"], ["w1", "split"], ["w2", "split"], ["w3", "split"], ["split", "sub"],
+    ["w1", "rev"], ["w2", "rev"], ["w3", "rev"], ["sub", "rev"], ["orch", "rev"]].map(([from, to]) => ({ key: `${from}>${to}`, from, to }));
+  links.push({ key: "loop", from: "rev", to: "orch" });
+  const ports = canvas.linkPorts(boxes, links);
+  const intoReviewer = links.filter(link => link.to === "rev").map(link => [link.from, ports.get(link.key).into]);
+  assert.equal(new Set(intoReviewer.map(([, x]) => x)).size, intoReviewer.length, "each link into the reviewer has its own point");
+  const byX = [...intoReviewer].sort((a, b) => a[1] - b[1]).map(([from]) => from);
+  const centre = id => boxes.get(id).x + 106;
+  assert.deepEqual(byX, [...byX].sort((a, b) => centre(a) - centre(b)), "points are ordered by where each link comes from");
+
+  const started = Date.now();
+  const shapes = canvas.routeLinks(boxes, links);
+  assert.ok(Date.now() - started < 1000, "routing a team this size is quick");
+  assert.equal(shapes.size, links.length);
+  const numbers = d => d.match(/-?\d+(\.\d+)?/g).map(Number);
+  const pairs = d => { const all = numbers(d), out = []; for (let i = 0; i + 1 < all.length; i += 2) out.push([all[i], all[i + 1]]); return out; };
+  for (const link of links) {
+    for (const [x, y] of pairs(shapes.get(link.key))) for (const [id, box] of boxes) {
+      if (id === link.from || id === link.to) continue;
+      assert.ok(!(x > box.x && x < box.x + box.w && y > box.y && y < box.y + box.h), `${link.key} passes through ${id}`);
+    }
+  }
+  // A routed link's corners are its Q control points: rebuild each polyline and check lanes.
+  const routed = links.filter(link => shapes.get(link.key).includes("Q")).map(link => {
+    const d = shapes.get(link.key), corners = [...d.matchAll(/Q(-?[\d.]+),(-?[\d.]+)/g)].map(m => [Number(m[1]), Number(m[2])]);
+    const start = pairs(d)[0], end = pairs(d).at(-1);
+    return { key: link.key, points: [start, ...corners, end] };
+  });
+  assert.ok(routed.length >= 3, "links that would cross cards are routed around them");
+  const runs = routed.flatMap(({ key, points }) => points.slice(1, -2).map((a, i) => ({ key, a, b: points[i + 2] })));
+  for (const one of runs) for (const other of runs) {
+    if (one.key === other.key) continue;
+    const vertical = one.a[0] === one.b[0] && other.a[0] === other.b[0] && one.a[0] === other.a[0];
+    const horizontal = one.a[1] === one.b[1] && other.a[1] === other.b[1] && one.a[1] === other.a[1];
+    const span = (s, axis) => [Math.min(s.a[axis], s.b[axis]), Math.max(s.a[axis], s.b[axis])];
+    if (vertical) { const [a1, a2] = span(one, 1), [b1, b2] = span(other, 1); assert.ok(Math.min(a2, b2) - Math.max(a1, b1) <= 0, `${one.key} and ${other.key} share a lane`); }
+    if (horizontal) { const [a1, a2] = span(one, 0), [b1, b2] = span(other, 0); assert.ok(Math.min(a2, b2) - Math.max(a1, b1) <= 0, `${one.key} and ${other.key} share a lane`); }
+  }
+  // Nothing in the way: the usual curve, between the spread points.
+  assert.match(shapes.get("orch>w1"), /^M\d+,116 C/);
+  // A pulled link keeps its point.
+  const pulled = canvas.routeLinks(boxes, [{ key: "orch>rev", from: "orch", to: "rev", via: { x: 1100, y: 400 } }]);
+  assert.match(pulled.get("orch>rev"), / 1100,400 S/);
+});
+
+test("a card's right-click menu names why it can't be removed", () => {
+  const canvas = canvasHelpers();
+  const node = (id, role) => ({ id, role, parents: [], state: "pending", x: 0, y: 0, task_id: "", route: { model: "" } });
+  const nodes = [node("lead", "planner"), node("w", "worker"), node("rev", "reviewer"), node("split", "review_split")];
+  assert.match(canvas.removalReason(nodes[0], nodes), /orchestrator/);
+  assert.match(canvas.removalReason(nodes[2], nodes), /main reviewer/);
+  assert.match(canvas.removalReason(nodes[3], nodes), /sub-reviewers/);
+  assert.match(canvas.removalReason(nodes[1], nodes), /at least one worker/);
+});
+
 test("a Shift-dragged link passes through its point, and a loop back to the orchestrator goes around the cards", () => {
   const canvas = canvasHelpers();
   const card = (x, y) => ({ x, y, w: 212, h: 76 });

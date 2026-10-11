@@ -1,6 +1,7 @@
 import { ROLE_TITLE } from "./AgentOrchestratorTeam";
+import { ChatMenu, type ChatMenuState } from "./ChatMenu";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
+import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from "react";
 
 export type CanvasNode = {
   id: string; task_id: string; role: string; state: string; parents: string[];
@@ -64,6 +65,212 @@ export function wirePath(from: WireBox, to: WireBox, others: WireBox[], bend = 0
   }
   return rounded([[x1, y1], [x1, out], [side, out], [side, into], [x2, into], [x2, y2]], 14);
 }
+
+export type WireLink = { key: string; from: string; to: string; via?: Point | null };
+/** Clearance kept around every card, the straight run out of and into a port, and the gap between parallel links. */
+const CLEAR = 16, STUB = 18, LANE = 8;
+/** Route costs: a turn, running along a link already placed (per pixel, and for joining it at all), crossing one. */
+const TURN = 36, SHARE = 6, JOIN = 80, CROSS = 14;
+
+/**
+ * Where each link leaves its parent and enters its child: one point per link, spread across the
+ * middle half of the card's edge and ordered by where the link's other end is, so links into one
+ * card fan in side by side instead of piling onto a single point.
+ */
+export function linkPorts(boxes: Map<string, WireBox>, links: WireLink[]): Map<string, { out: number; into: number }> {
+  const middle = (id: string) => { const box = boxes.get(id)!; return box.x + box.w / 2; };
+  const along = (box: WireBox, count: number, index: number) => Math.round(count === 1 ? box.x + box.w / 2 : box.x + box.w * (.25 + .5 * index / (count - 1)));
+  const ports = new Map<string, { out: number; into: number }>();
+  const groups = (end: "from" | "to") => {
+    const grouped = new Map<string, WireLink[]>();
+    for (const link of links) if (boxes.has(link.from) && boxes.has(link.to)) grouped.set(link[end], [...grouped.get(link[end]) ?? [], link]);
+    return grouped;
+  };
+  for (const [id, list] of groups("from")) {
+    list.sort((a, b) => middle(a.to) - middle(b.to) || a.key.localeCompare(b.key));
+    list.forEach((link, index) => ports.set(link.key, { out: along(boxes.get(id)!, list.length, index), into: 0 }));
+  }
+  for (const [id, list] of groups("to")) {
+    list.sort((a, b) => middle(a.from) - middle(b.from) || a.key.localeCompare(b.key));
+    list.forEach((link, index) => { ports.get(link.key)!.into = along(boxes.get(id)!, list.length, index); });
+  }
+  return ports;
+}
+
+const inside = (box: WireBox, x: number, y: number) => x > box.x && x < box.x + box.w && y > box.y && y < box.y + box.h;
+
+/**
+ * The routing grid for one layout: lines through every card's cleared edges, the channels between
+ * them and every link's start and goal, with which steps are open. It also remembers how many links
+ * already use each step, so later links pay to share a lane or to cross one and take their own.
+ */
+function routeGrid(walls: WireBox[], ends: Point[]) {
+  const lines = (pick: (box: WireBox) => number[], own: number[]) => {
+    const values = [...new Set([...own, ...walls.flatMap(pick)].map(Math.round))].sort((a, b) => a - b);
+    const between = values.slice(1).map((value, index) => Math.round((value + values[index]) / 2));
+    return [...new Set([...values, ...between, values[0] - 40, values[values.length - 1] + 40])].sort((a, b) => a - b);
+  };
+  const xs = lines(box => [box.x, box.x + box.w], ends.map(point => point.x));
+  const ys = lines(box => [box.y, box.y + box.h], ends.map(point => point.y));
+  const nx = xs.length, ny = ys.length, count = nx * ny;
+  const open = new Uint8Array(count), right = new Uint8Array(count), down = new Uint8Array(count);
+  for (let yi = 0; yi < ny; yi++) for (let xi = 0; xi < nx; xi++) {
+    const node = yi * nx + xi, x = xs[xi], y = ys[yi];
+    open[node] = walls.some(box => inside(box, x, y)) ? 0 : 1;
+    // A step is open when it runs through no card's cleared area (its edges may be followed).
+    if (xi + 1 < nx) right[node] = walls.some(box => y > box.y && y < box.y + box.h && box.x < xs[xi + 1] && box.x + box.w > x) ? 0 : 1;
+    if (yi + 1 < ny) down[node] = walls.some(box => x > box.x && x < box.x + box.w && box.y < ys[yi + 1] && box.y + box.h > y) ? 0 : 1;
+  }
+  return { xs, ys, nx, ny, open, right, down, usedRight: new Uint16Array(count), usedDown: new Uint16Array(count),
+    crossedH: new Uint16Array(count), crossedV: new Uint16Array(count) };
+}
+type RouteGrid = ReturnType<typeof routeGrid>;
+
+/**
+ * The cheapest orthogonal path from `start` to `goal` on the grid. Turns, running along a link
+ * already placed and crossing one cost extra; links leave their parent and reach their child heading down.
+ */
+function searchRoute(grid: RouteGrid, start: Point, goal: Point): number[] | null {
+  const { xs, ys, nx, ny, open, right, down, usedRight, usedDown, crossedH, crossedV } = grid;
+  const startNode = ys.indexOf(Math.round(start.y)) * nx + xs.indexOf(Math.round(start.x));
+  const goalNode = ys.indexOf(Math.round(goal.y)) * nx + xs.indexOf(Math.round(goal.x));
+  if (startNode < 0 || goalNode < 0 || !open[startNode] || !open[goalNode]) return null;
+  const count = nx * ny;
+  // State = node × heading (0 right, 1 left, 2 down, 3 up).
+  const best = new Float64Array(count * 4).fill(Infinity), previous = new Int32Array(count * 4).fill(-1);
+  const heap: number[] = [], keys: number[] = [];
+  const push = (state: number, key: number) => {
+    heap.push(state); keys.push(key);
+    for (let i = heap.length - 1; i > 0;) {
+      const up = (i - 1) >> 1; if (keys[up] <= keys[i]) break;
+      [heap[up], heap[i]] = [heap[i], heap[up]]; [keys[up], keys[i]] = [keys[i], keys[up]]; i = up;
+    }
+  };
+  const pop = () => {
+    const top = heap[0], lastState = heap.pop()!, lastKey = keys.pop()!;
+    if (heap.length) {
+      heap[0] = lastState; keys[0] = lastKey;
+      for (let i = 0; ;) {
+        const l = i * 2 + 1, r = l + 1; let m = i;
+        if (l < heap.length && keys[l] < keys[m]) m = l;
+        if (r < heap.length && keys[r] < keys[m]) m = r;
+        if (m === i) break;
+        [heap[m], heap[i]] = [heap[i], heap[m]]; [keys[m], keys[i]] = [keys[i], keys[m]]; i = m;
+      }
+    }
+    return top;
+  };
+  const goalX = xs[goalNode % nx], goalY = ys[Math.floor(goalNode / nx)];
+  const estimate = (node: number) => Math.abs(xs[node % nx] - goalX) + Math.abs(ys[Math.floor(node / nx)] - goalY);
+  const first = startNode * 4 + 2;
+  best[first] = 0; push(first, estimate(startNode));
+  const reverse = [1, 0, 3, 2];
+  for (let guard = 0; heap.length && guard < 400_000; guard++) {
+    const state = pop(), node = state >> 2, heading = state & 3, cost = best[state];
+    if (node === goalNode) {
+      const path: number[] = [];
+      for (let at = state; at >= 0; at = previous[at]) path.unshift(at >> 2);
+      return path;
+    }
+    const xi = node % nx, yi = Math.floor(node / nx);
+    for (let turn = 0; turn < 4; turn++) {
+      if (turn === reverse[heading]) continue;
+      let next: number, length: number, shared: number, crossings: number;
+      if (turn === 0) { if (xi + 1 >= nx || !right[node]) continue; next = node + 1; length = xs[xi + 1] - xs[xi]; shared = usedRight[node]; crossings = crossedV[next]; }
+      else if (turn === 1) { if (xi === 0 || !right[node - 1]) continue; next = node - 1; length = xs[xi] - xs[xi - 1]; shared = usedRight[next]; crossings = crossedV[next]; }
+      else if (turn === 2) { if (yi + 1 >= ny || !down[node]) continue; next = node + nx; length = ys[yi + 1] - ys[yi]; shared = usedDown[node]; crossings = crossedH[next]; }
+      else { if (yi === 0 || !down[node - nx]) continue; next = node - nx; length = ys[yi] - ys[yi - 1]; shared = usedDown[next]; crossings = crossedH[next]; }
+      if (!open[next]) continue;
+      const total = cost + length + (turn === heading ? 0 : TURN) + (shared ? JOIN + length * SHARE : 0) + crossings * CROSS
+        // A link arrives at its child heading down; arriving sideways costs the last turn.
+        + (next === goalNode && turn !== 2 ? TURN : 0);
+      const target = next * 4 + turn;
+      if (total < best[target]) { best[target] = total; previous[target] = state; push(target, total + estimate(next)); }
+    }
+  }
+  return null;
+}
+
+/** Marks a found path's steps as used, so the links routed after it look for their own lanes. */
+function claimRoute(grid: RouteGrid, path: number[]) {
+  for (let i = 0; i + 1 < path.length; i++) {
+    const a = path[i], b = path[i + 1];
+    if (Math.abs(a - b) === 1) { grid.usedRight[Math.min(a, b)]++; grid.crossedH[a]++; grid.crossedH[b]++; }
+    else { grid.usedDown[Math.min(a, b)]++; grid.crossedV[a]++; grid.crossedV[b]++; }
+  }
+}
+
+/** Drops points in the middle of a straight run, so each segment is one whole lane. */
+function straighten(points: Point[]): Point[] {
+  return points.filter((point, index) => {
+    if (index === 0 || index === points.length - 1) return true;
+    const before = points[index - 1], after = points[index + 1];
+    return !(before.x === point.x && point.x === after.x || before.y === point.y && point.y === after.y);
+  });
+}
+
+/**
+ * Every link's drawn path. A link keeps its curve while nothing is in its way; otherwise it is
+ * routed around the cards with its own lane where there is room, and links still sharing a lane
+ * are spread a few pixels apart so each one can be followed. A link pulled to a point keeps it.
+ */
+export function routeLinks(boxes: Map<string, WireBox>, links: WireLink[]): Map<string, string> {
+  const shapes = new Map<string, string>();
+  const ports = linkPorts(boxes, links);
+  const wallOf = new Map([...boxes].map(([id, box]) => [id, { x: box.x - CLEAR, y: box.y - CLEAR, w: box.w + CLEAR * 2, h: box.h + CLEAR * 2 }]));
+  const walls = [...wallOf.values()];
+  const routed: { link: WireLink; points: Point[] }[] = [];
+  const pending: { link: WireLink; start: Point; goal: Point; out: Point; into: Point }[] = [];
+  for (const link of links) {
+    const from = boxes.get(link.from), to = boxes.get(link.to), port = ports.get(link.key);
+    if (!from || !to || !port) continue;
+    const x1 = port.out, y1 = Math.round(from.y + from.h), x2 = port.into, y2 = Math.round(to.y);
+    if (link.via) { shapes.set(link.key, wirePath({ ...from, x: x1 - from.w / 2 }, { ...to, x: x2 - to.w / 2 }, [], 0, link.via)); continue; }
+    // The curve may not touch any other card's cleared area (its own two cards are where it starts and ends).
+    const others = [...wallOf].filter(([id]) => id !== link.from && id !== link.to).map(([, wall]) => wall);
+    const reach = Math.max(60, Math.abs(y2 - y1) * .45);
+    const clear = y2 > y1 + STUB * 2 && Array.from({ length: 23 }, (_, i) => (i + 1) / 24)
+      .every(t => !others.some(wall => inside(wall, cubicAt(t, x1, x1, x2, x2), cubicAt(t, y1, y1 + reach, y2 - reach, y2))));
+    if (clear) { shapes.set(link.key, `M${x1},${y1} C${x1},${y1 + reach} ${x2},${y2 - reach} ${x2},${y2}`); continue; }
+    pending.push({ link, out: { x: x1, y: y1 }, into: { x: x2, y: y2 }, start: { x: x1, y: y1 + STUB }, goal: { x: x2, y: y2 - STUB } });
+  }
+  // Shorter links first: they have the fewest ways round, so they take their lanes before longer ones.
+  pending.sort((a, b) => Math.abs(a.goal.x - a.start.x) + Math.abs(a.goal.y - a.start.y) - Math.abs(b.goal.x - b.start.x) - Math.abs(b.goal.y - b.start.y));
+  const grid = pending.length ? routeGrid(walls, pending.flatMap(item => [item.start, item.goal])) : null;
+  for (const { link, start, goal, out, into } of pending) {
+    const path = grid && grid.nx * grid.ny <= 60_000 ? searchRoute(grid, start, goal) : null;
+    if (!grid || !path) { shapes.set(link.key, wirePath(boxes.get(link.from)!, boxes.get(link.to)!, [...boxes.values()].filter(box => box !== boxes.get(link.from) && box !== boxes.get(link.to)))); continue; }
+    claimRoute(grid, path);
+    const middle = path.map(node => ({ x: grid.xs[node % grid.nx], y: grid.ys[Math.floor(node / grid.nx)] }));
+    routed.push({ link, points: straighten([out, ...middle, into].map(point => ({ ...point }))) });
+  }
+  // Links still sharing a lane: spread each group apart around the lane, ordered by where they start.
+  const runs = routed.flatMap(({ link, points }) => points.slice(1, -2).map((a, index) => {
+    const b = points[index + 2], vertical = a.x === b.x;
+    return { link: link.key, a, b, vertical, at: vertical ? a.x : a.y, lo: Math.min(vertical ? a.y : a.x, vertical ? b.y : b.x), hi: Math.max(vertical ? a.y : a.x, vertical ? b.y : b.x), order: points[0].x };
+  }));
+  const seen = new Set<number>();
+  runs.forEach((run, index) => {
+    if (seen.has(index)) return;
+    const group = [index];
+    for (let probe = 0; probe < group.length; probe++) {
+      const current = runs[group[probe]];
+      runs.forEach((other, j) => {
+        if (seen.has(j) || group.includes(j) || other.vertical !== current.vertical || other.at !== current.at || other.link === current.link) return;
+        if (Math.min(current.hi, other.hi) - Math.max(current.lo, other.lo) > 0) group.push(j);
+      });
+    }
+    group.forEach(j => seen.add(j));
+    if (group.length < 2) return;
+    const lane = Math.min(LANE, 28 / (group.length - 1));
+    group.sort((x, y) => runs[x].order - runs[y].order).forEach((j, slot) => {
+      const shift = (slot - (group.length - 1) / 2) * lane, { a, b, vertical } = runs[j];
+      if (vertical) { a.x += shift; b.x += shift; } else { a.y += shift; b.y += shift; }
+    });
+  });
+  for (const { link, points } of routed) shapes.set(link.key, rounded(points.map(point => [point.x, point.y]), 10));
+  return shapes;
+}
 const gapX = 252;
 const gapY = 56;
 const arrowMoves: Record<string, [number, number]> = { ArrowLeft: [-16, 0], ArrowRight: [16, 0], ArrowUp: [0, -16], ArrowDown: [0, 16] };
@@ -100,6 +307,15 @@ export function shiftLinkAction(starter: string, target: string,
   if (canConnect(target, starter)) return { kind: "connect", id: target, parentId: starter };
   if (canConnect(starter, target)) return { kind: "connect", id: starter, parentId: target };
   return null;
+}
+
+/** Why a card can't be removed from its team, for the right-click menu. */
+export function removalReason(node: CanvasNode, nodes: CanvasNode[]): string {
+  if (node.role === "planner") return "The orchestrator runs the team, so it stays";
+  if (node.role === "reviewer") return "The main reviewer closes every round, so it stays";
+  if (node.role === "review_split") return "Remove the sub-reviewers instead; this split goes with them";
+  if (node.role === "worker" && nodes.filter(item => item.role === "worker").length < 2) return "A team needs at least one worker";
+  return "This card can't be removed";
 }
 
 export function canvasLayout(nodes: CanvasNode[], levels: CanvasNode[][], heights = new Map<string, number>()): Map<string, Point> {
@@ -158,6 +374,8 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
   // released is kept here until the page's saved points catch up, so the link doesn't snap back.
   const bending = useRef<{ key: string; point: Point | null } | null>(null);
   const released = useRef(new Map<string, Point | null>());
+  // The last full routing and the layout it was made for.
+  const routes = useRef<{ signature: string; shapes: Map<string, string> }>({ signature: "", shapes: new Map() });
   const [parentId, setParentId] = useState("");
   const [dropTarget, setDropTarget] = useState("");
   const [draggingId, setDraggingId] = useState("");
@@ -166,6 +384,22 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
   useEffect(() => { if (!selectedId) setSelected(current => current.size ? new Set() : current); }, [selectedId]);
   const [notice, setNotice] = useState("");
   const noticeTimer = useRef(0);
+  // The card under the pointer: its links stand out and the others fade.
+  const [hovered, setHovered] = useState("");
+  const [menu, setMenu] = useState<ChatMenuState>(null);
+  const cardMenu = (event: ReactMouseEvent, node: CanvasNode) => {
+    event.preventDefault(); event.stopPropagation();
+    if (!onRemove) return;
+    const name = node.settings?.name || ROLE_TITLE[node.role as keyof typeof ROLE_TITLE] || "Worker";
+    setSelected(new Set([node.id]));
+    setMenu({ x: event.clientX, y: event.clientY, label: name, items: [
+      { label: "Edit", icon: "edit", run: () => onSelect(node.id) },
+      { kind: "separator" },
+      busy ? { label: "Remove from team", icon: "delete", danger: true, reason: "The team is saving" }
+        : canRemove?.(node.id) ? { label: "Remove from team", icon: "delete", danger: true, run: () => onRemove(node.id) }
+        : { label: "Remove from team", icon: "delete", danger: true, reason: removalReason(node, current.current.nodes) },
+    ] });
+  };
   const initialized = useRef(false);
   useLayoutEffect(() => () => window.clearTimeout(noticeTimer.current), []);
 
@@ -215,6 +449,23 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
     const links = current.current.nodes.flatMap(node => node.parents.map(parent => ({ parent, id: node.id, key: JSON.stringify([parent, node.id]), point: linkPointKey(parent, node.id) })));
     const loopLink = current.current.loop;
     if (loopLink) links.push({ parent: loopLink.from, id: loopLink.to, key: LOOP_LINK, point: LOOP_LINK });
+    // At rest every link is routed together (own ports, own lanes); the result is kept until a card,
+    // a link or a pulled point changes. While a card is dragged, links follow it as quick curves.
+    if (!drag.current?.id) {
+      const boxes = new Map(current.current.nodes.map(node => [node.id, box(node.id)] as const)
+        .filter((entry): entry is [string, WireBox] => Boolean(entry[1])));
+      const wires = links.map(link => ({ key: link.key, from: link.parent, to: link.id, via: pulled(link.point) }));
+      const signature = JSON.stringify([[...boxes], wires]);
+      if (routes.current.signature !== signature) routes.current = { signature, shapes: routeLinks(boxes, wires) };
+      for (const { key } of links) {
+        const shape = routes.current.shapes.get(key);
+        if (!shape) continue;
+        paths.current.get(key)?.setAttribute("d", shape);
+        paths.current.get(`${key}#hit`)?.setAttribute("d", shape);
+      }
+      wind.current = 0;
+      return;
+    }
     for (const { parent, id, key, point } of links) {
       const from = box(parent), to = box(id);
       if (!from || !to) continue;
@@ -428,9 +679,9 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
       {notice || (dropTarget ? "Drop to link" : "Shift-click a card to link or unlink")}</span> : null}
     {children}
     <div ref={scene} className="ao-canvas-scene">
-      <svg className="ao-canvas-wires" aria-hidden="true">{nodes.flatMap(node => node.parents.flatMap(parent => [<path key={JSON.stringify([parent, node.id])}
+      <svg className={hovered && !draggingId ? "ao-canvas-wires has-hover" : "ao-canvas-wires"} aria-hidden="true">{nodes.flatMap(node => node.parents.flatMap(parent => [<path key={JSON.stringify([parent, node.id])}
         ref={element => { const key = JSON.stringify([parent, node.id]); if (element) paths.current.set(key, element); else paths.current.delete(key); }}
-        className={["running", "reserved"].includes(node.state) ? "is-running" : ""} />,
+        className={[["running", "reserved"].includes(node.state) ? "is-running" : "", hovered && (hovered === parent || hovered === node.id) ? "is-related" : ""].filter(Boolean).join(" ")} />,
         // A wide invisible twin makes the thin link easy to click (or Shift-drag to pull it).
         onUnlink || onBend ? <path key={`${JSON.stringify([parent, node.id])}#hit`} className="ao-wire-hit"
           ref={element => { const key = `${JSON.stringify([parent, node.id])}#hit`; if (element) paths.current.set(key, element); else paths.current.delete(key); }}
@@ -439,14 +690,16 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
           onClick={event => { if (!busy && !event.shiftKey) onUnlink?.(node.id, parent); }}>
           <title>{[onUnlink ? "Click to remove this link" : "", onBend ? "Shift-drag to bend it, Shift-double-click to straighten it" : ""].filter(Boolean).join("; ")}</title></path> : null]))}
         {loop ? <>
-          <path key={LOOP_LINK} className="is-loop" ref={element => { if (element) paths.current.set(LOOP_LINK, element); else paths.current.delete(LOOP_LINK); }} />
+          <path key={LOOP_LINK} className={hovered && (hovered === loop.from || hovered === loop.to) ? "is-loop is-related" : "is-loop"} ref={element => { if (element) paths.current.set(LOOP_LINK, element); else paths.current.delete(LOOP_LINK); }} />
           {onBend ? <path key={`${LOOP_LINK}#hit`} className="ao-wire-hit"
             ref={element => { if (element) paths.current.set(`${LOOP_LINK}#hit`, element); else paths.current.delete(`${LOOP_LINK}#hit`); }}
             onPointerDown={event => { startBend(event, LOOP_LINK); }}
             onDoubleClick={event => { if (event.shiftKey && !busy) { released.current.set(LOOP_LINK, null); onBend(LOOP_LINK, null); schedule(); } }}>
             <title>The reviewer reports back to the orchestrator. Shift-drag to bend it, Shift-double-click to straighten it</title></path> : null}
         </> : null}</svg>
-      {nodes.map(node => <div key={node.id} data-ao-node={node.id} ref={element => { if (element) elements.current.set(node.id, element); else elements.current.delete(node.id); }}
+      {nodes.map(node => <div key={node.id} data-ao-node={node.id}
+        onPointerEnter={() => setHovered(node.id)} onPointerLeave={() => setHovered(current => current === node.id ? "" : current)}
+        onContextMenu={event => cardMenu(event, node)} ref={element => { if (element) elements.current.set(node.id, element); else elements.current.delete(node.id); }}
         className={`ao-canvas-card ao-node-${node.state}${selected.has(node.id) ? " is-selected" : ""}${draggingId && selected.has(node.id) ? " is-dragging" : ""}${dropTarget === node.id ? " is-target" : ""}`}>
         <button type="button" className="ao-card-handle" aria-label={showState ? `Edit ${node.settings?.name || node.role}, ${node.state}` : `Edit ${node.settings?.name || node.role}`}
           aria-pressed={selected.has(node.id)}
@@ -478,5 +731,6 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
           disabled={busy} aria-pressed={parentId === node.id} onClick={() => setParentId(parentId === node.id ? "" : node.id)}>●</button>
       </div>)}
     </div>
+    <ChatMenu menu={menu} onClose={() => setMenu(null)} />
   </div>;
 }

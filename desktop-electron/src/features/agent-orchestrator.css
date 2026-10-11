@@ -176,6 +176,10 @@
 .ao-canvas-wires path.ao-wire-hit:hover { stroke: var(--ao-red); stroke-opacity: .35; }
 /* The reviewer reporting back to the orchestrator: a dashed loop, not a dependency. */
 .ao-canvas-wires path.is-loop { stroke: var(--ao-blue, #1677ff); stroke-opacity: .55; stroke-dasharray: 6 5; }
+/* A hovered card: its own links stand out, the rest fade back. */
+.ao-canvas-wires.has-hover path:not(.ao-wire-hit):not(.is-related) { stroke-opacity: .14; }
+.ao-canvas-wires path.is-related { stroke-opacity: .95; stroke-width: 2; }
+.ao-canvas-wires path.is-loop.is-related { stroke-opacity: .95; }
 /* Shift held over a link: it can be pulled, not removed. */
 .ao-canvas.is-shift .ao-canvas-wires path.ao-wire-hit { cursor: grab; }
 .ao-canvas.is-shift .ao-canvas-wires path.ao-wire-hit:hover { stroke: var(--ao-blue, #1677ff); stroke-opacity: .25; }
