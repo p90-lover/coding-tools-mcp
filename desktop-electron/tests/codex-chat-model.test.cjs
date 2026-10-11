@@ -92,6 +92,7 @@ test("slash commands offer only what applies, and attachments become paths or in
   assert.equal(chat.chatSlashParse("/status now"), null, "a command without arguments followed by text is just a message");
   assert.equal(chat.chatSlashParse("/etc/hosts is broken"), null, "a path is a message, not a command");
   assert.equal(chat.chatSlashParse("please /goal x"), null);
+  assert.deepEqual(plain(chat.chatSlashParse("/rewind 2")), { name: "rewind", arg: "2" });
   assert.equal(chat.chatSlashTyping("/goal fix")?.name, "goal");
   assert.equal(chat.chatSlashTyping("/status x"), null);
   assert.equal(chat.goalElapsed(0, 50_000), "50s");

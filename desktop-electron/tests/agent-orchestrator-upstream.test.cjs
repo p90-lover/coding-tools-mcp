@@ -291,3 +291,16 @@ test("a follow-up turn is observed only once AO shows it; send and steer use AO'
   steerError = new Error("AO is down");
   await assert.rejects(upstream.steer("s", "x", "k4"), /AO is down/, "other failures are not mistaken for an ended turn");
 });
+
+test("a steered message reads as the user's own words in the live timeline", async () => {
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100") ? {
+      turns: [{ id: "t", state: "running" }], messages: [],
+      activities: [{ id: "s1", turnId: "t", sequence: 3, activityKind: "system", status: "completed", summary: "use pnpm…",
+        detail: { event: "steer", text: "use pnpm, not npm" } },
+        { id: "c1", turnId: "t", sequence: 2, activityKind: "system", status: "completed", summary: "Context compacted", detail: { event: "compaction" } }],
+    } : { session: { id: "s", mode: "chat", status: "working" } },
+  });
+  const timeline = JSON.parse(JSON.stringify((await upstream.observe("s")).timeline));
+  assert.deepEqual(timeline.map(item => [item.kind, item.text]), [["system", "Context compacted"], ["steer", "use pnpm, not npm"]]);
+});

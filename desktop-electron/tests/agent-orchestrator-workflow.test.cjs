@@ -2707,3 +2707,19 @@ test("steering a team chat reaches its orchestrator, not a worker", async () => 
   await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "focus on the UI" });
   assert.deepEqual(steered, [["lead-session", "focus on the UI"]]);
 });
+
+test("a follow-up that would overflow a long chat compacts it first instead of refusing", async () => {
+  const task = { id: "task-1", title: "Long job", description: "x".repeat(8180), state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false, nodes: [{ state: "finished" }] }] });
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/c.exe",
+    resolveHarness: async () => { throw new Error("stop before the background loop"); },
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async (url) => String(url).endsWith("/models")
+      ? { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) }
+      : { ok: true, json: async () => ({ choices: [{ message: { content: "Did the first half; next: the second half." } }] }) },
+  });
+  await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
+  const final = world.tasks[0].description;
+  assert.match(final, /^Summary of the earlier conversation \(compacted [^)]+ UTC\):\nDid the first half; next: the second half\.\n\nFollow-up \([^)]+ UTC\):\nkeep going$/);
+  assert.ok(final.length < 8192);
+});

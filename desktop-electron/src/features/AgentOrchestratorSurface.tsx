@@ -1295,6 +1295,18 @@ export function AgentOrchestratorSurface({ language, setError }: {
     setChatTaskId("");
     await Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]);
   });
+  // Rewind (Codex's backtrack): a new chat whose composer holds the messages up to and including
+  // this one, to edit and send. Nothing is sent and this chat stays as it is (files are not reverted).
+  const rewindChat = (taskId: string, upTo: number) => void (async () => {
+    const messages = chatMessagesFromDescription(await loadDescription(taskId));
+    if (!Number.isInteger(upTo) || upTo < 0 || upTo >= messages.length) return;
+    // Earlier messages keep the steers sent during their turns; the chosen one is just what was typed.
+    const earlier = messages.slice(0, upTo).flatMap((message) => [message.text, ...(message.steers ?? []).map((steer) => steer.text)]);
+    const text = [...earlier, messages[upTo].text].join("\n\n").slice(0, 8192);
+    setChatSeed({ key: crypto.randomUUID(), workspaceId, title: `${taskName(taskId)} (rewound)`.slice(0, 240), text });
+    setPendingChat(null); setInspectedId(""); setDraftTeam(null); setSheet("");
+    setChatTaskId(""); setView("chat");
+  })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
   // Fork: a new chat starting from this chat's messages (all, the first, or up to one of them).
   const forkChat = (taskId: string, upTo?: number | "first") => void (async () => {
     const messages = chatMessagesFromDescription(await loadDescription(taskId));
@@ -1654,8 +1666,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
                 projectName={workspaces.find((item) => item.id === workspaceId)?.name} projectBranch={projectBranch}
                 stop={stopChatRun} restart={restartChatRun}
                 thread={chatTaskId ? { newChat: startNewChat, rename: (title) => renameChat(chatTaskId, title), archive: () => missionAction(chatTaskId, "archive"),
-                  fork: (turnIndex) => forkChat(chatTaskId, turnIndex), copyConversation: () => copyChat(chatTaskId, "conversation"),
-                  togglePin: () => togglePin(chatTaskId), pinned: chatPins.includes(chatTaskId) } : undefined}
+                  fork: (turnIndex) => forkChat(chatTaskId, turnIndex), rewind: (turnIndex) => rewindChat(chatTaskId, turnIndex),
+                  copyConversation: () => copyChat(chatTaskId, "conversation"), togglePin: () => togglePin(chatTaskId), pinned: chatPins.includes(chatTaskId) } : undefined}
                 onPause={() => controlRun("pause")} onResume={() => controlRun("resume")} onSettings={() => openSheet("settings")}
                 onOpenProject={(() => { const open = workspaces.find((item) => item.id === workspaceId); return open?.path ? () => openFolder(open) : undefined; })()}
                 projects={workspaces.map((item) => ({ id: item.id, name: item.name, path: item.path }))} projectId={workspaceId}

@@ -217,8 +217,8 @@ test("Codex slash commands run from the composer in a Single chat or a team, wit
   type(teamChat, "/compact"); await enter(teamChat);
   assert.match(text(cardOf(teamChat)), /Compact is disabled while a chat is in progress/);
   type(teamChat, "/review"); await enter(teamChat);
-  assert.match(text(cardOf(teamChat)), /still working/, "a command that sends waits for the chat like any message");
-  assert.equal(busy.calls.filter((call) => call[0] === "send").length, 0);
+  assert.match(text(cardOf(teamChat)), /Queued: it's sent when the current turn finishes/, "a command that sends queues behind the working turn");
+  assert.equal(busy.calls.filter((call) => call[0] === "send").length, 0, "nothing is sent while the turn works");
   const pill = walk(teamChat.render({ commands: commands() })).find((element) => String(element.props?.className).startsWith("cx-goal "));
   assert.match(text(pill), /^Pursuing goalship the release5m \d+s$/, "Codex's goal bar: state, objective, running time");
   assert.deepEqual(walk(pill).filter((element) => element.type === "button").map((button) => button.props.title), ["Clear goal", "Pause goal", "Edit goal"]);
@@ -269,6 +269,47 @@ test("while the agent works, a typed message steers it at once; Esc on an empty 
   await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
   assert.deepEqual(JSON.parse(JSON.stringify(steered)), [{ taskId: "t", message: "use pnpm" }]);
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0, "a delivered steer is not also sent as a follow-up");
+});
+
+test("while the agent works, /review and /init steer it; a new goal waits for the turn; /rewind goes back to a message", async () => {
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  const steered = [], rewound = [];
+  const { props, calls } = base({ selectedTaskId: "t", working: true,
+    runs: [run("r1", "t", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/m" } })], { execution_mode: "single" })],
+    steer: async (input) => { steered.push(input); return true; },
+    pendingMessage: "fix the parser",
+    thread: { newChat() {}, rename: async () => {}, archive() {}, fork() {}, rewind: (index) => rewound.push(index), copyConversation() {}, togglePin() {}, pinned: false } });
+  const view = mount(props);
+  const type = (value) => walk(view.render()).find((element) => element.type === "textarea").props.onChange({ target: { value } });
+  const enter = async () => {
+    walk(view.render()).find((element) => element.type === "textarea").props.onKeyDown({ key: "Enter", shiftKey: false, preventDefault() {} });
+    await settle(); await settle();
+  };
+  const card = () => walk(view.render()).find((element) => String(element.props?.className).includes("cx-command-card"));
+  type("/review the parser"); await enter();
+  assert.equal(steered.length, 1);
+  assert.match(steered[0].message, /^Review the current code changes[\s\S]*Focus: the parser/);
+  assert.match(text(card()), /Sent to the working agent/);
+  type("/init"); await enter();
+  assert.match(steered.at(-1).message, /^Generate a file named AGENTS\.md/);
+  type("/goal finish the migration"); await enter();
+  assert.equal(steered.length, 2, "a goal is never steered");
+  assert.match(text(card()), /Queued: it's sent when the current turn finishes/);
+  type("/goal clear"); await enter();
+  assert.match(text(card()), /The queued goal was dropped/);
+  assert.equal(calls.filter(([kind]) => kind === "send").length, 0);
+
+  // /rewind lists the messages (newest first) and opens the chosen one to edit; a number picks directly.
+  type("/rewind"); await enter();
+  const items = walk(card()).filter((element) => element.type === "button" && /^\d+\. /.test(text(element)));
+  assert.ok(items.length >= 1, "each message is a rewind point");
+  items.at(-1).props.onClick();
+  assert.deepEqual(rewound, [0]);
+  type("/rewind 1"); await enter();
+  assert.deepEqual(rewound, [0, 0]);
+  type("/rewind 99"); await enter();
+  assert.match(text(card()), /Choose a message from 1 to \d+/);
+  assert.ok(walk(view.render()).some((element) => element.props?.["aria-label"] === "Rewind to this message"), "each message offers Rewind");
 });
 
 test("a working chat on a non-AO model is not offered steering", () => {
