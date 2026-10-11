@@ -68,18 +68,20 @@ export function wirePath(from: WireBox, to: WireBox, others: WireBox[], bend = 0
 
 export type WireLink = { key: string; from: string; to: string; via?: Point | null };
 /** Clearance kept around every card, the straight run out of and into a port, and the gap between parallel links. */
-const CLEAR = 16, STUB = 18, LANE = 8;
+const CLEAR = 20, STUB = 20, LANE = 10;
 /** Route costs: a turn, running along a link already placed (per pixel, and for joining it at all), crossing one. */
-const TURN = 36, SHARE = 6, JOIN = 80, CROSS = 14;
+const TURN = 36, SHARE = 8, JOIN = 120, CROSS = 30;
+/** Running beside another link closer than NEAR_GAP (per pixel), and along a card's cleared edge instead of a channel's middle. */
+const NEAR_GAP = 16, NEAR = 3, HUG = .6;
 
 /**
  * Where each link leaves its parent and enters its child: one point per link, spread across the
- * middle half of the card's edge and ordered by where the link's other end is, so links into one
+ * middle of the card's edge and ordered by where the link's other end is, so links into one
  * card fan in side by side instead of piling onto a single point.
  */
 export function linkPorts(boxes: Map<string, WireBox>, links: WireLink[]): Map<string, { out: number; into: number }> {
   const middle = (id: string) => { const box = boxes.get(id)!; return box.x + box.w / 2; };
-  const along = (box: WireBox, count: number, index: number) => Math.round(count === 1 ? box.x + box.w / 2 : box.x + box.w * (.25 + .5 * index / (count - 1)));
+  const along = (box: WireBox, count: number, index: number) => Math.round(count === 1 ? box.x + box.w / 2 : box.x + box.w * (.15 + .7 * index / (count - 1)));
   const ports = new Map<string, { out: number; into: number }>();
   const groups = (end: "from" | "to") => {
     const grouped = new Map<string, WireLink[]>();
@@ -93,6 +95,20 @@ export function linkPorts(boxes: Map<string, WireBox>, links: WireLink[]): Map<s
   for (const [id, list] of groups("to")) {
     list.sort((a, b) => middle(a.from) - middle(b.from) || a.key.localeCompare(b.key));
     list.forEach((link, index) => { ports.get(link.key)!.into = along(boxes.get(id)!, list.length, index); });
+  }
+  // A link whose ends nearly line up runs straight: both ends move to one x inside both cards, as
+  // long as that keeps clear of the other points on each edge.
+  const taken = (id: string, side: "out" | "into", skip: string) => links
+    .filter(link => link.key !== skip && (side === "out" ? link.from : link.to) === id && ports.has(link.key))
+    .map(link => ports.get(link.key)![side]);
+  for (const link of links) {
+    const port = ports.get(link.key), from = boxes.get(link.from), to = boxes.get(link.to);
+    if (!port || !from || !to || port.out === port.into || Math.abs(port.out - port.into) > 48) continue;
+    const low = Math.max(from.x + from.w * .15, to.x + to.w * .15), high = Math.min(from.x + from.w * .85, to.x + to.w * .85);
+    if (low > high) continue;
+    const x = Math.round(Math.min(high, Math.max(low, (port.out + port.into) / 2)));
+    const clear = (values: number[]) => values.every(value => Math.abs(value - x) >= 18);
+    if (clear(taken(link.from, "out", link.key)) && clear(taken(link.to, "into", link.key))) ports.set(link.key, { out: x, into: x });
   }
   return ports;
 }
@@ -121,7 +137,10 @@ function routeGrid(walls: WireBox[], ends: Point[]) {
     if (xi + 1 < nx) right[node] = walls.some(box => y > box.y && y < box.y + box.h && box.x < xs[xi + 1] && box.x + box.w > x) ? 0 : 1;
     if (yi + 1 < ny) down[node] = walls.some(box => x > box.x && x < box.x + box.w && box.y < ys[yi + 1] && box.y + box.h > y) ? 0 : 1;
   }
-  return { xs, ys, nx, ny, open, right, down, usedRight: new Uint16Array(count), usedDown: new Uint16Array(count),
+  const wallXs = new Set(walls.flatMap(box => [Math.round(box.x), Math.round(box.x + box.w)]));
+  const wallYs = new Set(walls.flatMap(box => [Math.round(box.y), Math.round(box.y + box.h)]));
+  const hugX = Uint8Array.from(xs, x => wallXs.has(x) ? 1 : 0), hugY = Uint8Array.from(ys, y => wallYs.has(y) ? 1 : 0);
+  return { xs, ys, nx, ny, open, right, down, hugX, hugY, usedRight: new Uint16Array(count), usedDown: new Uint16Array(count),
     crossedH: new Uint16Array(count), crossedV: new Uint16Array(count) };
 }
 type RouteGrid = ReturnType<typeof routeGrid>;
@@ -131,7 +150,7 @@ type RouteGrid = ReturnType<typeof routeGrid>;
  * already placed and crossing one cost extra; links leave their parent and reach their child heading down.
  */
 function searchRoute(grid: RouteGrid, start: Point, goal: Point): number[] | null {
-  const { xs, ys, nx, ny, open, right, down, usedRight, usedDown, crossedH, crossedV } = grid;
+  const { xs, ys, nx, ny, open, right, down, hugX, hugY, usedRight, usedDown, crossedH, crossedV } = grid;
   const startNode = ys.indexOf(Math.round(start.y)) * nx + xs.indexOf(Math.round(start.x));
   const goalNode = ys.indexOf(Math.round(goal.y)) * nx + xs.indexOf(Math.round(goal.x));
   if (startNode < 0 || goalNode < 0 || !open[startNode] || !open[goalNode]) return null;
@@ -161,6 +180,7 @@ function searchRoute(grid: RouteGrid, start: Point, goal: Point): number[] | nul
     return top;
   };
   const goalX = xs[goalNode % nx], goalY = ys[Math.floor(goalNode / nx)];
+  const downward = goalY > ys[Math.floor(startNode / nx)];
   const estimate = (node: number) => Math.abs(xs[node % nx] - goalX) + Math.abs(ys[Math.floor(node / nx)] - goalY);
   const first = startNode * 4 + 2;
   best[first] = 0; push(first, estimate(startNode));
@@ -181,7 +201,21 @@ function searchRoute(grid: RouteGrid, start: Point, goal: Point): number[] | nul
       else if (turn === 2) { if (yi + 1 >= ny || !down[node]) continue; next = node + nx; length = ys[yi + 1] - ys[yi]; shared = usedDown[node]; crossings = crossedH[next]; }
       else { if (yi === 0 || !down[node - nx]) continue; next = node - nx; length = ys[yi] - ys[yi - 1]; shared = usedDown[next]; crossings = crossedH[next]; }
       if (!open[next]) continue;
+      // A link beside another (within NEAR_GAP) reads as one; a link along a card's edge reads as part of it.
+      const vertical = turn >= 2, edge = vertical ? Math.min(node, next) : Math.min(node, next);
+      let beside = 0;
+      if (vertical) {
+        if (xi > 0 && xs[xi] - xs[xi - 1] < NEAR_GAP && usedDown[edge - 1]) beside++;
+        if (xi + 1 < nx && xs[xi + 1] - xs[xi] < NEAR_GAP && usedDown[edge + 1]) beside++;
+      } else {
+        if (yi > 0 && ys[yi] - ys[yi - 1] < NEAR_GAP && usedRight[edge - nx]) beside++;
+        if (yi + 1 < ny && ys[yi + 1] - ys[yi] < NEAR_GAP && usedRight[edge + nx]) beside++;
+      }
+      const hug = vertical ? hugX[xi] : hugY[yi];
       const total = cost + length + (turn === heading ? 0 : TURN) + (shared ? JOIN + length * SHARE : 0) + crossings * CROSS
+        + beside * length * NEAR + hug * length * HUG
+        // A link going down that climbs back up loops; it only does when there is no other way.
+        + (turn === 3 && downward ? length * 2 : 0)
         // A link arrives at its child heading down; arriving sideways costs the last turn.
         + (next === goalNode && turn !== 2 ? TURN : 0);
       const target = next * 4 + turn;
@@ -226,12 +260,6 @@ export function routeLinks(boxes: Map<string, WireBox>, links: WireLink[]): Map<
     if (!from || !to || !port) continue;
     const x1 = port.out, y1 = Math.round(from.y + from.h), x2 = port.into, y2 = Math.round(to.y);
     if (link.via) { shapes.set(link.key, wirePath({ ...from, x: x1 - from.w / 2 }, { ...to, x: x2 - to.w / 2 }, [], 0, link.via)); continue; }
-    // The curve may not touch any other card's cleared area (its own two cards are where it starts and ends).
-    const others = [...wallOf].filter(([id]) => id !== link.from && id !== link.to).map(([, wall]) => wall);
-    const reach = Math.max(60, Math.abs(y2 - y1) * .45);
-    const clear = y2 > y1 + STUB * 2 && Array.from({ length: 23 }, (_, i) => (i + 1) / 24)
-      .every(t => !others.some(wall => inside(wall, cubicAt(t, x1, x1, x2, x2), cubicAt(t, y1, y1 + reach, y2 - reach, y2))));
-    if (clear) { shapes.set(link.key, `M${x1},${y1} C${x1},${y1 + reach} ${x2},${y2 - reach} ${x2},${y2}`); continue; }
     pending.push({ link, out: { x: x1, y: y1 }, into: { x: x2, y: y2 }, start: { x: x1, y: y1 + STUB }, goal: { x: x2, y: y2 - STUB } });
   }
   // Shorter links first: they have the fewest ways round, so they take their lanes before longer ones.
@@ -268,7 +296,20 @@ export function routeLinks(boxes: Map<string, WireBox>, links: WireLink[]): Map<
       if (vertical) { a.x += shift; b.x += shift; } else { a.y += shift; b.y += shift; }
     });
   });
-  for (const { link, points } of routed) shapes.set(link.key, rounded(points.map(point => [point.x, point.y]), 10));
+  // Spreading lanes can leave a link with a tiny sideways jog between two parallel runs: line the
+  // later run up with the earlier one (or the earlier with the later, at the link's end).
+  for (const { points } of routed) {
+    for (let i = 1; i + 2 < points.length; i++) {
+      const a = points[i - 1], b = points[i], c = points[i + 1], d = points[i + 2];
+      const vertical = a.x === b.x && c.x === d.x && b.y === c.y, horizontal = a.y === b.y && c.y === d.y && b.x === c.x;
+      if (vertical && Math.abs(c.x - b.x) > 0 && Math.abs(c.x - b.x) < 14) {
+        if (i + 2 < points.length - 1) { c.x = b.x; d.x = b.x; } else if (i - 1 > 0) { a.x = c.x; b.x = c.x; }
+      } else if (horizontal && Math.abs(c.y - b.y) > 0 && Math.abs(c.y - b.y) < 14) {
+        if (i + 2 < points.length - 1) { c.y = b.y; d.y = b.y; } else if (i - 1 > 0) { a.y = c.y; b.y = c.y; }
+      }
+    }
+  }
+  for (const { link, points } of routed) shapes.set(link.key, rounded(straighten(points).map(point => [point.x, point.y]), 10));
   return shapes;
 }
 const gapX = 252;
