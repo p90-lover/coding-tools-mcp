@@ -187,6 +187,33 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     ];
     return items.sort((a, b) => a.sequence - b.sequence).slice(-40);
   }
+  /**
+   * The session's tool requests waiting on an answer (Claude Code's ACP permission requests, parked
+   * by AO). Each keeps AO's request id and the provider's own offered decisions, so an answer is
+   * always one of those; a Bash call is a "command", other tools a "permission".
+   */
+  function pendingApprovals(conversation) {
+    return (Array.isArray(conversation?.activities) ? conversation.activities : [])
+      .filter(activity => activity.activityKind === "approval" && activity.status === "pending" && typeof activity.requestId === "string")
+      .map(activity => {
+        const detail = activity.detail && typeof activity.detail === "object" ? activity.detail : {};
+        const input = detail.input && typeof detail.input === "object" ? detail.input : {};
+        const decisions = (Array.isArray(detail.decisions) ? detail.decisions : [])
+          .filter(decision => typeof decision?.id === "string" && typeof decision?.kind === "string")
+          .map(decision => ({ id: decision.id.slice(0, 200), kind: decision.kind.slice(0, 40), label: String(decision.label || decision.kind).slice(0, 120) }));
+        const command = detail.toolKind === "execute" && typeof input.command === "string" ? input.command : "";
+        const path = typeof input.file_path === "string" ? input.file_path : typeof input.path === "string" ? input.path : "";
+        return {
+          approval_id: activity.requestId.slice(0, 200), source: "ao", kind: command ? "command" : "permission",
+          ...(command ? { command: utf8Prefix(command, 4000) } : {}), ...(path ? { path: utf8Prefix(path, 1000) } : {}),
+          ...(typeof input.description === "string" ? { reason: utf8Prefix(input.description, 500) } : {}),
+          tool: String(detail.toolName || detail.toolKind || "tool").slice(0, 80),
+          summary: utf8Prefix(String(activity.summary || ""), 500), turn_id: typeof activity.turnId === "string" ? activity.turnId : undefined,
+          decisions,
+        };
+      })
+      .filter(approval => approval.decisions.length);
+  }
   /** The longest prefix of `text` that is at most `maxBytes` of UTF-8 (AO limits prompts in bytes). */
   function utf8Prefix(text, maxBytes) {
     const value = String(text);
@@ -312,7 +339,14 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         status, turnId: turn?.id, turnState: turn?.state, error: turn?.errorMessage,
         needsInput: status === "needs_input", exited: ["exited", "terminated"].includes(status),
         answer: answer.slice(0, 12000), liveOutput: utf8Prefix(liveOutput, 4096), timeline,
+        approvals: pendingApprovals(conversation),
       };
+    },
+    /** Answers one parked tool request with one of the decisions AO offered for it. */
+    async resolveApproval(id, requestId, decisionId) {
+      if (typeof requestId !== "string" || !requestId || typeof decisionId !== "string" || !decisionId) throw new Error("Choose an offered decision");
+      await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/approvals/${encodeURIComponent(requestId)}/resolve`, { decisionId });
+      return { ok: true };
     },
     async interrupt(id) {
       await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/interrupt`, {}).catch(() => undefined);

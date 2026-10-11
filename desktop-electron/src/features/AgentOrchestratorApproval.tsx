@@ -5,6 +5,8 @@ export type AoApproval = {
   thread_id?: string; turn_id?: string; item_id?: string; request?: Record<string, unknown>;
   permissions?: Record<string, unknown>; seconds_remaining?: number;
   recommendation?: { action: "allow" | "deny" | "ask"; reason: string };
+  /** An AO agent's parked tool request (e.g. Claude Code's Bash): its tool name and AO's summary. */
+  source?: "ao"; tool?: string; summary?: string;
 };
 export type ApprovalReply = boolean | Record<string, unknown>;
 const object = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -55,8 +57,8 @@ export function AgentOrchestratorApproval({ approval, busy, approve }: {
   };
   const supported = !typed || ["command", "file_change", "permissions", "questions", "mcp_form", "mcp_url"].includes(kind || "");
   return <div className="ao-msg ao-msg-approval">
-    <span className="ao-msg-meta">{typed ? "Native request" : "Approval needed"} · {kind || "Tool request"}</span>
-    <p>{approval.reason || String(request.message || "Tool request")} · {location}</p>
+    <span className="ao-msg-meta">{typed ? "Native request" : "Approval needed"} · {kind || "Tool request"}{approval.tool ? " · " + approval.tool : ""}</span>
+    <p>{approval.reason || approval.summary || String(request.message || "Tool request")} · {location}</p>
     {typed ? <p className="ao-hint">{approval.method} · Thread {approval.thread_id || "unknown"} · Turn {approval.turn_id || "unknown"}{approval.item_id ? " · Item " + approval.item_id : ""}</p> : null}
     {approval.command ? <pre>{approval.command}</pre> : null}
     {approval.recommendation ? <p className="ao-hint">Command approver suggests {approval.recommendation.action}: {approval.recommendation.reason}</p> : null}

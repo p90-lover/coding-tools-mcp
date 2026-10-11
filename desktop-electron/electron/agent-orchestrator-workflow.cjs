@@ -403,8 +403,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         const agentModel = wireModel && agent === "opencode" ? `openai/${wireModel}` : wireModel ?? node.route.model;
         session = await harnessService().spawn({ workspaceId, agent, model: agentModel, prompt: reserved.prompt,
           name: node.settings?.name || "AO worker",
+          // "Approve for me" is Codex's auto-review: Codex runs its own reviewer, but Claude Code's
+          // "auto" mode exists only for Claude models and otherwise falls back to asking for every
+          // edit. Claude Code therefore accepts edits and its tool requests go to our reviewer.
           ...(node.route.approval_policy ? { approvalMode: node.route.approval_policy === "never" ? "bypass-permissions"
-            : node.route.approvals_reviewer === "auto_review" ? "auto" : "accept-edits" } : {}),
+            : node.route.approvals_reviewer === "auto_review" && agent !== "claude-code" ? "auto" : "accept-edits" } : {}),
           ...(viaCpa ? { gateway: { provider: "cpa", model: wireModel } } : {}),
           ...(node.route.context_window != null ? { contextWindow: node.route.context_window } : {}),
           ...(plain ? { plain: true } : {}),
@@ -436,7 +439,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     if (node.state !== "running" || !session) return { ok: true, pending_approvals: [] };
     const observed = await harnessService().observe(session);
     const terminal = TERMINAL_TURNS.has(observed.turnState) || observed.exited;
-    if (!terminal) return { ok: true, pending_approvals: [], needs_input: observed.needsInput, session_id: session };
+    if (!terminal) {
+      // The agent's parked tool requests, answerable from the chat or by the reviewer.
+      const pending = (observed.approvals || []).map(approval => ({ ...approval, nodeId: node.id, thread_id: session }));
+      return { ok: true, pending_approvals: withAdvice(pending), needs_input: observed.needsInput && !pending.length, session_id: session };
+    }
     const completed = observed.turnState === "completed";
     const result = await requestHeadless("/api/v1/ao/external/terminal", {
       workspace_id: workspaceId, run_id: runId, node_id: node.id, session_id: session,
@@ -532,6 +539,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       node_id: clean(nodeId, 80),
     });
     if (response?.ok !== true) throw new Error("AO harness status unavailable");
+    if (response.status?.connected === false) {
+      // No native hub: an AO card's tool requests live in its AO session instead.
+      const found = await savedNode(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80)).catch(() => null);
+      if (found && externalAgent(found.node)) {
+        const observed = found.node.state === "running" && found.node.receipt?.thread_id
+          ? await observeExternal(workspaceId, runId, found.node) : { pending_approvals: [] };
+        return { ok: true, status: { connected: true, pending_approvals: observed.pending_approvals ?? [] } };
+      }
+    }
     return response.status?.pending_approvals
       ? { ...response, status: { ...response.status, pending_approvals: withAdvice(response.status.pending_approvals) } } : response;
   }
@@ -823,6 +839,20 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const current = await harnessStatus({ workspaceId: id, runId: run, nodeId: node });
     const pending = current.status?.pending_approvals?.find((entry) => entry.approval_id === approval);
     if (!pending) throw new Error("AO tool request is no longer pending");
+    if (pending.source === "ao") {
+      if (typed) throw new Error("Answer this request with Allow or Deny");
+      const decision = aoDecision(pending, allow);
+      if (!decision) throw new Error(`The agent did not offer a "${allow ? "allow" : "deny"}" answer for this request`);
+      if (!await confirm({
+        message: allow ? "Allow this tool request once?" : "Deny this tool request?",
+        detail: `Run: ${run}
+Node: ${node}
+Tool: ${pending.tool}
+${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pending.path}` : `Request: ${pending.summary}`}`,
+      })) return { ok: false, cancelled: true };
+      await harnessService().resolveApproval(pending.thread_id, approval, decision);
+      return { ok: true, result: { ok: true } };
+    }
     if (typed && (!pending.method || pending.thread_id !== thread || pending.turn_id !== turn)) {
       throw new Error("Native approval thread/turn scope changed; refresh the pending request");
     }
@@ -991,6 +1021,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     /\bshutdown\b|\breg\s+delete\b|\bbcdedit\b|\bdiskpart\b/i,
   ];
   const approverAdvice = new Map(); // approval_id -> { action, reason }
+  /** AO's offered decision id for allow-once / deny-once; an "always" choice is never made for the user. */
+  const aoDecision = (approval, allow) => (approval.decisions || [])
+    .find((decision) => decision.kind === (allow ? "allow_once" : "reject_once"))?.id
+    ?? (allow ? null : (approval.decisions || []).find((decision) => decision.kind === "reject_always")?.id) ?? null;
   const withAdvice = (approvals) => Array.isArray(approvals)
     ? approvals.map((item) => {
       // Modern native commands carry escalation scope separately from item/permissions requests.
@@ -1041,12 +1075,18 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
    * goes to the person. The hard deny list wins over the model.
    */
   async function screenApprovals(workspaceId, runId, mission, active, observed) {
-    const approver = mission.nodes.find((node) => node.role === "approver" && node.state === "finished" && node.receipt?.verdict === "APPROVED");
-    if (!approver) return null;
+    const teamApprover = mission.nodes.find((node) => node.role === "approver" && node.state === "finished" && node.receipt?.verdict === "APPROVED");
     let note = null;
     for (const [index, result] of observed.entries()) {
+      // A team's Command approver screens its workers; otherwise a card set to "Approve for me"
+      // has its AO tool requests reviewed and answered for it, like Codex's auto-review.
+      const own = active[index];
+      const approver = teamApprover ?? (own?.route?.approvals_reviewer === "auto_review" && externalAgent(own)
+        ? { route: own.route, settings: { instructions: "", auto_decide: true } } : null);
+      if (!approver) continue;
       for (const approval of result?.pending_approvals ?? []) {
-        if (approval?.kind !== "command" || !approval.approval_id || approverAdvice.has(approval.approval_id)) continue;
+        const screened = approval?.kind === "command" || approval?.source === "ao";
+        if (!screened || !approval.approval_id || approverAdvice.has(approval.approval_id)) continue;
         const request = describeRequest(approval);
         // The command advisor must not decide from a truncated command or permission scope.
         const incomplete = request.length >= 1500 || JSON.stringify(approval.permissions ?? {}).length > 800;
@@ -1062,7 +1102,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         }
         approverAdvice.set(approval.approval_id, advice);
         if (approverAdvice.size > 500) approverAdvice.delete(approverAdvice.keys().next().value);
-        if (approver.settings?.auto_decide === true && advice.action !== "ask") {
+        if (approval.source === "ao" && approver.settings?.auto_decide === true && advice.action !== "ask") {
+          const decision = aoDecision(approval, advice.action === "allow");
+          if (decision) {
+            await harnessService().resolveApproval(approval.thread_id, approval.approval_id, decision);
+            note = `Reviewer ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
+          } else note = `Reviewer suggests ${advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
+        } else if (approver.settings?.auto_decide === true && advice.action !== "ask") {
           await requestHeadless("/api/v1/ao/harness/approval", {
             workspace_id: workspaceId, run_id: runId, node_id: active[index].id, approval_id: approval.approval_id,
             allow: advice.action === "allow", confirm: false, approver_reason: advice.reason || advice.action, approver_request: request,

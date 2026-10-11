@@ -2029,7 +2029,9 @@ test("team chat binds selected identity and rejects stale config before writing"
 });
 
 test("external Codex-style permission tuples map to the real AO approval mode at spawn", async () => {
-  for (const agent of ["codex", "claude-code"]) for (const [policy, reviewer, expected] of [["on-request","user","accept-edits"],["on-request","auto_review","auto"],["never","user","bypass-permissions"]]) {
+  // Claude Code's own "auto" mode exists only for Claude models, so its "Approve for me" accepts edits
+  // and leaves tool requests to our reviewer; Codex keeps its native auto-review.
+  for (const agent of ["codex", "claude-code"]) for (const [policy, reviewer, expected] of [["on-request","user","accept-edits"],["on-request","auto_review",agent === "codex" ? "auto" : "accept-edits"],["never","user","bypass-permissions"]]) {
     let launched;
     const route = { harness_id: `ao:${agent}`, provider_id: "agent-orchestrator", account_id: "ao-local", model: "gpt-6-luna",
       permission_profile: ":ao-default", native_permission_profile: policy === "never" ? ":danger-full-access" : ":workspace", approval_policy: policy, approvals_reviewer: reviewer };
@@ -2263,4 +2265,51 @@ test("a start blocked on the browser returns its reason instead of a generic tra
   ready = { authenticated: false, ready: true };
   assert.match((await workflow.call("start_run", input)).reason, /Sign in to ChatGPT/);
   await assert.rejects(workflow.call("start_run", { ...input, proxyApiKey: "x" }), /refused/, "other start errors still throw");
+});
+
+test("a single AO card set to Approve for me has its parked tool requests reviewed and answered through AO", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "always", kind: "allow_always", label: "Always" }, { id: "no", kind: "reject_once", label: "Reject" }];
+  const requests = [
+    { approval_id: "safe", source: "ao", kind: "command", command: "npm test", tool: "Bash", summary: "Bash", decisions },
+    { approval_id: "push", source: "ao", kind: "command", command: "git push origin main", tool: "Bash", summary: "Bash", decisions },
+    { approval_id: "unclear", source: "ao", kind: "permission", path: "C:/elsewhere/file", tool: "Write", summary: "Write", decisions },
+  ];
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+    { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const resolved = [], advised = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) };
+      const prompt = JSON.parse(init.body).messages[0].content;
+      advised.push(JSON.parse(init.body).model);
+      const action = prompt.includes("npm test") ? "allow" : "ask";
+      return { ok: true, json: async () => ({ choices: [{ message: { content: `{"action":"${action}","reason":"fixture"}` } }] }) };
+    },
+    requestHeadless: async endpoint => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+      if (endpoint.endsWith("/approval")) throw new Error("AO requests are answered through AO, not the native hub");
+      return { ok: true, run: mission };
+    },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running",
+        approvals: requests.filter(request => !resolved.some(([, id]) => id === request.approval_id)) }),
+      resolveApproval: async (session, requestId, decisionId) => { resolved.push([session, requestId, decisionId]); return { ok: true }; },
+    },
+    confirm: async () => true,
+  });
+  await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  for (let tries = 0; tries < 200 && resolved.length < 2; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  mission.nodes[0].state = "finished"; // ends the run loop, as the turn finishing would
+  for (let tries = 0; tries < 100; tries++) {
+    if ((await workflow.call("run_status", { workspaceId: "ws", runId: "run" })).status !== "running") break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.deepEqual(JSON.parse(JSON.stringify(resolved)).sort(), [["session-1", "push", "no"], ["session-1", "safe", "yes"]],
+    "allowed once by the reviewer, git push denied by the hard rules, the unclear write left for the person; never an always-grant");
+  assert.ok(advised.length >= 1 && advised.every(model => model === "test-model"), "the card's own CPA model reviews");
 });

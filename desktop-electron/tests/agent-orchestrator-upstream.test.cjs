@@ -218,3 +218,33 @@ test("the AO harness list waits for fresh install checks and re-checks after a m
   const older = createAgentInventory(async (method) => { if (method === "POST") throw new Error("404"); return partial; });
   assert.deepEqual(await older(), partial, "a daemon without refresh still answers the plain list");
 });
+
+test("observe lists the agent's parked tool requests with AO's offered decisions, and resolveApproval answers one", async () => {
+  const calls = [];
+  const upstream = observeHarness({
+    internalApi: async (method, endpoint, body) => {
+      calls.push([method, endpoint, body]);
+      if (endpoint.endsWith("/conversation?limit=100")) return {
+        turns: [{ id: "t", state: "running" }], messages: [],
+        activities: [
+          { id: "a1", turnId: "t", sequence: 2, activityKind: "approval", status: "pending", requestId: "req-1", summary: "Bash",
+            detail: { toolKind: "execute", toolName: "Bash", input: { command: "npm test", description: "Run the tests" },
+              decisions: [{ id: "allow", kind: "allow_once", label: "Allow" }, { id: "always", kind: "allow_always", label: "Always" }, { id: "no", kind: "reject_once", label: "Reject" }] } },
+          { id: "a2", turnId: "t", sequence: 3, activityKind: "approval", status: "resolved", requestId: "req-0", detail: { decisions: [{ id: "x", kind: "allow_once" }] } },
+          { id: "a3", turnId: "t", sequence: 4, activityKind: "approval", status: "pending", requestId: "req-2", summary: "Edit app.ts",
+            detail: { toolKind: "edit", toolName: "Edit", input: { file_path: "src/app.ts" }, decisions: [{ id: "ok", kind: "allow_once" }] } },
+        ],
+      };
+      return endpoint.includes("/resolve") ? undefined : { session: { id: "s", mode: "chat", status: "working" } };
+    },
+  });
+  const observed = await upstream.observe("s");
+  const approvals = JSON.parse(JSON.stringify(observed.approvals));
+  assert.deepEqual(approvals.map(item => [item.approval_id, item.kind, item.tool, item.command ?? item.path]),
+    [["req-1", "command", "Bash", "npm test"], ["req-2", "permission", "Edit", "src/app.ts"]], "only pending requests; Bash is a command");
+  assert.equal(approvals[0].reason, "Run the tests");
+  assert.deepEqual(approvals[0].decisions.map(decision => decision.kind), ["allow_once", "allow_always", "reject_once"]);
+  await upstream.resolveApproval("s", "req-1", "allow");
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), ["POST", "/api/v1/sessions/s/conversation/approvals/req-1/resolve", { decisionId: "allow" }]);
+  await assert.rejects(upstream.resolveApproval("s", "req-1", ""), /offered decision/);
+});
