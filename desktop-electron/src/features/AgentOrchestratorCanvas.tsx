@@ -13,305 +13,39 @@ const width = 212;
 const height = 76;
 
 export type WireBox = { x: number; y: number; w: number; h: number };
-const cubicAt = (t: number, a: number, b: number, c: number, d: number) =>
-  (1 - t) ** 3 * a + 3 * (1 - t) ** 2 * t * b + 3 * (1 - t) * t * t * c + t ** 3 * d;
-const crosses = (box: WireBox, x: number, y: number, pad = 10) =>
-  x > box.x - pad && x < box.x + box.w + pad && y > box.y - pad && y < box.y + box.h + pad;
-
-/** Polyline with rounded corners, so a detour reads as one smooth link. */
-function rounded(points: [number, number][], radius: number): string {
-  let d = `M${points[0][0]},${points[0][1]}`;
-  for (let i = 1; i < points.length - 1; i++) {
-    const [px, py] = points[i - 1], [cx, cy] = points[i], [nx, ny] = points[i + 1];
-    const into = Math.hypot(cx - px, cy - py) || 1, out = Math.hypot(nx - cx, ny - cy) || 1;
-    const r = Math.min(radius, into / 2, out / 2);
-    d += ` L${cx + (px - cx) / into * r},${cy + (py - cy) / into * r} Q${cx},${cy} ${cx + (nx - cx) / out * r},${cy + (ny - cy) / out * r}`;
-  }
-  const [lx, ly] = points[points.length - 1];
-  return `${d} L${lx},${ly}`;
-}
 
 /**
- * A link from the bottom of `from` to the top of `to`. The usual curve is kept when the child is
- * below and nothing is in the way; otherwise the link goes around: out of the parent, along the
- * shorter side clear of every card it would cross, and into the child from above (a reviewer
- * linking back to the orchestrator loops around instead of running through the workers).
+ * A link from the bottom of `from` to the top of `to`, drawn as one smooth curve. A link the user
+ * pulled to a point passes through it; a link back up (the reviewer reporting to the orchestrator)
+ * swings out past the right of both cards instead of cutting back across the team.
  */
-export function wirePath(from: WireBox, to: WireBox, others: WireBox[], bend = 0, via?: Point | null): string {
+export function wirePath(from: WireBox, to: WireBox, bend = 0, via?: Point | null): string {
   const x1 = from.x + from.w / 2, y1 = from.y + from.h, x2 = to.x + to.w / 2, y2 = to.y;
-  // A link the user pulled to a point passes through it: out of the parent, through the point
-  // along the line between the two ends, and into the child from above.
   if (via) {
     const length = Math.hypot(x2 - x1, y2 - y1) || 1, pull = Math.min(140, length / 4);
     const ux = (x2 - x1) / length * pull, uy = (y2 - y1) / length * pull;
     const outReach = Math.max(48, Math.abs(via.y - y1) * .5), inReach = Math.max(48, Math.abs(y2 - via.y) * .5);
     return `M${x1},${y1} C${x1},${y1 + outReach} ${via.x - ux},${via.y - uy} ${via.x},${via.y} S${x2},${y2 - inReach} ${x2},${y2}`;
   }
+  if (y2 < y1 + 24) {
+    const side = Math.max(from.x + from.w, to.x + to.w) + 90, drop = 70;
+    return `M${x1},${y1} C${x1},${y1 + drop} ${side},${y1 + drop} ${side},${(y1 + y2) / 2} S${x2},${y2 - drop} ${x2},${y2}`;
+  }
   const reach = Math.max(60, Math.abs(y2 - y1) * .45);
-  const blocked = others.filter(other => Array.from({ length: 19 }, (_, i) => (i + 1) / 20)
-    .some(t => crosses(other, cubicAt(t, x1, x1 + bend, x2 + bend, x2), cubicAt(t, y1, y1 + reach, y2 - reach, y2))));
-  if (y2 > y1 + 24 && !blocked.length) return `M${x1},${y1} C${x1 + bend},${y1 + reach} ${x2 + bend},${y2 - reach} ${x2},${y2}`;
-  const out = y1 + 24, into = y2 - 24, gap = 36;
-  const span = [from, to, ...blocked];
-  const left = Math.min(...span.map(item => item.x)) - gap, right = Math.max(...span.map(item => item.x + item.w)) + gap;
-  const goLeft = Math.abs(x1 - left) + Math.abs(x2 - left) <= Math.abs(right - x1) + Math.abs(right - x2);
-  let side = goLeft ? left : right;
-  // Step further out while the side lane still runs through a card.
-  const top = Math.min(out, into), bottom = Math.max(out, into);
-  for (let guard = 0; guard < 24; guard++) {
-    const hit = others.find(other => side > other.x - 10 && side < other.x + other.w + 10 && other.y < bottom && other.y + other.h > top);
-    if (!hit) break;
-    side = goLeft ? hit.x - gap : hit.x + hit.w + gap;
-  }
-  return rounded([[x1, y1], [x1, out], [side, out], [side, into], [x2, into], [x2, y2]], 14);
+  return `M${x1},${y1} C${x1 + bend},${y1 + reach} ${x2 + bend},${y2 - reach} ${x2},${y2}`;
 }
 
-export type WireLink = { key: string; from: string; to: string; via?: Point | null };
-/** Clearance kept around every card, the straight run out of and into a port, and the gap between parallel links. */
-const CLEAR = 20, STUB = 20, LANE = 10;
-/** Route costs: a turn, running along a link already placed (per pixel, and for joining it at all), crossing one. */
-const TURN = 36, SHARE = 8, JOIN = 120, CROSS = 30;
-/** Running beside another link closer than NEAR_GAP (per pixel), and along a card's cleared edge instead of a channel's middle. */
-const NEAR_GAP = 16, NEAR = 3, HUG = .6;
+/** The canvas help: links run from a card's bottom to the top of the next, so layout is what keeps them clear. */
+export const CANVAS_TIPS = [
+  "Links run from the bottom of a card to the top of the next. Keep each card below the cards it depends on and lines stay short and uncrossed.",
+  "Lay the team out in rows in the order work flows: orchestrator, command approver, workers, reviewers.",
+  "Put cards that share a parent side by side in one row, and never park a card between a parent and its child.",
+  "▦ Tidy puts every card back in those rows. Ctrl-click several cards, then ⇤ / ⤒ to line them up.",
+  "Leave about a card's height between rows so the curves have room.",
+  "Shift-drag a link to bend it around a card; Shift-double-click it to straighten it again.",
+  "Hover a card to bring its own links forward and fade the rest.",
+];
 
-/**
- * Where each link leaves its parent and enters its child: one point per link, spread across the
- * middle of the card's edge and ordered by where the link's other end is, so links into one
- * card fan in side by side instead of piling onto a single point.
- */
-export function linkPorts(boxes: Map<string, WireBox>, links: WireLink[]): Map<string, { out: number; into: number }> {
-  const middle = (id: string) => { const box = boxes.get(id)!; return box.x + box.w / 2; };
-  const along = (box: WireBox, count: number, index: number) => Math.round(count === 1 ? box.x + box.w / 2 : box.x + box.w * (.15 + .7 * index / (count - 1)));
-  const ports = new Map<string, { out: number; into: number }>();
-  const groups = (end: "from" | "to") => {
-    const grouped = new Map<string, WireLink[]>();
-    for (const link of links) if (boxes.has(link.from) && boxes.has(link.to)) grouped.set(link[end], [...grouped.get(link[end]) ?? [], link]);
-    return grouped;
-  };
-  for (const [id, list] of groups("from")) {
-    list.sort((a, b) => middle(a.to) - middle(b.to) || a.key.localeCompare(b.key));
-    list.forEach((link, index) => ports.set(link.key, { out: along(boxes.get(id)!, list.length, index), into: 0 }));
-  }
-  for (const [id, list] of groups("to")) {
-    list.sort((a, b) => middle(a.from) - middle(b.from) || a.key.localeCompare(b.key));
-    list.forEach((link, index) => { ports.get(link.key)!.into = along(boxes.get(id)!, list.length, index); });
-  }
-  // A link whose ends nearly line up runs straight: both ends move to one x inside both cards, as
-  // long as that keeps clear of the other points on each edge.
-  const taken = (id: string, side: "out" | "into", skip: string) => links
-    .filter(link => link.key !== skip && (side === "out" ? link.from : link.to) === id && ports.has(link.key))
-    .map(link => ports.get(link.key)![side]);
-  for (const link of links) {
-    const port = ports.get(link.key), from = boxes.get(link.from), to = boxes.get(link.to);
-    if (!port || !from || !to || port.out === port.into || Math.abs(port.out - port.into) > 48) continue;
-    const low = Math.max(from.x + from.w * .15, to.x + to.w * .15), high = Math.min(from.x + from.w * .85, to.x + to.w * .85);
-    if (low > high) continue;
-    const x = Math.round(Math.min(high, Math.max(low, (port.out + port.into) / 2)));
-    const clear = (values: number[]) => values.every(value => Math.abs(value - x) >= 18);
-    if (clear(taken(link.from, "out", link.key)) && clear(taken(link.to, "into", link.key))) ports.set(link.key, { out: x, into: x });
-  }
-  return ports;
-}
-
-const inside = (box: WireBox, x: number, y: number) => x > box.x && x < box.x + box.w && y > box.y && y < box.y + box.h;
-
-/**
- * The routing grid for one layout: lines through every card's cleared edges, the channels between
- * them and every link's start and goal, with which steps are open. It also remembers how many links
- * already use each step, so later links pay to share a lane or to cross one and take their own.
- */
-function routeGrid(walls: WireBox[], ends: Point[]) {
-  const lines = (pick: (box: WireBox) => number[], own: number[]) => {
-    const values = [...new Set([...own, ...walls.flatMap(pick)].map(Math.round))].sort((a, b) => a - b);
-    const between = values.slice(1).map((value, index) => Math.round((value + values[index]) / 2));
-    return [...new Set([...values, ...between, values[0] - 40, values[values.length - 1] + 40])].sort((a, b) => a - b);
-  };
-  const xs = lines(box => [box.x, box.x + box.w], ends.map(point => point.x));
-  const ys = lines(box => [box.y, box.y + box.h], ends.map(point => point.y));
-  const nx = xs.length, ny = ys.length, count = nx * ny;
-  const open = new Uint8Array(count), right = new Uint8Array(count), down = new Uint8Array(count);
-  for (let yi = 0; yi < ny; yi++) for (let xi = 0; xi < nx; xi++) {
-    const node = yi * nx + xi, x = xs[xi], y = ys[yi];
-    open[node] = walls.some(box => inside(box, x, y)) ? 0 : 1;
-    // A step is open when it runs through no card's cleared area (its edges may be followed).
-    if (xi + 1 < nx) right[node] = walls.some(box => y > box.y && y < box.y + box.h && box.x < xs[xi + 1] && box.x + box.w > x) ? 0 : 1;
-    if (yi + 1 < ny) down[node] = walls.some(box => x > box.x && x < box.x + box.w && box.y < ys[yi + 1] && box.y + box.h > y) ? 0 : 1;
-  }
-  const wallXs = new Set(walls.flatMap(box => [Math.round(box.x), Math.round(box.x + box.w)]));
-  const wallYs = new Set(walls.flatMap(box => [Math.round(box.y), Math.round(box.y + box.h)]));
-  const hugX = Uint8Array.from(xs, x => wallXs.has(x) ? 1 : 0), hugY = Uint8Array.from(ys, y => wallYs.has(y) ? 1 : 0);
-  return { xs, ys, nx, ny, open, right, down, hugX, hugY, usedRight: new Uint16Array(count), usedDown: new Uint16Array(count),
-    crossedH: new Uint16Array(count), crossedV: new Uint16Array(count) };
-}
-type RouteGrid = ReturnType<typeof routeGrid>;
-
-/**
- * The cheapest orthogonal path from `start` to `goal` on the grid. Turns, running along a link
- * already placed and crossing one cost extra; links leave their parent and reach their child heading down.
- */
-function searchRoute(grid: RouteGrid, start: Point, goal: Point): number[] | null {
-  const { xs, ys, nx, ny, open, right, down, hugX, hugY, usedRight, usedDown, crossedH, crossedV } = grid;
-  const startNode = ys.indexOf(Math.round(start.y)) * nx + xs.indexOf(Math.round(start.x));
-  const goalNode = ys.indexOf(Math.round(goal.y)) * nx + xs.indexOf(Math.round(goal.x));
-  if (startNode < 0 || goalNode < 0 || !open[startNode] || !open[goalNode]) return null;
-  const count = nx * ny;
-  // State = node × heading (0 right, 1 left, 2 down, 3 up).
-  const best = new Float64Array(count * 4).fill(Infinity), previous = new Int32Array(count * 4).fill(-1);
-  const heap: number[] = [], keys: number[] = [];
-  const push = (state: number, key: number) => {
-    heap.push(state); keys.push(key);
-    for (let i = heap.length - 1; i > 0;) {
-      const up = (i - 1) >> 1; if (keys[up] <= keys[i]) break;
-      [heap[up], heap[i]] = [heap[i], heap[up]]; [keys[up], keys[i]] = [keys[i], keys[up]]; i = up;
-    }
-  };
-  const pop = () => {
-    const top = heap[0], lastState = heap.pop()!, lastKey = keys.pop()!;
-    if (heap.length) {
-      heap[0] = lastState; keys[0] = lastKey;
-      for (let i = 0; ;) {
-        const l = i * 2 + 1, r = l + 1; let m = i;
-        if (l < heap.length && keys[l] < keys[m]) m = l;
-        if (r < heap.length && keys[r] < keys[m]) m = r;
-        if (m === i) break;
-        [heap[m], heap[i]] = [heap[i], heap[m]]; [keys[m], keys[i]] = [keys[i], keys[m]]; i = m;
-      }
-    }
-    return top;
-  };
-  const goalX = xs[goalNode % nx], goalY = ys[Math.floor(goalNode / nx)];
-  const downward = goalY > ys[Math.floor(startNode / nx)];
-  const estimate = (node: number) => Math.abs(xs[node % nx] - goalX) + Math.abs(ys[Math.floor(node / nx)] - goalY);
-  const first = startNode * 4 + 2;
-  best[first] = 0; push(first, estimate(startNode));
-  const reverse = [1, 0, 3, 2];
-  for (let guard = 0; heap.length && guard < 400_000; guard++) {
-    const state = pop(), node = state >> 2, heading = state & 3, cost = best[state];
-    if (node === goalNode) {
-      const path: number[] = [];
-      for (let at = state; at >= 0; at = previous[at]) path.unshift(at >> 2);
-      return path;
-    }
-    const xi = node % nx, yi = Math.floor(node / nx);
-    for (let turn = 0; turn < 4; turn++) {
-      if (turn === reverse[heading]) continue;
-      let next: number, length: number, shared: number, crossings: number;
-      if (turn === 0) { if (xi + 1 >= nx || !right[node]) continue; next = node + 1; length = xs[xi + 1] - xs[xi]; shared = usedRight[node]; crossings = crossedV[next]; }
-      else if (turn === 1) { if (xi === 0 || !right[node - 1]) continue; next = node - 1; length = xs[xi] - xs[xi - 1]; shared = usedRight[next]; crossings = crossedV[next]; }
-      else if (turn === 2) { if (yi + 1 >= ny || !down[node]) continue; next = node + nx; length = ys[yi + 1] - ys[yi]; shared = usedDown[node]; crossings = crossedH[next]; }
-      else { if (yi === 0 || !down[node - nx]) continue; next = node - nx; length = ys[yi] - ys[yi - 1]; shared = usedDown[next]; crossings = crossedH[next]; }
-      if (!open[next]) continue;
-      // A link beside another (within NEAR_GAP) reads as one; a link along a card's edge reads as part of it.
-      const vertical = turn >= 2, edge = vertical ? Math.min(node, next) : Math.min(node, next);
-      let beside = 0;
-      if (vertical) {
-        if (xi > 0 && xs[xi] - xs[xi - 1] < NEAR_GAP && usedDown[edge - 1]) beside++;
-        if (xi + 1 < nx && xs[xi + 1] - xs[xi] < NEAR_GAP && usedDown[edge + 1]) beside++;
-      } else {
-        if (yi > 0 && ys[yi] - ys[yi - 1] < NEAR_GAP && usedRight[edge - nx]) beside++;
-        if (yi + 1 < ny && ys[yi + 1] - ys[yi] < NEAR_GAP && usedRight[edge + nx]) beside++;
-      }
-      const hug = vertical ? hugX[xi] : hugY[yi];
-      const total = cost + length + (turn === heading ? 0 : TURN) + (shared ? JOIN + length * SHARE : 0) + crossings * CROSS
-        + beside * length * NEAR + hug * length * HUG
-        // A link going down that climbs back up loops; it only does when there is no other way.
-        + (turn === 3 && downward ? length * 2 : 0)
-        // A link arrives at its child heading down; arriving sideways costs the last turn.
-        + (next === goalNode && turn !== 2 ? TURN : 0);
-      const target = next * 4 + turn;
-      if (total < best[target]) { best[target] = total; previous[target] = state; push(target, total + estimate(next)); }
-    }
-  }
-  return null;
-}
-
-/** Marks a found path's steps as used, so the links routed after it look for their own lanes. */
-function claimRoute(grid: RouteGrid, path: number[]) {
-  for (let i = 0; i + 1 < path.length; i++) {
-    const a = path[i], b = path[i + 1];
-    if (Math.abs(a - b) === 1) { grid.usedRight[Math.min(a, b)]++; grid.crossedH[a]++; grid.crossedH[b]++; }
-    else { grid.usedDown[Math.min(a, b)]++; grid.crossedV[a]++; grid.crossedV[b]++; }
-  }
-}
-
-/** Drops points in the middle of a straight run, so each segment is one whole lane. */
-function straighten(points: Point[]): Point[] {
-  return points.filter((point, index) => {
-    if (index === 0 || index === points.length - 1) return true;
-    const before = points[index - 1], after = points[index + 1];
-    return !(before.x === point.x && point.x === after.x || before.y === point.y && point.y === after.y);
-  });
-}
-
-/**
- * Every link's drawn path. A link keeps its curve while nothing is in its way; otherwise it is
- * routed around the cards with its own lane where there is room, and links still sharing a lane
- * are spread a few pixels apart so each one can be followed. A link pulled to a point keeps it.
- */
-export function routeLinks(boxes: Map<string, WireBox>, links: WireLink[]): Map<string, string> {
-  const shapes = new Map<string, string>();
-  const ports = linkPorts(boxes, links);
-  const wallOf = new Map([...boxes].map(([id, box]) => [id, { x: box.x - CLEAR, y: box.y - CLEAR, w: box.w + CLEAR * 2, h: box.h + CLEAR * 2 }]));
-  const walls = [...wallOf.values()];
-  const routed: { link: WireLink; points: Point[] }[] = [];
-  const pending: { link: WireLink; start: Point; goal: Point; out: Point; into: Point }[] = [];
-  for (const link of links) {
-    const from = boxes.get(link.from), to = boxes.get(link.to), port = ports.get(link.key);
-    if (!from || !to || !port) continue;
-    const x1 = port.out, y1 = Math.round(from.y + from.h), x2 = port.into, y2 = Math.round(to.y);
-    if (link.via) { shapes.set(link.key, wirePath({ ...from, x: x1 - from.w / 2 }, { ...to, x: x2 - to.w / 2 }, [], 0, link.via)); continue; }
-    pending.push({ link, out: { x: x1, y: y1 }, into: { x: x2, y: y2 }, start: { x: x1, y: y1 + STUB }, goal: { x: x2, y: y2 - STUB } });
-  }
-  // Shorter links first: they have the fewest ways round, so they take their lanes before longer ones.
-  pending.sort((a, b) => Math.abs(a.goal.x - a.start.x) + Math.abs(a.goal.y - a.start.y) - Math.abs(b.goal.x - b.start.x) - Math.abs(b.goal.y - b.start.y));
-  const grid = pending.length ? routeGrid(walls, pending.flatMap(item => [item.start, item.goal])) : null;
-  for (const { link, start, goal, out, into } of pending) {
-    const path = grid && grid.nx * grid.ny <= 60_000 ? searchRoute(grid, start, goal) : null;
-    if (!grid || !path) { shapes.set(link.key, wirePath(boxes.get(link.from)!, boxes.get(link.to)!, [...boxes.values()].filter(box => box !== boxes.get(link.from) && box !== boxes.get(link.to)))); continue; }
-    claimRoute(grid, path);
-    const middle = path.map(node => ({ x: grid.xs[node % grid.nx], y: grid.ys[Math.floor(node / grid.nx)] }));
-    routed.push({ link, points: straighten([out, ...middle, into].map(point => ({ ...point }))) });
-  }
-  // Links still sharing a lane: spread each group apart around the lane, ordered by where they start.
-  const runs = routed.flatMap(({ link, points }) => points.slice(1, -2).map((a, index) => {
-    const b = points[index + 2], vertical = a.x === b.x;
-    return { link: link.key, a, b, vertical, at: vertical ? a.x : a.y, lo: Math.min(vertical ? a.y : a.x, vertical ? b.y : b.x), hi: Math.max(vertical ? a.y : a.x, vertical ? b.y : b.x), order: points[0].x };
-  }));
-  const seen = new Set<number>();
-  runs.forEach((run, index) => {
-    if (seen.has(index)) return;
-    const group = [index];
-    for (let probe = 0; probe < group.length; probe++) {
-      const current = runs[group[probe]];
-      runs.forEach((other, j) => {
-        if (seen.has(j) || group.includes(j) || other.vertical !== current.vertical || other.at !== current.at || other.link === current.link) return;
-        if (Math.min(current.hi, other.hi) - Math.max(current.lo, other.lo) > 0) group.push(j);
-      });
-    }
-    group.forEach(j => seen.add(j));
-    if (group.length < 2) return;
-    const lane = Math.min(LANE, 28 / (group.length - 1));
-    group.sort((x, y) => runs[x].order - runs[y].order).forEach((j, slot) => {
-      const shift = (slot - (group.length - 1) / 2) * lane, { a, b, vertical } = runs[j];
-      if (vertical) { a.x += shift; b.x += shift; } else { a.y += shift; b.y += shift; }
-    });
-  });
-  // Spreading lanes can leave a link with a tiny sideways jog between two parallel runs: line the
-  // later run up with the earlier one (or the earlier with the later, at the link's end).
-  for (const { points } of routed) {
-    for (let i = 1; i + 2 < points.length; i++) {
-      const a = points[i - 1], b = points[i], c = points[i + 1], d = points[i + 2];
-      const vertical = a.x === b.x && c.x === d.x && b.y === c.y, horizontal = a.y === b.y && c.y === d.y && b.x === c.x;
-      if (vertical && Math.abs(c.x - b.x) > 0 && Math.abs(c.x - b.x) < 14) {
-        if (i + 2 < points.length - 1) { c.x = b.x; d.x = b.x; } else if (i - 1 > 0) { a.x = c.x; b.x = c.x; }
-      } else if (horizontal && Math.abs(c.y - b.y) > 0 && Math.abs(c.y - b.y) < 14) {
-        if (i + 2 < points.length - 1) { c.y = b.y; d.y = b.y; } else if (i - 1 > 0) { a.y = c.y; b.y = c.y; }
-      }
-    }
-  }
-  for (const { link, points } of routed) shapes.set(link.key, rounded(straighten(points).map(point => [point.x, point.y]), 10));
-  return shapes;
-}
 const gapX = 252;
 const gapY = 56;
 const arrowMoves: Record<string, [number, number]> = { ArrowLeft: [-16, 0], ArrowRight: [16, 0], ArrowUp: [0, -16], ArrowDown: [0, 16] };
@@ -415,8 +149,6 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
   // released is kept here until the page's saved points catch up, so the link doesn't snap back.
   const bending = useRef<{ key: string; point: Point | null } | null>(null);
   const released = useRef(new Map<string, Point | null>());
-  // The last full routing and the layout it was made for.
-  const routes = useRef<{ signature: string; shapes: Map<string, string> }>({ signature: "", shapes: new Map() });
   const [parentId, setParentId] = useState("");
   const [dropTarget, setDropTarget] = useState("");
   const [draggingId, setDraggingId] = useState("");
@@ -428,6 +160,7 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
   // The card under the pointer: its links stand out and the others fade.
   const [hovered, setHovered] = useState("");
   const [menu, setMenu] = useState<ChatMenuState>(null);
+  const [help, setHelp] = useState(false);
   const cardMenu = (event: ReactMouseEvent, node: CanvasNode) => {
     event.preventDefault(); event.stopPropagation();
     if (!onRemove) return;
@@ -490,23 +223,6 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
     const links = current.current.nodes.flatMap(node => node.parents.map(parent => ({ parent, id: node.id, key: JSON.stringify([parent, node.id]), point: linkPointKey(parent, node.id) })));
     const loopLink = current.current.loop;
     if (loopLink) links.push({ parent: loopLink.from, id: loopLink.to, key: LOOP_LINK, point: LOOP_LINK });
-    // At rest every link is routed together (own ports, own lanes); the result is kept until a card,
-    // a link or a pulled point changes. While a card is dragged, links follow it as quick curves.
-    if (!drag.current?.id) {
-      const boxes = new Map(current.current.nodes.map(node => [node.id, box(node.id)] as const)
-        .filter((entry): entry is [string, WireBox] => Boolean(entry[1])));
-      const wires = links.map(link => ({ key: link.key, from: link.parent, to: link.id, via: pulled(link.point) }));
-      const signature = JSON.stringify([[...boxes], wires]);
-      if (routes.current.signature !== signature) routes.current = { signature, shapes: routeLinks(boxes, wires) };
-      for (const { key } of links) {
-        const shape = routes.current.shapes.get(key);
-        if (!shape) continue;
-        paths.current.get(key)?.setAttribute("d", shape);
-        paths.current.get(`${key}#hit`)?.setAttribute("d", shape);
-      }
-      wind.current = 0;
-      return;
-    }
     for (const { parent, id, key, point } of links) {
       const from = box(parent), to = box(id);
       if (!from || !to) continue;
@@ -514,9 +230,7 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
       const dragged = drag.current?.id ? positions.current.get(drag.current.id) : null;
       const influence = dragged ? Math.max(0, 1 - Math.hypot((x1 + x2) / 2 - dragged.x - width / 2, (y1 + y2) / 2 - dragged.y - height / 2) / 400) : 1;
       const bend = reducedMotion.current ? 0 : wind.current * influence;
-      const others = current.current.nodes.filter(other => other.id !== parent && other.id !== id)
-        .map(other => box(other.id)).filter((other): other is WireBox => Boolean(other));
-      const shape = wirePath(from, to, others, bend, pulled(point));
+      const shape = wirePath(from, to, bend, pulled(point));
       paths.current.get(key)?.setAttribute("d", shape);
       paths.current.get(`${key}#hit`)?.setAttribute("d", shape);
     }
@@ -624,6 +338,8 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
   }, []);
 
   const begin = (event: ReactPointerEvent, id: string | null) => {
+    // Events from portals (the card menu) bubble here through React; they are not canvas clicks.
+    if (!(event.target instanceof Node) || !viewport.current?.contains(event.target)) return;
     if (event.button !== 0 || busy || event.target instanceof Element && event.target.closest(".ao-port")) return;
     if (id === null && event.target instanceof Element && event.target.closest(".ao-canvas-card, .ao-canvas-controls, .ao-canvas-overlay")) return;
     event.preventDefault();
@@ -692,6 +408,15 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
       schedule();
     });
   };
+  // Every card back to the automatic rows (each level below its parents, centred), saved as moved.
+  const tidy = () => {
+    if (busy) return;
+    const loose = (node: CanvasNode) => ({ ...node, positioned: false });
+    const next = canvasLayout(nodes.map(loose), levels.map(level => level.map(loose)), heights.current);
+    const before = new Map(positions.current);
+    for (const [id, point] of next) positions.current.set(id, point);
+    wind.current = 0; persist(before); fit();
+  };
   const align = (axis: "x" | "y") => {
     if (busy) return;
     const before = new Map([...positions.current].filter(([id]) => selected.has(id)));
@@ -712,10 +437,17 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
       <button type="button" onClick={() => zoom(1 / 1.2)} aria-label="Zoom out" title="Zoom out">−</button><span ref={zoomLabel}>100%</span>
       <button type="button" onClick={() => zoom(1.2)} aria-label="Zoom in" title="Zoom in">+</button><button type="button" onClick={fit} aria-label="Fit to screen" title="Fit">⤢</button>
       {selected.size > 1 ? <><span role="status">{selected.size}</span><button type="button" disabled={busy} onClick={() => align("x")} aria-label="Align left" title="Align left">⇤</button><button type="button" disabled={busy} onClick={() => align("y")} aria-label="Align top" title="Align top">⤒</button></> : null}
+      <button type="button" disabled={busy} onClick={tidy} aria-label="Tidy layout" title="Tidy: put every card back in rows, top to bottom in the order work flows">▦</button>
+      <button type="button" onClick={() => setHelp(open => !open)} aria-label="How to keep links clear" aria-expanded={help} title="How to keep links clear">?</button>
       {parentId ? <button type="button" onClick={() => setParentId("")} aria-label="Cancel connection" title="Cancel connection">✕</button> : null}
       {onRemove && selected.size === 1 && canRemove?.([...selected][0]) ? <button type="button" disabled={busy} onClick={() => onRemove([...selected][0])}
         aria-label="Remove selected card" title="Remove card (its task passes to another worker)">🗑</button> : null}
     </div>
+    {help ? <div className="ao-canvas-overlay ao-canvas-help" role="note" aria-label="Keeping links clear">
+      <strong>Keeping links clear</strong>
+      <ul>{CANVAS_TIPS.map(tip => <li key={tip}>{tip}</li>)}</ul>
+      <button type="button" className="button-secondary" onClick={() => setHelp(false)}>Got it</button>
+    </div> : null}
     {notice || dropTarget || parentId ? <span className="ao-connect-hint" role="status">
       {notice || (dropTarget ? "Drop to link" : "Shift-click a card to link or unlink")}</span> : null}
     {children}
