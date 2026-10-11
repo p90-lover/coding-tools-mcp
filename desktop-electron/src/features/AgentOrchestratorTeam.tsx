@@ -47,10 +47,19 @@ export function prepareTeamGraph(team: AoTeam, previous: AoTeam = team): AoTeam 
   const approver = next.nodes.find(node => node.role === "approver");
   const newApprover = approver && previous.nodes.find(node => node.id === approver.id)?.role !== "approver";
   const removed = previous.nodes.filter(old => !next.nodes.some(node => node.id === old.id));
+  // A removed card's children take its parents, through any chain of removed cards: removing the
+  // last sub-reviewer also drops the split pass, and the main reviewer goes back to the workers.
+  const through = (id: string, seen = new Set<string>()): string[] => {
+    const gone = removed.find(old => old.id === id);
+    if (!gone) return [id];
+    if (seen.has(id)) return [];
+    seen.add(id);
+    return gone.parents.flatMap(parent => through(parent, seen));
+  };
   for (const node of next.nodes) {
     if (node.role === "planner") { node.parents = []; continue; }
     if (node.role === "retry") { node.parents = planner ? [planner.id] : []; continue; }
-    node.parents = [...new Set(node.parents.flatMap(id => removed.find(old => old.id === id)?.parents ?? [id]))]
+    node.parents = [...new Set(node.parents.flatMap(id => through(id)))]
       .filter(id => id !== node.id && next.nodes.some(parent => parent.id === id && parent.role !== "retry"));
     if (node.role === "sub_reviewer" && split && !node.parents.includes(split.id)) node.parents.push(split.id);
     if (node.role === "worker" && newApprover && approver && !node.parents.includes(approver.id)) node.parents.push(approver.id);
