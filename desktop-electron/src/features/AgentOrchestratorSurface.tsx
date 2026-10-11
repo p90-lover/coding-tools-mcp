@@ -241,6 +241,29 @@ export async function moduleCall(operation: string, args: JsonObject = {}) {
   return result;
 }
 
+/**
+ * Reads the harness list, and while AO is still starting (the list then holds only Native Codex,
+ * with a notice) asks again with a growing pause for about three minutes, so Claude Code, Codex and
+ * the other AO harnesses appear once AO is up instead of staying missing until a reload.
+ * Returns a function that stops asking.
+ */
+export function watchHarnesses(update: (harnesses: AoHarness[], notice: string) => void): () => void {
+  let live = true;
+  void (async () => {
+    for (let attempt = 0; live && attempt < 20; attempt++) {
+      if (attempt) await new Promise(resolve => setTimeout(resolve, Math.min(2000 * attempt, 10_000)));
+      if (!live) return;
+      const result = await moduleCall("harnesses")
+        .catch(cause => ({ harnesses: [], notice: cause instanceof Error ? cause.message : String(cause) } as Record<string, unknown>));
+      if (!live) return;
+      const notice = typeof result.notice === "string" ? result.notice : "";
+      update(Array.isArray(result.harnesses) ? result.harnesses as AoHarness[] : [], notice);
+      if (!notice) return;
+    }
+  })();
+  return () => { live = false; };
+}
+
 /** Per-viewer chat list state (pins, unread, pinned projects), kept on this computer like Codex. */
 function readList(key: string): string[] {
   try {
@@ -522,17 +545,16 @@ export function AgentOrchestratorSurface({ language, setError }: {
 
   useEffect(() => {
     let live = true;
-    void moduleCall("harnesses").then(result => {
-      if (!live) return;
-      const items = Array.isArray(result.harnesses) ? result.harnesses as AoHarness[] : [];
-      setHarnesses(items.length ? items : [NATIVE_ENTRY]);
-      setHarnessNotice(typeof result.notice === "string" ? result.notice : "");
-    }).catch(cause => { if (live) setHarnessNotice(cause instanceof Error ? cause.message : String(cause)); });
+    // A list that only has Native Codex never replaces a fuller one already shown.
+    const stopHarnesses = watchHarnesses((items, notice) => {
+      setHarnesses(current => items.length > 1 || current.length <= 1 ? items.length ? items : [NATIVE_ENTRY] : current);
+      setHarnessNotice(notice);
+    });
     // Show which codex.exe an empty setting resolves to (the Codex CLI first).
     void moduleCall("codex_executable").then(result => {
       if (live && typeof result.executable === "string") setDetectedExecutable(result.executable);
     }).catch(() => { /* No Codex found: the start reports it with install guidance. */ });
-    return () => { live = false; };
+    return () => { live = false; stopHarnesses(); };
   }, []);
 
   const loadMissions = async (id: string) => {
