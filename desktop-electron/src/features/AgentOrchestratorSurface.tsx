@@ -1300,7 +1300,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const rewindChat = (taskId: string, upTo: number) => void (async () => {
     const messages = chatMessagesFromDescription(await loadDescription(taskId));
     if (!Number.isInteger(upTo) || upTo < 0 || upTo >= messages.length) return;
-    const text = messages.slice(0, upTo + 1).map((message) => message.text).join("\n\n").slice(0, 8192);
+    // Earlier messages keep the steers sent during their turns; the chosen one is just what was typed.
+    const earlier = messages.slice(0, upTo).flatMap((message) => [message.text, ...(message.steers ?? []).map((steer) => steer.text)]);
+    const text = [...earlier, messages[upTo].text].join("\n\n").slice(0, 8192);
     setChatSeed({ key: crypto.randomUUID(), workspaceId, title: `${taskName(taskId)} (rewound)`.slice(0, 240), text });
     setPendingChat(null); setInspectedId(""); setDraftTeam(null); setSheet("");
     setChatTaskId(""); setView("chat");
