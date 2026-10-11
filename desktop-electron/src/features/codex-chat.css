@@ -381,3 +381,47 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-modal-button.is-danger-soft:hover:not(:disabled) { background: color-mix(in srgb, var(--ao-red) 16%, transparent); }
 .cx-modal-button.is-danger { border-color: transparent; background: var(--ao-red); color: #fff; }
 .cx-modal-button.is-danger:hover:not(:disabled) { background: color-mix(in srgb, var(--ao-red) 88%, #000); }
+
+/* Slash commands: argument hints, the usage line, a command's result, the goal and plan mode. */
+.cx-slash button em { color: var(--ao-muted); font-style: normal; font-size: 12px; }
+.cx-slash-usage { margin: 0 0 6px; color: var(--ao-muted); font-size: 12px; }
+.cx-command-card, .cx-composer-modes { width: calc(100% - 48px); max-width: 780px; margin: 0 auto 8px; }
+.cx-command-card { padding: 10px 12px; border: 1px solid var(--ao-line); border-radius: 12px; background: var(--color-bg-primary); box-shadow: 0 6px 18px rgb(16 24 40 / 6%); font-size: 13px; }
+.cx-command-card header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.cx-command-card header strong { font-size: 13px; font-weight: 600; }
+.cx-command-card p { margin: 0; white-space: pre-wrap; color: var(--color-text-primary); }
+.cx-command-card pre { max-height: 320px; margin: 0; padding: 8px; overflow: auto; border-radius: 8px; background: var(--cx-hover); font: 12px/1.45 ui-monospace, "Cascadia Mono", Consolas, monospace; white-space: pre; }
+.cx-command-card dl { display: grid; gap: 3px; margin: 0; }
+.cx-command-card dl > div { display: grid; grid-template-columns: 120px 1fr; gap: 10px; }
+.cx-command-card dt { color: var(--ao-muted); }
+.cx-command-card dd { margin: 0; overflow-wrap: anywhere; }
+.cx-command-card ul { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.cx-command-card ul button { display: flex; justify-content: space-between; gap: 12px; width: 100%; padding: 6px 8px; border: 0; border-radius: 7px; background: transparent; color: var(--color-text-primary); text-align: left; cursor: pointer; }
+.cx-command-card ul button:hover { background: var(--cx-hover); }
+.cx-command-card ul small { color: var(--ao-muted); }
+.cx-composer-modes { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.cx-goal { display: flex; flex: 1 1 auto; align-items: center; gap: 8px; min-width: 0; padding: 5px 6px 5px 10px; border: 1px solid var(--ao-line); border-radius: 10px; background: var(--color-bg-primary); font-size: 12px; }
+.cx-goal-state { flex: 0 0 auto; font-weight: 600; }
+.cx-goal.is-active .cx-goal-state { color: var(--ao-blue); }
+.cx-goal.is-achieved .cx-goal-state { color: var(--ao-green); }
+.cx-goal.is-stalled .cx-goal-state, .cx-goal.is-limited .cx-goal-state { color: var(--ao-amber); }
+.cx-goal-objective { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--color-text-primary); text-overflow: ellipsis; white-space: nowrap; }
+.cx-goal-meta, .cx-goal-note { flex: 0 0 auto; color: var(--ao-muted); }
+.cx-goal-note { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cx-goal button, .cx-plan-chip button { display: inline-flex; align-items: center; padding: 2px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--ao-muted); font-size: 12px; cursor: pointer; }
+.cx-goal button:hover, .cx-plan-chip button:hover { background: var(--cx-hover); color: var(--color-text-primary); }
+.cx-plan-chip { display: inline-flex; align-items: center; gap: 2px; padding: 4px 4px 4px 10px; border-radius: 10px; background: color-mix(in srgb, var(--ao-blue) 10%, transparent); color: var(--ao-blue); font-size: 12px; font-weight: 600; }
+
+/* Codex goal bar: icon actions with tooltips; Edit goal opens an editor above it. */
+.cx-goal { gap: 7px; padding: 4px 4px 4px 10px; }
+.cx-goal > svg { flex: 0 0 auto; color: var(--ao-muted); }
+.cx-goal-state { font-weight: 500; color: var(--color-text-primary); }
+.cx-goal-objective { color: var(--ao-muted); }
+.cx-goal .cx-goal-icon { display: inline-grid; place-items: center; width: 24px; height: 24px; padding: 0; border-radius: 6px; color: var(--ao-muted); }
+.cx-goal .cx-goal-icon:hover { background: var(--cx-hover); color: var(--color-text-primary); }
+.cx-goal-editor textarea { width: 100%; min-height: 84px; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--ao-line); border-radius: 8px; background: var(--color-bg-primary); color: var(--color-text-primary); font: inherit; resize: vertical; }
+.cx-goal-editor footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.cx-goal-editor .cx-text-button, .cx-goal-editor .cx-primary-button { padding: 5px 12px; border: 0; border-radius: 8px; font-size: 12px; cursor: pointer; }
+.cx-goal-editor .cx-text-button { background: transparent; color: var(--ao-muted); }
+.cx-goal-editor .cx-primary-button { background: var(--color-text-primary); color: var(--color-bg-primary); }
+.cx-goal-editor .cx-primary-button:disabled { opacity: .4; cursor: default; }

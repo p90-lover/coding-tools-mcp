@@ -395,20 +395,32 @@ export function chatMarkdown(title: string, turns: ChatTurn[]): string {
 // ---------------------------------------------------------------------------------------------
 // Composer: slash commands and attachments.
 
-export type ChatSlashCommand = { name: string; hint: string; needsChat?: boolean; needsRun?: boolean; needsOpen?: boolean };
+export type ChatSlashCommand = { name: string; hint: string; args?: string; needsChat?: boolean; needsRun?: boolean; needsOpen?: boolean };
 
-/** Every command maps to a real action in the chat; none is a placeholder. */
+/**
+ * Codex's slash commands, in its order, plus the chat's own. Every command maps to a real action
+ * that works the same for a Single model and a team; none is a placeholder.
+ */
 export const CHAT_SLASH_COMMANDS: ChatSlashCommand[] = [
-  { name: "new", hint: "Start a new chat" },
-  { name: "stop", hint: "Stop the running mission", needsRun: true, needsOpen: true },
-  { name: "retry", hint: "Restart the latest mission with the same task", needsRun: true },
+  { name: "goal", hint: "Set a goal to keep pursuing", args: "<objective> | pause | resume | edit | clear" },
+  { name: "plan", hint: "Turn plan mode on or off" },
+  { name: "compact", hint: "Compact this chat's context", needsChat: true },
+  { name: "review", hint: "Review the current changes", args: "[what to focus on]" },
+  { name: "init", hint: "Create an AGENTS.md file with instructions for agents" },
+  { name: "status", hint: "Show chat ID, context usage, cards and goal" },
+  { name: "diff", hint: "Show the project's uncommitted changes" },
+  { name: "mcp", hint: "Show MCP server status" },
   { name: "model", hint: "Choose the model or team" },
-  { name: "structure", hint: "Show or hide the cards panel", needsRun: true },
-  { name: "board", hint: "Open the Mission Board" },
-  { name: "rename", hint: "Rename this chat", needsChat: true },
+  { name: "new", hint: "Start a new chat" },
+  { name: "resume", hint: "Resume a recent chat" },
   { name: "fork", hint: "Start a new chat from this conversation", needsChat: true },
+  { name: "rename", hint: "Rename this chat", needsChat: true },
   { name: "archive", hint: "Archive this chat", needsChat: true },
   { name: "copy", hint: "Copy this conversation as Markdown", needsChat: true },
+  { name: "stop", hint: "Stop the running mission", needsRun: true, needsOpen: true },
+  { name: "retry", hint: "Restart the latest mission with the same task", needsRun: true },
+  { name: "structure", hint: "Show or hide the cards panel", needsRun: true },
+  { name: "board", hint: "Open the Mission Board" },
 ];
 
 /** The commands matching a draft that starts with "/" and has no space yet. */
@@ -418,6 +430,63 @@ export function chatSlashMatches(draft: string, context: { chat: boolean; run: b
   const prefix = match[1].toLowerCase();
   return CHAT_SLASH_COMMANDS.filter((command) => command.name.startsWith(prefix)
     && (!command.needsChat || context.chat) && (!command.needsRun || context.run) && (!command.needsOpen || context.open !== false));
+}
+
+/** A command being typed with its argument ("/goal fix the flaky tests"), to show its usage. */
+export function chatSlashTyping(draft: string): ChatSlashCommand | null {
+  const match = /^\/([a-z]+)\s/i.exec(draft);
+  return CHAT_SLASH_COMMANDS.find((command) => command.args && command.name === match?.[1].toLowerCase()) ?? null;
+}
+
+/** A whole draft that is one known command, with what follows it: "/goal ship it" → goal, "ship it". */
+export function chatSlashParse(draft: string): { name: string; arg: string } | null {
+  const match = /^\/([a-z]+)(?:\s+([\s\S]*))?$/i.exec(draft.trim());
+  const name = match?.[1].toLowerCase();
+  const command = CHAT_SLASH_COMMANDS.find((entry) => entry.name === name);
+  if (!command || (!command.args && match?.[2]?.trim())) return null;
+  return { name: command.name, arg: match?.[2]?.trim() ?? "" };
+}
+
+/** A chat's goal (/goal), as the bridge keeps it. */
+export type ChatGoal = {
+  objective: string; status: "active" | "paused" | "achieved" | "stalled" | "limited";
+  round: number; rounds: number; startedAt: number; updatedAt: number; note?: string;
+};
+/** Codex's goal summary words for each state. */
+export const GOAL_SUMMARY: Record<ChatGoal["status"], string> = {
+  active: "Pursuing goal", paused: "Paused goal", achieved: "Goal achieved", stalled: "Goal stalled", limited: "Goal limited",
+};
+/** What a command shows above the composer: a few facts, a block of text, or a list to pick from. */
+export type ChatCommandCard = {
+  title: string; rows?: [string, string][]; text?: string; mono?: boolean;
+  items?: { label: string; detail?: string; run: () => void }[];
+};
+/** What the page provides so the chat's commands reach real data and actions. */
+export type ChatCommands = {
+  goal?: ChatGoal | null;
+  goalAction: (action: "pause" | "resume" | "clear") => Promise<void>;
+  /** Edit goal: saves a new objective for the rounds still to come. */
+  goalEdit: (objective: string) => Promise<void>;
+  /** Compacts the chat's context; says what happened. */
+  compact: () => Promise<string>;
+  diff: () => Promise<ChatCommandCard>;
+  mcp: () => Promise<ChatCommandCard>;
+  status: () => ChatCommandCard;
+  recent: () => ChatCommandCard;
+  planMode: boolean;
+  setPlanMode: (on: boolean) => void;
+};
+
+/** How long a goal has been going, as Codex shows it: "50s", "4m 50s", "7d 4h 4m 50s". */
+export function goalElapsed(since: number, now = Date.now()): string {
+  let seconds = Math.max(0, Math.floor((now - since) / 1000));
+  const parts: string[] = [];
+  for (const [unit, size] of [["d", 86_400], ["h", 3_600], ["m", 60]] as const) {
+    const count = Math.floor(seconds / size);
+    seconds -= count * size;
+    if (count || parts.length) parts.push(`${count}${unit}`);
+  }
+  return [...parts, `${seconds}s`].join(" ");
 }
 
 /** A whole draft that is exactly one known command ("/stop"), or null. */
