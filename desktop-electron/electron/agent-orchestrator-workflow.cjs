@@ -1775,8 +1775,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const previous = saved.runs.filter(run => run.project_id === task).at(-1);
       const card = previous?.execution_mode === "single" ? previous.nodes?.[0] : null;
       // The session keeps the permission mode, effort and context it was started with, so only an
-      // unchanged route continues it; any change starts a fresh session with the new settings.
-      const sameRoute = card && ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile",
+      // unchanged route continues it; any change starts a fresh session with the new settings. A Team
+      // follow-up has no single route and never continues the single card's session.
+      const sameRoute = executionMode === "single" && singleRoute && card && ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile",
         "approval_policy", "approvals_reviewer", "effort", "context_window"].every(field => (card.route?.[field] ?? null) === (singleRoute[field] ?? null));
       if (executionMode === "single" && card && externalAgent(card) && card.receipt?.thread_id
         && ["finished", "failed"].includes(card.state) && sameRoute) {
