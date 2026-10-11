@@ -193,6 +193,7 @@ test("upstream spawn preserves context on Chat/TUI fallback without adding nativ
     sessionId: id => id,
     utf8Prefix: text => text,
     TUI_RESULT_INSTRUCTION: "Write fixture result",
+    TRANSIENT_CHAT_START: /persistent (ACP )?host|timed out|timeout|deadline exceeded|context canceled/i, CHAT_RETRY_PAUSE_MS: 0, setTimeout,
     internalApi: async (verb, endpoint, body) => {
       if (verb === "GET") return { chatHarnesses: ["codex"] };
       bodies.push(body);
@@ -265,4 +266,38 @@ test("the CPA catalog's provider for each model reaches the model capabilities",
   assert.equal(capabilities["gemini-3.8-flash-high"].provider, "antigravity");
   assert.equal(capabilities["gpt-5.5"].provider, "codex");
   assert.equal(capabilities["plain-model"]?.provider, undefined);
+});
+
+test("a chat host that was only slow to start is retried as chat, not turned into a terminal session", async () => {
+  const file = path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs");
+  const source = fs.readFileSync(file, "utf8");
+  const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  let method;
+  const visit = node => { if (ts.isMethodDeclaration(node) && node.name.getText(ast) === "spawn") method = node; ts.forEachChild(node, visit); };
+  visit(ast);
+  const transient = source.match(/const TRANSIENT_CHAT_START = (\/.*\/i);/)[1];
+  const run = async (failures) => {
+    const modes = [];
+    const spawn = vm.runInNewContext("({" + method.getText(ast) + "}).spawn", {
+      Buffer, projectFor: async () => "project", agentId: id => id, sessionId: id => id, utf8Prefix: text => text,
+      TUI_RESULT_INSTRUCTION: "Write fixture result", TRANSIENT_CHAT_START: vm.runInNewContext(transient), CHAT_RETRY_PAUSE_MS: 0, setTimeout,
+      internalApi: async (verb, _endpoint, body) => {
+        if (verb === "GET") return { chatHarnesses: ["claude-code"] };
+        modes.push(body.mode);
+        const failure = failures.shift();
+        if (failure) throw Error(failure);
+        return { session: { id: "session-" + modes.length } };
+      },
+    });
+    const outcome = await spawn({ workspaceId: "ws", agent: "claude-code", model: "cpa/m", prompt: "task" }).catch(error => "error: " + error.message);
+    return { modes, outcome };
+  };
+  const slow = await run(["persistent ACP host: startup timed out (CHAT_DRIVER_UNAVAILABLE)"]);
+  assert.deepEqual(slow.modes, ["chat", "chat"], "a slow start is retried as chat");
+  assert.equal(slow.outcome, "session-2");
+  const stillSlow = await run(["persistent ACP host: startup timed out (CHAT_DRIVER_UNAVAILABLE)", "persistent ACP host: startup timed out (CHAT_DRIVER_UNAVAILABLE)"]);
+  assert.deepEqual(stillSlow.modes, ["chat", "chat"], "never silently becomes a terminal session");
+  assert.match(stillSlow.outcome, /^error: .*persistent ACP host/, "the card is held with the real reason");
+  const missing = await run(["AO ACP runtime is not installed (CHAT_DRIVER_UNAVAILABLE)"]);
+  assert.deepEqual(missing.modes, ["chat", "tui"], "without a chat runtime the agent still runs in its terminal");
 });
