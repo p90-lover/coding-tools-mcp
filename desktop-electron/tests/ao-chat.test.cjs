@@ -193,7 +193,7 @@ test("a new chat's prompt is Codex's \"Do anything\" in either mode; follow-up a
   assert.equal(placeholder({ composer: { mode: "team" } }), "Do anything");
   assert.equal(placeholder({ composer: { mode: "single" }, selectedTaskId: "task" }), "Send a follow-up…");
   assert.equal(placeholder({ composer: { mode: "single" }, selectedTaskId: "task", working: true,
-    runs: [run("active", "task", [node("worker", "worker", "running")])] }), "Running — you can send a follow-up when it finishes");
+    runs: [run("active", "task", [node("worker", "worker", "running")])] }), "Running — a message now is sent when it finishes");
 });
 
 test("mission drafts retain actual role routes and instructions rather than another task's newer global template",()=>{

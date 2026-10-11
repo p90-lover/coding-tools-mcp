@@ -309,8 +309,12 @@ export function AgentOrchestratorChat({
   // Only an AO agent can be steered: a single chat's card, or a team's orchestrator (see chat_steer).
   const steerable = Boolean(latest?.nodes.some((node) => node.state === "running" && node.route?.harness_id?.startsWith("ao:")
     && (latest.execution_mode === "single" || node.role === "planner")));
-  const steering = !accepts && working && steerOn && steerable && Boolean(steer && selectedTaskId);
-  const canSend = !busy && !sending && Boolean(draft.trim() || attachments.length) && (accepts || steering);
+  // A running AO card is steerable whether or not this page is driving its run: after an app restart
+  // the run goes on without the page's loop, and the user must still be able to reach the agent.
+  const steering = !accepts && steerOn && steerable && Boolean(steer && selectedTaskId);
+  // Otherwise a message typed while the chat runs waits and is sent when the turn finishes, as in Codex.
+  const queueing = !accepts && !steering && runOpen && Boolean(selectedTaskId);
+  const canSend = !busy && !sending && Boolean(draft.trim() || attachments.length) && (accepts || steering || queueing);
   const slash = chatSlashMatches(draft, { chat: Boolean(selectedTaskId), run: Boolean(latest), open: runOpen });
 
   // What a command shows above the composer (its result, or why it couldn't run).
@@ -349,7 +353,15 @@ export function AgentOrchestratorChat({
     if (command) { await runCommand(command.name, command.arg); return; }
     if (!canSend) return;
     const message = chatMessageWithAttachments(draft, attachments);
-    await deliver(commands?.planMode ? planMessage(message) : message);
+    const text = commands?.planMode ? planMessage(message) : message;
+    if (queueing) {
+      // Several messages typed during one turn go together, in order.
+      setQueued((current) => current && !current.goal ? { ...current, message: `${current.message}\n\n${text}` } : { what: "Message", message: text });
+      setDraft(""); setAttachments([]); setAttachNote("");
+      say("Queued", `It's sent when the current turn finishes.${latest && runOpen && stop ? " Send /stop to end the turn now." : ""}`);
+      return;
+    }
+    await deliver(text);
   };
 
   // A command's message waiting for the working turn to end (Codex queues the same way).
@@ -709,7 +721,7 @@ export function AgentOrchestratorChat({
             {attachNote ? <span className="cx-attach-note" role="status">{attachNote}</span> : null}
           </div> : null}
           <textarea ref={input} aria-label="Message" maxLength={8192} rows={1} value={draft}
-            placeholder={steering ? "Steer the agent — sent to it right away" : !accepts ? "Running — you can send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : "Do anything"}
+            placeholder={steering ? "Steer the agent — sent to it right away" : queueing ? "Running — a message now is sent when it finishes" : !accepts ? "Running — you can send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : "Do anything"}
             onChange={(event) => { setDraft(event.target.value); setSlashIndex(0); }}
             onPaste={(event) => { if (event.clipboardData.files.length) { event.preventDefault(); void addFiles(event.clipboardData.files); } }}
             onKeyDown={(event) => {
@@ -735,9 +747,10 @@ export function AgentOrchestratorChat({
             <span className="cx-head-spacer" />
             <button type="button" className="cx-icon-button cx-mic" aria-label="Voice input" title="Voice input isn't available yet" disabled>
               <ChatGlyph name="mic" size={16} /></button>
-            {latest && runOpen && stop && !accepts && !(steering && canSend)
+            {latest && runOpen && stop && !accepts && !((steering || queueing) && canSend)
               ? <button className="cx-send is-stop" type="button" aria-label="Stop (Esc)" title="Stop (Esc)" onClick={() => stop(latest.id)}><span aria-hidden="true" /></button>
-              : <button className="cx-send" type="submit" aria-label={sending ? "Starting…" : steering ? "Steer the agent" : "Send message"} title={steering ? "Steer — sent to the working agent now (Enter)" : "Send (Enter)"} disabled={!canSend}>
+              : <button className="cx-send" type="submit" aria-label={sending ? "Starting…" : steering ? "Steer the agent" : queueing ? "Queue message" : "Send message"}
+                title={steering ? "Steer — sent to the working agent now (Enter)" : queueing ? "Queue — sent when the current turn finishes (Enter)" : "Send (Enter)"} disabled={!canSend}>
                   <Icon name="forward" width="18" height="18" /></button>}
           </div>
         </form>
