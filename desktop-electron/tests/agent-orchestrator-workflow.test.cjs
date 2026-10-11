@@ -2264,3 +2264,178 @@ test("a start blocked on the browser returns its reason instead of a generic tra
   assert.match((await workflow.call("start_run", input)).reason, /Sign in to ChatGPT/);
   await assert.rejects(workflow.call("start_run", { ...input, proxyApiKey: "x" }), /refused/, "other start errors still throw");
 });
+
+// ---- Codex slash commands: /goal, /compact, /diff ----
+
+const { goalVerdict, closingAnswers, createGoalStore, goalPrompt } = require("../electron/chat-goals.cjs");
+
+test("a goal reads the closing cards' verdicts: a team's reviewer, a Single card, or a solo orchestrator", () => {
+  assert.equal(goalVerdict(["Done.\nGOAL: ACHIEVED — all tests pass"]), "achieved");
+  assert.equal(goalVerdict(["**GOAL: CONTINUE** — two tests still fail"]), "continue");
+  assert.equal(goalVerdict(["no verdict at all"]), null);
+  assert.equal(goalVerdict(["GOAL: CONTINUE — x", "GOAL: ACHIEVED"]), "achieved", "any closing card that saw it achieved wins");
+  const team = { nodes: [
+    { id: "lead", role: "planner", parents: [], receipt: { answer: "plan" } },
+    { id: "w", role: "worker", parents: ["lead"], receipt: { answer: "GOAL: ACHIEVED (a worker can't close it)" } },
+    { id: "rev", role: "reviewer", parents: ["w"], receipt: { answer: "APPROVED\nGOAL: CONTINUE — docs" } },
+    { id: "retry", role: "retry", parents: ["lead"], receipt: { answer: "GOAL: ACHIEVED" } },
+  ] };
+  assert.deepEqual(closingAnswers(team), ["APPROVED\nGOAL: CONTINUE — docs"], "only the reviewer closes a team; workers and the retry sidecar don't");
+  assert.equal(goalVerdict(closingAnswers({ ...team, solo: true })), "continue");
+  assert.deepEqual(closingAnswers({ nodes: [{ id: "one", role: "planner", parents: [], receipt: { answer: "GOAL: ACHIEVED" } }] }), ["GOAL: ACHIEVED"]);
+  assert.match(goalPrompt("ship it", 2, 6), /^Continue pursuing the goal \(round 2 of 6\)[\s\S]*Goal: ship it[\s\S]*GOAL: ACHIEVED[\s\S]*GOAL: CONTINUE/);
+});
+
+test("goals are kept per chat in a file and survive a restart", () => {
+  const file = path.join(require("node:os").tmpdir(), `ct-goals-${crypto.randomUUID()}.json`);
+  try {
+    const store = createGoalStore({ file, now: () => 1000 });
+    store.set("ws-1", "task-1", "  make the build green  ");
+    store.update("ws-1", "task-1", { round: 2 });
+    const again = createGoalStore({ file });
+    assert.equal(again.get("ws-1", "task-1").objective, "make the build green");
+    assert.equal(again.get("ws-1", "task-1").round, 2);
+    assert.deepEqual(Object.keys(again.forWorkspace("ws-1")), ["task-1"]);
+    assert.deepEqual(again.forWorkspace("ws-2"), {});
+    assert.throws(() => again.set("ws-1", "task-2", "   "), /Describe your goal/);
+    assert.equal(again.clear("ws-1", "task-1"), true);
+    assert.equal(createGoalStore({ file }).get("ws-1", "task-1"), null);
+  } finally { fs.rmSync(file, { force: true }); }
+});
+
+test("/goal starts the chat's first round with the goal and keeps it for the chat", async () => {
+  const world = chatWorld();
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/codex.exe",
+    resolveHarness: async () => { throw new Error("stop before the background loop"); } });
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
+  const sent = await workflow.call("chat_send", { workspaceId: "ws-1", message: "make every test pass", goal: "make every test pass", executionMode: "single", singleRoute: route });
+  assert.equal(sent.taskId, "task-1");
+  assert.equal(world.tasks[0].title, "make every test pass", "the chat is named after the goal, not the round's instructions");
+  assert.match(world.tasks[0].description, /^Goal \(round 1 of 6\):\nGoal: make every test pass[\s\S]*GOAL: ACHIEVED/);
+  const { goals } = await workflow.call("runs", { workspaceId: "ws-1" });
+  assert.equal(goals["task-1"].objective, "make every test pass");
+  assert.equal(goals["task-1"].status, "active");
+  assert.equal(goals["task-1"].round, 1);
+  await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", message: "x", goal: "   " }), /Describe your goal/);
+});
+
+/** A chat whose goal was set with its first round; tests push settled runs and call goalAfterRun. */
+async function goalChat() {
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Green build", description: "x", state: "in_progress", clauses: [] }], runs: [] });
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/codex.exe",
+    resolveHarness: async () => { throw new Error("stop before the background loop"); } });
+  await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "build green", goal: "build green" });
+  return { world, workflow };
+}
+const goalOf = async (workflow) => (await workflow.call("runs", { workspaceId: "ws-1" })).goals["task-1"];
+
+test("after a round without the goal achieved, the chat runs the next round with the same Single model", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default", effort: "max" };
+  const { world, workflow } = await goalChat();
+  world.runs.push({ id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { answer: "Fixed 3 of 5.\nGOAL: CONTINUE — 2 tests fail" } }] });
+  const updatesBefore = world.updates.length;
+  await workflow.goalAfterRun("ws-1", "r1", "finished", null);
+  const next = world.updates.slice(updatesBefore);
+  assert.equal(next.length, 1, "one new round");
+  assert.equal(next[0].execution_mode, "single");
+  assert.deepEqual(next[0].single_route, route, "the same Single model, effort and permissions");
+  assert.match(world.edits.at(-1).description, /Continue pursuing the goal \(round 2 of 6\)/);
+  const goal = await goalOf(workflow);
+  assert.equal(goal.status, "active");
+  assert.equal(goal.round, 2);
+  // The same settled run is not evaluated twice.
+  await workflow.goalAfterRun("ws-1", "r1", "finished", null);
+  assert.equal(world.updates.length, updatesBefore + 1);
+});
+
+test("a team's goal round continues on the chat's team; an achieved, failed, stopped or spent goal stops", async () => {
+  const teamRun = (id, answer) => ({ id, workspace_id: "ws-1", project_id: "task-1", cancelled: false, team: { id: "team-1", revision: 7 }, nodes: [
+    { id: "lead", role: "planner", parents: [], state: "finished", receipt: { answer: "plan" } },
+    { id: "rev", role: "reviewer", parents: ["lead"], state: "finished", receipt: { answer } }] });
+  let { world, workflow } = await goalChat();
+  world.runs.push(teamRun("t1", "APPROVED\nGOAL: CONTINUE — docs"));
+  const before = world.updates.length;
+  await workflow.goalAfterRun("ws-1", "t1", "finished", null);
+  assert.equal(world.updates.length, before + 1);
+  assert.equal(world.updates.at(-1).operation, "create_from_team");
+  assert.equal(world.updates.at(-1).team_id, "team-1", "the next round keeps the chat's team");
+
+  ({ world, workflow } = await goalChat());
+  world.runs.push(teamRun("t2", "APPROVED\nGOAL: ACHIEVED"));
+  await workflow.goalAfterRun("ws-1", "t2", "finished", null);
+  assert.equal((await goalOf(workflow)).status, "achieved");
+
+  for (const [status, attention, expected] of [["failed", "error", "stalled"], ["held", null, "stalled"], ["held", "stopped", "paused"]]) {
+    ({ world, workflow } = await goalChat());
+    world.runs.push(teamRun("t3", "anything"));
+    const count = world.updates.length;
+    await workflow.goalAfterRun("ws-1", "t3", status, attention);
+    assert.equal((await goalOf(workflow)).status, expected, `${status}/${attention}`);
+    assert.equal(world.updates.length, count, "no new round");
+  }
+
+  ({ world, workflow } = await goalChat());
+  // Spend every round: the goal stops as limited, and /goal resume allows more.
+  for (let round = 0; round < 10 && (await goalOf(workflow)).status === "active"; round++) {
+    world.runs.push(teamRun(`t4-${round}`, "GOAL: CONTINUE"));
+    await workflow.goalAfterRun("ws-1", `t4-${round}`, "finished", null);
+  }
+  let goal = await goalOf(workflow);
+  assert.equal(goal.status, "limited");
+  assert.equal(goal.round, 6);
+  const resumed = await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" });
+  assert.equal(resumed.goal.status, "active");
+  assert.equal(resumed.goal.rounds, 12, "resuming a spent goal allows as many rounds again");
+  assert.equal(resumed.goal.round, 7, "and starts the next round right away");
+  await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "edit", objective: "build green on CI" });
+  assert.equal((await goalOf(workflow)).objective, "build green on CI");
+  assert.equal((await goalOf(workflow)).round, 7, "editing starts no round");
+  await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" });
+  goal = await goalOf(workflow);
+  assert.equal(goal.status, "paused");
+  world.runs.push(teamRun("t5", "GOAL: CONTINUE"));
+  const paused = world.updates.length;
+  await workflow.goalAfterRun("ws-1", "t5", "finished", null);
+  assert.equal(world.updates.length, paused, "a paused goal starts no round");
+  assert.equal((await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "clear" })).cleared, true);
+  assert.equal(await goalOf(workflow), undefined);
+  await assert.rejects(workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" }), /No goal is currently set/);
+});
+
+test("/compact replaces a long chat's context with Codex's handoff summary; /diff reads the git tool", async () => {
+  const long = "Fix the login flow.\n\n" + "Follow-up: more detail. ".repeat(120);
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Login", description: long, state: "in_progress", clauses: [] }], runs: [] });
+  const requests = [];
+  const fetchImpl = async (url, options = {}) => {
+    requests.push({ url: String(url), body: options.body ? JSON.parse(options.body) : null });
+    if (String(url).includes("/v1/models")) return { ok: true, json: async () => ({ data: [{ id: "gpt-5.5" }] }) };
+    return { ok: true, json: async () => ({ choices: [{ message: { content: "Progress: login fixed. Next: add tests." } }] }) };
+  };
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, fetchImpl, findCodexExecutable: () => "C:/codex.exe",
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k".repeat(40) }) });
+  const compacted = await workflow.call("compact_chat", { workspaceId: "ws-1", taskId: "task-1" });
+  assert.equal(compacted.compacted, true);
+  assert.ok(compacted.after < compacted.before);
+  assert.match(world.tasks[0].description, /^Summary of the earlier conversation \(compacted [0-9-]+ [0-9:]+ UTC\):\nProgress: login fixed\. Next: add tests\.$/);
+  const completion = requests.find(entry => entry.url.endsWith("/v1/chat/completions"));
+  assert.match(completion.body.messages[0].content, /^You are performing a CONTEXT CHECKPOINT COMPACTION/);
+  assert.equal(completion.body.messages[1].content, long);
+  // A short chat has nothing to compact.
+  assert.equal((await workflow.call("compact_chat", { workspaceId: "ws-1", taskId: "task-1" })).compacted, false);
+  // A working chat refuses, as Codex does.
+  world.runs.push({ id: "busy", workspace_id: "ws-1", project_id: "task-1", cancelled: false, nodes: [{ id: "a", state: "running" }] });
+  await assert.rejects(workflow.call("compact_chat", { workspaceId: "ws-1", taskId: "task-1" }), /disabled while a chat is in progress/);
+
+  const diffWorld = async (endpoint, body) => {
+    if (endpoint === "/api/v1/tools/call" && body.tool === "git_diff") {
+      assert.deepEqual({ ...body.arguments }, { staged: true, unstaged: true, max_bytes: 120000 });
+      return { operation: { state: "completed", result: { ok: true, diff: "diff --git a/x b/x\n+y\n", files: ["x"], truncated: false, warnings: [] } } };
+    }
+    return world.requestHeadless(endpoint, body);
+  };
+  const differ = createAgentOrchestratorWorkflow({ requestHeadless: diffWorld, findCodexExecutable: () => "C:/codex.exe" });
+  const diff = await differ.call("chat_diff", { workspaceId: "ws-1" });
+  assert.equal(diff.diff, "diff --git a/x b/x\n+y\n");
+  assert.deepEqual([...diff.files], ["x"]);
+});

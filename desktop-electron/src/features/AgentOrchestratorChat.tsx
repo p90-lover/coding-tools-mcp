@@ -4,11 +4,12 @@ import { AgentOrchestratorComposerControls, type ComposerControlsProps } from ".
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { ChatMarkdown } from "./ChatMarkdown";
+import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
-  CHAT_DEFAULT_TITLE, chatAcceptsMessage, chatDuration, chatList, chatMessageWithAttachments, chatRunOpen, chatSlashCommand,
-  chatSlashMatches, chatTurns,
-  type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
+  CHAT_DEFAULT_TITLE, GOAL_SUMMARY, chatAcceptsMessage, chatDuration, chatList, chatMessageWithAttachments, chatRunOpen,
+  chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
+  type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -106,12 +107,25 @@ function MessageActions({ text, children }: { text: string; children?: ReactNode
   </div>;
 }
 
+/** The goal bar's glyphs (Lucide outlines, as Codex draws them). */
+function GoalGlyph({ name }: { name: "target" | "trash" | "play" | "pause" | "expand" }) {
+  return <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    {name === "target" ? <><circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="5" /><circle cx="12" cy="12" r="1" /></>
+      : name === "trash" ? <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+      : name === "play" ? <><circle cx="12" cy="12" r="9" /><path d="m10 8.5 5 3.5-5 3.5Z" /></>
+      : name === "pause" ? <><circle cx="12" cy="12" r="9" /><path d="M10 9v6M14 9v6" /></>
+      : <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />}
+  </svg>;
+}
+
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, working = false, describeNode, activity, permissions, composer, onOpenTeam, onOpenMissionBoard,
   projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject, projectBranch: branch,
-  pendingMessage, pendingTitle, pendingCreation = false,
+  pendingMessage, pendingTitle, pendingCreation = false, commands,
 }: {
+  /** Codex slash commands that need the page: goal, compact, diff, MCP, status, recent chats, plan mode. */
+  commands?: ChatCommands;
   /** A message being sent into a chat that has no run yet (shown at once, as Codex does). */
   pendingMessage?: string; pendingTitle?: string; pendingCreation?: boolean;
   /** How each card runs (harness · model · effort · context · role), shown on its messages. */
@@ -126,7 +140,8 @@ export function AgentOrchestratorChat({
   /** The chat's latest run is being driven right now (not just left pending). */
   working?: boolean;
   loadDescription: (taskId: string) => Promise<string>;
-  send: (input: { taskId?: string; title?: string; message: string }) => Promise<void>;
+  /** `goal` starts (or replaces) the chat’s goal with this objective; the message is its first round. */
+  send: (input: { taskId?: string; title?: string; message: string; goal?: string }) => Promise<void>;
   openStructure: (runId: string) => void;
   approvals: ChatApproval[];
   approve: (approval: ChatApproval, reply: ApprovalReply) => void;
@@ -283,32 +298,136 @@ export function AgentOrchestratorChat({
   const canSend = !busy && !sending && Boolean(draft.trim() || attachments.length) && accepts;
   const slash = chatSlashMatches(draft, { chat: Boolean(selectedTaskId), run: Boolean(latest), open: runOpen });
 
-  const submit = async () => {
-    if (!canSend) return;
-    const message = chatMessageWithAttachments(draft, attachments);
+  // What a command shows above the composer (its result, or why it couldn't run).
+  const [card, setCard] = useState<ChatCommandCard | null>(null);
+  // Edit goal: the objective being edited, or null.
+  const [goalEditing, setGoalEditing] = useState<string | null>(null);
+  // A goal being pursued shows how long it has run, to the second, as Codex does.
+  const [, setTick] = useState(0);
+  const pursuing = commands?.goal?.status === "active";
+  useEffect(() => {
+    if (!pursuing) return;
+    const timer = window.setInterval(() => setTick((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [pursuing]);
+  const say = (title: string, text: string) => setCard({ title, text });
+
+  /** Sends a message the way the composer does: into this chat, or as a new chat. */
+  const deliver = async (message: string, goal?: string) => {
     setSending(true);
     try {
-      await send(selectedTaskId ? { taskId: selectedTaskId, message } : { title: title.trim() || undefined, message });
+      await send(selectedTaskId ? { taskId: selectedTaskId, message, ...(goal ? { goal } : {}) }
+        : { title: title.trim() || undefined, message, ...(goal ? { goal } : {}) });
       setDraft(""); setTitle(""); setAttachments([]); setAttachNote(""); setAtBottom(true);
+      return true;
     } catch {
       // The surface already shows the error; keep the message so it can be sent again.
+      return false;
     } finally { setSending(false); }
   };
 
-  const runCommand = (name: string) => {
-    setDraft(""); setSlashIndex(0);
-    switch (name) {
-      case "new": thread?.newChat(); break;
-      case "stop": if (latest && runOpen) stop?.(latest.id); break;
-      case "retry": if (latest) restart?.(latest.id); break;
-      case "model": document.querySelector<HTMLButtonElement>(".cx-composer .ao-composer-chip")?.click(); break;
-      case "structure": setShowStructure((value) => !value); break;
-      case "board": onOpenMissionBoard?.(); break;
-      case "rename": if (chat) setRenaming(chat.title); break;
-      case "fork": thread?.fork(); break;
-      case "archive": thread?.archive(); break;
-      case "copy": thread?.copyConversation(); break;
+  const submit = async () => {
+    // A whole draft that is a command runs it, even while the chat is working (/status, /goal pause).
+    const command = attachments.length ? null : chatSlashParse(draft);
+    if (command) { await runCommand(command.name, command.arg); return; }
+    if (!canSend) return;
+    const message = chatMessageWithAttachments(draft, attachments);
+    await deliver(commands?.planMode ? planMessage(message) : message);
+  };
+
+  /** A command that sends a message needs the chat to be free, like any message. */
+  const sendable = (what: string) => {
+    if (!accepts) { say(what, "This chat is still working. Wait for it to finish, or stop it first."); return false; }
+    if (busy || sending) { say(what, "Another action is still running; try again in a moment."); return false; }
+    return true;
+  };
+
+  const runCommand = async (name: string, arg = "") => {
+    setSlashIndex(0);
+    const keep = name === "goal" && arg === "edit";
+    if (!keep) setDraft("");
+    try {
+      switch (name) {
+        case "goal": {
+          const goal = commands?.goal;
+          const action = arg.toLowerCase();
+          if (!arg) {
+            setCard(goal ? { title: GOAL_SUMMARY[goal.status], rows: [["Goal", goal.objective], ["Round", `${goal.round} of ${goal.rounds}`],
+              ["Running for", goalElapsed(goal.startedAt)], ...(goal.note ? [["Note", goal.note] as [string, string]] : [])] }
+              : { title: "Goal", text: "No goal is currently set.\nUsage: /goal <objective> | pause | resume | edit | clear\nExample: /goal make every test in this project pass" });
+            break;
+          }
+          if (["pause", "resume", "clear"].includes(action)) {
+            if (!commands) break;
+            if (!goal) { say("Goal", "No goal is currently set."); break; }
+            await commands.goalAction(action as "pause" | "resume" | "clear");
+            say("Goal", action === "clear" ? "Goal cleared." : action === "pause" ? "Goal paused; the current round finishes, then it waits." : "Goal resumed.");
+            break;
+          }
+          if (action === "edit") {
+            setDraft("");
+            if (!goal) say("Goal", "No goal is currently set."); else { setCard(null); setGoalEditing(goal.objective); }
+            break;
+          }
+          if (goal && ["active", "paused"].includes(goal.status)
+            && !window.confirm("Replace current goal?\n\nThis keeps the chat but replaces the saved goal with this one.")) { setDraft(`/goal ${arg}`); break; }
+          if (!sendable("Goal")) { setDraft(`/goal ${arg}`); break; }
+          if (!await deliver(arg, arg)) setDraft(`/goal ${arg}`);
+          else setCard(null);
+          break;
+        }
+        case "plan":
+          commands?.setPlanMode(!commands.planMode);
+          say("Plan mode", commands?.planMode ? "Plan mode is off." : "Plan mode is on: messages ask for a plan and no changes, until you turn it off with /plan.");
+          break;
+        case "compact":
+          if (!commands || !selectedTaskId) break;
+          if (!accepts) { say("Compact", "Compact is disabled while a chat is in progress."); break; }
+          say("Compact", "Compacting this chat's context…");
+          say("Compact", await commands.compact());
+          break;
+        case "review":
+          if (sendable("Review")) await deliver(reviewPrompt(arg));
+          break;
+        case "init":
+          if (sendable("Init")) await deliver(INIT_PROMPT);
+          break;
+        case "status": if (commands) setCard(commands.status()); break;
+        case "diff":
+          if (!commands) break;
+          say("Changes", "Reading the project's changes…");
+          setCard(await commands.diff());
+          break;
+        case "mcp":
+          if (!commands) break;
+          setCard(await commands.mcp());
+          break;
+        case "resume": if (commands) setCard(commands.recent()); break;
+        case "new": thread?.newChat(); break;
+        case "stop": if (latest && runOpen) stop?.(latest.id); break;
+        case "retry": if (latest) restart?.(latest.id); break;
+        case "model":
+          (document.querySelector<HTMLButtonElement>('.cx-composer [aria-label="Choose model"]')
+            ?? document.querySelector<HTMLButtonElement>('.cx-composer [aria-label="Choose saved team"]'))?.click();
+          break;
+        case "structure": setShowStructure((value) => !value); break;
+        case "board": onOpenMissionBoard?.(); break;
+        case "rename": if (chat) setRenaming(chat.title); break;
+        case "fork": thread?.fork(); break;
+        case "archive": thread?.archive(); break;
+        case "copy": thread?.copyConversation(); say("Copy", "Conversation copied as Markdown."); break;
+      }
+    } catch (cause) {
+      say(`/${name}`, cause instanceof Error ? cause.message : String(cause));
     }
+  };
+  const typing = chatSlashTyping(draft);
+  // Picking a command that takes an argument fills it in to type the rest, as Codex does.
+  const pick = (name: string) => {
+    const command = slash.find((entry) => entry.name === name);
+    // A fully typed command ("/review") runs; picking a partly typed one fills it in to add the argument.
+    if (command?.args && draft.trim().toLowerCase() !== `/${name}`) { setDraft(`/${name} `); setSlashIndex(0); window.setTimeout(() => input.current?.focus(), 0); return; }
+    void runCommand(name);
   };
 
   const addFiles = async (files: FileList | File[]) => {
@@ -475,15 +594,51 @@ export function AgentOrchestratorChat({
           <button type="button" className="cx-picker-action" disabled title="Chats run in a project's folder, so a project is required">
             <span aria-hidden="true">✕</span>Don't work in a project</button>
         </FloatingLayer> : null}
+        {card ? <section className="cx-command-card" role="status" aria-label={card.title}>
+          <header><strong>{card.title}</strong>
+            <button type="button" className="cx-icon-button" aria-label="Close" onClick={() => setCard(null)}><Icon name="close" width="12" height="12" /></button></header>
+          {card.rows?.length ? <dl>{card.rows.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl> : null}
+          {card.text ? card.mono ? <pre>{card.text}</pre> : <p>{card.text}</p> : null}
+          {card.items?.length ? <ul>{card.items.map((item, index) => <li key={`${item.label}:${index}`}>
+            <button type="button" onClick={() => { setCard(null); item.run(); }}><span>{item.label}</span>{item.detail ? <small>{item.detail}</small> : null}</button></li>)}</ul> : null}
+        </section> : null}
+        {goalEditing !== null && commands?.goal ? <section className="cx-command-card cx-goal-editor" aria-label="Edit goal">
+          <header><strong>Edit goal</strong>
+            <button type="button" className="cx-icon-button" aria-label="Cancel" onClick={() => setGoalEditing(null)}><Icon name="close" width="12" height="12" /></button></header>
+          <textarea aria-label="Goal" rows={4} maxLength={2000} value={goalEditing} placeholder="Describe your goal, define measurable outcomes for best results"
+            onChange={(event) => setGoalEditing(event.target.value)} />
+          <footer><button type="button" className="cx-text-button" onClick={() => setGoalEditing(null)}>Cancel</button>
+            <button type="button" className="cx-primary-button" disabled={!goalEditing.trim() || goalEditing.trim() === commands.goal.objective}
+              onClick={() => void commands.goalEdit(goalEditing.trim()).then(() => setGoalEditing(null), (cause) => say("Edit goal", cause instanceof Error ? cause.message : String(cause)))}>Save</button></footer>
+        </section> : null}
+        {commands?.goal || commands?.planMode ? <div className="cx-composer-modes">
+          {/* Codex's goal bar: state, objective, how long it has run, then Clear / Resume or Pause / Edit. */}
+          {commands?.goal ? <div className={`cx-goal is-${commands.goal.status}`} role="status">
+            <GoalGlyph name="target" />
+            <span className="cx-goal-state" title={commands.goal.note || `Round ${commands.goal.round} of ${commands.goal.rounds}`}>{GOAL_SUMMARY[commands.goal.status]}</span>
+            <span className="cx-goal-objective" title={commands.goal.objective}>{commands.goal.objective}</span>
+            {commands.goal.note ? <span className="cx-goal-note" title={commands.goal.note}>{commands.goal.note}</span> : null}
+            <span className="cx-goal-meta" title={`Round ${commands.goal.round} of ${commands.goal.rounds}`}>
+              {goalElapsed(commands.goal.startedAt, commands.goal.status === "active" ? Date.now() : commands.goal.updatedAt)}</span>
+            <button type="button" className="cx-goal-icon" title="Clear goal" aria-label="Clear goal" onClick={() => void runCommand("goal", "clear")}><GoalGlyph name="trash" /></button>
+            {commands.goal.status === "active"
+              ? <button type="button" className="cx-goal-icon" title="Pause goal" aria-label="Pause goal" onClick={() => void runCommand("goal", "pause")}><GoalGlyph name="pause" /></button>
+              : commands.goal.status !== "achieved" ? <button type="button" className="cx-goal-icon" title="Resume goal" aria-label="Resume goal" onClick={() => void runCommand("goal", "resume")}><GoalGlyph name="play" /></button> : null}
+            <button type="button" className="cx-goal-icon" title="Edit goal" aria-label="Edit goal" onClick={() => void runCommand("goal", "edit")}><GoalGlyph name="expand" /></button>
+          </div> : null}
+          {commands?.planMode ? <span className="cx-plan-chip" role="status">Plan mode
+            <button type="button" aria-label="Turn plan mode off" title="Turn plan mode off" onClick={() => commands.setPlanMode(false)}><Icon name="close" width="11" height="11" /></button></span> : null}
+        </div> : null}
         <form className="cx-composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}
           onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
           onDrop={(event) => { if (event.dataTransfer.files.length) { event.preventDefault(); void addFiles(event.dataTransfer.files); } }}>
           {slash.length ? <ul className="cx-slash" role="listbox" aria-label="Commands">
             {slash.map((command, index) => <li key={command.name} role="option" aria-selected={index === slashIndex % slash.length}>
-              <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => runCommand(command.name)}>
-                <span>/{command.name}</span><small>{command.hint}</small></button>
+              <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => pick(command.name)}>
+                <span>/{command.name}{command.args ? <em> {command.args}</em> : null}</span><small>{command.hint}</small></button>
             </li>)}
           </ul> : null}
+          {typing && !slash.length ? <p className="cx-slash-usage" role="status">/{typing.name} {typing.args} — {typing.hint}. Press Enter to run it.</p> : null}
           {attachments.length || attachNote ? <div className="cx-attachments">
             {attachments.map((item, index) => <span key={`${item.name}:${index}`} className="cx-attachment" title={item.path || `${item.name} (inline)`}>
               {item.image ? "🖼" : "📄"} {item.name}
@@ -500,12 +655,11 @@ export function AgentOrchestratorChat({
                 event.preventDefault(); setSlashIndex((value) => (value + (event.key === "ArrowDown" ? 1 : slash.length - 1)) % slash.length); return;
               }
               if (slash.length && (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey))) {
-                event.preventDefault(); runCommand(slash[slashIndex % slash.length].name); return;
+                event.preventDefault(); pick(slash[slashIndex % slash.length].name); return;
               }
               if (event.key === "Enter" && !event.shiftKey) {
                 event.preventDefault();
-                const command = chatSlashCommand(draft);
-                if (command) runCommand(command); else void submit();
+                void submit();
                 return;
               }
               // Esc interrupts the running mission, as in Codex.

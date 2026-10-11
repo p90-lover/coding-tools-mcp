@@ -46,6 +46,9 @@ const SPECS = Object.freeze({
   approve_harness: { readOnly: false, description: "Respond to one visible native consent request with its typed decision and exact thread/turn scope after local confirmation; legacy Allow/Deny remains supported." },
   next: { readOnly: true, description: "Return the next actionable plan clause for the active Codex harness." },
   chat_send: { readOnly: false, description: "Send a chat message: create the chat's task (or append a follow-up) and start a team run on it." },
+  chat_goal: { readOnly: false, description: "Pause, resume, edit or clear a chat's goal (/goal); a resumed goal starts its next round." },
+  compact_chat: { readOnly: false, description: "Replace a settled chat's context with a handoff summary (/compact)." },
+  chat_diff: { readOnly: true, description: "Read the project's uncommitted git changes (/diff)." },
   codex_executable: { readOnly: true, description: "Locate the installed Codex desktop app's codex.exe used to run missions." },
 
   create: { readOnly: false, description: "Create a task for the Coding Tools mission board at its expected revision." },
