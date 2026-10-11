@@ -2324,6 +2324,15 @@ async function start() {
   app.commandLine.appendSwitch("remote-debugging-port", String(cdpPort));
 
   await app.whenReady();
+  // Remove agent executables an update set aside (in-use-files.cjs) once nothing runs them.
+  if (process.platform === "win32" && app.isPackaged) {
+    setImmediate(() => {
+      try {
+        const { sweepSetAside, agentRuntimeRoots } = require("./in-use-files.cjs");
+        sweepSetAside(agentRuntimeRoots(process.resourcesPath));
+      } catch { /* best-effort cleanup */ }
+    });
+  }
 
   const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
   if (IS_DEV_PROFILE && !stateStore.read().onboardingComplete) {

@@ -75,8 +75,22 @@ function windowsInstallerArguments(job) {
   return args;
 }
 
+function setAsideRunningAgents(job) {
+  // Running agents (AO chat hosts, Claude's Node runtime) keep their executables in use; renaming
+  // them aside lets the installer write the new version without ending those agents.
+  try {
+    const { setAsideInUse, agentRuntimeRoots } = require(path.join(__dirname, "in-use-files.cjs"));
+    const moved = setAsideInUse(agentRuntimeRoots(path.join(path.dirname(job.target), "resources")),
+      { log: (message) => appendLog(job, message) });
+    if (moved.length) appendLog(job, `set aside ${moved.length} in-use agent executable(s) so running agents keep going`);
+  } catch (error) {
+    appendLog(job, `could not set aside running agents' executables: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 function updateWindows(job) {
   requireFile(job.source, "Windows installer");
+  setAsideRunningAgents(job);
   const result = spawnSync(job.source, windowsInstallerArguments(job), {
     encoding: "utf8",
     timeout: 45 * 60_000,
