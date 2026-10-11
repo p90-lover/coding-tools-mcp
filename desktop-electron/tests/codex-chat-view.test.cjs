@@ -342,11 +342,14 @@ test("after an app restart a running AO card is still steered, though the page i
   assert.deepEqual(JSON.parse(JSON.stringify(steered)), [{ taskId: "t", message: "have you done it?" }]);
 });
 
-test("a queued message belongs to its chat: switching chats keeps it, and it's sent only into that chat", () => {
+test("each chat has its own queue: queuing in another chat never replaces one, and the view closing keeps them", () => {
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
-  const queue = source.slice(source.indexOf("const [queued, setQueued]"), source.indexOf("const dispatch = async"));
-  assert.ok(queue.includes("queued.taskId !== selectedTaskId"), "it waits until its own chat is open and free");
-  assert.ok(!queue.includes("setQueued(null); }, [selectedTaskId]"), "opening another chat no longer drops it");
+  // The store lives at module level, outside the component, keyed by the chat's task id.
+  assert.ok(source.includes("const CHAT_QUEUES = new Map<string, QueuedChatMessage[]>();"));
+  assert.ok(source.indexOf("const CHAT_QUEUES") < source.indexOf("export function AgentOrchestratorChat"), "it outlives the chat view");
+  const queue = source.slice(source.indexOf("const [queueVersion, setQueueVersion]"), source.indexOf("const dispatch = async"));
+  assert.ok(queue.includes("queueOf(task)") && queue.includes("setQueue(task, rest)"), "a chat's queue is sent only into that chat, one item at a time");
+  assert.ok(queue.includes("sentWhileFree.current"), "one item per finished turn, never two into the same free spell");
   assert.ok(queue.includes("setDraft(next.message)"), "a queued message that can't be sent goes back into the composer");
-  assert.ok(source.includes("setQueued({ what, message, goal, taskId: selectedTaskId })"), "commands queue for their chat too");
+  assert.ok(source.includes("setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what, message,"), "commands queue in their own chat too");
 });
