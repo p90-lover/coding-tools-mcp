@@ -28,6 +28,8 @@ export type ChatThreadActions = {
   rename: (title: string) => Promise<void>;
   archive: () => void;
   fork: (turnIndex?: number) => void;
+  /** Rewind: a new chat with the messages before this turn's, that message ready to edit. */
+  rewind?: (turnIndex: number) => void;
   copyConversation: () => void;
   togglePin: () => void;
   pinned: boolean;
@@ -349,12 +351,30 @@ export function AgentOrchestratorChat({
     await deliver(commands?.planMode ? planMessage(message) : message);
   };
 
-  /** A command that sends a message needs the chat to be free, like any message. */
-  const sendable = (what: string) => {
-    if (!accepts) { say(what, "This chat is still working. Wait for it to finish, or stop it first."); return false; }
+  // A command's message waiting for the working turn to end (Codex queues the same way).
+  const [queued, setQueued] = useState<{ what: string; message: string; goal?: string } | null>(null);
+  useEffect(() => { setQueued(null); }, [selectedTaskId]);
+  useEffect(() => {
+    if (!queued || !accepts || busy || sending) return;
+    const next = queued;
+    setQueued(null);
+    void deliver(next.message, next.goal).then((sent) => {
+      if (sent) setCard(null); else say(next.what, "The queued message couldn't be sent; run the command again.");
+    });
+  }, [queued, accepts, busy, sending]);
+  /**
+   * Sends a command's message now when the chat is free, steers it into the working agent when it
+   * can be steered (never a goal), and otherwise queues it for when the current turn finishes.
+   */
+  const dispatch = async (what: string, message: string, goal?: string): Promise<"sent" | "queued" | false> => {
     if (busy || sending) { say(what, "Another action is still running; try again in a moment."); return false; }
-    return true;
+    if (accepts || (steering && !goal)) return await deliver(message, goal) ? "sent" : false;
+    setQueued({ what, message, goal });
+    say(what, `Queued: it's sent when the current turn finishes.${latest && runOpen && stop ? " Send /stop to end the turn now." : ""}`);
+    return "queued";
   };
+  // The messages /rewind can go back to, oldest first, with the turn each one opened.
+  const rewindPoints = turns.flatMap((turn, turnIndex) => turn.user ? [{ turnIndex, text: turn.user.text }] : []);
 
   const runCommand = async (name: string, arg = "") => {
     setSlashIndex(0);
@@ -372,6 +392,7 @@ export function AgentOrchestratorChat({
             break;
           }
           if (["pause", "resume", "clear"].includes(action)) {
+            if (action === "clear" && queued?.goal) { setQueued(null); say("Goal", "The queued goal was dropped."); break; }
             if (!commands) break;
             if (!goal) { say("Goal", "No goal is currently set."); break; }
             await commands.goalAction(action as "pause" | "resume" | "clear");
@@ -385,9 +406,10 @@ export function AgentOrchestratorChat({
           }
           if (goal && ["active", "paused"].includes(goal.status)
             && !window.confirm("Replace current goal?\n\nThis keeps the chat but replaces the saved goal with this one.")) { setDraft(`/goal ${arg}`); break; }
-          if (!sendable("Goal")) { setDraft(`/goal ${arg}`); break; }
-          if (!await deliver(arg, arg)) setDraft(`/goal ${arg}`);
-          else setCard(null);
+          // While a turn is working the goal is queued; it starts once the turn finishes.
+          const outcome = await dispatch("Goal", arg, arg);
+          if (!outcome) setDraft(`/goal ${arg}`);
+          else if (outcome === "sent") setCard(null);
           break;
         }
         case "plan":
@@ -401,11 +423,27 @@ export function AgentOrchestratorChat({
           say("Compact", await commands.compact());
           break;
         case "review":
-          if (sendable("Review")) await deliver(reviewPrompt(arg));
+          if (await dispatch("Review", reviewPrompt(arg)) === "sent" && !accepts) say("Review", "Sent to the working agent.");
           break;
         case "init":
-          if (sendable("Init")) await deliver(INIT_PROMPT);
+          if (await dispatch("Init", INIT_PROMPT) === "sent" && !accepts) say("Init", "Sent to the working agent.");
           break;
+        case "rewind": {
+          if (!thread?.rewind) break;
+          if (!rewindPoints.length) { say("Rewind", "There is no message to go back to yet."); break; }
+          const pick = Number(arg);
+          if (arg) {
+            const point = Number.isInteger(pick) ? rewindPoints[pick - 1] : undefined;
+            if (point) thread.rewind(point.turnIndex);
+            else say("Rewind", `Choose a message from 1 to ${rewindPoints.length}, e.g. /rewind ${rewindPoints.length}.`);
+            break;
+          }
+          setCard({ title: "Rewind",
+            text: "Go back to a message: a new chat opens with the conversation up to it and that message ready to edit. This chat and the files on disk stay as they are.",
+            items: rewindPoints.map((point, index) => ({ label: `${index + 1}. ${point.text.replace(/\s+/g, " ").slice(0, 90)}`,
+              run: () => { setCard(null); thread.rewind?.(point.turnIndex); } })).reverse() });
+          break;
+        }
         case "status": if (commands) setCard(commands.status()); break;
         case "diff":
           if (!commands) break;
@@ -528,6 +566,7 @@ export function AgentOrchestratorChat({
                 <div className="cx-bubble"><p>{turn.user.text}</p></div>
                 <MessageActions text={turn.user.text}>
                   {thread ? <button type="button" title="Fork from here" aria-label="Fork from this message" onClick={() => thread.fork(turnIndex)}>⑂</button> : null}
+                  {thread?.rewind ? <button type="button" title="Rewind: edit this message in a new chat" aria-label="Rewind to this message" onClick={() => thread.rewind?.(turnIndex)}>↶</button> : null}
                 </MessageActions>
                 {turn.user.stamp ? <span className="cx-stamp">{turn.user.stamp} UTC</span> : null}
               </div> : null}
