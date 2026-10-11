@@ -1788,11 +1788,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (/still running/.test(error?.message)) throw new Error("This chat is still running; wait for it to finish or stop it first");
         throw error;
       }
-      const detail = await board({ workspaceId: id, taskId: task });
+      let detail = await board({ workspaceId: id, taskId: task });
       if (!detail.task) throw new Error("This chat's task no longer exists");
       const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
-      const description = `${detail.task.description || ""}\n\nFollow-up (${stamp} UTC):\n${text}`.trim();
-      if (description.length > 8192) throw new Error("This chat is full; start a new chat to continue");
+      const extended = () => `${detail.task.description || ""}\n\nFollow-up (${stamp} UTC):\n${text}`.trim();
+      let description = extended();
+      if (description.length > 8192) {
+        // A long chat compacts itself, as Codex does, instead of stopping at the size limit: the
+        // earlier conversation becomes a handoff summary (what /compact does) and the chat goes on.
+        const compacted = await compactChat({ workspaceId: id, taskId: task })
+          .catch(error => { throw new Error(`This chat is full and could not be compacted: ${String(error?.message || error).slice(0, 200)}`); });
+        detail = await board({ workspaceId: id, taskId: task });
+        if (!detail.task) throw new Error("This chat's task no longer exists");
+        description = extended();
+        if (!compacted.compacted || description.length > 8192) throw new Error("This chat is full; start a new chat to continue");
+      }
       await write(id, { expected_revision: detail.revision,
         change: { operation: "edit", id: task, title: detail.task.title, description } });
     } else {
