@@ -46,6 +46,7 @@ const SPECS = Object.freeze({
   approve_harness: { readOnly: false, description: "Respond to one visible native consent request with its typed decision and exact thread/turn scope after local confirmation; legacy Allow/Deny remains supported." },
   next: { readOnly: true, description: "Return the next actionable plan clause for the active Codex harness." },
   chat_send: { readOnly: false, description: "Send a chat message: create the chat's task (or append a follow-up) and start a team run on it." },
+  chat_prewarm: { readOnly: false, description: "Start an AO agent for the new chat's selected model (or its team's orchestrator) ahead of the first message, so it does not launch on send." },
   chat_steer: { readOnly: false, description: "Hand a message to the chat's running AO agent at once (steer), without waiting for its turn to end." },
   chat_goal: { readOnly: false, description: "Pause, resume, edit or clear a chat's goal (/goal); a resumed goal starts its next round." },
   compact_chat: { readOnly: false, description: "Replace a settled chat's context with a handoff summary (/compact)." },
