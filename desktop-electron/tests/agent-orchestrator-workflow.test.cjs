@@ -1095,6 +1095,20 @@ test("a follow-up waits for the chat's run, then extends the same task and start
   assert.equal(done.updates[0].task_id, "task-1");
 });
 
+test("a Team follow-up in a chat whose last turn was a single model starts the team run", async () => {
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const single = { id: "r1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "finished", route: { harness_id: "ao:claude-code", model: "cpa/m" }, receipt: { thread_id: "sess-1" } }] };
+  const world = chatWorld({ tasks: [task], runs: [single] });
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:\c.exe",
+    resolveHarness: async () => { throw new Error("stop before the background loop"); } });
+  // It used to compare the single card's route with the (absent) single route and throw
+  // "Cannot read properties of undefined (reading 'harness_id')" on every Team send.
+  const result = await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "now as a team", executionMode: "team", teamId: "team-1", teamRevision: 7 });
+  assert.equal(result.status, "failed", "the team run was created (it stops at the stubbed harness)");
+  assert.equal(world.edits.length, 1);
+});
+
 test("without an installed Codex a chat send explains what to set", async () => {
   const world = chatWorld();
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => null });
@@ -2741,4 +2755,31 @@ test("a follow-up that would overflow a long chat compacts it first instead of r
   const final = world.tasks[0].description;
   assert.match(final, /^Summary of the earlier conversation \(compacted [^)]+ UTC\):\nDid the first half; next: the second half\.\n\nFollow-up \([^)]+ UTC\):\nkeep going$/);
   assert.ok(final.length < 8192);
+});
+
+test("a card stopped while its agent launched also stops that agent once its session arrives", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
+  const mission = { id: "run", workspace_id: "ws", revision: 1, execution_mode: "single", cancelled: false, grant: { executable_sha256: "a".repeat(64) },
+    nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+  const interrupted = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    requestHeadless: async (endpoint) => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+      if (endpoint.endsWith("/grant")) return { ok: true, run: mission, grant: { executable_sha256: "a".repeat(64) } };
+      if (endpoint.endsWith("/external/reserve")) { mission.nodes[0].state = "reserved"; return { ok: true, request_key: "k", prompt: "task" }; }
+      if (endpoint.endsWith("/external/submitted")) throw new Error("AO node is not reserved");
+      return { ok: true, run: mission };
+    },
+    aoHarness: {
+      // The user stops the card while AO is still launching its agent.
+      spawn: async () => { mission.cancelled = true; mission.nodes[0].state = "cancelled"; return "late-session"; },
+      interrupt: async (id) => { interrupted.push(id); },
+      observe: async () => ({ status: "idle", turnState: "completed" }),
+    },
+  });
+  await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  for (let tries = 0; tries < 200 && !interrupted.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.deepEqual(interrupted, ["late-session"], "the agent launched for a stopped card is not left running unseen");
 });

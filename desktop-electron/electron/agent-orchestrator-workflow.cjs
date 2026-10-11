@@ -454,14 +454,34 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
           // Native effort validation stays skipped for foreign models; CPA reads the suffix.
           ...(!viaCpa && node.route.effort ? { effort: node.route.effort } : {}) });
       } catch (error) { failure = error; }
-      const saved = await requestHeadless("/api/v1/ao/external/submitted", {
-        workspace_id: workspaceId, run_id: runId, node_id: node.id, request_key: reserved.request_key,
-        ...(session ? { session_id: session } : {}),
-        // The held card says why: a first chat's start runs detached, so this is the only place it shows.
-        ...(!session && failure ? { error: String(failure?.message || failure).slice(0, 400) } : {}),
-      });
+      // A card stopped while its launch was in flight has no session to stop yet; once the launch
+      // returns one, end it, or it keeps working (and waiting for input) where no chat shows it.
+      const stopIfAbandoned = async () => {
+        if (!session) return false;
+        const latest = await runs({ workspaceId, runId }).catch(() => null);
+        const mission = latest?.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
+        const card = mission?.nodes.find(entry => entry.id === node.id);
+        if (!mission?.cancelled && card && card.state === "reserved") return false;
+        await harnessService().interrupt(session).catch(() => undefined);
+        return true;
+      };
+      let saved;
+      try {
+        saved = await requestHeadless("/api/v1/ao/external/submitted", {
+          workspace_id: workspaceId, run_id: runId, node_id: node.id, request_key: reserved.request_key,
+          ...(session ? { session_id: session } : {}),
+          // The held card says why: a first chat's start runs detached, so this is the only place it shows.
+          ...(!session && failure ? { error: String(failure?.message || failure).slice(0, 400) } : {}),
+        });
+      } catch (error) {
+        if (await stopIfAbandoned()) throw new Error("The card was stopped while it launched; its agent was stopped too");
+        throw error;
+      }
       if (failure) throw failure;
-      if (saved?.ok !== true) throw new Error("AO harness session outcome is unknown");
+      if (saved?.ok !== true) {
+        if (await stopIfAbandoned()) throw new Error("The card was stopped while it launched; its agent was stopped too");
+        throw new Error("AO harness session outcome is unknown");
+      }
       return { ok: true, run: saved.run, session_id: session };
     } finally { dispatching.delete(key); }
   }
@@ -1779,8 +1799,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const previous = saved.runs.filter(run => run.project_id === task).at(-1);
       const card = previous?.execution_mode === "single" ? previous.nodes?.[0] : null;
       // The session keeps the permission mode, effort and context it was started with, so only an
-      // unchanged route continues it; any change starts a fresh session with the new settings.
-      const sameRoute = card && ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile",
+      // unchanged route continues it; any change starts a fresh session with the new settings. A Team
+      // follow-up has no single route and never continues the single card's session.
+      const sameRoute = executionMode === "single" && singleRoute && card && ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile",
         "approval_policy", "approvals_reviewer", "effort", "context_window"].every(field => (card.route?.[field] ?? null) === (singleRoute[field] ?? null));
       if (executionMode === "single" && card && externalAgent(card) && card.receipt?.thread_id
         && ["finished", "failed"].includes(card.state) && sameRoute) {
