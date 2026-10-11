@@ -1286,6 +1286,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function driveRun(workspaceId, runId, executable, state) {
     const pause = () => new Promise(resolve => setTimeout(resolve, 500));
     const observing = new Map();
+    const nodeAttention = new Map(); // running node id -> its last observed attention (or null)
     state.driving = true;
     try {
       for (;;) {
@@ -1357,8 +1358,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           if (pending.error) state.detail = publicText(pending.error?.message || pending.error, 500);
           observing.delete(node.id);
         }
-        const attention = observed.some(result => result.pending_approvals?.length) ? "pending_approval"
-          : observed.some(result => result.needs_input) ? "needs_input" : null;
+        // A node keeps its last observed attention until its next observation lands: observations
+        // finish on their own schedule, so judging only those that finished this tick reported the
+        // run as needing attention, then not, every other tick (thousands of reopened incidents).
+        for (const [index, node] of completed.entries()) {
+          const result = observed[index];
+          nodeAttention.set(node.id, result.pending_approvals?.length ? "pending_approval" : result.needs_input ? "needs_input" : null);
+        }
+        for (const id of [...nodeAttention.keys()]) if (!active.some(node => node.id === id)) nodeAttention.delete(id);
+        const kinds = [...nodeAttention.values()];
+        const attention = kinds.includes("pending_approval") ? "pending_approval" : kinds.includes("needs_input") ? "needs_input" : null;
         if (attention) state.detail = attention === "pending_approval" ? "Waiting for your tool approval" : "An AO worker needs input on the Board";
         if (attention === "pending_approval") {
           const note = await screenApprovals(workspaceId, runId, mission, completed, observed)

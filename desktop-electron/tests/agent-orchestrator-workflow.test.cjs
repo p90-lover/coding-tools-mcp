@@ -2561,3 +2561,29 @@ test("steering hands the message to the running AO agent and notes it in the cha
     "a turn that already ended is reported, so the chat sends it as a follow-up");
   assert.equal(world.edits.length, 1, "nothing is noted for an undelivered steer");
 });
+
+test("a run waiting on input reports it steadily, not on and off with each observation tick", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) },
+    nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1" } }] };
+  const reported = [];
+  let done = false;
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: { observe: () => new Promise(resolve => setTimeout(() => resolve({ status: "needs_input", needsInput: true, turnId: "t", turnState: "running", approvals: [] }), 40)) },
+    onRunState: update => { if (!done && update.runId === "run" && update.status === "running") reported.push(update.attention ?? null); },
+  });
+  await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  await new Promise(resolve => setTimeout(resolve, 1600));
+  done = true; // a finished card rightly clears its attention
+  mission.nodes[0].state = "finished";
+  for (let tries = 0; tries < 100; tries++) {
+    if ((await workflow.call("run_status", { workspaceId: "ws", runId: "run" })).status !== "running") break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  const first = reported.indexOf("needs_input");
+  assert.ok(first >= 0, "the wait was reported: " + JSON.stringify(reported));
+  assert.deepEqual([...new Set(reported.slice(first))], ["needs_input"], "never flips back to no attention while it still waits: " + JSON.stringify(reported));
+});
