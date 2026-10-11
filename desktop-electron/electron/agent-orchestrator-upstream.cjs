@@ -42,32 +42,28 @@ function createAgentInventory(api, { now = Date.now, recheckMs = AGENT_RECHECK_M
   };
 }
 
-// AO install checks that ended "unknown" without proving anything: still running, never run, timed
-// out, failed, or found a binary whose identity isn't confirmed yet. ("install_check_unsupported"
-// is left out: AO can never tell, so those harnesses are not offered.)
-const UNPROVEN_INSTALL_CHECKS = new Set(["checking", "not_checked", "install_check_timeout", "install_check_failed", "install_identity_pending"]);
+// AO install checks that have not finished: right after AO starts most agents are "not_checked".
+const PENDING_INSTALL_CHECKS = new Set(["checking", "not_checked"]);
 
 /**
  * The harness list from AO's inventory. AO lists only agents its latest check proved installed; a
- * check still running, timed out or failed leaves an agent "unknown", which AO calls advisory, not
- * missing. Such an agent is offered when its check was unproven or it was installed last time
- * (`lastInstalled`: id → auth status), until AO actually reports it not installed.
+ * check that is unfinished, timed out or failed leaves an agent "unknown", which AO calls advisory,
+ * not missing. An unknown agent is offered only with evidence: it was installed last time
+ * (`lastInstalled`: id → auth status) or AO found its binary and is confirming it. One whose check
+ * hasn't finished is marked `checking` (not offered yet) so the list is read again once it has.
  */
 function agentCatalog({ inventory, settings, readiness = null, lastInstalled = new Map() }) {
   const chat = new Set(Array.isArray(settings?.chatHarnesses) ? settings.chatHarnesses : []);
   const installed = new Map((inventory?.installed ?? []).map(item => [item?.id, item]));
   const checks = new Map((Array.isArray(readiness?.agents) ? readiness.agents : []).map(agent => [agent?.id, agent?.installation ?? {}]));
-  const present = id => {
-    if (installed.has(id)) return true;
-    const check = checks.get(id);
-    if (check?.state === "not_installed") return false;
-    return lastInstalled.has(id) || (check?.state === "unknown" && UNPROVEN_INSTALL_CHECKS.has(check.reasonCode));
-  };
   return (inventory?.supported ?? []).filter(item => typeof item?.id === "string" && /^[a-z0-9-]{1,40}$/.test(item.id)).map(item => {
-    const offered = present(item.id);
+    const check = checks.get(item.id);
+    const unknown = !installed.has(item.id) && check?.state !== "not_installed";
+    const offered = installed.has(item.id) || (unknown && (lastInstalled.has(item.id) || check?.reasonCode === "install_identity_pending"));
     return {
       id: item.id, label: String(item.label || item.id).slice(0, 80), installed: offered,
       authStatus: installed.get(item.id)?.authStatus || (offered && lastInstalled.get(item.id)) || "unknown", chat: chat.has(item.id),
+      ...(!offered && unknown && check?.state === "unknown" && PENDING_INSTALL_CHECKS.has(check.reasonCode) ? { checking: true } : {}),
     };
   });
 }

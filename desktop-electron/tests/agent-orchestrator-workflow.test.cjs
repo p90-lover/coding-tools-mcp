@@ -952,6 +952,25 @@ test("WebGPT is offered only on Native Codex; AO harnesses get every other CPA m
   assert.ok((await workflow.call("models", { harness: "codex-native" })).models.includes("chatgpt-web/high"));
 });
 
+test("while AO is still checking agents the harness list says so and the next read asks AO again", async () => {
+  let reads = 0;
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async () => { throw new Error("no headless call expected"); },
+    aoHarness: { catalog: async () => (++reads === 1
+      ? [{ id: "codex", label: "Codex", installed: true }, { id: "claude-code", label: "Claude Code", installed: false, checking: true }]
+      : [{ id: "codex", label: "Codex", installed: true }, { id: "claude-code", label: "Claude Code", installed: true }]) },
+    confirm: async () => true,
+  });
+  const first = await workflow.call("harnesses");
+  assert.equal(first.notice, "Still checking 1 agent CLI…", "the page keeps asking while a check is unfinished");
+  await workflow.call("harnesses"); // served at once while AO is asked again in the background
+  await new Promise(resolve => setImmediate(resolve));
+  const settled = await workflow.call("harnesses");
+  assert.equal(settled.notice, undefined);
+  assert.equal(settled.harnesses.find(item => item.id === "ao:claude-code").runnable, true);
+  assert.equal(reads, 2, "an unfinished catalog is not kept for a minute");
+});
+
 test("CPA models go only to agents that can use them through the gateway", async () => {
   const workflow = createAgentOrchestratorWorkflow({
     requestHeadless: async () => { throw new Error("no headless call expected"); },

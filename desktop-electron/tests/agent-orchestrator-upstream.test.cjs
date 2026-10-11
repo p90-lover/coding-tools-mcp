@@ -214,18 +214,24 @@ test("closing the AO gateway cancels a backend request stalled before response h
   }
 });
 
-test("an AO harness whose install check is only unproven stays offered; one AO reports missing does not", () => {
+test("an AO harness is offered on evidence only: proven, installed last time or being confirmed; an unfinished check is marked checking", () => {
   const { agentCatalog } = require("../electron/agent-orchestrator-upstream.cjs");
-  const supported = ["claude-code", "codex", "aider", "goose"].map(id => ({ id, label: id }));
+  const supported = ["claude-code", "codex", "aider", "goose", "amp", "kiro"].map(id => ({ id, label: id }));
   const inventory = { supported, installed: [{ id: "codex", authStatus: "authorized" }] };
+  // Reason codes as a busy machine's AO reported them right after a start.
   const readiness = { agents: [
     { id: "claude-code", installation: { state: "unknown", reasonCode: "checking" } },
     { id: "aider", installation: { state: "not_installed", reasonCode: "not_installed" } },
     { id: "goose", installation: { state: "unknown", reasonCode: "install_check_unsupported" } },
+    { id: "amp", installation: { state: "unknown", reasonCode: "install_check_timeout" } },
+    { id: "kiro", installation: { state: "unknown", reasonCode: "install_identity_pending" } },
   ] };
   const offered = list => Object.fromEntries(list.map(item => [item.id, item.installed]));
-  // Claude Code's check is still running (AO lists it nowhere): it is not reported missing.
-  assert.deepEqual(offered(agentCatalog({ inventory, readiness })), { "claude-code": true, codex: true, aider: false, goose: false });
+  // A timed-out check proves nothing (most agents time out on a busy machine): not offered. A binary
+  // AO found and is confirming is offered; a check still running is not yet, but asks for another read.
+  const first = agentCatalog({ inventory, readiness });
+  assert.deepEqual(offered(first), { "claude-code": false, codex: true, aider: false, goose: false, amp: false, kiro: true });
+  assert.deepEqual(first.filter(item => item.checking).map(item => item.id), ["claude-code"]);
   // Installed last time and the readiness read failed: still offered, with its last auth status.
   const kept = agentCatalog({ inventory, readiness: null, lastInstalled: new Map([["claude-code", "authorized"]]) });
   assert.deepEqual(kept.find(item => item.id === "claude-code"), { id: "claude-code", label: "claude-code", installed: true, authStatus: "authorized", chat: false });

@@ -370,8 +370,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     try {
       // Shares the permission menu's minute-old catalog, so opening that menu doesn't probe again.
       const catalog = await recentHarnessCatalog();
+      // While AO is still checking some agents the list is incomplete; the notice makes the page ask again.
+      const checking = catalog.filter(item => item.checking).length;
       return { ok: true, harnesses: [native, ...catalog.map(item => ({ id: `ao:${item.id}`, label: item.label,
-        installed: item.installed, authStatus: item.authStatus, chat: item.chat, runnable: item.installed }))] };
+        installed: item.installed, authStatus: item.authStatus, chat: item.chat, runnable: item.installed }))],
+        ...(checking ? { notice: `Still checking ${checking} agent CLI${checking === 1 ? "" : "s"}…` } : {}) };
     } catch (error) {
       return { ok: true, harnesses: [native], notice: String(error?.message || "AO harness catalog unavailable").slice(0, 300) };
     }
@@ -599,7 +602,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
 
   // AO probes every agent CLI to build its catalog, which takes seconds; the permission menu reads
   // it each time it opens. After the first read the last answer is served at once and refreshed in
-  // the background once it is a minute old (installs are rare). A failed read is never kept.
+  // the background once it is a minute old (installs are rare). A failed read is never kept, and one
+  // taken while AO was still checking agents is refreshed on the next read.
   let permissionCatalog = null;
   function recentHarnessCatalog() {
     const current = permissionCatalog;
@@ -607,7 +611,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const promise = harnessService().catalog();
     const entry = { at: Date.now(), promise, value: current?.value };
     permissionCatalog = entry;
-    promise.then(value => { entry.value = value; },
+    promise.then(value => { entry.value = value; if (Array.isArray(value) && value.some(item => item?.checking)) entry.at = 0; },
       () => { if (permissionCatalog === entry) permissionCatalog = current?.value ? { ...current, at: 0 } : null; });
     return current?.value ? Promise.resolve(current.value) : promise;
   }
