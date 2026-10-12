@@ -43,6 +43,8 @@ function createAgentInventory(api, { now = Date.now, recheckMs = AGENT_RECHECK_M
 }
 
 const TUI_RESULT_FILE = "AO_RESULT.md";
+/** How long a terminal agent AO lost the signal of may sit idle before its card is settled as failed. */
+const TUI_SILENT_MS = 30 * 60_000;
 // AO conversation turn states after which a turn can no longer change.
 const TERMINAL_TURN_STATES = new Set(["completed", "failed", "interrupted", "cancelled", "recovered"]);
 const TUI_RESULT_INSTRUCTION = `When the assignment is finished, write your complete final report (what you did and the evidence) to ${TUI_RESULT_FILE} at the root of your working directory, then stop and wait.`;
@@ -277,13 +279,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         .slice(0, 100).map(model => ({ id: model.id, label: String(model.label || model.id).slice(0, 128), isDefault: model.isDefault === true,
           efforts: Array.isArray(model.efforts) ? model.efforts.filter(value => typeof value === "string" && value.length <= 32).slice(0, 16) : [] }));
     },
-    async spawn({ workspaceId, agent, model, prompt, name, gateway = null, effort = null, contextWindow = null, approvalMode = null, plain = false }) {
+    async spawn({ workspaceId, agent, model, prompt, name, gateway = null, effort = null, contextWindow = null, approvalMode = null, plain = false, warm = false }) {
       if (approvalMode !== null && !["default", "accept-edits", "auto", "bypass-permissions"].includes(approvalMode)) throw new Error("Unsupported AO permission mode");
       const projectId = await projectFor(workspaceId);
       const settings = await internalApi("GET", "/api/v1/settings");
       // Chat-capable agents return their answer as a conversation turn. Every other
       // installed agent runs in its own terminal UI and hands back a result file.
       const chat = Array.isArray(settings?.chatHarnesses) && settings.chatHarnesses.includes(agentId(agent));
+      // A pre-warmed session must be a chat: it takes its first message later, which a terminal session cannot.
+      if (warm && !chat) throw new Error("Only a chat agent can be pre-warmed");
       const codexWorkspace = agent === "codex" && ["accept-edits", "auto"].includes(approvalMode);
       if (codexWorkspace && !chat) throw new Error("Codex workspace permissions require its capable chat driver; TUI sandbox settings cannot be verified.");
       // AO caps prompts at 16 KiB of UTF-8; leave room for the TUI result instruction.
@@ -291,7 +295,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       const launch = (mode) => internalApi("POST", "/api/v1/sessions", {
         projectId, kind: "worker", harness: agentId(agent), mode,
         ...(approvalMode ? { approvalMode } : {}),
-        prompt: mode === "chat" ? brief : `${brief}\n\n${TUI_RESULT_INSTRUCTION}`,
+        ...(brief ? { prompt: mode === "chat" ? brief : `${brief}\n\n${TUI_RESULT_INSTRUCTION}` } : {}),
         ...(model && model !== "default" ? { model: String(model).slice(0, 256) } : {}),
         ...(effort && !gateway ? { effort: String(effort).slice(0, 32) } : {}),
         ...(contextWindow != null ? { contextWindow } : {}),
@@ -308,6 +312,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // Chat mode needs AO's packaged ACP runtime (Claude's chat driver). Without it the agent
         // still runs in its own terminal and hands back a result file.
         if (!chat || codexWorkspace || !/CHAT_DRIVER_UNAVAILABLE/.test(String(error?.message))) throw error;
+        if (warm) throw error;
         if (TRANSIENT_CHAT_START.test(String(error?.message))) {
           // A chat host that was merely slow to start (a busy machine) is retried as chat: a terminal
           // session cannot show progress, take approvals or be steered. A second failure is reported.
@@ -319,7 +324,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     },
     async observe(id, expectedTurn) {
       const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`);
-      if (record?.session?.mode === "tui") return observeTui(id, record.session.status);
+      if (record?.session?.mode === "tui") return observeTui(id, record.session.status, record.session.activity);
       const [session, conversation] = [record, await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=100`)];
       const turns = Array.isArray(conversation?.turns) ? conversation.turns : [];
       // A follow-up sent into a live session is pinned to its own turn: until AO shows it, the
@@ -367,8 +372,42 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     async continuable(id) {
       const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`).catch(() => null);
       const status = record?.session?.status;
-      if (!record?.session || record.session.mode === "tui" || ["exited", "terminated", "killed", "errored"].includes(status)) return false;
+      if (!record?.session || record.session.mode === "tui" || record.session.isTerminated || ["terminated", "killed", "errored"].includes(status)) return false;
+      if (status === "exited") {
+        // An agent released while idle (exitAgent) keeps its session, worktree and conversation:
+        // bring it back (a few seconds) rather than start over and replay the whole chat.
+        const resumed = await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/resume-agent`, {}).catch(() => null);
+        if (resumed?.ok !== true) return false;
+      }
       return !(await chatHostGone(id));
+    },
+    /**
+     * Stops a session's agent (its chat host and model process) but keeps the session, worktree and
+     * provider conversation; continuable() resumes it on the next message.
+     */
+    async exitAgent(id) {
+      await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/exit-agent`, {});
+      return { ok: true };
+    },
+    /**
+     * Chat sessions whose agent is up but idle, with their last turn finished at least `idleMs`
+     * ago. Sessions that never ran a turn (pre-warmed ones) and terminal sessions are left out.
+     */
+    async idleChatSessions(idleMs, now = Date.now()) {
+      const list = await internalApi("GET", "/api/v1/sessions");
+      const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
+      const candidates = sessions.filter(session => session?.mode === "chat" && session.status === "idle" && !session.isTerminated);
+      const idle = await Promise.all(candidates.map(async session => {
+        const conversation = await internalApi("GET", `/api/v1/sessions/${sessionId(session.id)}/conversation?limit=1`).catch(() => null);
+        const turns = Array.isArray(conversation?.turns) ? conversation.turns : [];
+        const last = turns[turns.length - 1];
+        if (!last || !TERMINAL_TURN_STATES.has(last.state)) return null;
+        // The newest sign of use; the session's activity time restarts with its host and says nothing.
+        const used = Math.max(...[last.completedAt, last.startedAt, last.requestedAt, session.lastUserMessageAt]
+          .map(stamp => Date.parse(stamp ?? "")).filter(Number.isFinite));
+        return Number.isFinite(used) && now - used >= idleMs ? String(session.id) : null;
+      }));
+      return idle.filter(Boolean);
     },
     /** Sends a follow-up as a new turn of the same session; AO de-duplicates by client message id. */
     async send(id, text, clientMessageId) {
@@ -391,6 +430,25 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         if (/CHAT_NO_ACTIVE_TURN|no turn in flight|no active turn/i.test(String(error?.message))) return { steered: false };
         throw error;
       }
+    },
+    /** Ends a session and its agent (a pre-warmed one nobody used). */
+    async kill(id) {
+      await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/kill`, {});
+      return { ok: true };
+    },
+    /**
+     * Live sessions with this display name that never ran a turn: pre-warmed ones nobody used,
+     * e.g. left from an earlier run. One that took a chat keeps the name but has turns.
+     */
+    async warmSessions(name) {
+      const list = await internalApi("GET", "/api/v1/sessions");
+      const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
+      const candidates = sessions.filter(session => session?.displayName === name && !session.isTerminated && session.status !== "working");
+      const unused = await Promise.all(candidates.map(async session => {
+        const conversation = await internalApi("GET", `/api/v1/sessions/${sessionId(session.id)}/conversation?limit=1`).catch(() => null);
+        return conversation && Array.isArray(conversation.turns) && conversation.turns.length === 0 ? String(session.id) : null;
+      }));
+      return unused.filter(Boolean);
     },
     /** Answers one parked tool request with one of the decisions AO offered for it. */
     async resolveApproval(id, requestId, decisionId) {
@@ -419,9 +477,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     },
   });
 
-  async function observeTui(id, status) {
+  async function observeTui(id, status, activity = null, now = Date.now()) {
     const waiting = ["idle", "needs_input"].includes(status);
-    const ended = ["exited", "terminated"].includes(status);
+    // AO lost the terminal's signal (e.g. its pty host restarted with the app) and the agent has
+    // sat idle since: it will not write a report, and its card would read "working" forever.
+    const lostSince = Date.parse(activity?.lastActivityAt ?? "");
+    const silent = status === "no_signal" && activity?.state === "idle" && Number.isFinite(lostSince) && now - lostSince >= TUI_SILENT_MS;
+    const ended = ["exited", "terminated"].includes(status) || silent;
     if (!waiting && !ended) return { status, needsInput: false, exited: false, answer: "" };
     let answer = "";
     try {
@@ -429,6 +491,10 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       if (!file?.deleted && !file?.binary) answer = String(file?.content || "").trim().slice(0, 12000);
     } catch { /* The agent has not written its report yet. */ }
     if (answer) return { status, turnId: `tui-${id}`, turnState: "completed", answer, needsInput: false, exited: ended };
+    if (silent) {
+      return { status, turnId: `tui-${id}`, turnState: "failed", answer: "", exited: true,
+        error: `The terminal agent stopped reporting and has been idle since ${new Date(lostSince).toISOString()} without ${TUI_RESULT_FILE}; send a follow-up to continue in a new session` };
+    }
     if (ended) return { status, turnId: `tui-${id}`, turnState: "failed", error: `AO session ended without ${TUI_RESULT_FILE}`, answer: "", exited: true };
     // Idle without a report: the agent is waiting for the user in its terminal.
     return { status, needsInput: true, exited: false, answer: "" };

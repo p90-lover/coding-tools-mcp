@@ -2764,3 +2764,120 @@ test("a card stopped while its agent launched also stops that agent once its ses
   for (let tries = 0; tries < 200 && !interrupted.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
   assert.deepEqual(interrupted, ["late-session"], "the agent launched for a stopped card is not left running unseen");
 });
+
+test("a new chat's first message runs in the session pre-warmed for its model, and another is warmed", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  const world = chatWorld();
+  const created = new Map();
+  const spawned = [], sent = [], observedWith = [], killed = [];
+  const request = async (endpoint, body, options) => {
+    if (endpoint === "/api/v1/ao/read" && body.run_id) {
+      const run = created.get(body.run_id) ?? { id: body.run_id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1,
+        grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+      created.set(body.run_id, run);
+      return { ok: true, runs: [run], worker_capacity: { [body.run_id]: 1 } };
+    }
+    const latest = [...created.values()].at(-1);
+    if (endpoint === "/api/v1/ao/grant") return { ok: true, run: latest, grant: { executable_sha256: "a".repeat(64) } };
+    if (endpoint === "/api/v1/ao/external/reserve") { latest.nodes[0].state = "reserved"; return { ok: true, request_key: "key-1", prompt: "fix the login" }; }
+    if (endpoint === "/api/v1/ao/external/submitted") { latest.nodes[0].state = "running"; latest.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run: latest }; }
+    if (endpoint === "/api/v1/ao/external/terminal") { latest.nodes[0].state = "finished"; return { ok: true, run: latest }; }
+    return world.requestHeadless(endpoint, body, options);
+  };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: request, findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    aoHarness: {
+      spawn: async input => { spawned.push(input); return `warm-${spawned.length}`; },
+      continuable: async id => id.startsWith("warm-"),
+      send: async (id, text, key) => { sent.push([id, text, key]); return { turnId: "turn-1", state: "running" }; },
+      observe: async (id, expected) => { observedWith.push([id, expected]); return { status: "idle", turnId: expected, turnState: "completed", answer: "fixed" }; },
+      warmSessions: async () => ["left-over"],
+      kill: async id => { killed.push(id); return { ok: true }; },
+    },
+  });
+  const warmed = await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route });
+  assert.equal(warmed.warmed, true);
+  assert.equal((await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: { ...route } })).warmed, true);
+  assert.equal(spawned.length, 1, "one warm session per project and route");
+  assert.equal(spawned[0].prompt, "", "started without a prompt");
+  assert.equal(spawned[0].warm, true);
+  assert.equal(spawned[0].plain, true, "a single-model chat is plain, like its real launch");
+  assert.equal(spawned[0].model, "test-model");
+  for (let tries = 0; tries < 50 && !killed.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.deepEqual(killed, ["left-over"], "an unused warm session from an earlier run is ended");
+
+  await workflow.call("chat_send", { workspaceId: "ws-1", message: "fix the login", executionMode: "single", singleRoute: route });
+  for (let tries = 0; tries < 200 && !observedWith.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.deepEqual(JSON.parse(JSON.stringify(sent)), [["warm-1", "fix the login", "key-1"]], "the first message is the warm session's first turn");
+  assert.deepEqual(JSON.parse(JSON.stringify(observedWith[0])), ["warm-1", "turn-1"], "observed on that turn");
+  for (let tries = 0; tries < 50 && spawned.length < 2; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(spawned.length, 2, "the next chat on this route finds one waiting too");
+  assert.equal(spawned[1].prompt, "");
+});
+
+test("pre-warming skips a team without an orchestrator and native Codex routes", async () => {
+  const world = chatWorld();
+  const spawned = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless,
+    aoHarness: { spawn: async input => { spawned.push(input); return "s"; } } });
+  assert.equal((await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "team", teamId: "team-1" })).warmed, false);
+  assert.equal((await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: { harness_id: "codex", model: "gpt-5" } })).warmed, false);
+  assert.equal(spawned.length, 0);
+});
+
+test("idle agents are released on a timer, never a pre-warmed one, and the timer stops on dispose", async () => {
+  const timers = [];
+  const released = [];
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: chatWorld().requestHeadless, releaseIdleAgents: true,
+    setTimer: (run, delay) => { const timer = { run, delay, cleared: false }; timers.push(timer); return timer; },
+    clearTimer: timer => { timer.cleared = true; },
+    aoHarness: {
+      spawn: async () => "warm-1",
+      idleChatSessions: async idleMs => { assert.equal(idleMs, 30 * 60_000); return ["old-1", "warm-1", "old-2"]; },
+      exitAgent: async id => { released.push(id); if (id === "old-2") throw new Error("busy now"); return { ok: true }; },
+    } });
+  await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route });
+  await new Promise(resolve => setTimeout(resolve, 10));
+  const first = timers.find(timer => timer.delay === 2 * 60_000);
+  assert.ok(first, "the first sweep runs two minutes after start");
+  first.run();
+  for (let tries = 0; tries < 50 && timers.length < 3; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.deepEqual(released, ["old-1", "old-2"], "the pre-warmed session is kept; a refused release does not stop the sweep");
+  assert.ok(timers.some(timer => timer.delay === 10 * 60_000), "then every ten minutes");
+  workflow.dispose();
+  assert.ok(timers.at(-1).cleared, "dispose stops it");
+});
+
+test("an open chat pre-warms only when its next message cannot continue its agent, and at most two wait", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
+  const other = { ...route, model: "cpa/other-model" };
+  const third = { ...route, model: "cpa/third-model" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const stopped = { id: "r1", project_id: "task-1", execution_mode: "single", cancelled: true,
+    nodes: [{ id: "one", role: "planner", state: "cancelled", parents: [], route, receipt: { thread_id: "sess-1" } }] };
+  const world = chatWorld({ tasks: [task], runs: [stopped] });
+  const spawned = [], killed = [], checked = [];
+  let alive = true;
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless,
+    aoHarness: {
+      spawn: async input => { spawned.push(input.model); return `warm-${spawned.length}`; },
+      continuable: async id => { checked.push(id); return id === "sess-1" ? alive : true; },
+      kill: async id => { killed.push(id); return { ok: true }; },
+      warmSessions: async () => [],
+    } });
+  const same = await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route, taskId: "task-1" });
+  assert.equal(same.continues, true, "a stopped card's live agent takes the next message (Stop only interrupts the turn)");
+  assert.deepEqual(checked, ["sess-1"], "checking it also wakes an agent released while idle");
+  assert.equal(spawned.length, 0);
+  alive = false;
+  assert.equal((await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route, taskId: "task-1" })).warmed, true,
+    "an agent that is gone is replaced ahead of the message");
+  await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: other, taskId: "task-1" });
+  await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: third });
+  for (let tries = 0; tries < 50 && !killed.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.deepEqual(spawned, ["test-model", "other-model", "third-model"]);
+  assert.deepEqual(killed, ["warm-1"], "the oldest waiting agent is ended once a third is warmed");
+});

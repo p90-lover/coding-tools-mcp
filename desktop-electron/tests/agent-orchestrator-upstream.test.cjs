@@ -304,3 +304,78 @@ test("a steered message reads as the user's own words in the live timeline", asy
   const timeline = JSON.parse(JSON.stringify((await upstream.observe("s")).timeline));
   assert.deepEqual(timeline.map(item => [item.kind, item.text]), [["system", "Context compacted"], ["steer", "use pnpm, not npm"]]);
 });
+
+test("an idle agent is found by its last turn, released with exit-agent, and resumed when its chat continues", async () => {
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("    async continuable(id)");
+  const end = source.indexOf("    /** Sends a follow-up as a new turn", start);
+  const methods = source.slice(start, end).trim().replace(/,$/, "");
+  const helpers = source.slice(source.indexOf("  async function chatHostGone"), source.indexOf("  // Mission-owned AO calls."));
+  const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
+  const states = source.match(/const TERMINAL_TURN_STATES = .*;/)[0];
+  const now = Date.parse("2026-10-12T10:00:00Z");
+  const ago = minutes => new Date(now - minutes * 60_000).toISOString();
+  const sessions = [
+    { id: "old", mode: "chat", status: "idle" },
+    { id: "recent", mode: "chat", status: "idle" },
+    { id: "typed", mode: "chat", status: "idle", lastUserMessageAt: ago(5) },
+    { id: "warm", mode: "chat", status: "idle" },
+    { id: "busy", mode: "chat", status: "working" },
+    { id: "tui", mode: "tui", status: "idle" },
+    { id: "gone", mode: "chat", status: "idle", isTerminated: true },
+  ];
+  const turns = { old: [{ state: "completed", completedAt: ago(90) }], recent: [{ state: "completed", completedAt: ago(10) }],
+    typed: [{ state: "completed", completedAt: ago(90) }], warm: [] };
+  const calls = [];
+  let resumeOk = true;
+  let status = "exited";
+  const upstream = vm.runInNewContext(states + helpers + identity + "({" + methods + "})", {
+    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), Date, Math, Number, Promise,
+    internalApi: async (method, endpoint) => {
+      calls.push([method, endpoint]);
+      if (endpoint === "/api/v1/sessions") return { sessions };
+      const id = endpoint.split("/")[4];
+      if (endpoint.endsWith("/conversation?limit=1")) return { turns: turns[id] ?? [] };
+      if (endpoint.endsWith("/exit-agent")) return { ok: true };
+      if (endpoint.endsWith("/resume-agent")) { if (!resumeOk) throw new Error("resume failed"); status = "idle"; return { ok: true }; }
+      return { session: { id, mode: "chat", status } };
+    },
+  });
+  assert.deepEqual([...await upstream.idleChatSessions(30 * 60_000, now)], ["old"],
+    "only a chat agent idle past the limit; a recent turn or message, a never-used (pre-warmed), working, TUI or terminated session is kept");
+  await upstream.exitAgent("old");
+  assert.deepEqual(calls.at(-1), ["POST", "/api/v1/sessions/old/exit-agent"]);
+  assert.equal(await upstream.continuable("old"), true, "a released agent is resumed for the next message");
+  assert.ok(calls.some(([method, endpoint]) => method === "POST" && endpoint === "/api/v1/sessions/old/resume-agent"));
+  status = "exited"; resumeOk = false;
+  assert.equal(await upstream.continuable("old"), false, "a failed resume falls back to a fresh session");
+});
+
+test("a terminal agent AO lost the signal of settles as failed once idle past the limit, never while it may still report", async () => {
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const fnStart = source.indexOf("  async function observeTui(");
+  const fnEnd = source.indexOf("  function snapshot()", fnStart);
+  const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
+  const consts = ["TUI_RESULT_FILE", "TUI_SILENT_MS"].map(name => source.match(new RegExp(`const ${name} = .*;`))[0]).join("\n");
+  let report = null;
+  const observeTui = vm.runInNewContext(consts + identity + source.slice(fnStart, fnEnd) + "\nobserveTui", {
+    Date, Number, String,
+    internalApi: async () => { if (!report) throw new Error("no file"); return { content: report }; },
+  });
+  const now = Date.parse("2026-10-12T09:00:00Z");
+  const idleSince = minutes => ({ state: "idle", lastActivityAt: new Date(now - minutes * 60_000).toISOString() });
+  const stuck = await observeTui("reg-machine-7", "no_signal", idleSince(18 * 60), now);
+  assert.equal(stuck.turnState, "failed");
+  assert.equal(stuck.exited, true);
+  assert.match(stuck.error, /stopped reporting.*send a follow-up/);
+  const recent = await observeTui("reg-machine-7", "no_signal", idleSince(5), now);
+  assert.equal(recent.turnState, undefined, "a short silence is not yet a failure");
+  const busy = await observeTui("reg-machine-7", "no_signal", { state: "active", lastActivityAt: idleSince(120).lastActivityAt }, now);
+  assert.equal(busy.turnState, undefined, "an agent still active is left running");
+  report = "Done: registered.";
+  const reported = await observeTui("reg-machine-7", "no_signal", idleSince(18 * 60), now);
+  assert.equal(reported.turnState, "completed", "a report written before it went silent still counts");
+  assert.equal(reported.answer, "Done: registered.");
+});
