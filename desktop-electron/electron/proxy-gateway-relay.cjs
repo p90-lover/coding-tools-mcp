@@ -1084,6 +1084,7 @@ async function runHelper({ stdin = process.stdin, stdout = process.stdout, stder
   let config;
   let gateway;
   let control;
+  let leaseTimer = null;
   try {
     config = await readConfigLine(stdin);
     stdin.destroy?.();
@@ -1118,13 +1119,15 @@ async function runHelper({ stdin = process.stdin, stdout = process.stdout, stder
       ? config.tokenlessLeaseMs
       : DEFAULT_TOKENLESS_LEASE_MS;
     let leaseUntil = 0;
-    const leaseTimer = setInterval(() => {
+    // A background check: the listeners, not this timer, keep the helper running.
+    leaseTimer = setInterval(() => {
       if (leaseUntil && Date.now() > leaseUntil) {
         leaseUntil = 0;
         log("proxy_gateway.tokenless_lease_lapsed");
         void gateway.closeTokenless().catch(() => {});
       }
     }, Math.max(50, Math.min(1_000, Math.floor(leaseMs / 4))));
+    leaseTimer.unref?.();
     control = http.createServer((request, response) => {
       const send = (status, value) => {
         const body = JSON.stringify(value);
@@ -1149,6 +1152,8 @@ async function runHelper({ stdin = process.stdin, stdout = process.stdout, stder
           dataPort: address?.port ?? null,
           tokenlessPort: address?.tokenlessPort ?? null,
           tokenlessConfiguredPort: tokenlessPort,
+          // When the token-free port's lease lapses unless renewed (null while it is not leased).
+          tokenlessLeaseExpiresAt: leaseUntil ? new Date(leaseUntil).toISOString() : null,
           upstreamProfileId,
           fingerprint,
           keyHash,
@@ -1199,6 +1204,7 @@ async function runHelper({ stdin = process.stdin, stdout = process.stdout, stder
     const message = error instanceof Error ? error.message : String(error);
     log("proxy_gateway.helper_failed", { message });
     report({ event: "failed", error: message });
+    clearInterval(leaseTimer);
     await gateway?.stop().catch(() => {});
     control?.close();
     exit(1);

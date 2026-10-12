@@ -3,10 +3,11 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const http = require("node:http");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
-const { spawn } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const {
   DEFAULT_GATEWAY_PORT,
   createProxyGateway,
@@ -33,7 +34,13 @@ function listen(server) {
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)));
 }
 
+// Stops for tracked test servers: they destroy open sockets first, so close() never waits on a
+// connection someone else forgot.
+const serverStops = new WeakMap();
+
 function close(server) {
+  const stop = serverStops.get(server);
+  if (stop) return stop();
   return new Promise((resolve) => server.close(() => resolve()));
 }
 
@@ -55,14 +62,141 @@ function processAlive(pid) {
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-async function waitFor(predicate, timeoutMs = 5_000) {
+// Polls a (possibly async) condition until it holds or the deadline passes. The deadline is
+// generous because a full parallel run can stall this process for seconds; a passing check
+// returns as soon as it holds.
+async function waitFor(predicate, timeoutMs = 15_000) {
   const started = Date.now();
-  while (!predicate()) {
+  for (;;) {
+    let held = false;
+    try {
+      held = await predicate();
+    } catch {}
+    if (held) return true;
     if (Date.now() - started > timeoutMs) return false;
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await sleep(25);
   }
-  return true;
 }
+
+// A controller clock that moves only when the test advances it.
+function fakeClock(start = Date.now()) {
+  let current = start;
+  return {
+    now: () => current,
+    advance: (milliseconds) => {
+      current += milliseconds;
+    },
+  };
+}
+
+// ---- Cleanup ---------------------------------------------------------------------------------
+// Every helper process, server, controller and temp folder a test creates is released by one
+// t.after per test that runs each step on its own. A failing step (Windows still locking the
+// temp folder a helper has just left) must never skip the rest: a server left listening kept
+// this file's process, and with it a parallel `node --test` run, alive forever. A file-level
+// after() repeats the release and fails the file if a helper it spawned is still alive.
+const children = new Map();
+const servers = new Set();
+const controllers = new Set();
+const leftoverDirectories = new Set();
+const cleanups = new WeakMap();
+
+function childRunning(child) {
+  return child.exitCode === null && child.signalCode === null && processAlive(child.pid);
+}
+
+// Stops only the helpers this file spawned, through their ChildProcess: while it has not exited
+// we hold its process handle, so its pid cannot belong to anyone else.
+async function stopChildren() {
+  const live = [...children.values()].filter(childRunning);
+  if (!live.length) return;
+  for (const child of live) {
+    try {
+      child.kill();
+    } catch {}
+  }
+  if (await waitFor(() => !live.some(childRunning), 10_000)) return;
+  for (const child of live.filter(childRunning)) {
+    if (process.platform === "win32") {
+      spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore", windowsHide: true, timeout: 10_000 });
+    } else {
+      try {
+        child.kill("SIGKILL");
+      } catch {}
+    }
+  }
+  await waitFor(() => !live.some(childRunning), 10_000);
+}
+
+function removeDirectory(directory) {
+  try {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    leftoverDirectories.delete(directory);
+  } catch {
+    // A helper that has just exited can hold its working folder a moment longer.
+    leftoverDirectories.add(directory);
+  }
+}
+
+async function releaseShared() {
+  for (const controller of [...controllers]) {
+    controllers.delete(controller);
+    await controller.close().catch(() => {});
+  }
+  await stopChildren();
+}
+
+// Registers a cleanup step for test t; steps run last-in first-out after the test's controllers
+// are closed and its helpers stopped.
+function defer(t, step) {
+  let steps = cleanups.get(t);
+  if (!steps) {
+    steps = [];
+    cleanups.set(t, steps);
+    t.after(async () => {
+      const errors = [];
+      await releaseShared().catch((error) => errors.push(error));
+      for (const run of steps.reverse()) {
+        try {
+          await run();
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      if (errors.length) throw new AggregateError(errors, "Test cleanup failed");
+    });
+  }
+  steps.push(step);
+}
+
+// Tracks a test server's sockets; its stop destroys them and closes the server once.
+function trackServer(server) {
+  const sockets = new Set();
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  });
+  let stopped = null;
+  const stop = () => {
+    stopped ??= new Promise((resolve) => {
+      servers.delete(stop);
+      for (const socket of sockets) socket.destroy();
+      server.close(() => resolve());
+    });
+    return stopped;
+  };
+  servers.add(stop);
+  serverStops.set(server, stop);
+  return server;
+}
+
+test.after(async () => {
+  await releaseShared();
+  for (const stop of [...servers]) await stop();
+  for (const directory of [...leftoverDirectories]) removeDirectory(directory);
+  const survivors = [...children.values()].filter(childRunning).map((child) => child.pid);
+  assert.deepEqual(survivors, [], "no helper this file spawned outlives it");
+});
 
 function readHead(socket) {
   return new Promise((resolve, reject) => {
@@ -127,7 +261,7 @@ function respondTrace(socket, seen) {
 async function fakeHttpUpstream({ username, password }) {
   const requests = [];
   const expected = `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
-  const server = net.createServer(async (socket) => {
+  const server = trackServer(net.createServer(async (socket) => {
     socket.on("error", () => {});
     const head = await readHead(socket).catch(() => null);
     if (!head) return;
@@ -146,7 +280,7 @@ async function fakeHttpUpstream({ username, password }) {
       return;
     }
     respondTrace(socket, lines[0].split(" ")[1]);
-  });
+  }));
   const port = await listen(server);
   return { server, port, requests };
 }
@@ -154,7 +288,7 @@ async function fakeHttpUpstream({ username, password }) {
 // A fake SOCKS5 proxy with RFC 1929 username/password authentication.
 async function fakeSocksUpstream({ username, password, replyAddressType = 0x01 }) {
   const connects = [];
-  const server = net.createServer((socket) => {
+  const server = trackServer(net.createServer((socket) => {
     socket.on("error", () => {});
     let buffer = Buffer.alloc(0);
     let stage = "greeting";
@@ -212,7 +346,7 @@ async function fakeSocksUpstream({ username, password, replyAddressType = 0x01 }
       }
     };
     socket.on("data", onData);
-  });
+  }));
   const port = await listen(server);
   return { server, port, connects };
 }
@@ -232,11 +366,11 @@ async function connectTunnel(port, target, token = TOKEN, separator = ":") {
 
 test("the gateway relays CONNECT tunnels and plain HTTP through an authenticated HTTP upstream", async (t) => {
   const upstream = await fakeHttpUpstream({ username: "user-1", password: "p@ss:word" });
-  t.after(() => close(upstream.server));
+  defer(t, () => close(upstream.server));
   const { gateway, port } = await startGateway({
     protocol: "http", host: "127.0.0.1", port: upstream.port, username: "user-1", password: "p@ss:word",
   });
-  t.after(() => gateway.stop());
+  defer(t, () => gateway.stop());
 
   const tunnel = await connectTunnel(port, "chatgpt.com:443");
   assert.match(tunnel.head, /^HTTP\/1\.1 200 /);
@@ -273,11 +407,11 @@ test("the gateway relays CONNECT tunnels and plain HTTP through an authenticated
 
 test("the data port answers 407 without the local token; the token-free port serves without one", async (t) => {
   const upstream = await fakeHttpUpstream({ username: "user-1", password: "secret-1" });
-  t.after(() => close(upstream.server));
+  defer(t, () => close(upstream.server));
   const { gateway, port, tokenlessPort } = await startGateway({
     protocol: "http", host: "127.0.0.1", port: upstream.port, username: "user-1", password: "secret-1",
   });
-  t.after(() => gateway.stop());
+  defer(t, () => gateway.stop());
 
   for (const token of [null, "b".repeat(64)]) {
     const denied = await connectTunnel(port, "chatgpt.com:443", token);
@@ -320,13 +454,13 @@ test("the helper's config line survives a multibyte character split across chunk
 
 test("the gateway reports a rejected upstream login without leaking the credentials", async (t) => {
   const upstream = await fakeHttpUpstream({ username: "user-1", password: "right" });
-  t.after(() => close(upstream.server));
+  defer(t, () => close(upstream.server));
   const warnings = [];
   const { gateway, port } = await startGateway(
     { protocol: "http", host: "127.0.0.1", port: upstream.port, username: "user-1", password: "wrong-secret" },
     { logger: { info() {}, warn: (event, detail) => warnings.push(JSON.stringify({ event, detail })) } },
   );
-  t.after(() => gateway.stop());
+  defer(t, () => gateway.stop());
 
   const tunnel = await connectTunnel(port, "chatgpt.com:443");
   assert.match(tunnel.head, /^HTTP\/1\.1 502 /);
@@ -342,11 +476,11 @@ test("the gateway reports a rejected upstream login without leaking the credenti
 
 test("the gateway relays CONNECT and plain HTTP through an authenticated SOCKS5 upstream", async (t) => {
   const upstream = await fakeSocksUpstream({ username: "socks-user", password: "socks-pass" });
-  t.after(() => close(upstream.server));
+  defer(t, () => close(upstream.server));
   const { gateway, port } = await startGateway({
     protocol: "socks5", host: "127.0.0.1", port: upstream.port, username: "socks-user", password: "socks-pass",
   });
-  t.after(() => gateway.stop());
+  defer(t, () => gateway.stop());
 
   const tunnel = await connectTunnel(port, "chatgpt.com:443");
   assert.match(tunnel.head, /^HTTP\/1\.1 200 /);
@@ -366,9 +500,9 @@ test("the gateway relays CONNECT and plain HTTP through an authenticated SOCKS5 
 
 test("a SOCKS5 reply with an unknown address type is refused", async (t) => {
   const upstream = await fakeSocksUpstream({ username: "u", password: "p", replyAddressType: 0x05 });
-  t.after(() => close(upstream.server));
+  defer(t, () => close(upstream.server));
   const { gateway, port } = await startGateway({ protocol: "socks5", host: "127.0.0.1", port: upstream.port, username: "u", password: "p" });
-  t.after(() => gateway.stop());
+  defer(t, () => gateway.stop());
   const tunnel = await connectTunnel(port, "chatgpt.com:443");
   assert.match(tunnel.head, /^HTTP\/1\.1 502 /);
   assert.match(await readAll(tunnel.socket), /unknown address type 5/);
@@ -376,11 +510,11 @@ test("a SOCKS5 reply with an unknown address type is refused", async (t) => {
 
 test("the gateway rejects wrong SOCKS5 credentials, non-loopback clients and every loopback target spelling", async (t) => {
   const upstream = await fakeSocksUpstream({ username: "socks-user", password: "socks-pass" });
-  t.after(() => close(upstream.server));
+  defer(t, () => close(upstream.server));
   const { gateway, port } = await startGateway({
     protocol: "socks5", host: "127.0.0.1", port: upstream.port, username: "socks-user", password: "nope",
   });
-  t.after(() => gateway.stop());
+  defer(t, () => gateway.stop());
 
   const denied = await connectTunnel(port, "chatgpt.com:443");
   assert.match(denied.head, /^HTTP\/1\.1 502 /);
@@ -406,9 +540,9 @@ test("the gateway rejects wrong SOCKS5 credentials, non-loopback clients and eve
 
 test("bare LF and NUL inside the request head are refused before anything is relayed", async (t) => {
   const upstream = await fakeHttpUpstream({ username: "u", password: "p" });
-  t.after(() => close(upstream.server));
+  defer(t, () => close(upstream.server));
   const { gateway, port } = await startGateway({ protocol: "http", host: "127.0.0.1", port: upstream.port, username: "u", password: "p" });
-  t.after(() => gateway.stop());
+  defer(t, () => gateway.stop());
   for (const head of [
     `GET http://example.test/ HTTP/1.1\r\nHost: example.test\nProxy-Authorization: Basic eDp5\r\n${auth(TOKEN)}\r\n`,
     `GET http://example.test/ HTTP/1.1\r\nHost: exa\0mple.test\r\n${auth(TOKEN)}\r\n`,
@@ -423,21 +557,30 @@ test("bare LF and NUL inside the request head are refused before anything is rel
 
 test("a slow client cannot hold a slot past the fixed header deadline", async (t) => {
   const { gateway, port } = await startGateway({ protocol: "http", host: "proxy.test", port: 8080 }, { headerTimeoutMs: 200 });
-  t.after(() => gateway.stop());
+  defer(t, () => gateway.stop());
   const socket = await connect(port);
-  const closed = new Promise((resolve) => socket.once("close", resolve));
-  const trickle = setInterval(() => socket.write("X"), 50);
   socket.on("error", () => {});
-  const started = Date.now();
-  await closed;
-  clearInterval(trickle);
-  assert.ok(Date.now() - started < 1_500, "trickled bytes do not extend the deadline");
+  const trickle = setInterval(() => socket.write("X"), 50);
+  let timer = null;
+  defer(t, () => {
+    clearInterval(trickle);
+    clearTimeout(timer);
+    socket.destroy();
+  });
+  // An idle timer would never fire while bytes keep arriving; the fixed deadline still does.
+  const ended = await Promise.race([
+    new Promise((resolve) => socket.once("close", () => resolve(true))),
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve(false), 15_000);
+    }),
+  ]);
+  assert.equal(ended, true, "trickled bytes do not extend the deadline");
 });
 
 test("concurrent starts share one listener attempt", async (t) => {
   const port = await freePort();
   const gateway = createProxyGateway({ port, tokenlessPort: null, proxyToken: TOKEN, getUpstream: () => null });
-  t.after(() => gateway.stop());
+  defer(t, () => gateway.stop());
   const [first, second] = await Promise.all([gateway.start(), gateway.start()]);
   assert.deepEqual(first, second);
   assert.equal(first.port, port);
@@ -467,7 +610,7 @@ test("upstreams that loop back into ProxyBridge or the gateway are refused in ev
 
 function tempSetup(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "proxy-gateway-test-"));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  defer(t, () => removeDirectory(directory));
   const store = createProviderNetworkStore({
     filePath: path.join(directory, "providers", "provider-network.json"),
     keyPath: path.join(directory, "providers", "provider-network.key"),
@@ -494,41 +637,63 @@ function tempSetup(t) {
   return { directory, store, network, applied, environmentRoute: () => environmentRoute };
 }
 
-const pids = new Set();
-
-function trackHelpers(t) {
-  t.after(async () => {
-    for (const pid of pids) {
-      if (processAlive(pid)) {
-        try {
-          process.kill(pid);
-        } catch {}
-      }
-    }
-    await waitFor(() => [...pids].every((pid) => !processAlive(pid)));
-    pids.clear();
-  });
-}
-
+// Every controller is closed and every helper it spawns is stopped by the test's cleanup (see
+// defer). The control, ready and port-release deadlines are generous: they only bound a wait, so
+// a passing run is as fast as before, while a machine busy with a parallel run gets time to answer.
 function controllerFor(setup, spawns, options = {}) {
-  return createProxyGatewayController({
+  const controller = createProxyGatewayController({
     userData: setup.directory,
     network: setup.network,
     resolveRuntime: () => ({ executable: process.execPath, args: [], env: {}, kind: "node" }),
     spawnProcess: (executable, args, spawnOptions) => {
       const child = spawn(executable, args, spawnOptions);
       spawns.push({ executable, args, env: spawnOptions.env, pid: child.pid });
-      pids.add(child.pid);
+      if (Number.isInteger(child.pid)) children.set(child.pid, child);
       return child;
     },
     watchdogMs: 0,
+    controlTimeoutMs: 10_000,
+    readyTimeoutMs: 60_000,
+    portReleaseWaitMs: 15_000,
     ...options,
   });
+  controllers.add(controller);
+  return controller;
+}
+
+// The helper's control API, as the app calls it (the token comes from the state file).
+function helperControl(state, method, pathname) {
+  return new Promise((resolve, reject) => {
+    const request = http.request({
+      host: "127.0.0.1",
+      port: state.controlPort,
+      method,
+      path: pathname,
+      headers: { Authorization: `Bearer ${state.controlToken}` },
+      agent: false,
+    }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => {
+        try {
+          resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    request.on("error", reject);
+    request.end();
+  });
+}
+
+function readHelperState(setup) {
+  return JSON.parse(fs.readFileSync(path.join(setup.directory, "providers", "proxy-gateway.state.json"), "utf8"));
 }
 
 async function addUpstream(setup, t, { username = "isp-user", password = "isp-password-value" } = {}) {
   const upstream = await fakeHttpUpstream({ username, password });
-  t.after(() => close(upstream.server));
+  defer(t, () => close(upstream.server));
   setup.store.saveProxyProfile({
     id: "isp-upstream",
     name: "ISP upstream",
@@ -544,7 +709,6 @@ function gatewayToken(store) {
 }
 
 test("Use for this app runs a detached helper, routes through it with a local token and restores the previous route", async (t) => {
-  trackHelpers(t);
   const setup = tempSetup(t);
   const upstream = await addUpstream(setup, t);
   const spawns = [];
@@ -625,7 +789,6 @@ test("Use for this app runs a detached helper, routes through it with a local to
 });
 
 test("an app restart adopts the running helper and its open tunnels keep flowing", async (t) => {
-  trackHelpers(t);
   const setup = tempSetup(t);
   await addUpstream(setup, t);
   const firstSpawns = [];
@@ -659,7 +822,6 @@ test("an app restart adopts the running helper and its open tunnels keep flowing
 });
 
 test("a changed upstream identity makes the next app restart replace the helper with the same access key", async (t) => {
-  trackHelpers(t);
   const setup = tempSetup(t);
   await addUpstream(setup, t);
   const first = controllerFor(setup, []);
@@ -669,7 +831,7 @@ test("a changed upstream identity makes the next app restart replace the helper 
   await first.close();
 
   const replacement = await fakeHttpUpstream({ username: "other-user", password: "other-pass" });
-  t.after(() => close(replacement.server));
+  defer(t, () => close(replacement.server));
   setup.store.saveProxyProfile({
     id: "isp-upstream",
     name: "ISP upstream",
@@ -706,7 +868,6 @@ test("a changed upstream identity makes the next app restart replace the helper 
 });
 
 test("New access key is the one action that rotates the key, and the old key stops working", async (t) => {
-  trackHelpers(t);
   const setup = tempSetup(t);
   await addUpstream(setup, t);
   const controller = controllerFor(setup, []);
@@ -756,7 +917,6 @@ function staleState(pid, dataPort, controlPort) {
 }
 
 test("a stale state file is discarded without signalling a pid it cannot verify", async (t) => {
-  trackHelpers(t);
   const setup = tempSetup(t);
   await addUpstream(setup, t);
   const seed = controllerFor(setup, []);
@@ -782,7 +942,6 @@ test("a stale state file is discarded without signalling a pid it cannot verify"
 });
 
 test("a lost upstream takes the app off the gateway instead of leaving every request 502", async (t) => {
-  trackHelpers(t);
   const setup = tempSetup(t);
   await addUpstream(setup, t);
   const controller = controllerFor(setup, []);
@@ -800,7 +959,6 @@ test("a lost upstream takes the app off the gateway instead of leaving every req
 });
 
 test("launch falls back to the previous route when the helper can be neither adopted nor started", async (t) => {
-  trackHelpers(t);
   const setup = tempSetup(t);
   await addUpstream(setup, t);
   const first = controllerFor(setup, []);
@@ -824,7 +982,6 @@ test("launch falls back to the previous route when the helper can be neither ado
 });
 
 test("concurrent gateway starts spawn one helper", async (t) => {
-  trackHelpers(t);
   const setup = tempSetup(t);
   await addUpstream(setup, t);
   const spawns = [];
@@ -837,10 +994,11 @@ test("concurrent gateway starts spawn one helper", async (t) => {
 });
 
 test("the token-free port is closed by default, open while ChatGPT Desktop runs and closed after", async (t) => {
-  trackHelpers(t);
   const setup = tempSetup(t);
   await addUpstream(setup, t);
-  const controller = controllerFor(setup, [], { tokenlessHoldMs: 150 });
+  // The launch hold runs on the test's clock; no heartbeat, as from an app that later crashes.
+  const clock = fakeClock();
+  const controller = controllerFor(setup, [], { tokenlessHoldMs: 150, tokenlessHeartbeatMs: 0, now: clock.now });
   const tokenlessPort = await freePort();
   await controller.configure({ upstreamProfileId: "isp-upstream", port: await freePort(), tokenlessPort });
   assert.equal(await controller.desktopRoute(), null, "no token-free route while the app does not use the gateway");
@@ -855,7 +1013,7 @@ test("the token-free port is closed by default, open while ChatGPT Desktop runs 
   assert.match(tunnel.head, /^HTTP\/1\.1 200 /);
   tunnel.socket.destroy();
   await controller.setDesktopRunning(true);
-  await sleep(250);
+  clock.advance(250);
   assert.equal((await controller.status()).tokenlessOpen, true, "a tracked instance keeps it open past the launch hold");
   await controller.setDesktopRunning(false);
   assert.equal((await controller.status()).tokenlessOpen, false, "the last instance's exit closes it");
@@ -864,7 +1022,7 @@ test("the token-free port is closed by default, open while ChatGPT Desktop runs 
   // The app quits or crashes with the port open: the next app closes it when it adopts the helper.
   await controller.desktopRoute();
   assert.equal((await controller.status()).tokenlessOpen, true);
-  const relaunched = controllerFor(setup, [], { tokenlessHoldMs: 150 });
+  const relaunched = controllerFor(setup, [], { tokenlessHoldMs: 150, now: clock.now });
   const adopted = await relaunched.startup();
   assert.equal(adopted.helper.adopted, true);
   assert.equal(adopted.tokenlessOpen, false);
@@ -879,11 +1037,11 @@ test("a live helper that misses verification keeps its state and is never signal
     sockets.add(socket);
     socket.on("error", () => {});
   };
-  const holder = net.createServer(keep);
-  const silent = net.createServer(keep);
+  const holder = trackServer(net.createServer(keep));
+  const silent = trackServer(net.createServer(keep));
   const dataPort = await listen(holder);
   const controlPort = await listen(silent);
-  t.after(async () => {
+  defer(t, async () => {
     for (const socket of sockets) socket.destroy();
     await Promise.all([close(holder), close(silent)]);
   });
@@ -903,7 +1061,7 @@ test("a live helper that misses verification keeps its state and is never signal
 
 test("the proxy login answers only the challenger the global route names", async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "proxy-login-test-"));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  defer(t, () => removeDirectory(directory));
   const network = createProviderNetworkController({
     app: {},
     browserPartition: "test",
@@ -941,7 +1099,6 @@ test("the proxy login answers only the challenger the global route names", async
 });
 
 test("a helper that died while its port stayed free is restarted with the same key", async (t) => {
-  trackHelpers(t);
   const setup = tempSetup(t);
   await addUpstream(setup, t);
   const rotations = [];
@@ -973,36 +1130,27 @@ const SQUATTER_ANSWER = (() => {
 // Holds the port and answers every request with `answer` (a squatter answers the probe as another
 // process with 200 JSON).
 async function squat(t, port, answer = SQUATTER_ANSWER) {
-  const sockets = new Set();
-  const server = net.createServer((socket) => {
-    sockets.add(socket);
+  const server = trackServer(net.createServer((socket) => {
     socket.on("error", () => {});
     socket.once("data", () => socket.end(answer));
-  });
-  // A just-killed helper's socket can linger for a moment before the port is free to take.
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      await new Promise((resolve, reject) => {
-        server.once("error", reject);
-        server.listen(port, "127.0.0.1", () => {
-          server.off("error", reject);
-          resolve();
-        });
-      });
-      break;
-    } catch (error) {
-      if (attempt >= 40) throw error;
-      await sleep(100);
-    }
-  }
-  let closed = false;
-  const stop = async () => {
-    if (closed) return;
-    closed = true;
-    for (const socket of sockets) socket.destroy();
-    await close(server);
-  };
-  t.after(stop);
+  }));
+  const stop = () => close(server);
+  defer(t, stop);
+  // A just-stopped helper's socket can linger before the port is free to take; on a busy
+  // machine for seconds, so the bind is retried until a deadline rather than a fixed count.
+  let lastError = null;
+  const bound = await waitFor(() => new Promise((resolve) => {
+    const failed = (error) => {
+      lastError = error;
+      resolve(false);
+    };
+    server.once("error", failed);
+    server.listen(port, "127.0.0.1", () => {
+      server.off("error", failed);
+      resolve(true);
+    });
+  }));
+  if (!bound) throw lastError ?? new Error(`Port ${port} could not be squatted`);
   return stop;
 }
 
@@ -1019,7 +1167,6 @@ function rotationLog() {
 }
 
 test("startup rotates once when the data port answers as another process after the helper died", async (t) => {
-  trackHelpers(t);
   const setup = tempSetup(t);
   await addUpstream(setup, t);
   const port = await freePort();
@@ -1065,7 +1212,6 @@ test("startup rotates once when the data port answers as another process after t
 });
 
 test("a failed bind rotates the key; the hook runs once a helper serves it", async (t) => {
-  trackHelpers(t);
   const setup = tempSetup(t);
   await addUpstream(setup, t);
   const rotations = [];
@@ -1096,16 +1242,11 @@ test("our busy helper (503) or an older helper (407) on the port is not taken fo
     await addUpstream(setup, t);
     const dataPort = await freePort();
     await squat(t, dataPort, answer);
-    const sockets = new Set();
-    const silent = net.createServer((socket) => {
-      sockets.add(socket);
+    const silent = trackServer(net.createServer((socket) => {
       socket.on("error", () => {});
-    });
+    }));
     const controlPort = await listen(silent);
-    t.after(async () => {
-      for (const socket of sockets) socket.destroy();
-      await close(silent);
-    });
+    defer(t, () => close(silent));
     const log = rotationLog();
     const rotations = [];
     const controller = controllerFor(setup, [], {
@@ -1130,72 +1271,74 @@ test("our busy helper (503) or an older helper (407) on the port is not taken fo
 });
 
 test("a replaced helper reopens the token-free port while ChatGPT Desktop still runs", async (t) => {
-  trackHelpers(t);
   const setup = tempSetup(t);
   await addUpstream(setup, t);
-  const controller = controllerFor(setup, [], { restartBackoffBaseMs: 0 });
+  // The reopen happens at once, or (when the replaced helper's listener still lingers on the port)
+  // on the next heartbeat; the checks poll for it instead of reading one instant.
+  const controller = controllerFor(setup, [], { restartBackoffBaseMs: 0, tokenlessHeartbeatMs: 200 });
   const tokenlessPort = await freePort();
+  const tokenlessOpen = async () => (await controller.status()).tokenlessOpen === true;
   await controller.configure({ upstreamProfileId: "isp-upstream", port: await freePort(), tokenlessPort });
   await controller.setUseForApp(true);
   await controller.setDesktopRunning(true);
-  let status = await controller.status();
-  assert.equal(status.tokenlessOpen, true);
+  assert.ok(await waitFor(tokenlessOpen), "a running ChatGPT Desktop opens the port");
 
-  status = await controller.configure({ port: await freePort() });
-  assert.equal(status.tokenlessOpen, true, "configure replaced the helper and the demand reopened the port");
+  const replaced = await controller.configure({ port: await freePort() });
+  assert.ok(await waitFor(tokenlessOpen), "configure replaced the helper and the demand reopened the port");
   const first = await connectTunnel(tokenlessPort, "chatgpt.com:443", null);
   assert.match(first.head, /^HTTP\/1\.1 200 /);
   first.socket.destroy();
 
-  process.kill(status.helper.pid);
-  assert.ok(await waitFor(() => !processAlive(status.helper.pid)));
+  process.kill(replaced.helper.pid);
+  assert.ok(await waitFor(() => !processAlive(replaced.helper.pid)));
   await controller.watchdogTick();
-  status = await controller.status();
-  assert.equal(status.tokenlessOpen, true, "a watchdog restart reopens it too");
+  const restarted = await controller.status();
+  assert.equal(restarted.running, true);
+  assert.notEqual(restarted.helper.pid, replaced.helper.pid, "the watchdog started a new helper");
+  assert.ok(await waitFor(tokenlessOpen), "a watchdog restart reopens it too");
   await controller.setDesktopRunning(false);
-  assert.equal((await controller.status()).tokenlessOpen, false);
+  assert.equal(await tokenlessOpen(), false, "the last instance's exit closes it");
   await controller.setRunning(false);
 });
 
 test("the helper closes the token-free port by itself once the app's heartbeat stops", async (t) => {
-  trackHelpers(t);
   const setup = tempSetup(t);
   await addUpstream(setup, t);
-  const controller = controllerFor(setup, [], { tokenlessLeaseMs: 400, tokenlessHeartbeatMs: 100, tokenlessHoldMs: 50 });
+  // The helper reports its lease deadline, so renewal and lapse are read from the helper itself
+  // instead of from sleeps that a busy machine can stretch past the lease.
+  const controller = controllerFor(setup, [], { tokenlessLeaseMs: 1_000, tokenlessHeartbeatMs: 100 });
   const tokenlessPort = await freePort();
   await controller.configure({ upstreamProfileId: "isp-upstream", port: await freePort(), tokenlessPort });
   await controller.setUseForApp(true);
   await controller.setDesktopRunning(true);
-  await sleep(900);
-  assert.equal((await controller.status()).tokenlessOpen, true, "the heartbeat renews the lease");
+  const state = readHelperState(setup);
+  const leased = (await helperControl(state, "GET", "/status")).tokenlessLeaseExpiresAt;
+  assert.ok(leased, "the open token-free port is leased");
+  assert.ok(await waitFor(async () => {
+    const renewed = (await helperControl(state, "GET", "/status")).tokenlessLeaseExpiresAt;
+    return Boolean(renewed) && Date.parse(renewed) > Date.parse(leased);
+  }), "the heartbeat renews the lease");
+  assert.ok(await waitFor(async () => (await controller.status()).tokenlessOpen === true), "the port stays open while the app beats");
 
   // An app that opened the port and then crashed: no heartbeat follows.
-  const state = JSON.parse(fs.readFileSync(path.join(setup.directory, "providers", "proxy-gateway.state.json"), "utf8"));
   await controller.close();
-  await new Promise((resolve, reject) => {
-    const request = require("node:http").request({
-      host: "127.0.0.1", port: state.controlPort, method: "POST", path: "/tokenless/open",
-      headers: { Authorization: `Bearer ${state.controlToken}` },
-    }, (response) => {
-      response.resume();
-      response.on("end", resolve);
-    });
-    request.on("error", reject);
-    request.end();
-  });
-  const open = await connectTunnel(tokenlessPort, "chatgpt.com:443", null);
-  assert.match(open.head, /^HTTP\/1\.1 200 /);
-  open.socket.destroy();
-  await sleep(900);
+  const opened = await helperControl(state, "POST", "/tokenless/open");
+  assert.equal(opened.tokenlessPort, tokenlessPort, "the port opens with a fresh lease");
+  assert.ok(await waitFor(async () => {
+    const live = await helperControl(state, "GET", "/status");
+    return live.tokenlessPort === null && live.tokenlessLeaseExpiresAt === null;
+  }), "the helper closes the port once the lease lapses");
   await assert.rejects(connect(tokenlessPort), /ECONNREFUSED/, "the lapsed lease closed the port");
+  assert.ok(processAlive(state.pid), "the helper itself keeps running for the bridge and CPA");
 });
 
 test("the watchdog backs off exponentially when the helper keeps dying", async (t) => {
-  trackHelpers(t);
   const setup = tempSetup(t);
   await addUpstream(setup, t);
   const spawns = [];
-  const controller = controllerFor(setup, spawns, { restartBackoffBaseMs: 400, restartBackoffCapMs: 5_000 });
+  // The backoff runs on the test's clock, so a slow restart cannot eat into the delay.
+  const clock = fakeClock();
+  const controller = controllerFor(setup, spawns, { restartBackoffBaseMs: 400, restartBackoffCapMs: 5_000, now: clock.now });
   await controller.configure({ upstreamProfileId: "isp-upstream", port: await freePort(), tokenlessPort: await freePort() });
   await controller.setRunning(true);
   const kill = async () => {
@@ -1217,17 +1360,19 @@ test("the watchdog backs off exponentially when the helper keeps dying", async (
   assert.equal(status.helperState, "restarting");
   assert.ok(status.watchdog.nextRestartAt);
 
-  await sleep(450);
+  clock.advance(399);
+  await controller.watchdogTick();
+  assert.equal(spawns.length, 2, "still inside the 400 ms backoff");
+  clock.advance(1);
   await controller.watchdogTick();
   assert.equal(spawns.length, 3);
   status = await controller.status();
   assert.equal(status.watchdog.restarts, 2);
-  assert.ok(Date.parse(status.watchdog.nextRestartAt) - Date.now() > 500, "the next delay doubles");
+  assert.equal(Date.parse(status.watchdog.nextRestartAt) - clock.now(), 800, "the next delay doubles");
   await controller.setRunning(false);
 });
 
 test("a helper from another app version is replaced instead of adopted", async (t) => {
-  trackHelpers(t);
   const setup = tempSetup(t);
   await addUpstream(setup, t);
   const first = controllerFor(setup, [], { appVersion: "1.0.0" });
@@ -1248,10 +1393,9 @@ test("a helper from another app version is replaced instead of adopted", async (
 });
 
 test("a credential refresh that joins a start in flight still runs its own restart", async (t) => {
-  trackHelpers(t);
   const setup = tempSetup(t);
   const upstream = await fakeHttpUpstream({ username: "isp-user", password: "new-pass" });
-  t.after(() => close(upstream.server));
+  defer(t, () => close(upstream.server));
   const profile = (password) => setup.store.saveProxyProfile({
     id: "isp-upstream",
     name: "ISP upstream",
