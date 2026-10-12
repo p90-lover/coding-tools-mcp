@@ -38,6 +38,34 @@ function removeTokenFile(tokenPath, logger) {
   }
 }
 
+// The control token files headless writes (see start); anything else in their folder is left alone.
+const TOKEN_FILE_NAME = /^token-.+\.txt$/;
+
+/**
+ * Deletes control token files that earlier runs left in `directory` (the app crashed or was killed
+ * before it could delete its own): only regular files named token-*.txt, never `keep` (the one
+ * about to be used), and only those last written before `before` (epoch ms). Quiet: a file that
+ * cannot be read or removed is left for the next start.
+ */
+function removeStaleTokenFiles(directory, { keep = null, before }) {
+  let names;
+  try {
+    names = fs.readdirSync(directory);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const file = path.join(directory, name);
+    if (!TOKEN_FILE_NAME.test(name) || (keep && path.resolve(file) === path.resolve(keep))) continue;
+    try {
+      const metadata = fs.lstatSync(file);
+      if (metadata.isFile() && metadata.mtimeMs < before) fs.rmSync(file, { force: true });
+    } catch {
+      // Left for the next start.
+    }
+  }
+}
+
 function safeErrorMessage(error) {
   const message = error instanceof Error ? error.message : String(error);
   return message.replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, "Bearer [redacted]").slice(0, 500);
@@ -170,6 +198,9 @@ class HeadlessHost {
     const tokenPath = path.join(appDataDir, "aiTemp", "headless-control", `token-${id}.txt`);
     fs.mkdirSync(path.dirname(descriptorPath), { recursive: true, mode: 0o700 });
     fs.mkdirSync(path.dirname(tokenPath), { recursive: true, mode: 0o700 });
+    // A token file from an earlier run is a secret nobody will read; one written within the startup
+    // window may still be another instance's (dev and packaged builds can share this folder).
+    removeStaleTokenFiles(path.dirname(tokenPath), { keep: tokenPath, before: Date.now() - START_TIMEOUT_MS });
 
     const child = spawn(executable, ["serve"], {
       cwd: path.dirname(executable),
@@ -352,5 +383,6 @@ class HeadlessHost {
 
 module.exports = Object.freeze({
   HeadlessHost,
+  removeStaleTokenFiles,
   requestJson,
 });
