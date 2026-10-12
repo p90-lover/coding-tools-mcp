@@ -433,3 +433,25 @@ test("Claude Code's own tools are labelled by what they did, a shell call shows 
   assert.equal(request.tool, "PowerShell", "the tool's name, not ACP's \"other\"");
   assert.equal(request.reason, "安裝前端相依套件");
 });
+
+test("a tool request nobody answered says it timed out (or was cancelled), not just that the agent was blocked", async () => {
+  const at = (minutes) => new Date(Date.parse("2026-10-12T06:17:42Z") + minutes * 60_000).toISOString();
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.includes("/conversation") ? {
+      turns: [{ id: "t", state: "completed" }], messages: [],
+      activities: [
+        { id: "1", turnId: "t", sequence: 87, activityKind: "approval", status: "completed", summary: "PowerShell",
+          createdAt: at(0), updatedAt: at(30), detail: { resolvedBy: "provider" } },
+        { id: "2", turnId: "t", sequence: 92, activityKind: "approval", status: "completed", summary: "PowerShell",
+          createdAt: at(33), updatedAt: at(35), detail: { resolvedBy: "provider" } },
+        { id: "3", turnId: "t", sequence: 95, activityKind: "approval", status: "completed", summary: "Edit",
+          createdAt: at(40), updatedAt: at(41), detail: { decisionId: "allow" } },
+      ],
+    } : { session: { id: "s", mode: "chat", status: "idle" } },
+  });
+  const items = JSON.parse(JSON.stringify((await upstream.observe("s")).timeline));
+  assert.equal(items[0].label, "Approval timed out");
+  assert.match(items[0].text, /Nobody answered within 30 minutes.*PowerShell.*follow-up/);
+  assert.equal(items[1].label, "Approval cancelled", "the turn ended before it was answered");
+  assert.equal(items[2].label, undefined, "a request the user answered keeps its normal row");
+});
