@@ -368,3 +368,59 @@ test("rewind puts only the chosen message in the composer, with the earlier ones
   assert.ok(chat.includes("const CHAT_DRAFTS = new Map<string, string>();"));
   assert.ok(chat.includes("setDraft(CHAT_DRAFTS.get(selectedTaskId) ?? \"\")"));
 });
+
+test("Delete on a message asks in the chat first, then removes it with its reply; a working chat or its only message can't", async () => {
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  const deleted = [], loaded = [];
+  const done = (id) => run(id, "t", [node("p", "planner", "finished", { receipt: { answer: `answer ${id}` } })], { execution_mode: "single" });
+  const description = "first ask\n\nFollow-up (2026-10-10 10:00 UTC):\nsecond ask\n\n↳ Steer (2026-10-10 10:05 UTC): use pnpm";
+  const { props } = base({ selectedTaskId: "t", runs: [done("r1"), done("r2")], pendingMessage: description,
+    // This fake keeps the chat as it was, so it can be deleted from again below.
+    loadDescription: async (taskId) => { loaded.push(taskId); return description; },
+    thread: { newChat() {}, rename: async () => {}, archive() {}, fork() {}, rewind() {}, copyConversation() {}, togglePin() {}, pinned: false,
+      deleteMessage: async (index) => { deleted.push(index); } } });
+  const view = mount(props);
+  const buttons = (next) => walk(view.render(next)).filter((element) => element.props?.["aria-label"] === "Delete this message");
+  const confirm = () => walk(view.render()).find((element) => element.props?.role === "alertdialog");
+  assert.equal(buttons().length, 2, "each message has Delete");
+  const steer = walk(view.render()).find((element) => String(element.props?.className).includes("cx-steer"));
+  assert.ok(steer, "the steer shows under its message");
+  assert.equal(walk(steer).filter((element) => element.props?.["aria-label"] === "Delete this message").length, 0, "a steer goes with its message");
+  assert.equal(buttons()[1].props.disabled, false);
+
+  // The button only asks; Cancel leaves the chat as it is.
+  buttons()[1].props.onClick();
+  assert.equal(confirm().props["aria-label"], "Delete message");
+  assert.match(text(confirm()), /Delete this message\? It and its reply are removed from this chat\. The agent's files are not changed\./);
+  assert.deepEqual(deleted, []);
+  walk(confirm()).find((element) => element.type === "button" && text(element) === "Cancel").props.onClick();
+  assert.equal(confirm(), undefined);
+  assert.deepEqual(deleted, []);
+
+  // Confirming deletes that message (its turn index), then reads the chat's messages again.
+  buttons()[1].props.onClick();
+  walk(confirm()).find((element) => element.type === "button" && text(element) === "Delete").props.onClick();
+  await settle(); await settle();
+  assert.deepEqual(deleted, [1]);
+  assert.deepEqual(loaded, ["t"]);
+  assert.equal(confirm(), undefined);
+
+  // /delete <n> opens the same confirmation.
+  walk(view.render()).find((element) => element.type === "textarea").props.onChange({ target: { value: "/delete 1" } });
+  walk(view.render()).find((element) => element.type === "textarea").props.onKeyDown({ key: "Enter", shiftKey: false, preventDefault() {} });
+  await settle(); await settle();
+  assert.ok(confirm(), "/delete asks too");
+  assert.deepEqual(deleted, [1]);
+  walk(confirm()).find((element) => element.type === "button" && text(element) === "Delete").props.onClick();
+  await settle(); await settle();
+  assert.deepEqual(deleted, [1, 0]);
+  assert.deepEqual(loaded, ["t", "t"]);
+
+  // While the chat works the button is disabled and says why; so is a chat's only message.
+  const working = buttons({ working: true });
+  assert.ok(working.every((button) => button.props.disabled && /Stop the chat first/.test(button.props.title)));
+  const alone = buttons({ working: false, selectedTaskId: "u", runs: [run("r9", "u", [node("p", "planner", "finished")])], pendingMessage: "only ask" });
+  assert.equal(alone.length, 1);
+  assert.equal(alone[0].props.disabled, true);
+  assert.match(alone[0].props.title, /only message; archive or delete the chat instead/);
+});

@@ -2881,3 +2881,90 @@ test("an open chat pre-warms only when its next message cannot continue its agen
   assert.deepEqual(spawned, ["test-model", "other-model", "third-model"]);
   assert.deepEqual(killed, ["warm-1"], "the oldest waiting agent is ended once a third is warmed");
 });
+
+// ---- Delete message ----
+
+test("deleting a chat message removes it and its steers from the task and hides its run from the chat", async () => {
+  const description = "first ask\n\nFollow-up (2026-10-10 10:00 UTC):\nsecond ask\n\n↳ Steer (2026-10-10 10:05 UTC): use pnpm"
+    + "\n\nFollow-up (2026-10-10 11:00 UTC):\nthird ask";
+  const done = (id, task = "task-1") => ({ id, workspace_id: "ws-1", project_id: task, cancelled: false, nodes: [{ id: "one", role: "planner", state: "finished" }] });
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Fix auth", description, state: "in_progress", clauses: [] },
+    { id: "task-2", title: "Alone", description: "only ask", state: "in_progress", clauses: [] }],
+  runs: [done("r1"), done("other", "task-2"), done("r2"), done("r3")] });
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless });
+  const deleted = await workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: 1 });
+  assert.deepEqual({ ...deleted }, { ok: true, taskId: "task-1", index: 1, runId: "r2" }, "message 1 started the chat's second run");
+  assert.equal(world.tasks[0].description, "first ask\n\nFollow-up (2026-10-10 11:00 UTC):\nthird ask", "the steer goes with its message");
+  assert.equal(world.edits[0].title, "Fix auth");
+  assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), ["r1", "other", "r3"],
+    "the run stays in AO's history but not in the chat, so r3 still answers the third message");
+  // Indexes count the messages the chat shows now: deleting the first makes the next one first.
+  assert.equal((await workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: 0 })).runId, "r1");
+  assert.equal(world.tasks[0].description, "third ask");
+  assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), ["other", "r3"]);
+  await assert.rejects(workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: 0 }), /only message; archive or delete the chat instead/);
+  await assert.rejects(workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-2", index: 0 }), /only message/);
+  await assert.rejects(workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: 4 }), /no longer in this chat/);
+  // A working chat refuses: its latest run is still open.
+  world.tasks[0].description = description;
+  world.runs.push({ id: "busy", workspace_id: "ws-1", project_id: "task-1", cancelled: false, nodes: [{ id: "a", role: "planner", state: "running" }] });
+  const edits = world.edits.length;
+  await assert.rejects(workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: 1 }), /Stop the chat first/);
+  assert.equal(world.edits.length, edits, "nothing is changed");
+});
+
+test("after a deleted message the next turn starts a fresh agent session (chat_send and chat_prewarm), then continues its own", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask\n\nFollow-up (2026-10-10 10:00 UTC):\nsecond ask", state: "in_progress", clauses: [] };
+  const single = (id, session) => ({ id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "finished", parents: [], route, receipt: { thread_id: session } }] });
+  const world = chatWorld({ tasks: [task], runs: [single("r1", "sess-1"), single("r2", "sess-1")] });
+  const created = new Map();
+  const spawned = [], sent = [], observed = [];
+  const request = async (endpoint, body, options) => {
+    if (endpoint === "/api/v1/ao/read" && body.run_id) {
+      const run = created.get(body.run_id) ?? { id: body.run_id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1,
+        grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+      created.set(body.run_id, run);
+      return { ok: true, runs: [run], worker_capacity: { [body.run_id]: 1 } };
+    }
+    const latest = [...created.values()].at(-1);
+    if (endpoint === "/api/v1/ao/grant") return { ok: true, run: latest, grant: { executable_sha256: "a".repeat(64) } };
+    if (endpoint === "/api/v1/ao/external/reserve") { latest.nodes[0].state = "reserved"; return { ok: true, request_key: `key-${created.size}`, prompt: "first ask\n\nFollow-up: third ask" }; }
+    if (endpoint === "/api/v1/ao/external/submitted") { latest.nodes[0].state = "running"; latest.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run: latest }; }
+    if (endpoint === "/api/v1/ao/external/terminal") { latest.nodes[0].state = "finished"; return { ok: true, run: latest }; }
+    return world.requestHeadless(endpoint, body, options);
+  };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: request, findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    aoHarness: {
+      spawn: async input => { spawned.push(input); return input.warm ? "warm-1" : "new-session"; },
+      continuable: async () => true,
+      send: async (id, text, key) => { sent.push([id, text, key]); return { turnId: `turn-${sent.length}`, state: "running" }; },
+      observe: async (id, expected) => { observed.push([id, expected]); return { status: "idle", turnId: expected, turnState: "completed", answer: "done" }; },
+      kill: async () => ({ ok: true }), warmSessions: async () => [],
+    },
+  });
+  const prewarm = () => workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route, taskId: "task-1" });
+  assert.equal((await prewarm()).continues, true, "before the delete the chat's agent takes the next message");
+  await workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: 1 });
+  const warmed = await prewarm();
+  assert.equal(warmed.continues, undefined, "the old agent still remembers the deleted exchange");
+  assert.equal(warmed.warmed, true, "a fresh agent is made ready instead");
+  await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "third ask", executionMode: "single", singleRoute: route });
+  for (let tries = 0; tries < 200 && !observed.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.ok(observed.length, "the fresh turn ran");
+  assert.ok(!sent.some(([id]) => id === "sess-1"), "nothing continues the old session");
+  const fresh = [...spawned.filter(input => !input.warm).map(input => input.prompt), ...sent.map(([, text]) => text)];
+  assert.ok(fresh.includes("first ask\n\nFollow-up: third ask"), "the fresh agent gets the whole chat as it now reads");
+  for (let tries = 0; tries < 200 && [...created.values()][0]?.nodes[0].state !== "finished"; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  // The flag is cleared by that turn: its own session is continued from here on.
+  world.runs.push(single("r3", "sess-3"));
+  assert.equal((await prewarm()).continues, true);
+  const before = sent.length;
+  await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "fourth ask", executionMode: "single", singleRoute: route });
+  for (let tries = 0; tries < 200 && sent.length === before; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.deepEqual(sent.at(-1).slice(0, 2), ["sess-3", "fourth ask"]);
+});

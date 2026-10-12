@@ -50,6 +50,7 @@ const SPECS = Object.freeze({
   chat_steer: { readOnly: false, description: "Hand a message to the chat's running AO agent at once (steer), without waiting for its turn to end." },
   chat_goal: { readOnly: false, description: "Pause, resume, edit or clear a chat's goal (/goal); a resumed goal starts its next round." },
   compact_chat: { readOnly: false, description: "Replace a settled chat's context with a handoff summary (/compact)." },
+  chat_delete_message: { readOnly: false, description: "Delete one message of a settled chat with its reply: the message leaves the task, its run is hidden from the chat, and the next turn starts a fresh agent session." },
   chat_diff: { readOnly: true, description: "Read the project's uncommitted git changes (/diff)." },
   codex_executable: { readOnly: true, description: "Locate the installed Codex desktop app's codex.exe used to run missions." },
 

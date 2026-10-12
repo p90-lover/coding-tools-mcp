@@ -428,3 +428,10 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-goal-editor .cx-text-button { background: transparent; color: var(--ao-muted); }
 .cx-goal-editor .cx-primary-button { background: var(--color-text-primary); color: var(--color-bg-primary); }
 .cx-goal-editor .cx-primary-button:disabled { opacity: .4; cursor: default; }
+/* Delete message: the same in-chat confirmation, its Delete button in the danger colour. */
+.cx-delete-confirm footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.cx-delete-confirm .cx-text-button, .cx-delete-confirm .cx-primary-button { padding: 5px 12px; border: 0; border-radius: 8px; font-size: 12px; cursor: pointer; }
+.cx-delete-confirm .cx-text-button { background: transparent; color: var(--ao-muted); }
+.cx-delete-confirm .cx-primary-button { background: var(--ao-red); color: #fff; }
+.cx-delete-confirm .cx-primary-button:disabled { opacity: .4; cursor: default; }
+.cx-delete-confirm .cx-delete-reason { margin-top: 6px; color: var(--ao-muted); }

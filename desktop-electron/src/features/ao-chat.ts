@@ -429,6 +429,7 @@ export const CHAT_SLASH_COMMANDS: ChatSlashCommand[] = [
   { name: "resume", hint: "Resume a recent chat" },
   { name: "fork", hint: "Start a new chat from this conversation", needsChat: true },
   { name: "rewind", hint: "Go back to an earlier message and edit it", args: "[message number]", needsChat: true },
+  { name: "delete", hint: "Delete a message and its reply from this chat", args: "[message number]", needsChat: true },
   { name: "rename", hint: "Rename this chat", needsChat: true },
   { name: "archive", hint: "Archive this chat", needsChat: true },
   { name: "copy", hint: "Copy this conversation as Markdown", needsChat: true },

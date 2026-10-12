@@ -1346,6 +1346,13 @@ export function AgentOrchestratorSurface({ language, setError }: {
     if (!kept.length) return;
     await sendChat({ title: `Fork of ${taskName(taskId)}`.slice(0, 240), message: kept.map((message) => message.text).join("\n\n").slice(0, 8192) });
   })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+  // Delete message (confirmed in the chat): the message and its reply leave this chat; the bridge
+  // hides that message's run so later answers stay with their messages, and the next turn starts
+  // a fresh agent session. Files on disk are not changed.
+  const deleteChatMessage = (taskId: string, index: number) => chatRun(taskId, async () => {
+    await moduleCall("chat_delete_message", { workspaceId, taskId, index });
+    await loadMissions(workspaceId);
+  });
   /** A chat as Codex turns, read fresh (the board list omits task descriptions). */
   const chatTranscript = async (taskId: string) => chatTurns(missions.filter((mission) => mission.project_id === taskId) as unknown as ChatRun[],
     await loadDescription(taskId), { describe: describeChatNode, activity: chatActivity, now: Date.now() });
@@ -1699,6 +1706,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
                 stop={stopChatRun} restart={restartChatRun}
                 thread={chatTaskId ? { newChat: startNewChat, rename: (title) => renameChat(chatTaskId, title), archive: () => missionAction(chatTaskId, "archive"),
                   fork: (turnIndex) => forkChat(chatTaskId, turnIndex), rewind: (turnIndex) => rewindChat(chatTaskId, turnIndex),
+                  deleteMessage: (turnIndex) => deleteChatMessage(chatTaskId, turnIndex),
                   copyConversation: () => copyChat(chatTaskId, "conversation"), togglePin: () => togglePin(chatTaskId), pinned: chatPins.includes(chatTaskId) } : undefined}
                 onPause={() => controlRun("pause")} onResume={() => controlRun("resume")} onSettings={() => openSheet("settings")}
                 onOpenProject={(() => { const open = workspaces.find((item) => item.id === workspaceId); return open?.path ? () => openFolder(open) : undefined; })()}
