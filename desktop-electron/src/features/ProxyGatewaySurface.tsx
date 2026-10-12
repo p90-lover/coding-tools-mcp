@@ -11,8 +11,8 @@ import "./orchestration-control.css";
 import "./network-proxy.css";
 
 const GATEWAY_PROFILE_ID = "builtin-gateway";
-// ProxyBridge's listeners and the gateway's own default port; a profile pointing at them would loop.
-const LOOP_PORTS = new Set([17891, 17892, 17893, 17894]);
+// ProxyBridge's listeners and the gateway's own default ports; a profile pointing at them would loop.
+const LOOP_PORTS = new Set([17891, 17892, 17893, 17894, 17895]);
 const TRACE_URL = "https://chatgpt.com/cdn-cgi/trace";
 const POLL_MS = 2_000;
 
@@ -21,10 +21,10 @@ function isLoopbackHost(host: string): boolean {
   return value === "localhost" || value === "::1" || value.startsWith("127.");
 }
 
-function loopsBack(profile: ProxyProfileRecord, gatewayPort: number): boolean {
+function loopsBack(profile: ProxyProfileRecord, gatewayPorts: readonly number[]): boolean {
   return profile.id === GATEWAY_PROFILE_ID
     || (isLoopbackHost(profile.endpoint.host)
-      && (LOOP_PORTS.has(profile.endpoint.port) || profile.endpoint.port === gatewayPort));
+      && (LOOP_PORTS.has(profile.endpoint.port) || gatewayPorts.includes(profile.endpoint.port)));
 }
 
 function endpointText(profile: ProxyGatewayProfileSummary | null): string {
@@ -58,6 +58,7 @@ export function ProxyGatewaySurface({
   const [status, setStatus] = useState<ProxyGatewayStatus | null>(null);
   const [snapshot, setSnapshot] = useState<ProviderNetworkSnapshot | null>(null);
   const [portDraft, setPortDraft] = useState("");
+  const [tokenlessDraft, setTokenlessDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
 
@@ -101,6 +102,10 @@ export function ProxyGatewaySurface({
     if (status) setPortDraft(String(status.port));
   }, [status?.port]);
 
+  useEffect(() => {
+    if (status) setTokenlessDraft(String(status.tokenlessPort));
+  }, [status?.tokenlessPort]);
+
   const run = async (operation: () => Promise<ProxyGatewayStatus>, success: string) => {
     setBusy(true);
     setError(null);
@@ -116,7 +121,7 @@ export function ProxyGatewaySurface({
   };
 
   const api = window.codexWebLauncher;
-  const gatewayPort = status?.port ?? 17894;
+  const gatewayPorts = [status?.port ?? 17894, status?.tokenlessPort ?? 17895];
   const profiles = (snapshot?.proxyProfiles ?? []).filter((profile) => !profile.archivedAt && profile.id !== GATEWAY_PROFILE_ID);
   const running = status?.running === true;
   const useForApp = status?.useForApp === true;
@@ -141,19 +146,21 @@ export function ProxyGatewaySurface({
   const savePort = () => {
     if (!api) return;
     const port = Number(portDraft);
-    if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+    const tokenlessPort = Number(tokenlessDraft);
+    const valid = (value: number) => Number.isInteger(value) && value >= 1024 && value <= 65535;
+    if (!valid(port) || !valid(tokenlessPort) || port === tokenlessPort) {
       setError(localText(
         language,
-        "Enter a gateway port between 1024 and 65535.",
-        "請輸入 1024 至 65535 之間的閘道連接埠。",
-        "请输入 1024 至 65535 之间的网关端口。",
-        "1024〜65535 のゲートウェイポートを入力してください。",
+        "Enter two different gateway ports between 1024 and 65535.",
+        "請輸入兩個介於 1024 至 65535 之間且不同的閘道連接埠。",
+        "请输入两个介于 1024 至 65535 之间且不同的网关端口。",
+        "1024〜65535 の異なるゲートウェイポートを 2 つ入力してください。",
       ));
       return;
     }
     void run(
-      () => api.configureProxyGateway({ port }),
-      localText(language, `Gateway port set to ${port}.`, `閘道連接埠已設為 ${port}。`, `网关端口已设为 ${port}。`, `ゲートウェイのポートを ${port} にしました。`),
+      () => api.configureProxyGateway({ port, tokenlessPort }),
+      localText(language, `Gateway ports set to ${port} and ${tokenlessPort}.`, `閘道連接埠已設為 ${port} 與 ${tokenlessPort}。`, `网关端口已设为 ${port} 和 ${tokenlessPort}。`, `ゲートウェイのポートを ${port} と ${tokenlessPort} にしました。`),
     );
   };
 
@@ -222,7 +229,11 @@ export function ProxyGatewaySurface({
         </div>
         <dl className="proxy-route-list proxy-gateway-stats">
           <div><dt>{localText(language, "Listen address", "監聽位址", "监听地址", "待ち受けアドレス")}</dt><dd>{listen}</dd></div>
+          <div><dt>{localText(language, "Token-free port (ChatGPT Desktop)", "免權杖連接埠（ChatGPT Desktop）", "免令牌端口（ChatGPT Desktop）", "トークン不要のポート（ChatGPT Desktop）")}</dt><dd>{status ? `${status.listen.host}:${status.tokenlessPort}` : "—"}</dd></div>
           <div><dt>{localText(language, "Upstream", "上游代理", "上游代理", "上流プロキシ")}</dt><dd>{status?.upstream ? `${status.upstream.name} · ${endpointText(status.upstream)}` : "—"}</dd></div>
+          <div><dt>{localText(language, "Helper process", "輔助程序", "辅助进程", "ヘルパープロセス")}</dt><dd>{status?.helper
+            ? `PID ${status.helper.pid} · ${status.helper.runtime}${status.helper.adopted ? ` · ${localText(language, "kept from the last session", "沿用上次工作階段", "沿用上次会话", "前回のセッションから継続")}` : ""}`
+            : "—"}</dd></div>
           <div><dt>{localText(language, "Active connections", "使用中連線", "活动连接", "アクティブな接続")}</dt><dd>{stats?.activeConnections ?? 0}</dd></div>
           <div><dt>{localText(language, "Total connections", "連線總數", "连接总数", "接続の合計")}</dt><dd>{stats ? `${stats.totalConnections} (${stats.tunnels} CONNECT · ${stats.httpRequests} HTTP · ${stats.failures} ${localText(language, "failed", "失敗", "失败", "失敗")})` : "0"}</dd></div>
           <div><dt>{localText(language, "Sent to the app", "傳送至應用程式", "发送到应用程序", "アプリへ送信")}</dt><dd>{formatBytes(stats?.bytesSent)}</dd></div>
@@ -272,7 +283,7 @@ export function ProxyGatewaySurface({
               >
                 <option value="">—</option>
                 {profiles.map((profile) => {
-                  const loop = loopsBack(profile, gatewayPort);
+                  const loop = loopsBack(profile, gatewayPorts);
                   return (
                     <option disabled={loop || !profile.enabled} key={profile.id} value={profile.id}>
                       {profile.name} · {profile.endpoint.protocol}://{profile.endpoint.host}:{profile.endpoint.port}
@@ -286,10 +297,19 @@ export function ProxyGatewaySurface({
               <span>{localText(language, "Gateway port", "閘道連接埠", "网关端口", "ゲートウェイのポート")}</span>
               <input disabled={busy} inputMode="numeric" onChange={(event) => setPortDraft(event.target.value)} value={portDraft} />
             </label>
+            <label>
+              <span>{localText(language, "Token-free port", "免權杖連接埠", "免令牌端口", "トークン不要のポート")}</span>
+              <input disabled={busy} inputMode="numeric" onChange={(event) => setTokenlessDraft(event.target.value)} value={tokenlessDraft} />
+            </label>
           </div>
           <div className="control-actions">
-            <button className="secondary-button" disabled={busy || !status || portDraft === String(status.port)} onClick={savePort} type="button">
-              {localText(language, "Save port", "儲存連接埠", "保存端口", "ポートを保存")}
+            <button
+              className="secondary-button"
+              disabled={busy || !status || (portDraft === String(status.port) && tokenlessDraft === String(status.tokenlessPort))}
+              onClick={savePort}
+              type="button"
+            >
+              {localText(language, "Save ports", "儲存連接埠", "保存端口", "ポートを保存")}
             </button>
           </div>
           <p className="proxy-secret-help">{localText(
@@ -298,6 +318,13 @@ export function ProxyGatewaySurface({
             "支援 HTTP、HTTPS 與 SOCKS5 上游代理。憑證保存在加密的代理設定檔儲存中，請在「網路代理」編輯。17891-17893 連接埠屬於 ProxyBridge，不可使用。",
             "支持 HTTP、HTTPS 和 SOCKS5 上游代理。凭据保存在加密的代理配置存储中，请在“网络代理”中编辑。17891-17893 端口属于 ProxyBridge，不可使用。",
             "HTTP・HTTPS・SOCKS5 の上流に対応します。認証情報は暗号化されたプロキシ設定に保存され、ネットワークプロキシで編集します。17891〜17893 は ProxyBridge 用のため使用できません。",
+          )}</p>
+          <p className="proxy-secret-help">{localText(
+            language,
+            "The gateway runs as a helper process that keeps running when Coding Tools restarts or updates, so the Codex bridge and CPA keep their network. The gateway port needs a local token that the app supplies; the token-free port is for ChatGPT Desktop only and any local program can use it.",
+            "閘道以輔助程序執行，Coding Tools 重新啟動或更新時仍會繼續執行，讓 Codex 橋接與 CPA 保持連線。閘道連接埠需要由應用程式提供的本機權杖；免權杖連接埠只供 ChatGPT Desktop 使用，本機任何程式都可使用它。",
+            "网关以辅助进程运行，Coding Tools 重启或更新时仍会继续运行，让 Codex 桥接和 CPA 保持联网。网关端口需要由应用程序提供的本地令牌；免令牌端口仅供 ChatGPT Desktop 使用，本机任何程序都可以使用它。",
+            "ゲートウェイはヘルパープロセスとして動作し、Coding Tools の再起動や更新中も動き続けるため、Codex ブリッジと CPA の通信は途切れません。ゲートウェイのポートにはアプリが渡すローカルトークンが必要です。トークン不要のポートは ChatGPT Desktop 専用で、このマシンのどのプログラムからも使えます。",
           )}</p>
         </section>
 

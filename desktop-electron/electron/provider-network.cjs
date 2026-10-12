@@ -860,7 +860,14 @@ function createProviderNetworkController({
     safeStorage,
   });
   const ownedEnvironment = new Set();
+  // A profile may need a different env route than its Chromium proxy rule (the built-in
+  // gateway's env URL carries its local token). Returns { url, extra } or null.
+  let environmentRoute = null;
   if (typeof fetchImpl !== "function") throw new Error("Provider network fetch implementation is unavailable");
+
+  function setEnvironmentRoute(resolver) {
+    environmentRoute = typeof resolver === "function" ? resolver : null;
+  }
 
   function clearOwnedEnvironment() {
     for (const name of ownedEnvironment) delete process.env[name];
@@ -894,10 +901,15 @@ function createProviderNetworkController({
       proxyRules: route,
       proxyBypassRules: bypass,
     })));
-    setOwnedEnvironment("HTTP_PROXY", route);
-    setOwnedEnvironment("HTTPS_PROXY", route);
-    setOwnedEnvironment("ALL_PROXY", route);
+    const special = environmentRoute?.(profile) ?? null;
+    const environmentUrl = special?.url || route;
+    setOwnedEnvironment("HTTP_PROXY", environmentUrl);
+    setOwnedEnvironment("HTTPS_PROXY", environmentUrl);
+    setOwnedEnvironment("ALL_PROXY", environmentUrl);
     setOwnedEnvironment("NO_PROXY", profile.bypass.join(","));
+    for (const [name, value] of Object.entries(special?.extra ?? {})) {
+      if (typeof value === "string" && value) setOwnedEnvironment(name, value);
+    }
     logger.info("proxy.global_routing_applied", {
       profileId: profile.id,
       protocol: profile.endpoint.protocol,
@@ -1368,6 +1380,7 @@ function createProviderNetworkController({
   return {
     store,
     applyGlobalRouting,
+    setEnvironmentRoute,
     openProviderLogin,
     probeProviderAccount,
     testProxyProfile,

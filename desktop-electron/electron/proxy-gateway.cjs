@@ -1,721 +1,100 @@
+const crypto = require("node:crypto");
 const fs = require("node:fs");
-const net = require("node:net");
+const http = require("node:http");
+const os = require("node:os");
 const path = require("node:path");
-const tls = require("node:tls");
+const { spawn } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
-const { DEFAULT_BYPASS, tcpErrorText } = require("./provider-network.cjs");
+const { DEFAULT_BYPASS } = require("./provider-network.cjs");
+const { processRunning, terminateOwnedProcessTree } = require("./process-tree.cjs");
+const relay = require("./proxy-gateway-relay.cjs");
 
-// The built-in gateway replaces ProxyBridge for the app's own traffic: a loopback HTTP proxy in
-// Electron main that relays every request through one upstream proxy from the saved profiles.
-// Node-side sockets reach ISP proxies that Chromium's in-process DNS could not.
-const GATEWAY_HOST = "127.0.0.1";
-const DEFAULT_GATEWAY_PORT = 17894;
-// ProxyBridge owns 17891-17893; the gateway never listens there and never chains back to them.
-const PROXYBRIDGE_PORTS = Object.freeze([17891, 17892, 17893]);
+// App side of the built-in proxy gateway (the relay itself is proxy-gateway-relay.cjs).
+//
+// The gateway runs as a detached helper process so the Codex bridge, CPA and the MCP tunnel,
+// which outlive app restarts and installs and read their proxy route from their environment,
+// keep their network while the app is away. Like the bridge, the next app instance adopts a
+// helper it can verify: its pid is alive, its control port answers with the token from the
+// state file, it holds the data ports, and it serves the upstream the settings name.
+//
+// The data port requires a per-helper proxy token; it is saved as the builtin-gateway profile's
+// secret in the encrypted provider store, so Chromium's proxy login, CPA and the env routes pick
+// it up. The token-free port serves ChatGPT Desktop only and is an unauthenticated loopback
+// proxy (the same exposure as ProxyBridge's 17891). Upstream credentials go to the helper on
+// stdin and are never written to the settings, state or log files.
+const {
+  DEFAULT_GATEWAY_PORT,
+  DEFAULT_TOKENLESS_PORT,
+  DEFAULT_TRACE_URL,
+  GATEWAY_HOST,
+  HELPER_SERVICE,
+  PROXYBRIDGE_PORTS,
+  PROXY_USERNAME,
+} = relay;
 const GATEWAY_PROFILE_ID = "builtin-gateway";
 const GATEWAY_PROFILE_NAME = "Built-in proxy gateway";
 const GATEWAY_PROFILE_SCOPES = Object.freeze([
   "all", "browser", "provider", "oauth", "subagent", "mcp", "websocket", "http", "update",
 ]);
-const UPSTREAM_PROTOCOLS = new Set(["http", "https", "socks5"]);
-const DEFAULT_TRACE_URL = "https://chatgpt.com/cdn-cgi/trace";
+const TOKENLESS_PROXY_ENV = "CODING_TOOLS_TOKENLESS_PROXY_URL";
 const SETTINGS_VERSION = 1;
-const DEFAULT_LIMITS = Object.freeze({
-  connectTimeoutMs: 30_000,
-  headerTimeoutMs: 30_000,
-  idleTimeoutMs: 10 * 60_000,
-  maxHeaderBytes: 64 * 1024,
-  maxConnections: 1_024,
-});
-const SOCKS5_REPLIES = Object.freeze({
-  1: "general failure",
-  2: "connection not allowed by ruleset",
-  3: "network unreachable",
-  4: "host unreachable",
-  5: "connection refused",
-  6: "TTL expired",
-  7: "command not supported",
-  8: "address type not supported",
-});
-const STATUS_TEXT = Object.freeze({
-  400: "Bad Request",
-  403: "Forbidden",
-  431: "Request Header Fields Too Large",
-  502: "Bad Gateway",
-  503: "Service Unavailable",
-  504: "Gateway Timeout",
-});
-
-class GatewayError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
+const STATE_VERSION = 1;
+const LOG_ROTATE_BYTES = 1024 * 1024;
+const BOOT_STARTED_AT_MS = Date.now() - (os.uptime() * 1_000);
+const BOOT_TIME_TOLERANCE_MS = 5_000;
+const PROXY_ENV_KEYS = /^(https?_proxy|all_proxy|no_proxy|node_use_env_proxy|electron_run_as_node|coding_tools_tokenless_proxy_url)$/i;
 
 function noop() {}
 
-function bareHost(host) {
-  return String(host || "").trim().replace(/^\[|\]$/g, "").toLowerCase();
+function randomToken() {
+  return crypto.randomBytes(32).toString("hex");
 }
 
-function isLoopbackHost(host) {
-  const value = bareHost(host);
-  return value === "localhost"
-    || value.endsWith(".localhost")
-    || value === "::1"
-    || value === "0:0:0:0:0:0:0:1"
-    || value === "0.0.0.0"
-    || value === "::"
-    || /^127\./.test(value)
-    || /^::ffff:127\./.test(value);
+// A package runs the relay from app.asar.unpacked: the bundled Bun cannot read inside app.asar.
+function relayScriptPath(directory = __dirname) {
+  const packed = `${path.sep}app.asar${path.sep}`;
+  const root = directory.includes(packed)
+    ? directory.replace(packed, `${path.sep}app.asar.unpacked${path.sep}`)
+    : directory;
+  return path.join(root, "proxy-gateway-relay.cjs");
 }
 
-function isLoopbackAddress(address) {
-  const value = bareHost(address);
-  return net.isIP(value) !== 0 && value !== "0.0.0.0" && value !== "::" && isLoopbackHost(value);
-}
-
-function validateGatewayPort(value) {
-  const port = Number(value);
-  if (!Number.isInteger(port) || port < 1_024 || port > 65_535) {
-    throw new Error("Gateway port must be between 1024 and 65535");
-  }
-  if (PROXYBRIDGE_PORTS.includes(port)) {
-    throw new Error(`Port ${port} belongs to ProxyBridge; choose another gateway port`);
-  }
-  return port;
-}
-
-// Refuses an upstream that would send the gateway's traffic back into ProxyBridge or itself.
-function validateUpstream(upstream, { gatewayPort = DEFAULT_GATEWAY_PORT } = {}) {
-  if (!upstream || typeof upstream !== "object") throw new Error("Choose an upstream proxy profile first");
-  const protocol = String(upstream.protocol || "").toLowerCase();
-  if (!UPSTREAM_PROTOCOLS.has(protocol)) {
-    throw new Error("The gateway upstream must be an HTTP, HTTPS or SOCKS5 proxy");
-  }
-  const host = bareHost(upstream.host);
-  const port = Number(upstream.port);
-  if (!host || !Number.isInteger(port) || port < 1 || port > 65_535) {
-    throw new Error("The upstream proxy endpoint is invalid");
-  }
-  if (isLoopbackHost(host)
-    && (PROXYBRIDGE_PORTS.includes(port) || port === DEFAULT_GATEWAY_PORT || port === gatewayPort)) {
-    throw new Error("That profile points back at ProxyBridge or the gateway itself; choose the real upstream proxy");
-  }
-  return {
-    protocol,
-    host,
-    port,
-    username: typeof upstream.username === "string" ? upstream.username : "",
-    password: typeof upstream.password === "string" ? upstream.password : "",
-  };
-}
-
-function formatAuthority(host, port) {
-  return net.isIP(host) === 6 ? `[${host}]:${port}` : `${host}:${port}`;
-}
-
-function parseAuthority(value) {
-  const text = String(value || "");
-  let host;
-  let portText;
-  if (text.startsWith("[")) {
-    const end = text.indexOf("]");
-    if (end < 0 || text[end + 1] !== ":") throw new GatewayError(400, "Invalid tunnel target");
-    host = text.slice(1, end);
-    portText = text.slice(end + 2);
-  } else {
-    const separator = text.lastIndexOf(":");
-    if (separator < 1) throw new GatewayError(400, "Tunnel target has no port");
-    host = text.slice(0, separator);
-    portText = text.slice(separator + 1);
-  }
-  const port = Number(portText);
-  if (!host || !/^\d+$/.test(portText) || port < 1 || port > 65_535 || /[\s/@]/.test(host)) {
-    throw new GatewayError(400, "Invalid tunnel target");
-  }
-  if (isLoopbackHost(host)) throw new GatewayError(403, "Loopback destinations are not routed by the gateway");
-  return { host, port };
-}
-
-function basicAuthorization(upstream) {
-  if (!upstream.username && !upstream.password) return "";
-  return `Proxy-Authorization: Basic ${Buffer.from(`${upstream.username}:${upstream.password}`, "utf8").toString("base64")}\r\n`;
-}
-
-function statusOf(head) {
-  const line = head.toString("latin1").split("\r\n", 1)[0];
-  const match = /^HTTP\/1\.[01]\s+(\d{3})\b/i.exec(line);
-  if (!match) throw new GatewayError(502, "Upstream proxy returned an invalid HTTP status");
-  return { line: line.slice(0, 160), code: Number(match[1]) };
-}
-
-function ipv6Bytes(address) {
-  let text = bareHost(address);
-  const embedded = /(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(text);
-  if (embedded) {
-    const parts = embedded.slice(1).map(Number);
-    text = `${text.slice(0, -embedded[0].length)}${((parts[0] << 8) | parts[1]).toString(16)}:${((parts[2] << 8) | parts[3]).toString(16)}`;
-  }
-  const halves = text.split("::");
-  if (halves.length > 2) throw new GatewayError(400, "Invalid IPv6 target");
-  const head = halves[0] ? halves[0].split(":") : [];
-  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
-  const fill = halves.length === 2 ? 8 - head.length - tail.length : 0;
-  const groups = [...head, ...Array(Math.max(0, fill)).fill("0"), ...tail];
-  if (groups.length !== 8) throw new GatewayError(400, "Invalid IPv6 target");
-  const bytes = [];
-  for (const group of groups) {
-    const value = Number.parseInt(group || "0", 16);
-    if (!Number.isInteger(value) || value < 0 || value > 0xffff) throw new GatewayError(400, "Invalid IPv6 target");
-    bytes.push((value >> 8) & 0xff, value & 0xff);
-  }
-  return bytes;
-}
-
-function socks5Address(host, port) {
-  const portBytes = [(port >> 8) & 0xff, port & 0xff];
-  const version = net.isIP(host);
-  if (version === 4) return Buffer.from([0x01, ...host.split(".").map(Number), ...portBytes]);
-  if (version === 6) return Buffer.from([0x04, ...ipv6Bytes(host), ...portBytes]);
-  const name = Buffer.from(host, "utf8");
-  if (name.length > 255) throw new GatewayError(400, "SOCKS5 hostname is too long");
-  return Buffer.concat([Buffer.from([0x03, name.length]), name, Buffer.from(portBytes)]);
-}
-
-// Buffers a socket during a handshake; release() pauses it and hands back any bytes read past the
-// handshake so the following pipe() loses nothing.
-function createSocketReader(socket) {
-  let buffered = Buffer.alloc(0);
-  let failure = null;
-  let wake = null;
-  const onData = (chunk) => {
-    buffered = buffered.length ? Buffer.concat([buffered, chunk]) : chunk;
-    wake?.();
-  };
-  const onEnd = () => {
-    failure ??= new GatewayError(502, "Connection closed during the proxy handshake");
-    wake?.();
-  };
-  const onError = (error) => {
-    failure ??= error;
-    wake?.();
-  };
-  socket.on("data", onData);
-  socket.on("end", onEnd);
-  socket.on("close", onEnd);
-  socket.on("error", onError);
-
-  function waitFor(take) {
-    return new Promise((resolve, reject) => {
-      const check = () => {
-        let result;
-        try {
-          result = take(buffered);
-        } catch (error) {
-          wake = null;
-          reject(error);
-          return;
-        }
-        if (result) {
-          buffered = buffered.subarray(result.used);
-          wake = null;
-          resolve(result.value);
-        } else if (failure) {
-          wake = null;
-          reject(failure);
-        }
-      };
-      wake = check;
-      check();
-    });
-  }
-
-  return {
-    readExact(size) {
-      return waitFor((buffer) => (buffer.length >= size ? { value: buffer.subarray(0, size), used: size } : null));
-    },
-    readHead(limit) {
-      return waitFor((buffer) => {
-        const end = buffer.indexOf("\r\n\r\n");
-        if (end >= 0 && end + 4 <= limit) return { value: buffer.subarray(0, end + 4), used: end + 4 };
-        if (end >= 0 || buffer.length > limit) {
-          throw new GatewayError(431, "HTTP header exceeds the gateway limit");
-        }
-        return null;
-      });
-    },
-    readToEnd(limit) {
-      return new Promise((resolve, reject) => {
-        const check = () => {
-          if (buffered.length > limit) {
-            wake = null;
-            reject(new Error("Response is too large"));
-          } else if (failure) {
-            wake = null;
-            if (failure instanceof GatewayError) resolve(buffered);
-            else reject(failure);
-          }
-        };
-        wake = check;
-        check();
-      });
-    },
-    release() {
-      socket.pause();
-      socket.off("data", onData);
-      socket.off("end", onEnd);
-      socket.off("close", onEnd);
-      socket.off("error", onError);
-      const rest = buffered;
-      buffered = Buffer.alloc(0);
-      return rest;
-    },
-  };
-}
-
-function connectUpstream(upstream, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const secure = upstream.protocol === "https";
-    const socket = secure
-      ? tls.connect({
-          host: upstream.host,
-          port: upstream.port,
-          servername: net.isIP(upstream.host) ? undefined : upstream.host,
-          ALPNProtocols: ["http/1.1"],
-        })
-      : net.connect({ host: upstream.host, port: upstream.port });
-    let settled = false;
-    const finish = (error) => {
-      if (settled) return;
-      settled = true;
-      if (error) {
-        socket.destroy();
-        reject(error);
-      } else {
-        resolve(socket);
-      }
-    };
-    socket.on("error", noop);
-    // The timeout stays armed through the handshake that follows; splice() replaces it.
-    socket.setTimeout(timeoutMs, () => {
-      finish(new GatewayError(504, `Upstream proxy did not answer within ${Math.round(timeoutMs / 1000)} s`));
-      socket.destroy(new GatewayError(504, "Upstream proxy handshake timed out"));
-    });
-    socket.once(secure ? "secureConnect" : "connect", () => finish());
-    socket.once("error", (error) => finish(new GatewayError(502, `Upstream proxy unreachable: ${tcpErrorText(error)}`)));
-  });
-}
-
-async function openHttpTunnel(upstream, host, port, limits) {
-  const socket = await connectUpstream(upstream, limits.connectTimeoutMs);
-  const reader = createSocketReader(socket);
+// The helper runs on the bundled Bun from the durable runtime under coreHome (as the bridge does),
+// never on Coding Tools.exe: an installer replaces and stops programs in the install folder. A
+// development checkout uses Electron as Node.
+function resolveHelperRuntime({
+  isPackaged,
+  version,
+  coreHome,
+  execPath = process.execPath,
+  platform = process.platform,
+  arch = process.arch,
+}) {
+  if (!isPackaged) return { executable: execPath, args: [], env: { ELECTRON_RUN_AS_NODE: "1" }, kind: "electron" };
+  const binary = platform === "win32" ? "bun.exe" : "bun";
+  const versionsRoot = path.join(coreHome, "versions");
+  const current = `${version}-${platform}-${arch}`;
+  let names = [];
   try {
-    const authority = formatAuthority(host, port);
-    socket.write(
-      `CONNECT ${authority} HTTP/1.1\r\n`
-      + `Host: ${authority}\r\n`
-      + basicAuthorization(upstream)
-      + "Proxy-Connection: Keep-Alive\r\n\r\n",
-    );
-    const status = statusOf(await reader.readHead(limits.maxHeaderBytes));
-    if (status.code === 407) throw new GatewayError(502, "Upstream proxy rejected the saved credentials (407)");
-    if (status.code < 200 || status.code >= 300) {
-      throw new GatewayError(502, `Upstream proxy refused the tunnel: ${status.line}`);
-    }
-    return { socket, rest: reader.release() };
-  } catch (error) {
-    reader.release();
-    socket.destroy();
-    throw error;
+    names = fs.readdirSync(versionsRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && !/\.(tmp|previous)-/.test(entry.name))
+      .map((entry) => entry.name);
+  } catch {}
+  const ordered = [
+    current,
+    ...names.filter((name) => name.startsWith(`${current}-`)),
+    ...names.filter((name) => name !== current && !name.startsWith(`${current}-`)).sort().reverse(),
+  ];
+  for (const name of ordered) {
+    const executable = path.join(versionsRoot, name, "runtime", binary);
+    if (fs.existsSync(executable)) return { executable, args: [], env: {}, kind: "bun" };
   }
+  throw new Error("The bundled runtime is not installed yet; start the gateway again once Coding Tools has finished starting");
 }
 
-async function openSocks5Tunnel(upstream, host, port, limits) {
-  const socket = await connectUpstream(upstream, limits.connectTimeoutMs);
-  const reader = createSocketReader(socket);
-  try {
-    const withAuth = Boolean(upstream.username || upstream.password);
-    socket.write(Buffer.from(withAuth ? [0x05, 0x02, 0x00, 0x02] : [0x05, 0x01, 0x00]));
-    let reply = await reader.readExact(2);
-    if (reply[0] !== 0x05) throw new GatewayError(502, "Upstream is not a SOCKS5 proxy");
-    if (reply[1] === 0x02 && withAuth) {
-      const user = Buffer.from(upstream.username, "utf8");
-      const pass = Buffer.from(upstream.password, "utf8");
-      if (user.length > 255 || pass.length > 255) throw new GatewayError(502, "SOCKS5 credentials are too long");
-      socket.write(Buffer.concat([
-        Buffer.from([0x01, user.length]), user, Buffer.from([pass.length]), pass,
-      ]));
-      reply = await reader.readExact(2);
-      if (reply[1] !== 0x00) throw new GatewayError(502, "Upstream SOCKS5 proxy rejected the saved credentials");
-    } else if (reply[1] !== 0x00) {
-      throw new GatewayError(502, reply[1] === 0xff
-        ? "Upstream SOCKS5 proxy accepted none of the offered authentication methods"
-        : `Upstream SOCKS5 proxy selected unsupported method ${reply[1]}`);
-    }
-    socket.write(Buffer.concat([Buffer.from([0x05, 0x01, 0x00]), socks5Address(host, port)]));
-    reply = await reader.readExact(4);
-    if (reply[0] !== 0x05 || reply[1] !== 0x00) {
-      throw new GatewayError(502, `Upstream SOCKS5 connect failed: ${SOCKS5_REPLIES[reply[1]] || `code ${reply[1]}`}`);
-    }
-    const addressLength = reply[3] === 0x01 ? 4 : reply[3] === 0x04 ? 16 : (await reader.readExact(1))[0];
-    await reader.readExact(addressLength + 2);
-    return { socket, rest: reader.release() };
-  } catch (error) {
-    reader.release();
-    socket.destroy();
-    throw error;
-  }
-}
-
-function openTunnel(upstream, host, port, limits) {
-  return upstream.protocol === "socks5"
-    ? openSocks5Tunnel(upstream, host, port, limits)
-    : openHttpTunnel(upstream, host, port, limits);
-}
-
-const HOP_BY_HOP = /^(proxy-authorization|proxy-connection|connection|keep-alive|proxy-authenticate|te|trailer|upgrade):/i;
-
-// Plain proxy requests carry an absolute http:// URI; one request is relayed per connection.
-function parseForwardRequest(head) {
-  const lines = head.toString("latin1").split("\r\n").filter(Boolean);
-  const match = /^([A-Z]+)\s+(\S+)\s+(HTTP\/1\.[01])$/i.exec(lines[0] || "");
-  if (!match) throw new GatewayError(400, "Malformed proxy request");
-  let url;
-  try {
-    url = new URL(match[2]);
-  } catch {
-    throw new GatewayError(400, "Proxy requests need an absolute http:// URL");
-  }
-  if (url.protocol !== "http:") {
-    throw new GatewayError(400, "Only http:// URLs are forwarded; HTTPS uses CONNECT");
-  }
-  if (url.username || url.password) throw new GatewayError(400, "Proxy request URLs must not contain credentials");
-  if (isLoopbackHost(url.hostname)) throw new GatewayError(403, "Loopback destinations are not routed by the gateway");
-  const headers = lines.slice(1).filter((line) => !HOP_BY_HOP.test(line));
-  if (!headers.some((line) => /^host:/i.test(line))) headers.unshift(`Host: ${url.host}`);
-  headers.push("Connection: close");
-  return {
-    method: match[1].toUpperCase(),
-    version: match[3],
-    url,
-    host: bareHost(url.hostname),
-    port: Number(url.port || 80),
-    headers,
-  };
-}
-
-function errorResponse(status, message) {
-  const body = `${message}\n`;
-  return `HTTP/1.1 ${status} ${STATUS_TEXT[status] || "Error"}\r\n`
-    + "Content-Type: text/plain; charset=utf-8\r\n"
-    + `Content-Length: ${Buffer.byteLength(body)}\r\n`
-    + "Connection: close\r\n\r\n"
-    + body;
-}
-
-function createProxyGateway({
-  host = GATEWAY_HOST,
-  port = DEFAULT_GATEWAY_PORT,
-  getUpstream,
-  logger = { info: noop, warn: noop },
-  ...overrides
-} = {}) {
-  if (typeof getUpstream !== "function") throw new Error("Proxy gateway needs an upstream resolver");
-  if (!isLoopbackAddress(host)) throw new Error("The proxy gateway only listens on loopback");
-  const limits = { ...DEFAULT_LIMITS, ...overrides };
-  const clients = new Set();
-  const upstreams = new Set();
-  const totals = {
-    totalConnections: 0,
-    rejectedConnections: 0,
-    tunnels: 0,
-    httpRequests: 0,
-    failures: 0,
-    bytesSent: 0,
-    bytesReceived: 0,
-  };
-  let server = null;
-  let listening = null;
-  let startedAt = null;
-  let lastError = null;
-  let lastLoggedError = "";
-
-  function recordError(error) {
-    const message = error instanceof Error ? error.message : String(error);
-    totals.failures += 1;
-    lastError = { message: message.slice(0, 500), at: new Date().toISOString() };
-    if (message !== lastLoggedError) {
-      lastLoggedError = message;
-      logger.warn("proxy_gateway.request_failed", { message: lastError.message });
-    }
-  }
-
-  function track(socket, set) {
-    set.add(socket);
-    socket.once("close", () => set.delete(socket));
-  }
-
-  function splice(client, clientRest, upstream) {
-    client.removeAllListeners("timeout");
-    upstream.removeAllListeners("timeout");
-    const idle = () => {
-      client.destroy();
-      upstream.destroy();
-    };
-    client.setTimeout(limits.idleTimeoutMs > 0 ? limits.idleTimeoutMs : 0, idle);
-    upstream.setTimeout(limits.idleTimeoutMs > 0 ? limits.idleTimeoutMs : 0, idle);
-    if (clientRest.length) upstream.write(clientRest);
-    client.pipe(upstream);
-    upstream.pipe(client);
-    // A closed client has nothing left to receive; a cleanly closed upstream lets the client
-    // drain what was already piped before it ends.
-    client.once("close", () => upstream.destroy());
-    upstream.once("close", (hadError) => (hadError ? client.destroy() : client.end()));
-  }
-
-  async function relayForward(client, reader, head) {
-    const request = parseForwardRequest(head);
-    const upstream = validateUpstream(getUpstream(), { gatewayPort: listening?.port });
-    let socket;
-    let rest = Buffer.alloc(0);
-    let requestLine;
-    if (upstream.protocol === "socks5") {
-      ({ socket, rest } = await openSocks5Tunnel(upstream, request.host, request.port, limits));
-      requestLine = `${request.method} ${request.url.pathname}${request.url.search} ${request.version}`;
-    } else {
-      socket = await connectUpstream(upstream, limits.connectTimeoutMs);
-      requestLine = `${request.method} ${request.url.href} ${request.version}`;
-    }
-    track(socket, upstreams);
-    const auth = upstream.protocol === "socks5" ? "" : basicAuthorization(upstream);
-    socket.write(`${[requestLine, ...request.headers].join("\r\n")}\r\n${auth}\r\n`, "latin1");
-    if (rest.length) client.write(rest);
-    totals.httpRequests += 1;
-    splice(client, reader.release(), socket);
-  }
-
-  async function handleClient(client) {
-    client.on("error", noop);
-    if (!isLoopbackAddress(client.remoteAddress)) {
-      totals.rejectedConnections += 1;
-      client.destroy();
-      return;
-    }
-    if (clients.size >= limits.maxConnections) {
-      totals.rejectedConnections += 1;
-      client.end(errorResponse(503, "The gateway has too many open connections"));
-      return;
-    }
-    totals.totalConnections += 1;
-    track(client, clients);
-    client.once("close", () => {
-      totals.bytesReceived += client.bytesRead;
-      totals.bytesSent += client.bytesWritten;
-    });
-    client.setNoDelay(true);
-    client.setTimeout(limits.headerTimeoutMs, () => client.destroy());
-    const reader = createSocketReader(client);
-    let upstreamSocket = null;
-    try {
-      const head = await reader.readHead(limits.maxHeaderBytes);
-      const requestLine = head.toString("latin1").split("\r\n", 1)[0];
-      const connect = /^CONNECT\s+(\S+)\s+HTTP\/1\.[01]$/i.exec(requestLine);
-      if (!connect) {
-        await relayForward(client, reader, head);
-        return;
-      }
-      const target = parseAuthority(connect[1]);
-      const upstream = validateUpstream(getUpstream(), { gatewayPort: listening?.port });
-      const tunnel = await openTunnel(upstream, target.host, target.port, limits);
-      upstreamSocket = tunnel.socket;
-      track(upstreamSocket, upstreams);
-      if (client.destroyed) {
-        upstreamSocket.destroy();
-        return;
-      }
-      client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-      if (tunnel.rest.length) client.write(tunnel.rest);
-      totals.tunnels += 1;
-      splice(client, reader.release(), upstreamSocket);
-    } catch (error) {
-      upstreamSocket?.destroy();
-      reader.release();
-      if (client.destroyed) return;
-      recordError(error);
-      const status = error instanceof GatewayError ? error.status : 502;
-      client.end(errorResponse(status, error instanceof Error ? error.message : "Gateway request failed"));
-    }
-  }
-
-  function start() {
-    if (server) return Promise.resolve(listening);
-    return new Promise((resolve, reject) => {
-      const candidate = net.createServer({ noDelay: true }, (client) => { void handleClient(client); });
-      candidate.once("error", (error) => {
-        const message = error?.code === "EADDRINUSE"
-          ? `Port ${port} is already in use; choose another gateway port`
-          : `Gateway could not listen: ${error?.message || error}`;
-        lastError = { message, at: new Date().toISOString() };
-        reject(new Error(message));
-      });
-      candidate.listen({ host, port, exclusive: true }, () => {
-        candidate.removeAllListeners("error");
-        candidate.on("error", (error) => recordError(error));
-        server = candidate;
-        const address = candidate.address();
-        listening = { host, port: address.port };
-        startedAt = new Date().toISOString();
-        lastError = null;
-        logger.info("proxy_gateway.listening", listening);
-        resolve(listening);
-      });
-    });
-  }
-
-  function stop() {
-    const active = server;
-    server = null;
-    listening = null;
-    startedAt = null;
-    for (const socket of [...clients, ...upstreams]) socket.destroy();
-    if (!active) return Promise.resolve();
-    return new Promise((resolve) => active.close(() => {
-      logger.info("proxy_gateway.stopped", {});
-      resolve();
-    }));
-  }
-
-  function stats() {
-    let liveReceived = 0;
-    let liveSent = 0;
-    for (const client of clients) {
-      liveReceived += client.bytesRead;
-      liveSent += client.bytesWritten;
-    }
-    return {
-      ...totals,
-      activeConnections: clients.size,
-      bytesReceived: totals.bytesReceived + liveReceived,
-      bytesSent: totals.bytesSent + liveSent,
-      startedAt,
-    };
-  }
-
-  return {
-    start,
-    stop,
-    stats,
-    handleConnection: handleClient,
-    address: () => (listening ? { ...listening } : null),
-    lastError: () => (lastError ? { ...lastError } : null),
-    running: () => server !== null,
-  };
-}
-
-function decodeChunked(body) {
-  const parts = [];
-  let offset = 0;
-  while (offset < body.length) {
-    const lineEnd = body.indexOf("\r\n", offset);
-    if (lineEnd < 0) break;
-    const size = Number.parseInt(body.subarray(offset, lineEnd).toString("latin1"), 16);
-    if (!Number.isFinite(size) || size <= 0) break;
-    parts.push(body.subarray(lineEnd + 2, lineEnd + 2 + size));
-    offset = lineEnd + 2 + size + 2;
-  }
-  return Buffer.concat(parts);
-}
-
-function parseTrace(text) {
-  const values = {};
-  for (const line of String(text).split(/\r?\n/)) {
-    const separator = line.indexOf("=");
-    if (separator > 0) values[line.slice(0, separator).trim()] = line.slice(separator + 1).trim();
-  }
-  return values;
-}
-
-function parseHttpResponse(raw) {
-  const end = raw.indexOf("\r\n\r\n");
-  if (end < 0) throw new Error("The trace response was incomplete");
-  const head = raw.subarray(0, end).toString("latin1");
-  const status = statusOf(raw.subarray(0, end + 4));
-  let body = raw.subarray(end + 4);
-  if (/\r\ntransfer-encoding:\s*chunked/i.test(head)) body = decodeChunked(body);
-  return { status, body: body.toString("utf8") };
-}
-
-// Fetches a Cloudflare trace through the gateway, so the test exercises the same loopback hop and
-// upstream chain the app's traffic takes.
-async function fetchGatewayTrace({
-  host = GATEWAY_HOST,
-  port,
-  url = DEFAULT_TRACE_URL,
-  timeoutMs = 15_000,
-  tlsOptions = {},
-} = {}) {
-  const target = new URL(url);
-  const started = Date.now();
-  const sockets = [];
-  const timer = setTimeout(() => {
-    for (const socket of sockets) socket.destroy(new Error(`Trace timed out after ${Math.round(timeoutMs / 1000)} s`));
-  }, timeoutMs);
-  try {
-    const socket = await new Promise((resolve, reject) => {
-      const candidate = net.connect({ host, port });
-      sockets.push(candidate);
-      candidate.once("connect", () => resolve(candidate));
-      candidate.once("error", (error) => reject(new Error(`Gateway is not reachable: ${tcpErrorText(error)}`)));
-    });
-    socket.on("error", noop);
-    const reader = createSocketReader(socket);
-    let raw;
-    if (target.protocol === "https:") {
-      const targetPort = Number(target.port || 443);
-      const authority = formatAuthority(bareHost(target.hostname), targetPort);
-      socket.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n\r\n`);
-      const head = await reader.readHead(DEFAULT_LIMITS.maxHeaderBytes);
-      const status = statusOf(head);
-      if (status.code !== 200) {
-        const detail = (await reader.readToEnd(8_192).catch(() => Buffer.alloc(0))).toString("utf8").trim();
-        throw new Error(detail || `Gateway answered ${status.line}`);
-      }
-      const rest = reader.release();
-      if (rest.length) socket.unshift(rest);
-      const secure = tls.connect({ socket, servername: bareHost(target.hostname), ALPNProtocols: ["http/1.1"], ...tlsOptions });
-      sockets.push(secure);
-      secure.on("error", noop);
-      const secureReader = createSocketReader(secure);
-      await new Promise((resolve, reject) => {
-        secure.once("secureConnect", resolve);
-        secure.once("error", reject);
-        secure.once("close", () => reject(new Error("TLS closed during the handshake")));
-      });
-      secure.write(`GET ${target.pathname}${target.search} HTTP/1.1\r\nHost: ${target.host}\r\nUser-Agent: CodingTools-ProxyGateway\r\nAccept: text/plain\r\nConnection: close\r\n\r\n`);
-      raw = await secureReader.readToEnd(256 * 1024);
-    } else {
-      socket.write(`GET ${target.href} HTTP/1.1\r\nHost: ${target.host}\r\nUser-Agent: CodingTools-ProxyGateway\r\nAccept: text/plain\r\nConnection: close\r\n\r\n`);
-      raw = await reader.readToEnd(256 * 1024);
-    }
-    const response = parseHttpResponse(raw);
-    if (response.status.code !== 200) {
-      throw new Error(response.body.trim().slice(0, 300) || `Trace answered ${response.status.line}`);
-    }
-    const values = parseTrace(response.body);
-    if (!values.ip) throw new Error("The trace response had no ip= line");
-    return {
-      ok: true,
-      ip: values.ip,
-      loc: values.loc || undefined,
-      colo: values.colo || undefined,
-      latencyMs: Date.now() - started,
-    };
-  } finally {
-    clearTimeout(timer);
-    for (const socket of sockets) socket.destroy();
-  }
+function helperEnvironment(extra = {}) {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !PROXY_ENV_KEYS.test(key)));
+  return { ...env, ...extra };
 }
 
 function defaultSettings() {
@@ -723,6 +102,7 @@ function defaultSettings() {
     version: SETTINGS_VERSION,
     enabled: false,
     port: DEFAULT_GATEWAY_PORT,
+    tokenlessPort: DEFAULT_TOKENLESS_PORT,
     upstreamProfileId: null,
     useForApp: false,
     previousGlobal: null,
@@ -733,9 +113,14 @@ function normalizeSettings(value) {
   const fallback = defaultSettings();
   if (!value || typeof value !== "object" || value.version !== SETTINGS_VERSION) return fallback;
   let port = fallback.port;
+  let tokenlessPort = fallback.tokenlessPort;
   try {
-    port = validateGatewayPort(value.port);
+    port = relay.validateGatewayPort(value.port);
   } catch {}
+  try {
+    tokenlessPort = relay.validateGatewayPort(value.tokenlessPort ?? fallback.tokenlessPort);
+  } catch {}
+  if (tokenlessPort === port) tokenlessPort = port === DEFAULT_TOKENLESS_PORT ? DEFAULT_GATEWAY_PORT : DEFAULT_TOKENLESS_PORT;
   const previous = value.previousGlobal && typeof value.previousGlobal === "object"
     ? {
         enabled: value.previousGlobal.enabled === true,
@@ -746,6 +131,7 @@ function normalizeSettings(value) {
     version: SETTINGS_VERSION,
     enabled: value.enabled === true,
     port,
+    tokenlessPort,
     upstreamProfileId: typeof value.upstreamProfileId === "string" && value.upstreamProfileId
       ? value.upstreamProfileId
       : null,
@@ -754,17 +140,127 @@ function normalizeSettings(value) {
   };
 }
 
-// Owns the gateway's settings and the "Use for this app" switch. Settings hold no secrets: the
-// upstream credentials are read from the encrypted provider-network store when the gateway starts.
+function normalizeState(value) {
+  const port = (item) => Number.isInteger(item) && item > 0 && item < 65_536;
+  const token = (item) => typeof item === "string" && /^[0-9a-f]{32,128}$/.test(item);
+  if (!value || value.version !== STATE_VERSION
+    || !Number.isInteger(value.pid) || value.pid < 1
+    || !port(value.dataPort) || !(value.tokenlessPort === null || port(value.tokenlessPort))
+    || !port(value.controlPort)
+    || !token(value.controlToken) || !token(value.proxyToken)
+    || typeof value.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(value.fingerprint)
+    || typeof value.startedAt !== "string" || Number.isNaN(Date.parse(value.startedAt))) {
+    return null;
+  }
+  return {
+    pid: value.pid,
+    dataPort: value.dataPort,
+    tokenlessPort: value.tokenlessPort,
+    controlPort: value.controlPort,
+    controlToken: value.controlToken,
+    proxyToken: value.proxyToken,
+    upstreamProfileId: typeof value.upstreamProfileId === "string" ? value.upstreamProfileId : null,
+    fingerprint: value.fingerprint,
+    runtime: typeof value.runtime === "string" ? value.runtime : "unknown",
+    startedAt: value.startedAt,
+  };
+}
+
+function waitForExit(pid, timeoutMs) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const check = () => {
+      if (!processRunning(pid)) resolve(true);
+      else if (Date.now() - started >= timeoutMs) resolve(false);
+      else setTimeout(check, 50);
+    };
+    check();
+  });
+}
+
+function waitForReady(child, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let buffered = "";
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve(value);
+    };
+    const timer = setTimeout(() => finish(new Error("The gateway helper did not start in time")), timeoutMs);
+    child.stdout.on("data", (chunk) => {
+      buffered += chunk.toString("utf8");
+      const newline = buffered.indexOf("\n");
+      if (newline < 0) return;
+      let value;
+      try {
+        value = JSON.parse(buffered.slice(0, newline));
+      } catch {
+        finish(new Error("The gateway helper answered with an unreadable ready line"));
+        return;
+      }
+      if (value?.event === "ready") finish(null, value);
+      else finish(new Error(value?.error || "The gateway helper failed to start"));
+    });
+    child.once("error", (error) => finish(new Error(`The gateway helper could not start: ${error.message}`)));
+    child.once("exit", (code, signal) => finish(new Error(`The gateway helper exited (${signal || code}) before it was ready`)));
+  });
+}
+
+function controlRequest(target, method, pathname, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const request = http.request({
+      host: GATEWAY_HOST,
+      port: target.controlPort,
+      method,
+      path: pathname,
+      headers: { Authorization: `Bearer ${target.controlToken}` },
+      timeout: timeoutMs,
+    }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => {
+        if (response.statusCode !== 200) {
+          reject(new Error(`Gateway control answered ${response.statusCode}`));
+          return;
+        }
+        try {
+          resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        } catch {
+          reject(new Error("Gateway control answer is unreadable"));
+        }
+      });
+      response.on("error", reject);
+    });
+    request.on("timeout", () => request.destroy(new Error("Gateway control timed out")));
+    request.on("error", reject);
+    request.end();
+  });
+}
+
+// Owns the gateway's settings, its helper process and the "Use for this app" switch. Settings and
+// the state file hold no upstream secrets.
 function createProxyGatewayController({
   userData,
   settingsPath = path.join(userData, "providers", "proxy-gateway.json"),
+  statePath = path.join(userData, "providers", "proxy-gateway.state.json"),
+  logPath = path.join(userData, "providers", "proxy-gateway.log"),
   network,
   logger = { info: noop, warn: noop },
-  createGateway = createProxyGateway,
-  fetchTrace = fetchGatewayTrace,
+  resolveRuntime = () => {
+    throw new Error("No runtime is configured for the gateway helper");
+  },
+  helperScript = relayScriptPath(),
+  spawnProcess = spawn,
+  fetchTrace = relay.fetchGatewayTrace,
+  probe = relay.probeGateway,
   traceUrl = DEFAULT_TRACE_URL,
-  gatewayOptions = {},
+  helperLimits = null,
+  readyTimeoutMs = 15_000,
+  controlTimeoutMs = 2_000,
+  watchdogMs = 15_000,
 }) {
   if (!network?.store || typeof network.applyGlobalRouting !== "function") {
     throw new Error("Proxy gateway needs the provider network controller");
@@ -776,13 +272,59 @@ function createProxyGatewayController({
   } catch {
     settings = defaultSettings();
   }
-  let upstream = null;
-  let gateway = null;
+  let helper = null;
+  let ensurePromise = null;
+  let watchdog = null;
   let lastError = null;
   let lastTest = null;
 
+  // Child processes take the route from HTTP(S)_PROXY, which must carry the gateway's local token;
+  // ChatGPT Desktop cannot send credentials and reads the token-free URL first.
+  network.setEnvironmentRoute?.((profile) => {
+    if (profile?.id !== GATEWAY_PROFILE_ID) return null;
+    const secret = store.proxySecret(GATEWAY_PROFILE_ID);
+    const host = `${GATEWAY_HOST}:${profile.endpoint.port}`;
+    return {
+      url: secret?.password
+        ? `http://${encodeURIComponent(secret.username || PROXY_USERNAME)}:${encodeURIComponent(secret.password)}@${host}`
+        : `http://${host}`,
+      extra: { [TOKENLESS_PROXY_ENV]: `http://${GATEWAY_HOST}:${settings.tokenlessPort}` },
+    };
+  });
+
   function persist() {
     writePrivateFileAtomic(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
+  }
+
+  function readState() {
+    try {
+      return normalizeState(JSON.parse(fs.readFileSync(statePath, "utf8")));
+    } catch {
+      return null;
+    }
+  }
+
+  function writeState(target) {
+    writePrivateFileAtomic(statePath, `${JSON.stringify({
+      version: STATE_VERSION,
+      pid: target.pid,
+      ownerPid: process.pid,
+      dataPort: target.dataPort,
+      tokenlessPort: target.tokenlessPort,
+      controlPort: target.controlPort,
+      controlToken: target.controlToken,
+      proxyToken: target.proxyToken,
+      upstreamProfileId: target.upstreamProfileId,
+      fingerprint: target.fingerprint,
+      runtime: target.runtime,
+      startedAt: target.startedAt,
+    }, null, 2)}\n`);
+  }
+
+  function clearState(pid = null) {
+    const current = readState();
+    if (pid !== null && current && current.pid !== pid) return;
+    fs.rmSync(statePath, { force: true });
   }
 
   function fail(error) {
@@ -806,108 +348,213 @@ function createProxyGatewayController({
     if (profile.hasAuthentication && !credentials?.username && !credentials?.password) {
       throw new Error("Saved upstream proxy credentials are unavailable");
     }
-    return validateUpstream({
+    return relay.validateUpstream({
       protocol: profile.endpoint.protocol,
       host: profile.endpoint.host,
       port: profile.endpoint.port,
       username: credentials?.username || "",
       password: credentials?.password || "",
-    }, { gatewayPort: settings.port });
+    }, { gatewayPorts: [settings.port, settings.tokenlessPort] });
   }
 
-  function publicProfile(profile) {
-    return profile
-      ? {
-          profileId: profile.id,
-          name: profile.name,
-          protocol: profile.endpoint.protocol,
-          host: profile.endpoint.host,
-          port: profile.endpoint.port,
-          hasAuthentication: profile.hasAuthentication,
+  // A helper is ours and usable only if its control port answers with our token and the same pid,
+  // and both data ports are held by that pid.
+  async function verify(target) {
+    if (!target || !processRunning(target.pid)) return null;
+    try {
+      const live = await controlRequest(target, "GET", "/status", controlTimeoutMs);
+      if (live?.service !== HELPER_SERVICE || live.pid !== target.pid) return null;
+      const data = await probe({ port: target.dataPort, proxyToken: target.proxyToken, timeoutMs: controlTimeoutMs });
+      if (data.pid !== target.pid) return null;
+      if (target.tokenlessPort !== null) {
+        const tokenless = await probe({ port: target.tokenlessPort, timeoutMs: controlTimeoutMs });
+        if (tokenless.pid !== target.pid) return null;
+      }
+      return live;
+    } catch {
+      return null;
+    }
+  }
+
+  function wanted(target, fingerprint) {
+    return target.fingerprint === fingerprint
+      && target.upstreamProfileId === settings.upstreamProfileId
+      && target.dataPort === settings.port
+      && target.tokenlessPort === settings.tokenlessPort;
+  }
+
+  // Only a helper verified as ours moments earlier is ever signalled.
+  async function stopHelper(target) {
+    try {
+      await controlRequest(target, "POST", "/stop", controlTimeoutMs);
+    } catch {}
+    if (!(await waitForExit(target.pid, 3_000))) {
+      try {
+        if (target.child) terminateOwnedProcessTree(target.child);
+        else process.kill(target.pid);
+      } catch {}
+      await waitForExit(target.pid, 2_000);
+    }
+    if (helper?.pid === target.pid) helper = null;
+    clearState(target.pid);
+    logger.info("proxy_gateway.helper_stopped", { pid: target.pid });
+  }
+
+  function rotateLog() {
+    fs.mkdirSync(path.dirname(logPath), { recursive: true, mode: 0o700 });
+    try {
+      if (fs.statSync(logPath).size > LOG_ROTATE_BYTES) fs.renameSync(logPath, `${logPath}.1`);
+    } catch {}
+  }
+
+  async function spawnHelper(upstream, fingerprint) {
+    const runtime = resolveRuntime();
+    const controlToken = randomToken();
+    const proxyToken = randomToken();
+    rotateLog();
+    const logFd = fs.openSync(logPath, "a", 0o600);
+    let child;
+    try {
+      child = spawnProcess(runtime.executable, [...(runtime.args || []), helperScript], {
+        // The working directory stays out of the install folder so an installer can replace it.
+        cwd: path.dirname(statePath),
+        detached: true,
+        env: helperEnvironment(runtime.env),
+        stdio: ["pipe", "pipe", logFd],
+        windowsHide: true,
+      });
+    } finally {
+      fs.closeSync(logFd);
+    }
+    child.on("error", noop);
+    child.stdin.on("error", noop);
+    child.stdout.on("error", noop);
+    const ready = waitForReady(child, readyTimeoutMs);
+    child.stdin.end(`${JSON.stringify({
+      version: 1,
+      dataPort: settings.port,
+      tokenlessPort: settings.tokenlessPort,
+      controlToken,
+      proxyToken,
+      upstreamProfileId: settings.upstreamProfileId,
+      upstream,
+      ...(helperLimits ? { limits: helperLimits } : {}),
+    })}\n`);
+    let started;
+    try {
+      const line = await ready;
+      started = {
+        pid: line.pid,
+        dataPort: line.dataPort,
+        tokenlessPort: line.tokenlessPort ?? null,
+        controlPort: line.controlPort,
+        controlToken,
+        proxyToken,
+        upstreamProfileId: settings.upstreamProfileId,
+        fingerprint,
+        runtime: runtime.kind || "unknown",
+        startedAt: new Date().toISOString(),
+        child,
+      };
+      if (started.pid !== child.pid || !(await verify(started))) {
+        throw new Error("The gateway helper started but does not answer on its ports");
+      }
+    } catch (error) {
+      try {
+        if (child.exitCode === null && child.signalCode === null) terminateOwnedProcessTree(child);
+      } catch {}
+      throw error;
+    }
+    child.stdout.destroy();
+    child.unref();
+    writeState(started);
+    logger.info("proxy_gateway.helper_started", {
+      pid: started.pid,
+      dataPort: started.dataPort,
+      tokenlessPort: started.tokenlessPort,
+      runtime: started.runtime,
+      upstreamProfileId: started.upstreamProfileId,
+    });
+    return started;
+  }
+
+  async function ensureHelperOnce({ restart = false } = {}) {
+    const upstream = resolveUpstream();
+    const fingerprint = relay.upstreamFingerprint(upstream);
+    if (!helper) {
+      const state = readState();
+      if (state) {
+        const stale = Date.parse(state.startedAt) < BOOT_STARTED_AT_MS - BOOT_TIME_TOLERANCE_MS
+          || !processRunning(state.pid);
+        const live = stale ? null : await verify(state);
+        if (live && wanted(state, fingerprint) && !restart) {
+          helper = { ...state, adopted: true };
+          logger.info("proxy_gateway.helper_adopted", { pid: state.pid, dataPort: state.dataPort });
+          return helper;
         }
-      : null;
+        if (live) {
+          await stopHelper(state);
+        } else {
+          // A dead or unverifiable pid is never signalled: it may belong to someone else now.
+          logger.warn("proxy_gateway.stale_state_discarded", { pid: state.pid, alive: !stale });
+          clearState(state.pid);
+        }
+      }
+    } else {
+      const live = await verify(helper);
+      if (live && wanted(helper, fingerprint) && !restart) return helper;
+      if (live) await stopHelper(helper);
+      else helper = null;
+    }
+    helper = await spawnHelper(upstream, fingerprint);
+    return helper;
   }
 
-  function status() {
-    const snapshot = store.snapshot();
-    const findProfile = (id) => snapshot.proxyProfiles.find((profile) => profile.id === id) ?? null;
-    const globalProfile = snapshot.routing.globalProfileId ? findProfile(snapshot.routing.globalProfileId) : null;
-    const running = gateway?.running() === true;
-    const serverError = gateway?.lastError() ?? null;
-    const errors = [lastError, serverError].filter(Boolean).sort((left, right) => right.at.localeCompare(left.at));
-    return {
-      enabled: settings.enabled,
-      running,
-      listen: gateway?.address() ?? { host: GATEWAY_HOST, port: settings.port },
-      port: settings.port,
-      reservedPorts: [...PROXYBRIDGE_PORTS],
-      gatewayProfileId: GATEWAY_PROFILE_ID,
-      upstreamProfileId: settings.upstreamProfileId,
-      upstream: publicProfile(settings.upstreamProfileId ? findProfile(settings.upstreamProfileId) : null),
-      useForApp: routeUsesGateway(snapshot.routing),
-      globalRoute: {
-        enabled: snapshot.routing.globalEnabled,
-        profileId: snapshot.routing.globalProfileId,
-        profile: publicProfile(globalProfile),
-      },
-      previousGlobal: settings.previousGlobal ? { ...settings.previousGlobal } : null,
-      stats: gateway?.stats() ?? null,
-      lastError: errors[0] ?? null,
-      lastTest: lastTest ? { ...lastTest } : null,
-    };
-  }
-
-  async function startGateway() {
-    upstream = resolveUpstream();
-    if (gateway?.running()) return;
-    const candidate = createGateway({
-      host: GATEWAY_HOST,
-      port: settings.port,
-      getUpstream: () => upstream,
-      logger,
-      ...gatewayOptions,
+  // Concurrent callers share one attempt instead of racing for the ports.
+  function ensureHelper(options) {
+    ensurePromise ??= ensureHelperOnce(options).finally(() => {
+      ensurePromise = null;
     });
-    await candidate.start();
-    gateway = candidate;
-    lastError = null;
-    logger.info("proxy_gateway.started", {
-      port: settings.port,
-      upstreamProfileId: settings.upstreamProfileId,
-      protocol: upstream.protocol,
-      host: upstream.host,
-      upstreamPort: upstream.port,
-    });
-  }
-
-  async function stopGateway() {
-    const active = gateway;
-    gateway = null;
-    upstream = null;
-    if (active) await active.stop();
+    return ensurePromise;
   }
 
   function ensureGatewayProfile() {
+    if (!helper) throw new Error("The gateway is not running");
     const existing = store.snapshot().proxyProfiles.find((profile) => profile.id === GATEWAY_PROFILE_ID);
     if (existing?.archivedAt) {
-      throw new Error("The built-in gateway profile was archived in Network Proxy and cannot be reused");
+      throw new Error("The built-in gateway profile was archived and cannot be reused");
     }
-    if (existing?.hasAuthentication) {
-      throw new Error("The built-in gateway profile must not carry saved credentials");
-    }
+    const secret = existing?.hasAuthentication ? store.proxySecret(GATEWAY_PROFILE_ID) : null;
     const matches = existing
       && existing.enabled
       && existing.endpoint.protocol === "http"
       && existing.endpoint.host === GATEWAY_HOST
-      && existing.endpoint.port === settings.port;
-    if (matches) return;
+      && existing.endpoint.port === helper.dataPort
+      && secret?.username === PROXY_USERNAME
+      && secret?.password === helper.proxyToken;
+    if (matches) return false;
     store.saveProxyProfile({
       id: GATEWAY_PROFILE_ID,
       name: GATEWAY_PROFILE_NAME,
       enabled: true,
-      endpoint: { protocol: "http", host: GATEWAY_HOST, port: settings.port },
+      endpoint: { protocol: "http", host: GATEWAY_HOST, port: helper.dataPort },
       scopes: [...GATEWAY_PROFILE_SCOPES],
       bypass: existing?.bypass ?? [...DEFAULT_BYPASS],
+      username: PROXY_USERNAME,
+      password: helper.proxyToken,
     });
+    return true;
+  }
+
+  function gatewayProfileExists() {
+    return store.snapshot().proxyProfiles.some((profile) => profile.id === GATEWAY_PROFILE_ID && !profile.archivedAt);
+  }
+
+  // A new or adopted helper is listening and verified; only now may the route point at it.
+  async function routeToHelper() {
+    if (!gatewayProfileExists()) return;
+    const changed = ensureGatewayProfile();
+    if (changed && routeUsesGateway()) await network.applyGlobalRouting();
   }
 
   // Puts back the global route that was active before "Use for this app" was switched on.
@@ -927,68 +574,158 @@ function createProxyGatewayController({
     return true;
   }
 
-  // Called before the saved global route is applied at launch, so a route that points at the
-  // gateway never starts against a closed port. A gateway that cannot start hands the app back
-  // to the route it used before.
+  // Takes the app off the gateway without ever leaving the route on a dead or upstream-less port:
+  // the previous route if it can be restored, direct otherwise.
+  async function leaveGatewayRoute(reason, { apply = true } = {}) {
+    let restored = false;
+    try {
+      restored = restorePreviousRoute();
+    } catch (error) {
+      logger.warn("proxy_gateway.route_restore_failed", { message: error instanceof Error ? error.message : String(error) });
+      try {
+        store.setGlobalRouting({ enabled: false, profileId: null });
+        restored = true;
+      } catch {}
+    }
+    settings.useForApp = false;
+    settings.previousGlobal = null;
+    try {
+      persist();
+    } catch (error) {
+      logger.warn("proxy_gateway.settings_write_failed", { message: error instanceof Error ? error.message : String(error) });
+    }
+    if (restored) {
+      logger.warn("proxy_gateway.route_restored", { reason, profileId: store.snapshot().routing.globalProfileId });
+      if (apply) await network.applyGlobalRouting();
+    }
+    return restored;
+  }
+
+  function startWatchdog() {
+    if (watchdog || !(watchdogMs > 0)) return;
+    watchdog = setInterval(() => {
+      if (!settings.enabled || !helper || processRunning(helper.pid) || ensurePromise) return;
+      logger.warn("proxy_gateway.helper_exited", { pid: helper.pid });
+      helper = null;
+      void ensureHelper()
+        .then(() => routeToHelper())
+        .catch(async (error) => {
+          fail(error);
+          if (routeUsesGateway()) await leaveGatewayRoute("helper_restart_failed").catch(noop);
+        });
+    }, watchdogMs);
+    watchdog.unref?.();
+  }
+
+  async function status() {
+    const snapshot = store.snapshot();
+    const findProfile = (id) => snapshot.proxyProfiles.find((profile) => profile.id === id) ?? null;
+    const globalProfile = snapshot.routing.globalProfileId ? findProfile(snapshot.routing.globalProfileId) : null;
+    let live = null;
+    if (helper && processRunning(helper.pid)) {
+      try {
+        live = await controlRequest(helper, "GET", "/status", controlTimeoutMs);
+      } catch {}
+    }
+    const errors = [lastError, live?.lastError].filter(Boolean).sort((left, right) => right.at.localeCompare(left.at));
+    const publicProfile = (profile) => (profile
+      ? {
+          profileId: profile.id,
+          name: profile.name,
+          protocol: profile.endpoint.protocol,
+          host: profile.endpoint.host,
+          port: profile.endpoint.port,
+          hasAuthentication: profile.hasAuthentication,
+        }
+      : null);
+    return {
+      enabled: settings.enabled,
+      running: Boolean(live),
+      listen: { host: GATEWAY_HOST, port: helper?.dataPort ?? settings.port },
+      port: settings.port,
+      tokenlessPort: settings.tokenlessPort,
+      reservedPorts: [...PROXYBRIDGE_PORTS],
+      gatewayProfileId: GATEWAY_PROFILE_ID,
+      helper: helper
+        ? { pid: helper.pid, runtime: helper.runtime, adopted: helper.adopted === true, startedAt: helper.startedAt }
+        : null,
+      upstreamProfileId: settings.upstreamProfileId,
+      upstream: publicProfile(settings.upstreamProfileId ? findProfile(settings.upstreamProfileId) : null),
+      useForApp: routeUsesGateway(snapshot.routing),
+      globalRoute: {
+        enabled: snapshot.routing.globalEnabled,
+        profileId: snapshot.routing.globalProfileId,
+        profile: publicProfile(globalProfile),
+      },
+      previousGlobal: settings.previousGlobal ? { ...settings.previousGlobal } : null,
+      stats: live?.stats ?? null,
+      lastError: errors[0] ?? null,
+      lastTest: lastTest ? { ...lastTest } : null,
+    };
+  }
+
+  // Called before the saved global route is applied at launch. An adopted helper keeps the
+  // bridge's and CPA's traffic flowing across the restart; a helper that cannot be adopted or
+  // started hands the app back to the route it used before.
   async function startup() {
     const routed = routeUsesGateway();
-    if (!settings.enabled && !routed) return status();
+    if (!settings.enabled && !routed) {
+      await retireUnwantedHelper();
+      return status();
+    }
     try {
-      await startGateway();
+      await ensureHelper();
       if (routed) ensureGatewayProfile();
+      else await routeToHelper();
+      startWatchdog();
     } catch (error) {
       fail(error);
       logger.warn("proxy_gateway.startup_failed", { message: lastError.message });
-      if (routed) {
-        restorePreviousRoute();
-        settings.useForApp = false;
-        persist();
-        logger.warn("proxy_gateway.route_restored", { profileId: store.snapshot().routing.globalProfileId });
-      }
+      if (routed) await leaveGatewayRoute("startup_failed", { apply: false });
     }
     return status();
+  }
+
+  async function retireUnwantedHelper() {
+    const state = readState();
+    if (!state) return;
+    const live = await verify(state);
+    if (live) await stopHelper(state);
+    else clearState(state.pid);
   }
 
   async function configure(input = {}) {
     if (!input || typeof input !== "object") throw new Error("Gateway settings are required");
     const next = { ...settings };
-    if (Object.hasOwn(input, "port")) next.port = validateGatewayPort(input.port);
+    if (Object.hasOwn(input, "port")) next.port = relay.validateGatewayPort(input.port);
+    if (Object.hasOwn(input, "tokenlessPort")) next.tokenlessPort = relay.validateGatewayPort(input.tokenlessPort, "Token-free port");
+    if (next.port === next.tokenlessPort) throw fail(new Error("The gateway and token-free ports must differ"));
     if (Object.hasOwn(input, "upstreamProfileId")) {
-      const profileId = typeof input.upstreamProfileId === "string" && input.upstreamProfileId.trim()
+      next.upstreamProfileId = typeof input.upstreamProfileId === "string" && input.upstreamProfileId.trim()
         ? input.upstreamProfileId.trim()
         : null;
-      next.upstreamProfileId = profileId;
     }
     const previous = settings;
     settings = next;
     try {
       if (settings.upstreamProfileId) resolveUpstream();
-      else if (gateway?.running()) throw new Error("Stop the gateway before clearing its upstream");
+      else if (helper) throw new Error("Stop the gateway before clearing its upstream");
     } catch (error) {
       settings = previous;
       throw fail(error);
     }
-    const portChanged = next.port !== previous.port;
     persist();
-    if (gateway?.running()) {
-      if (portChanged) {
-        await stopGateway();
-        try {
-          await startGateway();
-        } catch (error) {
-          // Keep the app's route alive: go back to the port that was working.
-          settings = previous;
-          persist();
-          await startGateway().catch(() => {});
-          throw fail(error);
-        }
-      } else {
-        upstream = resolveUpstream();
+    if (helper) {
+      try {
+        await ensureHelper();
+      } catch (error) {
+        // Keep the app's route alive: go back to the settings that were working.
+        settings = previous;
+        persist();
+        await ensureHelper().catch(noop);
+        throw fail(error);
       }
-    }
-    if (portChanged && routeUsesGateway()) {
-      ensureGatewayProfile();
-      await network.applyGlobalRouting();
+      await routeToHelper();
     }
     lastError = null;
     return status();
@@ -997,29 +734,34 @@ function createProxyGatewayController({
   async function setRunning(running) {
     if (running === true) {
       try {
-        await startGateway();
+        await ensureHelper();
+        await routeToHelper();
       } catch (error) {
         throw fail(error);
       }
       settings.enabled = true;
       persist();
+      startWatchdog();
       return status();
     }
-    // Stopping the gateway also hands the app back to its previous route; leaving the global
-    // route on a closed port would blank every proxied page.
-    const restored = restorePreviousRoute();
+    // The app leaves the gateway first, so nothing is routed to a port that is about to close.
+    if (routeUsesGateway()) await leaveGatewayRoute("gateway_stopped");
     settings.enabled = false;
     settings.useForApp = false;
     persist();
-    await stopGateway();
-    if (restored) await network.applyGlobalRouting();
+    if (helper) {
+      if (await verify(helper)) await stopHelper(helper);
+      helper = null;
+    } else {
+      await retireUnwantedHelper();
+    }
     return status();
   }
 
   async function setUseForApp(enabled) {
     if (enabled === true) {
       try {
-        await startGateway();
+        await ensureHelper();
         ensureGatewayProfile();
       } catch (error) {
         throw fail(error);
@@ -1032,36 +774,53 @@ function createProxyGatewayController({
       settings.enabled = true;
       settings.useForApp = true;
       persist();
+      startWatchdog();
       await network.applyGlobalRouting();
       logger.info("proxy_gateway.app_route_enabled", { previousProfileId: settings.previousGlobal?.profileId ?? null });
       return status();
     }
-    const restored = restorePreviousRoute();
-    settings.useForApp = false;
-    persist();
-    if (restored) await network.applyGlobalRouting();
+    await leaveGatewayRoute("switched_off");
     logger.info("proxy_gateway.app_route_disabled", { profileId: store.snapshot().routing.globalProfileId });
     return status();
   }
 
-  // Re-reads the upstream after its profile was edited or archived in Network Proxy.
-  function refreshUpstream() {
-    if (!gateway?.running()) return status();
+  // The upstream profile was edited or archived in Network Proxy. New credentials need a new
+  // helper; a lost upstream takes the app off the gateway instead of leaving every request 502.
+  async function refreshUpstream({ credentialsChanged = false } = {}) {
+    if (!settings.upstreamProfileId) return status();
+    let upstream;
     try {
       upstream = resolveUpstream();
-      lastError = null;
     } catch (error) {
-      upstream = null;
       fail(error);
+      logger.warn("proxy_gateway.upstream_lost", { message: lastError.message });
+      if (routeUsesGateway()) await leaveGatewayRoute("upstream_lost");
+      settings.enabled = false;
+      persist();
+      if (helper) {
+        if (await verify(helper)) await stopHelper(helper);
+        helper = null;
+      }
+      return status();
+    }
+    if (!helper) return status();
+    const restart = credentialsChanged || helper.fingerprint !== relay.upstreamFingerprint(upstream);
+    if (!restart) return status();
+    try {
+      await ensureHelper({ restart: true });
+      await routeToHelper();
+    } catch (error) {
+      fail(error);
+      if (routeUsesGateway()) await leaveGatewayRoute("helper_restart_failed");
     }
     return status();
   }
 
   async function test() {
-    if (!gateway?.running()) throw fail(new Error("Start the gateway before testing it"));
+    if (!helper || !processRunning(helper.pid)) throw fail(new Error("Start the gateway before testing it"));
     const at = new Date().toISOString();
     try {
-      const result = await fetchTrace({ host: GATEWAY_HOST, port: gateway.address().port, url: traceUrl });
+      const result = await fetchTrace({ host: GATEWAY_HOST, port: helper.dataPort, proxyToken: helper.proxyToken, url: traceUrl });
       lastTest = { ...result, at };
     } catch (error) {
       lastTest = { ok: false, error: (error instanceof Error ? error.message : String(error)).slice(0, 500), at };
@@ -1075,12 +834,13 @@ function createProxyGatewayController({
     return status();
   }
 
-  // App quit: close the listener without changing the saved settings.
+  // App quit: the helper keeps running for the bridge and CPA, and the next app adopts it.
   function close() {
-    const active = gateway;
-    gateway = null;
-    upstream = null;
-    return active ? active.stop() : Promise.resolve();
+    if (watchdog) clearInterval(watchdog);
+    watchdog = null;
+    helper?.child?.unref?.();
+    helper = null;
+    return Promise.resolve();
   }
 
   return {
@@ -1098,15 +858,12 @@ function createProxyGatewayController({
 
 module.exports = {
   DEFAULT_GATEWAY_PORT,
+  DEFAULT_TOKENLESS_PORT,
   DEFAULT_TRACE_URL,
   GATEWAY_PROFILE_ID,
   PROXYBRIDGE_PORTS,
-  createProxyGateway,
+  TOKENLESS_PROXY_ENV,
   createProxyGatewayController,
-  fetchGatewayTrace,
-  isLoopbackAddress,
-  isLoopbackHost,
-  parseTrace,
-  validateGatewayPort,
-  validateUpstream,
+  relayScriptPath,
+  resolveHelperRuntime,
 };

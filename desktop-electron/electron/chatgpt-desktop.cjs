@@ -83,7 +83,8 @@ function cpaSlotId(accountId, email) {
 // none of it; launched without it, it reaches chatgpt.com directly, where a region block answers
 // every account lookup with 403 and the app falls back to its sign-in screen.
 function proxyRouteFromEnvironment(env = process.env) {
-  const url = env.HTTPS_PROXY || env.HTTP_PROXY || env.ALL_PROXY;
+  // The built-in gateway publishes a token-free loopback URL for this command-line route.
+  const url = env.CODING_TOOLS_TOKENLESS_PROXY_URL || env.HTTPS_PROXY || env.HTTP_PROXY || env.ALL_PROXY;
   if (!url) return null;
   let parsed;
   try { parsed = new URL(url); } catch { return null; }

@@ -56,7 +56,8 @@
       "electron/cpa-managed.cjs",
       "vendor/bundled/cpa-plugins/**",
       "electron/cpa-codex-long-run.cjs",
-      "electron/atomic-file.cjs"
+      "electron/atomic-file.cjs",
+      "electron/proxy-gateway-relay.cjs"
     ],
     "directories": {
       "output": "release"

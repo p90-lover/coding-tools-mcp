@@ -134,6 +134,8 @@ export interface ProxyGatewayStats {
   activeConnections: number;
   totalConnections: number;
   rejectedConnections: number;
+  pendingConnections: number;
+  authFailures: number;
   tunnels: number;
   httpRequests: number;
   failures: number;
@@ -157,7 +159,9 @@ export interface ProxyGatewayStatus {
   running: boolean;
   listen: { host: string; port: number };
   port: number;
+  tokenlessPort: number;
   reservedPorts: number[];
+  helper: { pid: number; runtime: string; adopted: boolean; startedAt: string } | null;
   gatewayProfileId: string;
   upstreamProfileId: string | null;
   upstream: ProxyGatewayProfileSummary | null;
@@ -867,6 +871,7 @@ export interface LauncherApi {
   configureProxyGateway(input: {
     upstreamProfileId?: string | null;
     port?: number;
+    tokenlessPort?: number;
   }): Promise<ProxyGatewayStatus>;
   setProxyGatewayRunning(running: boolean): Promise<ProxyGatewayStatus>;
   setProxyGatewayForApp(enabled: boolean): Promise<ProxyGatewayStatus>;

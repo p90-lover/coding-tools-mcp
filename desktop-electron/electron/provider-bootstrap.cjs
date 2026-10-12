@@ -4,7 +4,11 @@ const {
 } = require("./provider-network.cjs");
 const { createProviderExecutionPlan } = require("./provider-execution-router.cjs");
 const { resolveLauncherProfile } = require("./profile.cjs");
-const { GATEWAY_PROFILE_ID, createProxyGatewayController } = require("./proxy-gateway.cjs");
+const {
+  GATEWAY_PROFILE_ID,
+  createProxyGatewayController,
+  resolveHelperRuntime,
+} = require("./proxy-gateway.cjs");
 
 let providerNetworkControllerPromise = null;
 let providerBrowserHostGetter = () => null;
@@ -100,13 +104,19 @@ function installProviderNetwork({
       userData: app.getPath("userData"),
     });
 
-    // The gateway listens before the saved global route is applied, so a route that points at it
-    // never starts against a closed port; if it cannot start, it puts the previous route back.
+    // The gateway helper is adopted or started (and verified on its ports) before the saved global
+    // route is applied, so a route that points at it never starts against a closed or foreign
+    // port; if it cannot start, it puts the previous route back.
     try {
       gateway = createProxyGatewayController({
         userData: app.getPath("userData"),
         network: controller,
         logger,
+        resolveRuntime: () => resolveHelperRuntime({
+          isPackaged: app.isPackaged,
+          version: app.getVersion(),
+          coreHome: launcherProfile.coreHome,
+        }),
       });
       await gateway.startup();
     } catch (error) {
@@ -191,19 +201,29 @@ function installProviderNetwork({
     publish(await active.probeProviderAccount(accountId))
   ));
 
-  // An edited or archived gateway upstream takes effect on the gateway's next connection.
-  function refreshGatewayUpstream(profileId) {
-    if (gateway && profileId && gateway.upstreamProfileId() === profileId) {
-      publishGateway(gateway.refreshUpstream());
+  // An edited upstream restarts the gateway helper with the new credentials; a lost one takes the
+  // app off the gateway. Either way the route may change, so both snapshots are published.
+  async function refreshGatewayUpstream(active, profileId, options) {
+    if (!gateway || !profileId || gateway.upstreamProfileId() !== profileId) return;
+    try {
+      publishGateway(await gateway.refreshUpstream(options));
+      publish(active.store.snapshot());
+    } catch (error) {
+      logger.warn("proxy_gateway.refresh_failed", { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
   handle("launcher:proxy-profile-save", async (active, _event, input) => {
+    if (input?.id === GATEWAY_PROFILE_ID) {
+      throw new Error("The built-in gateway profile is managed in Proxy Gateway and cannot be edited here");
+    }
     const current = active.store.snapshot();
     const refreshGlobal = current.routing.globalEnabled
       && current.routing.globalProfileId === input?.id;
     const snapshot = await publishMutation(active, () => active.store.saveProxyProfile(input), { refreshGlobal });
-    refreshGatewayUpstream(input?.id);
+    await refreshGatewayUpstream(active, input?.id, {
+      credentialsChanged: typeof input?.username === "string" || typeof input?.password === "string",
+    });
     return snapshot;
   }, "network");
   handle("launcher:proxy-profile-archive", async (active, _event, profileId) => {
@@ -215,7 +235,7 @@ function installProviderNetwork({
       () => active.store.archiveProxyProfile(profileId),
       { refreshGlobal: true },
     );
-    refreshGatewayUpstream(profileId);
+    await refreshGatewayUpstream(active, profileId);
     return snapshot;
   }, "network");
   handle("launcher:proxy-profile-test", async (active, _event, profileId) => {
@@ -269,6 +289,7 @@ function installProviderNetwork({
   ));
   handleGateway("launcher:proxy-gateway-test", async (_active, current) => publishGateway(await current.test()));
 
+  // A normal quit leaves the gateway helper running, like the bridge; the next app adopts it.
   app.on("will-quit", () => {
     void gateway?.close().catch(() => {});
   });

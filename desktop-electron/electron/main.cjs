@@ -255,11 +255,17 @@ function getChatGptDesktop(logger) {
 // GPT Browser account partitions take the same route as the main browser (Global Routing
 // publishes it in HTTPS_PROXY/NO_PROXY); chatgpt.com refuses this machine's direct route.
 async function routeGptBrowserSession(browserSession) {
-  const route = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || "";
+  let route = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || "";
   if (!route) {
     await browserSession.setProxy({ mode: "direct" });
     return;
   }
+  // The built-in gateway's env route carries its local token; Chromium takes the bare proxy and
+  // answers the proxy's 407 through the app's login handler instead.
+  try {
+    const parsed = new URL(route);
+    if (parsed.username || parsed.password) route = `${parsed.protocol}//${parsed.host}`;
+  } catch {}
   await browserSession.setProxy({ mode: "fixed_servers", proxyRules: route, proxyBypassRules: process.env.NO_PROXY || "" });
 }
 
