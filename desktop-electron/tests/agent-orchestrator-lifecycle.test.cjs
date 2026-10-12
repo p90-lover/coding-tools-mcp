@@ -169,7 +169,8 @@ function createHarness(hooks = {}) {
     // The live session feed is tested on its own; lifecycle tests never subscribe.
     "./ao-session-events.cjs": { createAoSessionEvents: () => ({ subscribe: () => () => {} }) },
     // Dependency links have their own tests; here a project never has any to sync.
-    "./ao-dependency-links.cjs": { createAoDependencyLinks: () => ({ sync: async () => ({ changed: false }), enabled: () => true, setEnabled: value => value }) },
+    "./ao-dependency-links.cjs": { createAoDependencyLinks: () => ({ sync: async () => ({ changed: false }), settings: () => ({ enabled: true, python: false }),
+      set: value => value, inEffect: async () => ({ shared: [], farmed: [] }) }) },
   };
   const loadedModule = { exports: {} };
   vm.runInNewContext(fs.readFileSync(sourcePath, "utf8"), {

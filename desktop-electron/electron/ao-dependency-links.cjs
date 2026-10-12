@@ -1,13 +1,19 @@
 "use strict";
 
 // AO runs each chat agent in its own git worktree, which has none of the project's git-ignored
-// dependency folders, so the agent asks to reinstall them. AO can link folders from the project
-// into every new worktree (the project config's `symlinks`; a junction per folder on Windows).
-// This keeps that list filled with the dependency folders the project actually has installed.
+// dependency folders, so the agent asks to reinstall them. This keeps the AO project config filled
+// with the dependency folders the project actually has installed:
 //
-// Sharing is not free: an install run in a worktree (npm install, npm ci, pip install) changes
-// the project's own node_modules or .venv. AO only links a folder while its manifests and
-// lockfiles match the project's (a branch that changes them gets its own install).
+// - node_modules -> `hardLinkFarms` ("Reuse installed Node packages", on by default). AO rebuilds
+//   the folder in each worktree as real directories whose files are hard links to the project's,
+//   so an agent's `npm ci` or `npm install` replaces only the worktree's links, never the
+//   project's packages. Same drive only; a file written in place (not replaced) is still shared.
+// - .venv / venv -> `symlinks` ("Share the Python environment", off by default). AO links the
+//   project's environment itself (a junction on Windows): a `pip install` in a worktree changes
+//   the project's environment, whose launchers point at the project's python.
+//
+// AO builds either only while the folder's manifests and lockfiles match the project's (a branch
+// that changes them gets its own install).
 
 const fs = require("node:fs");
 const path = require("node:path");
@@ -53,44 +59,56 @@ function detectDependencyLinks(root, { fs: fsImpl = fs } = {}) {
 }
 
 const linkKey = value => String(value).trim().replace(/\\/g, "/").replace(/\/+$/, "");
+const isNodeFolder = entry => linkKey(entry).split("/").pop() === NODE_FOLDER;
+const strings = value => Array.isArray(value) ? value.filter(entry => typeof entry === "string") : [];
 
 /**
- * The project's next `symlinks` list. Entries the user set are kept as they are; entries this
- * app added earlier (`managed`) are dropped once their folder is gone (or the feature is off);
- * detected folders are added. Returns the list and the entries the app now manages.
+ * One of the project's next path lists (`symlinks` or `hardLinkFarms`). Entries the user set are
+ * kept as they are; entries this app added earlier (`managed`) are dropped once their folder is
+ * gone (or the setting is off); detected folders are added, except those the user put in the
+ * other list (`reserved`), whose choice stands. Returns the list and the entries the app now manages.
  */
-function mergeSymlinks(current, detected, managed) {
+function mergeManaged(current, detected, managed, reserved = []) {
   const ours = new Set(managed.map(linkKey));
-  const wanted = new Set(detected.map(linkKey));
+  const userOther = new Set(reserved.map(linkKey));
+  const wanted = new Set(detected.map(linkKey).filter(key => !userOther.has(key)));
   const userSet = new Set(current.map(linkKey).filter(key => !ours.has(key)));
   const kept = current.filter(entry => userSet.has(linkKey(entry)) || wanted.has(linkKey(entry)));
   const present = new Set(kept.map(linkKey));
-  const symlinks = [...kept, ...detected.filter(entry => !present.has(linkKey(entry)))];
-  return { symlinks, managed: detected.filter(entry => !userSet.has(linkKey(entry))) };
+  const list = [...kept, ...detected.filter(entry => wanted.has(linkKey(entry)) && !present.has(linkKey(entry)))];
+  return { list, managed: detected.filter(entry => wanted.has(linkKey(entry)) && !userSet.has(linkKey(entry))) };
 }
+
+/** The entries of `current` the app did not add (`managed`): the user's own. */
+const userEntries = (current, managed) => {
+  const ours = new Set(managed.map(linkKey));
+  return current.filter(entry => !ours.has(linkKey(entry)));
+};
+
+/** A path list as repo-relative POSIX paths, without duplicates. */
+const posixPaths = entries => [...new Set(entries.map(linkKey).filter(Boolean))];
 
 const sameList = (a, b) => a.length === b.length && a.every((value, index) => value === b[index]);
 
 /**
- * Keeps AO projects' `symlinks` in step with their installed dependency folders.
- * `request(method, endpoint, body)` is an AO API call that returns the parsed body or throws.
- * The setting and the entries this app added live in `file`.
+ * Keeps AO projects' `hardLinkFarms` and `symlinks` in step with their installed dependency
+ * folders. `request(method, endpoint, body)` is an AO API call that returns the parsed body or
+ * throws. The settings and the entries this app added live in `file`: `enabled` (reuse Node
+ * packages, default on), `python` (share the Python environment, default off), and per project
+ * the app's own `projects` (symlinks) and `farms` (hardLinkFarms) entries.
  */
 function createAoDependencyLinks({ file, request, logger = console }) {
   const synced = new Map();
   const chains = new Map();
 
+  const lists = value => Object.fromEntries(Object.entries(value && typeof value === "object" ? value : {})
+    .filter(([, entries]) => Array.isArray(entries))
+    .map(([id, entries]) => [id, strings(entries)]));
   function load() {
     try {
       const value = JSON.parse(fs.readFileSync(file, "utf8"));
-      const projects = value?.projects && typeof value.projects === "object" ? value.projects : {};
-      return {
-        enabled: value?.enabled !== false,
-        projects: Object.fromEntries(Object.entries(projects)
-          .filter(([, entries]) => Array.isArray(entries))
-          .map(([id, entries]) => [id, entries.filter(entry => typeof entry === "string")])),
-      };
-    } catch { return { enabled: true, projects: {} }; }
+      return { enabled: value?.enabled !== false, python: value?.python === true, projects: lists(value?.projects), farms: lists(value?.farms) };
+    } catch { return { enabled: true, python: false, projects: {}, farms: {} }; }
   }
   // A backend-bundle module may only require Node built-ins and other bundle modules, so the
   // small atomic write is done here: a temp file next to the state, then a rename over it.
@@ -107,33 +125,42 @@ function createAoDependencyLinks({ file, request, logger = console }) {
 
   async function syncNow(projectId, folder) {
     const state = load();
-    const detected = state.enabled ? detectDependencyLinks(folder) : [];
-    const managedBefore = state.projects[projectId] || [];
-    if (!state.enabled && !managedBefore.length) return { changed: false };
-    const key = JSON.stringify([detected, managedBefore]);
+    const detected = state.enabled || state.python ? detectDependencyLinks(folder) : [];
+    const farmsWanted = state.enabled ? detected.filter(isNodeFolder) : [];
+    // node_modules is never shared any more: an app entry for it in `symlinks` (an earlier
+    // version put it there) is dropped below and the folder farmed instead.
+    const linksWanted = state.python ? detected.filter(entry => !isNodeFolder(entry)) : [];
+    const linksBefore = state.projects[projectId] || [];
+    const farmsBefore = state.farms[projectId] || [];
+    if (!farmsWanted.length && !linksWanted.length && !linksBefore.length && !farmsBefore.length) return { changed: false };
+    const key = JSON.stringify([farmsWanted, linksWanted, linksBefore, farmsBefore]);
     if (synced.get(projectId) === key) return { changed: false };
     const record = await request("GET", `/api/v1/projects/${encodeURIComponent(projectId)}`);
     const project = record?.project;
     // A degraded or scratch project has no config this app should rewrite.
     if (record?.status !== "ok" || !project || project.kind === "scratch") return { changed: false };
     const config = project.config && typeof project.config === "object" ? project.config : {};
-    const current = Array.isArray(config.symlinks) ? config.symlinks.filter(entry => typeof entry === "string") : [];
-    const next = mergeSymlinks(current, detected, managedBefore);
-    const changed = !sameList(next.symlinks, current);
+    const currentLinks = strings(config.symlinks);
+    const currentFarms = strings(config.hardLinkFarms);
+    // A folder the user listed in one list themselves is not added to the other.
+    const links = mergeManaged(currentLinks, linksWanted, linksBefore, userEntries(currentFarms, farmsBefore));
+    const farms = mergeManaged(currentFarms, farmsWanted, farmsBefore, userEntries(currentLinks, linksBefore));
+    const changed = !sameList(links.list, currentLinks) || !sameList(farms.list, currentFarms);
     if (changed) {
-      const { symlinks: _previous, ...rest } = config;
+      const { symlinks: _links, hardLinkFarms: _farms, ...rest } = config;
       // AO replaces the whole config, so every other setting is sent back as it was.
       await request("PUT", `/api/v1/projects/${encodeURIComponent(projectId)}/config`, {
-        config: next.symlinks.length ? { ...rest, symlinks: next.symlinks } : rest,
+        config: { ...rest, ...(links.list.length ? { symlinks: links.list } : {}), ...(farms.list.length ? { hardLinkFarms: farms.list } : {}) },
       });
     }
-    if (!sameList(next.managed, managedBefore)) {
+    if (!sameList(links.managed, linksBefore) || !sameList(farms.managed, farmsBefore)) {
       const latest = load();
-      if (next.managed.length) latest.projects[projectId] = next.managed; else delete latest.projects[projectId];
+      if (links.managed.length) latest.projects[projectId] = links.managed; else delete latest.projects[projectId];
+      if (farms.managed.length) latest.farms[projectId] = farms.managed; else delete latest.farms[projectId];
       save(latest);
     }
-    synced.set(projectId, JSON.stringify([detected, next.managed]));
-    return { changed, symlinks: next.symlinks };
+    synced.set(projectId, JSON.stringify([farmsWanted, linksWanted, links.managed, farms.managed]));
+    return { changed, symlinks: links.list, hardLinkFarms: farms.list };
   }
 
   /** Brings one project's links up to date; one sync per project at a time. Never throws. */
@@ -148,18 +175,36 @@ function createAoDependencyLinks({ file, request, logger = console }) {
     return run;
   }
 
+  const settings = (state = load()) => ({ enabled: state.enabled, python: state.python });
   return {
     sync,
-    enabled: () => load().enabled,
-    /** Turning it off removes the app's entries from each project on that project's next sync. */
-    setEnabled(enabled) {
+    /** `enabled`: reuse installed Node packages (hard-link farms); `python`: share the Python environment. */
+    settings: () => settings(),
+    /**
+     * Changes either setting (a boolean each; others are left as they are). Turning one off
+     * removes the app's entries for it from each project on that project's next sync.
+     */
+    set({ enabled, python } = {}) {
       const state = load();
-      state.enabled = enabled === true;
+      if (typeof enabled === "boolean") state.enabled = enabled;
+      if (typeof python === "boolean") state.python = python;
       save(state);
       synced.clear();
-      return state.enabled;
+      return settings(state);
+    },
+    /**
+     * The folders a project's new worktrees get from the project, as repo-relative POSIX paths:
+     * `shared` (symlinks: the project's own folder or file) and `farmed` (hardLinkFarms). A path
+     * in both is farmed (AO builds farms first), so it is only listed there.
+     */
+    async inEffect(projectId) {
+      const record = await request("GET", `/api/v1/projects/${encodeURIComponent(projectId)}`);
+      const config = record?.status === "ok" && record.project?.config && typeof record.project.config === "object" ? record.project.config : {};
+      const farmed = posixPaths(strings(config.hardLinkFarms));
+      const farmedKeys = new Set(farmed);
+      return { shared: posixPaths(strings(config.symlinks)).filter(entry => !farmedKeys.has(entry)), farmed };
     },
   };
 }
 
-module.exports = { createAoDependencyLinks, detectDependencyLinks, mergeSymlinks };
+module.exports = { createAoDependencyLinks, detectDependencyLinks, mergeManaged };

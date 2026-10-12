@@ -93,6 +93,8 @@ function createAoWorkspaceBoard({ listWorkspaces, listProjects, createProject, m
       pending.set(id, operation);
       return operation;
     },
+    /** The workspace's AO project ({ workspaceId, projectId|null }) without registering one or syncing it. */
+    project: id => binding(id, false),
     readWorkspace,
     async read(projectId, runId) {
       const project = (await listProjects()).find(item => item.id === projectId);

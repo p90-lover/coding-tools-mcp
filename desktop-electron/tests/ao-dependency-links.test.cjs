@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { createAoDependencyLinks, detectDependencyLinks, mergeSymlinks } = require("../electron/ao-dependency-links.cjs");
+const { createAoDependencyLinks, detectDependencyLinks, mergeManaged } = require("../electron/ao-dependency-links.cjs");
 const { createAoWorkspaceBoard } = require("../electron/agent-orchestrator-workspace.cjs");
 
 function tree(t, files) {
@@ -34,15 +34,18 @@ test("detection finds installed node_modules and virtual environments where a pr
   assert.deepEqual(detectDependencyLinks(path.join(node, "missing")), []);
 });
 
-test("the symlinks list keeps the user's entries and only adds or drops the app's own", () => {
-  assert.deepEqual(mergeSymlinks([".env"], ["frontend/node_modules", ".venv"], []),
-    { symlinks: [".env", "frontend/node_modules", ".venv"], managed: ["frontend/node_modules", ".venv"] });
+test("each path list keeps the user's entries and only adds or drops the app's own", () => {
+  assert.deepEqual(mergeManaged([".env"], ["frontend/node_modules", ".venv"], []),
+    { list: [".env", "frontend/node_modules", ".venv"], managed: ["frontend/node_modules", ".venv"] });
   // A folder that went away is dropped only when the app added it; the user's own entry stays.
-  assert.deepEqual(mergeSymlinks([".env", "node_modules", ".venv"], [], [".venv"]),
-    { symlinks: [".env", "node_modules"], managed: [] });
+  assert.deepEqual(mergeManaged([".env", "node_modules", ".venv"], [], [".venv"]),
+    { list: [".env", "node_modules"], managed: [] });
   // An entry the user already had is never claimed (or later removed) by the app.
-  assert.deepEqual(mergeSymlinks(["frontend\\node_modules/"], ["frontend/node_modules"], []),
-    { symlinks: ["frontend\\node_modules/"], managed: [] });
+  assert.deepEqual(mergeManaged(["frontend\\node_modules/"], ["frontend/node_modules"], []),
+    { list: ["frontend\\node_modules/"], managed: [] });
+  // A folder the user put in the other list is left to that choice.
+  assert.deepEqual(mergeManaged([], ["node_modules", "web/node_modules"], [], ["node_modules"]),
+    { list: ["web/node_modules"], managed: ["web/node_modules"] });
 });
 
 function aoProject(config) {
@@ -57,46 +60,83 @@ function aoProject(config) {
   return { requests, request, stored: () => stored };
 }
 
-test("a sync sends AO the whole config back with the detected folders added, once", async (t) => {
+const readState = file => JSON.parse(fs.readFileSync(file, "utf8"));
+
+test("a sync farms node_modules by default, shares a venv only when asked, and sends the whole config back", async (t) => {
   const root = tree(t, ["requirements.txt", ".venv/pyvenv.cfg", "frontend/package.json", "frontend/node_modules/"]);
   const file = path.join(root, "state", "links.json");
   const ao = aoProject({ env: { A: "1" }, symlinks: [".env"], postCreate: ["echo ok"] });
   const links = createAoDependencyLinks({ file, request: ao.request, logger: { warn() {} } });
 
-  assert.equal(links.enabled(), true, "on by default");
-  assert.deepEqual(await links.sync("reg", root), { changed: true, symlinks: [".env", ".venv", "frontend/node_modules"] });
+  assert.deepEqual(links.settings(), { enabled: true, python: false }, "Node packages on, Python environment off by default");
+  assert.deepEqual(await links.sync("reg", root), { changed: true, symlinks: [".env"], hardLinkFarms: ["frontend/node_modules"] });
   assert.deepEqual(ao.requests, [
     ["GET", "/api/v1/projects/reg", undefined],
-    ["PUT", "/api/v1/projects/reg/config", { config: { env: { A: "1" }, postCreate: ["echo ok"], symlinks: [".env", ".venv", "frontend/node_modules"] } }],
+    ["PUT", "/api/v1/projects/reg/config", { config: { env: { A: "1" }, postCreate: ["echo ok"], symlinks: [".env"], hardLinkFarms: ["frontend/node_modules"] } }],
   ]);
-  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { enabled: true, projects: { reg: [".venv", "frontend/node_modules"] } });
+  assert.deepEqual(readState(file), { enabled: true, python: false, projects: {}, farms: { reg: ["frontend/node_modules"] } });
 
   // Nothing changed on disk: the next spawn costs a few stats and no AO request.
   assert.deepEqual(await links.sync("reg", root), { changed: false });
   assert.equal(ao.requests.length, 2);
 
-  // Turned off: the app's entries leave the project; the user's .env stays.
-  assert.equal(links.setEnabled(false), false);
+  // Sharing the Python environment links the venv; the farm stays.
+  assert.deepEqual(links.set({ python: true }), { enabled: true, python: true });
+  await links.sync("reg", root);
+  assert.deepEqual(ao.requests.at(-1), ["PUT", "/api/v1/projects/reg/config",
+    { config: { env: { A: "1" }, postCreate: ["echo ok"], symlinks: [".env", ".venv"], hardLinkFarms: ["frontend/node_modules"] } }]);
+  assert.deepEqual(readState(file), { enabled: true, python: true, projects: { reg: [".venv"] }, farms: { reg: ["frontend/node_modules"] } });
+
+  // Both off: the app's entries leave the project; the user's .env stays.
+  assert.deepEqual(links.set({ enabled: false, python: false }), { enabled: false, python: false });
   await links.sync("reg", root);
   assert.deepEqual(ao.requests.at(-1), ["PUT", "/api/v1/projects/reg/config", { config: { env: { A: "1" }, postCreate: ["echo ok"], symlinks: [".env"] } }]);
-  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { enabled: false, projects: {} });
+  assert.deepEqual(readState(file), { enabled: false, python: false, projects: {}, farms: {} });
   const count = ao.requests.length;
   await links.sync("reg", root);
   assert.equal(ao.requests.length, count, "off and nothing left to remove: no AO request");
 });
 
-test("a project with no config gets one holding only the links, and a failed AO call never throws", async (t) => {
+test("node_modules the app shared before moves to a farm; the user's own entries stay where they are", async (t) => {
+  const root = tree(t, ["package.json", "node_modules/", "web/package.json", "web/node_modules/", "requirements.txt", ".venv/pyvenv.cfg"]);
+  const file = path.join(root, "links.json");
+  // What the previous version left: node_modules and .venv shared by the app.
+  fs.writeFileSync(file, JSON.stringify({ enabled: true, projects: { reg: ["node_modules", ".venv"] } }));
+  const ao = aoProject({ symlinks: [".env", "node_modules", ".venv"] });
+  const links = createAoDependencyLinks({ file, request: ao.request, logger: { warn() {} } });
+  await links.sync("reg", root);
+  assert.deepEqual(ao.stored(), { symlinks: [".env"], hardLinkFarms: ["node_modules", "web/node_modules"] });
+  assert.deepEqual(readState(file), { enabled: true, python: false, projects: {}, farms: { reg: ["node_modules", "web/node_modules"] } });
+
+  // The user shares web/node_modules on purpose and farms .venv: the app adds neither elsewhere.
+  const own = aoProject({ symlinks: ["web\\node_modules"], hardLinkFarms: [".venv"] });
+  const mine = createAoDependencyLinks({ file: path.join(root, "own.json"), request: own.request, logger: { warn() {} } });
+  mine.set({ python: true });
+  await mine.sync("reg", root);
+  assert.deepEqual(own.stored(), { symlinks: ["web\\node_modules"], hardLinkFarms: [".venv", "node_modules"] });
+});
+
+test("a project with no config gets one holding only the farm, and a failed AO call never throws", async (t) => {
   const root = tree(t, ["package.json", "node_modules/"]);
   const ao = aoProject(undefined);
   const links = createAoDependencyLinks({ file: path.join(root, "links.json"), request: ao.request, logger: { warn() {} } });
   await links.sync("reg", root);
-  assert.deepEqual(ao.stored(), { symlinks: ["node_modules"] });
+  assert.deepEqual(ao.stored(), { hardLinkFarms: ["node_modules"] });
 
   const warnings = [];
   const failing = createAoDependencyLinks({ file: path.join(root, "other.json"), logger: { warn: message => warnings.push(message) },
     request: async () => { throw new Error("AO is not running"); } });
   assert.deepEqual(await failing.sync("reg", root), { changed: false });
   assert.match(warnings[0], /AO is not running/);
+});
+
+test("the links in effect are repo-relative POSIX paths, a farmed path listed only as farmed", async (t) => {
+  const root = tree(t, []);
+  const ao = aoProject({ symlinks: ["frontend\\node_modules/", ".venv", ".env", ".venv"], hardLinkFarms: ["frontend/node_modules", "node_modules"] });
+  const links = createAoDependencyLinks({ file: path.join(root, "links.json"), request: ao.request, logger: { warn() {} } });
+  assert.deepEqual(await links.inEffect("reg"), { shared: [".venv", ".env"], farmed: ["frontend/node_modules", "node_modules"] });
+  assert.deepEqual(ao.requests, [["GET", "/api/v1/projects/reg", undefined]], "read-only");
+  assert.deepEqual(await createAoDependencyLinks({ file: path.join(root, "x.json"), request: aoProject(undefined).request }).inEffect("reg"), { shared: [], farmed: [] });
 });
 
 test("binding a workspace for a session syncs its project's links; reading the board does not", async () => {
@@ -110,6 +150,8 @@ test("binding a workspace for a session syncs its project's links; reading the b
     syncProject: async (project, folder) => { synced.push([project.id, folder]); },
   });
   await bridge.readWorkspace("ws");
+  // The approval card's lookup only reads the binding.
+  assert.deepEqual(await bridge.project("ws"), { workspaceId: "ws", projectId: "reg" });
   assert.deepEqual(synced, []);
   assert.deepEqual(await bridge.bind("ws"), { workspaceId: "ws", projectId: "reg" });
   assert.deepEqual(synced, [["reg", "C:\\work\\reg"]]);

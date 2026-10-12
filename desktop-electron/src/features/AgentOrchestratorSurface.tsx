@@ -404,21 +404,26 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [missions, setMissions] = useState<AoMission[]>([]);
   const [selectedRunId, setSelectedRunId] = useState("");
   const [showInactive, setShowInactive] = useState(false);
-  // Link the project's installed node_modules/.venv into agent worktrees (null: not read yet).
-  const [shareDeps, setShareDeps] = useState<boolean | null>(null);
+  // What agent worktrees get of the project's installed dependencies (null: not read yet):
+  // `enabled` reuses node_modules as a hard-link farm, `python` shares the .venv/venv itself.
+  type DependencySettings = { enabled: boolean; python: boolean };
+  const [depSettings, setDepSettings] = useState<DependencySettings | null>(null);
+  const readDepSettings = (result: { enabled?: unknown; python?: unknown }): DependencySettings =>
+    ({ enabled: result.enabled !== false, python: result.python === true });
   useEffect(() => {
     if (sheet !== "settings") return;
     let live = true;
     void moduleCall("upstream_dependency_links")
-      .then((result) => { if (live) setShareDeps(result.enabled !== false); })
-      .catch(() => { if (live) setShareDeps(null); });
+      .then((result) => { if (live) setDepSettings(readDepSettings(result)); })
+      .catch(() => { if (live) setDepSettings(null); });
     return () => { live = false; };
   }, [sheet]);
-  const changeShareDeps = (enabled: boolean) => {
-    setShareDeps(enabled);
-    void moduleCall("upstream_set_dependency_links", { enabled })
-      .then((result) => setShareDeps(result.enabled !== false))
-      .catch(() => setShareDeps(!enabled));
+  const changeDepSetting = (name: keyof DependencySettings, value: boolean) => {
+    const previous = depSettings;
+    if (previous) setDepSettings({ ...previous, [name]: value });
+    void moduleCall("upstream_set_dependency_links", { [name]: value })
+      .then((result) => setDepSettings(readDepSettings(result)))
+      .catch(() => setDepSettings(previous));
   };
   const [inspectedId, setInspectedId] = useState("");
   const [team, setTeam] = useState<AoTeam | null>(null);
@@ -1701,10 +1706,15 @@ export function AgentOrchestratorSurface({ language, setError }: {
               <span>Cancelled cards</span>
               <input type="checkbox" role="switch" checked={showInactive} onChange={(event) => setShowInactive(event.target.checked)} />
             </label>
-            <label className="ao-set-row ao-set-toggle" title="Link the project's installed node_modules and .venv into each agent's worktree instead of reinstalling them. They are shared: an install an agent runs changes the project's own copy. A branch whose lockfile or requirements differ gets no link.">
+            <label className="ao-set-row ao-set-toggle" title="Give each agent's worktree the project's installed node_modules instead of reinstalling them: its folders are new and its files are hard links to the project's, so an npm ci or npm install the agent runs replaces only the worktree's copy. Same drive only. A tool that edits a package file in place (rather than replacing it) still changes the project's file. A branch whose package.json or lockfile differs starts with none.">
               <span className="ao-set-icon" aria-hidden="true">📦</span>
-              <span>Share installed dependencies</span>
-              <input type="checkbox" role="switch" checked={shareDeps !== false} disabled={shareDeps === null} onChange={(event) => changeShareDeps(event.target.checked)} />
+              <span>Reuse installed Node packages</span>
+              <input type="checkbox" role="switch" checked={depSettings?.enabled !== false} disabled={depSettings === null} onChange={(event) => changeDepSetting("enabled", event.target.checked)} />
+            </label>
+            <label className="ao-set-row ao-set-toggle" title="Link the project's .venv/venv itself into each agent's worktree. It is shared: a pip install an agent runs there changes the project's own environment (pip's launchers point at the project's python). A branch whose requirements differ gets no link. Off: agents create their own environment.">
+              <span className="ao-set-icon" aria-hidden="true">🐍</span>
+              <span>Share the Python environment</span>
+              <input type="checkbox" role="switch" checked={depSettings?.python === true} disabled={depSettings === null} onChange={(event) => changeDepSetting("python", event.target.checked)} />
             </label>
             <p className="ao-set-row ao-set-note" title={harnessNotice || undefined}>
               <span className="ao-set-icon" aria-hidden="true">🧩</span>
