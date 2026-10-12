@@ -1028,12 +1028,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     return response.pending_approvals ? { ...response, pending_approvals: withAdvice(response.pending_approvals) } : response;
   }
 
-  async function approveAoHarness({ workspaceId, runId, nodeId, approvalId, allow, response, threadId, turnId } = {}) {
+  async function approveAoHarness({ workspaceId, runId, nodeId, approvalId, allow, response, threadId, turnId, decisionId } = {}) {
     const id = clean(workspaceId, 128), run = clean(runId, 80), node = clean(nodeId, 80);
     const approval = clean(approvalId, 128);
     const typed = response !== undefined;
-    if (typed ? allow !== undefined || !response || typeof response !== "object" || Array.isArray(response)
-      : typeof allow !== "boolean") throw new Error("Choose either a typed native reply or legacy Allow/Deny");
+    // An AO agent's request answered with one of the decisions it offered (e.g. ExitPlanMode's
+    // "auto" / "acceptEdits" / "default" / "plan"), named by its id.
+    const chosen = decisionId !== undefined;
+    if (chosen ? typed || allow !== undefined || typeof decisionId !== "string" || !decisionId
+      : typed ? allow !== undefined || !response || typeof response !== "object" || Array.isArray(response)
+        : typeof allow !== "boolean") throw new Error("Choose either a typed native reply or legacy Allow/Deny");
     let reply, thread, turn;
     if (typed) {
       if (typeof threadId !== "string" || typeof turnId !== "string") throw new Error("Native reply requires live thread/turn scope");
@@ -1047,10 +1051,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     if (!pending) throw new Error("AO tool request is no longer pending");
     if (pending.source === "ao") {
       if (typed) throw new Error("Answer this request with Allow or Deny");
-      const decision = aoDecision(pending, allow);
+      const offered = chosen ? (pending.decisions || []).find((entry) => entry.id === decisionId) : null;
+      if (chosen && !offered) throw new Error("The agent did not offer that answer for this request");
+      const decision = chosen ? offered.id : aoDecision(pending, allow);
       if (!decision) throw new Error(`The agent did not offer a "${allow ? "allow" : "deny"}" answer for this request`);
+      const approving = chosen ? !offered.kind.startsWith("reject") : allow;
       if (!await confirm({
-        message: allow ? "Allow this tool request once?" : "Deny this tool request?",
+        message: chosen ? `${offered.label}?` : approving ? "Allow this tool request once?" : "Deny this tool request?",
         detail: `Run: ${run}
 Node: ${node}
 Tool: ${pending.tool}

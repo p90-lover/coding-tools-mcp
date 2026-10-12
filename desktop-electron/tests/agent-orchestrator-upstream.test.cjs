@@ -429,3 +429,21 @@ test("a conversation too big for one response is read again with fewer items ins
   } });
   await assert.rejects(failing.observe("s"), /AO is down/, "other failures are not retried as size problems");
 });
+
+test("Claude Code's ExitPlanMode request carries its plan and every way it offered to go on", async () => {
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.includes("/conversation") ? {
+      turns: [{ id: "t", state: "running" }], messages: [],
+      activities: [{ id: "a1", turnId: "t", sequence: 2, activityKind: "approval", status: "pending", requestId: "req-plan", summary: "Ready to code?",
+        createdAt: "2026-10-12T02:00:00Z",
+        detail: { toolKind: "switch_mode", toolName: "ExitPlanMode", input: { plan: "## Plan\n1. Add /register\n2. Test it" },
+          decisions: [{ id: "auto", kind: "allow_always", label: "Yes, and auto-accept" }, { id: "acceptEdits", kind: "allow_always", label: "Yes, and accept edits" },
+            { id: "default", kind: "allow_once", label: "Yes, and manually approve edits" }, { id: "plan", kind: "reject_once", label: "No, keep planning" }] } }],
+    } : { session: { id: "s", mode: "chat", status: "needs_input" } },
+  });
+  const [request] = JSON.parse(JSON.stringify((await upstream.observe("s")).approvals));
+  assert.equal(request.kind, "plan");
+  assert.equal(request.plan, "## Plan\n1. Add /register\n2. Test it");
+  assert.equal(request.since, "2026-10-12T02:00:00Z");
+  assert.deepEqual(request.decisions.map(decision => decision.id), ["auto", "acceptEdits", "default", "plan"]);
+});

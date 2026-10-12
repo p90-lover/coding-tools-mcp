@@ -3032,3 +3032,26 @@ test("after a deleted message the next turn starts a fresh agent session (chat_s
   for (let tries = 0; tries < 200 && sent.length === before; tries++) await new Promise(resolve => setTimeout(resolve, 10));
   assert.deepEqual(sent.at(-1).slice(0, 2), ["sess-3", "fourth ask"]);
 });
+
+test("an AO request can be answered with any decision the agent offered, and only those", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) },
+    nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1" } }] };
+  const resolved = [], confirmed = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } }
+      : endpoint.endsWith("/harness/status") ? { ok: true, status: { connected: false } } : { ok: true, run: mission },
+    confirm: async input => { confirmed.push(input.message); return true; },
+    aoHarness: {
+      observe: async () => ({ status: "needs_input", turnState: "running", approvals: [{ approval_id: "req-plan", source: "ao", kind: "plan", tool: "ExitPlanMode",
+        plan: "1. Add /register", decisions: [{ id: "acceptEdits", kind: "allow_always", label: "Yes, and accept edits" }, { id: "plan", kind: "reject_once", label: "No, keep planning" }] }] }),
+      resolveApproval: async (session, request, decision) => { resolved.push([session, request, decision]); return { ok: true }; },
+    },
+  });
+  const input = { workspaceId: "ws", runId: "run", nodeId: "one", approvalId: "req-plan" };
+  await workflow.call("approve_harness", { ...input, decisionId: "acceptEdits" });
+  assert.deepEqual(resolved, [["session-1", "req-plan", "acceptEdits"]], "the chosen option, not a generic allow");
+  assert.deepEqual(confirmed, ["Yes, and accept edits?"]);
+  await assert.rejects(workflow.call("approve_harness", { ...input, decisionId: "bypassPermissions" }), /did not offer that answer/);
+  await assert.rejects(workflow.call("approve_harness", { ...input, decisionId: "plan", allow: true }), /typed native reply or legacy Allow\/Deny/);
+});

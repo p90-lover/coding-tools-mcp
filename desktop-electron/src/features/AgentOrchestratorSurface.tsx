@@ -1440,7 +1440,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
     if (!selectedRun) return;
     const result = await moduleCall("approve_harness", { workspaceId, runId: selectedRun.id,
       nodeId: approval.nodeId, approvalId: approval.approval_id,
-      ...(typeof reply === "boolean" ? { allow: reply } : { response: reply as JsonObject, threadId: approval.thread_id!, turnId: approval.turn_id! }) });
+      ...(typeof reply === "boolean" ? { allow: reply }
+        : typeof (reply as { decisionId?: unknown }).decisionId === "string" ? { decisionId: (reply as { decisionId: string }).decisionId }
+          : { response: reply as JsonObject, threadId: approval.thread_id!, turnId: approval.turn_id! }) });
     if (!result.cancelled) setPendingApprovals((current) => current.filter((item) => item.approval_id !== approval.approval_id));
   });
 
