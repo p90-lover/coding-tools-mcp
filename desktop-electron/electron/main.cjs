@@ -2616,6 +2616,8 @@ async function start() {
     aoChangeWatch = () => { stopAoWatch(); aoPulse.stop(); };
     missionWorkflowRuntime?.dispose();
     const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
+      // Stop agents that sat idle for a while; their chats resume them on the next message.
+      releaseIdleAgents: true,
       // Chat goals (/goal) survive an app restart.
       goalsFile: path.join(app.getPath("userData"), "integrations", "chat-goals.json"),
       requestHeadless: (endpoint, body, options) => {
