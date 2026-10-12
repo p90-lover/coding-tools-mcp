@@ -922,6 +922,27 @@ function smokePassedForCurrentVersion(state) {
 }
 
 
+// An agent waiting on a tool approval stops until it is answered (AO gives up after 30 minutes and
+// the agent reports it was blocked). When a run starts waiting and the app is not in front, say so:
+// a notification and a flashing taskbar button. Once per wait, not on every observation.
+const aoApprovalWaits = new Set();
+function noticeAoApproval(update) {
+  const key = `${update?.workspaceId}:${update?.runId}`;
+  if (update?.attention !== "pending_approval") { aoApprovalWaits.delete(key); return; }
+  if (aoApprovalWaits.has(key)) return;
+  aoApprovalWaits.add(key);
+  if (aoApprovalWaits.size > 200) aoApprovalWaits.delete(aoApprovalWaits.values().next().value);
+  const window = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  if (window?.isFocused()) return;
+  window?.flashFrame(true);
+  if (Notification.isSupported()) {
+    const notice = new Notification({ title: "An agent is waiting for your approval",
+      body: "Open Coding Tools to allow or deny its request. Unanswered requests expire after 30 minutes." });
+    notice.on("click", () => { if (window) { if (window.isMinimized()) window.restore(); window.show(); window.focus(); } });
+    notice.show();
+  }
+}
+
 function assertFocusedMainWindow(event, write = false) {
   const window = BrowserWindow.fromWebContents(event.sender);
   const valid = window
@@ -2625,7 +2646,11 @@ async function start() {
       resolveHarness: (selection) => resolveAoNativeConnection({ ...selection, userData: app.getPath("userData") }),
       aoHarness: agentOrchestratorUpstream.harness,
       confirm: confirmAoAction,
-      onRunState: (update) => { mcpEventMonitor.runState(update); aoPulse.run(update.workspaceId, update.runId); },
+      onRunState: (update) => {
+        mcpEventMonitor.runState(update);
+        aoPulse.run(update.workspaceId, update.runId);
+        noticeAoApproval(update);
+      },
     });
     try {
       appsHost = createCodingToolsAppsHost({
