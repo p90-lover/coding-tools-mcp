@@ -49,7 +49,9 @@
   --color-border-heavy: rgb(255 255 255 / 16%);
   --color-border-focus: rgb(51 156 255 / 70%);
 
-  --font-ui: "OpenAI Sans", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Hiragino Sans", "Yu Gothic UI", "Meiryo", "Segoe UI", sans-serif;
+  /* Latin fonts first: Japanese fonts (Yu Gothic, Meiryo, Hiragino) draw "\" as "¥", which turned every
+     Windows path into C:¥Users¥…. They stay as fallbacks for the characters the Latin fonts lack. */
+  --font-ui: "OpenAI Sans", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif;
   --font-mono: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas, monospace;
   --text-xs: 11px;
   --text-sm: 12px;
