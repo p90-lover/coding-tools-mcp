@@ -84,6 +84,8 @@ export type TaskLifecycleView = {
 };
 export type ChatRun = {
   replaces_run_id?: string;
+  /** Restart mission: this run answers the same message again (set by the bridge). */
+  restarts_run_id?: string;
   id: string;
   project_id: string;
   cancelled: boolean;
@@ -330,6 +332,8 @@ export type ChatTurn = {
   key: string;
   runId: string;
   user?: { text: string; stamp?: string; steers?: ChatSteer[] };
+  /** Which of the chat's messages `user` is (its place in the task description). */
+  messageIndex?: number;
   /** The cards' work, in pipeline order, without the answer that closes the turn. */
   steps: ChatStep[];
   /** The answer shown in full: the final reviewer's, or the orchestrator's when it went solo. */
@@ -362,7 +366,11 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
 export function chatTurns(runs: ChatRun[], description: string | undefined, options: ChatOptions = {}): ChatTurn[] {
   const said = chatMessagesFromDescription(description);
   const now = options.now ?? Date.now();
-  const turns: ChatTurn[] = runs.map((run, index) => {
+  // Each run answers the next message, except a restart or a reconfigured replacement: that one
+  // answers its earlier run's message again, so it shows as a turn of its own without a message.
+  let messageIndex = 0;
+  const turns: ChatTurn[] = runs.map((run) => {
+    const index = run.restarts_run_id || run.replaces_run_id ? -1 : messageIndex++;
     const steps = chatNodeOrder(run.nodes)
       .filter((node) => node.state !== "pending" || node.receipt)
       .map((node) => chatStep(run, node, options, now));
@@ -372,17 +380,28 @@ export function chatTurns(runs: ChatRun[], description: string | undefined, opti
     const starts = steps.map((step) => step.startedAtMs).filter((value): value is number => Boolean(value));
     return {
       key: run.id, runId: run.id,
-      ...(said[index] ? { user: said[index] } : {}),
+      ...(said[index] ? { user: said[index], messageIndex: index } : {}),
       steps: closing ? steps.filter((step) => step !== closing) : steps,
       ...(closing ? { final: closing } : {}),
       status: chatRunStatus(run), solo: Boolean(run.solo),
       ...(starts.length ? { startedAtMs: Math.min(...starts) } : {}),
     };
   });
-  for (let index = runs.length; index < said.length; index += 1) {
-    turns.push({ key: `pending:${index}`, runId: "", user: said[index], steps: [], status: "queued", solo: false });
+  for (let index = messageIndex; index < said.length; index += 1) {
+    turns.push({ key: `pending:${index}`, runId: "", user: said[index], messageIndex: index, steps: [], status: "queued", solo: false });
   }
   return turns;
+}
+
+/** Every run of the message whose turn ran `runId`: that run, then each restart or replacement of it (and of those). */
+export function chatRunsOfMessage(runs: ChatRun[], runId: string): string[] {
+  const found = runId ? [runId] : [];
+  for (let at = 0; at < found.length; at += 1) {
+    for (const run of runs) {
+      if ((run.restarts_run_id === found[at] || run.replaces_run_id === found[at]) && !found.includes(run.id)) found.push(run.id);
+    }
+  }
+  return found;
 }
 
 /** The description up to and including the user's message at `turnIndex`, for "Fork from here". */

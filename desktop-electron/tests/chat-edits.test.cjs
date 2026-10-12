@@ -60,8 +60,7 @@ test("the store hides deleted messages' runs per project, flags a fresh session,
     const store = createChatEditStore({ file });
     const runs = [{ id: "r1" }, { id: "r2" }, { id: "r3" }];
     assert.equal(store.visible("ws-1", runs), runs, "nothing deleted: the same list");
-    store.deleteMessage("ws-1", "task-1", "r2");
-    store.deleteMessage("ws-1", "task-1", undefined); // a message whose run never started
+    store.deleteMessage("ws-1", "task-1", ["r2"]);
     assert.deepEqual(store.visible("ws-1", runs).map(run => run.id), ["r1", "r3"]);
     assert.deepEqual(store.visible("ws-2", runs).map(run => run.id), ["r1", "r2", "r3"], "another project is untouched");
     assert.equal(store.fresh("ws-1", "task-1"), true);
@@ -74,11 +73,28 @@ test("the store hides deleted messages' runs per project, flags a fresh session,
     assert.deepEqual(createChatEditStore({ file }).visible("ws-1", runs).map(run => run.id), ["r1", "r3"], "the run stays hidden");
     // A delete whose task edit failed is put back as it was.
     const before = reopened.get("ws-1", "task-1");
-    reopened.deleteMessage("ws-1", "task-1", "r3");
+    reopened.deleteMessage("ws-1", "task-1", ["r3"]);
     reopened.restore("ws-1", "task-1", before);
     assert.deepEqual(reopened.visible("ws-1", runs).map(run => run.id), ["r1", "r3"]);
     assert.equal(reopened.fresh("ws-1", "task-1"), false);
   } finally {
     fs.rmSync(folder, { recursive: true, force: true });
   }
+});
+
+test("a restart is marked on its run, so the chat shows it under the message it answers again", () => {
+  const store = createChatEditStore();
+  const runs = [{ id: "r1" }, { id: "r1b" }, { id: "r1c" }, { id: "r2" }];
+  store.restarted("ws-1", "task-1", "r1", "r1b");
+  store.restarted("ws-1", "task-1", "r1b", "r1c");
+  assert.deepEqual(store.visible("ws-1", runs), [{ id: "r1" }, { id: "r1b", restarts_run_id: "r1" }, { id: "r1c", restarts_run_id: "r1b" }, { id: "r2" }]);
+  assert.deepEqual(runs[1], { id: "r1b" }, "the runs read from AO are not changed");
+  assert.deepEqual(store.runsOfMessage("ws-1", "task-1", "r1"), ["r1", "r1b", "r1c"], "a restart of a restart is the same message too");
+  assert.deepEqual(store.runsOfMessage("ws-1", "task-1", "r2"), ["r2"]);
+  assert.equal(store.fresh("ws-1", "task-1"), false, "a restart alone asks for nothing fresh");
+  // The renderer reads the same chain, from the bridge's marks and its own reconfigure replacements.
+  const shown = [...store.visible("ws-1", runs), { id: "r2r", replaces_run_id: "r2" }];
+  assert.deepEqual([...chat.chatRunsOfMessage(shown, "r1")], ["r1", "r1b", "r1c"]);
+  assert.deepEqual([...chat.chatRunsOfMessage(shown, "r2")], ["r2", "r2r"]);
+  assert.deepEqual([...chat.chatRunsOfMessage(shown, "")], [], "a message that has not run has no runs");
 });

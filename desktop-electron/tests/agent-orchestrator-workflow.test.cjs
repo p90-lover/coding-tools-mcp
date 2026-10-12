@@ -2892,25 +2892,70 @@ test("deleting a chat message removes it and its steers from the task and hides 
     { id: "task-2", title: "Alone", description: "only ask", state: "in_progress", clauses: [] }],
   runs: [done("r1"), done("other", "task-2"), done("r2"), done("r3")] });
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless });
-  const deleted = await workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: 1 });
-  assert.deepEqual({ ...deleted }, { ok: true, taskId: "task-1", index: 1, runId: "r2" }, "message 1 started the chat's second run");
+  const remove = (index, runId, extra = {}) => workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index, runId, ...extra });
+  const deleted = await remove(1, "r2");
+  assert.deepEqual(JSON.parse(JSON.stringify(deleted)), { ok: true, taskId: "task-1", index: 1, runIds: ["r2"] }, "the run the chat showed under message 1");
   assert.equal(world.tasks[0].description, "first ask\n\nFollow-up (2026-10-10 11:00 UTC):\nthird ask", "the steer goes with its message");
   assert.equal(world.edits[0].title, "Fix auth");
   assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), ["r1", "other", "r3"],
     "the run stays in AO's history but not in the chat, so r3 still answers the third message");
   // Indexes count the messages the chat shows now: deleting the first makes the next one first.
-  assert.equal((await workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: 0 })).runId, "r1");
+  assert.deepEqual([...(await remove(0, "r1")).runIds], ["r1"]);
   assert.equal(world.tasks[0].description, "third ask");
   assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), ["other", "r3"]);
-  await assert.rejects(workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: 0 }), /only message; archive or delete the chat instead/);
-  await assert.rejects(workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-2", index: 0 }), /only message/);
-  await assert.rejects(workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: 4 }), /no longer in this chat/);
-  // A working chat refuses: its latest run is still open.
+  await assert.rejects(remove(0, "r3"), /only message; archive or delete the chat instead/);
+  await assert.rejects(workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-2", index: 0, runId: "other" }), /only message/);
   world.tasks[0].description = description;
+  await assert.rejects(remove(4, "r3"), /no longer in this chat/);
+  // The reply must be one this chat shows: not a deleted run, another chat's run, or none at all.
+  await assert.rejects(remove(1, "r2"), /reply was not found; reload the chat/);
+  await assert.rejects(remove(1, "other"), /reply was not found/);
+  await assert.rejects(remove(1, "r3", { runIds: ["r2"] }), /reply was not found/);
+  await assert.rejects(remove(1, undefined), /no reply yet/);
+  // A working chat refuses: its latest run is still open.
   world.runs.push({ id: "busy", workspace_id: "ws-1", project_id: "task-1", cancelled: false, nodes: [{ id: "a", role: "planner", state: "running" }] });
   const edits = world.edits.length;
-  await assert.rejects(workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: 1 }), /Stop the chat first/);
+  await assert.rejects(remove(1, "r3"), /Stop the chat first/);
   assert.equal(world.edits.length, edits, "nothing is changed");
+});
+
+// The chat's own pairing (ao-chat.ts), to check what a deletion leaves on screen.
+const aoChat = (() => {
+  const vm = require("node:vm");
+  const ts = require(require.resolve("typescript", { paths: [path.resolve(__dirname, "..")] }));
+  const exports = {};
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/ao-chat.ts"), "utf8");
+  vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText,
+    { exports, require: () => ({}) });
+  return exports;
+})();
+
+test("a restarted message keeps its restart: deleting the next message hides that message's own run, and every turn keeps its message", async () => {
+  const description = "first ask\n\nFollow-up (2026-10-10 10:00 UTC):\nsecond ask\n\nFollow-up (2026-10-10 11:00 UTC):\nthird ask";
+  const done = (id) => ({ id, workspace_id: "ws-1", project_id: "task-1", cancelled: false, revision: 1,
+    nodes: [{ id: "lead", role: "planner", state: "finished", receipt: { answer: `answer of ${id}` } }] });
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Fix auth", description, state: "in_progress", clauses: [] }], runs: [done("r1")] });
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/codex.exe",
+    resolveHarness: async () => { throw new Error("stop before the background loop"); } });
+  // Restart mission on the first message: a second run of it, with no new message.
+  const restarted = await workflow.call("restart_run", { workspaceId: "ws-1", runId: "r1" });
+  world.runs.push(done(restarted.runId), done("r2"), done("r3"));
+  const shown = async () => (await workflow.call("runs", { workspaceId: "ws-1" })).runs.filter(run => run.project_id === "task-1");
+  const turns = async () => aoChat.chatTurns(await shown(), world.tasks[0].description)
+    .map(turn => [turn.runId === restarted.runId ? "restart" : turn.runId, turn.user?.text ?? null, turn.messageIndex ?? null]);
+  assert.deepEqual(JSON.parse(JSON.stringify(await turns())),
+    [["r1", "first ask", 0], ["restart", null, null], ["r2", "second ask", 1], ["r3", "third ask", 2]],
+    "the restart answers the first message again; it does not take the second message");
+  // Delete the second message as the chat does: its turn's run, and the runs of that message.
+  const second = aoChat.chatTurns(await shown(), world.tasks[0].description).find(turn => turn.messageIndex === 1);
+  const runIds = aoChat.chatRunsOfMessage(await shown(), second.runId);
+  assert.deepEqual([...runIds], ["r2"]);
+  await workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: second.messageIndex, runId: runIds[0], runIds: runIds.slice(1) });
+  assert.deepEqual(JSON.parse(JSON.stringify(await turns())), [["r1", "first ask", 0], ["restart", null, null], ["r3", "third ask", 1]],
+    "the second message's own run is hidden, not the first message's restart");
+  // Deleting the first message takes its restart along, even if the chat named only the first run.
+  await workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: 0, runId: "r1" });
+  assert.deepEqual(JSON.parse(JSON.stringify(await turns())), [["r3", "third ask", 0]], "no turn is left without its message");
 });
 
 test("after a deleted message the next turn starts a fresh agent session (chat_send and chat_prewarm), then continues its own", async () => {
@@ -2949,7 +2994,7 @@ test("after a deleted message the next turn starts a fresh agent session (chat_s
   });
   const prewarm = () => workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route, taskId: "task-1" });
   assert.equal((await prewarm()).continues, true, "before the delete the chat's agent takes the next message");
-  await workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: 1 });
+  await workflow.call("chat_delete_message", { workspaceId: "ws-1", taskId: "task-1", index: 1, runId: "r2" });
   const warmed = await prewarm();
   assert.equal(warmed.continues, undefined, "the old agent still remembers the deleted exchange");
   assert.equal(warmed.warmed, true, "a fresh agent is made ready instead");

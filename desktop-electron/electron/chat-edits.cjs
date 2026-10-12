@@ -3,9 +3,10 @@
 // Deleting one message from a chat. A chat is a board task whose description holds the user's
 // messages (the first one, then "\n\nFollow-up (<stamp> UTC):\n<text>" blocks, each with any
 // "\n\n↳ Steer (<stamp> UTC): <text>" lines sent during its turn), and each message started one run.
-// The chat pairs run i with message i, so a deleted message takes its run out of the chat too: the
-// run is kept in AO's history but left out of what the chat is shown. The agent's session still
-// remembers the deleted exchange, so the chat's next follow-up starts a fresh session.
+// The chat pairs the runs with the messages in order (a restart answers its run's message again),
+// so a deleted message takes its runs out of the chat too: they are kept in AO's history but left
+// out of what the chat is shown. The agent's session still remembers the deleted exchange, so the
+// chat's next follow-up starts a fresh session.
 
 const fs = require("node:fs");
 const path = require("node:path");
@@ -37,9 +38,10 @@ function chatDescriptionWithout(description, index) {
 }
 
 /**
- * Per chat ("<workspace>:<task>"): the runs of deleted messages, hidden from the chat, and whether
- * the next follow-up must start a fresh agent session. Kept in a small JSON file so both survive an
- * app restart; without a file (tests) they live in memory.
+ * Per chat ("<workspace>:<task>"): the runs of deleted messages, hidden from the chat; whether the
+ * next follow-up must start a fresh agent session; and which runs restart an earlier one (Restart
+ * mission adds a run without a message, so the chat must not pair it with the next message). Kept
+ * in a small JSON file so all of it survives an app restart; without a file (tests) it lives in memory.
  */
 function createChatEditStore({ file = null } = {}) {
   let chats = {};
@@ -57,17 +59,32 @@ function createChatEditStore({ file = null } = {}) {
     fs.writeFileSync(temporary, JSON.stringify(chats, null, 2));
     fs.renameSync(temporary, file);
   };
-  const deletedIn = (workspaceId) => {
+  const projectChats = (workspaceId) => {
     const prefix = `${workspaceId}:`;
-    return new Set(Object.entries(chats).filter(([name]) => name.startsWith(prefix)).flatMap(([, chat]) => chat.deletedRuns ?? []));
+    return Object.entries(chats).filter(([name]) => name.startsWith(prefix)).map(([, chat]) => chat);
   };
   return {
     get: (workspaceId, taskId) => chats[key(workspaceId, taskId)] ?? null,
-    /** A message was deleted: hide its run (if it had one) and start the next follow-up afresh. */
-    deleteMessage(workspaceId, taskId, runId) {
+    /** A message was deleted: hide its runs (the one it started and any restarts of it) and start the next follow-up afresh. */
+    deleteMessage(workspaceId, taskId, runIds) {
       const chat = chats[key(workspaceId, taskId)] ?? { deletedRuns: [] };
-      chats[key(workspaceId, taskId)] = { ...chat, deletedRuns: [...new Set([...(chat.deletedRuns ?? []), ...(runId ? [runId] : [])])], fresh: true };
+      chats[key(workspaceId, taskId)] = { ...chat, deletedRuns: [...new Set([...(chat.deletedRuns ?? []), ...runIds.filter(Boolean)])], fresh: true };
       persist();
+    },
+    /** Restart mission: `runId` is a fresh run of the same message as `previousRunId`. */
+    restarted(workspaceId, taskId, previousRunId, runId) {
+      const chat = chats[key(workspaceId, taskId)] ?? {};
+      chats[key(workspaceId, taskId)] = { ...chat, restarts: { ...(chat.restarts ?? {}), [runId]: previousRunId } };
+      persist();
+    },
+    /** Every run of one message: the run it started, then each restart of it (and of those). */
+    runsOfMessage(workspaceId, taskId, runId) {
+      const restarts = Object.entries(chats[key(workspaceId, taskId)]?.restarts ?? {});
+      const found = [runId];
+      for (let at = 0; at < found.length; at += 1) {
+        for (const [next, previous] of restarts) if (previous === found[at] && !found.includes(next)) found.push(next);
+      }
+      return found;
     },
     /** Puts a chat's entry back as it was (a failed delete). */
     restore(workspaceId, taskId, saved) {
@@ -82,10 +99,17 @@ function createChatEditStore({ file = null } = {}) {
       chats[key(workspaceId, taskId)] = { ...chat, fresh: false };
       persist();
     },
-    /** The runs a chat shows: those of deleted messages are left out. */
+    /**
+     * The runs a chat shows: those of deleted messages are left out, and a restart says which run it
+     * restarts (`restarts_run_id`), so the chat shows it under that message instead of the next one.
+     */
     visible(workspaceId, runs) {
-      const deleted = deletedIn(workspaceId);
-      return deleted.size ? runs.filter(run => !deleted.has(run?.id)) : runs;
+      const project = projectChats(workspaceId);
+      const deleted = new Set(project.flatMap(chat => chat.deletedRuns ?? []));
+      const restarts = Object.assign({}, ...project.map(chat => chat.restarts ?? {}));
+      if (!deleted.size && !Object.keys(restarts).length) return runs;
+      return runs.filter(run => !deleted.has(run?.id))
+        .map(run => restarts[run?.id] && !run.restarts_run_id ? { ...run, restarts_run_id: restarts[run.id] } : run);
     },
   };
 }

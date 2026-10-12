@@ -1346,11 +1346,13 @@ export function AgentOrchestratorSurface({ language, setError }: {
     if (!kept.length) return;
     await sendChat({ title: `Fork of ${taskName(taskId)}`.slice(0, 240), message: kept.map((message) => message.text).join("\n\n").slice(0, 8192) });
   })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
-  // Delete message (confirmed in the chat): the message and its reply leave this chat; the bridge
-  // hides that message's run so later answers stay with their messages, and the next turn starts
-  // a fresh agent session. Files on disk are not changed.
-  const deleteChatMessage = (taskId: string, index: number) => chatRun(taskId, async () => {
-    await moduleCall("chat_delete_message", { workspaceId, taskId, index });
+  // Delete message (confirmed in the chat): the message and its reply leave this chat. The chat
+  // names the runs its turn showed (the first is the one the message started); the bridge hides
+  // exactly those, so every other answer stays with its message, and the next turn starts a fresh
+  // agent session. Files on disk are not changed.
+  const deleteChatMessage = (taskId: string, index: number, runIds: string[]) => chatRun(taskId, async () => {
+    const [runId, ...more] = runIds;
+    await moduleCall("chat_delete_message", { workspaceId, taskId, index, runId, runIds: more });
     await loadMissions(workspaceId);
   });
   /** A chat as Codex turns, read fresh (the board list omits task descriptions). */
@@ -1706,7 +1708,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
                 stop={stopChatRun} restart={restartChatRun}
                 thread={chatTaskId ? { newChat: startNewChat, rename: (title) => renameChat(chatTaskId, title), archive: () => missionAction(chatTaskId, "archive"),
                   fork: (turnIndex) => forkChat(chatTaskId, turnIndex), rewind: (turnIndex) => rewindChat(chatTaskId, turnIndex),
-                  deleteMessage: (turnIndex) => deleteChatMessage(chatTaskId, turnIndex),
+                  deleteMessage: (messageIndex, runIds) => deleteChatMessage(chatTaskId, messageIndex, runIds),
                   copyConversation: () => copyChat(chatTaskId, "conversation"), togglePin: () => togglePin(chatTaskId), pinned: chatPins.includes(chatTaskId) } : undefined}
                 onPause={() => controlRun("pause")} onResume={() => controlRun("resume")} onSettings={() => openSheet("settings")}
                 onOpenProject={(() => { const open = workspaces.find((item) => item.id === workspaceId); return open?.path ? () => openFolder(open) : undefined; })()}

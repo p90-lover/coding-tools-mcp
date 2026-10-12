@@ -1849,6 +1849,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const next = await createTeamRun(id, mission.project_id, team,
       single ? { executionMode: "single", singleRoute }
         : mission.team?.id ? { executionMode: "team" } : {});
+    // The new run answers the same message: the chat shows it there, not under the next message.
+    chatEdits.restarted(id, mission.project_id, previous, next);
     try {
       const started = await startRun({ workspaceId: id, runId: next, executable: selectedExecutable });
       return { ok: true, runId: next, status: started.status };
@@ -2111,30 +2113,36 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
 
   // Delete one message from a chat, with its reply. The message (and the steers sent during its
-  // turn) leaves the task's description and its run is hidden from the chat, so every later run
-  // still pairs with its own message. The files the agent changed stay as they are. The agent's
-  // session still remembers the exchange, so the next turn starts a fresh one (freshSessionRequired).
-  async function chatDeleteMessage({ workspaceId, taskId, index } = {}) {
+  // turn) leaves the task's description and its runs (the one it started, as the chat paired them,
+  // and every restart of it) are hidden from the chat, so every other run keeps its own message.
+  // The files the agent changed stay as they are. The agent's session still remembers the
+  // exchange, so the next turn starts a fresh one (freshSessionRequired).
+  async function chatDeleteMessage({ workspaceId, taskId, index, runId, runIds = [] } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
     if (!Number.isSafeInteger(index) || index < 0) throw new Error("Choose a message to delete");
+    if (typeof runId !== "string" || !runId) throw new Error("This message has no reply yet; it can be deleted once its turn has run");
+    if (!Array.isArray(runIds) || runIds.length > 50) throw new Error("This message's reply was not found; reload the chat");
+    const own = [runId, ...runIds].map(value => clean(value, 80));
     const saved = await runs({ workspaceId: id });
     const chatRuns = saved.runs.filter(run => run.project_id === task);
     const latest = chatRuns.at(-1);
     if ((latest && !runSettled(latest)) || chatWorking(id, task, saved.runs)) throw new Error("Stop the chat first; a message can't be deleted while the chat is working");
     const detail = await board({ workspaceId: id, taskId: task });
     if (!detail.task) throw new Error("This chat's task no longer exists");
+    // The chat says which of its runs answered this message; each must be one it shows.
+    const shown = new Set(chatEdits.visible(id, chatRuns).map(run => run.id));
+    if (!own.every(run => shown.has(run))) throw new Error("This message's reply was not found; reload the chat");
     const description = chatDescriptionWithout(detail.task.description || "", index);
-    // The chat pairs its shown runs with its messages in order: message `index` started this one.
-    const run = chatEdits.visible(id, chatRuns)[index];
+    const hidden = [...new Set([...chatEdits.runsOfMessage(id, task, own[0]), ...own])];
     const before = chatEdits.get(id, task);
-    chatEdits.deleteMessage(id, task, run?.id);
+    chatEdits.deleteMessage(id, task, hidden);
     try {
       await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
     } catch (error) {
       chatEdits.restore(id, task, before);
       throw error;
     }
-    return { ok: true, taskId: task, index, ...(run ? { runId: run.id } : {}) };
+    return { ok: true, taskId: task, index, runIds: hidden };
   }
 
   // /diff: the project's uncommitted changes (staged and unstaged), through the workspace git tool.
