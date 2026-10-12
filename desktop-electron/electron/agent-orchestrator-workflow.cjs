@@ -1279,6 +1279,25 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     return "Routine project command: installs from the lockfile, the project's own scripts and checks run without asking";
   }
+  // The app's own agent tools (the "coding-tools" MCP server a chat agent gets). Claude Code asks for
+  // every MCP tool, even under accept-edits, so "Approve for me" asked the user for each read. Reads,
+  // searches, git history and patches confined to the agent's worktree (the endpoint and headless
+  // enforce that) are allowed like Claude's own reads and edits; the terminal and the screen are not,
+  // and keep their own confirm in the app. Matched on the exact server prefix and an exact name.
+  const APP_TOOL_PREFIX = "mcp__coding-tools__";
+  const APP_TOOLS_ALLOWED = new Set(["read_file", "list_dir", "list_files", "search_text", "grep_text", "get_current_time",
+    "get_plan", "update_plan", "tool_search", "server_info", "git_status", "git_diff", "git_log", "git_show", "git_blame",
+    "view_image", "image_info", "compare_images", "check_exec_environment", "read_output", "apply_patch", "patch_check"]);
+  /** Why an app agent-tool call "Approve for me" may answer itself, or null. */
+  function routineAppTool(tool) {
+    const name = String(tool ?? "");
+    if (!name.startsWith(APP_TOOL_PREFIX)) return null;
+    const short = name.slice(APP_TOOL_PREFIX.length);
+    if (!APP_TOOLS_ALLOWED.has(short)) return null;
+    return short === "apply_patch" || short === "patch_check"
+      ? "An edit through the app's tools, confined to the agent's worktree (like Claude's own edits)"
+      : "A read through the app's tools, confined to the agent's worktree";
+  }
   const approverAdvice = new Map(); // approval_id -> { action, reason }
   /** AO's offered decision id for allow-once / deny-once; an "always" choice is never made for the user. */
   const aoDecision = (approval, allow) => (approval.decisions || [])
@@ -1296,7 +1315,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         ? { ...scoped, recommendation: approverAdvice.get(item.approval_id) } : scoped;
     })
     : approvals;
-  const describeRequest = (approval) => [approval.kind, approval.command, approval.path, approval.cwd && `in ${approval.cwd}`, approval.reason]
+  const describeRequest = (approval) => [approval.kind, approval.tool, approval.command, approval.path, approval.toolInput && `input ${approval.toolInput}`,
+    approval.cwd && `in ${approval.cwd}`, approval.reason]
     .filter(Boolean).join(" · ").slice(0, 1500);
 
   async function askApprover({ approver, mission, approval }) {
@@ -1351,13 +1371,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const request = describeRequest(approval);
         // The command advisor must not decide from a truncated command or permission scope.
         const incomplete = request.length >= 1500 || JSON.stringify(approval.permissions ?? {}).length > 800;
-        let advice = incomplete
+        // An app agent tool's safety comes from its endpoint (worktree confinement, protected paths), not
+        // from reading its arguments, so a long patch is no reason to ask.
+        let advice = routineAppTool(approval.tool)
+          ? { action: "allow", reason: routineAppTool(approval.tool) }
+          : incomplete
           ? { action: "ask", reason: "Inspect the complete native command and requested permission scope yourself" }
           : HARD_DENY.some((pattern) => pattern.test(request))
             ? { action: "deny", reason: "Blocked by the command approver's safety rules" }
-            : approval.kind === "command" && routineCommand(approval.command)
-              ? { action: "allow", reason: routineCommand(approval.command) }
-              : await askApprover({ approver, mission, approval });
+              // A shell line counts only from the agent's own shell tool; the app's exec_command
+              // (an MCP tool with a command) keeps going to the reviewer and the app's confirm.
+              : approval.kind === "command" && !/^mcp__/.test(String(approval.tool ?? "")) && routineCommand(approval.command)
+                ? { action: "allow", reason: routineCommand(approval.command) }
+                : await askApprover({ approver, mission, approval });
         const offered = approval.request?.availableDecisions;
         if (Array.isArray(offered) && advice.action !== "ask"
           && !offered.includes(advice.action === "allow" ? "accept" : "decline")) {
@@ -2566,7 +2592,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
 
   // goalAfterRun runs on its own when a run settles (reportRun); it is exposed for tests and recovery.
-  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, routineCommand });
+  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, routineCommand, routineAppTool });
 }
 
 module.exports = { createAgentOrchestratorWorkflow, delayToMilliseconds, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

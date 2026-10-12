@@ -10,6 +10,8 @@ export type AoApproval = {
   source?: "ao"; tool?: string; summary?: string;
   /** The decisions the AO agent offered; `plan` is the plan of an ExitPlanMode request. */
   decisions?: { id: string; kind: string; label: string }[]; plan?: string; since?: string;
+  /** An MCP tool's arguments, as JSON (what read_file reads, what search_text looks for). */
+  toolInput?: string;
   /** What an install command does to the project's own packages (see dependencyInstallNote). */
   dependencyNote?: { tone: "warn" | "info"; text: string };
 };
@@ -89,7 +91,7 @@ export function AgentOrchestratorApproval({ approval, busy, approve }: {
     <span className="ao-msg-meta">{typed ? "Native request" : "Approval needed"} · {kind || "Tool request"}{approval.tool ? " · " + approval.tool : ""}</span>
     <p>{approval.reason || approval.summary || String(request.message || "Tool request")}{location ? ` · ${location}` : ""}</p>
     {typed ? <p className="ao-hint">{approval.method} · Thread {approval.thread_id || "unknown"} · Turn {approval.turn_id || "unknown"}{approval.item_id ? " · Item " + approval.item_id : ""}</p> : null}
-    {approval.command ? <pre>{approval.command}</pre> : null}
+    {approval.command ? <pre>{approval.command}</pre> : approval.toolInput ? <pre aria-label="Tool input">{approval.toolInput}</pre> : null}
     {approval.dependencyNote ? <p className={`ao-hint ao-dependency-note is-${approval.dependencyNote.tone}`}
       role={approval.dependencyNote.tone === "warn" ? "alert" : "note"}>{approval.dependencyNote.text}</p> : null}
     {approval.recommendation ? <p className="ao-hint">Command approver suggests {approval.recommendation.action}: {approval.recommendation.reason}</p> : null}

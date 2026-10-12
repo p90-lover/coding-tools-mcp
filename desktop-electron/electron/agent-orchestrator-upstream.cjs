@@ -293,9 +293,14 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // Claude Code's ExitPlanMode asks to leave plan mode with the plan it wrote; each offered
         // decision is a different way to go on (auto, accept edits, ask for edits, keep planning).
         const plan = typeof input.plan === "string" && input.plan.trim() ? utf8Prefix(input.plan, 20000) : "";
+        // An MCP tool's arguments (read_file's path, search_text's pattern) are what it will do; the card
+        // and the reviewer need them. Shown as JSON, so control characters arrive escaped.
+        const toolName = String(detail.toolName || "");
+        const toolInput = /^mcp__/.test(toolName) && Object.keys(input).length ? utf8Prefix(JSON.stringify(input), 1500) : "";
         return {
           approval_id: activity.requestId.slice(0, 200), source: "ao", kind: plan ? "plan" : command ? "command" : "permission",
           ...(plan ? { plan } : {}),
+          ...(toolInput ? { toolInput } : {}),
           ...(typeof activity.createdAt === "string" ? { since: activity.createdAt } : {}),
           ...(command ? { command: utf8Prefix(command, 4000) } : {}), ...(path ? { path: utf8Prefix(path, 1000) } : {}),
           ...(typeof input.description === "string" ? { reason: utf8Prefix(input.description, 500) } : {}),
