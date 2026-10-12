@@ -356,6 +356,8 @@ function createProxyGatewayController({
   readServicePids = () => null,
   rotationDedupMs = 60_000,
   portReleaseWaitMs = 5_000,
+  // The clock for the restart backoff, the launch hold and the rotation dedup (tests advance it).
+  now = Date.now,
 }) {
   if (!network?.store || typeof network.applyGlobalRouting !== "function") {
     throw new Error("Proxy gateway needs the provider network controller");
@@ -381,6 +383,8 @@ function createProxyGatewayController({
   let tokenlessDemand = false;
   let tokenlessHoldUntil = 0;
   let heartbeat = null;
+  // Set by close(): background work (watchdog, heartbeat) never starts or restarts a helper after.
+  let closed = false;
   // Evidence rotation bookkeeping: the reason waiting for the route follow-up, the reason waiting
   // for CPA's restart (once a helper runs), when each port last rotated (one incident rotates
   // once), a key for the next helper when no gateway profile exists yet, and the kept services
@@ -611,6 +615,9 @@ function createProxyGatewayController({
       try {
         if (child.exitCode === null && child.signalCode === null) terminateOwnedProcessTree(child);
       } catch {}
+      // Even a helper that would not die must never keep the app's process alive.
+      child.stdout.destroy();
+      child.unref();
       throw error;
     }
     child.stdout.destroy();
@@ -681,11 +688,11 @@ function createProxyGatewayController({
   function rotateOnEvidence(reason, port) {
     if (rotationPending) return;
     const last = rotatedPorts.get(port);
-    if (last && Date.now() - last < rotationDedupMs) {
+    if (last && now() - last < rotationDedupMs) {
       logger.info("proxy_gateway.access_key_rotation_skipped", { reason, port });
       return;
     }
-    rotatedPorts.set(port, Date.now());
+    rotatedPorts.set(port, now());
     const key = randomToken();
     if (gatewayProfile()) {
       saveGatewayProfile(gatewayProfile().endpoint.port, key);
@@ -904,7 +911,7 @@ function createProxyGatewayController({
   // that crashes right after ready is not respawned forever. The key changes only on evidence of a
   // squat, which the pass itself checks.
   async function watchdogTick() {
-    if (!settings.enabled || ensurePromise) return;
+    if (closed || !settings.enabled || ensurePromise) return;
     if (helper && processRunning(helper.pid)) {
       if (Date.now() - Date.parse(helper.startedAt) > restartBackoffCapMs) restartFailures = 0;
       return;
@@ -917,8 +924,8 @@ function createProxyGatewayController({
     } else if (!unverified && !restartPending) {
       return;
     }
-    if (Date.now() < nextRestartAt) return;
-    nextRestartAt = Date.now() + Math.min(restartBackoffBaseMs * (2 ** restartFailures), restartBackoffCapMs);
+    if (now() < nextRestartAt) return;
+    nextRestartAt = now() + Math.min(restartBackoffBaseMs * (2 ** restartFailures), restartBackoffCapMs);
     restartFailures += 1;
     try {
       await ensureHelper();
@@ -931,7 +938,7 @@ function createProxyGatewayController({
   }
 
   function startWatchdog() {
-    if (watchdog || !(watchdogMs > 0)) return;
+    if (closed || watchdog || !(watchdogMs > 0)) return;
     watchdog = setInterval(() => void watchdogTick(), watchdogMs);
     watchdog.unref?.();
   }
@@ -939,7 +946,7 @@ function createProxyGatewayController({
   // ---- token-free listener for ChatGPT Desktop ---------------------------------------------
 
   function tokenlessWanted() {
-    return tokenlessDemand || Date.now() < tokenlessHoldUntil;
+    return tokenlessDemand || now() < tokenlessHoldUntil;
   }
 
   function stopHeartbeat() {
@@ -950,8 +957,12 @@ function createProxyGatewayController({
   // While the port is wanted, each beat renews the helper's lease; when it is no longer wanted the
   // beat closes it. If the app quits or crashes the beats stop and the helper closes it itself.
   function startHeartbeat() {
-    if (heartbeat || !(tokenlessHeartbeatMs > 0)) return;
+    if (closed || heartbeat || !(tokenlessHeartbeatMs > 0)) return;
     heartbeat = setInterval(() => {
+      if (closed) {
+        stopHeartbeat();
+        return;
+      }
       if (!tokenlessWanted() || !routeUsesGateway()) {
         void closeTokenlessIfIdle();
         return;
@@ -995,7 +1006,7 @@ function createProxyGatewayController({
   async function desktopRoute() {
     const profile = gatewayProfile();
     if (!profile || !routeUsesGateway() || !helper) return null;
-    tokenlessHoldUntil = Date.now() + tokenlessHoldMs;
+    tokenlessHoldUntil = now() + tokenlessHoldMs;
     const port = await openTokenless();
     return { url: `http://${GATEWAY_HOST}:${port}`, bypass: [...profile.bypass] };
   }
@@ -1034,7 +1045,7 @@ function createProxyGatewayController({
       ? "running"
       : unverified
         ? "unverified"
-        : settings.enabled && (restartPending || restartFailures > 0) && Date.now() < nextRestartAt
+        : settings.enabled && (restartPending || restartFailures > 0) && now() < nextRestartAt
           ? "restarting"
           : "stopped";
     return {
@@ -1055,7 +1066,7 @@ function createProxyGatewayController({
       needsRestart: (refreshNeedsRestart(), [...needsRestart]),
       watchdog: {
         restarts: restartFailures,
-        nextRestartAt: nextRestartAt > Date.now() ? new Date(nextRestartAt).toISOString() : null,
+        nextRestartAt: nextRestartAt > now() ? new Date(nextRestartAt).toISOString() : null,
       },
       upstreamProfileId: settings.upstreamProfileId,
       upstream: publicProfile(settings.upstreamProfileId ? findProfile(settings.upstreamProfileId) : null),
@@ -1272,8 +1283,10 @@ function createProxyGatewayController({
 
   // App quit: the helper keeps running for the bridge and CPA, and the next app adopts it. The
   // token-free port is closed best effort; if that request never leaves, the stopped heartbeat
-  // lets the lease lapse and the helper closes it by itself.
+  // lets the lease lapse and the helper closes it by itself. Every timer is cleared here, so a
+  // closed controller holds nothing that keeps the process alive.
   async function close() {
+    closed = true;
     if (watchdog) clearInterval(watchdog);
     watchdog = null;
     stopHeartbeat();
