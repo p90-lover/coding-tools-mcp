@@ -24,3 +24,23 @@
 .cgd-empty { display: grid; place-content: center; justify-items: center; gap: 10px; flex: 1 1 auto; padding: 24px; text-align: center; }
 .cgd-empty p { max-width: 460px; margin: 0; font-size: 13px; line-height: 1.5; }
 .cgd-muted { color: var(--color-text-secondary); font-size: 12px; }
+/* The user's own ChatGPT app: preview and the opt-in send box, beside the docked copy. */
+.cgd-local { display: flex; flex: 0 0 340px; flex-direction: column; gap: 12px; min-width: 0; min-height: 0; padding: 12px; overflow: auto; border-left: 1px solid var(--cgd-line); }
+.cgd-local-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 13px; }
+.cgd-local-view { display: grid; justify-items: center; gap: 10px; padding: 8px; border-radius: 8px; background: var(--color-background-surface-under); }
+.cgd-local-view img { display: block; max-width: 100%; max-height: 420px; border-radius: 6px; object-fit: contain; }
+.cgd-local-view p { margin: 12px 4px; font-size: 12px; line-height: 1.5; text-align: center; }
+.cgd-local-ext { display: flex; align-items: flex-start; gap: 10px; }
+.cgd-local-ext .switch { flex: 0 0 auto; margin-top: 2px; }
+.cgd-local-ext strong { font-size: 12px; }
+.cgd-local-ext p { margin: 2px 0 0; line-height: 1.4; }
+.cgd-local-send { display: grid; gap: 8px; }
+.cgd-local-send textarea {
+  min-height: 72px; padding: 7px 8px; border: 1px solid rgb(255 255 255 / 12%); border-radius: 7px; resize: vertical;
+  background: var(--color-background-surface); color: var(--color-text-primary); font: inherit; font-size: 12px;
+}
+.cgd-local-send textarea:focus-visible { outline: 2px solid var(--color-border-focus); outline-offset: 1px; }
+.cgd-local-send button { justify-self: end; }
+.cgd-local-result { margin: 0; padding: 6px 8px; border-radius: 6px; font-size: 12px; overflow-wrap: anywhere; }
+.cgd-local-result.is-ok { background: var(--color-background-status-success); color: var(--color-text-success); }
+.cgd-local-result.is-error { background: var(--color-background-status-error); color: var(--color-text-error); }
