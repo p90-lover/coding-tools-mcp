@@ -9,6 +9,7 @@ const { createAgentOrchestratorGateway } = require("./agent-orchestrator-gateway
 const { createAoWorkspaceBoard } = require("./agent-orchestrator-workspace.cjs");
 const { readCpaCatalog, collectMissionAccounting } = require("./agent-orchestrator-accounting.cjs");
 const { createAoSessionEvents } = require("./ao-session-events.cjs");
+const { createAoDependencyLinks } = require("./ao-dependency-links.cjs");
 
 const API_OPERATIONS = Object.freeze({
   upstream_projects: { method: "GET", endpoint: "/api/v1/projects" },
@@ -98,9 +99,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     } else await shell.openExternal(url.toString());
     return true;
   }
+  // Links each new worktree to the project's installed node_modules/.venv (AO project symlinks).
+  const dependencyLinks = createAoDependencyLinks({
+    file: path.join(dataRoot, "coding-tools-dependency-links.json"),
+    request: (method, endpoint, body) => internalApi(method, endpoint, body), logger,
+  });
   const workspaceBoard = typeof getWorkspaces === "function" && typeof missionCall === "function"
     ? createAoWorkspaceBoard({
       listWorkspaces: getWorkspaces, missionCall,
+      syncProject: (project, folder) => dependencyLinks.sync(project.id, folder),
       readAccounting: async scope => collectMissionAccounting({
         ...scope, catalog: readCpaCatalog(getCpaPricesPath()),
         readSession: async id => {
@@ -807,6 +814,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (operation === "upstream_bind_workspace") {
       if (!workspaceBoard) throw new Error("Coding Tools mission service is unavailable");
       return { ok: true, ...await workspaceBoard.bind(args.workspaceId) };
+    }
+    // The "Share installed dependencies" setting (default on).
+    if (operation === "upstream_dependency_links") return { ok: true, enabled: dependencyLinks.enabled() };
+    if (operation === "upstream_set_dependency_links") {
+      if (typeof args.enabled !== "boolean") throw new Error("enabled must be true or false");
+      return { ok: true, enabled: dependencyLinks.setEnabled(args.enabled) };
     }
     if (operation === "upstream_show") return show(args.bounds, args.projectBoard === true, args.workspaceId, args.terminal || null);
     if (operation === "upstream_hide") return hide();

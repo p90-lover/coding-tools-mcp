@@ -18,6 +18,8 @@ const SPECS = Object.freeze({
   upstream_bounds: { readOnly: false, description: "Resize the embedded AO renderer within the host window." },
   upstream_projects: { readOnly: true, description: "List actual upstream AO projects." },
   upstream_bind_workspace: { readOnly: false, description: "Bind a registered local workspace to AO by its canonical directory without creating repositories or worktrees." },
+  upstream_dependency_links: { readOnly: true, description: "Read whether new AO worktrees link the project's installed node_modules/.venv." },
+  upstream_set_dependency_links: { readOnly: false, description: "Turn linking the project's installed node_modules/.venv into new AO worktrees on or off." },
   upstream_sessions: { readOnly: true, description: "List actual upstream AO sessions." },
   upstream_agents: { readOnly: true, description: "List upstream harness availability." },
   upstream_orchestrators: { readOnly: true, description: "List upstream project orchestrators." },

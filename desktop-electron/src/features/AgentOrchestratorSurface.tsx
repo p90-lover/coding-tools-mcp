@@ -404,6 +404,22 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [missions, setMissions] = useState<AoMission[]>([]);
   const [selectedRunId, setSelectedRunId] = useState("");
   const [showInactive, setShowInactive] = useState(false);
+  // Link the project's installed node_modules/.venv into agent worktrees (null: not read yet).
+  const [shareDeps, setShareDeps] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (sheet !== "settings") return;
+    let live = true;
+    void moduleCall("upstream_dependency_links")
+      .then((result) => { if (live) setShareDeps(result.enabled !== false); })
+      .catch(() => { if (live) setShareDeps(null); });
+    return () => { live = false; };
+  }, [sheet]);
+  const changeShareDeps = (enabled: boolean) => {
+    setShareDeps(enabled);
+    void moduleCall("upstream_set_dependency_links", { enabled })
+      .then((result) => setShareDeps(result.enabled !== false))
+      .catch(() => setShareDeps(!enabled));
+  };
   const [inspectedId, setInspectedId] = useState("");
   const [team, setTeam] = useState<AoTeam | null>(null);
   const [savedTeams, setSavedTeams] = useState<AoTeam[]>([]);
@@ -1684,6 +1700,11 @@ export function AgentOrchestratorSurface({ language, setError }: {
               <span className="ao-set-icon" aria-hidden="true">👁️</span>
               <span>Cancelled cards</span>
               <input type="checkbox" role="switch" checked={showInactive} onChange={(event) => setShowInactive(event.target.checked)} />
+            </label>
+            <label className="ao-set-row ao-set-toggle" title="Link the project's installed node_modules and .venv into each agent's worktree instead of reinstalling them. They are shared: an install an agent runs changes the project's own copy. A branch whose lockfile or requirements differ gets no link.">
+              <span className="ao-set-icon" aria-hidden="true">📦</span>
+              <span>Share installed dependencies</span>
+              <input type="checkbox" role="switch" checked={shareDeps !== false} disabled={shareDeps === null} onChange={(event) => changeShareDeps(event.target.checked)} />
             </label>
             <p className="ao-set-row ao-set-note" title={harnessNotice || undefined}>
               <span className="ao-set-icon" aria-hidden="true">🧩</span>
