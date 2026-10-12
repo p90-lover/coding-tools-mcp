@@ -32,6 +32,34 @@ export type ChatActivity = {
 /** One live entry of a working card's turn. `kind` is "message" or AO's activity kind (reasoning, command, …). */
 export type ChatLiveItem = { id: string; kind: string; status: string; text: string; label?: string };
 
+/** The folders new worktrees share with the project (`shared`, a link) or get as hard-link farms (`farmed`). */
+export type DependencyLinks = { shared: string[]; farmed: string[] };
+export type DependencyNote = { tone: "warn" | "info"; text: string };
+const NODE_INSTALL = /\b(?:npm|pnpm|yarn)(?:\.cmd)?\s+(?:ci|install|i|add|remove|rm|uninstall|un|update|up|upgrade)\b/i;
+const PYTHON_INSTALL = /\b(?:pip3?|python3?\s+-m\s+pip|py\s+-m\s+pip|uv\s+pip|uv|poetry|pipenv)(?:\.exe)?\s+(?:install|add|sync|uninstall|remove|update|lock)\b/i;
+const isVenv = (dir: string) => /(?:^|\/)\.?venv$/i.test(dir);
+const isNodeModules = (dir: string) => /(?:^|\/)node_modules$/i.test(dir);
+/**
+ * What an agent's install command does to the project's own packages, shown on its approval card:
+ * a folder linked to the project (the opt-in shared Python environment, or a user's own link) is
+ * changed for the project too; a hard-link farm (node_modules by default) installs privately.
+ */
+export function dependencyInstallNote(command: string | undefined, links: DependencyLinks | null): DependencyNote | null {
+  if (!command || !links) return null;
+  if (PYTHON_INSTALL.test(command) && links.shared.some(isVenv)) {
+    return { tone: "warn", text: "This worktree shares the project's Python environment: installing here changes the project's packages too." };
+  }
+  if (NODE_INSTALL.test(command)) {
+    if (links.shared.some(isNodeModules)) {
+      return { tone: "warn", text: "This worktree shares the project's node_modules: installing here changes the project's packages too." };
+    }
+    if (links.farmed.some(isNodeModules)) {
+      return { tone: "info", text: "Node packages install privately in this worktree; the project's own stay as they are." };
+    }
+  }
+  return null;
+}
+
 export type ChatOptions = {
   /** One line per card: harness · model · effort · context · role. */
   describe?: (node: ChatNode, run?: ChatRun) => string;

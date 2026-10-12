@@ -31,6 +31,8 @@ function createAoWorkspaceBoard({ listWorkspaces, listProjects, createProject, m
   realpath = fs.promises.realpath, platform = process.platform,
   isRepositoryRoot = async directory => fs.existsSync(path.join(directory, ".git")),
   recordDefaultBranch = recordLocalDefaultBranch,
+  // Before AO starts a session, brings the project's links to installed dependencies up to date.
+  syncProject = null,
 }) {
   const pending = new Map();
   async function canonical(directory) {
@@ -66,6 +68,7 @@ function createAoWorkspaceBoard({ listWorkspaces, listProjects, createProject, m
       project = await createProject({ path: folder });
       if (!project || await canonical(project.path) !== root) throw new Error("AO project registration changed the workspace scope");
     }
+    if (register && project?.id && typeof syncProject === "function") await syncProject(project, folder);
     return { workspaceId: item.id, projectId: project?.id ?? null };
   }
   async function readWorkspace(workspaceId, runId) {
@@ -90,6 +93,8 @@ function createAoWorkspaceBoard({ listWorkspaces, listProjects, createProject, m
       pending.set(id, operation);
       return operation;
     },
+    /** The workspace's AO project ({ workspaceId, projectId|null }) without registering one or syncing it. */
+    project: id => binding(id, false),
     readWorkspace,
     async read(projectId, runId) {
       const project = (await listProjects()).find(item => item.id === projectId);

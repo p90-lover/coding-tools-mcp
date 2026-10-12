@@ -10,6 +10,8 @@ export type AoApproval = {
   source?: "ao"; tool?: string; summary?: string;
   /** The decisions the AO agent offered; `plan` is the plan of an ExitPlanMode request. */
   decisions?: { id: string; kind: string; label: string }[]; plan?: string; since?: string;
+  /** What an install command does to the project's own packages (see dependencyInstallNote). */
+  dependencyNote?: { tone: "warn" | "info"; text: string };
 };
 export type ApprovalReply = boolean | { decisionId: string } | Record<string, unknown>;
 /** How long ago an AO request started waiting (AO ends an unanswered one after 30 minutes). */
@@ -88,6 +90,8 @@ export function AgentOrchestratorApproval({ approval, busy, approve }: {
     <p>{approval.reason || approval.summary || String(request.message || "Tool request")}{location ? ` · ${location}` : ""}</p>
     {typed ? <p className="ao-hint">{approval.method} · Thread {approval.thread_id || "unknown"} · Turn {approval.turn_id || "unknown"}{approval.item_id ? " · Item " + approval.item_id : ""}</p> : null}
     {approval.command ? <pre>{approval.command}</pre> : null}
+    {approval.dependencyNote ? <p className={`ao-hint ao-dependency-note is-${approval.dependencyNote.tone}`}
+      role={approval.dependencyNote.tone === "warn" ? "alert" : "note"}>{approval.dependencyNote.text}</p> : null}
     {approval.recommendation ? <p className="ao-hint">Command approver suggests {approval.recommendation.action}: {approval.recommendation.reason}</p> : null}
     {typed ? <details><summary>Exact native request</summary><pre>{JSON.stringify(request, null, 2)}</pre></details> : null}
     {typed && !scoped ? <p role="alert">Missing live thread/turn scope. Refresh the request or reconnect this role through its normal consent flow; no response can be sent.</p> : null}

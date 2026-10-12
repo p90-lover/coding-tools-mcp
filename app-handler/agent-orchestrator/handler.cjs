@@ -18,6 +18,9 @@ const SPECS = Object.freeze({
   upstream_bounds: { readOnly: false, description: "Resize the embedded AO renderer within the host window." },
   upstream_projects: { readOnly: true, description: "List actual upstream AO projects." },
   upstream_bind_workspace: { readOnly: false, description: "Bind a registered local workspace to AO by its canonical directory without creating repositories or worktrees." },
+  upstream_dependency_links: { readOnly: true, description: "Read whether new AO worktrees reuse the project's installed node_modules (a hard-link farm, `enabled`) and share its .venv/venv (`python`)." },
+  upstream_set_dependency_links: { readOnly: false, description: "Turn reusing the project's installed node_modules (`enabled`) or sharing its .venv/venv (`python`) in new AO worktrees on or off." },
+  dependency_link_info: { readOnly: true, description: "Read the repo-relative folders new worktrees of a workspace's AO project share with the project (`shared`) or get as hard-link farms (`farmed`)." },
   upstream_sessions: { readOnly: true, description: "List actual upstream AO sessions." },
   upstream_agents: { readOnly: true, description: "List upstream harness availability." },
   upstream_orchestrators: { readOnly: true, description: "List upstream project orchestrators." },
@@ -61,6 +64,9 @@ const SPECS = Object.freeze({
   move_clause: { readOnly: false, description: "Move one plan clause after local confirmation." },
 });
 
+// Operations served by the AO runtime service although their names do not start with "upstream_".
+const UPSTREAM_OPERATIONS = new Set(["dependency_link_info"]);
+
 module.exports = Object.freeze({
   operations: Object.freeze(Object.keys(SPECS)),
   module: Object.freeze({
@@ -73,7 +79,7 @@ module.exports = Object.freeze({
   },
   async invoke(operation, args = {}, context = {}) {
     if (!Object.hasOwn(SPECS, operation)) throw new Error("Unknown Agent Orchestrator operation");
-    const call = operation.startsWith("upstream_")
+    const call = operation.startsWith("upstream_") || UPSTREAM_OPERATIONS.has(operation)
       ? context.services?.agentOrchestratorUpstream
       : context.services?.agentOrchestrator;
     if (typeof call !== "function") {

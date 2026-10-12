@@ -11,7 +11,7 @@ import { ProjectEditDialog } from "./ProjectEditDialog";
 import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
-import { GOAL_SUMMARY, chatArchived, chatList, chatMarkdown, chatMessagesFromDescription, chatTurns, goalElapsed, type ChatActivity, type ChatCommands, type ChatGoal, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
+import { GOAL_SUMMARY, chatArchived, chatList, chatMarkdown, chatMessagesFromDescription, chatTurns, dependencyInstallNote, goalElapsed, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatGoal, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
 import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { createLatestConfigQueue } from "./ao-config";
 import {
@@ -427,6 +427,27 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [missions, setMissions] = useState<AoMission[]>([]);
   const [selectedRunId, setSelectedRunId] = useState("");
   const [showInactive, setShowInactive] = useState(false);
+  // What agent worktrees get of the project's installed dependencies (null: not read yet):
+  // `enabled` reuses node_modules as a hard-link farm, `python` shares the .venv/venv itself.
+  type DependencySettings = { enabled: boolean; python: boolean };
+  const [depSettings, setDepSettings] = useState<DependencySettings | null>(null);
+  const readDepSettings = (result: { enabled?: unknown; python?: unknown }): DependencySettings =>
+    ({ enabled: result.enabled !== false, python: result.python === true });
+  useEffect(() => {
+    if (sheet !== "settings") return;
+    let live = true;
+    void moduleCall("upstream_dependency_links")
+      .then((result) => { if (live) setDepSettings(readDepSettings(result)); })
+      .catch(() => { if (live) setDepSettings(null); });
+    return () => { live = false; };
+  }, [sheet]);
+  const changeDepSetting = (name: keyof DependencySettings, value: boolean) => {
+    const previous = depSettings;
+    if (previous) setDepSettings({ ...previous, [name]: value });
+    void moduleCall("upstream_set_dependency_links", { [name]: value })
+      .then((result) => setDepSettings(readDepSettings(result)))
+      .catch(() => setDepSettings(previous));
+  };
   const [inspectedId, setInspectedId] = useState("");
   const [team, setTeam] = useState<AoTeam | null>(null);
   const [savedTeams, setSavedTeams] = useState<AoTeam[]>([]);
@@ -456,6 +477,23 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [advanceNotice, setAdvanceNotice] = useState("");
   const [autoStatus, setAutoStatus] = useState("idle");
   const [pendingApprovals, setPendingApprovals] = useState<AoApproval[]>([]);
+  // Which folders this project's worktrees share or farm, for the install note on approval cards.
+  const [dependencyLinks, setDependencyLinks] = useState<{ workspaceId: string; at: number; links: DependencyLinks } | null>(null);
+  const wantsDependencyLinks = Boolean(workspaceId) && pendingApprovals.some((approval) => Boolean(approval.command));
+  useEffect(() => {
+    if (!wantsDependencyLinks) return;
+    if (dependencyLinks?.workspaceId === workspaceId && Date.now() - dependencyLinks.at < 60_000) return;
+    let live = true;
+    void moduleCall("dependency_link_info", { workspaceId }).then((result) => {
+      const list = (value: unknown) => Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+      if (live) setDependencyLinks({ workspaceId, at: Date.now(), links: { shared: list(result.shared), farmed: list(result.farmed) } });
+    }).catch(() => undefined);
+    return () => { live = false; };
+  }, [wantsDependencyLinks, workspaceId, pendingApprovals.length]);
+  const shownApprovals = pendingApprovals.map((approval) => {
+    const note = dependencyInstallNote(approval.command, dependencyLinks?.workspaceId === workspaceId ? dependencyLinks.links : null);
+    return note ? { ...approval, dependencyNote: note } : approval;
+  });
   const [runtimePolicies, setRuntimePolicies] = useState<Record<string, RuntimePermissionPolicy>>({});
   const [runTaskId, setRunTaskId] = useState("");
   const [workerParentId, setWorkerParentId] = useState("");
@@ -1707,6 +1745,16 @@ export function AgentOrchestratorSurface({ language, setError }: {
               <span>Cancelled cards</span>
               <input type="checkbox" role="switch" checked={showInactive} onChange={(event) => setShowInactive(event.target.checked)} />
             </label>
+            <label className="ao-set-row ao-set-toggle" title="Give each agent's worktree the project's installed node_modules instead of reinstalling them: its folders are new and its files are hard links to the project's, so an npm ci or npm install the agent runs replaces only the worktree's copy. Same drive only. A tool that edits a package file in place (rather than replacing it) still changes the project's file. A branch whose package.json or lockfile differs starts with none.">
+              <span className="ao-set-icon" aria-hidden="true">📦</span>
+              <span>Reuse installed Node packages</span>
+              <input type="checkbox" role="switch" checked={depSettings?.enabled !== false} disabled={depSettings === null} onChange={(event) => changeDepSetting("enabled", event.target.checked)} />
+            </label>
+            <label className="ao-set-row ao-set-toggle" title="Link the project's .venv/venv itself into each agent's worktree. It is shared: a pip install an agent runs there changes the project's own environment (pip's launchers point at the project's python). A branch whose requirements differ gets no link. Off: agents create their own environment.">
+              <span className="ao-set-icon" aria-hidden="true">🐍</span>
+              <span>Share the Python environment</span>
+              <input type="checkbox" role="switch" checked={depSettings?.python === true} disabled={depSettings === null} onChange={(event) => changeDepSetting("python", event.target.checked)} />
+            </label>
             <p className="ao-set-row ao-set-note" title={harnessNotice || undefined}>
               <span className="ao-set-icon" aria-hidden="true">🧩</span>
               <span>{harnesses.filter(item => item.runnable).length} harnesses ready{harnessNotice ? " ⚠️" : ""}</span>
@@ -1764,7 +1812,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
                 pendingTitle={pendingChat?.title} pendingCreation={Boolean(pendingChat && !pendingChat.taskId)}
                 working={Boolean(selectedRun && chatTaskId && selectedRun.project_id === chatTaskId && ["starting", "running"].includes(autoStatus))}
                 openStructure={(runId) => { setSelectedRunId(runId); setView("overview"); }}
-                approvals={selectedRun && chatTaskId && selectedRun.project_id === chatTaskId ? pendingApprovals : []}
+                approvals={selectedRun && chatTaskId && selectedRun.project_id === chatTaskId ? shownApprovals : []}
                 composer={{ mode: composerMode, onModeChange: setComposerMode, route: singleRoute, onRouteChange: setSingleRoute,
                   harnesses, loadModels, teams: savedTeams, teamId: composerTeamId, onTeamChange: setComposerTeamId }}
                 onOpenTeam={openTeam}
@@ -1798,7 +1846,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
               onUnlink={unlink} canUnlink={(nodeId, parentId) => Boolean(aoUnlinkChange(selectedRun, nodeId, parentId))}
               onRemove={removeCard} canRemove={(nodeId) => Boolean(aoRemoveChange(selectedRun, nodeId))}>
               {pendingApprovals.length ? <aside className="ao-approvals ao-canvas-overlay" aria-label="AO tool approvals">
-                {pendingApprovals.map(approval => <AgentOrchestratorApproval key={approval.approval_id} approval={approval} busy={Boolean(busy)} approve={approve} />)}
+                {shownApprovals.map(approval => <AgentOrchestratorApproval key={approval.approval_id} approval={approval} busy={Boolean(busy)} approve={approve} />)}
               </aside> : null}
               <button type="button" className="ao-fab ao-canvas-overlay" title="Add worker"
                 disabled={selectedRun.cancelled || selectedRun.nodes.length >= 24 || selectedRun.nodes.some((node) => node.role === "reviewer" && node.state !== "pending") || Boolean(busy)}

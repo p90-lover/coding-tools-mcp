@@ -185,6 +185,10 @@ test("AO handler exposes named upstream APIs and keeps absent board detail JSON-
   assert.equal(result.result.task, null);
   await host.call("agent-orchestrator", "upstream_projects", {});
   assert.deepEqual(operations, [["upstream_projects", {}]]);
+  // The approval card's read of a workspace's dependency links is served by the AO runtime.
+  assert.equal(handler.isReadOnly("dependency_link_info"), true);
+  await host.call("agent-orchestrator", "dependency_link_info", { workspaceId: "ws" });
+  assert.deepEqual(operations.at(-1), ["dependency_link_info", { workspaceId: "ws" }]);
   await assert.rejects(host.call("agent-orchestrator", "upstream_arbitrary_url", { url: "http://example.com" }), /does not expose/);
 });
 

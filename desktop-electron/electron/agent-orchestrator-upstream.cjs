@@ -9,6 +9,7 @@ const { createAgentOrchestratorGateway } = require("./agent-orchestrator-gateway
 const { createAoWorkspaceBoard } = require("./agent-orchestrator-workspace.cjs");
 const { readCpaCatalog, collectMissionAccounting } = require("./agent-orchestrator-accounting.cjs");
 const { createAoSessionEvents } = require("./ao-session-events.cjs");
+const { createAoDependencyLinks } = require("./ao-dependency-links.cjs");
 
 const API_OPERATIONS = Object.freeze({
   upstream_projects: { method: "GET", endpoint: "/api/v1/projects" },
@@ -124,9 +125,16 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     } else await shell.openExternal(url.toString());
     return true;
   }
+  // Gives each new worktree the project's installed node_modules (AO hardLinkFarms) and, when
+  // the user allows it, its .venv/venv (AO symlinks).
+  const dependencyLinks = createAoDependencyLinks({
+    file: path.join(dataRoot, "coding-tools-dependency-links.json"),
+    request: (method, endpoint, body) => internalApi(method, endpoint, body), logger,
+  });
   const workspaceBoard = typeof getWorkspaces === "function" && typeof missionCall === "function"
     ? createAoWorkspaceBoard({
       listWorkspaces: getWorkspaces, missionCall,
+      syncProject: (project, folder) => dependencyLinks.sync(project.id, folder),
       readAccounting: async scope => collectMissionAccounting({
         ...scope, catalog: readCpaCatalog(getCpaPricesPath()),
         readSession: async id => {
@@ -851,6 +859,24 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (operation === "upstream_bind_workspace") {
       if (!workspaceBoard) throw new Error("Coding Tools mission service is unavailable");
       return { ok: true, ...await workspaceBoard.bind(args.workspaceId) };
+    }
+    // "Reuse installed Node packages" (`enabled`, default on) and "Share the Python environment"
+    // (`python`, default off).
+    if (operation === "upstream_dependency_links") return { ok: true, ...dependencyLinks.settings() };
+    if (operation === "upstream_set_dependency_links") {
+      const given = ["enabled", "python"].filter(name => args[name] !== undefined);
+      if (!given.length || given.some(name => typeof args[name] !== "boolean")) throw new Error("enabled or python must be true or false");
+      return { ok: true, ...dependencyLinks.set({ enabled: args.enabled, python: args.python }) };
+    }
+    // The folders new worktrees of this workspace's AO project share with it or get as hard-link
+    // farms, for the approval card. Read-only: it neither registers a project nor starts AO.
+    if (operation === "dependency_link_info") {
+      if (!workspaceBoard) throw new Error("Coding Tools mission service is unavailable");
+      // With AO stopped no session runs, so nothing is in effect.
+      if (state !== "ready") return { ok: true, shared: [], farmed: [] };
+      const { projectId } = await workspaceBoard.project(args.workspaceId);
+      if (!projectId) return { ok: true, shared: [], farmed: [] };
+      return { ok: true, ...await dependencyLinks.inEffect(projectId) };
     }
     if (operation === "upstream_show") return show(args.bounds, args.projectBoard === true, args.workspaceId, args.terminal || null);
     if (operation === "upstream_hide") return hide();
