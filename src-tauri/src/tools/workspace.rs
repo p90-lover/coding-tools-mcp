@@ -43,10 +43,16 @@ pub(crate) fn is_protected_name(part: &str, names: &[&str]) -> bool {
 }
 
 /// Why Windows would open something other than what a path part names, if it would: trailing
-/// dots or spaces (dropped), `:` (an alternate data stream), a reserved device name (CON, PRN,
-/// AUX, NUL, COM0-9, LPT0-9, with or without an extension), or, when `short_names` is set, an 8.3
-/// short name (`~` and a digit, e.g. `GIT~1`), which the file system expands to a long name.
-pub(crate) fn windows_quirk(part: &str, short_names: bool) -> Option<&'static str> {
+/// dots or spaces (dropped) and `:` (an alternate data stream), always; when `device_names` is set,
+/// a reserved device name (CON, PRN, AUX, NUL, COM0-9, LPT0-9, with or without an extension); and
+/// when `short_names` is set, an 8.3 short name (`~` and a digit, e.g. `GIT~1`), which the file
+/// system expands to a long name. The last two are also ordinary names (`file~2.txt`, and `aux.ts`
+/// on Windows 11), so they are only checked where a write could reach a session root's git data.
+pub(crate) fn windows_quirk(
+    part: &str,
+    device_names: bool,
+    short_names: bool,
+) -> Option<&'static str> {
     if matches!(part, "." | "..") || part.is_empty() {
         return None;
     }
@@ -55,6 +61,9 @@ pub(crate) fn windows_quirk(part: &str, short_names: bool) -> Option<&'static st
     }
     if part.contains(':') {
         return Some("a path part names an alternate data stream");
+    }
+    if !device_names {
+        return None;
     }
     let stem = part
         .split('.')
@@ -88,18 +97,20 @@ pub(crate) fn windows_quirk(part: &str, short_names: bool) -> Option<&'static st
     None
 }
 
-/// Refuses a path spelled with any Windows quirk (see `windows_quirk`). Short names are checked in
-/// relative paths; an absolute path may legitimately pass through one (a short temp directory),
-/// and its protected names are compared after canonicalization instead.
-fn reject_windows_quirks(raw_path: &str) -> WorkspaceResult<()> {
+/// Refuses a path spelled with a Windows quirk (see `windows_quirk`). Device names and short names
+/// are checked only for a `session_write` (a write into a session's own root). Short names are
+/// checked in relative paths; an absolute path may legitimately pass through one (a short temp
+/// directory), and its protected names are compared after canonicalization instead.
+fn reject_windows_quirks(raw_path: &str, session_write: bool) -> WorkspaceResult<()> {
     if !cfg!(windows) {
         return Ok(());
     }
     let path = Path::new(raw_path);
-    let short_names = !path.is_absolute() && !raw_path.starts_with(['\\', '/']);
+    let short_names = session_write && !path.is_absolute() && !raw_path.starts_with(['\\', '/']);
     for part in path.components() {
         if let Component::Normal(name) = part {
-            if let Some(reason) = windows_quirk(&name.to_string_lossy(), short_names) {
+            if let Some(reason) = windows_quirk(&name.to_string_lossy(), session_write, short_names)
+            {
                 return Err(WorkspaceError::Tool {
                     code: "UNSAFE_PATH_SPELLING",
                     message: format!("Path refused: {reason}: {raw_path}"),
@@ -492,7 +503,18 @@ impl Workspace {
                 return Err(WorkspaceError::path_outside_workspace());
             }
         }
-        reject_windows_quirks(raw_path)
+        reject_windows_quirks(raw_path, false)
+    }
+
+    /// `reject_unsafe_text` for a path a tool writes: in a session's own root (see `isolated`)
+    /// device names and 8.3 short names are refused too, so no write reaches git's own data, or a
+    /// device, by another name. Elsewhere such names are ordinary files.
+    pub fn reject_unsafe_write_text(&self, raw_path: &str) -> WorkspaceResult<()> {
+        self.reject_unsafe_text(raw_path)?;
+        if self.isolated {
+            reject_windows_quirks(raw_path, true)?;
+        }
+        Ok(())
     }
 
     pub fn resolve_existing(&self, raw_path: &str) -> WorkspaceResult<ResolvedPath> {
@@ -558,7 +580,7 @@ impl Workspace {
 
     pub fn resolve_for_write(&self, raw_path: &str) -> WorkspaceResult<ResolvedPath> {
         self.ensure_roots_current()?;
-        self.reject_unsafe_text(raw_path)?;
+        self.reject_unsafe_write_text(raw_path)?;
         self.reject_protected_write_path(raw_path)?;
         let pure = Path::new(raw_path);
         if pure.file_name().is_none() || raw_path == "." || raw_path == ".." {
@@ -661,7 +683,7 @@ impl Workspace {
     }
 
     pub fn reject_write_symlink(&self, raw_path: &str) -> WorkspaceResult<()> {
-        self.reject_unsafe_text(raw_path)?;
+        self.reject_unsafe_write_text(raw_path)?;
         let (candidate, project) = self.candidate_from_raw(&self.root, raw_path)?;
         if project.as_ref().is_some_and(LinkedProject::read_only)
             || self
@@ -682,7 +704,7 @@ impl Workspace {
     }
 
     pub fn reject_protected_write_path(&self, raw_path: &str) -> WorkspaceResult<()> {
-        self.reject_unsafe_text(raw_path)?;
+        self.reject_unsafe_write_text(raw_path)?;
         let (candidate, project) = self.candidate_from_raw(&self.root, raw_path)?;
         if project.as_ref().is_some_and(LinkedProject::read_only)
             || self
@@ -726,7 +748,7 @@ impl Workspace {
         if raw_path.contains('\0') {
             return Err(WorkspaceError::invalid_argument("Path contains a NUL byte"));
         }
-        reject_windows_quirks(raw_path)
+        reject_windows_quirks(raw_path, false)
     }
 
     /// Whether this is a session's own root alone (see `isolated`).
@@ -925,30 +947,33 @@ mod path_spelling_tests {
 
     #[test]
     fn windows_quirks_are_named() {
+        for part in [".git.", ".git ", "a.", "b ", ".git::$DATA", "x:y", "PRN "] {
+            assert!(windows_quirk(part, false, false).is_some(), "{part}");
+        }
         for part in [
-            ".git.",
-            ".git ",
-            "a.",
-            "b ",
-            ".git::$DATA",
-            "x:y",
             "CON",
             "con",
             "nul.txt",
             "Aux.tar.gz",
+            "aux.ts",
+            "con.go",
             "COM1",
             "lpt9.log",
             "COM0",
             "conin$",
-            "PRN ",
         ] {
-            assert!(windows_quirk(part, false).is_some(), "{part}");
+            assert!(windows_quirk(part, true, false).is_some(), "{part}");
+            assert!(
+                windows_quirk(part, false, false).is_none(),
+                "{part}: a device name only matters for a session write"
+            );
         }
-        assert!(windows_quirk("GIT~1", true).is_some());
-        assert!(windows_quirk("GITHUB~2.TXT", true).is_some());
+        assert!(windows_quirk("GIT~1", true, true).is_some());
+        assert!(windows_quirk("GITHUB~2.TXT", true, true).is_some());
+        assert!(windows_quirk("file~2.txt", true, true).is_some());
         assert!(
-            windows_quirk("GIT~1", false).is_none(),
-            "absolute paths skip it"
+            windows_quirk("GIT~1", true, false).is_none(),
+            "absolute paths and reads skip it"
         );
         for part in [
             "src",
@@ -961,7 +986,7 @@ mod path_spelling_tests {
             ".",
             "..",
         ] {
-            assert!(windows_quirk(part, true).is_none(), "{part}");
+            assert!(windows_quirk(part, true, true).is_none(), "{part}");
         }
     }
 
@@ -1040,6 +1065,18 @@ mod path_spelling_tests {
                 "{target}: {}",
                 write.code()
             );
+        }
+        // Reads refuse only the spellings that are never an ordinary name.
+        for target in [
+            ".git./config",
+            ".git /config",
+            ".git::$INDEX_ALLOCATION/config",
+            ".git:stream",
+            ".github./workflows/ci.yml",
+            "a.txt.",
+            "a.txt ",
+            "a.txt::$DATA",
+        ] {
             assert!(ws.resolve_existing(target).is_err(), "{target}");
             assert!(ws.resolve_read_path(target).is_err(), "{target}");
         }
@@ -1052,6 +1089,32 @@ mod path_spelling_tests {
             assert_eq!(denied.code(), "PROTECTED_PATH");
         }
         assert!(ws.resolve_read_path("a.txt").is_ok());
+    }
+
+    #[test]
+    fn short_and_device_like_names_are_refused_only_for_session_writes() {
+        let workspace = tempdir().expect("workspace");
+        let names: Vec<&str> = ["file~2.txt", "foo.~1~", "aux.ts", "con.go"]
+            .into_iter()
+            .filter(|name| fs::write(workspace.path().join(name), "x").is_ok())
+            .collect();
+        assert!(names.contains(&"file~2.txt") && names.contains(&"foo.~1~"));
+        let open = Workspace::new(workspace.path().to_path_buf()).expect("workspace");
+        let session = Workspace::isolated(workspace.path().to_path_buf()).expect("workspace");
+        for name in &names {
+            for ws in [&open, &session] {
+                assert!(ws.resolve_existing(name).is_ok(), "{name}");
+                assert!(ws.resolve_read_path(name).is_ok(), "{name}");
+            }
+            assert!(open.resolve_for_write(name).is_ok(), "{name}");
+            if cfg!(windows) {
+                assert_eq!(
+                    session.resolve_for_write(name).unwrap_err().code(),
+                    "UNSAFE_PATH_SPELLING",
+                    "{name}"
+                );
+            }
+        }
     }
 }
 

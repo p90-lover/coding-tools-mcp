@@ -9,7 +9,8 @@ use crate::tools::context::ToolContext;
 use crate::tools::workspace::{is_protected_name, tool_ok, Workspace, WorkspaceError};
 
 fn request_path(ctx: &ToolContext, raw: &str) -> Result<String, WorkspaceError> {
-    ctx.workspace.reject_unsafe_text(raw)?;
+    // Every patch target is written (an update, a delete or a new file).
+    ctx.workspace.reject_unsafe_write_text(raw)?;
     if raw.starts_with('@') || std::path::Path::new(raw).is_absolute() {
         Ok(raw.to_string())
     } else {
@@ -242,7 +243,7 @@ pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceEr
     let mut staged: HashMap<String, Option<String>> = HashMap::new();
 
     for fp in &file_patches {
-        ws.reject_unsafe_text(&fp.path)?;
+        ws.reject_unsafe_write_text(&fp.path)?;
         let target = request_path(ctx, &fp.path)?;
         let resolved = if fp.is_new_file {
             ws.resolve_for_write(&target)?
@@ -1024,8 +1025,18 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_path_quirks_in_patches_are_refused() {
-        let (workspace, _harness, context) = context_with_file();
+        let (workspace, _harness, mut context) = context_with_file();
         std::fs::create_dir_all(workspace.path().join(".git")).expect("git dir");
+        // Anywhere: spellings that are never an ordinary name.
+        for target in ["main.rs.", "main.rs. ", "main.rs:stream"] {
+            let patch = format!("*** Begin Patch\n*** Add File: {target}\n+x\n*** End Patch\n");
+            let error = apply_patch(&context, &json!({ "patch": patch }))
+                .expect_err(target)
+                .code();
+            assert_eq!(error, "UNSAFE_PATH_SPELLING", "{target}");
+        }
+        // In a chat session's own root, device and 8.3 short names too.
+        context.workspace = Workspace::isolated(workspace.path().to_path_buf()).expect("session");
         for target in [
             "GIT~1/config",
             "main.rs.",

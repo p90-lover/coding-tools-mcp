@@ -6,7 +6,7 @@ const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { createChatAgentTools, patchTargets, toolResult, windowsQuirk } = require("../electron/chat-agent-tools.cjs");
+const { createChatAgentTools, displaySafe, parsePatch, patchTargets, toolResult, windowsQuirk } = require("../electron/chat-agent-tools.cjs");
 
 const WINDOWS = process.platform === "win32";
 const tool = (name) => ({ name, description: name, inputSchema: { type: "object" } });
@@ -33,12 +33,15 @@ function tempTree() {
   return { base, root, checkout, elsewhere, cleanup: () => fs.rmSync(base, { recursive: true, force: true }) };
 }
 
-function fixture({ enabled = () => true, desktop = () => false, terminal = () => false, results = {}, workspaces = null, confirm = async () => true, root = null, worktreesRoot = null } = {}) {
+function fixture({ enabled = () => true, desktop = () => false, terminal = () => false, results = {}, workspaces = null, confirm = async () => true, root = null, worktreesRoot = null,
+  minAnswerMs = 0, answerClock = undefined } = {}) {
   const calls = [];
   const asked = [];
   const confirmations = [];
   const tools = createChatAgentTools({
     enabled, desktopEnabled: desktop, terminalEnabled: terminal, worktreesRoot, version: "9.9.9", logger: { info() {}, warn() {} },
+    // A fake confirm answers at once; the quick-answer check has its own test.
+    minAnswerMs, ...(answerClock ? { answerClock } : {}),
     confirm: async (request) => { confirmations.push(request); return confirm(request); },
     sessionWorkspace: async (id) => {
       asked.push(id);
@@ -88,6 +91,9 @@ function post(url, body, headers = {}) {
     if (headers[":method"] !== "GET") request.end(payload); else request.end();
   });
 }
+
+/** Dialog text with its hard wraps undone. */
+const unwrapped = (text) => text.replace(/\n↪ /g, "");
 
 let nextId = 100;
 const callTool = (url, auth, name, args = {}) =>
@@ -332,9 +338,19 @@ test("apply_patch is refused when any file it names is outside the worktree", as
 });
 
 test("patchTargets names every file a patch touches, in both formats headless applies", () => {
-  assert.deepEqual(patchTargets("*** Begin Patch\n*** Add File: a\n+x\n*** Update File: b/c\n*** Delete File: d\n*** Move to: e\n*** End Patch"),
-    ["a", "c", "d", "e"]);
+  assert.deepEqual(patchTargets("*** Begin Patch\n*** Add File: a\n+x\n*** Update File: b/c\n*** Move to: e\n*** Delete File: d\n*** End Patch"),
+    ["a", "c", "e", "d"]);
   assert.deepEqual(patchTargets("--- a/x\n+++ b/y\n@@\n-1\n+2\n--- /dev/null\n+++ b/z\n"), ["x", "y", "z"]);
+  // As patch.rs reads them: a `--- ` header with no `+++ ` still names a file; "*** Begin Patch "
+  // (a trailing space) is not a Codex envelope, so its `---`/`+++` headers count.
+  assert.deepEqual(patchTargets("--- ../lone\n@@ -1 +1 @@\n-a\n+b\n"), ["../lone"]);
+  assert.deepEqual(patchTargets("*** Begin Patch \n--- a/../x\n+++ b/../y\n"), ["../x", "../y"]);
+  assert.deepEqual(parsePatch("--- a/src/a.txt\n+++ b/src/a.txt\n@@ -1,2 +1,2 @@\n-a\n--- not a header\n+b\n+c\n--- a/old.txt\n+++ /dev/null\n--- /dev/null\n+++ b/new.txt\n"), [
+    { path: "src/a.txt", operation: "update" }, { path: "old.txt", operation: "delete" }, { path: "new.txt", operation: "add" },
+  ]);
+  assert.deepEqual(parsePatch("*** Begin Patch\r\n*** Update File: a.txt\r\n*** Move to: b.txt\r\n@@\r\n-x\r\n+y\r\n*** Delete File: c\\d.txt\r\n*** End Patch\r\n"), [
+    { path: "a.txt", operation: "update", moveTo: "b.txt" }, { path: "c/d.txt", operation: "delete" },
+  ]);
 });
 
 test("exec_command always starts in the worktree", async () => {
@@ -399,14 +415,14 @@ test("every command and every input to one is confirmed by the user, unless the 
     assert.equal(confirmations.length, 1);
     assert.match(confirmations[0].message, /run a command/);
     assert.match(confirmations[0].detail, /npm test/, "the dialog shows the command");
-    assert.ok(confirmations[0].detail.includes(path.join(path.resolve(tree.root), "src")), "and the directory it starts in");
+    assert.ok(unwrapped(confirmations[0].detail).includes(path.join(path.resolve(tree.root), "src")), "and the directory it starts in");
     assert.match(confirmations[0].detail, /not confined/);
     assert.equal(calls.at(-1).body.tool, "exec_command");
 
     assert.equal((await callTool(url, auth, "write_stdin", { command_id: "c1", chars: "y\n" })).isError, false);
     assert.equal(confirmations.length, 2);
     assert.match(confirmations[1].detail, /c1/);
-    assert.match(confirmations[1].detail, /y\n/);
+    assert.match(confirmations[1].detail, /y⏎\n/, "the newline it sends is shown");
     // Polling (an empty write), reading output and stopping a command send nothing to it.
     for (const [name, args] of [["write_stdin", { command_id: "c1", chars: "" }], ["read_output", { output_ref: "o1" }], ["kill_command", { command_id: "c1" }]]) {
       assert.equal((await callTool(url, auth, name, args)).isError, false, name);
@@ -507,12 +523,12 @@ test("APPROVAL_REQUIRED goes to the user; on yes the endpoint obtains a one-use 
   } finally { await tools.close(); tree.cleanup(); }
 });
 
-test("a command the user already confirmed gets its approval without a second dialog; a confirmation gate is answered by the user too", async () => {
+test("a command the user already confirmed gets a routine approval without a second dialog; a confirmation gate is answered by the user too", async () => {
   const tree = tempTree();
   const results = {
     exec_command: (body) => (body.arguments.approval_token
       ? { state: "completed", result: { ok: true, stdout: "done" } }
-      : { state: "completed", result: { ok: false, error: { code: "APPROVAL_REQUIRED", details: { request_id: "req-1", risk: "network" } } } }),
+      : { state: "completed", result: { ok: false, error: { code: "APPROVAL_REQUIRED", details: { request_id: "req-1", risk: "routine_mutation" } } } }),
     request_permissions: () => ({ state: "completed", result: { ok: true, approval_token: "tok-2" } }),
     apply_patch: (body) => (body.arguments.confirm === true
       ? { state: "completed", result: { ok: true, deleted: true } }
@@ -532,6 +548,7 @@ test("a command the user already confirmed gets its approval without a second di
     assert.equal(deleted.isError, false);
     assert.equal(confirmations.length, 2);
     assert.match(confirmations[1].detail, /critical project file/);
+    assert.match(confirmations[1].detail, /^DELETE \(critical file\): package\.json$/m, "the dialog lists the delete itself");
     const attempts = calls.filter((call) => call.body?.tool === "apply_patch");
     assert.equal(attempts[0].body.arguments.confirm, undefined, "the agent's confirm was stripped");
     assert.equal(attempts[1].body.arguments.confirm, true, "the user's confirmation is supplied by the endpoint");
@@ -567,10 +584,13 @@ test("Windows spellings that open another file are refused, and patches never wr
         assert.match(refused.content[0].text, /patch target .* refused/, target);
       }
     }
-    for (const target of quirks) {
+    // Reads keep only the spellings that are never an ordinary name; device and short names are
+    // refused for writes (above) but read wherever they really resolve.
+    const readQuirks = WINDOWS ? [".git./config", ".git /config", ".git::$INDEX_ALLOCATION/config", ".git:stream", "a.txt.", "src/a.txt::$DATA"] : [];
+    for (const target of readQuirks) {
       const refused = await callTool(url, auth, "read_file", { path: target });
       assert.equal(refused.isError, true, target);
-      assert.match(refused.content[0].text, /dot or a space|alternate data stream|reserved device name|short name/, target);
+      assert.match(refused.content[0].text, /dot or a space|alternate data stream/, target);
     }
     assert.equal(calls.length, before, "none reached the service");
     assert.equal(fs.readFileSync(path.join(tree.root, ".git", "config"), "utf8"), "[core]\n");
@@ -582,13 +602,40 @@ test("Windows spellings that open another file are refused, and patches never wr
   } finally { await tools.close(); tree.cleanup(); }
 });
 
-test("windowsQuirk names every spelling Windows would open as another file", () => {
-  for (const part of [".git.", ".git ", ".git::$DATA", "x:y", "CON", "con", "nul.txt", "Aux.tar.gz", "COM1", "lpt9.log", "COM0", "conin$", "PRN ", "GIT~1", "GITHUB~2.TXT", "COM¹"]) {
+test("windowsQuirk names every spelling Windows would open as another file; device and short names only for writes", () => {
+  for (const part of [".git.", ".git ", ".git::$DATA", "x:y", "PRN "]) {
     assert.ok(windowsQuirk(part), part);
+    assert.ok(windowsQuirk(part, { write: true }), part);
+  }
+  for (const part of ["CON", "con", "nul.txt", "Aux.tar.gz", "aux.ts", "con.go", "COM1", "lpt9.log", "COM0", "conin$", "GIT~1", "GITHUB~2.TXT", "COM¹",
+    "file~2.txt", "foo.~1~"]) {
+    assert.ok(windowsQuirk(part, { write: true }), part);
+    assert.equal(windowsQuirk(part), null, `${part} is an ordinary name to read`);
   }
   for (const part of ["src", ".git", "console.log", "nullable.rs", "COM10", "LPT", "a~b", ".", "..", ""]) {
-    assert.equal(windowsQuirk(part), null, part);
+    assert.equal(windowsQuirk(part, { write: true }), null, part);
   }
+});
+
+test("reads of names like file~2.txt and aux.ts are not refused; writes to them in the worktree are", async () => {
+  const tree = tempTree();
+  const { tools, calls } = fixture({ root: tree.root });
+  try {
+    const { url, auth } = await session(tools);
+    for (const name of ["file~2.txt", "foo.~1~", "aux.ts", "con.go", "src/GIT~1"]) {
+      const read = await callTool(url, auth, "read_file", { path: name });
+      assert.equal(read.isError, false, name);
+      assert.equal(calls.at(-1).body.arguments.path, name);
+    }
+    if (WINDOWS) {
+      const before = calls.length;
+      for (const name of ["file~2.txt", "aux.ts"]) {
+        const write = await callTool(url, auth, "apply_patch", { patch: `*** Begin Patch\n*** Add File: ${name}\n+x\n*** End Patch\n` });
+        assert.match(write.content[0].text, /short name|reserved device name/, name);
+      }
+      assert.equal(calls.length, before);
+    }
+  } finally { await tools.close(); tree.cleanup(); }
 });
 
 test("a root outside AO's worktrees folder is refused", async () => {
@@ -799,4 +846,201 @@ test("image results become MCP image content, as the workspace listener shapes t
   assert.equal(computer.content[0].type, "image");
   const plain = toolResult("list_dir", {}, ["a", "b"]);
   assert.deepEqual(plain.structuredContent, { value: ["a", "b"] });
+});
+
+test("a command or input too long to show in full is refused, never shown cut", async () => {
+  const tree = tempTree();
+  const { tools, calls, confirmations } = fixture({ root: tree.root, terminal: () => true });
+  try {
+    const { url, auth } = await session(tools);
+    const before = calls.length;
+    const padded = await callTool(url, auth, "exec_command", { cmd: "python", stdin: `${"#".repeat(5000)}\nimport os; os.remove("x")` });
+    assert.equal(padded.isError, true);
+    assert.match(padded.content[0].text, /not run/);
+    assert.match(padded.content[0].text, /apply_patch/, "the agent is told to write a script file instead");
+    const long = await callTool(url, auth, "exec_command", { cmd: Array.from({ length: 40 }, (_, line) => `echo ${line}`).join("\n") });
+    assert.equal(long.isError, true, "too many lines");
+    const typed = await callTool(url, auth, "write_stdin", { command_id: "c1", chars: "y".repeat(3000) });
+    assert.match(typed.content[0].text, /not sent/);
+    assert.equal(confirmations.length, 0, "the user is never shown a cut version");
+    assert.equal(calls.length, before, "and nothing ran");
+
+    // Spaces used as padding collapse, so what follows them is on screen; it all fits, in full.
+    const script = `${" ".repeat(5000)}import os; os.remove("x")`;
+    assert.equal((await callTool(url, auth, "exec_command", { cmd: "python", stdin: script })).isError, false);
+    assert.ok(confirmations[0].detail.includes('␠×5000import os; os.remove("x")'), confirmations[0].detail);
+    const fits = Array.from({ length: 12 }, (_, line) => `echo line ${line} ${"z".repeat(40)}`).join("\n");
+    assert.equal((await callTool(url, auth, "exec_command", { cmd: fits })).isError, false);
+    assert.equal(unwrapped(confirmations[1].detail).replace(/⏎/g, "").includes(fits), true, "a command that fits is shown whole");
+    for (const confirmation of confirmations) {
+      const lines = confirmation.detail.split("\n");
+      assert.ok(lines.length <= 30, `${lines.length} lines`);
+      assert.ok(lines.every((line) => [...line].length <= 72), "every line fits the dialog's width");
+    }
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("every character in a confirmation is visible: bidi, zero-width and control characters are escaped", async () => {
+  const shown = displaySafe("echo safe‮gnp.exe​⁦x\u0007 a b ć́ \\u{41} ⏎");
+  for (const raw of ["‮", "​", "⁦", "\u0007", " ", " "]) assert.ok(!shown.includes(raw), `U+${raw.codePointAt(0).toString(16)}`);
+  for (const escape of ["\\u{202E}", "\\u{200B}", "\\u{2066}", "\\u{0007}", "\\u{00A0}", "\\u{2028}", "\\u{0301}", "\\u{005C}u{41}", "\\u{23CE}"]) {
+    assert.ok(shown.includes(escape), escape);
+  }
+  assert.equal(displaySafe("ć́"), "ć\\u{0301}", "one combining mark is drawn, a second is escaped");
+  assert.equal(displaySafe("a\tb\nc"), "a⇥b⏎\nc", "a tab and a newline are drawn, the newline also breaks the line");
+  assert.equal(displaySafe("a   b    c"), "a   b␠×4c", "runs of more than 3 spaces are counted");
+  assert.equal(displaySafe("x".repeat(80)), `${"x".repeat(72)}\n↪ ${"x".repeat(8)}`, "long lines are hard-wrapped");
+  assert.equal(displaySafe("字".repeat(40)).split("\n")[0].length, 36, "a wide character takes two columns");
+
+  const tree = tempTree();
+  const { tools, confirmations } = fixture({ root: tree.root, terminal: () => true });
+  try {
+    const { url, auth } = await session(tools);
+    await callTool(url, auth, "exec_command", { cmd: "type notes‮txt.exe​" });
+    assert.ok(confirmations[0].detail.includes("type notes\\u{202E}txt.exe\\u{200B}"));
+    assert.ok(!/[‮​]/.test(confirmations[0].detail));
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("a patch's approval lists every file and every delete, and a patch with too many files is refused", async () => {
+  const tree = tempTree();
+  const results = {
+    apply_patch: (body) => (body.arguments.approval_token
+      ? { state: "completed", result: { ok: true, applied: true } }
+      : { state: "completed", result: { ok: false, error: { code: "APPROVAL_REQUIRED", message: "This operation requires a scoped approval grant.",
+        details: { request_id: "req-3", risk: "destructive", summary: "Allow a destructive command or file-removal patch" } } } }),
+    request_permissions: () => ({ state: "completed", result: { ok: true, approval_token: "tok-3" } }),
+  };
+  const { tools, calls, confirmations } = fixture({ root: tree.root, results });
+  try {
+    const { url, auth } = await session(tools);
+    const patch = [
+      "*** Begin Patch", "*** Update File: src/a.txt", "@@", "-a", "+b", "*** Delete File: README.md", `*** Add File: src/new‮txt.js`, "+x",
+      "*** Delete File: src/old.txt", "*** Update File: src/moved.txt", "*** Move to: src/elsewhere.txt", "@@", "-a", "+b",
+      "*** Delete File: package.json", "*** End Patch", "",
+    ].join("\n");
+    assert.equal((await callTool(url, auth, "apply_patch", { patch })).isError, false);
+    const { message, detail } = confirmations[0];
+    assert.match(message, /risk: destructive/);
+    assert.match(detail, /^Files \(6; 3 deleted, 2 critical\):$/m);
+    for (const line of ["DELETE (critical file): README.md", "DELETE: src/old.txt", "DELETE (critical file): package.json", "update: src/a.txt",
+      "add: src/new\\u{202E}txt.js", "update: src/moved.txt (its Move to: src/elsewhere.txt is not applied; the file is changed in place)"]) {
+      assert.ok(unwrapped(detail).split("\n").includes(line), `${line}\n${detail}`);
+    }
+    assert.ok(detail.indexOf("DELETE") < detail.indexOf("update:"), "deletes come first");
+    assert.ok(!detail.includes("+b"), "no patch body, cut or whole: the files are what is approved");
+
+    const big = ["*** Begin Patch", ...Array.from({ length: 21 }, (_, index) => `*** Delete File: src/f${index}.txt`), "*** End Patch"].join("\n");
+    const before = calls.length;
+    const refused = await callTool(url, auth, "apply_patch", { patch: big });
+    assert.equal(refused.isError, true);
+    assert.match(refused.content[0].text, /at most 20 files/);
+    assert.equal(confirmations.length, 1, "not asked");
+    assert.equal(calls.length, before + 1, "the first attempt ran (the policy asked), nothing after it");
+    assert.equal(calls.at(-1).body.arguments.approval_token, undefined);
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("prompts never overlap: a batch of confirmable calls and calls from other sessions are asked one at a time", async () => {
+  const tree = tempTree();
+  let open = 0;
+  let most = 0;
+  const { tools, calls, confirmations } = fixture({ root: tree.root, terminal: () => true, confirm: async () => {
+    open += 1;
+    most = Math.max(most, open);
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    open -= 1;
+    return true;
+  } });
+  try {
+    const one = await session(tools, { id: "ao-1" });
+    const two = await session(tools, { id: "ao-2" });
+    const batch = Array.from({ length: 4 }, (_, index) => ({ jsonrpc: "2.0", id: 900 + index, method: "tools/call",
+      params: { name: "exec_command", arguments: { cmd: `echo ${index}` } } }));
+    const [answered, ...others] = await Promise.all([
+      post(one.url, batch, one.auth),
+      callTool(two.url, two.auth, "exec_command", { cmd: "echo other" }),
+      callTool(two.url, two.auth, "write_stdin", { command_id: "c1", chars: "y" }),
+    ]);
+    assert.equal(answered.body.length, 4);
+    assert.ok(answered.body.every((reply) => reply.result.isError === false));
+    assert.ok(others.every((reply) => reply.isError === false));
+    assert.equal(confirmations.length, 6, "one prompt per call");
+    assert.equal(most, 1, "never two at once");
+    assert.equal(calls.filter((call) => call.body?.tool === "exec_command").length, 5);
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("an approval given too quickly to have been read is asked again", async () => {
+  const tree = tempTree();
+  let clock = 0;
+  const delays = [];
+  const { tools, calls, confirmations } = fixture({ root: tree.root, terminal: () => true, minAnswerMs: 500, answerClock: () => clock,
+    confirm: async () => { clock += delays.shift() ?? 0; return answer; } });
+  let answer = true;
+  try {
+    const { url, auth } = await session(tools);
+    delays.push(20, 900);
+    assert.equal((await callTool(url, auth, "exec_command", { cmd: "dir" })).isError, false);
+    assert.equal(confirmations.length, 2, "the instant approval was not taken");
+    assert.match(confirmations[1].message, /too quickly/);
+    assert.equal(confirmations[1].detail, confirmations[0].detail, "the same prompt again");
+    assert.equal(calls.filter((call) => call.body?.tool === "exec_command").length, 1);
+
+    delays.push(5, 5, 5);
+    const refused = await callTool(url, auth, "exec_command", { cmd: "dir" });
+    assert.equal(refused.isError, true);
+    assert.match(refused.content[0].text, /too quickly/);
+    assert.equal(confirmations.length, 5, "asked three times, then refused");
+    assert.equal(calls.filter((call) => call.body?.tool === "exec_command").length, 1, "nothing ran");
+
+    answer = false;
+    delays.push(1);
+    assert.match((await callTool(url, auth, "exec_command", { cmd: "dir" })).content[0].text, /declined/, "a quick no is a no");
+    assert.equal(confirmations.length, 6);
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("a confirmed command that then needs a dangerous or non-routine approval asks again, showing the risk", async () => {
+  const tree = tempTree();
+  const results = {
+    exec_command: (body) => {
+      if (body.arguments.cmd === "curl https://example.com") {
+        return body.arguments.approval_token ? { state: "completed", result: { ok: true } }
+          : { state: "completed", result: { ok: false, error: { code: "APPROVAL_REQUIRED", message: "This operation requires a scoped approval grant.",
+            details: { request_id: "req-n", risk: "network", summary: "Allow a command that may contact the network" } } } };
+      }
+      if (body.arguments.confirm !== true) {
+        return { state: "completed", result: { ok: false, error: { code: "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION", message: "dangerous command requires confirm=true" } } };
+      }
+      return body.arguments.approval_token ? { state: "completed", result: { ok: true, removed: true } }
+        : { state: "completed", result: { ok: false, error: { code: "APPROVAL_REQUIRED", details: { request_id: "req-d", risk: "destructive" } } } };
+    },
+    request_permissions: (body) => ({ state: "completed", result: { ok: true, approval_token: `tok-${body.arguments.request_id}` } }),
+  };
+  let approve = () => true;
+  const { tools, calls, confirmations } = fixture({ root: tree.root, terminal: () => true, results, confirm: async (request) => approve(request) });
+  try {
+    const { url, auth } = await session(tools);
+    const done = await callTool(url, auth, "exec_command", { cmd: "rm -rf build" });
+    assert.equal(done.isError, false, JSON.stringify(done));
+    assert.equal(confirmations.length, 3, "the command, then its danger, then its destructive approval");
+    assert.match(confirmations[0].message, /run a command/);
+    assert.match(confirmations[1].message, /risk: dangerous operation/);
+    assert.match(confirmations[1].detail, /dangerous command requires confirm=true/);
+    assert.match(confirmations[1].detail, /rm -rf build/, "with the command again");
+    assert.match(confirmations[2].message, /risk: destructive/);
+    assert.match(confirmations[2].detail, /^Risk: destructive$/m);
+
+    assert.equal((await callTool(url, auth, "exec_command", { cmd: "curl https://example.com" })).isError, false);
+    assert.equal(confirmations.length, 5, "a network risk is asked about too");
+    assert.match(confirmations[4].detail, /network/);
+
+    approve = (request) => !/risk/.test(request.message);
+    const before = calls.length;
+    const declined = await callTool(url, auth, "exec_command", { cmd: "rm -rf build" });
+    assert.match(declined.content[0].text, /declined/);
+    assert.equal(calls.length, before + 1, "only the first, refused attempt ran");
+    assert.equal(calls.at(-1).body.arguments.confirm, undefined);
+  } finally { await tools.close(); tree.cleanup(); }
 });

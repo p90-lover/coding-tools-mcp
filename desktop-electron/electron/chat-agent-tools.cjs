@@ -17,7 +17,8 @@
 //   /api/v1/tools/call), so paths, the command directory, terminal sessions, approvals and plans
 //   all belong to it. This endpoint is the outer guard: every path argument and patch target must
 //   resolve inside the worktree (after `..`, drive letters, UNC and device paths, Windows spellings
-//   that open another file (trailing dots or spaces, `:` streams, device names, 8.3 short names),
+//   that open another file (trailing dots or spaces, `:` streams, and for patch targets also
+//   device names and 8.3 short names),
 //   and symlinks or junctions via realpath), a patch never writes git's own data, and
 //   exec_command always starts in the worktree.
 // - Consent is the user's alone: `confirm` and `approval_token` are stripped from every call the
@@ -25,6 +26,10 @@
 //   approval (APPROVAL_REQUIRED) or a confirmation (DANGEROUS_OPERATION_REQUIRES_CONFIRMATION),
 //   the user is asked here; on yes this endpoint obtains a one-use grant for that one operation in
 //   the session's own context and retries it once. The grant never reaches the agent.
+// - The user approves only what they were shown: a confirmation shows what will run in full,
+//   every character visible (displaySafe), and a call too long to show in full is refused, never
+//   cut. One prompt is open at a time across every session, and an approval given too quickly to
+//   have been read is asked again.
 // - Not a sandbox: a terminal command can still `cd` anywhere and read or change anything the
 //   user's account can, exactly as the agent's own built-in shell can. That is why the terminal is
 //   its own group, off by default, and why the user confirms every command and every input sent
@@ -113,6 +118,19 @@ const PATCH_TOOLS = new Set(["apply_patch", "patch_check"]);
 // Names no patch writes into, compared by the name the file system opens (see effectiveName).
 const PROTECTED_NAMES = new Set([".git", ".github", ".mcp-paths"]);
 
+// What a confirmation dialog can show in full. It is the app's native message box, which never
+// scrolls: everything must fit on screen at once (a 720-pixel-high work area, as on a 1080p
+// display at 150%). Shown text is hard-wrapped at DISPLAY_COLUMNS (a wide character counts twice),
+// and a dialog whose text would take more than DIALOG_MAX_LINES lines is refused, never cut.
+const DISPLAY_COLUMNS = 72;
+const DIALOG_MAX_LINES = 30;
+// A patch is approved by its list of files, one line each; more than this are refused.
+const MAX_CONFIRM_PATHS = 20;
+// An approval given sooner than this after the prompt opened was not read (a double click, a key
+// held down): the prompt is shown again, at most MAX_QUICK_ANSWERS times.
+const MIN_ANSWER_MS = 500;
+const MAX_QUICK_ANSWERS = 3;
+
 const ROOT_RECHECK_MS = 30_000;
 const UNBOUND_TTL_MS = 10 * 60_000;
 const SWEEP_MS = 10 * 60_000;
@@ -186,14 +204,17 @@ const RESERVED_DEVICE = /^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|(?:COM|LPT)[0-9\u0
 
 /**
  * Why Windows would open something other than what a path part names, if it would: trailing dots
- * or spaces are dropped, `:` names an alternate data stream (`.git::$INDEX_ALLOCATION` is the
- * `.git` directory), a device name (CON, NUL, COM1, with or without an extension) is a device, and
- * an 8.3 short name (`GIT~1`) is expanded by the file system.
+ * or spaces are dropped and `:` names an alternate data stream (`.git::$INDEX_ALLOCATION` is the
+ * `.git` directory), for every path. With `write` (a write into this chat's own worktree) also a
+ * device name (CON, NUL, COM1, with or without an extension), which is a device, and an 8.3 short
+ * name (`GIT~1`), which the file system expands. Reads keep those two: `file~2.txt` and `aux.ts`
+ * are ordinary names, and a read lands wherever the name really resolves (checked by realpath).
  */
-function windowsQuirk(part) {
+function windowsQuirk(part, { write = false } = {}) {
   if (!part || part === "." || part === "..") return null;
   if (/[. ]$/.test(part)) return "a path part ends with a dot or a space";
   if (part.includes(":")) return "a path part names an alternate data stream";
+  if (!write) return null;
   if (RESERVED_DEVICE.test(part.split(".")[0].replace(/ +$/, ""))) return "a path part is a reserved device name";
   if (/~\d/.test(part)) return "a path part is an 8.3 short name";
   return null;
@@ -220,7 +241,7 @@ function scopePath(root, raw, label, { write = false } = {}) {
   const parts = relative ? relative.split(path.sep) : [];
   if (WINDOWS) {
     for (const part of parts) {
-      const why = windowsQuirk(part);
+      const why = windowsQuirk(part, { write });
       if (why) throw outside(why);
     }
   }
@@ -235,29 +256,217 @@ function scopePath(root, raw, label, { write = false } = {}) {
   return relative.split(path.sep).join("/") || ".";
 }
 
+// Rust's `trim` and `split_whitespace` use the Unicode White_Space property.
+const trimWhite = (text) => text.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
+const withoutCr = (line) => line.replace(/\r+$/, "");
+
+/** patch.rs parse_diff_path: trimmed, without an `a/` or `b/` prefix, `/dev/null` as none. */
+function diffPath(raw) {
+  const trimmed = trimWhite(raw);
+  const target = trimmed.startsWith("a/") || trimmed.startsWith("b/") ? trimmed.slice(2) : trimmed;
+  return target === "/dev/null" ? "" : target.replace(/\\/g, "/");
+}
+
+/** patch.rs unified_header: a hunk's old and new line counts, or null when it has none. */
+function hunkCounts(line) {
+  const parts = trimWhite(line.slice(2)).split(/\p{White_Space}+/u);
+  const count = (part, sign) => {
+    if (!part?.startsWith(sign)) return null;
+    const body = part.slice(1);
+    const comma = body.indexOf(",");
+    const [start, lines] = comma < 0 ? [body, "1"] : [body.slice(0, comma), body.slice(comma + 1)];
+    const usize = (value) => (/^\+?[0-9]+$/.test(value) && BigInt(value) <= 0xFFFF_FFFF_FFFF_FFFFn ? Number(value) : null);
+    return usize(start) === null || usize(lines) === null ? null : usize(lines);
+  };
+  const old = count(parts[0], "-");
+  const added = old === null ? null : count(parts[1], "+");
+  return added === null ? null : { old, added };
+}
+
+/**
+ * Every file a patch touches, parsed as headless parses it (patch.rs parse_unified_diff and
+ * parse_codex_patch): `{ path, operation: "add" | "update" | "delete" }`, plus the names headless
+ * ignores but a scope check still covers: a unified diff's old name (`from`) and a Codex
+ * `*** Move to:` (`moveTo`; headless does not move files, it updates the original in place).
+ */
+function parsePatch(text) {
+  const lines = String(text).split(/\r?\n/);
+  const files = [];
+  if (lines.some((line) => withoutCr(line) === "*** Begin Patch")) {
+    let current = null;
+    for (const raw of lines) {
+      const line = withoutCr(raw);
+      const header = /^\*\*\* (Add|Update|Delete) File: /.exec(line);
+      if (header) {
+        current = { path: diffPath(line.slice(header[0].length)), operation: header[1].toLowerCase() };
+        files.push(current);
+      } else if (line === "*** End Patch") {
+        current = null;
+      } else if (line.startsWith("*** Move to: ") && current) {
+        current.moveTo = diffPath(line.slice("*** Move to: ".length));
+      }
+    }
+    return files;
+  }
+  let current = null;
+  let hunk = null;
+  lines.forEach((line, index) => {
+    // A real file header is `--- ` directly followed by `+++ `; anything else inside a counted
+    // hunk is its content (a removed SQL comment `-- x`), as in patch.rs.
+    const header = line.startsWith("--- ") && (lines[index + 1] ?? "").startsWith("+++ ");
+    if (hunk && !header && hunk.old + hunk.added > 0) {
+      const body = withoutCr(line);
+      if (body.startsWith("+")) { hunk.added = Math.max(0, hunk.added - 1); return; }
+      if (body.startsWith("-")) { hunk.old = Math.max(0, hunk.old - 1); return; }
+      if (body === "" || body.startsWith(" ")) {
+        hunk.old = Math.max(0, hunk.old - 1);
+        hunk.added = Math.max(0, hunk.added - 1);
+        return;
+      }
+    }
+    if (line.startsWith("--- ")) {
+      hunk = null;
+      const from = diffPath(line.slice(4));
+      current = { path: from, from, added: line.includes("/dev/null"), deleted: false };
+      files.push(current);
+    } else if (line.startsWith("+++ ")) {
+      if (current) {
+        const next = diffPath(line.slice(4));
+        if (next) current.path = next;
+        if (line.includes("/dev/null")) current.deleted = true;
+      }
+    } else if (line.startsWith("@@")) {
+      hunk = hunkCounts(line) ?? { old: 0, added: 0 };
+    }
+  });
+  return files.map(({ path: target, from, added, deleted }) => ({
+    path: target, operation: deleted ? "delete" : added ? "add" : "update", ...(from && from !== target ? { from } : {}),
+  }));
+}
+
 /** Every file a patch names, in the formats headless applies (patch.rs): Codex envelopes or unified diffs. */
 function patchTargets(text) {
-  const lines = String(text).split(/\r?\n/);
-  const strip = (raw) => {
-    const value = raw.trim();
-    const target = value.startsWith("a/") || value.startsWith("b/") ? value.slice(2) : value;
-    return target === "/dev/null" ? "" : target;
-  };
-  const targets = [];
-  if (lines.some((line) => line.trimEnd() === "*** Begin Patch")) {
-    for (const line of lines) {
-      const match = /^\*\*\* (?:Add File|Update File|Delete File|Move to): (.*)$/.exec(line.trimEnd());
-      if (match) targets.push(strip(match[1]));
+  return parsePatch(text).flatMap((file) => [file.from, file.path, file.moveTo]).filter(Boolean);
+}
+
+/** patch.rs is_critical_file: deleting one needs the user's confirmation. */
+function criticalFile(target) {
+  const parts = target.replace(/\\/g, "/").split("/");
+  if (parts[0] && [".git", ".github"].includes(effectiveName(parts[0]))) return true;
+  const name = parts.at(-1);
+  return [".gitignore", "Cargo.toml", "Cargo.lock", "package.json", "package-lock.json", "pnpm-lock.yaml", "tauri.conf.json", "pyproject.toml"].includes(name)
+    || name.startsWith("README") || name.startsWith("LICENSE") || name.startsWith("vite.config.");
+}
+
+// Characters that would hide or disguise text in a dialog: controls (Cc), format characters such
+// as bidi overrides and zero-width spaces (Cf), line and paragraph separators (Zl, Zp), spaces
+// other than U+0020 (Zs), surrogates, private-use and unassigned code points.
+const INVISIBLE = /^[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Zs}]$/u;
+const COMBINING = /^\p{M}$/u;
+// The marks displaySafe draws with; a literal one in the text is escaped so a mark always means it.
+const MARKS = new Set(["⏎", "⇥", "␠", "↪"]);
+const WIDE = /^[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦\u{1f300}-\u{1faff}\u{20000}-\u{3fffd}]$/u;
+const escapeCodePoint = (char) => `\\u{${char.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}}`;
+
+/**
+ * Text for a confirmation dialog with every character visible: a newline is drawn as `⏎` and
+ * breaks the line, a tab as `⇥`, a run of more than 3 spaces as `␠×N`, and any character that is
+ * invisible or reorders text (bidi controls, zero-width characters, other controls, separators,
+ * unusual spaces, a second combining mark) as `\u{XXXX}`; a backslash that would read as such an
+ * escape is escaped itself. Lines are hard-wrapped at DISPLAY_COLUMNS, each continuation starting
+ * with `↪`, so nothing runs off the dialog; `column` is where the text starts on its first line.
+ */
+function displaySafe(text, { column = 0 } = {}) {
+  const tokens = []; // [shown, width] or "\n"
+  const chars = [...String(text)];
+  for (let index = 0; index < chars.length; index += 1) {
+    const char = chars[index];
+    if (char === "\n") { tokens.push(["⏎", 1], "\n"); continue; }
+    if (char === "\t") { tokens.push(["⇥", 1]); continue; }
+    if (char === " ") {
+      let run = 1;
+      while (chars[index + run] === " ") run += 1;
+      if (run > 3) {
+        tokens.push([`␠×${run}`, 2 + String(run).length]);
+        index += run - 1;
+      } else {
+        tokens.push([" ", 1]);
+      }
+      continue;
     }
-  } else {
-    // A header is `--- ` directly followed by `+++ `; any other `+++ ` line is checked too, so a
-    // target is never missed (a hunk adding a line that starts with "++ " is checked needlessly).
-    lines.forEach((line, index) => {
-      if (line.startsWith("+++ ")) targets.push(strip(line.slice(4)));
-      else if (line.startsWith("--- ") && lines[index + 1]?.startsWith("+++ ")) targets.push(strip(line.slice(4)));
-    });
+    const escaped = INVISIBLE.test(char) || MARKS.has(char)
+      || (COMBINING.test(char) && (index === 0 || COMBINING.test(chars[index - 1])))
+      || (char === "\\" && chars[index + 1] === "u" && chars[index + 2] === "{");
+    if (escaped) {
+      const shown = escapeCodePoint(char);
+      tokens.push([shown, shown.length]);
+    } else {
+      tokens.push([char, COMBINING.test(char) ? 0 : WIDE.test(char) ? 2 : 1]);
+    }
   }
-  return targets.filter(Boolean);
+  const lines = [];
+  let line = "";
+  let width = column;
+  for (const token of tokens) {
+    if (token === "\n") { lines.push(line); line = ""; width = 0; continue; }
+    const [shown, size] = token;
+    if (width && width + size > DISPLAY_COLUMNS) {
+      lines.push(line);
+      line = "↪ ";
+      width = 2;
+    }
+    line += shown;
+    width += size;
+  }
+  lines.push(line);
+  return lines.join("\n");
+}
+
+/**
+ * The full dialog text, or null when it would not fit the dialog in full. `parts` are fixed
+ * strings (the app's own wording, already wrapped) or `{ value }` for anything else, shown with
+ * displaySafe.
+ */
+function dialogText(parts) {
+  let text = "";
+  for (const part of parts) {
+    // Far too long to fit (every shown character takes a column, a lone combining mark aside):
+    // refused before it is drawn at all.
+    if (typeof part !== "string" && String(part.value).length > 4 * DISPLAY_COLUMNS * DIALOG_MAX_LINES) return null;
+    text += typeof part === "string" ? part : displaySafe(part.value, { column: [...text.slice(text.lastIndexOf("\n") + 1)].length });
+  }
+  return text.split("\n").length <= DIALOG_MAX_LINES ? text : null;
+}
+
+/** The text of what a call would do, for its approval: [label, value] lines, or null if it cannot be shown in full. */
+function describeCall(name, args, root) {
+  if (name === "exec_command") {
+    const directory = root ? path.join(root.path, String(args.workdir ?? args.cwd ?? ".")) : String(args.workdir ?? args.cwd ?? ".");
+    const input = typeof args.stdin === "string" && args.stdin ? ["\nInput:\n", { value: args.stdin }] : [];
+    return ["Directory: ", { value: directory }, "\n\nCommand:\n", { value: String(args.cmd ?? "") }, ...input];
+  }
+  if (name === "write_stdin") {
+    return ["Command: ", { value: String(args.command_id ?? args.session_id ?? "") }, "\n\nInput:\n", { value: String(args.chars ?? "") }];
+  }
+  if (PATCH_TOOLS.has(name) && typeof args.patch === "string") {
+    const files = parsePatch(args.patch);
+    if (!files.length || files.length > MAX_CONFIRM_PATHS) return null;
+    // Deletes first, each critical file marked: confirming a patch approves all of them.
+    const ordered = [...files.filter((file) => file.operation === "delete"), ...files.filter((file) => file.operation !== "delete")];
+    const deletes = ordered.filter((file) => file.operation === "delete");
+    const critical = ordered.filter((file) => criticalFile(file.path));
+    const lines = ordered.flatMap((file) => [
+      `\n${file.operation === "delete" ? "DELETE" : file.operation}${criticalFile(file.path) ? " (critical file)" : ""}: `,
+      { value: file.path || "(no path)" },
+      ...(file.moveTo ? [" (its Move to: ", { value: file.moveTo }, " is not applied; the file is changed in place)"] : []),
+    ]);
+    const rest = Object.fromEntries(Object.entries(args).filter(([key]) => key !== "patch"));
+    return [
+      `Files (${files.length}; ${deletes.length} deleted, ${critical.length} critical):`, ...lines,
+      ...(Object.keys(rest).length ? ["\n\nOther arguments:\n", { value: JSON.stringify(rest, null, 1) }] : []),
+    ];
+  }
+  return ["Arguments:\n", { value: JSON.stringify(args, null, 1) ?? "{}" }];
 }
 
 /** The call's arguments without any consent the agent tried to give itself. */
@@ -293,7 +502,8 @@ function instructionsFor(groups, { bypass = false } = {}) {
     + (groups.includes("terminal")
       ? "exec_command, write_stdin, read_output and kill_command run commands through the app's terminal. A command "
         + "starts in the worktree but is NOT confined to it: it can read and write anything the user's account can. "
-        + (bypass ? "" : "The user confirms each command and each input sent to one. ")
+        + (bypass ? "" : "The user confirms each command and each input sent to one, shown in full: a command with its "
+          + "input must fit about 20 short lines, so write anything longer to a script file with apply_patch and run that. ")
       : "")
     + "When the workspace policy needs approval for an operation, the user is asked in the app; never pass confirm "
     + "or approval_token yourself (they are ignored). "
@@ -304,10 +514,23 @@ function instructionsFor(groups, { bypass = false } = {}) {
     + "Large results are paged; ask for less per call.";
 }
 
-/** A short, readable summary of a call's arguments for a confirmation dialog. */
-function summarize(args) {
-  const text = JSON.stringify(args, null, 2) ?? "{}";
-  return text.length > 4000 ? `${text.slice(0, 4000)}\n…` : text;
+/** What the agent is told when a call cannot be shown to the user in full: nothing ran. */
+function tooLongToShow(name) {
+  const limit = `A confirmation shows what will run in full, every character visible, in at most ${DIALOG_MAX_LINES} lines `
+    + `of ${DISPLAY_COLUMNS} characters`;
+  if (name === "exec_command") {
+    return `${limit}; this command and its input do not fit, so it was not run. Use a shorter command, or write a `
+      + "script file with apply_patch first and run that.";
+  }
+  if (name === "write_stdin") {
+    return `${limit}; this input does not fit, so it was not sent. Send it in smaller pieces, or write it to a file `
+      + "with apply_patch and have the command read that.";
+  }
+  if (PATCH_TOOLS.has(name)) {
+    return `${limit}, one line per file and at most ${MAX_CONFIRM_PATHS} files; this patch does not fit, so it was not `
+      + "applied. Split it into smaller patches.";
+  }
+  return `${limit}; this ${name} call does not fit, so it was not run. Use shorter arguments.`;
 }
 
 function createChatAgentTools({
@@ -315,6 +538,9 @@ function createChatAgentTools({
   enabled = () => true, terminalEnabled = () => false, desktopEnabled = () => false,
   worktreesRoot = null,
   logger = console, version = "1", now = Date.now,
+  // How long the user must have had a prompt open for an approval to count (see MIN_ANSWER_MS),
+  // on a monotonic clock.
+  minAnswerMs = MIN_ANSWER_MS, answerClock = () => performance.now(),
 } = {}) {
   if (typeof requestHeadless !== "function") throw new Error("The headless tool service is required");
   // Identifies this server's lifetime in warm-session keys without exposing any credential.
@@ -354,6 +580,8 @@ function createChatAgentTools({
     const entry = {
       key, agent, workspaceId, groups: currentGroups(), expected: Buffer.from(`Bearer ${token}`),
       // Only a session launched to bypass permissions runs commands without a confirmation each.
+      // Captured once, at spawn time, from the mode the session was launched with: changing the
+      // session's mode in AO later does not change it here, either way (a relaunch gets a new lease).
       bypass: approvalMode === "bypass-permissions", controlAllowed: false,
       aoSession: null, root: null, checkedAt: 0, createdAt: now(), usedAt: now(),
     };
@@ -429,15 +657,38 @@ function createChatAgentTools({
       }));
   }
 
-  /** Asks the user in the app; true when they agree, otherwise the refusal to return to the agent. */
-  async function ask(message, detail, declined) {
-    let approved = false;
-    try {
-      approved = typeof confirm === "function" && await confirm({ message, detail }) === true;
-    } catch (error) {
-      return failedCall(`The user could not be asked, so nothing was run: ${errorMessage(error)}`);
+  // Every prompt, from every session and every call in a batch, waits for the one before it: two
+  // dialogs never stack, so a second click can never land on a prompt the user has not seen.
+  let prompting = Promise.resolve();
+
+  /**
+   * Asks the user in the app; true when they agree, otherwise the refusal to return to the agent.
+   * `detail` is the full dialog text (see dialogText): null means it cannot be shown in full, and
+   * the call is refused without asking.
+   */
+  function ask(message, detail, declined, tooLong = "This call cannot be shown to the user in full, so it was not run.") {
+    if (detail === null) return Promise.resolve(failedCall(tooLong));
+    const turn = prompting.then(() => askNow(message, detail, declined));
+    prompting = turn.catch(() => undefined);
+    return turn;
+  }
+
+  async function askNow(message, detail, declined) {
+    for (let attempt = 0; attempt < MAX_QUICK_ANSWERS; attempt += 1) {
+      const opened = answerClock();
+      let approved = false;
+      try {
+        approved = typeof confirm === "function" && await confirm({
+          message: attempt ? `That answer came too quickly to have been read. ${message}` : message, detail,
+        }) === true;
+      } catch (error) {
+        return failedCall(`The user could not be asked, so nothing was run: ${errorMessage(error)}`);
+      }
+      if (!approved) return failedCall(declined);
+      // An approval sooner than the user could have read the prompt is not one: ask again.
+      if (answerClock() - opened >= minAnswerMs) return true;
     }
-    return approved ? true : failedCall(declined);
+    return failedCall(`The user's approval came too quickly to have been read, ${MAX_QUICK_ANSWERS} times; nothing was run or sent.`);
   }
 
   /** One call to headless: `{ result }` once it completed, or `{ failed }` with the agent's error. */
@@ -461,44 +712,61 @@ function createChatAgentTools({
     return { result: operation.result };
   }
 
-  const who = (entry) => `Agent: ${entry.agent}\nAO session: ${entry.aoSession}`;
+  const who = (entry) => [`Agent: ${entry.agent}\nAO session: `, { value: String(entry.aoSession) }, "\n"];
 
   /** The user's confirmation of one command or one input to a command, unless the session bypasses permissions. */
   async function confirmTerminal(entry, name, args, root) {
     if (entry.bypass) return false;
     if (name === "exec_command") {
-      const directory = path.join(root.path, String(args.workdir ?? args.cwd ?? "."));
-      const input = typeof args.stdin === "string" && args.stdin ? `\nInput:\n${args.stdin.slice(0, 4000)}` : "";
       return ask("A chat agent wants to run a command",
-        `${who(entry)}\nDirectory: ${directory}\n\nCommand:\n${String(args.cmd ?? "").slice(0, 8000)}${input}\n\n`
-          + "The command starts in the chat's worktree but is not confined to it: it can read and change anything "
-          + "your user account can. Run it once?",
-        "The user declined this command; it was not run.");
+        dialogText([...who(entry), ...describeCall(name, args, root),
+          "\n\nThe command starts in the chat's worktree but is not confined to it:\n"
+            + "it can read and change anything your user account can. Run it once?"]),
+        "The user declined this command; it was not run.", tooLongToShow(name));
     }
     // An empty write only polls the command's output; it sends nothing.
     if (name === "write_stdin" && typeof args.chars === "string" && args.chars) {
       return ask("A chat agent wants to type into a running command",
-        `${who(entry)}\nWorktree: ${root.path}\nCommand: ${String(args.command_id ?? args.session_id ?? "")}\n\nInput:\n${args.chars.slice(0, 8000)}\n\nSend it once?`,
-        "The user declined this input; it was not sent.");
+        dialogText([...who(entry), "Worktree: ", { value: root.path }, "\n", ...describeCall(name, args, root), "\n\nSend it once?"]),
+        "The user declined this input; it was not sent.", tooLongToShow(name));
     }
     return false;
   }
 
+  // An approval the user already gave for the command itself covers only a routine one; any
+  // other risk is shown and asked about (see approveAndRetry).
+  const ROUTINE_RISK = "routine_mutation";
+  const gateKey = (failure) => `${failure.code}:${typeof failure.details?.risk === "string" ? failure.details.risk : ""}`;
+
   /**
    * The workspace policy wants the user's approval (APPROVAL_REQUIRED) or confirmation
-   * (DANGEROUS_OPERATION_REQUIRES_CONFIRMATION) for this exact call: ask the user (unless they just
-   * confirmed this same command), then obtain a one-use grant in the session's own context and
-   * retry the call once with it. The grant never reaches the agent.
+   * (DANGEROUS_OPERATION_REQUIRES_CONFIRMATION) for this exact call: ask the user, showing the
+   * risk and the reason, then obtain a one-use grant in the session's own context and retry the
+   * call once with it. The grant never reaches the agent. A command the user just confirmed is
+   * not asked about again only for a routine approval; a confirmation never stands in for a risk
+   * the user was not shown, so each new gate (a dangerous command, a destructive, network,
+   * interpreter or elevation risk) is asked about with its own risk.
    */
   async function approveAndRetry(entry, name, args, root, failure, alreadyConfirmed) {
-    const reason = [failure.details?.summary, failure.details?.risk && `risk: ${failure.details.risk}`, failure.message]
-      .filter((value) => typeof value === "string" && value).join("\n");
-    if (!alreadyConfirmed) {
-      const answer = await ask(`A chat agent's ${name} call needs your approval`,
-        `${who(entry)}\nWorktree: ${root ? root.path : "(the workspace)"}\nTool: ${name}\n\nWhy:\n${reason.slice(0, 2000)}\n\nArguments:\n${summarize(args)}\n\nAllow it once?`,
-        `The user declined ${name}; it was not run.`);
-      if (answer !== true) return answer;
-    }
+    const shown = new Set();
+    const gate = async (current) => {
+      if (shown.has(gateKey(current))) return true;
+      if (alreadyConfirmed && current.code === "APPROVAL_REQUIRED" && current.details?.risk === ROUTINE_RISK) return true;
+      const risk = typeof current.details?.risk === "string" && current.details.risk
+        ? current.details.risk : current.code === "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION" ? "dangerous operation" : "";
+      const reason = [current.details?.summary, current.message].filter((value) => typeof value === "string" && value).join("\n");
+      const call = describeCall(name, args, root);
+      const answer = await ask(`A chat agent's ${name} call needs your approval${risk ? ` (risk: ${risk})` : ""}`,
+        call && dialogText([
+          ...who(entry), "Worktree: ", { value: root ? root.path : "(the workspace)" }, `\nTool: ${name}\n`,
+          ...(risk ? ["Risk: ", { value: risk }, "\n"] : []),
+          ...(reason ? ["\nWhy:\n", { value: reason }, "\n"] : []),
+          "\n", ...call, "\n\nAllow it once?",
+        ]),
+        `The user declined ${name}; it was not run.`, tooLongToShow(name));
+      if (answer === true) shown.add(gateKey(current));
+      return answer;
+    };
     // A confirmation can be followed by an approval for the same call (or the other way round):
     // each is supplied at most once, then whatever headless answers goes back to the agent.
     let callArgs = args;
@@ -506,9 +774,14 @@ function createChatAgentTools({
     let result = null;
     const tokens = [];
     for (let round = 0; round < 2; round += 1) {
-      if (current.code === "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION" && callArgs.confirm !== true) {
+      const needed = (current.code === "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION" && callArgs.confirm !== true)
+        || (current.code === "APPROVAL_REQUIRED" && typeof current.details?.request_id === "string" && !callArgs.approval_token);
+      if (!needed) break;
+      const answer = await gate(current);
+      if (answer !== true) return answer;
+      if (current.code === "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION") {
         callArgs = { ...callArgs, confirm: true };
-      } else if (current.code === "APPROVAL_REQUIRED" && typeof current.details?.request_id === "string" && !callArgs.approval_token) {
+      } else {
         const granted = await invoke(entry, "request_permissions",
           { request_id: current.details.request_id, scope: "once", confirm: true, reason: "Approved by the user in Coding Tools" }, root);
         const token = granted.result?.ok === true && typeof granted.result.approval_token === "string" ? granted.result.approval_token : null;
@@ -518,8 +791,6 @@ function createChatAgentTools({
         }
         tokens.push(token);
         callArgs = { ...callArgs, approval_token: token };
-      } else {
-        break;
       }
       const retried = await invoke(entry, name, callArgs, root);
       if (retried.failed) return retried.failed;
@@ -548,15 +819,19 @@ function createChatAgentTools({
       throw error;
     }
     if (CONFIRMED_TOOLS.has(name)) {
+      // What it observes (which window, which display) is part of what the user allows.
+      const details = Object.keys(args).length ? ["\n", ...describeCall(name, args, null)] : [];
       const answer = await ask(`A chat agent wants to ${CONFIRMED_TOOLS.get(name)}`,
-        `${who(entry)}\nTool: ${name}\n\nAllow this once?`, `The user declined ${name}.`);
+        dialogText([...who(entry), `Tool: ${name}\n`, ...details, "\nAllow this once?"]), `The user declined ${name}.`, tooLongToShow(name));
       if (answer !== true) return answer;
     }
     if (CONTROL_TOOLS.has(name) && !entry.controlAllowed) {
+      // This allows the chat, not one action, so the action's arguments are not what is approved.
       const answer = await ask("A chat agent wants to control your screen",
-        `${who(entry)}\nTool: ${name}\n\nWhile you have computer control enabled in Coding Tools, this chat could click and type in `
-          + "the window you enabled it for. Control is enabled for the workspace, not for one chat: every chat you allow here can "
-          + "use it while it is on. Allow this chat?",
+        dialogText([...who(entry), `Tool: ${name}\n\nWhile you have computer control enabled in Coding Tools, this chat could\n`
+          + "click and type in the window you enabled it for. Control is enabled for the\n"
+          + "workspace, not for one chat: every chat you allow here can use it while it\n"
+          + "is on. Allow this chat?"]),
         `The user did not allow this chat to control the screen (${name}).`);
       if (answer !== true) return answer;
       entry.controlAllowed = true;
@@ -663,7 +938,13 @@ function createChatAgentTools({
       const batch = Array.isArray(parsed);
       const messages = batch ? parsed : [parsed];
       if (!messages.length || messages.length > 32) { send(response, 400, rpcError(null, -32600, "Invalid request")); return; }
-      const answers = (await Promise.all(messages.map((message) => dispatch(entry, message)))).filter(Boolean);
+      // One message at a time: a batch of calls that each need the user's confirmation asks
+      // about them one after another, never all at once.
+      const answers = [];
+      for (const message of messages) {
+        const answer = await dispatch(entry, message);
+        if (answer) answers.push(answer);
+      }
       if (!answers.length) send(response, 202, undefined);
       else send(response, 200, batch ? answers : answers[0]);
     });
@@ -765,6 +1046,8 @@ module.exports = Object.freeze({
   SERVER_NAME,
   TERMINAL_TOOLS,
   createChatAgentTools,
+  displaySafe,
+  parsePatch,
   patchTargets,
   scopePath,
   toolResult,
