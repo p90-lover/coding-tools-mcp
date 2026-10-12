@@ -637,7 +637,7 @@ test("an app restart adopts the running helper and its open tunnels keep flowing
   await second.setRunning(false);
 });
 
-test("a changed upstream identity makes the next app restart replace the helper and rotate its token", async (t) => {
+test("a changed upstream identity makes the next app restart replace the helper with the same access key", async (t) => {
   trackHelpers(t);
   const setup = tempSetup(t);
   await addUpstream(setup, t);
@@ -662,12 +662,60 @@ test("a changed upstream identity makes the next app restart replace the helper 
   assert.equal(spawns.length, 1);
   assert.notEqual(status.helper.pid, started.helper.pid);
   assert.ok(await waitFor(() => !processAlive(started.helper.pid)), "the old helper was stopped");
-  assert.notEqual(gatewayToken(setup.store), oldToken);
-  const tunnel = await connectTunnel(status.listen.port, "chatgpt.com:443", gatewayToken(setup.store));
+  assert.equal(gatewayToken(setup.store), oldToken, "kept background services never meet a 407");
+  const tunnel = await connectTunnel(status.listen.port, "chatgpt.com:443", oldToken);
   assert.match(tunnel.head, /^HTTP\/1\.1 200 /);
   tunnel.socket.destroy();
   assert.equal(replacement.requests.length, 1);
+
+  // A credential save and a port change replace the helper too, still with the same key.
+  const portChanged = await second.configure({ port: await freePort() });
+  assert.notEqual(portChanged.helper.pid, status.helper.pid);
+  assert.equal(gatewayToken(setup.store), oldToken);
+  const restarted = await second.refreshUpstream({ credentialsChanged: true });
+  assert.notEqual(restarted.helper.pid, portChanged.helper.pid);
+  assert.equal(gatewayToken(setup.store), oldToken);
+  const denied = await connectTunnel(restarted.listen.port, "chatgpt.com:443", "f".repeat(64));
+  assert.match(denied.head, /^HTTP\/1\.1 407 /);
+  denied.socket.destroy();
+  const probe = await connectTunnel(restarted.listen.port, "chatgpt.com:443", oldToken);
+  assert.doesNotMatch(probe.head, /^HTTP\/1\.1 407 /, "the replacement helper accepts the kept key");
+  probe.socket.destroy();
   await second.setRunning(false);
+});
+
+test("New access key is the one action that rotates the key, and the old key stops working", async (t) => {
+  trackHelpers(t);
+  const setup = tempSetup(t);
+  await addUpstream(setup, t);
+  const controller = controllerFor(setup, []);
+  await controller.configure({ upstreamProfileId: "isp-upstream", port: await freePort(), tokenlessPort: await freePort() });
+  const started = await controller.setUseForApp(true);
+  const oldToken = gatewayToken(setup.store);
+  setup.applied.length = 0;
+
+  const rotated = await controller.rotateAccessKey();
+  const newToken = gatewayToken(setup.store);
+  assert.match(newToken, /^[0-9a-f]{64}$/);
+  assert.notEqual(newToken, oldToken);
+  assert.notEqual(rotated.helper.pid, started.helper.pid);
+  assert.equal(rotated.useForApp, true);
+  assert.deepEqual(setup.applied, [GATEWAY_PROFILE_ID], "the env route is re-applied with the new key");
+  assert.equal(setup.environmentRoute()(setup.store.snapshot().proxyProfiles.find((profile) => profile.id === GATEWAY_PROFILE_ID)).url,
+    `http://ct:${newToken}@127.0.0.1:${rotated.listen.port}`);
+  const stale = await connectTunnel(rotated.listen.port, "chatgpt.com:443", oldToken);
+  assert.match(stale.head, /^HTTP\/1\.1 407 /);
+  stale.socket.destroy();
+  const fresh = await connectTunnel(rotated.listen.port, "chatgpt.com:443", newToken);
+  assert.match(fresh.head, /^HTTP\/1\.1 200 /);
+  fresh.socket.destroy();
+
+  await controller.close();
+  const relaunched = controllerFor(setup, []);
+  const adopted = await relaunched.startup();
+  assert.equal(adopted.helper.pid, rotated.helper.pid, "the rotated helper is adopted as usual");
+  assert.equal(gatewayToken(setup.store), newToken);
+  await relaunched.setRunning(false);
 });
 
 test("a stale state file is discarded without signalling a pid it cannot verify", async (t) => {
@@ -833,17 +881,17 @@ test("Proxy Gateway is a More tab wired through guarded IPC and packaged for the
   assert.equal((i18n.match(/proxyGateway: "/g) || []).length, 3, "en, zh-CN and ja carry the tab label");
   assert.match(zhTW, /proxyGateway: "/);
 
-  for (const api of ["proxyGatewayStatus", "configureProxyGateway", "setProxyGatewayRunning", "setProxyGatewayForApp", "testProxyGateway", "onProxyGatewayChanged"]) {
+  for (const api of ["proxyGatewayStatus", "configureProxyGateway", "setProxyGatewayRunning", "setProxyGatewayForApp", "rotateProxyGatewayKey", "testProxyGateway", "onProxyGatewayChanged"]) {
     assert.match(preload, new RegExp(`${api}:`), `preload exposes ${api}`);
     assert.match(types, new RegExp(`${api}\\(`), `types declare ${api}`);
   }
-  for (const api of ["proxyGatewayStatus", "configureProxyGateway", "setProxyGatewayRunning", "setProxyGatewayForApp", "testProxyGateway"]) {
-    assert.match(surface, new RegExp(`\\.${api}\\(`), `surface calls ${api}`);
+  for (const api of ["proxyGatewayStatus", "configureProxyGateway", "setProxyGatewayRunning", "setProxyGatewayForApp", "rotateProxyGatewayKey", "testProxyGateway"]) {
+    assert.match(surface,new RegExp(`\\.${api}\\(`), `surface calls ${api}`);
   }
   assert.match(surface, /17891/);
   assert.match(surface, /cdn-cgi\/trace/);
   assert.match(bootstrap, /handleGateway\("launcher:proxy-gateway-status", [^\n]*\{ write: false \}/);
-  for (const channel of ["configure", "running", "use-for-app", "test"]) {
+  for (const channel of ["configure", "running", "use-for-app", "rotate-key", "test"]) {
     assert.match(bootstrap, new RegExp(`handleGateway\\("launcher:proxy-gateway-${channel}"`));
   }
   assert.match(bootstrap, /if \(write\) providerWriteGuard\(event\)/);

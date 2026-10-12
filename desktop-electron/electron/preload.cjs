@@ -193,6 +193,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   configureProxyGateway: (input) => ipcRenderer.invoke("launcher:proxy-gateway-configure", input),
   setProxyGatewayRunning: (running) => ipcRenderer.invoke("launcher:proxy-gateway-running", running),
   setProxyGatewayForApp: (enabled) => ipcRenderer.invoke("launcher:proxy-gateway-use-for-app", enabled),
+  rotateProxyGatewayKey: () => ipcRenderer.invoke("launcher:proxy-gateway-rotate-key"),
   testProxyGateway: () => ipcRenderer.invoke("launcher:proxy-gateway-test"),
   logs: (limit) => ipcRenderer.invoke("launcher:logs", limit),
   exportLogs: () => ipcRenderer.invoke("launcher:export-logs"),

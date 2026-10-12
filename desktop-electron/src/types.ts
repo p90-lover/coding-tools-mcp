@@ -875,6 +875,7 @@ export interface LauncherApi {
   }): Promise<ProxyGatewayStatus>;
   setProxyGatewayRunning(running: boolean): Promise<ProxyGatewayStatus>;
   setProxyGatewayForApp(enabled: boolean): Promise<ProxyGatewayStatus>;
+  rotateProxyGatewayKey(): Promise<ProxyGatewayStatus>;
   testProxyGateway(): Promise<ProxyGatewayStatus>;
   logs(limit?: number): Promise<LogRecord[]>;
   exportLogs(): Promise<string | null>;

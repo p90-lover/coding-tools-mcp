@@ -184,6 +184,20 @@ export function ProxyGatewaySurface({
     );
   };
 
+  const rotateKey = () => {
+    if (!api) return;
+    void run(
+      () => api.rotateProxyGatewayKey(),
+      localText(
+        language,
+        "New access key saved. Restart CPA (Network Proxy → Apply route to CPA); the Codex bridge picks it up on its next start.",
+        "已儲存新存取金鑰。請重新啟動 CPA（網路代理 → 套用路由至 CPA）；Codex 橋接會在下次啟動時取用。",
+        "已保存新访问密钥。请重启 CPA（网络代理 → 应用路由到 CPA）；Codex 桥接会在下次启动时取用。",
+        "新しいアクセスキーを保存しました。CPA を再起動してください（ネットワークプロキシ → CPA に経路を適用）。Codex ブリッジは次回起動時に使います。",
+      ),
+    );
+  };
+
   const testRoute = () => {
     if (!api) return;
     setBusy(true);
@@ -359,6 +373,18 @@ export function ProxyGatewaySurface({
             "開啟「用於此應用程式」後，應用程式本身的流量不再需要 127.0.0.1:17891 上的 ProxyBridge。ProxyBridge 代理的其他程式不受影響。已在執行的 CPA 等服務會在重新啟動後套用新路由（網路代理 → 套用路由至 CPA）。",
             "开启“用于此应用程序”后，应用程序自身的流量不再需要 127.0.0.1:17891 上的 ProxyBridge。ProxyBridge 代理的其他程序不受影响。已在运行的 CPA 等服务会在重启后应用新路由（网络代理 → 应用路由到 CPA）。",
             "「このアプリで使用」をオンにすると、アプリ自身の通信に 127.0.0.1:17891 の ProxyBridge は不要になります。ProxyBridge が中継する他のプログラムには影響しません。実行中の CPA などのサービスは再起動時に新しい経路を使います（ネットワークプロキシ → CPA に経路を適用）。",
+          )}</p>
+          <div className="control-actions">
+            <button className="secondary-button" disabled={busy || !status} onClick={rotateKey} type="button">
+              {localText(language, "New access key", "新存取金鑰", "新访问密钥", "新しいアクセスキー")}
+            </button>
+          </div>
+          <p className="proxy-secret-help">{localText(
+            language,
+            "The access key stays the same when the gateway restarts. A new key locks out anything holding the old one: running background services must restart to pick it up (Network Proxy → Apply route to CPA; the Codex bridge picks it up on its next start).",
+            "閘道重新啟動時存取金鑰保持不變。新金鑰會擋下仍使用舊金鑰的程式：執行中的背景服務必須重新啟動才會取用（網路代理 → 套用路由至 CPA；Codex 橋接會在下次啟動時取用）。",
+            "网关重启时访问密钥保持不变。新密钥会拦下仍使用旧密钥的程序：运行中的后台服务必须重启才会取用（网络代理 → 应用路由到 CPA；Codex 桥接会在下次启动时取用）。",
+            "アクセスキーはゲートウェイを再起動しても変わりません。新しいキーにすると古いキーを持つものは接続できなくなります。実行中のバックグラウンドサービスは再起動で新しいキーを使います（ネットワークプロキシ → CPA に経路を適用。Codex ブリッジは次回起動時）。",
           )}</p>
         </section>
       </div>

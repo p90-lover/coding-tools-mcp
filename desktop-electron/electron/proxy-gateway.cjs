@@ -17,11 +17,14 @@ const relay = require("./proxy-gateway-relay.cjs");
 // helper it can verify: its pid is alive, its control port answers with the token from the
 // state file, it holds the data ports, and it serves the upstream the settings name.
 //
-// The data port requires a per-helper proxy token; it is saved as the builtin-gateway profile's
-// secret in the encrypted provider store, so Chromium's proxy login, CPA and the env routes pick
-// it up. The token-free port serves ChatGPT Desktop only and is an unauthenticated loopback
-// proxy (the same exposure as ProxyBridge's 17891). Upstream credentials go to the helper on
-// stdin and are never written to the settings, state or log files.
+// The data port requires a proxy token (the access key); it is saved as the builtin-gateway
+// profile's secret in the encrypted provider store, so Chromium's proxy login, CPA and the env
+// routes pick it up (Bun 1.4 sends `http://ct:<token>@…` env credentials on plain requests and on
+// CONNECT, verified). The key stays the same when the helper is replaced, so a bridge or CPA kept
+// across restarts never meets a 407; only the user's "New access key" changes it. The token-free
+// port serves ChatGPT Desktop only and is an unauthenticated loopback proxy (the same exposure as
+// ProxyBridge's 17891). Upstream credentials go to the helper on stdin and are never written to
+// the settings, state or log files.
 const {
   DEFAULT_GATEWAY_PORT,
   DEFAULT_TOKENLESS_PORT,
@@ -407,10 +410,9 @@ function createProxyGatewayController({
     } catch {}
   }
 
-  async function spawnHelper(upstream, fingerprint) {
+  async function spawnHelper(upstream, fingerprint, proxyToken) {
     const runtime = resolveRuntime();
     const controlToken = randomToken();
-    const proxyToken = randomToken();
     rotateLog();
     const logFd = fs.openSync(logPath, "a", 0o600);
     let child;
@@ -478,16 +480,30 @@ function createProxyGatewayController({
     return started;
   }
 
-  async function ensureHelperOnce({ restart = false } = {}) {
+  function validToken(value) {
+    return typeof value === "string" && /^[0-9a-f]{64}$/.test(value) ? value : null;
+  }
+
+  // The access key children already hold: the gateway profile's saved secret first, then the
+  // running or recorded helper's. A replacement helper reuses it.
+  function currentAccessKey() {
+    return validToken(store.proxySecret(GATEWAY_PROFILE_ID)?.password)
+      ?? validToken(helper?.proxyToken)
+      ?? validToken(readState()?.proxyToken);
+  }
+
+  async function ensureHelperOnce({ restart = false, rotateKey = false } = {}) {
     const upstream = resolveUpstream();
     const fingerprint = relay.upstreamFingerprint(upstream);
+    const accessKey = rotateKey ? randomToken() : currentAccessKey() ?? randomToken();
+    const keeps = (target) => wanted(target, fingerprint) && target.proxyToken === accessKey && !restart;
     if (!helper) {
       const state = readState();
       if (state) {
         const stale = Date.parse(state.startedAt) < BOOT_STARTED_AT_MS - BOOT_TIME_TOLERANCE_MS
           || !processRunning(state.pid);
         const live = stale ? null : await verify(state);
-        if (live && wanted(state, fingerprint) && !restart) {
+        if (live && keeps(state)) {
           helper = { ...state, adopted: true };
           logger.info("proxy_gateway.helper_adopted", { pid: state.pid, dataPort: state.dataPort });
           return helper;
@@ -502,11 +518,11 @@ function createProxyGatewayController({
       }
     } else {
       const live = await verify(helper);
-      if (live && wanted(helper, fingerprint) && !restart) return helper;
+      if (live && keeps(helper)) return helper;
       if (live) await stopHelper(helper);
       else helper = null;
     }
-    helper = await spawnHelper(upstream, fingerprint);
+    helper = await spawnHelper(upstream, fingerprint, accessKey);
     return helper;
   }
 
@@ -816,6 +832,35 @@ function createProxyGatewayController({
     return status();
   }
 
+  // The user's "New access key": the only path that changes the token. A running helper is replaced
+  // with the new key and the route updated; kept background services pick it up on restart.
+  async function rotateAccessKey() {
+    await ensurePromise?.catch(noop);
+    if (helper && processRunning(helper.pid)) {
+      try {
+        await ensureHelper({ rotateKey: true });
+        await routeToHelper();
+      } catch (error) {
+        throw fail(error);
+      }
+    } else if (gatewayProfileExists()) {
+      const existing = store.snapshot().proxyProfiles.find((profile) => profile.id === GATEWAY_PROFILE_ID);
+      store.saveProxyProfile({
+        id: GATEWAY_PROFILE_ID,
+        name: GATEWAY_PROFILE_NAME,
+        enabled: existing.enabled,
+        endpoint: existing.endpoint,
+        scopes: existing.scopes,
+        bypass: existing.bypass,
+        username: PROXY_USERNAME,
+        password: randomToken(),
+      });
+      if (routeUsesGateway()) await network.applyGlobalRouting();
+    }
+    logger.info("proxy_gateway.access_key_rotated", { running: Boolean(helper) });
+    return status();
+  }
+
   async function test() {
     if (!helper || !processRunning(helper.pid)) throw fail(new Error("Start the gateway before testing it"));
     const at = new Date().toISOString();
@@ -850,6 +895,7 @@ function createProxyGatewayController({
     setRunning,
     setUseForApp,
     refreshUpstream,
+    rotateAccessKey,
     test,
     close,
     upstreamProfileId: () => settings.upstreamProfileId,

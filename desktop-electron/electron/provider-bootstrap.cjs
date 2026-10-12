@@ -287,7 +287,11 @@ function installProviderNetwork({
     active,
     () => current.setUseForApp(enabled === true),
   ));
-  handleGateway("launcher:proxy-gateway-test", async (_active, current) => publishGateway(await current.test()));
+  handleGateway("launcher:proxy-gateway-rotate-key", (active, current) => gatewayMutation(
+    active,
+    () => current.rotateAccessKey(),
+  ));
+  handleGateway("launcher:proxy-gateway-test",async (_active, current) => publishGateway(await current.test()));
 
   // A normal quit leaves the gateway helper running, like the bridge; the next app adopts it.
   app.on("will-quit", () => {
