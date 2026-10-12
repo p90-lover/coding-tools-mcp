@@ -370,8 +370,42 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     async continuable(id) {
       const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`).catch(() => null);
       const status = record?.session?.status;
-      if (!record?.session || record.session.mode === "tui" || ["exited", "terminated", "killed", "errored"].includes(status)) return false;
+      if (!record?.session || record.session.mode === "tui" || record.session.isTerminated || ["terminated", "killed", "errored"].includes(status)) return false;
+      if (status === "exited") {
+        // An agent released while idle (exitAgent) keeps its session, worktree and conversation:
+        // bring it back (a few seconds) rather than start over and replay the whole chat.
+        const resumed = await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/resume-agent`, {}).catch(() => null);
+        if (resumed?.ok !== true) return false;
+      }
       return !(await chatHostGone(id));
+    },
+    /**
+     * Stops a session's agent (its chat host and model process) but keeps the session, worktree and
+     * provider conversation; continuable() resumes it on the next message.
+     */
+    async exitAgent(id) {
+      await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/exit-agent`, {});
+      return { ok: true };
+    },
+    /**
+     * Chat sessions whose agent is up but idle, with their last turn finished at least `idleMs`
+     * ago. Sessions that never ran a turn (pre-warmed ones) and terminal sessions are left out.
+     */
+    async idleChatSessions(idleMs, now = Date.now()) {
+      const list = await internalApi("GET", "/api/v1/sessions");
+      const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
+      const candidates = sessions.filter(session => session?.mode === "chat" && session.status === "idle" && !session.isTerminated);
+      const idle = await Promise.all(candidates.map(async session => {
+        const conversation = await internalApi("GET", `/api/v1/sessions/${sessionId(session.id)}/conversation?limit=1`).catch(() => null);
+        const turns = Array.isArray(conversation?.turns) ? conversation.turns : [];
+        const last = turns[turns.length - 1];
+        if (!last || !TERMINAL_TURN_STATES.has(last.state)) return null;
+        // The newest sign of use; the session's activity time restarts with its host and says nothing.
+        const used = Math.max(...[last.completedAt, last.startedAt, last.requestedAt, session.lastUserMessageAt]
+          .map(stamp => Date.parse(stamp ?? "")).filter(Number.isFinite));
+        return Number.isFinite(used) && now - used >= idleMs ? String(session.id) : null;
+      }));
+      return idle.filter(Boolean);
     },
     /** Sends a follow-up as a new turn of the same session; AO de-duplicates by client message id. */
     async send(id, text, clientMessageId) {

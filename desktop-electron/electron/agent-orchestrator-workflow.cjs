@@ -161,7 +161,7 @@ function delayToMilliseconds(value, unit) {
   }
   return ms;
 }
-function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, releaseIdleAgents = false }) {
   const goals = createGoalStore({ file: goalsFile, now });
   // A saved path goes stale when the Codex app updates itself (it replaces bin\<build>\), so a
   // chosen executable that no longer exists falls back to the currently installed one.
@@ -277,6 +277,34 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const session = await entry.promise.catch(() => null);
     return session && await harnessService().continuable?.(session).catch(() => false) ? session : null;
   }
+  // Idle agents: AO keeps every chat's agent running, and starts one again for every chat when it
+  // starts, so dozens of finished chats held a model process each (gigabytes of memory). An agent
+  // idle for a while is stopped; its session, worktree and conversation stay, and the next message
+  // resumes it (continuable) in a few seconds instead of launching a new one.
+  const IDLE_RELEASE_MS = 30 * 60_000;
+  const IDLE_SWEEP_MS = 10 * 60_000;
+  const IDLE_FIRST_SWEEP_MS = 2 * 60_000;
+  let idleTimer = null;
+  let idleStopped = false;
+  async function releaseIdle() {
+    const ours = new Set([...warm.values()].map(entry => entry.session).filter(Boolean));
+    const idle = await harnessService().idleChatSessions?.(IDLE_RELEASE_MS, now()).catch(() => []) ?? [];
+    const released = [];
+    for (const id of idle) {
+      if (ours.has(id)) continue;
+      if (await harnessService().exitAgent?.(id).then(() => true, () => false)) released.push(id);
+    }
+    return released;
+  }
+  function scheduleIdleRelease(delay) {
+    if (idleStopped) return;
+    idleTimer = setTimer(() => {
+      void releaseIdle().catch(() => []).finally(() => scheduleIdleRelease(IDLE_SWEEP_MS));
+    }, delay);
+    idleTimer?.unref?.();
+  }
+  if (releaseIdleAgents) scheduleIdleRelease(IDLE_FIRST_SWEEP_MS);
+
   /** chat_prewarm: keep an agent ready for the new chat's selected model, or its team's orchestrator. */
   async function chatPrewarm({ workspaceId, executionMode, singleRoute, teamId } = {}) {
     const id = clean(workspaceId, 128);
@@ -2354,6 +2382,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
   function dispose() {
     schedulerDisposed = true;
+    idleStopped = true;
+    if (idleTimer) clearTimer(idleTimer);
     for (const timer of scheduleTimers.values()) clearTimer(timer);
     scheduleTimers.clear();
   }
