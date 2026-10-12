@@ -1,6 +1,7 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const http = require("node:http");
+const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
@@ -14,17 +15,27 @@ const relay = require("./proxy-gateway-relay.cjs");
 // The gateway runs as a detached helper process so the Codex bridge, CPA and the MCP tunnel,
 // which outlive app restarts and installs and read their proxy route from their environment,
 // keep their network while the app is away. Like the bridge, the next app instance adopts a
-// helper it can verify: its pid is alive, its control port answers with the token from the
-// state file, it holds the data ports, and it serves the upstream the settings name.
+// helper it can verify: its pid is alive, its control port answers with the control token from
+// the state file, it holds the data port, and it runs this app's relay code and version with the
+// upstream and access key the settings name. A helper whose pid is alive and which still holds the
+// port but does not verify keeps its state (it is never signalled) and verification is retried.
 //
-// The data port requires a proxy token (the access key); it is saved as the builtin-gateway
-// profile's secret in the encrypted provider store, so Chromium's proxy login, CPA and the env
-// routes pick it up (Bun 1.4 sends `http://ct:<token>@…` env credentials on plain requests and on
-// CONNECT, verified). The key stays the same when the helper is replaced, so a bridge or CPA kept
-// across restarts never meets a 407; only the user's "New access key" changes it. The token-free
-// port serves ChatGPT Desktop only and is an unauthenticated loopback proxy (the same exposure as
-// ProxyBridge's 17891). Upstream credentials go to the helper on stdin and are never written to
-// the settings, state or log files.
+// Access key: the data port requires `Proxy-Authorization: Basic ct:<key>`. The key's only stored
+// copy is the builtin-gateway profile's secret in the encrypted provider store (never the state
+// file), so Chromium's proxy login, CPA and the env routes pick it up (Bun 1.4 sends
+// `http://ct:<key>@…` env credentials on plain requests and on CONNECT, verified). CPA's generated
+// proxy-url YAML (cpa-managed.cjs) necessarily holds a plaintext copy. The key survives helper
+// replacements so a kept bridge or CPA never meets a 407. It rotates on the user's "New access
+// key", and also after the helper exits unexpectedly or its port could not be bound: something
+// else may have held the port and collected the key that children send. Between such an exit and
+// the restart (the watchdog interval plus backoff) children keep sending the old key to whatever
+// answers on the port; after the rotation CPA is restarted with the new key and the Codex bridge
+// picks it up on its next start.
+//
+// The token-free port is an unauthenticated loopback proxy for ChatGPT Desktop, which receives its
+// route as `--proxy-server` and cannot carry credentials. It is closed by default and opened over
+// the control channel only while a ChatGPT Desktop instance runs (or is being launched).
+// Upstream credentials go to the helper on stdin and are never written to a file.
 const {
   DEFAULT_GATEWAY_PORT,
   DEFAULT_TOKENLESS_PORT,
@@ -39,9 +50,8 @@ const GATEWAY_PROFILE_NAME = "Built-in proxy gateway";
 const GATEWAY_PROFILE_SCOPES = Object.freeze([
   "all", "browser", "provider", "oauth", "subagent", "mcp", "websocket", "http", "update",
 ]);
-const TOKENLESS_PROXY_ENV = "CODING_TOOLS_TOKENLESS_PROXY_URL";
 const SETTINGS_VERSION = 1;
-const STATE_VERSION = 1;
+const STATE_VERSION = 2;
 const LOG_ROTATE_BYTES = 1024 * 1024;
 const BOOT_STARTED_AT_MS = Date.now() - (os.uptime() * 1_000);
 const BOOT_TIME_TOLERANCE_MS = 5_000;
@@ -53,6 +63,10 @@ function randomToken() {
   return crypto.randomBytes(32).toString("hex");
 }
 
+function sleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 // A package runs the relay from app.asar.unpacked: the bundled Bun cannot read inside app.asar.
 function relayScriptPath(directory = __dirname) {
   const packed = `${path.sep}app.asar${path.sep}`;
@@ -60,6 +74,36 @@ function relayScriptPath(directory = __dirname) {
     ? directory.replace(packed, `${path.sep}app.asar.unpacked${path.sep}`)
     : directory;
   return path.join(root, "proxy-gateway-relay.cjs");
+}
+
+// "0.10.2-rc.3-win32-x64[-bundle]" -> comparable parts; numeric fields compare as numbers and a
+// release sorts above its prereleases.
+function versionParts(name) {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-((?:[0-9A-Za-z]+\.?)*?))?-(?:win32|darwin|linux)-/.exec(name);
+  if (!match) return null;
+  return {
+    core: match.slice(1, 4).map(Number),
+    prerelease: match[4] ? match[4].split(".").filter(Boolean) : [],
+  };
+}
+
+function compareVersionNames(left, right) {
+  const a = versionParts(left);
+  const b = versionParts(right);
+  if (!a || !b) return a ? 1 : b ? -1 : left.localeCompare(right);
+  for (let index = 0; index < 3; index += 1) {
+    if (a.core[index] !== b.core[index]) return a.core[index] - b.core[index];
+  }
+  if (!a.prerelease.length || !b.prerelease.length) return b.prerelease.length - a.prerelease.length;
+  for (let index = 0; index < Math.max(a.prerelease.length, b.prerelease.length); index += 1) {
+    const x = a.prerelease[index];
+    const y = b.prerelease[index];
+    if (x === undefined || y === undefined) return x === undefined ? -1 : 1;
+    const numeric = /^\d+$/.test(x) && /^\d+$/.test(y);
+    const order = numeric ? Number(x) - Number(y) : x.localeCompare(y);
+    if (order) return order;
+  }
+  return 0;
 }
 
 // The helper runs on the bundled Bun from the durable runtime under coreHome (as the bridge does),
@@ -86,7 +130,8 @@ function resolveHelperRuntime({
   const ordered = [
     current,
     ...names.filter((name) => name.startsWith(`${current}-`)),
-    ...names.filter((name) => name !== current && !name.startsWith(`${current}-`)).sort().reverse(),
+    ...names.filter((name) => name !== current && !name.startsWith(`${current}-`))
+      .sort((left, right) => compareVersionNames(right, left)),
   ];
   for (const name of ordered) {
     const executable = path.join(versionsRoot, name, "runtime", binary);
@@ -145,13 +190,10 @@ function normalizeSettings(value) {
 
 function normalizeState(value) {
   const port = (item) => Number.isInteger(item) && item > 0 && item < 65_536;
-  const token = (item) => typeof item === "string" && /^[0-9a-f]{32,128}$/.test(item);
   if (!value || value.version !== STATE_VERSION
     || !Number.isInteger(value.pid) || value.pid < 1
-    || !port(value.dataPort) || !(value.tokenlessPort === null || port(value.tokenlessPort))
-    || !port(value.controlPort)
-    || !token(value.controlToken) || !token(value.proxyToken)
-    || typeof value.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(value.fingerprint)
+    || !port(value.dataPort) || !port(value.tokenlessPort) || !port(value.controlPort)
+    || typeof value.controlToken !== "string" || !/^[0-9a-f]{64}$/.test(value.controlToken)
     || typeof value.startedAt !== "string" || Number.isNaN(Date.parse(value.startedAt))) {
     return null;
   }
@@ -161,9 +203,7 @@ function normalizeState(value) {
     tokenlessPort: value.tokenlessPort,
     controlPort: value.controlPort,
     controlToken: value.controlToken,
-    proxyToken: value.proxyToken,
     upstreamProfileId: typeof value.upstreamProfileId === "string" ? value.upstreamProfileId : null,
-    fingerprint: value.fingerprint,
     runtime: typeof value.runtime === "string" ? value.runtime : "unknown",
     startedAt: value.startedAt,
   };
@@ -225,14 +265,16 @@ function controlRequest(target, method, pathname, timeoutMs) {
       const chunks = [];
       response.on("data", (chunk) => chunks.push(chunk));
       response.on("end", () => {
-        if (response.statusCode !== 200) {
-          reject(new Error(`Gateway control answered ${response.statusCode}`));
-          return;
-        }
+        let value = null;
         try {
-          resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
-        } catch {
+          value = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        } catch {}
+        if (response.statusCode !== 200) {
+          reject(new Error(value?.error || `Gateway control answered ${response.statusCode}`));
+        } else if (!value) {
           reject(new Error("Gateway control answer is unreadable"));
+        } else {
+          resolve(value);
         }
       });
       response.on("error", reject);
@@ -243,8 +285,17 @@ function controlRequest(target, method, pathname, timeoutMs) {
   });
 }
 
+// True when something holds the loopback port (we cannot bind it ourselves).
+function portHeld(port) {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.once("error", () => resolve(true));
+    server.listen({ host: GATEWAY_HOST, port, exclusive: true }, () => server.close(() => resolve(false)));
+  });
+}
+
 // Owns the gateway's settings, its helper process and the "Use for this app" switch. Settings and
-// the state file hold no upstream secrets.
+// the state file hold no upstream secrets and no access key.
 function createProxyGatewayController({
   userData,
   settingsPath = path.join(userData, "providers", "proxy-gateway.json"),
@@ -252,6 +303,7 @@ function createProxyGatewayController({
   logPath = path.join(userData, "providers", "proxy-gateway.log"),
   network,
   logger = { info: noop, warn: noop },
+  appVersion = null,
   resolveRuntime = () => {
     throw new Error("No runtime is configured for the gateway helper");
   },
@@ -263,12 +315,19 @@ function createProxyGatewayController({
   helperLimits = null,
   readyTimeoutMs = 15_000,
   controlTimeoutMs = 2_000,
+  verifyRetryDelaysMs = [250, 750, 1_500],
   watchdogMs = 15_000,
+  restartBackoffBaseMs = 15_000,
+  restartBackoffCapMs = 10 * 60_000,
+  tokenlessHoldMs = 2 * 60_000,
+  // Called after the key rotated because of an incident, so kept services can be restarted.
+  onAccessKeyRotated = noop,
 }) {
   if (!network?.store || typeof network.applyGlobalRouting !== "function") {
     throw new Error("Proxy gateway needs the provider network controller");
   }
   const store = network.store;
+  const scriptHash = relay.relayScriptHash(helperScript);
   let settings;
   try {
     settings = normalizeSettings(JSON.parse(fs.readFileSync(settingsPath, "utf8")));
@@ -276,13 +335,20 @@ function createProxyGatewayController({
     settings = defaultSettings();
   }
   let helper = null;
+  let unverified = null;
   let ensurePromise = null;
+  let ensureKey = null;
   let watchdog = null;
+  let restartFailures = 0;
+  let nextRestartAt = 0;
+  let incidentPending = false;
   let lastError = null;
   let lastTest = null;
+  let tokenlessDemand = false;
+  let tokenlessHoldUntil = 0;
+  let tokenlessTimer = null;
 
-  // Child processes take the route from HTTP(S)_PROXY, which must carry the gateway's local token;
-  // ChatGPT Desktop cannot send credentials and reads the token-free URL first.
+  // Child processes take the route from HTTP(S)_PROXY, which must carry the gateway's access key.
   network.setEnvironmentRoute?.((profile) => {
     if (profile?.id !== GATEWAY_PROFILE_ID) return null;
     const secret = store.proxySecret(GATEWAY_PROFILE_ID);
@@ -291,7 +357,6 @@ function createProxyGatewayController({
       url: secret?.password
         ? `http://${encodeURIComponent(secret.username || PROXY_USERNAME)}:${encodeURIComponent(secret.password)}@${host}`
         : `http://${host}`,
-      extra: { [TOKENLESS_PROXY_ENV]: `http://${GATEWAY_HOST}:${settings.tokenlessPort}` },
     };
   });
 
@@ -316,9 +381,10 @@ function createProxyGatewayController({
       tokenlessPort: target.tokenlessPort,
       controlPort: target.controlPort,
       controlToken: target.controlToken,
-      proxyToken: target.proxyToken,
       upstreamProfileId: target.upstreamProfileId,
       fingerprint: target.fingerprint,
+      scriptHash: target.scriptHash,
+      appVersion: target.appVersion,
       runtime: target.runtime,
       startedAt: target.startedAt,
     }, null, 2)}\n`);
@@ -360,17 +426,45 @@ function createProxyGatewayController({
     }, { gatewayPorts: [settings.port, settings.tokenlessPort] });
   }
 
-  // A helper is ours and usable only if its control port answers with our token and the same pid,
-  // and both data ports are held by that pid.
-  async function verify(target) {
+  function validKey(value) {
+    return typeof value === "string" && /^[0-9a-f]{64}$/.test(value) ? value : null;
+  }
+
+  // The access key children already hold: the encrypted profile secret is the source of truth;
+  // a helper started in this session also has it in memory.
+  function currentAccessKey() {
+    return validKey(store.proxySecret(GATEWAY_PROFILE_ID)?.password) ?? validKey(helper?.proxyToken);
+  }
+
+  function gatewayProfile() {
+    return store.snapshot().proxyProfiles.find((profile) => profile.id === GATEWAY_PROFILE_ID && !profile.archivedAt) ?? null;
+  }
+
+  function saveGatewayProfile(port, key) {
+    const existing = gatewayProfile();
+    store.saveProxyProfile({
+      id: GATEWAY_PROFILE_ID,
+      name: GATEWAY_PROFILE_NAME,
+      enabled: true,
+      endpoint: { protocol: "http", host: GATEWAY_HOST, port },
+      scopes: existing?.scopes ?? [...GATEWAY_PROFILE_SCOPES],
+      bypass: existing?.bypass ?? [...DEFAULT_BYPASS],
+      username: PROXY_USERNAME,
+      password: key,
+    });
+  }
+
+  // One verification: our control token and pid answer, and that pid holds the data port (and the
+  // token-free port while it is open).
+  async function verifyOnce(target) {
     if (!target || !processRunning(target.pid)) return null;
     try {
       const live = await controlRequest(target, "GET", "/status", controlTimeoutMs);
       if (live?.service !== HELPER_SERVICE || live.pid !== target.pid) return null;
-      const data = await probe({ port: target.dataPort, proxyToken: target.proxyToken, timeoutMs: controlTimeoutMs });
+      const data = await probe({ port: target.dataPort, probeToken: target.controlToken, timeoutMs: controlTimeoutMs });
       if (data.pid !== target.pid) return null;
-      if (target.tokenlessPort !== null) {
-        const tokenless = await probe({ port: target.tokenlessPort, timeoutMs: controlTimeoutMs });
+      if (live.tokenlessPort) {
+        const tokenless = await probe({ port: live.tokenlessPort, timeoutMs: controlTimeoutMs });
         if (tokenless.pid !== target.pid) return null;
       }
       return live;
@@ -379,11 +473,15 @@ function createProxyGatewayController({
     }
   }
 
-  function wanted(target, fingerprint) {
-    return target.fingerprint === fingerprint
-      && target.upstreamProfileId === settings.upstreamProfileId
-      && target.dataPort === settings.port
-      && target.tokenlessPort === settings.tokenlessPort;
+  // A live helper can miss one check (a busy machine); retry with backoff before giving up.
+  async function verify(target) {
+    for (const delay of [0, ...verifyRetryDelaysMs]) {
+      if (delay) await sleep(delay);
+      const live = await verifyOnce(target);
+      if (live) return live;
+      if (!processRunning(target.pid)) return null;
+    }
+    return null;
   }
 
   // Only a helper verified as ours moments earlier is ever signalled.
@@ -439,6 +537,7 @@ function createProxyGatewayController({
       controlToken,
       proxyToken,
       upstreamProfileId: settings.upstreamProfileId,
+      appVersion,
       upstream,
       ...(helperLimits ? { limits: helperLimits } : {}),
     })}\n`);
@@ -448,17 +547,19 @@ function createProxyGatewayController({
       started = {
         pid: line.pid,
         dataPort: line.dataPort,
-        tokenlessPort: line.tokenlessPort ?? null,
+        tokenlessPort: settings.tokenlessPort,
         controlPort: line.controlPort,
         controlToken,
         proxyToken,
         upstreamProfileId: settings.upstreamProfileId,
         fingerprint,
+        scriptHash,
+        appVersion,
         runtime: runtime.kind || "unknown",
         startedAt: new Date().toISOString(),
         child,
       };
-      if (started.pid !== child.pid || !(await verify(started))) {
+      if (started.pid !== child.pid || !(await verifyOnce(started))) {
         throw new Error("The gateway helper started but does not answer on its ports");
       }
     } catch (error) {
@@ -473,65 +574,92 @@ function createProxyGatewayController({
     logger.info("proxy_gateway.helper_started", {
       pid: started.pid,
       dataPort: started.dataPort,
-      tokenlessPort: started.tokenlessPort,
       runtime: started.runtime,
       upstreamProfileId: started.upstreamProfileId,
     });
     return started;
   }
 
-  function validToken(value) {
-    return typeof value === "string" && /^[0-9a-f]{64}$/.test(value) ? value : null;
-  }
-
-  // The access key children already hold: the gateway profile's saved secret first, then the
-  // running or recorded helper's. A replacement helper reuses it.
-  function currentAccessKey() {
-    return validToken(store.proxySecret(GATEWAY_PROFILE_ID)?.password)
-      ?? validToken(helper?.proxyToken)
-      ?? validToken(readState()?.proxyToken);
-  }
-
   async function ensureHelperOnce({ restart = false, rotateKey = false } = {}) {
     const upstream = resolveUpstream();
     const fingerprint = relay.upstreamFingerprint(upstream);
     const accessKey = rotateKey ? randomToken() : currentAccessKey() ?? randomToken();
-    const keeps = (target) => wanted(target, fingerprint) && target.proxyToken === accessKey && !restart;
-    if (!helper) {
-      const state = readState();
-      if (state) {
-        const stale = Date.parse(state.startedAt) < BOOT_STARTED_AT_MS - BOOT_TIME_TOLERANCE_MS
-          || !processRunning(state.pid);
-        const live = stale ? null : await verify(state);
-        if (live && keeps(state)) {
-          helper = { ...state, adopted: true };
-          logger.info("proxy_gateway.helper_adopted", { pid: state.pid, dataPort: state.dataPort });
-          return helper;
-        }
-        if (live) {
-          await stopHelper(state);
-        } else {
-          // A dead or unverifiable pid is never signalled: it may belong to someone else now.
-          logger.warn("proxy_gateway.stale_state_discarded", { pid: state.pid, alive: !stale });
-          clearState(state.pid);
-        }
+    const keyHash = relay.accessKeyHash(accessKey);
+    const keeps = (target, live) => !restart
+      && live.fingerprint === fingerprint
+      && live.keyHash === keyHash
+      && live.scriptHash === scriptHash
+      && (live.appVersion ?? null) === appVersion
+      && target.upstreamProfileId === settings.upstreamProfileId
+      && target.dataPort === settings.port
+      && target.tokenlessPort === settings.tokenlessPort;
+    let target = helper;
+    if (!target) {
+      target = readState();
+      if (target && (Date.parse(target.startedAt) < BOOT_STARTED_AT_MS - BOOT_TIME_TOLERANCE_MS || !processRunning(target.pid))) {
+        logger.warn("proxy_gateway.stale_state_discarded", { pid: target.pid });
+        clearState(target.pid);
+        target = null;
       }
-    } else {
-      const live = await verify(helper);
-      if (live && keeps(helper)) return helper;
-      if (live) await stopHelper(helper);
-      else helper = null;
     }
-    helper = await spawnHelper(upstream, fingerprint, accessKey);
+    if (target) {
+      const live = await verify(target);
+      if (live && keeps(target, live)) {
+        if (!helper) logger.info("proxy_gateway.helper_adopted", { pid: target.pid, dataPort: target.dataPort });
+        helper = helper ?? { ...target, fingerprint, scriptHash, appVersion, proxyToken: accessKey, adopted: true };
+        unverified = null;
+        return helper;
+      }
+      if (live) {
+        if (live.scriptHash !== scriptHash || (live.appVersion ?? null) !== appVersion) {
+          logger.info("proxy_gateway.helper_outdated", { pid: target.pid, appVersion: live.appVersion ?? null });
+        }
+        await stopHelper(target);
+      } else if (processRunning(target.pid) && await portHeld(target.dataPort)) {
+        // Never signal it and keep its state (the control token): it may be our helper, busy.
+        helper = null;
+        unverified = { pid: target.pid, port: target.dataPort, since: unverified?.since ?? new Date().toISOString() };
+        throw new Error(`An unverified helper (pid ${target.pid}) holds the gateway port ${target.dataPort}; verification is retried`);
+      } else {
+        // Dead, or alive without the port (a reused pid): discard without signalling it.
+        logger.warn("proxy_gateway.stale_state_discarded", { pid: target.pid, alive: processRunning(target.pid) });
+        clearState(target.pid);
+        helper = null;
+      }
+    }
+    unverified = null;
+    try {
+      helper = await spawnHelper(upstream, fingerprint, accessKey);
+    } catch (error) {
+      if (/already in use/.test(error?.message || "")) await rotateAfterIncident("bind_failed");
+      throw error;
+    }
     return helper;
   }
 
-  // Concurrent callers share one attempt instead of racing for the ports.
-  function ensureHelper(options) {
-    ensurePromise ??= ensureHelperOnce(options).finally(() => {
-      ensurePromise = null;
+  // Concurrent callers with the same request share one attempt; a call asking for more (a restart
+  // or a new key) queues its own pass after the one in flight.
+  function ensureHelper(options = {}) {
+    const key = `${options.restart === true}:${options.rotateKey === true}`;
+    if (ensurePromise && ensureKey === key) return ensurePromise;
+    const previous = ensurePromise ? ensurePromise.catch(noop) : Promise.resolve();
+    const run = previous.then(() => ensureHelperOnce(options));
+    ensurePromise = run;
+    ensureKey = key;
+    run.catch(noop).finally(() => {
+      if (ensurePromise === run) {
+        ensurePromise = null;
+        ensureKey = null;
+      }
     });
-    return ensurePromise;
+    return run;
+  }
+
+  // The port may have been held by something else that collected the key children send: store a
+  // new key so the next helper (and every child restarted after it) uses it.
+  async function rotateAfterIncident(reason) {
+    if (gatewayProfile()) saveGatewayProfile(gatewayProfile().endpoint.port, randomToken());
+    logger.warn("proxy_gateway.access_key_rotated", { reason });
   }
 
   function ensureGatewayProfile() {
@@ -549,26 +677,13 @@ function createProxyGatewayController({
       && secret?.username === PROXY_USERNAME
       && secret?.password === helper.proxyToken;
     if (matches) return false;
-    store.saveProxyProfile({
-      id: GATEWAY_PROFILE_ID,
-      name: GATEWAY_PROFILE_NAME,
-      enabled: true,
-      endpoint: { protocol: "http", host: GATEWAY_HOST, port: helper.dataPort },
-      scopes: [...GATEWAY_PROFILE_SCOPES],
-      bypass: existing?.bypass ?? [...DEFAULT_BYPASS],
-      username: PROXY_USERNAME,
-      password: helper.proxyToken,
-    });
+    saveGatewayProfile(helper.dataPort, helper.proxyToken);
     return true;
-  }
-
-  function gatewayProfileExists() {
-    return store.snapshot().proxyProfiles.some((profile) => profile.id === GATEWAY_PROFILE_ID && !profile.archivedAt);
   }
 
   // A new or adopted helper is listening and verified; only now may the route point at it.
   async function routeToHelper() {
-    if (!gatewayProfileExists()) return;
+    if (!gatewayProfile()) return;
     const changed = ensureGatewayProfile();
     if (changed && routeUsesGateway()) await network.applyGlobalRouting();
   }
@@ -617,20 +732,83 @@ function createProxyGatewayController({
     return restored;
   }
 
+  // Restarts an exited helper (with a new key) or retries an unverified one, backing off
+  // exponentially so a helper that crashes right after ready is not respawned forever.
+  async function watchdogTick() {
+    if (!settings.enabled || ensurePromise) return;
+    if (helper && processRunning(helper.pid)) {
+      if (Date.now() - Date.parse(helper.startedAt) > restartBackoffCapMs) restartFailures = 0;
+      return;
+    }
+    if (helper) {
+      logger.warn("proxy_gateway.helper_exited", { pid: helper.pid });
+      clearState(helper.pid);
+      helper = null;
+      incidentPending = true;
+    } else if (!unverified && !incidentPending) {
+      return;
+    }
+    if (Date.now() < nextRestartAt) return;
+    nextRestartAt = Date.now() + Math.min(restartBackoffBaseMs * (2 ** restartFailures), restartBackoffCapMs);
+    restartFailures += 1;
+    const rotate = incidentPending;
+    try {
+      await ensureHelper({ rotateKey: rotate });
+      incidentPending = false;
+      await routeToHelper();
+      if (rotate) {
+        logger.warn("proxy_gateway.access_key_rotated", { reason: "helper_exited" });
+        await Promise.resolve(onAccessKeyRotated({ reason: "helper_exited" })).catch(noop);
+      }
+    } catch (error) {
+      fail(error);
+      if (!unverified && routeUsesGateway()) await leaveGatewayRoute("helper_restart_failed").catch(noop);
+    }
+  }
+
   function startWatchdog() {
     if (watchdog || !(watchdogMs > 0)) return;
-    watchdog = setInterval(() => {
-      if (!settings.enabled || !helper || processRunning(helper.pid) || ensurePromise) return;
-      logger.warn("proxy_gateway.helper_exited", { pid: helper.pid });
-      helper = null;
-      void ensureHelper()
-        .then(() => routeToHelper())
-        .catch(async (error) => {
-          fail(error);
-          if (routeUsesGateway()) await leaveGatewayRoute("helper_restart_failed").catch(noop);
-        });
-    }, watchdogMs);
+    watchdog = setInterval(() => void watchdogTick(), watchdogMs);
     watchdog.unref?.();
+  }
+
+  // ---- token-free listener for ChatGPT Desktop ---------------------------------------------
+
+  async function closeTokenlessIfIdle() {
+    if (tokenlessDemand || Date.now() < tokenlessHoldUntil || !helper) return;
+    try {
+      await controlRequest(helper, "POST", "/tokenless/close", controlTimeoutMs);
+    } catch {}
+  }
+
+  // The ChatGPT Desktop launch route: opens the token-free port (held for a launch window even
+  // before the instance is tracked) when the app routes through the gateway.
+  async function desktopRoute() {
+    const profile = gatewayProfile();
+    if (!profile || !routeUsesGateway() || !helper) return null;
+    tokenlessHoldUntil = Date.now() + tokenlessHoldMs;
+    clearTimeout(tokenlessTimer);
+    tokenlessTimer = setTimeout(() => void closeTokenlessIfIdle(), tokenlessHoldMs + 50);
+    tokenlessTimer.unref?.();
+    const opened = await controlRequest(helper, "POST", "/tokenless/open", controlTimeoutMs);
+    if (!opened?.tokenlessPort) throw new Error("The token-free gateway port did not open");
+    return { url: `http://${GATEWAY_HOST}:${opened.tokenlessPort}`, bypass: [...profile.bypass] };
+  }
+
+  // ChatGPT Desktop reports whether any instance is running; the port closes after the last one.
+  async function setDesktopRunning(running) {
+    const next = running === true;
+    if (next === tokenlessDemand) return;
+    tokenlessDemand = next;
+    if (next) {
+      if (helper && routeUsesGateway()) {
+        await controlRequest(helper, "POST", "/tokenless/open", controlTimeoutMs).catch((error) => {
+          logger.warn("proxy_gateway.tokenless_open_failed", { message: error.message });
+        });
+      }
+    } else {
+      await closeTokenlessIfIdle();
+    }
   }
 
   async function status() {
@@ -654,17 +832,31 @@ function createProxyGatewayController({
           hasAuthentication: profile.hasAuthentication,
         }
       : null);
+    const helperState = live
+      ? "running"
+      : unverified
+        ? "unverified"
+        : settings.enabled && (incidentPending || restartFailures > 0) && Date.now() < nextRestartAt
+          ? "restarting"
+          : "stopped";
     return {
       enabled: settings.enabled,
       running: Boolean(live),
+      helperState,
       listen: { host: GATEWAY_HOST, port: helper?.dataPort ?? settings.port },
       port: settings.port,
       tokenlessPort: settings.tokenlessPort,
+      tokenlessOpen: Boolean(live?.tokenlessPort),
       reservedPorts: [...PROXYBRIDGE_PORTS],
       gatewayProfileId: GATEWAY_PROFILE_ID,
       helper: helper
         ? { pid: helper.pid, runtime: helper.runtime, adopted: helper.adopted === true, startedAt: helper.startedAt }
         : null,
+      unverifiedHelper: unverified ? { ...unverified } : null,
+      watchdog: {
+        restarts: restartFailures,
+        nextRestartAt: nextRestartAt > Date.now() ? new Date(nextRestartAt).toISOString() : null,
+      },
       upstreamProfileId: settings.upstreamProfileId,
       upstream: publicProfile(settings.upstreamProfileId ? findProfile(settings.upstreamProfileId) : null),
       useForApp: routeUsesGateway(snapshot.routing),
@@ -693,21 +885,24 @@ function createProxyGatewayController({
       await ensureHelper();
       if (routed) ensureGatewayProfile();
       else await routeToHelper();
-      startWatchdog();
+      // No ChatGPT Desktop instance is tracked yet in this app: a token-free port left open by the
+      // previous app closes until one asks for it.
+      await closeTokenlessIfIdle();
     } catch (error) {
       fail(error);
       logger.warn("proxy_gateway.startup_failed", { message: lastError.message });
       if (routed) await leaveGatewayRoute("startup_failed", { apply: false });
     }
+    startWatchdog();
     return status();
   }
 
   async function retireUnwantedHelper() {
     const state = readState();
     if (!state) return;
-    const live = await verify(state);
+    const live = processRunning(state.pid) ? await verify(state) : null;
     if (live) await stopHelper(state);
-    else clearState(state.pid);
+    else if (!processRunning(state.pid)) clearState(state.pid);
   }
 
   async function configure(input = {}) {
@@ -765,6 +960,10 @@ function createProxyGatewayController({
     settings.enabled = false;
     settings.useForApp = false;
     persist();
+    incidentPending = false;
+    restartFailures = 0;
+    nextRestartAt = 0;
+    await ensurePromise?.catch(noop);
     if (helper) {
       if (await verify(helper)) await stopHelper(helper);
       helper = null;
@@ -813,14 +1012,15 @@ function createProxyGatewayController({
       if (routeUsesGateway()) await leaveGatewayRoute("upstream_lost");
       settings.enabled = false;
       persist();
+      await ensurePromise?.catch(noop);
       if (helper) {
         if (await verify(helper)) await stopHelper(helper);
         helper = null;
       }
       return status();
     }
-    if (!helper) return status();
-    const restart = credentialsChanged || helper.fingerprint !== relay.upstreamFingerprint(upstream);
+    if (!helper && !ensurePromise) return status();
+    const restart = credentialsChanged || helper?.fingerprint !== relay.upstreamFingerprint(upstream);
     if (!restart) return status();
     try {
       await ensureHelper({ restart: true });
@@ -832,8 +1032,8 @@ function createProxyGatewayController({
     return status();
   }
 
-  // The user's "New access key": the only path that changes the token. A running helper is replaced
-  // with the new key and the route updated; kept background services pick it up on restart.
+  // The user's "New access key": replaces a running helper with the new key and updates the route;
+  // kept background services pick it up when they restart.
   async function rotateAccessKey() {
     await ensurePromise?.catch(noop);
     if (helper && processRunning(helper.pid)) {
@@ -843,21 +1043,11 @@ function createProxyGatewayController({
       } catch (error) {
         throw fail(error);
       }
-    } else if (gatewayProfileExists()) {
-      const existing = store.snapshot().proxyProfiles.find((profile) => profile.id === GATEWAY_PROFILE_ID);
-      store.saveProxyProfile({
-        id: GATEWAY_PROFILE_ID,
-        name: GATEWAY_PROFILE_NAME,
-        enabled: existing.enabled,
-        endpoint: existing.endpoint,
-        scopes: existing.scopes,
-        bypass: existing.bypass,
-        username: PROXY_USERNAME,
-        password: randomToken(),
-      });
+    } else if (gatewayProfile()) {
+      saveGatewayProfile(gatewayProfile().endpoint.port, randomToken());
       if (routeUsesGateway()) await network.applyGlobalRouting();
     }
-    logger.info("proxy_gateway.access_key_rotated", { running: Boolean(helper) });
+    logger.info("proxy_gateway.access_key_rotated", { reason: "user", running: Boolean(helper) });
     return status();
   }
 
@@ -879,13 +1069,16 @@ function createProxyGatewayController({
     return status();
   }
 
-  // App quit: the helper keeps running for the bridge and CPA, and the next app adopts it.
-  function close() {
+  // App quit: the helper keeps running for the bridge and CPA, and the next app adopts it. The
+  // token-free port is closed (best effort; the next adoption closes it otherwise).
+  async function close() {
     if (watchdog) clearInterval(watchdog);
     watchdog = null;
-    helper?.child?.unref?.();
+    clearTimeout(tokenlessTimer);
+    const target = helper;
     helper = null;
-    return Promise.resolve();
+    target?.child?.unref?.();
+    if (target) await controlRequest(target, "POST", "/tokenless/close", controlTimeoutMs).catch(noop);
   }
 
   return {
@@ -896,9 +1089,13 @@ function createProxyGatewayController({
     setUseForApp,
     refreshUpstream,
     rotateAccessKey,
+    desktopRoute,
+    setDesktopRunning,
     test,
     close,
     upstreamProfileId: () => settings.upstreamProfileId,
+    // For tests: run one watchdog pass now.
+    watchdogTick,
   };
 }
 
@@ -908,7 +1105,7 @@ module.exports = {
   DEFAULT_TRACE_URL,
   GATEWAY_PROFILE_ID,
   PROXYBRIDGE_PORTS,
-  TOKENLESS_PROXY_ENV,
+  compareVersionNames,
   createProxyGatewayController,
   relayScriptPath,
   resolveHelperRuntime,

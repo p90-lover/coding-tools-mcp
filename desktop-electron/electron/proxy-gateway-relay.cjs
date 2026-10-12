@@ -12,8 +12,10 @@
 //   Loopback is reachable by every local user's processes, so this keeps them off the paid upstream.
 // - token-free port (default 17895): the same relay WITHOUT authentication. It exists only for
 //   ChatGPT Desktop, which receives its route as `--proxy-server` and cannot carry credentials.
-//   Any local process can use this one port, the same exposure as ProxyBridge's 17891.
-// - control port (ephemeral): status/stop for the app, guarded by a random bearer token.
+//   It is closed by default; the app opens it over the control port only while a ChatGPT Desktop
+//   instance runs. While open, any local process can use it (ProxyBridge's 17891 exposure).
+// - control port (ephemeral): status, stop and token-free open/close for the app, guarded by a
+//   random bearer token. The same token lets the app probe which process holds the data port.
 //
 // Every request is relayed through one upstream proxy: http/https (CONNECT chaining with Basic
 // proxy auth) or SOCKS5 (RFC 1928/1929 username/password). The upstream credentials arrive on
@@ -22,9 +24,11 @@
 // This file may require Node built-ins only: a package runs it from app.asar.unpacked with Bun.
 
 const crypto = require("node:crypto");
+const fs = require("node:fs");
 const http = require("node:http");
 const net = require("node:net");
 const tls = require("node:tls");
+const { StringDecoder } = require("node:string_decoder");
 
 const GATEWAY_HOST = "127.0.0.1";
 const DEFAULT_GATEWAY_PORT = 17894;
@@ -33,6 +37,7 @@ const DEFAULT_TOKENLESS_PORT = 17895;
 const PROXYBRIDGE_PORTS = Object.freeze([17891, 17892, 17893]);
 const HELPER_SERVICE = "coding-tools-proxy-gateway";
 const PROBE_PATH = "/.well-known/coding-tools-gateway";
+const PROBE_HEADER = "x-coding-tools-probe";
 const PROXY_USERNAME = "ct";
 const UPSTREAM_PROTOCOLS = new Set(["http", "https", "socks5"]);
 const DEFAULT_TRACE_URL = "https://chatgpt.com/cdn-cgi/trace";
@@ -529,7 +534,12 @@ function createProxyGateway({
   host = GATEWAY_HOST,
   port = DEFAULT_GATEWAY_PORT,
   tokenlessPort = null,
+  // The token-free listener opens with start() unless this is false; the helper opens it only
+  // while ChatGPT Desktop runs.
+  openTokenlessAtStart = true,
   proxyToken,
+  // Lets the app prove which process holds the data port without sending the access key.
+  probeToken = null,
   getUpstream,
   logger = { info: noop, warn: noop },
   ...overrides
@@ -553,7 +563,9 @@ function createProxyGateway({
     bytesSent: 0,
     bytesReceived: 0,
   };
-  const servers = [];
+  let dataServer = null;
+  let tokenlessServer = null;
+  let tokenlessPromise = null;
   let listening = null;
   let startPromise = null;
   let startedAt = null;
@@ -663,17 +675,19 @@ function createProxyGateway({
       clearTimeout(deadline);
       deadline = setTimeout(() => client.destroy(), limits.connectTimeoutMs + limits.headerTimeoutMs);
       const parsed = parseHead(head);
-      if (authenticated && !proxyTokenMatches(parsed.headers, proxyToken)) {
-        totals.authFailures += 1;
-        reader.release();
-        client.end(plainResponse(407, "Proxy authentication required", 'Proxy-Authenticate: Basic realm="Coding Tools gateway"\r\n'));
-        return;
-      }
-      if (/^GET\s+\S+\s+HTTP\/1\.[01]$/i.test(parsed.requestLine)
-        && parsed.requestLine.split(/\s+/)[1] === PROBE_PATH) {
+      const allowed = !authenticated || proxyTokenMatches(parsed.headers, proxyToken);
+      const probe = /^GET\s+\S+\s+HTTP\/1\.[01]$/i.test(parsed.requestLine)
+        && parsed.requestLine.split(/\s+/)[1] === PROBE_PATH;
+      if (probe && (allowed || tokensMatch(parsed.headers.find((entry) => entry.name === PROBE_HEADER)?.value, probeToken))) {
         reader.release();
         const body = JSON.stringify({ service: HELPER_SERVICE, pid: process.pid, listener: authenticated ? "data" : "tokenless" });
         client.end(`HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`);
+        return;
+      }
+      if (!allowed) {
+        totals.authFailures += 1;
+        reader.release();
+        client.end(plainResponse(407, "Proxy authentication required", 'Proxy-Authenticate: Basic realm="Coding Tools gateway"\r\n'));
         return;
       }
       const connect = /^CONNECT\s+(\S+)\s+HTTP\/1\.[01]$/i.exec(parsed.requestLine);
@@ -724,9 +738,44 @@ function createProxyGateway({
     });
   }
 
-  function closeServers() {
-    const active = servers.splice(0);
-    return Promise.all(active.map((server) => new Promise((resolve) => server.close(() => resolve()))));
+  function closeServer(server) {
+    return server ? new Promise((resolve) => server.close(() => resolve())) : Promise.resolve();
+  }
+
+  function refreshListening() {
+    if (!listening) return;
+    listening = { ...listening, tokenlessPort: tokenlessServer ? tokenlessServer.address().port : null };
+  }
+
+  // The unauthenticated listener exists only while something needs it (ChatGPT Desktop).
+  function openTokenless() {
+    if (tokenlessPort === null || tokenlessPort === undefined) {
+      return Promise.reject(new Error("No token-free port is configured"));
+    }
+    if (tokenlessServer) return Promise.resolve(address());
+    tokenlessPromise ??= listenOn(tokenlessPort, false).then((server) => {
+      tokenlessServer = server;
+      refreshListening();
+      logger.info("proxy_gateway.tokenless_opened", { port: server.address().port });
+      return address();
+    }).finally(() => {
+      tokenlessPromise = null;
+    });
+    return tokenlessPromise;
+  }
+
+  async function closeTokenless() {
+    await tokenlessPromise?.catch(noop);
+    const server = tokenlessServer;
+    if (!server) return address();
+    tokenlessServer = null;
+    refreshListening();
+    for (const client of clients) {
+      if (client.localPort === server.address().port) client.destroy();
+    }
+    await closeServer(server);
+    logger.info("proxy_gateway.tokenless_closed", {});
+    return address();
   }
 
   function start() {
@@ -734,24 +783,17 @@ function createProxyGateway({
     // Concurrent starts share one attempt instead of racing for the port.
     startPromise ??= (async () => {
       try {
-        const data = await listenOn(port, true);
-        servers.push(data);
-        let tokenless = null;
-        if (tokenlessPort !== null && tokenlessPort !== undefined) {
-          tokenless = await listenOn(tokenlessPort, false);
-          servers.push(tokenless);
-        }
-        listening = {
-          host,
-          port: data.address().port,
-          tokenlessPort: tokenless ? tokenless.address().port : null,
-        };
+        dataServer = await listenOn(port, true);
+        listening = { host, port: dataServer.address().port, tokenlessPort: null };
+        if (openTokenlessAtStart && tokenlessPort !== null && tokenlessPort !== undefined) await openTokenless();
         startedAt = new Date().toISOString();
         lastError = null;
         logger.info("proxy_gateway.listening", listening);
         return listening;
       } catch (error) {
-        await closeServers();
+        listening = null;
+        await closeServer(dataServer);
+        dataServer = null;
         lastError = { message: error.message, at: new Date().toISOString() };
         throw error;
       } finally {
@@ -765,8 +807,16 @@ function createProxyGateway({
     listening = null;
     startedAt = null;
     for (const socket of [...clients, ...upstreams]) socket.destroy();
-    await closeServers();
+    await tokenlessPromise?.catch(noop);
+    const servers = [dataServer, tokenlessServer];
+    dataServer = null;
+    tokenlessServer = null;
+    await Promise.all(servers.map(closeServer));
     logger.info("proxy_gateway.stopped", {});
+  }
+
+  function address() {
+    return listening ? { ...listening } : null;
   }
 
   function stats() {
@@ -791,7 +841,9 @@ function createProxyGateway({
     stop,
     stats,
     handleConnection: handleClient,
-    address: () => (listening ? { ...listening } : null),
+    openTokenless,
+    closeTokenless,
+    address,
     lastError: () => (lastError ? { ...lastError } : null),
     running: () => listening !== null,
   };
@@ -847,7 +899,7 @@ function openGatewaySocket(host, port, sockets) {
 
 // Asks a gateway listener which process holds it, so the app only routes to a port it knows is
 // served by its own helper.
-async function probeGateway({ host = GATEWAY_HOST, port, proxyToken = null, timeoutMs = 2_000 } = {}) {
+async function probeGateway({ host = GATEWAY_HOST, port, proxyToken = null, probeToken = null, timeoutMs = 2_000 } = {}) {
   const sockets = [];
   const timer = setTimeout(() => {
     for (const socket of sockets) socket.destroy(new Error("Gateway probe timed out"));
@@ -856,7 +908,8 @@ async function probeGateway({ host = GATEWAY_HOST, port, proxyToken = null, time
     const socket = await openGatewaySocket(host, port, sockets);
     socket.on("error", noop);
     const reader = createSocketReader(socket);
-    socket.write(`GET ${PROBE_PATH} HTTP/1.1\r\nHost: ${host}:${port}\r\n${proxyAuthorizationLine(proxyToken)}Connection: close\r\n\r\n`);
+    const probeLine = probeToken ? `X-Coding-Tools-Probe: ${probeToken}\r\n` : "";
+    socket.write(`GET ${PROBE_PATH} HTTP/1.1\r\nHost: ${host}:${port}\r\n${proxyAuthorizationLine(proxyToken)}${probeLine}Connection: close\r\n\r\n`);
     const response = parseHttpResponse(await reader.readToEnd(16 * 1024));
     if (response.status.code !== 200) throw new Error(`Gateway probe answered ${response.status.line}`);
     const value = JSON.parse(response.body);
@@ -944,6 +997,8 @@ function tokensMatch(supplied, expected) {
 
 function readConfigLine(stream, limit = 64 * 1024) {
   return new Promise((resolve, reject) => {
+    // A multibyte character (a non-ASCII password) can be split across chunks.
+    const decoder = new StringDecoder("utf8");
     let buffered = "";
     const cleanup = () => {
       stream.off("data", onData);
@@ -951,7 +1006,7 @@ function readConfigLine(stream, limit = 64 * 1024) {
       stream.off("error", onEnd);
     };
     const onData = (chunk) => {
-      buffered += chunk.toString("utf8");
+      buffered += typeof chunk === "string" ? chunk : decoder.write(chunk);
       const newline = buffered.indexOf("\n");
       if (newline >= 0) {
         cleanup();
@@ -974,6 +1029,19 @@ function readConfigLine(stream, limit = 64 * 1024) {
     stream.once("end", onEnd);
     stream.once("error", onEnd);
   });
+}
+
+function relayScriptHash(file = __filename) {
+  try {
+    return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  } catch {
+    return null;
+  }
+}
+
+// Lets the app check which access key a helper holds without the key leaving memory.
+function accessKeyHash(key) {
+  return crypto.createHash("sha256").update(`coding-tools-gateway-key:${key}`).digest("hex");
 }
 
 function requiredToken(value, label) {
@@ -1010,11 +1078,17 @@ async function runHelper({ stdin = process.stdin, stdout = process.stdout, stder
     const upstream = validateUpstream(config.upstream, { gatewayPorts: [dataPort, tokenlessPort] });
     const fingerprint = upstreamFingerprint(upstream);
     const upstreamProfileId = typeof config.upstreamProfileId === "string" ? config.upstreamProfileId : null;
+    const appVersion = typeof config.appVersion === "string" ? config.appVersion.slice(0, 64) : null;
+    // The app replaces a helper whose relay code or app version differs from its own.
+    const scriptHash = relayScriptHash();
+    const keyHash = accessKeyHash(proxyToken);
     const limits = config.limits && typeof config.limits === "object" ? config.limits : {};
     gateway = createProxyGateway({
       port: dataPort,
       tokenlessPort,
+      openTokenlessAtStart: false,
       proxyToken,
+      probeToken: controlToken,
       getUpstream: () => upstream,
       logger: { info: log, warn: log },
       ...Object.fromEntries(Object.entries(limits).filter(([key, value]) => key in DEFAULT_LIMITS && Number.isFinite(value))),
@@ -1044,12 +1118,23 @@ async function runHelper({ stdin = process.stdin, stdout = process.stdout, stder
           pid: process.pid,
           dataPort: address?.port ?? null,
           tokenlessPort: address?.tokenlessPort ?? null,
+          tokenlessConfiguredPort: tokenlessPort,
           upstreamProfileId,
           fingerprint,
+          keyHash,
+          scriptHash,
+          appVersion,
           startedAt,
           stats: gateway.stats(),
           lastError: gateway.lastError(),
         });
+        return;
+      }
+      if (request.method === "POST" && (request.url === "/tokenless/open" || request.url === "/tokenless/close")) {
+        const opening = request.url === "/tokenless/open";
+        (opening ? gateway.openTokenless() : gateway.closeTokenless())
+          .then((address) => send(200, { tokenlessPort: address?.tokenlessPort ?? null }))
+          .catch((error) => send(409, { error: error instanceof Error ? error.message : String(error) }));
         return;
       }
       if (request.method === "POST" && request.url === "/stop") {
@@ -1106,6 +1191,7 @@ module.exports = {
   HELPER_SERVICE,
   PROXYBRIDGE_PORTS,
   PROXY_USERNAME,
+  accessKeyHash,
   createProxyGateway,
   fetchGatewayTrace,
   isLoopbackAddress,
@@ -1113,6 +1199,8 @@ module.exports = {
   normalizeHost,
   parseTrace,
   probeGateway,
+  readConfigLine,
+  relayScriptHash,
   runHelper,
   upstreamFingerprint,
   validateGatewayPort,

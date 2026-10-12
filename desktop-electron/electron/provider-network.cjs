@@ -1370,6 +1370,13 @@ function createProviderNetworkController({
     if (!authInfo?.isProxy) return false;
     const snapshot = store.snapshot();
     if (!snapshot.routing.globalEnabled || !snapshot.routing.globalProfileId) return false;
+    // Answer only the proxy the route names: anything else on another host or port (a squatter
+    // on a loopback port, for one) never receives the saved credentials.
+    const profile = store.activeProxy(snapshot.routing.globalProfileId);
+    const bare = (value) => String(value ?? "").trim().replace(/^\[|\]$/g, "").toLowerCase();
+    if (!profile || bare(authInfo.host) !== bare(profile.endpoint.host) || Number(authInfo.port) !== profile.endpoint.port) {
+      return false;
+    }
     const secret = store.proxySecret(snapshot.routing.globalProfileId);
     if (!secret || (!secret.username && !secret.password)) return false;
     event.preventDefault();

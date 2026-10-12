@@ -160,8 +160,12 @@ export interface ProxyGatewayStatus {
   listen: { host: string; port: number };
   port: number;
   tokenlessPort: number;
+  tokenlessOpen: boolean;
   reservedPorts: number[];
+  helperState: "running" | "unverified" | "restarting" | "stopped";
   helper: { pid: number; runtime: string; adopted: boolean; startedAt: string } | null;
+  unverifiedHelper: { pid: number; port: number; since: string } | null;
+  watchdog: { restarts: number; nextRestartAt: string | null };
   gatewayProfileId: string;
   upstreamProfileId: string | null;
   upstream: ProxyGatewayProfileSummary | null;

@@ -12,15 +12,16 @@ const {
   createProxyGateway,
   fetchGatewayTrace,
   isLoopbackHost,
+  readConfigLine,
   validateGatewayPort,
   validateUpstream,
 } = require("../electron/proxy-gateway-relay.cjs");
 const {
   GATEWAY_PROFILE_ID,
-  TOKENLESS_PROXY_ENV,
+  compareVersionNames,
   createProxyGatewayController,
 } = require("../electron/proxy-gateway.cjs");
-const { createProviderNetworkStore } = require("../electron/provider-network.cjs");
+const { createProviderNetworkController, createProviderNetworkStore } = require("../electron/provider-network.cjs");
 const { proxyRouteFromEnvironment } = require("../electron/chatgpt-desktop.cjs");
 
 const root = path.resolve(__dirname, "..");
@@ -51,6 +52,8 @@ function processAlive(pid) {
     return error.code === "EPERM";
   }
 }
+
+const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 async function waitFor(predicate, timeoutMs = 5_000) {
   const started = Date.now();
@@ -291,12 +294,28 @@ test("the data port answers 407 without the local token; the token-free port ser
   assert.equal(await readSome(open.socket, 12), "echo:desktop");
   open.socket.destroy();
 
-  // ChatGPT Desktop reads the token-free URL first; the env route with the token is ignored.
-  assert.deepEqual(proxyRouteFromEnvironment({
-    [TOKENLESS_PROXY_ENV]: "http://127.0.0.1:17895",
-    HTTPS_PROXY: `http://ct:${TOKEN}@127.0.0.1:17894`,
-    NO_PROXY: "localhost",
-  }), { url: "http://127.0.0.1:17895", bypass: ["localhost"] });
+  // The token-free listener can be closed and reopened without touching the data port.
+  await gateway.closeTokenless();
+  assert.equal(gateway.address().tokenlessPort, null);
+  await assert.rejects(connect(tokenlessPort), /ECONNREFUSED/);
+  const reopened = await gateway.openTokenless();
+  const again = await connectTunnel(reopened.tokenlessPort, "chatgpt.com:443", null);
+  assert.match(again.head, /^HTTP\/1\.1 200 /);
+  again.socket.destroy();
+
+  // ChatGPT Desktop never puts credentials on its command line: the env route with a key is refused.
+  assert.equal(proxyRouteFromEnvironment({ HTTPS_PROXY: `http://ct:${TOKEN}@127.0.0.1:17894` }), null);
+});
+
+test("the helper's config line survives a multibyte character split across chunks", async () => {
+  const { PassThrough } = require("node:stream");
+  const stream = new PassThrough();
+  const pending = readConfigLine(stream);
+  const bytes = Buffer.from(`${JSON.stringify({ password: "密碼-pässwörd" })}\n`, "utf8");
+  const split = bytes.indexOf(Buffer.from("密", "utf8")) + 1;
+  stream.write(bytes.subarray(0, split));
+  stream.write(bytes.subarray(split));
+  assert.deepEqual(await pending, { password: "密碼-pässwörd" });
 });
 
 test("the gateway reports a rejected upstream login without leaking the credentials", async (t) => {
@@ -553,8 +572,8 @@ test("Use for this app runs a detached helper, routes through it with a local to
   assert.equal(setup.store.snapshot().routing.globalProfileId, GATEWAY_PROFILE_ID);
   assert.deepEqual(setup.applied, [GATEWAY_PROFILE_ID]);
   const envRoute = setup.environmentRoute()(gatewayProfile);
-  assert.equal(envRoute.url, `http://ct:${token}@127.0.0.1:${port}`);
-  assert.equal(envRoute.extra[TOKENLESS_PROXY_ENV], `http://127.0.0.1:${tokenlessPort}`);
+  assert.deepEqual(envRoute, { url: `http://ct:${token}@127.0.0.1:${port}` },
+    "children get the key in their env route; no token-free URL reaches every child");
 
   const denied = await connectTunnel(port, "chatgpt.com:443", null);
   assert.match(denied.head, /^HTTP\/1\.1 407 /);
@@ -564,17 +583,19 @@ test("Use for this app runs a detached helper, routes through it with a local to
   tunnel.socket.write("ping");
   assert.equal(await readSome(tunnel.socket, 9), "echo:ping");
   tunnel.socket.destroy();
-  const open = await connectTunnel(tokenlessPort, "chatgpt.com:443", null);
-  assert.match(open.head, /^HTTP\/1\.1 200 /);
-  open.socket.destroy();
+  assert.equal(status.tokenlessOpen, false, "the token-free port is closed by default");
+  await assert.rejects(connect(tokenlessPort), /ECONNREFUSED/);
   assert.equal(upstream.requests.at(-1).auth, `Basic ${Buffer.from("isp-user:isp-password-value").toString("base64")}`);
 
-  // Upstream credentials never reach argv, the helper env, the settings, state or log files.
+  // Upstream credentials never reach argv, the helper env, the settings, state or log files, and
+  // the access key's only stored copy is the encrypted profile secret.
   const providers = path.join(setup.directory, "providers");
   const state = JSON.parse(fs.readFileSync(path.join(providers, "proxy-gateway.state.json"), "utf8"));
   assert.equal(state.pid, pid);
   assert.equal(state.dataPort, port);
   assert.match(state.fingerprint, /^[0-9a-f]{64}$/);
+  assert.equal(Object.hasOwn(state, "proxyToken"), false);
+  assert.doesNotMatch(JSON.stringify(state), new RegExp(token));
   await waitFor(() => fs.existsSync(path.join(providers, "proxy-gateway.log")) && fs.readFileSync(path.join(providers, "proxy-gateway.log"), "utf8").includes("helper_ready"));
   for (const [label, text] of [
     ["argv", JSON.stringify(spawns.map((entry) => [entry.executable, ...entry.args]))],
@@ -718,6 +739,22 @@ test("New access key is the one action that rotates the key, and the old key sto
   await relaunched.setRunning(false);
 });
 
+function staleState(pid, dataPort, controlPort) {
+  return {
+    version: 2,
+    pid,
+    ownerPid: 1,
+    dataPort,
+    tokenlessPort: 17895,
+    controlPort,
+    controlToken: "c".repeat(64),
+    upstreamProfileId: "isp-upstream",
+    fingerprint: "e".repeat(64),
+    runtime: "node",
+    startedAt: new Date().toISOString(),
+  };
+}
+
 test("a stale state file is discarded without signalling a pid it cannot verify", async (t) => {
   trackHelpers(t);
   const setup = tempSetup(t);
@@ -731,20 +768,8 @@ test("a stale state file is discarded without signalling a pid it cannot verify"
   await new Promise((resolve) => dead.once("exit", resolve));
   const statePath = path.join(setup.directory, "providers", "proxy-gateway.state.json");
   for (const pid of [dead.pid, process.pid]) {
-    fs.writeFileSync(statePath, JSON.stringify({
-      version: 1,
-      pid,
-      ownerPid: 1,
-      dataPort: 1,
-      tokenlessPort: 2,
-      controlPort: await freePort(),
-      controlToken: "c".repeat(64),
-      proxyToken: "d".repeat(64),
-      upstreamProfileId: "isp-upstream",
-      fingerprint: "e".repeat(64),
-      runtime: "node",
-      startedAt: new Date().toISOString(),
-    }));
+    // A dead pid, or a live pid that does not hold the data port (a reused pid).
+    fs.writeFileSync(statePath, JSON.stringify(staleState(pid, await freePort(), await freePort())));
     const spawns = [];
     const controller = controllerFor(setup, spawns);
     const status = await controller.setRunning(true);
@@ -811,11 +836,230 @@ test("concurrent gateway starts spawn one helper", async (t) => {
   await controller.setRunning(false);
 });
 
+test("the token-free port is closed by default, open while ChatGPT Desktop runs and closed after", async (t) => {
+  trackHelpers(t);
+  const setup = tempSetup(t);
+  await addUpstream(setup, t);
+  const controller = controllerFor(setup, [], { tokenlessHoldMs: 150 });
+  const tokenlessPort = await freePort();
+  await controller.configure({ upstreamProfileId: "isp-upstream", port: await freePort(), tokenlessPort });
+  assert.equal(await controller.desktopRoute(), null, "no token-free route while the app does not use the gateway");
+  const started = await controller.setUseForApp(true);
+  assert.equal(started.tokenlessOpen, false);
+  await assert.rejects(connect(tokenlessPort), /ECONNREFUSED/);
+
+  const route = await controller.desktopRoute();
+  assert.equal(route.url, `http://127.0.0.1:${tokenlessPort}`, "a ChatGPT Desktop launch gets the token-free port");
+  assert.ok(route.bypass.includes("localhost"));
+  const tunnel = await connectTunnel(tokenlessPort, "chatgpt.com:443", null);
+  assert.match(tunnel.head, /^HTTP\/1\.1 200 /);
+  tunnel.socket.destroy();
+  await controller.setDesktopRunning(true);
+  await sleep(250);
+  assert.equal((await controller.status()).tokenlessOpen, true, "a tracked instance keeps it open past the launch hold");
+  await controller.setDesktopRunning(false);
+  assert.equal((await controller.status()).tokenlessOpen, false, "the last instance's exit closes it");
+  await assert.rejects(connect(tokenlessPort), /ECONNREFUSED/);
+
+  // The app quits or crashes with the port open: the next app closes it when it adopts the helper.
+  await controller.desktopRoute();
+  assert.equal((await controller.status()).tokenlessOpen, true);
+  const relaunched = controllerFor(setup, [], { tokenlessHoldMs: 150 });
+  const adopted = await relaunched.startup();
+  assert.equal(adopted.helper.adopted, true);
+  assert.equal(adopted.tokenlessOpen, false);
+  await relaunched.setRunning(false);
+});
+
+test("a live helper that misses verification keeps its state and is never signalled", async (t) => {
+  const setup = tempSetup(t);
+  await addUpstream(setup, t);
+  const sockets = new Set();
+  const keep = (socket) => {
+    sockets.add(socket);
+    socket.on("error", () => {});
+  };
+  const holder = net.createServer(keep);
+  const silent = net.createServer(keep);
+  const dataPort = await listen(holder);
+  const controlPort = await listen(silent);
+  t.after(async () => {
+    for (const socket of sockets) socket.destroy();
+    await Promise.all([close(holder), close(silent)]);
+  });
+  const controller = controllerFor(setup, [], { controlTimeoutMs: 150, verifyRetryDelaysMs: [50, 100] });
+  await controller.configure({ upstreamProfileId: "isp-upstream", port: await freePort(), tokenlessPort: await freePort() });
+  const statePath = path.join(setup.directory, "providers", "proxy-gateway.state.json");
+  const state = staleState(process.pid, dataPort, controlPort);
+  fs.writeFileSync(statePath, JSON.stringify(state));
+
+  await assert.rejects(controller.setRunning(true), /unverified helper \(pid \d+\) holds the gateway port/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(statePath, "utf8")), state, "the state and its control token are kept");
+  const status = await controller.status();
+  assert.equal(status.helperState, "unverified");
+  assert.equal(status.unverifiedHelper.pid, process.pid);
+  assert.ok(processAlive(process.pid), "the pid was not signalled");
+});
+
+test("the proxy login answers only the challenger the global route names", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "proxy-login-test-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const network = createProviderNetworkController({
+    app: {},
+    browserPartition: "test",
+    getBrowserHost: () => null,
+    logger: { info() {}, warn() {} },
+    safeStorage: null,
+    session: {},
+    shell: {},
+    userData: directory,
+  });
+  const key = "k".repeat(64);
+  network.store.saveProxyProfile({
+    id: GATEWAY_PROFILE_ID,
+    name: "Built-in proxy gateway",
+    endpoint: { protocol: "http", host: "127.0.0.1", port: 17894 },
+    username: "ct",
+    password: key,
+  });
+  network.store.setGlobalRouting({ enabled: true, profileId: GATEWAY_PROFILE_ID });
+  const attempt = (authInfo) => {
+    const answers = [];
+    let prevented = false;
+    const handled = network.handleProxyLogin({ preventDefault: () => { prevented = true; } }, authInfo, (...values) => answers.push(values));
+    return { handled, prevented, answers };
+  };
+  for (const authInfo of [
+    { isProxy: true, host: "127.0.0.1", port: 17895 },
+    { isProxy: true, host: "127.0.0.2", port: 17894 },
+    { isProxy: true, host: "squatter.test", port: 17894 },
+    { isProxy: false, host: "127.0.0.1", port: 17894 },
+  ]) {
+    assert.deepEqual(attempt(authInfo), { handled: false, prevented: false, answers: [] }, JSON.stringify(authInfo));
+  }
+  assert.deepEqual(attempt({ isProxy: true, host: "127.0.0.1", port: 17894 }), { handled: true, prevented: true, answers: [["ct", key]] });
+});
+
+test("an unexpected helper exit restarts it with a new key, re-applies the route and restarts kept services", async (t) => {
+  trackHelpers(t);
+  const setup = tempSetup(t);
+  await addUpstream(setup, t);
+  const rotations = [];
+  const controller = controllerFor(setup, [], { restartBackoffBaseMs: 0, onAccessKeyRotated: (detail) => rotations.push(detail) });
+  await controller.configure({ upstreamProfileId: "isp-upstream", port: await freePort(), tokenlessPort: await freePort() });
+  const started = await controller.setUseForApp(true);
+  const oldKey = gatewayToken(setup.store);
+  process.kill(started.helper.pid);
+  assert.ok(await waitFor(() => !processAlive(started.helper.pid)));
+  setup.applied.length = 0;
+
+  await controller.watchdogTick();
+  const status = await controller.status();
+  assert.equal(status.running, true);
+  assert.notEqual(status.helper.pid, started.helper.pid);
+  const newKey = gatewayToken(setup.store);
+  assert.notEqual(newKey, oldKey, "something may have collected the old key while the port was free");
+  assert.deepEqual(setup.applied, [GATEWAY_PROFILE_ID], "the env route is re-applied with the new key");
+  assert.deepEqual(rotations, [{ reason: "helper_exited" }], "kept services (CPA) are restarted");
+  const stale = await connectTunnel(status.listen.port, "chatgpt.com:443", oldKey);
+  assert.match(stale.head, /^HTTP\/1\.1 407 /);
+  stale.socket.destroy();
+  await controller.setRunning(false);
+});
+
+test("the watchdog backs off exponentially when the helper keeps dying", async (t) => {
+  trackHelpers(t);
+  const setup = tempSetup(t);
+  await addUpstream(setup, t);
+  const spawns = [];
+  const controller = controllerFor(setup, spawns, { restartBackoffBaseMs: 400, restartBackoffCapMs: 5_000 });
+  await controller.configure({ upstreamProfileId: "isp-upstream", port: await freePort(), tokenlessPort: await freePort() });
+  await controller.setRunning(true);
+  const kill = async () => {
+    const { helper } = await controller.status();
+    process.kill(helper.pid);
+    assert.ok(await waitFor(() => !processAlive(helper.pid)));
+  };
+
+  await kill();
+  await controller.watchdogTick();
+  assert.equal(spawns.length, 2, "the first restart is immediate");
+  let status = await controller.status();
+  assert.equal(status.watchdog.restarts, 1);
+
+  await kill();
+  await controller.watchdogTick();
+  assert.equal(spawns.length, 2, "a second crash waits out the backoff");
+  status = await controller.status();
+  assert.equal(status.helperState, "restarting");
+  assert.ok(status.watchdog.nextRestartAt);
+
+  await sleep(450);
+  await controller.watchdogTick();
+  assert.equal(spawns.length, 3);
+  status = await controller.status();
+  assert.equal(status.watchdog.restarts, 2);
+  assert.ok(Date.parse(status.watchdog.nextRestartAt) - Date.now() > 500, "the next delay doubles");
+  await controller.setRunning(false);
+});
+
+test("a helper from another app version is replaced instead of adopted", async (t) => {
+  trackHelpers(t);
+  const setup = tempSetup(t);
+  await addUpstream(setup, t);
+  const first = controllerFor(setup, [], { appVersion: "1.0.0" });
+  await first.configure({ upstreamProfileId: "isp-upstream", port: await freePort(), tokenlessPort: await freePort() });
+  const started = await first.setRunning(true);
+  await first.close();
+  const spawns = [];
+  const updated = controllerFor(setup, spawns, { appVersion: "1.0.1" });
+  const status = await updated.startup();
+  assert.equal(spawns.length, 1);
+  assert.notEqual(status.helper.pid, started.helper.pid);
+  assert.ok(await waitFor(() => !processAlive(started.helper.pid)), "the outdated helper was stopped");
+  await updated.setRunning(false);
+
+  const names = ["0.9.0-win32-x64", "0.10.0-rc.2-win32-x64", "0.10.0-win32-x64", "0.10.0-rc.10-win32-x64-abc123"];
+  assert.deepEqual([...names].sort((left, right) => compareVersionNames(right, left)),
+    ["0.10.0-win32-x64", "0.10.0-rc.10-win32-x64-abc123", "0.10.0-rc.2-win32-x64", "0.9.0-win32-x64"]);
+});
+
+test("a credential refresh that joins a start in flight still runs its own restart", async (t) => {
+  trackHelpers(t);
+  const setup = tempSetup(t);
+  const upstream = await fakeHttpUpstream({ username: "isp-user", password: "new-pass" });
+  t.after(() => close(upstream.server));
+  const profile = (password) => setup.store.saveProxyProfile({
+    id: "isp-upstream",
+    name: "ISP upstream",
+    endpoint: { protocol: "http", host: "127.0.0.1", port: upstream.port },
+    username: "isp-user",
+    password,
+  });
+  profile("old-pass");
+  const spawns = [];
+  const controller = controllerFor(setup, spawns);
+  await controller.configure({ upstreamProfileId: "isp-upstream", port: await freePort(), tokenlessPort: await freePort() });
+  const starting = controller.setUseForApp(true);
+  await new Promise((resolve) => setImmediate(resolve));
+  profile("new-pass");
+  const refreshed = controller.refreshUpstream({ credentialsChanged: true });
+  await Promise.all([starting, refreshed]);
+  assert.equal(spawns.length, 2, "the refresh queued its own pass instead of joining the start");
+  const status = await controller.status();
+  assert.equal(status.helper.pid, spawns[1].pid);
+  const tunnel = await connectTunnel(status.listen.port, "chatgpt.com:443", gatewayToken(setup.store));
+  assert.match(tunnel.head, /^HTTP\/1\.1 200 /, "the running helper uses the new upstream password");
+  tunnel.socket.destroy();
+  await controller.setRunning(false);
+});
+
 test("gateway channels use the provider IPC sender check; Network Proxy cannot overwrite the gateway profile", async () => {
   const { EventEmitter } = require("node:events");
   const app = new EventEmitter();
   app.whenReady = () => Promise.resolve();
   app.getPath = () => "unused";
+  app.getVersion = () => "0.0.0-test";
   const handlers = new Map();
   const saved = [];
   const calls = [];

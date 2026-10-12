@@ -13,6 +13,8 @@ const {
 let providerNetworkControllerPromise = null;
 let providerBrowserHostGetter = () => null;
 let providerCpaConnectionGetter = () => null;
+let proxyGatewayInstance = null;
+let proxyGatewayKeyRotated = () => {};
 
 function setProviderBrowserHost(getter) {
   if (typeof getter !== "function") {
@@ -26,6 +28,30 @@ function setProviderCpaConnection(getter) {
     throw new Error("Provider CPA connection getter must be a function");
   }
   providerCpaConnectionGetter = getter;
+}
+
+// After the gateway's access key rotated because of an incident, main restarts the kept services
+// that hold the old key (CPA, through its Apply-route path).
+function setProxyGatewayKeyRotated(handler) {
+  if (typeof handler !== "function") {
+    throw new Error("Proxy gateway key-rotation handler must be a function");
+  }
+  proxyGatewayKeyRotated = handler;
+}
+
+// ChatGPT Desktop's launch route: the gateway's token-free port while the app routes through the
+// gateway, otherwise null (the caller falls back to its env route).
+async function proxyGatewayDesktopRoute() {
+  if (!providerNetworkControllerPromise) return null;
+  await providerNetworkControllerPromise;
+  return proxyGatewayInstance ? proxyGatewayInstance.desktopRoute() : null;
+}
+
+// ChatGPT Desktop reports whether an instance runs; the token-free port closes after the last one.
+async function setProxyGatewayDesktopRunning(running) {
+  if (!providerNetworkControllerPromise) return;
+  await providerNetworkControllerPromise;
+  await proxyGatewayInstance?.setDesktopRunning(running);
 }
 
 function providerNetworkReady() {
@@ -101,12 +127,15 @@ function installProviderNetwork({
         userData: app.getPath("userData"),
         network: controller,
         logger,
+        appVersion: app.getVersion(),
         resolveRuntime: () => resolveHelperRuntime({
           isPackaged: app.isPackaged,
           version: app.getVersion(),
           coreHome: launcherProfile.coreHome,
         }),
+        onAccessKeyRotated: (detail) => proxyGatewayKeyRotated(detail),
       });
+      proxyGatewayInstance = gateway;
       await gateway.startup();
     } catch (error) {
       logger.warn("proxy_gateway.unavailable", {
@@ -294,6 +323,9 @@ function installProviderNetwork({
 module.exports = {
   installProviderNetwork,
   providerNetworkReady,
+  proxyGatewayDesktopRoute,
+  setProxyGatewayDesktopRunning,
+  setProxyGatewayKeyRotated,
   setProviderBrowserHost,
   setProviderCpaConnection,
 };

@@ -238,16 +238,28 @@ export function ProxyGatewaySurface({
               ? localText(language, "Checking", "檢查中", "检查中", "確認中")
               : running
                 ? localText(language, "Running", "執行中", "运行中", "実行中")
-                : localText(language, "Stopped", "已停止", "已停止", "停止中")}
+                : status.helperState === "unverified"
+                  ? localText(language, "Unverified helper holds the port", "未驗證的輔助程序佔用連接埠", "未验证的辅助进程占用端口", "未確認のヘルパーがポートを使用中")
+                  : status.helperState === "restarting"
+                    ? localText(language, "Restarting (backing off)", "重新啟動中（延後重試）", "重启中（退避重试）", "再起動待ち（間隔を空けて再試行）")
+                    : localText(language, "Stopped", "已停止", "已停止", "停止中")}
           </span>
         </div>
         <dl className="proxy-route-list proxy-gateway-stats">
           <div><dt>{localText(language, "Listen address", "監聽位址", "监听地址", "待ち受けアドレス")}</dt><dd>{listen}</dd></div>
-          <div><dt>{localText(language, "Token-free port (ChatGPT Desktop)", "免權杖連接埠（ChatGPT Desktop）", "免令牌端口（ChatGPT Desktop）", "トークン不要のポート（ChatGPT Desktop）")}</dt><dd>{status ? `${status.listen.host}:${status.tokenlessPort}` : "—"}</dd></div>
+          <div><dt>{localText(language, "Token-free port (ChatGPT Desktop)", "免權杖連接埠（ChatGPT Desktop）", "免令牌端口（ChatGPT Desktop）", "トークン不要のポート（ChatGPT Desktop）")}</dt><dd>{status
+            ? `${status.listen.host}:${status.tokenlessPort} · ${status.tokenlessOpen
+              ? localText(language, "open while ChatGPT Desktop runs", "ChatGPT Desktop 執行中，已開啟", "ChatGPT Desktop 运行中，已开启", "ChatGPT Desktop 実行中のため開いています")
+              : localText(language, "closed", "已關閉", "已关闭", "閉じています")}`
+            : "—"}</dd></div>
           <div><dt>{localText(language, "Upstream", "上游代理", "上游代理", "上流プロキシ")}</dt><dd>{status?.upstream ? `${status.upstream.name} · ${endpointText(status.upstream)}` : "—"}</dd></div>
           <div><dt>{localText(language, "Helper process", "輔助程序", "辅助进程", "ヘルパープロセス")}</dt><dd>{status?.helper
             ? `PID ${status.helper.pid} · ${status.helper.runtime}${status.helper.adopted ? ` · ${localText(language, "kept from the last session", "沿用上次工作階段", "沿用上次会话", "前回のセッションから継続")}` : ""}`
-            : "—"}</dd></div>
+            : status?.unverifiedHelper
+              ? `PID ${status.unverifiedHelper.pid} · ${localText(language, "unverified, retrying", "未驗證，重試中", "未验证，重试中", "未確認・再試行中")}`
+              : status?.watchdog.nextRestartAt
+                ? `${localText(language, "next restart", "下次重新啟動", "下次重启", "次の再起動")} ${new Date(status.watchdog.nextRestartAt).toLocaleTimeString()}`
+                : "—"}</dd></div>
           <div><dt>{localText(language, "Active connections", "使用中連線", "活动连接", "アクティブな接続")}</dt><dd>{stats?.activeConnections ?? 0}</dd></div>
           <div><dt>{localText(language, "Total connections", "連線總數", "连接总数", "接続の合計")}</dt><dd>{stats ? `${stats.totalConnections} (${stats.tunnels} CONNECT · ${stats.httpRequests} HTTP · ${stats.failures} ${localText(language, "failed", "失敗", "失败", "失敗")})` : "0"}</dd></div>
           <div><dt>{localText(language, "Sent to the app", "傳送至應用程式", "发送到应用程序", "アプリへ送信")}</dt><dd>{formatBytes(stats?.bytesSent)}</dd></div>
@@ -335,10 +347,10 @@ export function ProxyGatewaySurface({
           )}</p>
           <p className="proxy-secret-help">{localText(
             language,
-            "The gateway runs as a helper process that keeps running when Coding Tools restarts or updates, so the Codex bridge and CPA keep their network. The gateway port needs a local token that the app supplies; the token-free port is for ChatGPT Desktop only and any local program can use it.",
-            "閘道以輔助程序執行，Coding Tools 重新啟動或更新時仍會繼續執行，讓 Codex 橋接與 CPA 保持連線。閘道連接埠需要由應用程式提供的本機權杖；免權杖連接埠只供 ChatGPT Desktop 使用，本機任何程式都可使用它。",
-            "网关以辅助进程运行，Coding Tools 重启或更新时仍会继续运行，让 Codex 桥接和 CPA 保持联网。网关端口需要由应用程序提供的本地令牌；免令牌端口仅供 ChatGPT Desktop 使用，本机任何程序都可以使用它。",
-            "ゲートウェイはヘルパープロセスとして動作し、Coding Tools の再起動や更新中も動き続けるため、Codex ブリッジと CPA の通信は途切れません。ゲートウェイのポートにはアプリが渡すローカルトークンが必要です。トークン不要のポートは ChatGPT Desktop 専用で、このマシンのどのプログラムからも使えます。",
+            "The gateway runs as a helper process that keeps running when Coding Tools restarts or updates, so the Codex bridge and CPA keep their network. The gateway port needs a local token that the app supplies; the token-free port opens only while ChatGPT Desktop runs, and while open any local program can use it.",
+            "閘道以輔助程序執行，Coding Tools 重新啟動或更新時仍會繼續執行，讓 Codex 橋接與 CPA 保持連線。閘道連接埠需要由應用程式提供的本機權杖；免權杖連接埠只在 ChatGPT Desktop 執行時開啟，開啟期間本機任何程式都可使用它。",
+            "网关以辅助进程运行，Coding Tools 重启或更新时仍会继续运行，让 Codex 桥接和 CPA 保持联网。网关端口需要由应用程序提供的本地令牌；免令牌端口只在 ChatGPT Desktop 运行时开启，开启期间本机任何程序都可以使用它。",
+            "ゲートウェイはヘルパープロセスとして動作し、Coding Tools の再起動や更新中も動き続けるため、Codex ブリッジと CPA の通信は途切れません。ゲートウェイのポートにはアプリが渡すローカルトークンが必要です。トークン不要のポートは ChatGPT Desktop の実行中だけ開き、その間はこのマシンのどのプログラムからも使えます。",
           )}</p>
         </section>
 
