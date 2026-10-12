@@ -464,7 +464,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [missionPrompt, setMissionPrompt] = useState("");
   const [pendingChat, setPendingChat] = useState<{ title: string; message: string; taskId?: string } | null>(null);
   /** "Continue in project": a new chat in another project, its composer filled with this chat's messages. */
-  const [chatSeed, setChatSeed] = useState<{ key: string; workspaceId: string; title: string; text: string } | null>(null);
+  const [chatSeed, setChatSeed] = useState<{ key: string; workspaceId: string; title: string; text: string; context?: string[] } | null>(null);
 
   const selection = useRef({ workspaceId, taskId: chatTaskId ?? "", runId: selectedRunId });
   selection.current = { workspaceId, taskId: chatTaskId ?? "", runId: selectedRunId };
@@ -1348,15 +1348,16 @@ export function AgentOrchestratorSurface({ language, setError }: {
     setChatTaskId("");
     await Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]);
   });
-  // Rewind (Codex's backtrack): a new chat whose composer holds the messages up to and including
-  // this one, to edit and send. Nothing is sent and this chat stays as it is (files are not reverted).
+  // Rewind (Codex's backtrack): a new chat whose composer holds just the chosen message, to edit and
+  // send; the messages before it go along as context (shown as a chip that can be dropped). Nothing
+  // is sent and this chat stays as it is (files are not reverted).
   const rewindChat = (taskId: string, upTo: number) => void (async () => {
     const messages = chatMessagesFromDescription(await loadDescription(taskId));
     if (!Number.isInteger(upTo) || upTo < 0 || upTo >= messages.length) return;
     // Earlier messages keep the steers sent during their turns; the chosen one is just what was typed.
     const earlier = messages.slice(0, upTo).flatMap((message) => [message.text, ...(message.steers ?? []).map((steer) => steer.text)]);
-    const text = [...earlier, messages[upTo].text].join("\n\n").slice(0, 8192);
-    setChatSeed({ key: crypto.randomUUID(), workspaceId, title: `${taskName(taskId)} (rewound)`.slice(0, 240), text });
+    setChatSeed({ key: crypto.randomUUID(), workspaceId, title: `${taskName(taskId)} (rewound)`.slice(0, 240), text: messages[upTo].text,
+      ...(earlier.length ? { context: earlier } : {}) });
     setPendingChat(null); setInspectedId(""); setDraftTeam(null); setSheet("");
     setChatTaskId(""); setView("chat");
   })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));

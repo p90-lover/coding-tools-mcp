@@ -24,6 +24,8 @@ const INLINE_ATTACHMENT_BYTES = 200 * 1024;
  * they survive the view closing (another page, the board) and switching chats.
  */
 const CHAT_QUEUES = new Map<string, QueuedChatMessage[]>();
+/** Each chat's unsent draft (task id → text; "" is the new-chat composer), kept while another chat is open. */
+const CHAT_DRAFTS = new Map<string, string>();
 /** The cards panel's dragged width (px), kept on this computer. */
 const CARDS_WIDTH_KEY = "coding-tools:ao:cards-panel-width";
 
@@ -176,7 +178,7 @@ export function AgentOrchestratorChat({
   /** The path of a dropped or picked file, when the app can tell. */
   filePath?: (file: File) => string;
   /** A new chat's starting draft ("Continue in project"); taken once, then onSeedUsed clears it. */
-  seed?: { key: string; title: string; text: string };
+  seed?: { key: string; title: string; text: string; context?: string[] };
   onSeedUsed?: () => void;
   /** Extra header controls before the header buttons (the chat's team picker). */
   headerExtra?: ReactNode;
@@ -288,10 +290,23 @@ export function AgentOrchestratorChat({
   };
   // A new chat starts at the bottom.
   useEffect(() => { setAtBottom(true); setShowStructure(false); setRenaming(null); }, [selectedTaskId]);
-  // Continue in project: the new chat opens with the carried messages, ready to review and send.
+  // Each chat keeps its own unsent draft, as Codex does (the new-chat composer is "" here): opening
+  // another chat puts this one's draft aside and brings that chat's back.
+  const draftOwner = useRef(selectedTaskId);
+  useEffect(() => {
+    if (draftOwner.current === selectedTaskId) return;
+    if (draft) CHAT_DRAFTS.set(draftOwner.current, draft); else CHAT_DRAFTS.delete(draftOwner.current);
+    setDraft(CHAT_DRAFTS.get(selectedTaskId) ?? "");
+    CHAT_DRAFTS.delete(selectedTaskId);
+    draftOwner.current = selectedTaskId;
+  }, [selectedTaskId]);
+  // Messages a rewound chat carries as context ahead of its first message; the composer holds only
+  // the chosen message. Dropped with the chip's ×, or sent once with that first message.
+  const [carried, setCarried] = useState<string[] | null>(null);
+  // Continue in project / Rewind: the new chat opens with the seeded message, ready to review and send.
   useEffect(() => {
     if (!seed || selectedTaskId) return;
-    setDraft(seed.text); setTitle(seed.title);
+    setDraft(seed.text); setTitle(seed.title); setCarried(seed.context?.length ? seed.context : null);
     onSeedUsed?.();
     window.setTimeout(() => input.current?.focus(), 0);
   }, [seed?.key]);
@@ -342,9 +357,12 @@ export function AgentOrchestratorChat({
     try {
       // A steer the turn outran (it ended first) is sent as an ordinary follow-up instead; a goal is never steered.
       const steered = !goal && steering && steer && selectedTaskId ? await steer({ taskId: selectedTaskId, message }) : false;
+      // A rewound chat's first message takes the earlier messages along ahead of it, as context.
+      const first = !selectedTaskId && carried?.length ? [...carried, message].join("\n\n").slice(-8192) : message;
       if (!steered) await send(selectedTaskId ? { taskId: selectedTaskId, message, ...(goal ? { goal } : {}) }
-        : { title: title.trim() || undefined, message, ...(goal ? { goal } : {}) });
+        : { title: title.trim() || undefined, message: first, ...(goal ? { goal } : {}) });
       setDraft(""); setTitle(""); setAttachments([]); setAttachNote(""); setAtBottom(true);
+      if (!selectedTaskId) setCarried(null);
       return true;
     } catch {
       // The surface already shows the error; keep the message so it can be sent again.
@@ -738,6 +756,12 @@ export function AgentOrchestratorChat({
             </li>)}
           </ul> : null}
           {typing && !slash.length ? <p className="cx-slash-usage" role="status">/{typing.name} {typing.args} — {typing.hint}. Press Enter to run it.</p> : null}
+          {carried?.length && !selectedTaskId ? <div className="cx-attachments">
+            <span className="cx-attachment" title={carried.join("\n\n").slice(0, 600)}>
+              ↶ Includes {carried.length} earlier message{carried.length === 1 ? "" : "s"} as context
+              <button type="button" aria-label="Drop the earlier messages" onClick={() => setCarried(null)}>×</button>
+            </span>
+          </div> : null}
           {attachments.length || attachNote ? <div className="cx-attachments">
             {attachments.map((item, index) => <span key={`${item.name}:${index}`} className="cx-attachment" title={item.path || `${item.name} (inline)`}>
               {item.image ? "🖼" : "📄"} {item.name}
