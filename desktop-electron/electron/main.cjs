@@ -54,7 +54,10 @@ const {
   providerNetworkReady,
   setProviderBrowserHost,
   setProviderCpaConnection,
+  setProviderWriteGuard,
 } = require("./provider-bootstrap.cjs");
+// Proxy Gateway changes are user actions: only the visible, focused main window may make them.
+setProviderWriteGuard((event) => assertFocusedMainWindow(event, true));
 
 const { createManagedExternalServicesController, resolveManagedProxyEnvironment } = require("./managed-external-services.cjs");
 const { createManagedBootstrap } = require("./managed-bootstrap.cjs");

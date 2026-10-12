@@ -4,10 +4,15 @@ const {
 } = require("./provider-network.cjs");
 const { createProviderExecutionPlan } = require("./provider-execution-router.cjs");
 const { resolveLauncherProfile } = require("./profile.cjs");
+const { GATEWAY_PROFILE_ID, createProxyGatewayController } = require("./proxy-gateway.cjs");
 
 let providerNetworkControllerPromise = null;
 let providerBrowserHostGetter = () => null;
 let providerCpaConnectionGetter = () => null;
+// Proxy Gateway writes are refused until main.cjs installs its focused-main-window check.
+let providerWriteGuard = () => {
+  throw new Error("Use the visible, focused main-window controller for provider consent");
+};
 
 function setProviderBrowserHost(getter) {
   if (typeof getter !== "function") {
@@ -21,6 +26,13 @@ function setProviderCpaConnection(getter) {
     throw new Error("Provider CPA connection getter must be a function");
   }
   providerCpaConnectionGetter = getter;
+}
+
+function setProviderWriteGuard(guard) {
+  if (typeof guard !== "function") {
+    throw new Error("Provider write guard must be a function");
+  }
+  providerWriteGuard = guard;
 }
 
 function providerNetworkReady() {
@@ -39,6 +51,7 @@ function installProviderNetwork({
   shell,
 }) {
   let controller = null;
+  let gateway = null;
 
   const logger = Object.freeze({
     info(event, detail = {}) {
@@ -56,6 +69,15 @@ function installProviderNetwork({
       }
     }
     return snapshot;
+  }
+
+  function publishGateway(status) {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send("launcher:proxy-gateway-changed", status);
+      }
+    }
+    return status;
   }
 
   providerNetworkControllerPromise = app.whenReady().then(async () => {
@@ -77,6 +99,21 @@ function installProviderNetwork({
       shell,
       userData: app.getPath("userData"),
     });
+
+    // The gateway listens before the saved global route is applied, so a route that points at it
+    // never starts against a closed port; if it cannot start, it puts the previous route back.
+    try {
+      gateway = createProxyGatewayController({
+        userData: app.getPath("userData"),
+        network: controller,
+        logger,
+      });
+      await gateway.startup();
+    } catch (error) {
+      logger.warn("proxy_gateway.unavailable", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
 
     const snapshot = controller.store.snapshot();
     if (snapshot.routing.globalEnabled && snapshot.routing.globalProfileId) {
@@ -154,17 +191,33 @@ function installProviderNetwork({
     publish(await active.probeProviderAccount(accountId))
   ));
 
-  handle("launcher:proxy-profile-save", (active, _event, input) => {
+  // An edited or archived gateway upstream takes effect on the gateway's next connection.
+  function refreshGatewayUpstream(profileId) {
+    if (gateway && profileId && gateway.upstreamProfileId() === profileId) {
+      publishGateway(gateway.refreshUpstream());
+    }
+  }
+
+  handle("launcher:proxy-profile-save", async (active, _event, input) => {
     const current = active.store.snapshot();
     const refreshGlobal = current.routing.globalEnabled
       && current.routing.globalProfileId === input?.id;
-    return publishMutation(active, () => active.store.saveProxyProfile(input), { refreshGlobal });
+    const snapshot = await publishMutation(active, () => active.store.saveProxyProfile(input), { refreshGlobal });
+    refreshGatewayUpstream(input?.id);
+    return snapshot;
   }, "network");
-  handle("launcher:proxy-profile-archive", (active, _event, profileId) => publishMutation(
-    active,
-    () => active.store.archiveProxyProfile(profileId),
-    { refreshGlobal: true },
-  ), "network");
+  handle("launcher:proxy-profile-archive", async (active, _event, profileId) => {
+    if (profileId === GATEWAY_PROFILE_ID) {
+      throw new Error("The built-in gateway profile is managed in Proxy Gateway; turn off \"Use for this app\" there instead");
+    }
+    const snapshot = await publishMutation(
+      active,
+      () => active.store.archiveProxyProfile(profileId),
+      { refreshGlobal: true },
+    );
+    refreshGatewayUpstream(profileId);
+    return snapshot;
+  }, "network");
   handle("launcher:proxy-profile-test", async (active, _event, profileId) => {
     const result = await active.testProxyProfile(profileId);
     publish(result.snapshot);
@@ -184,6 +237,42 @@ function installProviderNetwork({
     () => active.store.setAccountPolicy(input),
   ), "network");
 
+  // Proxy Gateway: the status read is open; every change is a user action from the focused main
+  // window, checked before anything else runs.
+  function handleGateway(channel, callback, { write = true } = {}) {
+    ipcMain.handle(channel, async (event, ...args) => {
+      if (write) providerWriteGuard(event);
+      const active = await controllerPromise;
+      if (!gateway) throw new Error("Proxy Gateway is unavailable; check the launcher log");
+      return callback(active, gateway, ...args);
+    });
+  }
+
+  async function gatewayMutation(active, mutate) {
+    const status = await mutate();
+    publish(active.store.snapshot());
+    return publishGateway(status);
+  }
+
+  handleGateway("launcher:proxy-gateway-status", (_active, current) => current.status(), { write: false });
+  handleGateway("launcher:proxy-gateway-configure", (active, current, input) => gatewayMutation(
+    active,
+    () => current.configure(input),
+  ));
+  handleGateway("launcher:proxy-gateway-running", (active, current, running) => gatewayMutation(
+    active,
+    () => current.setRunning(running === true),
+  ));
+  handleGateway("launcher:proxy-gateway-use-for-app", (active, current, enabled) => gatewayMutation(
+    active,
+    () => current.setUseForApp(enabled === true),
+  ));
+  handleGateway("launcher:proxy-gateway-test", async (_active, current) => publishGateway(await current.test()));
+
+  app.on("will-quit", () => {
+    void gateway?.close().catch(() => {});
+  });
+
   return Object.freeze({
     ready: providerNetworkReady,
     createProviderNetworkStore,
@@ -196,4 +285,5 @@ module.exports = {
   providerNetworkReady,
   setProviderBrowserHost,
   setProviderCpaConnection,
+  setProviderWriteGuard,
 };

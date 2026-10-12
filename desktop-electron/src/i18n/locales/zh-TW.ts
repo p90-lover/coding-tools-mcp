@@ -124,6 +124,7 @@ export default {
   paseoOrchestrator: "Paseo 協調器",
   annealTasks: "Anneal 任務",
   networkProxy: "網路代理",
+  proxyGateway: "代理閘道",
   usePaseo: "使用 Paseo 作為協調器",
   dispatchThroughPaseo: "透過 Paseo 執行",
   customOrchestrator: "自訂協調器",
