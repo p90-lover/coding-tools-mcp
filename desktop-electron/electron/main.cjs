@@ -2145,10 +2145,13 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:set-preference", (_event, key, value) => {
     const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "autoConnectExistingMcp"
-      || key === "chatAgentTools" || key === "chatAgentDesktopTools";
+      || key === "chatAgentTools" || key === "chatAgentDesktopTools" || key === "chatAgentTerminalTools";
     if (!ordinary) throw new Error("Unknown preference");
-    // Consent: auto-connecting MCP and letting chat agents see and drive the screen are the user's.
-    if (key === "autoConnectExistingMcp" || (key === "chatAgentDesktopTools" && value === true)) assertFocusedMainWindow(_event, true);
+    // Consent: auto-connecting MCP, and letting chat agents see and drive the screen or run
+    // commands, are the user's.
+    if (key === "autoConnectExistingMcp" || ((key === "chatAgentDesktopTools" || key === "chatAgentTerminalTools") && value === true)) {
+      assertFocusedMainWindow(_event, true);
+    }
     const state = stateStore.update({ [key]: value === true });
     if (key === "autoConnectExistingMcp") {
       automaticMcpAttemptPid = null;
@@ -2503,11 +2506,18 @@ async function start() {
     const { createChangePulse } = backendBundles.requireModule(backend, "ao-session-events.cjs");
     const { createAgentOrchestratorWorkflow, resolveAoNativeConnection, aoWebCatalogForModel } = backendBundles.requireModule(backend, "agent-orchestrator-workflow.cjs");
     const { HeadlessHost } = backendBundles.requireModule(backend, "headless-host.cjs");
+    const aoDataRoot = process.env.CODING_TOOLS_AO_DATA_DIR
+      ? path.resolve(process.env.CODING_TOOLS_AO_DATA_DIR)
+      : path.join(app.getPath("home"), ".ao", IS_DEV_PROFILE ? "coding-tools-development" : "coding-tools");
+    // AO keeps every session's worktree here; a chat agent's tools are rooted only inside it.
+    const aoWorktreesRoot = path.join(aoDataRoot, "worktrees");
     // Chat agents get tools over MCP, each session rooted at its own AO worktree: files, search,
-    // patches, git and terminal (Settings > "Give chat agents the app's tools", on by default),
-    // and screen capture and computer control only when the user opts in (Settings > "Let chat
-    // agents see and control the screen"). Created once: a live session keeps its server URL and
-    // credential across a backend restart.
+    // patches and git (Settings > "Give chat agents the app's tools", on by default); commands
+    // through the app's terminal only when the user opts in (Settings > "Let chat agents run
+    // commands through the app's terminal"), each confirmed here unless the session bypasses
+    // permissions; and screen capture and computer control only when the user opts in (Settings >
+    // "Let chat agents see and control the screen"). Created once: a live session keeps its
+    // server URL and credential across a backend restart.
     if (!chatAgentTools) {
       const { createChatAgentTools } = backendBundles.requireModule(backend, "chat-agent-tools.cjs");
       chatAgentTools = createChatAgentTools({
@@ -2519,9 +2529,12 @@ async function start() {
           if (!agentOrchestratorUpstream) throw new Error("Agent Orchestrator is unavailable");
           return agentOrchestratorUpstream.harness.sessionWorkspace(id);
         },
-        // Every screen or window observation is the user's call, in the focused app window.
+        worktreesRoot: aoWorktreesRoot,
+        // Every command, sensitive operation and screen or window observation is the user's call,
+        // in the focused app window.
         confirm: confirmAoAction,
         enabled: () => stateStore.read().chatAgentTools !== false,
+        terminalEnabled: () => stateStore.read().chatAgentTerminalTools === true,
         desktopEnabled: () => stateStore.read().chatAgentDesktopTools === true,
         version: app.getVersion(),
         logger,
@@ -2583,9 +2596,7 @@ async function start() {
         : app.isPackaged
           ? path.join(process.resourcesPath, "agent-orchestrator")
           : path.join(__dirname, "..", "build", "agent-orchestrator"),
-      dataRoot: process.env.CODING_TOOLS_AO_DATA_DIR
-        ? path.resolve(process.env.CODING_TOOLS_AO_DATA_DIR)
-        : path.join(app.getPath("home"), ".ao", IS_DEV_PROFILE ? "coding-tools-development" : "coding-tools"),
+      dataRoot: aoDataRoot,
       confirm: confirmAoAction, getWindow: () => mainWindow,
       getWorkspaces: listHeadlessWorkspaces,
       getCpaPricesPath: () => require("./cpa-managed.cjs").helperPricesPath(
@@ -2696,6 +2707,7 @@ async function start() {
       logger,
       sourceRoot: SOURCE_ROOT,
       binaryRoot: backend.source === "bundle" ? backend.resourcesRoot : null,
+      aoWorktreesRoot,
     });
     activeBackend = backend;
     missionWorkflowRuntime = agentOrchestratorWorkflow;

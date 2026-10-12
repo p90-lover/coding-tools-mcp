@@ -267,10 +267,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
    * the worktree AO creates for it), or null. Never fails a launch: without them the agent starts
    * without them.
    */
-  async function chatTools(agent, workspaceId) {
+  async function chatTools(agent, workspaceId, approvalMode) {
     if (!agentTools) return null;
     try {
-      const lease = await agentTools.lease({ agent, workspaceId });
+      // The session's permission mode goes with its credential: only a session launched to
+      // bypass permissions runs terminal commands without the user confirming each one.
+      const lease = await agentTools.lease({ agent, workspaceId, ...(approvalMode ? { approvalMode } : {}) });
       return Array.isArray(lease?.servers) && lease.servers.length ? lease : null;
     } catch (cause) {
       logger.warn?.("ao.agent_tools_unavailable", { agent, message: String(cause?.message || cause).slice(0, 200) });
@@ -315,7 +317,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       const launch = async (mode) => {
         // Chat sessions only: a terminal launch has no controller to attach tool servers to. Each
         // attempt gets its own credential, bound to the session it creates and to nothing else.
-        const tools = mode === "chat" ? await chatTools(agent, workspaceId) : null;
+        const tools = mode === "chat" ? await chatTools(agent, workspaceId, approvalMode) : null;
         let created;
         try {
           created = await launchSession(mode, tools?.servers ?? []);

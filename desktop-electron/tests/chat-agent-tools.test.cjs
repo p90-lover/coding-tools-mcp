@@ -6,7 +6,7 @@ const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { createChatAgentTools, patchTargets, toolResult } = require("../electron/chat-agent-tools.cjs");
+const { createChatAgentTools, patchTargets, toolResult, windowsQuirk } = require("../electron/chat-agent-tools.cjs");
 
 const WINDOWS = process.platform === "win32";
 const tool = (name) => ({ name, description: name, inputSchema: { type: "object" } });
@@ -33,12 +33,12 @@ function tempTree() {
   return { base, root, checkout, elsewhere, cleanup: () => fs.rmSync(base, { recursive: true, force: true }) };
 }
 
-function fixture({ enabled = () => true, desktop = () => false, results = {}, workspaces = null, confirm = async () => true, root = null } = {}) {
+function fixture({ enabled = () => true, desktop = () => false, terminal = () => false, results = {}, workspaces = null, confirm = async () => true, root = null, worktreesRoot = null } = {}) {
   const calls = [];
   const asked = [];
   const confirmations = [];
   const tools = createChatAgentTools({
-    enabled, desktopEnabled: desktop, version: "9.9.9", logger: { info() {}, warn() {} },
+    enabled, desktopEnabled: desktop, terminalEnabled: terminal, worktreesRoot, version: "9.9.9", logger: { info() {}, warn() {} },
     confirm: async (request) => { confirmations.push(request); return confirm(request); },
     sessionWorkspace: async (id) => {
       asked.push(id);
@@ -49,7 +49,8 @@ function fixture({ enabled = () => true, desktop = () => false, results = {}, wo
       calls.push({ endpoint, body, options });
       if (endpoint.startsWith("/api/v1/tools/catalog?")) return CATALOG;
       if (endpoint === "/api/v1/tools/call") {
-        const outcome = results[body.tool];
+        const given = results[body.tool];
+        const outcome = typeof given === "function" ? given(body) : given;
         if (outcome instanceof Error) throw outcome;
         return { ok: true, operation: outcome ?? { state: "completed", result: { ok: true, tool: body.tool, echo: body.arguments } } };
       }
@@ -60,8 +61,8 @@ function fixture({ enabled = () => true, desktop = () => false, results = {}, wo
 }
 
 /** A leased, bound session: its URL and auth header. */
-async function session(tools, { agent = "codex", workspaceId = "ws1", id = "ao-1" } = {}) {
-  const lease = await tools.lease({ agent, workspaceId });
+async function session(tools, { agent = "codex", workspaceId = "ws1", id = "ao-1", approvalMode = undefined } = {}) {
+  const lease = await tools.lease({ agent, workspaceId, ...(approvalMode ? { approvalMode } : {}) });
   assert.ok(lease, "leased");
   if (id) assert.equal(lease.bind(id), true);
   const [{ url, headers }] = lease.servers;
@@ -119,7 +120,8 @@ test("each chat session gets its own server path and credential, for agents whos
 test("the warm-session identity names the tool groups, never a credential or a session, and is pending until the server listens", async () => {
   let on = true;
   let desktop = false;
-  const { tools } = fixture({ enabled: () => on, desktop: () => desktop });
+  let terminal = false;
+  const { tools } = fixture({ enabled: () => on, desktop: () => desktop, terminal: () => terminal });
   try {
     assert.equal(tools.identity("ws1"), "pending");
     const lease = await tools.lease({ agent: "codex", workspaceId: "ws1" });
@@ -132,6 +134,10 @@ test("the warm-session identity names the tool groups, never a credential or a s
     assert.equal(tools.identity("ws2"), identity, "the workspace is already part of the warm key");
     desktop = true;
     assert.match(tools.identity("ws1"), /^on\|agent\+desktop\|/, "the desktop group is part of it");
+    terminal = true;
+    assert.match(tools.identity("ws1"), /^on\|agent\+terminal\+desktop\|/, "so is the terminal group");
+    desktop = false;
+    assert.match(tools.identity("ws1"), /^on\|agent\+terminal\|/);
     on = false;
     assert.equal(tools.identity("ws1"), "off");
   } finally { await tools.close(); }
@@ -158,8 +164,8 @@ test("the MCP endpoint answers initialize, lists the agent tools and calls them 
 
     const reply = await post(url, { jsonrpc: "2.0", id: 2, method: "tools/list" }, auth);
     assert.deepEqual(reply.body.result.tools.map((entry) => entry.name),
-      ["read_file", "exec_command", "apply_patch", "git_status", "view_image", "update_plan", "request_permissions"],
-      "desktop tools are off by default; the default cwd, task board, native Codex, history, operation store, sandbox and harness tools are never offered");
+      ["read_file", "apply_patch", "git_status", "view_image", "update_plan"],
+      "terminal and desktop tools are off by default; request_permissions, the default cwd, task board, native Codex, history, operation store, sandbox and harness tools are never offered");
     assert.equal(Object.hasOwn(reply.body.result.tools[0], "outputSchema"), false);
     assert.deepEqual(reply.body.result.tools[0].annotations, { readOnlyHint: true });
     assert.equal(calls[0].endpoint, "/api/v1/tools/catalog?workspace_id=ws1");
@@ -179,7 +185,8 @@ test("the MCP endpoint answers initialize, lists the agent tools and calls them 
     assert.deepEqual(JSON.parse(called.content[0].text), called.structuredContent);
 
     const before = calls.length;
-    for (const hidden of ["workflow_update", "set_default_cwd", "get_default_cwd", "codex_command_exec", "capture_screenshot", "computer_action", "sandbox_exec", "no_such_tool"]) {
+    for (const hidden of ["workflow_update", "set_default_cwd", "get_default_cwd", "codex_command_exec", "capture_screenshot", "computer_action", "sandbox_exec",
+      "request_permissions", "exec_command", "write_stdin", "read_output", "kill_command", "no_such_tool"]) {
       const refused = await callTool(url, auth, hidden);
       assert.equal(refused.isError, true, hidden);
       assert.match(refused.content[0].text, /Unknown tool/, hidden);
@@ -332,7 +339,7 @@ test("patchTargets names every file a patch touches, in both formats headless ap
 
 test("exec_command always starts in the worktree", async () => {
   const tree = tempTree();
-  const { tools, calls } = fixture({ root: tree.root });
+  const { tools, calls } = fixture({ root: tree.root, terminal: () => true });
   try {
     const { url, auth } = await session(tools);
     assert.equal((await callTool(url, auth, "exec_command", { cmd: "git status" })).isError, false);
@@ -349,6 +356,257 @@ test("exec_command always starts in the worktree", async () => {
       assert.equal(refused.isError, true, JSON.stringify(args));
     }
     assert.equal(calls.length, before);
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("the terminal is its own group, off by default, and turning it on reaches only new sessions", async () => {
+  const tree = tempTree();
+  let terminal = false;
+  const { tools, calls } = fixture({ root: tree.root, terminal: () => terminal });
+  try {
+    const before = await session(tools, { id: "ao-1" });
+    assert.ok(!(await listed(before.url, before.auth)).includes("exec_command"));
+    const init = await post(before.url, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, before.auth);
+    assert.doesNotMatch(init.body.result.instructions, /exec_command/, "the terminal is not mentioned while it is off");
+    const count = calls.length;
+    for (const name of ["exec_command", "write_stdin", "read_output", "kill_command", "kill_session", "check_exec_environment"]) {
+      assert.match((await callTool(before.url, before.auth, name, { cmd: "dir" })).content[0].text, /Unknown tool/, name);
+    }
+    assert.equal(calls.length, count, "no terminal call reached the service");
+
+    terminal = true;
+    assert.match((await callTool(before.url, before.auth, "exec_command", { cmd: "dir" })).content[0].text, /Unknown tool/,
+      "a session started without the terminal group does not gain it");
+    const opted = await session(tools, { id: "ao-2" });
+    assert.ok((await listed(opted.url, opted.auth)).includes("exec_command"));
+    const optedInit = await post(opted.url, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, opted.auth);
+    assert.match(optedInit.body.result.instructions, /NOT confined/, "the agent is told plainly that commands are not confined");
+    assert.match(optedInit.body.result.instructions, /anything the user's account can/);
+    assert.match(optedInit.body.result.instructions, /confirms each command/);
+    terminal = false;
+    assert.match((await callTool(opted.url, opted.auth, "exec_command", { cmd: "dir" })).content[0].text, /Unknown tool/,
+      "turning the setting off refuses it in running sessions too");
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("every command and every input to one is confirmed by the user, unless the session bypasses permissions", async () => {
+  const tree = tempTree();
+  let answer = async () => true;
+  const { tools, calls, confirmations } = fixture({ root: tree.root, terminal: () => true, confirm: (request) => answer(request) });
+  try {
+    const { url, auth } = await session(tools);
+    assert.equal((await callTool(url, auth, "exec_command", { cmd: "npm test", workdir: "src" })).isError, false);
+    assert.equal(confirmations.length, 1);
+    assert.match(confirmations[0].message, /run a command/);
+    assert.match(confirmations[0].detail, /npm test/, "the dialog shows the command");
+    assert.ok(confirmations[0].detail.includes(path.join(path.resolve(tree.root), "src")), "and the directory it starts in");
+    assert.match(confirmations[0].detail, /not confined/);
+    assert.equal(calls.at(-1).body.tool, "exec_command");
+
+    assert.equal((await callTool(url, auth, "write_stdin", { command_id: "c1", chars: "y\n" })).isError, false);
+    assert.equal(confirmations.length, 2);
+    assert.match(confirmations[1].detail, /c1/);
+    assert.match(confirmations[1].detail, /y\n/);
+    // Polling (an empty write), reading output and stopping a command send nothing to it.
+    for (const [name, args] of [["write_stdin", { command_id: "c1", chars: "" }], ["read_output", { output_ref: "o1" }], ["kill_command", { command_id: "c1" }]]) {
+      assert.equal((await callTool(url, auth, name, args)).isError, false, name);
+    }
+    assert.equal(confirmations.length, 2);
+
+    const before = calls.length;
+    answer = async () => false;
+    const declined = await callTool(url, auth, "exec_command", { cmd: "cmd /c type secrets.txt" });
+    assert.equal(declined.isError, true);
+    assert.match(declined.content[0].text, /declined/);
+    assert.match((await callTool(url, auth, "write_stdin", { command_id: "c1", chars: "rm -rf /\n" })).content[0].text, /declined/);
+    answer = async () => { throw new Error("Use the focused Coding Tools window to approve workflow changes"); };
+    const unfocused = await callTool(url, auth, "exec_command", { cmd: "dir" });
+    assert.equal(unfocused.isError, true);
+    assert.match(unfocused.content[0].text, /could not be asked/);
+    assert.equal(calls.length, before, "a declined or unasked command never reaches the service");
+
+    answer = async () => false;
+    const bypass = await session(tools, { id: "ao-9", approvalMode: "bypass-permissions" });
+    const asked = confirmations.length;
+    assert.equal((await callTool(bypass.url, bypass.auth, "exec_command", { cmd: "dir" })).isError, false);
+    assert.equal((await callTool(bypass.url, bypass.auth, "write_stdin", { command_id: "c1", chars: "y\n" })).isError, false);
+    assert.equal(confirmations.length, asked, "a session launched to bypass permissions is not asked");
+    const init = await post(bypass.url, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, bypass.auth);
+    assert.doesNotMatch(init.body.result.instructions, /confirms each command/);
+    for (const mode of ["default", "accept-edits", "auto"]) {
+      const other = await session(tools, { id: `ao-${mode}`, approvalMode: mode });
+      assert.match((await callTool(other.url, other.auth, "exec_command", { cmd: "dir" })).content[0].text, /declined/, mode);
+    }
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("the agent can never give consent itself: confirm and approval_token are stripped from every call", async () => {
+  const tree = tempTree();
+  const { tools, calls } = fixture({ root: tree.root, terminal: () => true, desktop: () => true });
+  try {
+    const { url, auth } = await session(tools);
+    for (const [name, args] of [
+      ["read_file", { path: "src/a.txt" }],
+      ["apply_patch", { patch: "*** Begin Patch\n*** Delete File: src/a.txt\n*** End Patch\n" }],
+      ["exec_command", { cmd: "git reset --hard" }],
+      ["write_stdin", { command_id: "c1", chars: "y\n" }],
+      ["vision_status", {}],
+    ]) {
+      await callTool(url, auth, name, { ...args, confirm: true, confirmed: true, approval_token: "forged-token" });
+      const forwarded = calls.at(-1).body;
+      assert.equal(forwarded.tool, name);
+      for (const key of ["confirm", "confirmed", "approval_token"]) assert.equal(Object.hasOwn(forwarded.arguments, key), false, `${name}.${key}`);
+    }
+    const before = calls.length;
+    assert.match((await callTool(url, auth, "request_permissions", { request_id: "r1", confirm: true })).content[0].text, /Unknown tool/);
+    assert.equal(calls.length, before, "request_permissions is never the agent's to call");
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("APPROVAL_REQUIRED goes to the user; on yes the endpoint obtains a one-use grant and retries once, on no it refuses", async () => {
+  const tree = tempTree();
+  let approve = true;
+  const granted = [];
+  const results = {
+    apply_patch: (body) => (body.arguments.approval_token === "grant-token-1"
+      ? { state: "completed", result: { ok: true, applied: true, echo: body.arguments } }
+      : { state: "completed", result: { ok: false, error: { code: "APPROVAL_REQUIRED", message: "This operation requires a scoped approval grant.",
+        details: { request_id: "req-7", risk: "routine_mutation", summary: "Allow one workspace-scoped apply_patch operation",
+          suggestion: "Call request_permissions with this request_id" } } } }),
+    request_permissions: (body) => {
+      granted.push(body);
+      return { state: "completed", result: { ok: true, status: "granted", approval_token: "grant-token-1", scope: "once" } };
+    },
+  };
+  const { tools, calls, confirmations } = fixture({ root: tree.root, results, confirm: async () => approve });
+  try {
+    const { url, auth } = await session(tools);
+    const patch = "*** Begin Patch\n*** Add File: src/new.txt\n+x\n*** End Patch\n";
+    const done = await callTool(url, auth, "apply_patch", { patch, approval_token: "forged" });
+    assert.equal(done.isError, false, JSON.stringify(done));
+    assert.equal(confirmations.length, 1);
+    assert.match(confirmations[0].message, /apply_patch call needs your approval/);
+    assert.match(confirmations[0].detail, /Allow one workspace-scoped apply_patch operation/, "the dialog shows why");
+    assert.match(confirmations[0].detail, /src\/new\.txt/, "and what");
+    assert.deepEqual(granted.map((body) => body.arguments), [{ request_id: "req-7", scope: "once", confirm: true, reason: "Approved by the user in Coding Tools" }]);
+    assert.equal(granted[0].root, path.resolve(tree.root), "the grant belongs to the session's own rooted context");
+    const tried = calls.filter((call) => call.body?.tool === "apply_patch");
+    assert.equal(tried.length, 2, "the original call is retried once");
+    assert.equal(tried[0].body.arguments.approval_token, undefined, "the agent's own token was stripped");
+    assert.equal(tried[1].body.arguments.approval_token, "grant-token-1");
+    assert.equal(tried[1].body.root, path.resolve(tree.root));
+    assert.ok(!JSON.stringify(done).includes("grant-token-1"), "the grant never reaches the agent");
+
+    approve = false;
+    const before = calls.length;
+    const refused = await callTool(url, auth, "apply_patch", { patch });
+    assert.equal(refused.isError, true);
+    assert.match(refused.content[0].text, /declined apply_patch; it was not run/);
+    assert.equal(calls.length, before + 1, "only the first attempt ran: no grant, no retry");
+    assert.equal(granted.length, 1);
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("a command the user already confirmed gets its approval without a second dialog; a confirmation gate is answered by the user too", async () => {
+  const tree = tempTree();
+  const results = {
+    exec_command: (body) => (body.arguments.approval_token
+      ? { state: "completed", result: { ok: true, stdout: "done" } }
+      : { state: "completed", result: { ok: false, error: { code: "APPROVAL_REQUIRED", details: { request_id: "req-1", risk: "network" } } } }),
+    request_permissions: () => ({ state: "completed", result: { ok: true, approval_token: "tok-2" } }),
+    apply_patch: (body) => (body.arguments.confirm === true
+      ? { state: "completed", result: { ok: true, deleted: true } }
+      : { state: "completed", result: { ok: false, error: { code: "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION", message: "Deleting a critical project file requires explicit confirmation: package.json" } } }),
+  };
+  let approve = true;
+  const { tools, calls, confirmations } = fixture({ root: tree.root, terminal: () => true, results, confirm: async () => approve });
+  try {
+    const { url, auth } = await session(tools);
+    const ran = await callTool(url, auth, "exec_command", { cmd: "curl https://example.com" });
+    assert.equal(ran.isError, false);
+    assert.equal(confirmations.length, 1, "one dialog: the command itself");
+    assert.equal(calls.filter((call) => call.body?.tool === "exec_command").length, 2);
+
+    const patch = "*** Begin Patch\n*** Delete File: package.json\n*** End Patch\n";
+    const deleted = await callTool(url, auth, "apply_patch", { patch, confirm: true });
+    assert.equal(deleted.isError, false);
+    assert.equal(confirmations.length, 2);
+    assert.match(confirmations[1].detail, /critical project file/);
+    const attempts = calls.filter((call) => call.body?.tool === "apply_patch");
+    assert.equal(attempts[0].body.arguments.confirm, undefined, "the agent's confirm was stripped");
+    assert.equal(attempts[1].body.arguments.confirm, true, "the user's confirmation is supplied by the endpoint");
+
+    approve = false;
+    const declined = await callTool(url, auth, "apply_patch", { patch });
+    assert.match(declined.content[0].text, /declined/);
+    assert.equal(calls.filter((call) => call.body?.tool === "apply_patch").length, 3);
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("Windows spellings that open another file are refused, and patches never write git's own data", async () => {
+  const tree = tempTree();
+  fs.mkdirSync(path.join(tree.root, ".git"));
+  fs.writeFileSync(path.join(tree.root, ".git", "config"), "[core]\n");
+  fs.mkdirSync(path.join(tree.root, "sub", ".git"), { recursive: true });
+  const { tools, calls } = fixture({ root: tree.root });
+  try {
+    const { url, auth } = await session(tools);
+    const before = calls.length;
+    const protectedTargets = [".git/config", ".GIT/config", ".Github/workflows/ci.yml", "sub/.git/config", "sub/.GIT/hooks/pre-commit", ".mcp-paths/x.txt"];
+    const quirks = WINDOWS ? [
+      ".git./config", ".git /config", ".git::$INDEX_ALLOCATION/config", ".git:stream", "GIT~1/config", ".github./workflows/ci.yml",
+      "a.txt.", "src/a.txt::$DATA", "CON", "nul.txt", "src/COM1.rs", "LPT9.log", "Aux.tar.gz", "src\\deep\\x~1.txt",
+    ] : [];
+    for (const target of [...protectedTargets, ...quirks]) {
+      for (const patch of [
+        `*** Begin Patch\n*** Add File: ${target}\n+x\n*** End Patch\n`,
+        `--- /dev/null\n+++ b/${target}\n@@ -0,0 +1 @@\n+x\n`,
+      ]) {
+        const refused = await callTool(url, auth, "apply_patch", { patch });
+        assert.equal(refused.isError, true, target);
+        assert.match(refused.content[0].text, /patch target .* refused/, target);
+      }
+    }
+    for (const target of quirks) {
+      const refused = await callTool(url, auth, "read_file", { path: target });
+      assert.equal(refused.isError, true, target);
+      assert.match(refused.content[0].text, /dot or a space|alternate data stream|reserved device name|short name/, target);
+    }
+    assert.equal(calls.length, before, "none reached the service");
+    assert.equal(fs.readFileSync(path.join(tree.root, ".git", "config"), "utf8"), "[core]\n");
+    for (const allowed of [".gitignore", "src/.github-notes.md", "console.log", "src/a~b.txt"]) {
+      const patched = await callTool(url, auth, "apply_patch", { patch: `*** Begin Patch\n*** Add File: ${allowed}\n+x\n*** End Patch\n` });
+      assert.equal(patched.isError, false, allowed);
+    }
+    assert.equal((await callTool(url, auth, "read_file", { path: ".git/config" })).isError, false, "reading git's data is not writing it");
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("windowsQuirk names every spelling Windows would open as another file", () => {
+  for (const part of [".git.", ".git ", ".git::$DATA", "x:y", "CON", "con", "nul.txt", "Aux.tar.gz", "COM1", "lpt9.log", "COM0", "conin$", "PRN ", "GIT~1", "GITHUB~2.TXT", "COM¹"]) {
+    assert.ok(windowsQuirk(part), part);
+  }
+  for (const part of ["src", ".git", "console.log", "nullable.rs", "COM10", "LPT", "a~b", ".", "..", ""]) {
+    assert.equal(windowsQuirk(part), null, part);
+  }
+});
+
+test("a root outside AO's worktrees folder is refused", async () => {
+  const tree = tempTree();
+  let reported = tree.root;
+  const { tools, calls } = fixture({ workspaces: () => ({ root: reported }), worktreesRoot: path.join(tree.base, "worktrees") });
+  try {
+    const one = await session(tools, { id: "ao-1" });
+    assert.equal((await callTool(one.url, one.auth, "read_file", { path: "src/a.txt" })).isError, false);
+    reported = tree.checkout;
+    const two = await session(tools, { id: "ao-2" });
+    const refused = await callTool(two.url, two.auth, "read_file", { path: "x" });
+    assert.match(refused.content[0].text, /not one of AO's worktrees/);
+    reported = path.join(tree.base, "worktrees");
+    const three = await session(tools, { id: "ao-3" });
+    assert.match((await callTool(three.url, three.auth, "read_file", { path: "x" })).content[0].text, /not one of AO's worktrees/,
+      "the folder itself is not a session's worktree");
+    assert.equal(calls.filter((call) => call.endpoint === "/api/v1/tools/call").length, 1);
   } finally { await tools.close(); tree.cleanup(); }
 });
 
@@ -434,7 +692,7 @@ test("desktop tools are hidden and refused unless the user opts in, and every sc
     assert.match((await callTool(before.url, before.auth, "capture_screenshot")).content[0].text, /Unknown tool/,
       "a session started without the desktop group does not gain it");
     const opted = await session(tools, { id: "ao-2" });
-    assert.deepEqual((await listed(opted.url, opted.auth)).filter((name) => !["read_file", "exec_command", "apply_patch", "git_status", "view_image", "update_plan", "request_permissions"].includes(name)),
+    assert.deepEqual((await listed(opted.url, opted.auth)).filter((name) => !["read_file", "apply_patch", "git_status", "view_image", "update_plan"].includes(name)),
       ["capture_screenshot", "list_windows", "computer_snapshot", "computer_action", "vision_status"]);
     const init = await post(opted.url, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, opted.auth);
     assert.match(init.body.result.instructions, /confirms each screen capture/);
@@ -449,10 +707,28 @@ test("desktop tools are hidden and refused unless the user opts in, and every sc
     const declined = await callTool(opted.url, opted.auth, "list_windows");
     assert.match(declined.content[0].text, /declined/);
     assert.equal(calls.at(-1).body.tool, "capture_screenshot", "a declined call never reaches the service");
-    // Computer control is gated by the user's own local enable (its lease), not a dialog per action.
+    assert.match((await callTool(opted.url, opted.auth, "computer_snapshot", { session_id: "lease" })).content[0].text, /declined/,
+      "a snapshot of the controlled window is an observation, confirmed every time");
+    assert.equal(calls.at(-1).body.tool, "capture_screenshot");
+    approve = true;
     await callTool(opted.url, opted.auth, "computer_snapshot", { session_id: "lease" });
     assert.equal(calls.at(-1).body.tool, "computer_snapshot");
-    assert.equal(confirmations.length, 2);
+    assert.equal(confirmations.length, 4);
+    // Computer control needs the user's local enable (its lease, shared by the workspace) and,
+    // once per chat, the user's leave for this chat to use it.
+    approve = false;
+    assert.match((await callTool(opted.url, opted.auth, "computer_action", { session_id: "lease" })).content[0].text, /did not allow this chat/);
+    assert.equal(calls.at(-1).body.tool, "computer_snapshot");
+    approve = true;
+    await callTool(opted.url, opted.auth, "computer_action", { session_id: "lease" });
+    assert.equal(calls.at(-1).body.tool, "computer_action");
+    assert.match(confirmations.at(-1).detail, /every chat you allow here/);
+    const asked = confirmations.length;
+    await callTool(opted.url, opted.auth, "computer_action", { session_id: "lease" });
+    assert.equal(confirmations.length, asked, "asked once per chat, not per action");
+    const another = await session(tools, { id: "ao-3" });
+    await callTool(another.url, another.auth, "computer_action", { session_id: "lease" });
+    assert.equal(confirmations.length, asked + 1, "another chat is asked for itself");
 
     desktop = false;
     assert.match((await callTool(opted.url, opted.auth, "computer_action", {})).content[0].text, /Unknown tool/,
@@ -475,7 +751,7 @@ test("turning the app's tools off refuses calls in running sessions", async () =
 
 test("tool failures come back as tool errors, not transport errors", async () => {
   const tree = tempTree();
-  const { tools } = fixture({ root: tree.root, results: {
+  const { tools } = fixture({ root: tree.root, terminal: () => true, results: {
     exec_command: { state: "failed", error: "RESULT_TOO_LARGE: exec_command ran" },
     read_file: new Error("Headless service rejected the request (HTTP 400)"),
     git_status: { state: "completed", result: { ok: false, error: { code: "APPROVAL_REQUIRED" } } },

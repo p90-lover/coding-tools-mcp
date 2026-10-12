@@ -11,23 +11,36 @@
 // - The root is learned from AO once the session exists: the spawn binds the credential to its
 //   AO session, and the first call asks AO for the session's worktree (re-checked every
 //   ROOT_RECHECK_MS). Until AO has made it, calls are refused ("not ready yet"); once the
-//   session has ended, its credential is forgotten (also on kill, after a sweep, or unused).
+//   session has ended, its credential is forgotten (also on kill, after a sweep, or unused). When
+//   the app names AO's worktrees folder, a root outside it is refused.
 // - Headless runs each call in a context rooted at that worktree (the `root` of
 //   /api/v1/tools/call), so paths, the command directory, terminal sessions, approvals and plans
 //   all belong to it. This endpoint is the outer guard: every path argument and patch target must
-//   resolve inside the worktree (after `..`, drive letters, UNC and device paths, and symlinks or
-//   junctions via realpath), and exec_command always starts in it.
-// - Not a sandbox: a shell command can still `cd` anywhere the user can, exactly as the agent's
-//   own built-in shell can. What stays in the worktree are the defaults and the file tools.
+//   resolve inside the worktree (after `..`, drive letters, UNC and device paths, Windows spellings
+//   that open another file (trailing dots or spaces, `:` streams, device names, 8.3 short names),
+//   and symlinks or junctions via realpath), a patch never writes git's own data, and
+//   exec_command always starts in the worktree.
+// - Consent is the user's alone: `confirm` and `approval_token` are stripped from every call the
+//   agent makes, and request_permissions is never offered. When the workspace policy needs an
+//   approval (APPROVAL_REQUIRED) or a confirmation (DANGEROUS_OPERATION_REQUIRES_CONFIRMATION),
+//   the user is asked here; on yes this endpoint obtains a one-use grant for that one operation in
+//   the session's own context and retries it once. The grant never reaches the agent.
+// - Not a sandbox: a terminal command can still `cd` anywhere and read or change anything the
+//   user's account can, exactly as the agent's own built-in shell can. That is why the terminal is
+//   its own group, off by default, and why the user confirms every command and every input sent
+//   to one (unless the session was launched to bypass permissions).
 //
-// Tool groups, both under Settings: "agent" (files, search, patches, git, terminal, images, plan;
-// on by default) and "desktop" (screen capture and computer control; off unless the user opts
-// in). Anything else (the default cwd, the native Codex bridge, ChatGPT history, the operation
-// store, the task board, sandbox and harness tools) is never offered. A tool outside the enabled
-// groups is absent from tools/list and refused on tools/call; turning a group off also refuses it
-// in sessions already running. Desktop tools run in the workspace's own context: computer_*
-// control needs the user to enable it in the app (its existing local lease, bound to the
-// workspace), and a screen or window observation is confirmed by the user in the app every time.
+// Tool groups, all under Settings: "agent" (files, search, patches, git, images, plan; on by
+// default), "terminal" (exec_command, write_stdin, read_output, kill_command; off unless the user
+// opts in) and "desktop" (screen capture and computer control; off unless the user opts in).
+// Anything else (the default cwd, the native Codex bridge, ChatGPT history, the operation store,
+// the task board, request_permissions, sandbox and harness tools) is never offered. A tool outside
+// the enabled groups is absent from tools/list and refused on tools/call; turning a group off also
+// refuses it in sessions already running. Desktop tools run in the workspace's own context:
+// computer_* control needs the user to enable it in the app (its existing local lease, bound to the
+// workspace, not to one chat: every chat the user allows to control the screen can use it while it
+// is enabled), each chat asks the user once before its first control call, and a screen or window
+// observation is confirmed by the user in the app every time.
 //
 // Transport: MCP Streamable HTTP (JSON responses, no SSE stream) on 127.0.0.1 at an ephemeral port.
 
@@ -48,16 +61,19 @@ const WORKSPACE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const SESSION_KEY = /^[A-Za-z0-9_-]{16,64}$/;
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const IMAGE_TOOLS = new Set(["view_image", "capture_screenshot", "capture_window"]);
+const WINDOWS = process.platform === "win32";
 
 // Default on: everything stays inside the session's worktree.
 const AGENT_TOOLS = new Set([
   "read_file", "list_dir", "list_files", "search_text", "grep_text",
   "apply_patch", "patch_check",
   "git_status", "git_diff", "git_log", "git_show", "git_blame",
-  "exec_command", "write_stdin", "read_output", "kill_command", "kill_session",
   "view_image", "image_info", "compare_images",
-  "update_plan", "get_plan", "get_current_time", "tool_search", "server_info", "request_permissions",
-  "check_exec_environment",
+  "update_plan", "get_plan", "get_current_time", "tool_search", "server_info",
+]);
+// Opt-in: commands start in the worktree but are not confined to it.
+const TERMINAL_TOOLS = new Set([
+  "exec_command", "write_stdin", "read_output", "kill_command", "kill_session", "check_exec_environment",
 ]);
 // Opt-in: these see the screen and drive the mouse and keyboard, outside any worktree.
 const DESKTOP_TOOLS = new Set([
@@ -65,17 +81,24 @@ const DESKTOP_TOOLS = new Set([
   "computer_find_control", "computer_wait", "computer_action", "computer_sequence", "computer_stop",
   "capture_screenshot", "capture_window", "list_windows", "list_displays", "vision_status",
 ]);
-// Desktop tools that observe the screen with no consent of their own (computer_* control has the
-// user's local lease): the user confirms each call in the app.
+// Desktop tools that observe the screen: the user confirms each call in the app.
 const CONFIRMED_TOOLS = new Map([
   ["capture_screenshot", "take a screenshot of your screen"],
   ["capture_window", "capture a window on your screen"],
   ["list_windows", "list the windows open on your desktop"],
   ["list_displays", "list your displays"],
   ["computer_list_windows", "list the windows open on your desktop"],
+  ["computer_snapshot", "capture the window it controls"],
 ]);
-const GROUPS = Object.freeze(["agent", "desktop"]);
-const groupOf = (name) => (AGENT_TOOLS.has(name) ? "agent" : DESKTOP_TOOLS.has(name) ? "desktop" : null);
+// Computer control the user allows once per chat (on top of enabling control in the app); status
+// and stop are harmless, and the observations above are confirmed every time.
+const CONTROL_TOOLS = new Set([
+  "computer_route", "computer_select_window", "computer_find_control", "computer_wait", "computer_action", "computer_sequence",
+]);
+// Consent the agent may never give itself: stripped from every call it makes.
+const CONSENT_ARGUMENTS = Object.freeze(["confirm", "confirmed", "approval_token"]);
+const GROUPS = Object.freeze(["agent", "terminal", "desktop"]);
+const groupOf = (name) => (AGENT_TOOLS.has(name) ? "agent" : TERMINAL_TOOLS.has(name) ? "terminal" : DESKTOP_TOOLS.has(name) ? "desktop" : null);
 
 // Path arguments per tool, taken from the tool schemas (registry_definitions.rs) and the headless
 // dispatch's own default-cwd rewriting (dispatch.rs apply_default_cwd).
@@ -87,6 +110,8 @@ const PATH_ARGUMENTS = Object.freeze({
 });
 const PATH_LIST_ARGUMENTS = Object.freeze({ git_diff: ["paths"], git_show: ["paths"] });
 const PATCH_TOOLS = new Set(["apply_patch", "patch_check"]);
+// Names no patch writes into, compared by the name the file system opens (see effectiveName).
+const PROTECTED_NAMES = new Set([".git", ".github", ".mcp-paths"]);
 
 const ROOT_RECHECK_MS = 30_000;
 const UNBOUND_TTL_MS = 10 * 60_000;
@@ -157,22 +182,57 @@ function realLocation(target) {
 const DEVICE_PATH = /^[\\/]{2}[?.](?:[\\/]|$)/;
 // C:foo is relative to that drive's current directory, not to the worktree.
 const DRIVE_RELATIVE = /^[A-Za-z]:(?![\\/])/;
+const RESERVED_DEVICE = /^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|(?:COM|LPT)[0-9\u00b9\u00b2\u00b3])$/i;
+
+/**
+ * Why Windows would open something other than what a path part names, if it would: trailing dots
+ * or spaces are dropped, `:` names an alternate data stream (`.git::$INDEX_ALLOCATION` is the
+ * `.git` directory), a device name (CON, NUL, COM1, with or without an extension) is a device, and
+ * an 8.3 short name (`GIT~1`) is expanded by the file system.
+ */
+function windowsQuirk(part) {
+  if (!part || part === "." || part === "..") return null;
+  if (/[. ]$/.test(part)) return "a path part ends with a dot or a space";
+  if (part.includes(":")) return "a path part names an alternate data stream";
+  if (RESERVED_DEVICE.test(part.split(".")[0].replace(/ +$/, ""))) return "a path part is a reserved device name";
+  if (/~\d/.test(part)) return "a path part is an 8.3 short name";
+  return null;
+}
+
+/** The name Windows opens for a path part, lower-cased: `.git.`, `.GIT ` and `.git::$DATA` all open `.git`. */
+const effectiveName = (part) => part.split(":")[0].replace(/[. ]+$/, "").toLowerCase();
+const protectedName = (part) => part !== "." && part !== ".." && PROTECTED_NAMES.has(effectiveName(part));
 
 /**
  * A path argument, scoped to the session's worktree: relative to its root, refused if it resolves
- * anywhere else, and forwarded relative (headless resolves it against the same root).
+ * anywhere else or is spelled to open another file than it names, and forwarded relative (headless
+ * resolves it against the same root). A `write` target may not be git's own data or another
+ * protected folder, compared by its canonical name.
  */
-function scopePath(root, raw, label) {
+function scopePath(root, raw, label, { write = false } = {}) {
   if (typeof raw !== "string" || !raw || raw.includes("\0")) throw new ScopeError(`${label} must be a non-empty path`);
   const outside = (why = "it is outside this chat's worktree") => new ScopeError(`${label} "${raw.slice(0, 200)}" is refused: ${why}`);
   if (raw.startsWith("@")) throw outside("linked projects (@alias) are outside this chat's worktree");
   if (DEVICE_PATH.test(raw) || DRIVE_RELATIVE.test(raw)) throw outside();
   const candidate = path.resolve(root.path, raw);
   if (!inside(root.path, candidate)) throw outside();
+  const relative = path.relative(root.path, candidate);
+  const parts = relative ? relative.split(path.sep) : [];
+  if (WINDOWS) {
+    for (const part of parts) {
+      const why = windowsQuirk(part);
+      if (why) throw outside(why);
+    }
+  }
   let real;
   try { real = realLocation(candidate); } catch (error) { throw outside(error instanceof ScopeError ? error.message : undefined); }
   if (!inside(root.real, real)) throw outside("it leads outside this chat's worktree through a link");
-  return path.relative(root.path, candidate).split(path.sep).join("/") || ".";
+  if (write) {
+    const realRelative = path.relative(root.real, real);
+    const canonical = realRelative ? realRelative.split(path.sep) : [];
+    if ([...parts, ...canonical].some(protectedName)) throw outside("git's own data and protected folders are never patched");
+  }
+  return relative.split(path.sep).join("/") || ".";
 }
 
 /** Every file a patch names, in the formats headless applies (patch.rs): Codex envelopes or unified diffs. */
@@ -200,6 +260,13 @@ function patchTargets(text) {
   return targets.filter(Boolean);
 }
 
+/** The call's arguments without any consent the agent tried to give itself. */
+function withoutConsent(args) {
+  const clean = { ...args };
+  for (const key of CONSENT_ARGUMENTS) delete clean[key];
+  return clean;
+}
+
 /** The call's arguments with every path scoped to the worktree; throws ScopeError on any escape. */
 function scopeArguments(name, args, root) {
   const scoped = { ...args };
@@ -213,27 +280,40 @@ function scopeArguments(name, args, root) {
     scoped[key] = scoped[key].map((value) => scopePath(root, value, key));
   }
   if (PATCH_TOOLS.has(name) && typeof scoped.patch === "string") {
-    for (const target of patchTargets(scoped.patch)) scopePath(root, target, "patch target");
+    for (const target of patchTargets(scoped.patch)) scopePath(root, target, "patch target", { write: true });
   }
   // Commands start in the worktree unless they name a directory inside it.
   if (name === "exec_command" && scoped.workdir === undefined && scoped.cwd === undefined) scoped.workdir = ".";
   return scoped;
 }
 
-function instructionsFor(groups) {
+function instructionsFor(groups, { bypass = false } = {}) {
   return "Coding Tools tools for this chat's own git worktree: read_file, list_dir, search_text and apply_patch "
-    + "for files; exec_command, write_stdin, read_output and kill_command for terminal sessions; git_* for history. "
-    + "Paths are relative to the worktree root and paths outside it are refused; commands start in it. "
+    + "for files; git_* for this worktree's history. Paths are relative to the worktree root and paths outside it are refused. "
+    + (groups.includes("terminal")
+      ? "exec_command, write_stdin, read_output and kill_command run commands through the app's terminal. A command "
+        + "starts in the worktree but is NOT confined to it: it can read and write anything the user's account can. "
+        + (bypass ? "" : "The user confirms each command and each input sent to one. ")
+      : "")
+    + "When the workspace policy needs approval for an operation, the user is asked in the app; never pass confirm "
+    + "or approval_token yourself (they are ignored). "
     + (groups.includes("desktop")
       ? "capture_screenshot, list_windows and computer_* see and drive the desktop: the user confirms each screen "
-        + "capture, and computer control works only while the user has enabled it in the app. "
+        + "capture, and computer control works only while the user has enabled it in the app and allowed this chat. "
       : "")
     + "Large results are paged; ask for less per call.";
 }
 
+/** A short, readable summary of a call's arguments for a confirmation dialog. */
+function summarize(args) {
+  const text = JSON.stringify(args, null, 2) ?? "{}";
+  return text.length > 4000 ? `${text.slice(0, 4000)}\n…` : text;
+}
+
 function createChatAgentTools({
   requestHeadless, sessionWorkspace = null, confirm = null,
-  enabled = () => true, desktopEnabled = () => false,
+  enabled = () => true, terminalEnabled = () => false, desktopEnabled = () => false,
+  worktreesRoot = null,
   logger = console, version = "1", now = Date.now,
 } = {}) {
   if (typeof requestHeadless !== "function") throw new Error("The headless tool service is required");
@@ -251,8 +331,9 @@ function createChatAgentTools({
   const isEnabled = () => {
     try { return enabled() !== false; } catch { return false; }
   };
-  /** The groups a new session gets now: agent tools when the setting is on, plus desktop when opted in. */
-  const currentGroups = () => (isEnabled() ? GROUPS.filter((group) => group === "agent" || setting(desktopEnabled)) : []);
+  const optIns = { terminal: terminalEnabled, desktop: desktopEnabled };
+  /** The groups a new session gets now: agent tools when the setting is on, plus each opted-in group. */
+  const currentGroups = () => (isEnabled() ? GROUPS.filter((group) => group === "agent" || setting(optIns[group])) : []);
   // A group is usable only if the session got it and the setting still allows it.
   const allowed = (entry, group) => entry.groups.includes(group) && currentGroups().includes(group);
 
@@ -263,7 +344,7 @@ function createChatAgentTools({
     entry.expected = null;
   }
 
-  function mint({ agent, workspaceId }) {
+  function mint({ agent, workspaceId, approvalMode }) {
     while (sessions.size >= MAX_SESSIONS) {
       const oldest = [...sessions.values()].sort((left, right) => left.usedAt - right.usedAt)[0];
       forget(oldest.key);
@@ -272,6 +353,8 @@ function createChatAgentTools({
     const token = crypto.randomBytes(32).toString("base64url");
     const entry = {
       key, agent, workspaceId, groups: currentGroups(), expected: Buffer.from(`Bearer ${token}`),
+      // Only a session launched to bypass permissions runs commands without a confirmation each.
+      bypass: approvalMode === "bypass-permissions", controlAllowed: false,
       aoSession: null, root: null, checkedAt: 0, createdAt: now(), usedAt: now(),
     };
     sessions.set(key, entry);
@@ -283,6 +366,12 @@ function createChatAgentTools({
     const expected = entry?.expected ?? Buffer.from(`Bearer ${crypto.randomBytes(32).toString("base64url")}`);
     const match = given.length === expected.length && crypto.timingSafeEqual(given, expected);
     return match && Boolean(entry?.expected);
+  }
+
+  /** AO's worktrees folder, resolved, when the app named it. */
+  function worktreesBase() {
+    if (typeof worktreesRoot !== "string" || !path.isAbsolute(worktreesRoot)) return null;
+    try { return fs.realpathSync.native(worktreesRoot); } catch { return path.resolve(worktreesRoot); }
   }
 
   /** The session's worktree, as AO reports it; throws a message for the agent when it is not usable. */
@@ -312,6 +401,11 @@ function createChatAgentTools({
     } catch {
       throw new ScopeError("This chat's session workspace is not ready yet; try again in a moment.");
     }
+    const base = worktreesBase();
+    if (base && (!inside(base, real) || path.relative(base, real) === "")) {
+      // Only AO's own session worktrees are roots, never the user's checkout or anything else.
+      throw new ScopeError("This chat's session workspace is not one of AO's worktrees; its tools are unavailable.");
+    }
     if (entry.root && path.relative(entry.root.path, reported) !== "") {
       // A session never moves to another tree; refuse rather than follow it.
       forget(entry.key);
@@ -335,50 +429,153 @@ function createChatAgentTools({
       }));
   }
 
-  async function callTool(entry, params) {
-    const name = params?.name;
-    if (typeof name !== "string" || !name || name.length > 128) return failedCall("A tool name is required");
-    if (!isEnabled()) return failedCall("The app's tools for chat agents are turned off in Settings.");
-    const group = groupOf(name);
-    if (!group || !allowed(entry, group)) return failedCall(`Unknown tool: ${name}`);
-    let args = params.arguments && typeof params.arguments === "object" && !Array.isArray(params.arguments) ? params.arguments : {};
-    let root;
+  /** Asks the user in the app; true when they agree, otherwise the refusal to return to the agent. */
+  async function ask(message, detail, declined) {
+    let approved = false;
     try {
-      root = await rootOf(entry);
-      if (group === "agent") args = scopeArguments(name, args, root);
+      approved = typeof confirm === "function" && await confirm({ message, detail }) === true;
     } catch (error) {
-      if (error instanceof ScopeError) return failedCall(error.message);
-      throw error;
+      return failedCall(`The user could not be asked, so nothing was run: ${errorMessage(error)}`);
     }
-    if (CONFIRMED_TOOLS.has(name)) {
-      let approved = false;
-      try {
-        approved = typeof confirm === "function" && await confirm({
-          message: `A chat agent wants to ${CONFIRMED_TOOLS.get(name)}`,
-          detail: `Agent: ${entry.agent}\nTool: ${name}\nAO session: ${entry.aoSession}\n\nAllow this once?`,
-        }) === true;
-      } catch (error) {
-        return failedCall(`The user could not be asked: ${errorMessage(error)}`);
-      }
-      if (!approved) return failedCall(`The user declined ${name}.`);
-    }
+    return approved ? true : failedCall(declined);
+  }
+
+  /** One call to headless: `{ result }` once it completed, or `{ failed }` with the agent's error. */
+  async function invoke(entry, name, args, root) {
     let response;
     try {
       response = await requestHeadless("/api/v1/tools/call", {
         request_id: crypto.randomUUID(), workspace_id: entry.workspaceId, tool: name, arguments: args,
         // Desktop tools act on the screen, not on files, and computer control is leased to the
         // workspace itself; everything else runs in the session's worktree.
-        ...(group === "agent" ? { root: root.path } : {}),
+        ...(root ? { root: root.path } : {}),
       }, { timeout: TOOL_CALL_TIMEOUT_MS });
     } catch (error) {
-      return failedCall(errorMessage(error));
+      return { failed: failedCall(errorMessage(error)) };
     }
     const operation = response?.operation;
     if (operation?.state !== "completed") {
-      return failedCall(typeof operation?.error === "string" && operation.error
-        ? operation.error.slice(0, 2000) : "The tool call did not complete; its outcome is unknown.");
+      return { failed: failedCall(typeof operation?.error === "string" && operation.error
+        ? operation.error.slice(0, 2000) : "The tool call did not complete; its outcome is unknown.") };
     }
-    return toolResult(name, args, operation.result);
+    return { result: operation.result };
+  }
+
+  const who = (entry) => `Agent: ${entry.agent}\nAO session: ${entry.aoSession}`;
+
+  /** The user's confirmation of one command or one input to a command, unless the session bypasses permissions. */
+  async function confirmTerminal(entry, name, args, root) {
+    if (entry.bypass) return false;
+    if (name === "exec_command") {
+      const directory = path.join(root.path, String(args.workdir ?? args.cwd ?? "."));
+      const input = typeof args.stdin === "string" && args.stdin ? `\nInput:\n${args.stdin.slice(0, 4000)}` : "";
+      return ask("A chat agent wants to run a command",
+        `${who(entry)}\nDirectory: ${directory}\n\nCommand:\n${String(args.cmd ?? "").slice(0, 8000)}${input}\n\n`
+          + "The command starts in the chat's worktree but is not confined to it: it can read and change anything "
+          + "your user account can. Run it once?",
+        "The user declined this command; it was not run.");
+    }
+    // An empty write only polls the command's output; it sends nothing.
+    if (name === "write_stdin" && typeof args.chars === "string" && args.chars) {
+      return ask("A chat agent wants to type into a running command",
+        `${who(entry)}\nWorktree: ${root.path}\nCommand: ${String(args.command_id ?? args.session_id ?? "")}\n\nInput:\n${args.chars.slice(0, 8000)}\n\nSend it once?`,
+        "The user declined this input; it was not sent.");
+    }
+    return false;
+  }
+
+  /**
+   * The workspace policy wants the user's approval (APPROVAL_REQUIRED) or confirmation
+   * (DANGEROUS_OPERATION_REQUIRES_CONFIRMATION) for this exact call: ask the user (unless they just
+   * confirmed this same command), then obtain a one-use grant in the session's own context and
+   * retry the call once with it. The grant never reaches the agent.
+   */
+  async function approveAndRetry(entry, name, args, root, failure, alreadyConfirmed) {
+    const reason = [failure.details?.summary, failure.details?.risk && `risk: ${failure.details.risk}`, failure.message]
+      .filter((value) => typeof value === "string" && value).join("\n");
+    if (!alreadyConfirmed) {
+      const answer = await ask(`A chat agent's ${name} call needs your approval`,
+        `${who(entry)}\nWorktree: ${root ? root.path : "(the workspace)"}\nTool: ${name}\n\nWhy:\n${reason.slice(0, 2000)}\n\nArguments:\n${summarize(args)}\n\nAllow it once?`,
+        `The user declined ${name}; it was not run.`);
+      if (answer !== true) return answer;
+    }
+    // A confirmation can be followed by an approval for the same call (or the other way round):
+    // each is supplied at most once, then whatever headless answers goes back to the agent.
+    let callArgs = args;
+    let current = failure;
+    let result = null;
+    const tokens = [];
+    for (let round = 0; round < 2; round += 1) {
+      if (current.code === "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION" && callArgs.confirm !== true) {
+        callArgs = { ...callArgs, confirm: true };
+      } else if (current.code === "APPROVAL_REQUIRED" && typeof current.details?.request_id === "string" && !callArgs.approval_token) {
+        const granted = await invoke(entry, "request_permissions",
+          { request_id: current.details.request_id, scope: "once", confirm: true, reason: "Approved by the user in Coding Tools" }, root);
+        const token = granted.result?.ok === true && typeof granted.result.approval_token === "string" ? granted.result.approval_token : null;
+        if (!token) {
+          const why = granted.failed?.content?.[0]?.text || granted.result?.error?.message || "no grant was issued";
+          return failedCall(`The user approved ${name}, but the approval could not be recorded: ${String(why).slice(0, 500)}`);
+        }
+        tokens.push(token);
+        callArgs = { ...callArgs, approval_token: token };
+      } else {
+        break;
+      }
+      const retried = await invoke(entry, name, callArgs, root);
+      if (retried.failed) return retried.failed;
+      // Nothing of a grant goes back to the agent.
+      result = JSON.parse(tokens.reduce((text, token) => text.split(token).join("[redacted]"), JSON.stringify(retried.result ?? null)));
+      current = result && typeof result === "object" && result.ok === false ? result.error : null;
+      if (!current) break;
+    }
+    return toolResult(name, args, result);
+  }
+
+  async function callTool(entry, params) {
+    const name = params?.name;
+    if (typeof name !== "string" || !name || name.length > 128) return failedCall("A tool name is required");
+    if (!isEnabled()) return failedCall("The app's tools for chat agents are turned off in Settings.");
+    const group = groupOf(name);
+    if (!group || !allowed(entry, group)) return failedCall(`Unknown tool: ${name}`);
+    const given = params.arguments && typeof params.arguments === "object" && !Array.isArray(params.arguments) ? params.arguments : {};
+    let args = withoutConsent(given);
+    let root;
+    try {
+      root = await rootOf(entry);
+      if (group !== "desktop") args = scopeArguments(name, args, root);
+    } catch (error) {
+      if (error instanceof ScopeError) return failedCall(error.message);
+      throw error;
+    }
+    if (CONFIRMED_TOOLS.has(name)) {
+      const answer = await ask(`A chat agent wants to ${CONFIRMED_TOOLS.get(name)}`,
+        `${who(entry)}\nTool: ${name}\n\nAllow this once?`, `The user declined ${name}.`);
+      if (answer !== true) return answer;
+    }
+    if (CONTROL_TOOLS.has(name) && !entry.controlAllowed) {
+      const answer = await ask("A chat agent wants to control your screen",
+        `${who(entry)}\nTool: ${name}\n\nWhile you have computer control enabled in Coding Tools, this chat could click and type in `
+          + "the window you enabled it for. Control is enabled for the workspace, not for one chat: every chat you allow here can "
+          + "use it while it is on. Allow this chat?",
+        `The user did not allow this chat to control the screen (${name}).`);
+      if (answer !== true) return answer;
+      entry.controlAllowed = true;
+    }
+    let confirmed = false;
+    if (group === "terminal") {
+      const answer = await confirmTerminal(entry, name, args, root);
+      if (answer !== true && answer !== false) return answer;
+      confirmed = answer === true;
+    }
+    const rooted = group === "desktop" ? null : root;
+    const outcome = await invoke(entry, name, args, rooted);
+    if (outcome.failed) return outcome.failed;
+    const failure = outcome.result && typeof outcome.result === "object" && outcome.result.ok === false ? outcome.result.error : null;
+    if ((failure?.code === "APPROVAL_REQUIRED" && typeof failure.details?.request_id === "string")
+      || failure?.code === "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION") {
+      return approveAndRetry(entry, name, args, rooted, failure, confirmed);
+    }
+    return toolResult(name, args, outcome.result);
   }
 
   async function dispatch(entry, message) {
@@ -396,7 +593,7 @@ function createChatAgentTools({
             protocolVersion: PROTOCOL_VERSIONS.includes(requested) ? requested : PROTOCOL_VERSIONS[0],
             capabilities: { tools: { listChanged: false } },
             serverInfo: { name: SERVER_NAME, title: "Coding Tools", version: String(version) },
-            instructions: instructionsFor(entry.groups.filter((group) => allowed(entry, group))),
+            instructions: instructionsFor(entry.groups.filter((group) => allowed(entry, group)), { bypass: entry.bypass }),
           } };
         }
         case "ping": return { jsonrpc: "2.0", id, result: {} };
@@ -510,12 +707,13 @@ function createChatAgentTools({
      * Tools for one AO chat session about to be spawned, or null when the setting is off, the
      * agent's driver cannot take an HTTP server, or the workspace id is unusable. `servers` go into
      * the spawn's mcpServers; `bind(sessionId)` ties the credential to the session AO created (its
-     * worktree becomes the root), and `release()` forgets it when the spawn failed.
+     * worktree becomes the root), and `release()` forgets it when the spawn failed. `approvalMode`
+     * is the session's AO permission mode: only "bypass-permissions" runs commands unconfirmed.
      */
-    async lease({ agent, workspaceId } = {}) {
+    async lease({ agent, workspaceId, approvalMode = null } = {}) {
       if (!isEnabled() || !MCP_HTTP_AGENTS.has(agent) || typeof workspaceId !== "string" || !WORKSPACE_ID.test(workspaceId)) return null;
       await listen();
-      const { entry, token } = mint({ agent, workspaceId });
+      const { entry, token } = mint({ agent, workspaceId, approvalMode });
       const url = `http://127.0.0.1:${port}/mcp/${encodeURIComponent(workspaceId)}/${entry.key}`;
       return Object.freeze({
         servers: [{ name: SERVER_NAME, type: "http", url, headers: { Authorization: `Bearer ${token}` } }],
@@ -538,8 +736,9 @@ function createChatAgentTools({
       for (const entry of [...sessions.values()]) if (entry.aoSession === sessionId) forget(entry.key);
     },
     /**
-     * What a launch would attach now: the tool groups and this server's lifetime, never a
-     * credential or anything per session. "pending" until the server listens.
+     * What a launch would attach now: the tool groups (agent[+terminal][+desktop]) and this
+     * server's lifetime, never a credential or anything per session. "pending" until the server
+     * listens.
      */
     identity() {
       const groups = currentGroups();
@@ -564,8 +763,10 @@ module.exports = Object.freeze({
   DESKTOP_TOOLS,
   MCP_HTTP_AGENTS,
   SERVER_NAME,
+  TERMINAL_TOOLS,
   createChatAgentTools,
   patchTargets,
   scopePath,
   toolResult,
+  windowsQuirk,
 });

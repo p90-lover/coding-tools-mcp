@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::tools::context::ToolContext;
-use crate::tools::workspace::{tool_ok, Workspace, WorkspaceError};
+use crate::tools::workspace::{is_protected_name, tool_ok, Workspace, WorkspaceError};
 
 fn request_path(ctx: &ToolContext, raw: &str) -> Result<String, WorkspaceError> {
     ctx.workspace.reject_unsafe_text(raw)?;
@@ -898,7 +898,7 @@ fn cleanup_staging_roots(staging_roots: &HashMap<PathBuf, PathBuf>) {
 fn is_critical_file(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
     let first = normalized.split('/').next().unwrap_or("");
-    if matches!(first, ".git" | ".github") {
+    if is_protected_name(first, REPOSITORY_ASSET_NAMES) {
         return true;
     }
     let name = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
@@ -915,11 +915,16 @@ fn is_critical_file(path: &str) -> bool {
         || name == "pyproject.toml"
 }
 
+const REPOSITORY_ASSET_NAMES: &[&str] = &[".git", ".github"];
+
+/// Any part naming `.git` or `.github` by the name Windows would open: any case, trailing dots
+/// or spaces, or a `:stream` suffix (`.git.`, `.GIT `, `.git::$INDEX_ALLOCATION`). Such spellings
+/// are also refused outright when the target is resolved (`Workspace::reject_unsafe_text`).
 fn is_protected_repository_asset(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
     normalized
         .split('/')
-        .any(|part| part.eq_ignore_ascii_case(".git") || part.eq_ignore_ascii_case(".github"))
+        .any(|part| is_protected_name(part, REPOSITORY_ASSET_NAMES))
 }
 
 fn dangerous_operation(message: impl Into<String>) -> WorkspaceError {
@@ -984,6 +989,62 @@ mod tests {
             "preserve me"
         );
         assert!(destination.starts_with(root.path().join("aiTemp").join("Trash")));
+    }
+
+    #[test]
+    fn git_data_is_refused_however_it_is_spelled() {
+        let (workspace, _harness, context) = context_with_file();
+        std::fs::create_dir_all(workspace.path().join(".git")).expect("git dir");
+        std::fs::write(workspace.path().join(".git").join("config"), "[core]\n").expect("config");
+        for target in [
+            ".git/config",
+            ".GIT/config",
+            ".git./config",
+            ".git /config",
+            ".git::$INDEX_ALLOCATION/config",
+            ".github./workflows/ci.yml",
+            "sub/.Git/config",
+        ] {
+            for patch in [
+                format!("*** Begin Patch\n*** Add File: {target}\n+[core]\n*** End Patch\n"),
+                format!("--- /dev/null\n+++ b/{target}\n@@ -0,0 +1 @@\n+[core]\n"),
+            ] {
+                let error = apply_patch(&context, &json!({ "patch": patch }))
+                    .expect_err(target)
+                    .code();
+                assert_eq!(error, "PROTECTED_REPOSITORY_ASSET", "{target}");
+            }
+        }
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join(".git").join("config")).unwrap(),
+            "[core]\n"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_path_quirks_in_patches_are_refused() {
+        let (workspace, _harness, context) = context_with_file();
+        std::fs::create_dir_all(workspace.path().join(".git")).expect("git dir");
+        for target in [
+            "GIT~1/config",
+            "main.rs.",
+            "main.rs. ",
+            "main.rs:stream",
+            "CON",
+            "nul.txt",
+            "src/COM1.rs",
+        ] {
+            let patch = format!("*** Begin Patch\n*** Add File: {target}\n+x\n*** End Patch\n");
+            let error = apply_patch(&context, &json!({ "patch": patch }))
+                .expect_err(target)
+                .code();
+            assert_eq!(error, "UNSAFE_PATH_SPELLING", "{target}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("main.rs")).unwrap(),
+            "old\n"
+        );
     }
 
     #[test]

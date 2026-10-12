@@ -370,6 +370,9 @@ struct ServiceState {
     contexts: Arc<Mutex<HashMap<String, ContextEntry>>>,
     ao_hubs: Arc<Mutex<AoHubMap>>,
     ao_home_root: PathBuf,
+    /// AO's directory of session worktrees, when the app named it: a rooted call's root must lie
+    /// inside it (see `session_root`).
+    ao_worktrees_root: Option<PathBuf>,
     operations: Arc<Mutex<OperationStore>>,
     shutdown_tx: tokio::sync::watch::Sender<Option<String>>,
     drain_timeout: Duration,
@@ -398,7 +401,13 @@ impl ServiceState {
             })
             .map_err(text_error)?;
         let root = root
-            .map(|root| session_root(Path::new(&profile.path), root))
+            .map(|root| {
+                session_root(
+                    Path::new(&profile.path),
+                    root,
+                    self.ao_worktrees_root.as_deref(),
+                )
+            })
             .transpose()?;
         let mut bytes = serde_json::to_vec(&profile).map_err(text_error)?;
         let key = match &root {
@@ -2013,6 +2022,7 @@ mod workspace_auth_tests {
             contexts: Arc::new(Mutex::new(HashMap::new())),
             ao_hubs: Arc::new(Mutex::new(HashMap::new())),
             ao_home_root: PathBuf::from("aiTemp/ao-test-home"),
+            ao_worktrees_root: None,
             operations: Arc::new(Mutex::new(OperationStore::default())),
             shutdown_tx,
             drain_timeout: Duration::from_secs(1),
@@ -2826,11 +2836,17 @@ const AO_CPA_CONFIG: &str = concat!(ao_cpa_provider!(), ao_card_features!());
 const AO_CPA_CONFIG_V1: &str = ao_cpa_provider!();
 const AO_CPA_CONFIG_V2: &str = concat!(ao_cpa_provider!(), ao_card_features_v2!());
 
-/// Where a rooted tool call may run: an AO chat session's own git worktree of the workspace's
-/// repository (its top directory, whose `.git` file shares the workspace's git directory), or a
-/// directory inside the workspace. Anything else is refused, so a caller cannot point the
-/// workspace's tool policy at an arbitrary directory.
-fn session_root(workspace: &Path, requested: &str) -> Result<PathBuf, String> {
+/// Where a rooted tool call may run: an AO chat session's own *linked* git worktree of the
+/// workspace's repository (its top directory, whose `.git` file names a gitdir that shares the
+/// workspace's git directory), and, when the app named AO's worktrees directory
+/// (`CODING_TOOLS_AO_WORKTREES_DIR`), one inside it. The main checkout itself, a directory inside
+/// it, and anything else are refused, so a caller cannot point the workspace's tool policy at an
+/// arbitrary directory or at the user's own checkout.
+fn session_root(
+    workspace: &Path,
+    requested: &str,
+    worktrees_base: Option<&Path>,
+) -> Result<PathBuf, String> {
     let requested = Path::new(requested);
     if requested.as_os_str().is_empty() || !requested.is_absolute() {
         return Err("The session root must be an absolute path".into());
@@ -2844,18 +2860,44 @@ fn session_root(workspace: &Path, requested: &str) -> Result<PathBuf, String> {
     let workspace = workspace
         .canonicalize()
         .map_err(|_| "The workspace path does not exist".to_string())?;
-    if root.starts_with(&workspace) {
-        return Ok(root);
+    if root == workspace {
+        return Err("The session root cannot be the workspace's own checkout".into());
     }
-    let worktree_top = fs::symlink_metadata(root.join(".git")).is_ok_and(|meta| meta.is_file());
+    if let Some(base) = worktrees_base {
+        let base = base
+            .canonicalize()
+            .map_err(|_| "The session root is not in AO's worktrees directory".to_string())?;
+        if !root.starts_with(&base) || root == base {
+            return Err("The session root is not in AO's worktrees directory".into());
+        }
+    }
     match (
-        worktree_top,
-        git_common_dir(&root),
+        linked_worktree_common_dir(&root),
         git_common_dir(&workspace),
     ) {
-        (true, Some(session), Some(repository)) if session == repository => Ok(root),
-        _ => Err("The session root is not a worktree of this workspace's repository".into()),
+        (Some(session), Some(repository)) if session == repository => Ok(root),
+        _ => Err("The session root is not a linked worktree of this workspace's repository".into()),
     }
+}
+
+/// The shared git directory of a linked worktree's top: its `.git` is a file naming a gitdir at
+/// `<common>/worktrees/<name>` whose `commondir` leads back to `<common>`, as `git worktree add`
+/// leaves it. A checkout with its own `.git` directory, or a `.git` file pointing straight at a
+/// repository's git directory, is not a linked worktree.
+fn linked_worktree_common_dir(top: &Path) -> Option<PathBuf> {
+    let marker = top.join(".git");
+    if !fs::symlink_metadata(&marker).ok()?.is_file() {
+        return None;
+    }
+    let text = fs::read_to_string(&marker).ok()?;
+    let gitdir = text
+        .lines()
+        .find_map(|line| line.strip_prefix("gitdir:"))?
+        .trim();
+    let gitdir = top.join(gitdir).canonicalize().ok()?;
+    let common = fs::read_to_string(gitdir.join("commondir")).ok()?;
+    let common = gitdir.join(common.trim()).canonicalize().ok()?;
+    (gitdir.parent()? == common.join("worktrees")).then_some(common)
 }
 
 /// A checkout's shared git directory: the nearest `.git` directory, or for a linked worktree
@@ -2905,15 +2947,68 @@ mod session_root_tests {
         (repo, worktree)
     }
 
+    fn session_root(workspace: &Path, requested: &str) -> Result<PathBuf, String> {
+        super::session_root(workspace, requested, None)
+    }
+
     #[test]
     fn a_session_root_is_the_workspace_repositorys_own_worktree() {
         let base = tempfile::tempdir().unwrap();
         let (repo, worktree) = repository(base.path());
         let root = session_root(&repo, &worktree.to_string_lossy()).unwrap();
         assert_eq!(root, worktree.canonicalize().unwrap());
-        // Inside the workspace is narrower than the workspace itself.
+        // Bound to AO's worktrees directory when the app names it.
+        let worktrees = base.path().join("worktrees");
+        assert!(super::session_root(&repo, &worktree.to_string_lossy(), Some(&worktrees)).is_ok());
+        let elsewhere = base.path().join("elsewhere-worktrees");
+        fs::create_dir_all(&elsewhere).unwrap();
+        assert!(
+            super::session_root(&repo, &worktree.to_string_lossy(), Some(&elsewhere)).is_err(),
+            "a worktree outside AO's directory"
+        );
+        assert!(
+            super::session_root(&repo, &worktrees.to_string_lossy(), Some(&worktrees)).is_err(),
+            "the directory itself"
+        );
+    }
+
+    #[test]
+    fn the_main_checkout_and_directories_inside_it_are_not_session_roots() {
+        let base = tempfile::tempdir().unwrap();
+        let (repo, _worktree) = repository(base.path());
+        assert!(
+            session_root(&repo, &repo.to_string_lossy()).is_err(),
+            "the checkout"
+        );
         fs::create_dir_all(repo.join("sub")).unwrap();
-        assert!(session_root(&repo, &repo.join("sub").to_string_lossy()).is_ok());
+        assert!(
+            session_root(&repo, &repo.join("sub").to_string_lossy()).is_err(),
+            "inside the checkout"
+        );
+        // A checkout whose .git file points straight at the repository's git directory.
+        let alias = base.path().join("alias");
+        fs::create_dir_all(&alias).unwrap();
+        fs::write(
+            alias.join(".git"),
+            format!(
+                "gitdir: {}\n",
+                repo.join(".git").to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        assert!(session_root(&repo, &alias.to_string_lossy()).is_err());
+        // A linked worktree placed inside the checkout is still a linked worktree.
+        let admin = repo.join(".git").join("worktrees").join("inner");
+        fs::create_dir_all(&admin).unwrap();
+        fs::write(admin.join("commondir"), "../..\n").unwrap();
+        let inner = repo.join("inner-worktree");
+        fs::create_dir_all(&inner).unwrap();
+        fs::write(
+            inner.join(".git"),
+            format!("gitdir: {}\n", admin.to_string_lossy().replace('\\', "/")),
+        )
+        .unwrap();
+        assert!(session_root(&repo, &inner.to_string_lossy()).is_ok());
     }
 
     #[test]
@@ -3005,6 +3100,7 @@ mod session_root_tests {
             contexts: Arc::new(Mutex::new(HashMap::new())),
             ao_hubs: Arc::new(Mutex::new(HashMap::new())),
             ao_home_root: PathBuf::from("aiTemp/ao-test-home"),
+            ao_worktrees_root: Some(base.path().join("worktrees")),
             operations: Arc::new(Mutex::new(OperationStore::default())),
             shutdown_tx,
             drain_timeout: Duration::from_secs(1),
@@ -3056,6 +3152,12 @@ mod session_root_tests {
 
         let (status, value) = call(&state, "r5", "read_file", read("x.txt"), Some(&external)).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
+        let (status, value) = call(&state, "r7", "read_file", read("main.txt"), Some(&repo)).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "the main checkout is never a session root: {value}"
+        );
         let (status, _) = call(
             &state,
             "r6",
@@ -5311,6 +5413,9 @@ impl HeadlessService {
             contexts: Arc::new(Mutex::new(HashMap::new())),
             ao_hubs: Arc::new(Mutex::new(HashMap::new())),
             ao_home_root: config.app_data_dir.join("ao-homes"),
+            ao_worktrees_root: std::env::var_os("CODING_TOOLS_AO_WORKTREES_DIR")
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute()),
             operations: Arc::new(Mutex::new(OperationStore::default())),
             shutdown_tx: shutdown_tx.clone(),
             drain_timeout: config.drain_timeout,

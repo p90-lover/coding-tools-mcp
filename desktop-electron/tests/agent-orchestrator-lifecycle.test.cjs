@@ -645,6 +645,13 @@ test("chat launches carry their own tool credential as mcpServers, bound to the 
     assert.deepEqual(JSON.parse(JSON.stringify(launches.at(-1).mcpServers)), leases[1].servers, "a pre-warmed chat gets one of its own");
     assert.notEqual(leases[1].servers[0].url, leases[0].servers[0].url);
     assert.deepEqual(leases[1].bound, ["session-2"]);
+    // The session's permission mode goes with its credential (it decides whether each terminal
+    // command is confirmed).
+    await h.controller.harness.spawn({ workspaceId: "ws", agent: "claude-code", model: "model", prompt: "hello", approvalMode: "bypass-permissions" });
+    assert.deepEqual(JSON.parse(JSON.stringify(asked.at(-1))), { agent: "claude-code", workspaceId: "ws", approvalMode: "bypass-permissions" });
+    assert.equal(launches.at(-1).approvalMode, "bypass-permissions");
+    await h.controller.harness.spawn({ workspaceId: "ws", agent: "codex", model: "model", prompt: "hello", approvalMode: "auto" });
+    assert.equal(asked.at(-1).approvalMode, "auto");
 
     const askedBefore = asked.length;
     await h.controller.harness.spawn({ workspaceId: "ws", agent: "aider", model: "model", prompt: "hello" });

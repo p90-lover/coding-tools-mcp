@@ -191,6 +191,7 @@ pub fn read_file(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> 
     }
     let mut input =
         File::open(&resolved.path).map_err(|_| WorkspaceError::not_found("File not found"))?;
+    ws.verify_opened(&input, &resolved.path)?;
     let file_bytes = input
         .metadata()
         .map_err(|_| WorkspaceError::not_found("File not found"))?

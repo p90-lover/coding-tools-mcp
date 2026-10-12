@@ -105,12 +105,14 @@ function requestJson({ endpoint, token, localUiToken = null, pathname, method = 
 }
 
 class HeadlessHost {
-  constructor({ app, logger, sourceRoot, binaryRoot = null }) {
+  constructor({ app, logger, sourceRoot, binaryRoot = null, aoWorktreesRoot = null }) {
     this.app = app;
     this.logger = logger;
     this.sourceRoot = sourceRoot;
     // A swappable backend bundle carries its own headless executable under coding-tools/.
     this.binaryRoot = binaryRoot;
+    // AO's session worktrees: a tool call rooted at a chat session must be rooted inside it.
+    this.aoWorktreesRoot = typeof aoWorktreesRoot === "string" && path.isAbsolute(aoWorktreesRoot) ? aoWorktreesRoot : null;
     this.child = null;
     this.control = null;
     this.starting = null;
@@ -166,9 +168,12 @@ class HeadlessHost {
         ...process.env,
         CODING_TOOLS_APP_DATA_DIR: appDataDir,
         ...(process.env.CODING_TOOLS_DEV_HOME ? { CODING_TOOLS_STATE_DIR: process.env.CODING_TOOLS_STATE_DIR || path.join(appDataDir, "state") } : {}),
+        // Read once at startup; headless never passes them (or any other CODING_TOOLS_* secret) on
+        // to the commands and git processes it starts for tool calls.
         CODING_TOOLS_CONTROL_DESCRIPTOR_FILE: descriptorPath,
         CODING_TOOLS_CONTROL_TOKEN_FILE: tokenPath,
         CODING_TOOLS_LOCAL_UI_STDIN: "1",
+        ...(this.aoWorktreesRoot ? { CODING_TOOLS_AO_WORKTREES_DIR: this.aoWorktreesRoot } : {}),
       },
       stdio: ["pipe", "ignore", "ignore"],
       windowsHide: true,
