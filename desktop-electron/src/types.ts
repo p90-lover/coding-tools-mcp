@@ -492,6 +492,12 @@ export interface LauncherState {
   automaticUpdates: boolean;
   keepRunningOnClose: boolean;
   showBrowserDuringTurns: boolean;
+  /** AO chat agents get the app's own tools over MCP; absent means on. */
+  chatAgentTools?: boolean;
+  /** Those agents may also capture the screen and control the computer; absent means off. */
+  chatAgentDesktopTools?: boolean;
+  /** Those agents may also run commands through the app's terminal; absent means off. */
+  chatAgentTerminalTools?: boolean;
   browserInteractionMode: BrowserInteractionMode;
   experimentalBiggerContext: boolean;
   zeroRiskProEnabled: boolean;
@@ -809,7 +815,7 @@ export interface LauncherApi {
     targetMode: BrowserInteractionMode;
   }>;
   setPreference(
-    key: "keepRunningOnClose" | "showBrowserDuringTurns" | "autoConnectExistingMcp",
+    key: "keepRunningOnClose" | "showBrowserDuringTurns" | "autoConnectExistingMcp" | "chatAgentTools" | "chatAgentDesktopTools" | "chatAgentTerminalTools",
     value: boolean,
   ): Promise<LauncherState>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;

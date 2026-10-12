@@ -162,7 +162,7 @@ function delayToMilliseconds(value, unit) {
   }
   return ms;
 }
-function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, chatEditsFile = null, releaseIdleAgents = false }) {
+function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, chatEditsFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null }) {
   const goals = createGoalStore({ file: goalsFile, now });
   // Deleted chat messages: their runs are hidden from the chat, and the next follow-up starts afresh.
   const chatEdits = createChatEditStore({ file: chatEditsFile });
@@ -256,7 +256,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   // Opening chats warms agents too; keep only the newest few so browsing does not pile them up.
   const WARM_MAX = 2;
   const warm = new Map(); // key -> { promise, session?, timer }
-  const warmKey = (workspaceId, route, plain) => JSON.stringify([workspaceId, Boolean(plain), ...ROUTE_IDENTITY.map(field => route?.[field] ?? null)]);
+  // The app's tools a launch attaches (the tool groups enabled and the server's lifetime; never a
+  // credential or anything per session) are launch identity too: a session warmed with other
+  // tools, or none, is not handed to this chat.
+  const toolsKey = (workspaceId) => { try { return agentToolsIdentity(workspaceId) ?? null; } catch { return null; } };
+  const warmKey = (workspaceId, route, plain) => JSON.stringify([workspaceId, Boolean(plain), toolsKey(workspaceId), ...ROUTE_IDENTITY.map(field => route?.[field] ?? null)]);
   // Listed once, before this run starts any warm session of its own, so none of ours is in the list.
   let sweep = null;
   const sweepStaleWarm = () => sweep ??= (async () => {
@@ -266,6 +270,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   async function chatPrewarmRoute(workspaceId, route, plain) {
     const node = { route, settings: { name: WARM_NAME } };
     if (!externalAgent(node)) return { ok: true, warmed: false, reason: "Only AO agents are pre-warmed" };
+    // Until the tool server (started with the app) listens, its identity is "pending": a session
+    // warmed under that key would never match the launch that comes for it.
+    if (toolsKey(workspaceId) === "pending") return { ok: true, warmed: false, reason: "The app's tools are still starting" };
     const key = warmKey(workspaceId, route, plain);
     if (warm.has(key)) return { ok: true, warmed: true };
     const args = aoLaunchArgs(workspaceId, node, plain);

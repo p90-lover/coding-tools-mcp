@@ -173,6 +173,8 @@ let agentOrchestratorUpstream = null;
 /** Stops the AO change push wired up with the current upstream module. */
 let aoChangeWatch = null;
 let missionWorkflowRuntime = null;
+/** The app's tool server for AO chat agents; one per app run, kept across backend restarts. */
+let chatAgentTools = null;
 let antigravityReauth = null;
 let antigravityAuthBrowser = null;
 // The swappable backend tier (see backend-bundle.cjs): restarted in place, never with the core.
@@ -2230,9 +2232,14 @@ function registerIpc({ logger, stateStore }) {
     return { state, credentialsRequired: false, targetMode: mode };
   });
   handle("launcher:set-preference", (_event, key, value) => {
-    const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "autoConnectExistingMcp";
+    const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "autoConnectExistingMcp"
+      || key === "chatAgentTools" || key === "chatAgentDesktopTools" || key === "chatAgentTerminalTools";
     if (!ordinary) throw new Error("Unknown preference");
-    if (key === "autoConnectExistingMcp") assertFocusedMainWindow(_event, true);
+    // Consent: auto-connecting MCP, and letting chat agents see and drive the screen or run
+    // commands, are the user's.
+    if (key === "autoConnectExistingMcp" || ((key === "chatAgentDesktopTools" || key === "chatAgentTerminalTools") && value === true)) {
+      assertFocusedMainWindow(_event, true);
+    }
     const state = stateStore.update({ [key]: value === true });
     if (key === "autoConnectExistingMcp") {
       automaticMcpAttemptPid = null;
@@ -2609,6 +2616,44 @@ async function start() {
     const { createChangePulse } = backendBundles.requireModule(backend, "ao-session-events.cjs");
     const { createAgentOrchestratorWorkflow, resolveAoNativeConnection, aoWebCatalogForModel } = backendBundles.requireModule(backend, "agent-orchestrator-workflow.cjs");
     const { HeadlessHost } = backendBundles.requireModule(backend, "headless-host.cjs");
+    const aoDataRoot = process.env.CODING_TOOLS_AO_DATA_DIR
+      ? path.resolve(process.env.CODING_TOOLS_AO_DATA_DIR)
+      : path.join(app.getPath("home"), ".ao", IS_DEV_PROFILE ? "coding-tools-development" : "coding-tools");
+    // AO keeps every session's worktree here; a chat agent's tools are rooted only inside it.
+    const aoWorktreesRoot = path.join(aoDataRoot, "worktrees");
+    // Chat agents get tools over MCP, each session rooted at its own AO worktree: files, search,
+    // patches and git (Settings > "Give chat agents the app's tools", on by default); commands
+    // through the app's terminal only when the user opts in (Settings > "Let chat agents run
+    // commands through the app's terminal"), each confirmed here unless the session bypasses
+    // permissions; and screen capture and computer control only when the user opts in (Settings >
+    // "Let chat agents see and control the screen"). Created once: a live session keeps its
+    // server URL and credential across a backend restart.
+    if (!chatAgentTools) {
+      const { createChatAgentTools } = backendBundles.requireModule(backend, "chat-agent-tools.cjs");
+      chatAgentTools = createChatAgentTools({
+        requestHeadless: (endpoint, body, options) => {
+          if (!headlessHost) throw new Error("Local Coding Tools runtime is unavailable");
+          return headlessHost.request(endpoint, body, options);
+        },
+        sessionWorkspace: (id) => {
+          if (!agentOrchestratorUpstream) throw new Error("Agent Orchestrator is unavailable");
+          return agentOrchestratorUpstream.harness.sessionWorkspace(id);
+        },
+        worktreesRoot: aoWorktreesRoot,
+        // Every command, sensitive operation and screen or window observation is the user's call,
+        // in the focused app window.
+        confirm: confirmAoAction,
+        enabled: () => stateStore.read().chatAgentTools !== false,
+        terminalEnabled: () => stateStore.read().chatAgentTerminalTools === true,
+        desktopEnabled: () => stateStore.read().chatAgentDesktopTools === true,
+        version: app.getVersion(),
+        logger,
+      });
+      // Listening before the first launch keeps a pre-warmed session's tools identity stable.
+      void chatAgentTools.listen().catch((error) => logger.warn("chat_agent_tools.listen_failed", {
+        message: error instanceof Error ? error.message : String(error),
+      }));
+    }
     const createCodingToolsAppsHost = loadCreateCodingToolsAppsHost(backend.appHandlerRoot);
     const antigravityCli = createAntigravityCli({
       toolsRoot: path.join(app.getPath("userData"), "tools"),
@@ -2661,9 +2706,7 @@ async function start() {
         : app.isPackaged
           ? path.join(process.resourcesPath, "agent-orchestrator")
           : path.join(__dirname, "..", "build", "agent-orchestrator"),
-      dataRoot: process.env.CODING_TOOLS_AO_DATA_DIR
-        ? path.resolve(process.env.CODING_TOOLS_AO_DATA_DIR)
-        : path.join(app.getPath("home"), ".ao", IS_DEV_PROFILE ? "coding-tools-development" : "coding-tools"),
+      dataRoot: aoDataRoot,
       confirm: confirmAoAction, getWindow: () => mainWindow,
       getWorkspaces: listHeadlessWorkspaces,
       getCpaPricesPath: () => require("./cpa-managed.cjs").helperPricesPath(
@@ -2680,6 +2723,7 @@ async function start() {
       },
       missionCall: (operation, args) => agentOrchestratorWorkflow.call(operation, args),
       openAuth: (url) => antigravityAuthBrowser(url),
+      agentTools: chatAgentTools,
       WebContentsView, dialog, shell, logger,
     });
     // Push AO changes to the Mission chat instead of making it poll: AO's session feed (a role's
@@ -2692,6 +2736,8 @@ async function start() {
     const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
       // Stop agents that sat idle for a while; their chats resume them on the next message.
       releaseIdleAgents: true,
+      // A pre-warmed session is reused only by a launch that attaches the same app tools.
+      agentToolsIdentity: (workspaceId) => chatAgentTools?.identity(workspaceId) ?? null,
       // Chat goals (/goal) survive an app restart.
       goalsFile: path.join(app.getPath("userData"), "integrations", "chat-goals.json"),
       // So do deleted chat messages (their hidden runs and fresh-session flags).
@@ -2775,6 +2821,7 @@ async function start() {
       logger,
       sourceRoot: SOURCE_ROOT,
       binaryRoot: backend.source === "bundle" ? backend.resourcesRoot : null,
+      aoWorktreesRoot,
     });
     activeBackend = backend;
     missionWorkflowRuntime = agentOrchestratorWorkflow;

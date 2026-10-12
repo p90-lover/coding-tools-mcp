@@ -29,6 +29,15 @@ function within(parent, child) {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+/** Deletes the control token's file once the app holds the token (or headless did not start). */
+function removeTokenFile(tokenPath, logger) {
+  try {
+    fs.rmSync(tokenPath, { force: true });
+  } catch (error) {
+    logger?.warn?.("headless.token_file_not_removed", { message: safeErrorMessage(error) });
+  }
+}
+
 function safeErrorMessage(error) {
   const message = error instanceof Error ? error.message : String(error);
   return message.replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, "Bearer [redacted]").slice(0, 500);
@@ -105,12 +114,14 @@ function requestJson({ endpoint, token, localUiToken = null, pathname, method = 
 }
 
 class HeadlessHost {
-  constructor({ app, logger, sourceRoot, binaryRoot = null }) {
+  constructor({ app, logger, sourceRoot, binaryRoot = null, aoWorktreesRoot = null }) {
     this.app = app;
     this.logger = logger;
     this.sourceRoot = sourceRoot;
     // A swappable backend bundle carries its own headless executable under coding-tools/.
     this.binaryRoot = binaryRoot;
+    // AO's session worktrees: a tool call rooted at a chat session must be rooted inside it.
+    this.aoWorktreesRoot = typeof aoWorktreesRoot === "string" && path.isAbsolute(aoWorktreesRoot) ? aoWorktreesRoot : null;
     this.child = null;
     this.control = null;
     this.starting = null;
@@ -166,9 +177,12 @@ class HeadlessHost {
         ...process.env,
         CODING_TOOLS_APP_DATA_DIR: appDataDir,
         ...(process.env.CODING_TOOLS_DEV_HOME ? { CODING_TOOLS_STATE_DIR: process.env.CODING_TOOLS_STATE_DIR || path.join(appDataDir, "state") } : {}),
+        // Read once at startup; headless never passes them (or any other CODING_TOOLS_* secret) on
+        // to the commands and git processes it starts for tool calls.
         CODING_TOOLS_CONTROL_DESCRIPTOR_FILE: descriptorPath,
         CODING_TOOLS_CONTROL_TOKEN_FILE: tokenPath,
         CODING_TOOLS_LOCAL_UI_STDIN: "1",
+        ...(this.aoWorktreesRoot ? { CODING_TOOLS_AO_WORKTREES_DIR: this.aoWorktreesRoot } : {}),
       },
       stdio: ["pipe", "ignore", "ignore"],
       windowsHide: true,
@@ -200,6 +214,7 @@ class HeadlessHost {
     const deadline = Date.now() + START_TIMEOUT_MS;
     while (Date.now() < deadline) {
       if (child.exitCode !== null) {
+        removeTokenFile(tokenPath, this.logger);
         throw new Error(`Local execution service exited during startup (${child.exitCode})`);
       }
       if (fs.existsSync(descriptorPath) && fs.existsSync(tokenPath)) {
@@ -216,6 +231,9 @@ class HeadlessHost {
           if (health.ready !== true || health.protocol_version !== CONTROL_PROTOCOL_VERSION) {
             throw new Error("Headless health contract is not ready");
           }
+          // The token lives on in memory only: headless never reads its file back, and a file
+          // left at a known path could be read by any command the service runs for a tool call.
+          removeTokenFile(tokenPath, this.logger);
           this.control = Object.freeze({
             endpoint: descriptor.endpoint,
             token,
@@ -230,12 +248,16 @@ class HeadlessHost {
           });
           return this.control;
         } catch (error) {
-          if (Date.now() + 100 >= deadline) throw error;
+          if (Date.now() + 100 >= deadline) {
+            removeTokenFile(tokenPath, this.logger);
+            throw error;
+          }
         }
       }
       await sleep(100);
     }
     child.kill();
+    removeTokenFile(tokenPath, this.logger);
     throw new Error("Local execution service did not become ready");
   }
 

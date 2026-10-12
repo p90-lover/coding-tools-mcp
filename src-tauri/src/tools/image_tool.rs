@@ -219,6 +219,7 @@ fn read_source(ws: &Workspace, path: &str) -> Result<(Vec<u8>, String), Workspac
     }
     let file = File::open(&resolved.path)
         .map_err(|_| vision_error("IO_ERROR", "Unable to open image file"))?;
+    ws.verify_opened(&file, &resolved.path)?;
     if !file
         .metadata()
         .map_err(|_| vision_error("IO_ERROR", "Unable to inspect opened image"))?

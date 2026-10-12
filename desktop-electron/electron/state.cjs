@@ -56,6 +56,12 @@ function readState(filePath) {
     ]) {
       if (typeof state[key] !== "boolean") state[key] = DEFAULT_STATE[key];
     }
+    // AO chat agents get the app's own tools unless this is false; absent means on.
+    if (Object.hasOwn(state, "chatAgentTools") && typeof state.chatAgentTools !== "boolean") delete state.chatAgentTools;
+    // Their screen capture and computer control only when this is true; absent means off.
+    if (Object.hasOwn(state, "chatAgentDesktopTools") && state.chatAgentDesktopTools !== true) delete state.chatAgentDesktopTools;
+    // Their commands through the app's terminal only when this is true; absent means off.
+    if (Object.hasOwn(state, "chatAgentTerminalTools") && state.chatAgentTerminalTools !== true) delete state.chatAgentTerminalTools;
     if (state.browserInteractionMode !== "automatic" && state.browserInteractionMode !== "manual") {
       state.browserInteractionMode = DEFAULT_STATE.browserInteractionMode;
     }

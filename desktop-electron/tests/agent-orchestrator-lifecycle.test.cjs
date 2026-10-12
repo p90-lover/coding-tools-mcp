@@ -192,6 +192,8 @@ function createHarness(hooks = {}) {
       }
       if (hooks.api) {
         const result = await hooks.api(endpoint, options);
+        // { $status, body } answers with that HTTP status.
+        if (result?.$status) return { ok: result.$status < 400, status: result.$status, text: async () => JSON.stringify(result.body ?? {}) };
         if (result !== undefined) return { ok: true, status: 200, text: async () => JSON.stringify(result) };
       }
       if (endpoint.pathname === "/api/v1/projects") {
@@ -208,6 +210,7 @@ function createHarness(hooks = {}) {
     confirm: async (request) => hooks.confirm?.(request) ?? true,
     shell: { openExternal: async (url) => { opened.push(url); } },
     openAuth: hooks.openAuth,
+    agentTools: hooks.agentTools,
     logger: { warn: (...entry) => warnings.push(entry) },
   });
   return { controller, children, gateways, reservations, views, requests, events, warnings, parent, opened };
@@ -605,4 +608,135 @@ test("explicit Codex workspace permissions require chat and cannot fall back to 
       if(!enabled)assert.equal(launches.length,0,"refused before a session exists");
     } finally {await h.controller.stop();}
   }
+});
+
+test("chat launches carry their own tool credential as mcpServers, bound to the session they create", async () => {
+  const launches = [];
+  const asked = [];
+  const leases = [];
+  const lease = (request) => {
+    const server = { name: "coding-tools", type: "http", url: `http://127.0.0.1:41234/mcp/ws/key-${leases.length}`, headers: { Authorization: `Bearer test-token-${leases.length}` } };
+    const entry = { request, servers: [server], bound: [], released: false, bind(id) { entry.bound.push(id); return true; }, release() { entry.released = true; } };
+    leases.push(entry);
+    return entry;
+  };
+  let tools = async (request) => { asked.push(request); return lease(request); };
+  let chatFails = false;
+  let sessionCount = 0;
+  const h = createHarness({
+    getWorkspaces: async () => [], missionCall: async () => ({ ok: true }),
+    workspaceBoard: { bind: async () => ({ projectId: "project-fixture" }) },
+    agentTools: { lease: (request) => tools(request) },
+    api: async (endpoint, options) => {
+      if (endpoint.pathname === "/api/v1/settings") return { chatHarnesses: ["claude-code", "codex"] };
+      if (endpoint.pathname === "/api/v1/sessions") {
+        const launch = JSON.parse(options.body);
+        launches.push(launch);
+        if (chatFails && launch.mode === "chat") throw new Error("CHAT_DRIVER_UNAVAILABLE");
+        return { session: { id: `session-${++sessionCount}` } };
+      }
+    },
+  });
+  try {
+    await h.controller.start();
+    await h.controller.harness.spawn({ workspaceId: "ws", agent: "claude-code", model: "model", prompt: "hello" });
+    assert.deepEqual(JSON.parse(JSON.stringify(launches.at(-1).mcpServers)), leases[0].servers, "a chat session gets its tool server");
+    assert.equal(launches.at(-1).mode, "chat");
+    assert.deepEqual(JSON.parse(JSON.stringify(asked.at(-1))), { agent: "claude-code", workspaceId: "ws" });
+    assert.deepEqual(leases[0].bound, ["session-1"], "the credential is bound to the session AO created");
+    await h.controller.harness.spawn({ workspaceId: "ws", agent: "codex", model: "model", prompt: "", warm: true });
+    assert.deepEqual(JSON.parse(JSON.stringify(launches.at(-1).mcpServers)), leases[1].servers, "a pre-warmed chat gets one of its own");
+    assert.notEqual(leases[1].servers[0].url, leases[0].servers[0].url);
+    assert.deepEqual(leases[1].bound, ["session-2"]);
+    // The session's permission mode goes with its credential (it decides whether each terminal
+    // command is confirmed).
+    await h.controller.harness.spawn({ workspaceId: "ws", agent: "claude-code", model: "model", prompt: "hello", approvalMode: "bypass-permissions" });
+    assert.deepEqual(JSON.parse(JSON.stringify(asked.at(-1))), { agent: "claude-code", workspaceId: "ws", approvalMode: "bypass-permissions" });
+    assert.equal(launches.at(-1).approvalMode, "bypass-permissions");
+    await h.controller.harness.spawn({ workspaceId: "ws", agent: "codex", model: "model", prompt: "hello", approvalMode: "auto" });
+    assert.equal(asked.at(-1).approvalMode, "auto");
+
+    const askedBefore = asked.length;
+    await h.controller.harness.spawn({ workspaceId: "ws", agent: "aider", model: "model", prompt: "hello" });
+    assert.equal(launches.at(-1).mode, "tui");
+    assert.equal(Object.hasOwn(launches.at(-1), "mcpServers"), false, "a terminal agent has no controller to attach it to");
+    assert.equal(asked.length, askedBefore, "no credential is minted for a terminal launch");
+
+    chatFails = true;
+    const count = launches.length;
+    await h.controller.harness.spawn({ workspaceId: "ws", agent: "claude-code", model: "model", prompt: "hello" });
+    assert.equal(launches.length, count + 2);
+    assert.ok(launches.at(-2).mcpServers, "the chat attempt carried it");
+    assert.equal(leases.at(-1).released, true, "the failed attempt's credential is released");
+    assert.deepEqual(leases.at(-1).bound, []);
+    assert.equal(launches.at(-1).mode, "tui");
+    assert.equal(Object.hasOwn(launches.at(-1), "mcpServers"), false, "the terminal fallback does not");
+    chatFails = false;
+
+    tools = async () => null;
+    await h.controller.harness.spawn({ workspaceId: "ws", agent: "claude-code", model: "model", prompt: "hello" });
+    assert.equal(Object.hasOwn(launches.at(-1), "mcpServers"), false, "setting off or agent unsupported: no field at all");
+
+    tools = async () => { throw new Error("listener failed"); };
+    await h.controller.harness.spawn({ workspaceId: "ws", agent: "claude-code", model: "model", prompt: "hello" });
+    assert.equal(launches.at(-1).mode, "chat", "an unavailable tool server never fails the launch");
+    assert.equal(Object.hasOwn(launches.at(-1), "mcpServers"), false);
+    assert.ok(h.warnings.some(([code]) => code === "ao.agent_tools_unavailable"));
+    assert.ok(!JSON.stringify(h.warnings).includes("test-token"), "the token is never logged");
+  } finally { await h.controller.stop(); }
+});
+
+test("a session's tool root is its AO worktree, read without exposing it, and killing the session forgets its credential", async () => {
+  const forgotten = [];
+  const plain = (value) => JSON.parse(JSON.stringify(value));
+  const sessions = {
+    "s-ready": { session: { id: "s-ready", status: "idle", isTerminated: false } },
+    "s-provisioning": { session: { id: "s-provisioning", status: "working", provisionState: "provisioning", isTerminated: false } },
+    "s-done": { session: { id: "s-done", status: "terminated", isTerminated: true } },
+    "s-exited": { session: { id: "s-exited", status: "exited", isTerminated: false } },
+  };
+  const workspaces = { "s-ready": path.resolve("ao-worktrees", "p-1"), "s-exited": path.resolve("ao-worktrees", "p-2") };
+  const h = createHarness({
+    getWorkspaces: async () => [], missionCall: async () => ({ ok: true }),
+    agentTools: { forgetSession: (id) => forgotten.push(id) },
+    api: async (endpoint) => {
+      const read = /^\/api\/v1\/sessions\/([^/]+)$/.exec(endpoint.pathname);
+      if (read) return sessions[read[1]] ?? { $status: 404, body: { error: { message: "Unknown session" }, code: "SESSION_NOT_FOUND" } };
+      const location = /^\/api\/v1\/desktop\/sessions\/([^/]+)\/workspace$/.exec(endpoint.pathname);
+      if (location) {
+        const workspacePath = workspaces[location[1]];
+        return workspacePath ? { sessionId: location[1], workspacePath } : { $status: 404, body: { code: "SESSION_WORKSPACE_NOT_FOUND" } };
+      }
+      if (/\/kill$/.test(endpoint.pathname)) return { ok: true };
+    },
+  });
+  try {
+    await assert.rejects(h.controller.harness.sessionWorkspace("s-ready"), /AO runtime first/, "it never starts AO itself");
+    await h.controller.start();
+    assert.deepEqual(plain(await h.controller.harness.sessionWorkspace("s-ready")), { root: workspaces["s-ready"] });
+    assert.deepEqual(plain(await h.controller.harness.sessionWorkspace("s-exited")), { root: workspaces["s-exited"] }, "an agent released while idle keeps its root");
+    assert.deepEqual(plain(await h.controller.harness.sessionWorkspace("s-provisioning")), { ready: false });
+    assert.deepEqual(plain(await h.controller.harness.sessionWorkspace("s-done")), { ended: true });
+    assert.deepEqual(plain(await h.controller.harness.sessionWorkspace("s-gone")), { ended: true });
+    await assert.rejects(h.controller.harness.sessionWorkspace("../x"), /valid AO session ID/);
+    await h.controller.harness.kill("s-ready");
+    assert.deepEqual(forgotten, ["s-ready"]);
+  } finally { await h.controller.stop(); }
+});
+
+test("without a tool server the launch body is unchanged", async () => {
+  const launches = [];
+  const h = createHarness({
+    getWorkspaces: async () => [], missionCall: async () => ({ ok: true }),
+    workspaceBoard: { bind: async () => ({ projectId: "project-fixture" }) },
+    api: async (endpoint, options) => {
+      if (endpoint.pathname === "/api/v1/settings") return { chatHarnesses: ["claude-code"] };
+      if (endpoint.pathname === "/api/v1/sessions") { launches.push(JSON.parse(options.body)); return { session: { id: "s" } }; }
+    },
+  });
+  try {
+    await h.controller.start();
+    await h.controller.harness.spawn({ workspaceId: "ws", agent: "claude-code", model: "model", prompt: "hello" });
+    assert.equal(Object.hasOwn(launches[0], "mcpServers"), false);
+  } finally { await h.controller.stop(); }
 });
