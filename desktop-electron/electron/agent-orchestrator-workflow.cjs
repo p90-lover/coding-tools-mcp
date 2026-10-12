@@ -1233,6 +1233,45 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     /\bRemove-Item\b[^\n]*-Recurse[^\n]*([a-z]:\\|~|\$HOME)/i, /\bdel\s+\/[sq]\b|\brd\s+\/s\b/i,
     /\bshutdown\b|\breg\s+delete\b|\bbcdedit\b|\bdiskpart\b/i,
   ];
+  // Routine project commands "Approve for me" runs without asking, as Codex's auto-review does:
+  // installing from the project's lockfile, running the project's own scripts, type checks and
+  // linters, read-only git and version probes. Decided here, before the model reviewer, so the
+  // answer never depends on a prompt. Anything else (adding packages, global installs, a server
+  // on a non-loopback host, chained or redirected shell, paths outside the project) still goes to
+  // the reviewer, and its "ask" to the person.
+  const ROUTINE_SEGMENT = [
+    // Lockfile installs: no package names, so nothing new enters the project.
+    /^(?:npm|pnpm)(?:\.cmd)?\s+(?:ci|install|i)(?:\s+--?[\w-]+(?:[=\s][\w./-]+)?)*$/i,
+    /^yarn(?:\.cmd)?(?:\s+install)?(?:\s+--?[\w-]+(?:[=\s][\w./-]+)?)*$/i,
+    /^(?:pip3?|python3?\s+-m\s+pip|py\s+-m\s+pip)(?:\.exe)?\s+install\s+-r\s+[\w./-]+(?:\s+--?[\w-]+)*$/i,
+    /^(?:uv\s+sync|poetry\s+install|pipenv\s+(?:install|sync))(?:\s+--?[\w-]+)*$/i,
+    // The project's own scripts and checks.
+    /^(?:npm|pnpm)(?:\.cmd)?\s+(?:run(?:-script)?\s+[\w:.-]+|test|start|t)(?:\s+--?[\w-]+(?:[=\s][\w./:-]+)?)*(?:\s+--(?:\s+[\w./:=-]+)*)?$/i,
+    /^yarn(?:\.cmd)?\s+(?:run\s+)?[\w:.-]+(?:\s+--?[\w-]+(?:[=\s][\w./:-]+)?)*$/i,
+    /^(?:npx\s+)?(?:tsc|eslint|vitest|jest|prettier\s+--check|biome\s+(?:check|lint))(?:\s+[\w./*:=-]+)*$/i,
+    /^(?:python3?\s+-m\s+)?(?:pytest|mypy|ruff\s+check)(?:\s+[\w./:=-]+)*$/i,
+    /^(?:node|npm|pnpm|yarn|python3?|py|pip3?|uv|git|tsc|go|cargo|rustc)(?:\.cmd|\.exe)?\s+(?:--version|-v|-V|version)$/i,
+    /^git\s+(?:status|diff|log|show|branch|rev-parse)(?:\s+[\w./:=-]+)*$/i,
+  ];
+  /** Why `command` is a routine project command "Approve for me" may run, or null. */
+  function routineCommand(command) {
+    const text = String(command ?? "").trim();
+    // One plain command line: no redirects, pipes, subshells, backgrounding or newlines; "&&" and
+    // ";" only between commands that are each routine.
+    if (!text || text.length > 400 || /[|<>`\n\r]|\$\(|(^|[^&])&([^&]|$)/.test(text)) return null;
+    const segments = text.split(/\s*(?:&&|;)\s*/).filter(Boolean);
+    if (!segments.length) return null;
+    for (const segment of segments) {
+      if (!ROUTINE_SEGMENT.some((pattern) => pattern.test(segment))) return null;
+      // Stay inside the project: relative paths only, no parent hops, drives or UNC.
+      if (/(?:^|\s|=)(?:\.\.(?:[\\/]|$)|[a-z]:[\\/]|[\\/]{2}|~[\\/])/i.test(segment)) return null;
+      // A dev server is reachable from this machine only.
+      const host = /--host(?:=|\s+)(\S+)/i.exec(segment)?.[1];
+      if (host && !/^(?:127\.0\.0\.1|localhost|::1)$/i.test(host)) return null;
+      if (/\s(?:-g|--global|--location[=\s]global)\b/i.test(segment)) return null;
+    }
+    return "Routine project command: installs from the lockfile, the project's own scripts and checks run without asking";
+  }
   const approverAdvice = new Map(); // approval_id -> { action, reason }
   /** AO's offered decision id for allow-once / deny-once; an "always" choice is never made for the user. */
   const aoDecision = (approval, allow) => (approval.decisions || [])
@@ -1309,7 +1348,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           ? { action: "ask", reason: "Inspect the complete native command and requested permission scope yourself" }
           : HARD_DENY.some((pattern) => pattern.test(request))
             ? { action: "deny", reason: "Blocked by the command approver's safety rules" }
-            : await askApprover({ approver, mission, approval });
+            : approval.kind === "command" && routineCommand(approval.command)
+              ? { action: "allow", reason: routineCommand(approval.command) }
+              : await askApprover({ approver, mission, approval });
         const offered = approval.request?.availableDecisions;
         if (Array.isArray(offered) && advice.action !== "ask"
           && !offered.includes(advice.action === "allow" ? "accept" : "decline")) {
@@ -2518,7 +2559,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
 
   // goalAfterRun runs on its own when a run settles (reportRun); it is exposed for tests and recovery.
-  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun });
+  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, routineCommand });
 }
 
 module.exports = { createAgentOrchestratorWorkflow, delayToMilliseconds, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
