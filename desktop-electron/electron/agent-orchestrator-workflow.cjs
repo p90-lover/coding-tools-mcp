@@ -192,6 +192,17 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   const dispatching = new Set();
   // runId -> { session, text }: a single-model follow-up that continues its chat's live AO session.
   const continuations = new Map();
+  /**
+   * The single card whose live AO session a single-model follow-up on `singleRoute` continues, or
+   * null: the chat's last run was a single model on exactly this route and its card is done (a
+   * stopped one too: Stop only interrupts the turn, and continuable() checks the agent is there).
+   */
+  function continuationCard(previous, executionMode, singleRoute) {
+    const card = previous?.execution_mode === "single" ? previous.nodes?.[0] : null;
+    if (executionMode !== "single" || !singleRoute || !card || !externalAgent(card) || !card.receipt?.thread_id) return null;
+    if (!["finished", "failed", "cancelled"].includes(card.state)) return null;
+    return ROUTE_IDENTITY.every(field => (card.route?.[field] ?? null) === (singleRoute[field] ?? null)) ? card : null;
+  }
   // Everything that decides how an agent is launched; two routes alike in these share a session.
   const ROUTE_IDENTITY = ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile",
     "approval_policy", "approvals_reviewer", "effort", "context_window"];
@@ -237,6 +248,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   // by their name and ended.
   const WARM_NAME = "Coding Tools · ready";
   const WARM_TTL_MS = 15 * 60_000;
+  // Opening chats warms agents too; keep only the newest few so browsing does not pile them up.
+  const WARM_MAX = 2;
   const warm = new Map(); // key -> { promise, session?, timer }
   const warmKey = (workspaceId, route, plain) => JSON.stringify([workspaceId, Boolean(plain), ...ROUTE_IDENTITY.map(field => route?.[field] ?? null)]);
   // Listed once, before this run starts any warm session of its own, so none of ours is in the list.
@@ -251,6 +264,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const key = warmKey(workspaceId, route, plain);
     if (warm.has(key)) return { ok: true, warmed: true };
     const args = aoLaunchArgs(workspaceId, node, plain);
+    while (warm.size >= WARM_MAX) {
+      const [oldKey, oldest] = warm.entries().next().value;
+      warm.delete(oldKey);
+      clearTimeout(oldest.timer);
+      void oldest.promise.then(session => harnessService().kill?.(session)).catch(() => undefined);
+    }
     const entry = {};
     entry.promise = sweepStaleWarm().then(() => harnessService().spawn({ ...args, prompt: "", warm: true })).then(session => {
       entry.session = session;
@@ -306,13 +325,21 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   if (releaseIdleAgents) scheduleIdleRelease(IDLE_FIRST_SWEEP_MS);
 
   /** chat_prewarm: keep an agent ready for the new chat's selected model, or its team's orchestrator. */
-  async function chatPrewarm({ workspaceId, executionMode, singleRoute, teamId } = {}) {
+  async function chatPrewarm({ workspaceId, executionMode, singleRoute, teamId, taskId } = {}) {
     const id = clean(workspaceId, 128);
+    const task = taskId ? clean(taskId, 128) : "";
+    const saved = executionMode !== "single" || task ? await runs({ workspaceId: id }) : null;
     if (executionMode === "single") {
       if (!singleRoute || typeof singleRoute !== "object") throw new Error("Choose a model route to pre-warm");
+      // An open chat whose next message continues its agent needs no new one; this also brings back
+      // an agent released while idle, so it is ready before the message is sent.
+      const previous = task ? saved.runs.filter(run => run.project_id === task).at(-1) : null;
+      const live = continuationCard(previous, executionMode, singleRoute);
+      if (live && await harnessService().continuable?.(live.receipt.thread_id).catch(() => false)) {
+        return { ok: true, warmed: false, continues: true };
+      }
       return chatPrewarmRoute(id, singleRoute, true);
     }
-    const saved = await runs({ workspaceId: id });
     const team = (saved.teams ?? (saved.team ? [saved.team] : [])).find(item => item?.id === teamId) ?? saved.team;
     const planner = team?.nodes?.find(node => node.role === "planner");
     if (!planner?.route) return { ok: true, warmed: false, reason: "The team has no orchestrator to pre-warm" };
@@ -1898,15 +1925,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // The chat's last single-model turn ran in an AO session; a follow-up on the same model
       // continues it (see dispatchExternal), carrying only the new message.
       const previous = saved.runs.filter(run => run.project_id === task).at(-1);
-      const card = previous?.execution_mode === "single" ? previous.nodes?.[0] : null;
       // The session keeps the permission mode, effort and context it was started with, so only an
       // unchanged route continues it; any change starts a fresh session with the new settings. A Team
       // follow-up has no single route and never continues the single card's session.
-      const sameRoute = executionMode === "single" && singleRoute && card && ROUTE_IDENTITY.every(field => (card.route?.[field] ?? null) === (singleRoute[field] ?? null));
-      if (executionMode === "single" && card && externalAgent(card) && card.receipt?.thread_id
-        && ["finished", "failed"].includes(card.state) && sameRoute) {
-        continuation = { session: card.receipt.thread_id, text };
-      }
+      const live = continuationCard(previous, executionMode, singleRoute);
+      if (live) continuation = { session: live.receipt.thread_id, text };
       try {
         await retireOpenRuns(id, task, saved.runs);
       } catch (error) {

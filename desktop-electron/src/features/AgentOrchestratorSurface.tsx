@@ -1234,16 +1234,20 @@ export function AgentOrchestratorSurface({ language, setError }: {
       return result.steered === true;
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); throw cause; }
   };
-  // On a new chat, start the selected model's agent (or the team's orchestrator) before the first
-  // message, so sending does not wait half a minute for it to launch. Best effort and silent.
-  const prewarmKey = view === "chat" && chatTaskId === "" && workspaceId
-    ? JSON.stringify([workspaceId, composerMode, composerMode === "single" ? singleRoute : composerTeamId]) : "";
+  // Have the agent the next message needs running before it is sent, so sending does not wait half
+  // a minute for a launch: the selected model's (or the team's orchestrator) on a new chat, and on an
+  // open chat whenever its agent cannot simply continue (the backend decides, and wakes one that was
+  // released while idle). Best effort and silent.
+  const prewarmKey = view === "chat" && chatTaskId !== null && workspaceId
+    ? JSON.stringify([workspaceId, chatTaskId, composerMode, composerMode === "single" ? singleRoute : composerTeamId]) : "";
   useEffect(() => {
     if (!prewarmKey) return;
     let execution: JsonObject;
     try { execution = aoChatExecution(composerMode, singleRoute, savedTeams, composerTeamId); } catch { return; }
     // Wait for the picker to settle so trying models does not start an agent for each.
-    const timer = setTimeout(() => { void moduleCall("chat_prewarm", { workspaceId, ...execution }).catch(() => undefined); }, 1500);
+    const timer = setTimeout(() => {
+      void moduleCall("chat_prewarm", { workspaceId, ...execution, ...(chatTaskId ? { taskId: chatTaskId } : {}) }).catch(() => undefined);
+    }, 600);
     return () => clearTimeout(timer);
   }, [prewarmKey, savedTeams.length]);
   const retryChatStart = (runId: string) => void run("start-run", async () => {
