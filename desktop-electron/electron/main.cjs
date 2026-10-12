@@ -2637,6 +2637,8 @@ async function start() {
       releaseIdleAgents: true,
       // Chat goals (/goal) survive an app restart.
       goalsFile: path.join(app.getPath("userData"), "integrations", "chat-goals.json"),
+      // So do deleted chat messages (their hidden runs and fresh-session flags).
+      chatEditsFile: path.join(app.getPath("userData"), "integrations", "chat-edits.json"),
       requestHeadless: (endpoint, body, options) => {
         if (!headlessHost) throw new Error("Local Coding Tools runtime is unavailable");
         return headlessHost.request(endpoint, body, options);

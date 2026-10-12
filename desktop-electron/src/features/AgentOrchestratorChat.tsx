@@ -8,7 +8,7 @@ import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, chatAcceptsMessage, chatDuration, chatList, chatMessageWithAttachments, chatRunOpen,
-  chatQueueAdd, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
+  chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
 } from "./ao-chat";
 
@@ -34,9 +34,15 @@ export type ChatThreadActions = {
   newChat: () => void;
   rename: (title: string) => Promise<void>;
   archive: () => void;
-  fork: (turnIndex?: number) => void;
-  /** Rewind: a new chat with the messages before this turn's, that message ready to edit. */
-  rewind?: (turnIndex: number) => void;
+  /** Fork from here: a new chat with the messages up to this one (its index in the chat's messages). */
+  fork: (messageIndex?: number) => void;
+  /** Rewind: a new chat with the messages before this one, this message ready to edit. */
+  rewind?: (messageIndex: number) => void;
+  /**
+   * Delete a message and its reply from the chat (asked to confirm first). `runIds` are the runs
+   * its turn showed: the run it started first, then any restart or replacement of that run.
+   */
+  deleteMessage?: (messageIndex: number, runIds: string[]) => Promise<void>;
   copyConversation: () => void;
   togglePin: () => void;
   pinned: boolean;
@@ -428,7 +434,29 @@ export function AgentOrchestratorChat({
     return "queued";
   };
   // The messages /rewind can go back to, oldest first, with the turn each one opened.
-  const rewindPoints = turns.flatMap((turn, turnIndex) => turn.user ? [{ turnIndex, text: turn.user.text }] : []);
+  const rewindPoints = turns.flatMap((turn, turnIndex) => turn.user ? [{ turnIndex, messageIndex: turn.messageIndex ?? turnIndex, text: turn.user.text }] : []);
+  // Delete message: the turn whose message waits for the in-chat confirmation, or null. A message
+  // goes with its reply and the steers sent during its turn; the agent's files stay as they are.
+  const [deleting, setDeleting] = useState<number | null>(null);
+  const [deletingBusy, setDeletingBusy] = useState(false);
+  useEffect(() => { setDeleting(null); }, [selectedTaskId]);
+  const deleteBlocked = runOpen || working ? "Stop the chat first to delete a message"
+    : rewindPoints.length <= 1 ? "This is the chat's only message; archive or delete the chat instead" : "";
+  // A message is deleted with the runs its turn showed, so exactly that reply leaves the chat.
+  const deletion = (turn: ChatTurn | undefined) => turn?.user && turn.runId && turn.messageIndex !== undefined
+    ? { index: turn.messageIndex, runIds: chatRunsOfMessage(chatRuns, turn.runId) } : null;
+  const notYet = "This message hasn't run yet; it can be deleted once its turn has run";
+  const confirmDelete = async () => {
+    const target = deleting === null ? null : deletion(turns[deleting]), task = selectedTaskId;
+    if (!target || !thread?.deleteMessage || deleteBlocked) return;
+    setDeletingBusy(true);
+    try {
+      await thread.deleteMessage(target.index, target.runIds);
+      void loadDescription(task).then((text) => setDescriptions((current) => ({ ...current, [task]: text }))).catch(() => {});
+    } catch {
+      // The surface already shows why it could not be deleted.
+    } finally { setDeletingBusy(false); setDeleting(null); }
+  };
 
   const runCommand = async (name: string, arg = "") => {
     setSlashIndex(0);
@@ -490,14 +518,30 @@ export function AgentOrchestratorChat({
           const pick = Number(arg);
           if (arg) {
             const point = Number.isInteger(pick) ? rewindPoints[pick - 1] : undefined;
-            if (point) thread.rewind(point.turnIndex);
+            if (point) thread.rewind(point.messageIndex);
             else say("Rewind", `Choose a message from 1 to ${rewindPoints.length}, e.g. /rewind ${rewindPoints.length}.`);
             break;
           }
           setCard({ title: "Rewind",
             text: "Go back to a message: a new chat opens with the conversation up to it and that message ready to edit. This chat and the files on disk stay as they are.",
             items: rewindPoints.map((point, index) => ({ label: `${index + 1}. ${point.text.replace(/\s+/g, " ").slice(0, 90)}`,
-              run: () => { setCard(null); thread.rewind?.(point.turnIndex); } })).reverse() });
+              run: () => { setCard(null); thread.rewind?.(point.messageIndex); } })).reverse() });
+          break;
+        }
+        case "delete": {
+          if (!thread?.deleteMessage) break;
+          if (deleteBlocked) { say("Delete message", `${deleteBlocked}.`); break; }
+          const pick = Number(arg);
+          if (arg) {
+            const point = Number.isInteger(pick) ? rewindPoints[pick - 1] : undefined;
+            if (point && !deletion(turns[point.turnIndex])) say("Delete message", `${notYet}.`);
+            else if (point) { setCard(null); setDeleting(point.turnIndex); }
+            else say("Delete message", `Choose a message from 1 to ${rewindPoints.length}, e.g. /delete ${rewindPoints.length}.`);
+            break;
+          }
+          setCard({ title: "Delete message", text: "Choose the message to delete; you are asked to confirm.",
+            items: rewindPoints.map((point, index) => ({ label: `${index + 1}. ${point.text.replace(/\s+/g, " ").slice(0, 90)}`,
+              run: () => deletion(turns[point.turnIndex]) ? setDeleting(point.turnIndex) : say("Delete message", `${notYet}.`) })).reverse() });
           break;
         }
         case "status": if (commands) setCard(commands.status()); break;
@@ -621,8 +665,10 @@ export function AgentOrchestratorChat({
               {turn.user ? <div className="cx-user">
                 <div className="cx-bubble"><p>{turn.user.text}</p></div>
                 <MessageActions text={turn.user.text}>
-                  {thread ? <button type="button" title="Fork from here" aria-label="Fork from this message" onClick={() => thread.fork(turnIndex)}>⑂</button> : null}
-                  {thread?.rewind ? <button type="button" title="Rewind: edit this message in a new chat" aria-label="Rewind to this message" onClick={() => thread.rewind?.(turnIndex)}>↶</button> : null}
+                  {thread ? <button type="button" title="Fork from here" aria-label="Fork from this message" onClick={() => thread.fork(turn.messageIndex ?? turnIndex)}>⑂</button> : null}
+                  {thread?.rewind ? <button type="button" title="Rewind: edit this message in a new chat" aria-label="Rewind to this message" onClick={() => thread.rewind?.(turn.messageIndex ?? turnIndex)}>↶</button> : null}
+                  {thread?.deleteMessage ? <button type="button" title={deleteBlocked || (deletion(turn) ? "Delete this message and its reply" : notYet)} aria-label="Delete this message"
+                    disabled={Boolean(deleteBlocked) || !deletion(turn) || deletingBusy} onClick={() => setDeleting(turnIndex)}>🗑</button> : null}
                 </MessageActions>
                 {turn.user.stamp ? <span className="cx-stamp">{turn.user.stamp} UTC</span> : null}
               </div> : null}
@@ -718,6 +764,14 @@ export function AgentOrchestratorChat({
           {card.text ? card.mono ? <pre>{card.text}</pre> : <p>{card.text}</p> : null}
           {card.items?.length ? <ul>{card.items.map((item, index) => <li key={`${item.label}:${index}`}>
             <button type="button" onClick={() => { setCard(null); item.run(); }}><span>{item.label}</span>{item.detail ? <small>{item.detail}</small> : null}</button></li>)}</ul> : null}
+        </section> : null}
+        {deleting !== null ? <section className="cx-command-card cx-delete-confirm" role="alertdialog" aria-label="Delete message">
+          <header><strong>Delete message</strong>
+            <button type="button" className="cx-icon-button" aria-label="Cancel" onClick={() => setDeleting(null)}><Icon name="close" width="12" height="12" /></button></header>
+          <p>Delete this message? It and its reply are removed from this chat. The agent's files are not changed.</p>
+          {deleteBlocked ? <p className="cx-delete-reason">{deleteBlocked}.</p> : null}
+          <footer><button type="button" className="cx-text-button" onClick={() => setDeleting(null)}>Cancel</button>
+            <button type="button" className="cx-primary-button" disabled={Boolean(deleteBlocked) || deletingBusy} onClick={() => void confirmDelete()}>Delete</button></footer>
         </section> : null}
         {goalEditing !== null && commands?.goal ? <section className="cx-command-card cx-goal-editor" aria-label="Edit goal">
           <header><strong>Edit goal</strong>

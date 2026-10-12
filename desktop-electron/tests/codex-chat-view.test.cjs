@@ -368,3 +368,94 @@ test("rewind puts only the chosen message in the composer, with the earlier ones
   assert.ok(chat.includes("const CHAT_DRAFTS = new Map<string, string>();"));
   assert.ok(chat.includes("setDraft(CHAT_DRAFTS.get(selectedTaskId) ?? \"\")"));
 });
+
+test("Delete on a message asks in the chat first, then removes it with its reply; a working chat or its only message can't", async () => {
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  const deleted = [], loaded = [];
+  const done = (id) => run(id, "t", [node("p", "planner", "finished", { receipt: { answer: `answer ${id}` } })], { execution_mode: "single" });
+  const description = "first ask\n\nFollow-up (2026-10-10 10:00 UTC):\nsecond ask\n\n↳ Steer (2026-10-10 10:05 UTC): use pnpm";
+  const { props } = base({ selectedTaskId: "t", runs: [done("r1"), done("r2")], pendingMessage: description,
+    // This fake keeps the chat as it was, so it can be deleted from again below.
+    loadDescription: async (taskId) => { loaded.push(taskId); return description; },
+    thread: { newChat() {}, rename: async () => {}, archive() {}, fork() {}, rewind() {}, copyConversation() {}, togglePin() {}, pinned: false,
+      deleteMessage: async (index, runIds) => { deleted.push([index, [...runIds]]); } } });
+  const view = mount(props);
+  const buttons = (next) => walk(view.render(next)).filter((element) => element.props?.["aria-label"] === "Delete this message");
+  const confirm = () => walk(view.render()).find((element) => element.props?.role === "alertdialog");
+  assert.equal(buttons().length, 2, "each message has Delete");
+  const steer = walk(view.render()).find((element) => String(element.props?.className).includes("cx-steer"));
+  assert.ok(steer, "the steer shows under its message");
+  assert.equal(walk(steer).filter((element) => element.props?.["aria-label"] === "Delete this message").length, 0, "a steer goes with its message");
+  assert.equal(buttons()[1].props.disabled, false);
+
+  // The button only asks; Cancel leaves the chat as it is.
+  buttons()[1].props.onClick();
+  assert.equal(confirm().props["aria-label"], "Delete message");
+  assert.match(text(confirm()), /Delete this message\? It and its reply are removed from this chat\. The agent's files are not changed\./);
+  assert.deepEqual(deleted, []);
+  walk(confirm()).find((element) => element.type === "button" && text(element) === "Cancel").props.onClick();
+  assert.equal(confirm(), undefined);
+  assert.deepEqual(deleted, []);
+
+  // Confirming deletes that message with the run its turn showed, then reads the chat's messages again.
+  buttons()[1].props.onClick();
+  walk(confirm()).find((element) => element.type === "button" && text(element) === "Delete").props.onClick();
+  await settle(); await settle();
+  assert.deepEqual(deleted, [[1, ["r2"]]]);
+  assert.deepEqual(loaded, ["t"]);
+  assert.equal(confirm(), undefined);
+
+  // /delete <n> opens the same confirmation.
+  walk(view.render()).find((element) => element.type === "textarea").props.onChange({ target: { value: "/delete 1" } });
+  walk(view.render()).find((element) => element.type === "textarea").props.onKeyDown({ key: "Enter", shiftKey: false, preventDefault() {} });
+  await settle(); await settle();
+  assert.ok(confirm(), "/delete asks too");
+  assert.deepEqual(deleted, [[1, ["r2"]]]);
+  walk(confirm()).find((element) => element.type === "button" && text(element) === "Delete").props.onClick();
+  await settle(); await settle();
+  assert.deepEqual(deleted, [[1, ["r2"]], [0, ["r1"]]]);
+  assert.deepEqual(loaded, ["t", "t"]);
+
+  // While the chat works the button is disabled and says why; so is a chat's only message.
+  const working = buttons({ working: true });
+  assert.ok(working.every((button) => button.props.disabled && /Stop the chat first/.test(button.props.title)));
+  const alone = buttons({ working: false, selectedTaskId: "u", runs: [run("r9", "u", [node("p", "planner", "finished")])], pendingMessage: "only ask" });
+  assert.equal(alone.length, 1);
+  assert.equal(alone[0].props.disabled, true);
+  assert.match(alone[0].props.title, /only message; archive or delete the chat instead/);
+});
+
+test("Delete names the runs its turn showed: a restarted message takes its restart along, and a message that hasn't run can't be deleted", async () => {
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  const deleted = [], forked = [];
+  const description = "first ask\n\nFollow-up (2026-10-10 10:00 UTC):\nsecond ask\n\nFollow-up (2026-10-10 11:00 UTC):\nthird ask";
+  const done = (id, extra = {}) => run(id, "t", [node("p", "planner", "finished", { receipt: { answer: `answer ${id}` } })], { execution_mode: "single", ...extra });
+  const { props } = base({ selectedTaskId: "t",
+    // r1 answered the first message and was restarted (r1b); r2 answered the second; the third hasn't run.
+    runs: [done("r1"), done("r1b", { restarts_run_id: "r1" }), done("r2")],
+    pendingMessage: description,
+    // This fake keeps the chat as it was, so each turn can be pressed in turn.
+    loadDescription: async () => description,
+    thread: { newChat() {}, rename: async () => {}, archive() {}, fork: (index) => forked.push(index), rewind() {}, copyConversation() {}, togglePin() {}, pinned: false,
+      deleteMessage: async (index, runIds) => { deleted.push([index, [...runIds]]); } } });
+  const view = mount(props);
+  const turns = () => walk(view.render()).filter((element) => element.type === "article");
+  assert.deepEqual(turns().map((turn) => text(walk(turn).find((element) => element.props?.className === "cx-bubble") ?? null)),
+    ["first ask", "", "second ask", "third ask"], "the restart shows as its own turn, without taking the next message");
+  const buttonIn = (turn, label) => walk(turn).find((element) => element.props?.["aria-label"] === label);
+  const press = async (turn) => {
+    buttonIn(turns()[turn], "Delete this message").props.onClick();
+    walk(walk(view.render()).find((element) => element.props?.role === "alertdialog")).find((element) => element.type === "button" && text(element) === "Delete").props.onClick();
+    await settle(); await settle();
+  };
+  await press(2);
+  assert.deepEqual(deleted, [[1, ["r2"]]], "the second message goes with its own run, not the first message's restart");
+  await press(0);
+  assert.deepEqual(deleted.at(-1), [0, ["r1", "r1b"]], "the first message goes with its restart");
+  const pending = buttonIn(turns()[3], "Delete this message");
+  assert.equal(pending.props.disabled, true);
+  assert.match(pending.props.title, /hasn't run yet/);
+  // Fork from here counts messages, not turns.
+  buttonIn(turns()[2], "Fork from this message").props.onClick();
+  assert.deepEqual(forked, [1]);
+});

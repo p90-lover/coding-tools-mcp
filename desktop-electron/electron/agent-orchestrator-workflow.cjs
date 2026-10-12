@@ -4,6 +4,7 @@ const { createHash, randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { DEFAULT_GOAL_ROUNDS, goalPrompt, goalVerdict, closingAnswers, cleanObjective, createGoalStore } = require("./chat-goals.cjs");
+const { chatDescriptionWithout, createChatEditStore } = require("./chat-edits.cjs");
 
 function clean(value, limit, required = true) {
   if (typeof value !== "string") throw new Error("Expected text");
@@ -161,8 +162,12 @@ function delayToMilliseconds(value, unit) {
   }
   return ms;
 }
-function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, releaseIdleAgents = false }) {
+function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, chatEditsFile = null, releaseIdleAgents = false }) {
   const goals = createGoalStore({ file: goalsFile, now });
+  // Deleted chat messages: their runs are hidden from the chat, and the next follow-up starts afresh.
+  const chatEdits = createChatEditStore({ file: chatEditsFile });
+  /** After a message was deleted the agent's session still remembers it, so the chat's next turn must not continue it. */
+  const freshSessionRequired = (workspaceId, taskId) => Boolean(taskId) && chatEdits.fresh(workspaceId, taskId);
   // A saved path goes stale when the Codex app updates itself (it replaces bin\<build>\), so a
   // chosen executable that no longer exists falls back to the currently installed one.
   function codexExecutable(chosen) {
@@ -334,7 +339,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       // An open chat whose next message continues its agent needs no new one; this also brings back
       // an agent released while idle, so it is ready before the message is sent.
       const previous = task ? saved.runs.filter(run => run.project_id === task).at(-1) : null;
-      const live = continuationCard(previous, executionMode, singleRoute);
+      const live = freshSessionRequired(id, task) ? null : continuationCard(previous, executionMode, singleRoute);
       if (live && await harnessService().continuable?.(live.receipt.thread_id).catch(() => false)) {
         return { ok: true, warmed: false, continues: true };
       }
@@ -1848,6 +1853,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const next = await createTeamRun(id, mission.project_id, team,
       single ? { executionMode: "single", singleRoute }
         : mission.team?.id ? { executionMode: "team" } : {});
+    // The new run answers the same message: the chat shows it there, not under the next message.
+    chatEdits.restarted(id, mission.project_id, previous, next);
     try {
       const started = await startRun({ workspaceId: id, runId: next, executable: selectedExecutable });
       return { ok: true, runId: next, status: started.status };
@@ -1932,7 +1939,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // The session keeps the permission mode, effort and context it was started with, so only an
       // unchanged route continues it; any change starts a fresh session with the new settings. A Team
       // follow-up has no single route and never continues the single card's session.
-      const live = continuationCard(previous, executionMode, singleRoute);
+      const live = freshSessionRequired(id, task) ? null : continuationCard(previous, executionMode, singleRoute);
       if (live) continuation = { session: live.receipt.thread_id, text };
       try {
         await retireOpenRuns(id, task, saved.runs);
@@ -1969,6 +1976,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
 
     const { runId, run: createdRun } = await createTeamRun(id, task, team, { executionMode, singleRoute }, true);
+    // After a deleted message this run started without the old session; later follow-ups continue its own.
+    if (taskId) chatEdits.clearFresh(id, task);
     if (continuation) {
       continuations.set(runId, continuation);
       if (continuations.size > 200) continuations.delete(continuations.keys().next().value);
@@ -2105,6 +2114,39 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!fresh.task || String(fresh.task.description || "") !== before) throw new Error("The chat changed while compacting; try again");
     await write(id, { expected_revision: fresh.revision, change: { operation: "edit", id: task, title: fresh.task.title, description } });
     return { ok: true, compacted: true, before: before.length, after: description.length };
+  }
+
+  // Delete one message from a chat, with its reply. The message (and the steers sent during its
+  // turn) leaves the task's description and its runs (the one it started, as the chat paired them,
+  // and every restart of it) are hidden from the chat, so every other run keeps its own message.
+  // The files the agent changed stay as they are. The agent's session still remembers the
+  // exchange, so the next turn starts a fresh one (freshSessionRequired).
+  async function chatDeleteMessage({ workspaceId, taskId, index, runId, runIds = [] } = {}) {
+    const id = clean(workspaceId, 128), task = clean(taskId, 128);
+    if (!Number.isSafeInteger(index) || index < 0) throw new Error("Choose a message to delete");
+    if (typeof runId !== "string" || !runId) throw new Error("This message has no reply yet; it can be deleted once its turn has run");
+    if (!Array.isArray(runIds) || runIds.length > 50) throw new Error("This message's reply was not found; reload the chat");
+    const own = [runId, ...runIds].map(value => clean(value, 80));
+    const saved = await runs({ workspaceId: id });
+    const chatRuns = saved.runs.filter(run => run.project_id === task);
+    const latest = chatRuns.at(-1);
+    if ((latest && !runSettled(latest)) || chatWorking(id, task, saved.runs)) throw new Error("Stop the chat first; a message can't be deleted while the chat is working");
+    const detail = await board({ workspaceId: id, taskId: task });
+    if (!detail.task) throw new Error("This chat's task no longer exists");
+    // The chat says which of its runs answered this message; each must be one it shows.
+    const shown = new Set(chatEdits.visible(id, chatRuns).map(run => run.id));
+    if (!own.every(run => shown.has(run))) throw new Error("This message's reply was not found; reload the chat");
+    const description = chatDescriptionWithout(detail.task.description || "", index);
+    const hidden = [...new Set([...chatEdits.runsOfMessage(id, task, own[0]), ...own])];
+    const before = chatEdits.get(id, task);
+    chatEdits.deleteMessage(id, task, hidden);
+    try {
+      await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
+    } catch (error) {
+      chatEdits.restore(id, task, before);
+      throw error;
+    }
+    return { ok: true, taskId: task, index, runIds: hidden };
   }
 
   // /diff: the project's uncommitted changes (staged and unstaged), through the workspace git tool.
@@ -2426,7 +2468,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "task_rename": return taskRename(args);
       case "models": return models(args);
       case "harnesses": return harnesses();
-      case "runs": return { ...(await runs(args)), goals: goals.forWorkspace(clean(args.workspaceId, 128)) };
+      case "runs": {
+        const saved = await runs(args);
+        // The runs of deleted chat messages stay in AO's history but are not shown in their chat.
+        return { ...saved, runs: chatEdits.visible(clean(args.workspaceId, 128), saved.runs), goals: goals.forWorkspace(clean(args.workspaceId, 128)) };
+      }
+      case "chat_delete_message": return chatDeleteMessage(args);
       case "chat_goal": return chatGoal(args);
       case "compact_chat": return compactChat(args);
       case "chat_diff": return chatDiff(args);
