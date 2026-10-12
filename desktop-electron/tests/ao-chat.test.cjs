@@ -583,3 +583,17 @@ test("a steer saved under a message is its own message, and a fork keeps it", ()
   ]);
   assert.equal(chat.chatDescriptionUpTo(description, 1), description, "a fork reproduces the steers it contains");
 });
+
+test("an install command's approval says what it does to the project's own packages", () => {
+  const links = { shared: [".venv"], farmed: ["frontend/node_modules", "node_modules"] };
+  assert.equal(chat.dependencyInstallNote("pip install requests", links).tone, "warn", "a shared Python environment changes for the project");
+  assert.equal(chat.dependencyInstallNote("python -m pip install -r requirements.txt", links).tone, "warn");
+  assert.equal(chat.dependencyInstallNote("uv sync", links).tone, "warn");
+  assert.equal(chat.dependencyInstallNote("npm ci --prefix frontend", links).tone, "info", "a farmed node_modules installs privately");
+  assert.match(chat.dependencyInstallNote("pnpm add zod", links).text, /privately/);
+  assert.equal(chat.dependencyInstallNote("npm ci", { shared: ["node_modules"], farmed: [] }).tone, "warn", "a user's own node_modules link is shared");
+  assert.equal(chat.dependencyInstallNote("pip install requests", { shared: [], farmed: ["node_modules"] }), null, "no shared venv, nothing to say");
+  assert.equal(chat.dependencyInstallNote("npm run dev", links), null, "not an install");
+  assert.equal(chat.dependencyInstallNote("Get-ChildItem frontend", links), null);
+  assert.equal(chat.dependencyInstallNote("npm install", null), null, "unknown links: no note");
+});

@@ -72,6 +72,8 @@
 /* ExitPlanMode: the plan scrolls inside the card, so its answer buttons stay in view. */
 .ao-msg-plan .ao-plan { max-height: min(48vh, 420px); overflow: auto; margin: 8px 0; padding: 4px 12px; border: 1px solid var(--ao-line); border-radius: 8px; }
 .ao-msg-plan .ao-msg-actions { flex-wrap: wrap; }
+/* An install that changes the project's own packages (a shared Python environment). */
+.ao-dependency-note.is-warn { color: var(--color-text-warning, #b45309); font-weight: 600; }
 .ao-msg-approval fieldset input[type="checkbox"] { width: auto; justify-self: start; }
 .ao-msg-approval pre { max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .ao-msg-approval a { color: var(--ao-blue); }
