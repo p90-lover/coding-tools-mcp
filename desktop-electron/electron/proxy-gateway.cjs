@@ -26,11 +26,14 @@ const relay = require("./proxy-gateway-relay.cjs");
 // `http://ct:<key>@…` env credentials on plain requests and on CONNECT, verified). CPA's generated
 // proxy-url YAML (cpa-managed.cjs) necessarily holds a plaintext copy. The key survives helper
 // replacements so a kept bridge or CPA never meets a 407. It rotates on the user's "New access
-// key", and on evidence of a squat on the data port: the port could not be bound, or something
-// that is not our helper holds it (after our helper died, or answering the control-token probe
-// as another process). After such a rotation the route is re-applied and CPA restarts with the
-// new key; the Codex bridge and the MCP tunnel are never restarted (they carry in-flight work),
-// so the status lists them in needsRestart until they restart on their own.
+// key", and on evidence of a squat on the data port: the port could not be bound, or it answers
+// the control-token probe with a 200 JSON naming another process or service (whether our helper
+// died or is alive). Anything less definite (our busy helper's 503, an older helper's 407, a
+// timeout, a socket left by a dead helper) is not evidence. One incident rotates once per port
+// within a minute. After a rotation the route is re-applied at once and CPA restarts once a
+// helper serves the new key; the Codex bridge and the MCP tunnel are never restarted (they carry
+// in-flight work), so the status lists them in needsRestart until the runtime supervisor's state
+// shows them running as new processes (or the app restarts, when their pids are unknown).
 // A helper that died while the port stayed free is replaced with the same key. That leaves one
 // window: something that bound the port after the helper died and released it before we looked
 // could have collected the key children sent meanwhile, and the key is not rotated for it.
@@ -300,14 +303,22 @@ function portHeld(port) {
   });
 }
 
-// Held on every check over about a second and a half, not just while a dead process's socket
-// is being torn down.
-async function portHeldPersistently(port, checks = [0, 250, 500, 750]) {
-  for (const delay of checks) {
-    if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
-    if (!(await portHeld(port))) return false;
+// The Codex bridge (daemon) and MCP tunnel pids from the runtime supervisor's ownership state, so
+// a "needs restart" note clears once they run as new processes.
+function readSupervisorPids(coreHome) {
+  const state = JSON.parse(fs.readFileSync(path.join(coreHome, "runtime", "launcher-supervisor.json"), "utf8"));
+  const pid = (value) => (Number.isInteger(value) && value > 0 ? value : null);
+  return { bridge: pid(state?.daemonPid), mcp: pid(state?.tunnelPid) };
+}
+
+// A just-exited process's listening socket can linger for a moment; wait (bounded) for it to go.
+async function waitForPortRelease(port, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!(await portHeld(port))) return true;
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  return true;
+  return !(await portHeld(port));
 }
 
 // Owns the gateway's settings, its helper process and the "Use for this app" switch. Settings and
@@ -327,6 +338,7 @@ function createProxyGatewayController({
   spawnProcess = spawn,
   fetchTrace = relay.fetchGatewayTrace,
   probe = relay.probeGateway,
+  probeAnswer = relay.probeGatewayAnswer,
   traceUrl = DEFAULT_TRACE_URL,
   helperLimits = null,
   readyTimeoutMs = 15_000,
@@ -340,6 +352,10 @@ function createProxyGatewayController({
   tokenlessLeaseMs = 30_000,
   // Called after the key rotated on evidence of a squat, so CPA can restart with the new key.
   onAccessKeyRotated = noop,
+  // Reads the kept services' pids ({ bridge, mcp }); null when unknown.
+  readServicePids = () => null,
+  rotationDedupMs = 60_000,
+  portReleaseWaitMs = 5_000,
 }) {
   if (!network?.store || typeof network.applyGlobalRouting !== "function") {
     throw new Error("Proxy gateway needs the provider network controller");
@@ -365,13 +381,16 @@ function createProxyGatewayController({
   let tokenlessDemand = false;
   let tokenlessHoldUntil = 0;
   let heartbeat = null;
-  // Evidence rotation bookkeeping: the reason waiting for the route/CPA follow-up, the incident
-  // already rotated for (so a retry does not rotate again), a key for the next helper when no
-  // gateway profile exists yet, and the kept services that still hold the old key.
+  // Evidence rotation bookkeeping: the reason waiting for the route follow-up, the reason waiting
+  // for CPA's restart (once a helper runs), when each port last rotated (one incident rotates
+  // once), a key for the next helper when no gateway profile exists yet, and the kept services
+  // that still hold the old key with their pids at the rotation.
   let rotationPending = null;
-  let rotatedIncident = null;
+  let rotationHookPending = null;
+  const rotatedPorts = new Map();
   let pendingKey = null;
   let needsRestart = [];
+  let restartBaseline = {};
 
   // Child processes take the route from HTTP(S)_PROXY, which must carry the gateway's access key.
   network.setEnvironmentRoute?.((profile) => {
@@ -606,28 +625,73 @@ function createProxyGatewayController({
     return started;
   }
 
-  // What answers on the data port: our helper (by pid), something else, or no definite answer.
+  // What answers on the data port. Only a 200 JSON probe answer naming another process or service
+  // is "other" (positive evidence of a squat). Our own helper at its connection cap (503), an older
+  // helper (407), a timeout or an unreadable answer is "unknown": no rotation, verification retried.
   async function dataPortHolder(target) {
+    let answer;
     try {
-      const answer = await probe({ port: target.dataPort, probeToken: target.controlToken, timeoutMs: controlTimeoutMs });
-      return answer.pid === target.pid ? "ours" : "other";
-    } catch (error) {
-      return /answered|not served|invalid HTTP|incomplete|unexpected token|JSON/i.test(error?.message || "") ? "other" : "unknown";
+      answer = await probeAnswer({ port: target.dataPort, probeToken: target.controlToken, timeoutMs: controlTimeoutMs });
+    } catch {
+      return "unknown";
+    }
+    const value = answer?.value;
+    if (answer?.statusCode !== 200 || !value || typeof value !== "object") return "unknown";
+    return value.service === HELPER_SERVICE && value.pid === target.pid ? "ours" : "other";
+  }
+
+  function servicePids() {
+    try {
+      const pids = readServicePids();
+      return pids && typeof pids === "object" ? pids : null;
+    } catch {
+      return null;
     }
   }
 
+  // The kept services that may still hold the old key: those running at the rotation. A service
+  // whose pid is unknown stays listed until the app restarts.
+  function recordNeedsRestart() {
+    const pids = servicePids();
+    restartBaseline = {};
+    needsRestart = ["bridge", "mcp"].filter((service) => {
+      const pid = pids?.[service];
+      if (pids && !(Number.isInteger(pid) && processRunning(pid))) return false;
+      restartBaseline[service] = Number.isInteger(pid) ? pid : null;
+      return true;
+    });
+  }
+
+  // A listed service that has restarted (another pid) or stopped no longer holds the old key.
+  function refreshNeedsRestart() {
+    if (!needsRestart.length) return;
+    const pids = servicePids();
+    if (!pids) return;
+    needsRestart = needsRestart.filter((service) => {
+      const before = restartBaseline[service];
+      if (!Number.isInteger(before)) return true;
+      const now = pids[service];
+      return now === before && processRunning(before);
+    });
+  }
+
   // Evidence that something other than our helper held the data port: children may have sent it
-  // the key. Store a new key for the next helper; the route and CPA follow once the pass ends.
-  function rotateOnEvidence(reason, incident) {
-    // One rotation per incident and per pass (a squat found after an exit also fails the bind).
-    if (rotatedIncident === incident || rotationPending) return;
-    rotatedIncident = incident;
+  // the key. Store a new key for the next helper; the route and CPA follow once a helper runs.
+  // One incident (a squat found after an exit, then the failed bind on the next pass) rotates once.
+  function rotateOnEvidence(reason, port) {
+    if (rotationPending) return;
+    const last = rotatedPorts.get(port);
+    if (last && Date.now() - last < rotationDedupMs) {
+      logger.info("proxy_gateway.access_key_rotation_skipped", { reason, port });
+      return;
+    }
+    rotatedPorts.set(port, Date.now());
     const key = randomToken();
     if (gatewayProfile()) {
       saveGatewayProfile(gatewayProfile().endpoint.port, key);
       // The Codex bridge and the MCP tunnel are kept alive across restarts and carry in-flight
       // work, so they are never restarted for this; they take the key on their next start.
-      needsRestart = ["bridge", "mcp"];
+      recordNeedsRestart();
     }
     pendingKey = key;
     rotationPending = reason;
@@ -635,18 +699,25 @@ function createProxyGatewayController({
     if (needsRestart.length) logger.warn("proxy_gateway.restart_needed", { services: needsRestart, reason });
   }
 
-  // After an evidence rotation: re-apply the route with the new key and let CPA restart.
+  // After an evidence rotation: re-apply the route with the new key right away; restart CPA only
+  // once a helper serves the new key (a CPA restart while the gateway is down would gain nothing).
   async function finishRotation(running) {
-    if (!rotationPending) return;
-    const reason = rotationPending;
-    rotationPending = null;
-    try {
-      if (running) await routeToHelper();
-      if (routeUsesGateway()) await network.applyGlobalRouting();
-    } catch (error) {
-      logger.warn("proxy_gateway.rotation_route_failed", { message: error instanceof Error ? error.message : String(error) });
+    if (rotationPending) {
+      const reason = rotationPending;
+      rotationPending = null;
+      try {
+        if (running) await routeToHelper();
+        if (routeUsesGateway()) await network.applyGlobalRouting();
+      } catch (error) {
+        logger.warn("proxy_gateway.rotation_route_failed", { message: error instanceof Error ? error.message : String(error) });
+      }
+      rotationHookPending = reason;
     }
-    await Promise.resolve(onAccessKeyRotated({ reason })).catch(noop);
+    if (running && rotationHookPending) {
+      const reason = rotationHookPending;
+      rotationHookPending = null;
+      await Promise.resolve(onAccessKeyRotated({ reason })).catch(noop);
+    }
   }
 
   async function ensureHelperOnce(options = {}) {
@@ -673,9 +744,12 @@ function createProxyGatewayController({
       }
     }
     if (target && !processRunning(target.pid)) {
-      // Our helper died. Something else on its port now is evidence of a squat; a free port is not.
-      // The dead helper's own socket can linger for a moment, so only a port that stays held counts.
-      if (await portHeldPersistently(target.dataPort)) rotateOnEvidence("port_held_after_exit", `exit:${target.pid}`);
+      // Our helper died. Its port answering as another process is evidence of a squat; a port that
+      // is free, or held without such an answer (the dead helper's socket can linger), is not.
+      if (await portHeld(target.dataPort)) {
+        if (await dataPortHolder(target) === "other") rotateOnEvidence("port_held_after_exit", target.dataPort);
+        else await waitForPortRelease(target.dataPort, portReleaseWaitMs);
+      }
       logger.warn("proxy_gateway.stale_state_discarded", { pid: target.pid, reason: "exited" });
       clearState(target.pid);
       helper = null;
@@ -705,11 +779,11 @@ function createProxyGatewayController({
         }
         await stopHelper(target);
       } else if (processRunning(target.pid) && await portHeld(target.dataPort)) {
-        // Never signal it and keep its state (the control token). If the port answers as someone
-        // else, that is a squat; otherwise it may be our helper, busy.
+        // Never signal it and keep its state (the control token). Only a positive answer from
+        // another process is a squat; otherwise it may be our helper, busy.
         helper = null;
         if (await dataPortHolder(target) === "other") {
-          rotateOnEvidence("port_held_by_other", `other:${target.pid}:${target.dataPort}`);
+          rotateOnEvidence("port_held_by_other", target.dataPort);
           unverified = null;
           throw new Error(`Something other than the gateway helper holds port ${target.dataPort}`);
         }
@@ -728,11 +802,8 @@ function createProxyGatewayController({
     try {
       helper = await spawnHelper(upstream, fingerprint, startKey);
       pendingKey = null;
-      rotatedIncident = null;
     } catch (error) {
-      if (/already in use/.test(error?.message || "")) {
-        rotateOnEvidence("bind_failed", `bind:${settings.port}`);
-      }
+      if (/already in use/.test(error?.message || "")) rotateOnEvidence("bind_failed", settings.port);
       throw error;
     }
     return helper;
@@ -981,7 +1052,7 @@ function createProxyGatewayController({
         : null,
       unverifiedHelper: unverified ? { ...unverified } : null,
       // Kept services still holding the previous key after an evidence rotation.
-      needsRestart: [...needsRestart],
+      needsRestart: (refreshNeedsRestart(), [...needsRestart]),
       watchdog: {
         restarts: restartFailures,
         nextRestartAt: nextRestartAt > Date.now() ? new Date(nextRestartAt).toISOString() : null,
@@ -1238,6 +1309,7 @@ module.exports = {
   PROXYBRIDGE_PORTS,
   compareVersionNames,
   createProxyGatewayController,
+  readSupervisorPids,
   relayScriptPath,
   resolveHelperRuntime,
 };

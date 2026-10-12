@@ -901,9 +901,9 @@ function openGatewaySocket(host, port, sockets) {
   });
 }
 
-// Asks a gateway listener which process holds it, so the app only routes to a port it knows is
-// served by its own helper.
-async function probeGateway({ host = GATEWAY_HOST, port, proxyToken = null, probeToken = null, timeoutMs = 2_000 } = {}) {
+// The raw answer to a probe: the status code and the JSON body when there is one. Throws only when
+// no HTTP answer arrives (refused, reset, timed out).
+async function probeGatewayAnswer({ host = GATEWAY_HOST, port, proxyToken = null, probeToken = null, timeoutMs = 2_000 } = {}) {
   const sockets = [];
   const timer = setTimeout(() => {
     for (const socket of sockets) socket.destroy(new Error("Gateway probe timed out"));
@@ -915,14 +915,26 @@ async function probeGateway({ host = GATEWAY_HOST, port, proxyToken = null, prob
     const probeLine = probeToken ? `X-Coding-Tools-Probe: ${probeToken}\r\n` : "";
     socket.write(`GET ${PROBE_PATH} HTTP/1.1\r\nHost: ${host}:${port}\r\n${proxyAuthorizationLine(proxyToken)}${probeLine}Connection: close\r\n\r\n`);
     const response = parseHttpResponse(await reader.readToEnd(16 * 1024));
-    if (response.status.code !== 200) throw new Error(`Gateway probe answered ${response.status.line}`);
-    const value = JSON.parse(response.body);
-    if (value?.service !== HELPER_SERVICE || !Number.isInteger(value.pid)) throw new Error("Port is not served by the gateway");
-    return value;
+    let value = null;
+    try {
+      value = JSON.parse(response.body);
+    } catch {}
+    return { statusCode: response.status.code, statusLine: response.status.line, value };
   } finally {
     clearTimeout(timer);
     for (const socket of sockets) socket.destroy();
   }
+}
+
+// Asks a gateway listener which process holds it, so the app only routes to a port it knows is
+// served by its own helper.
+async function probeGateway(options = {}) {
+  const answer = await probeGatewayAnswer(options);
+  if (answer.statusCode !== 200) throw new Error(`Gateway probe answered ${answer.statusLine}`);
+  if (answer.value?.service !== HELPER_SERVICE || !Number.isInteger(answer.value.pid)) {
+    throw new Error("Port is not served by the gateway");
+  }
+  return answer.value;
 }
 
 // Fetches a Cloudflare trace through the gateway, so the test exercises the same loopback hop and
@@ -1219,6 +1231,7 @@ module.exports = {
   normalizeHost,
   parseTrace,
   probeGateway,
+  probeGatewayAnswer,
   readConfigLine,
   relayScriptHash,
   runHelper,

@@ -7,6 +7,7 @@ const { resolveLauncherProfile } = require("./profile.cjs");
 const {
   GATEWAY_PROFILE_ID,
   createProxyGatewayController,
+  readSupervisorPids,
   resolveHelperRuntime,
 } = require("./proxy-gateway.cjs");
 
@@ -134,6 +135,7 @@ function installProviderNetwork({
           coreHome: launcherProfile.coreHome,
         }),
         onAccessKeyRotated: (detail) => proxyGatewayKeyRotated(detail),
+        readServicePids: () => readSupervisorPids(launcherProfile.coreHome),
       });
       proxyGatewayInstance = gateway;
       await gateway.startup();

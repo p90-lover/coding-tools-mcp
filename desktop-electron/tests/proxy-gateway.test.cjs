@@ -965,12 +965,19 @@ test("a helper that died while its port stayed free is restarted with the same k
   await controller.setRunning(false);
 });
 
-async function squat(t, port) {
+const SQUATTER_ANSWER = (() => {
+  const body = JSON.stringify({ service: "someone-else", pid: 4242 });
+  return `HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`;
+})();
+
+// Holds the port and answers every request with `answer` (a squatter answers the probe as another
+// process with 200 JSON).
+async function squat(t, port, answer = SQUATTER_ANSWER) {
   const sockets = new Set();
   const server = net.createServer((socket) => {
     sockets.add(socket);
     socket.on("error", () => {});
-    socket.end("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi");
+    socket.once("data", () => socket.end(answer));
   });
   // A just-killed helper's socket can linger for a moment before the port is free to take.
   for (let attempt = 0; ; attempt += 1) {
@@ -988,14 +995,30 @@ async function squat(t, port) {
       await sleep(100);
     }
   }
-  t.after(async () => {
+  let closed = false;
+  const stop = async () => {
+    if (closed) return;
+    closed = true;
     for (const socket of sockets) socket.destroy();
     await close(server);
-  });
-  return server;
+  };
+  t.after(stop);
+  return stop;
 }
 
-test("startup rotates the key when another listener holds the data port after the helper died", async (t) => {
+function rotationLog() {
+  const events = [];
+  return {
+    events,
+    logger: {
+      info: (event, detail) => events.push({ event, detail }),
+      warn: (event, detail) => events.push({ event, detail }),
+    },
+    rotated: () => events.filter((entry) => entry.event === "proxy_gateway.access_key_rotated"),
+  };
+}
+
+test("startup rotates once when the data port answers as another process after the helper died", async (t) => {
   trackHelpers(t);
   const setup = tempSetup(t);
   await addUpstream(setup, t);
@@ -1007,19 +1030,41 @@ test("startup rotates the key when another listener holds the data port after th
   await first.close();
   process.kill(started.helper.pid);
   assert.ok(await waitFor(() => !processAlive(started.helper.pid)));
-  await squat(t, port);
+  const release = await squat(t, port);
 
   const rotations = [];
-  const relaunched = controllerFor(setup, [], { onAccessKeyRotated: (detail) => rotations.push(detail) });
-  const status = await relaunched.startup();
-  assert.notEqual(gatewayToken(setup.store), oldKey, "the squatter may have collected the old key");
-  assert.deepEqual(rotations, [{ reason: "port_held_after_exit" }], "one rotation, and CPA's restart hook runs");
+  const pids = { bridge: process.pid, mcp: process.pid };
+  const relaunched = controllerFor(setup, [], {
+    onAccessKeyRotated: (detail) => rotations.push(detail),
+    readServicePids: () => ({ ...pids }),
+  });
+  let status = await relaunched.startup();
+  const newKey = gatewayToken(setup.store);
+  assert.notEqual(newKey, oldKey, "the squatter may have collected the old key");
+  assert.deepEqual(rotations, [], "CPA is not restarted while the gateway is down");
   assert.deepEqual(status.needsRestart, ["bridge", "mcp"], "the bridge and MCP are flagged, never restarted");
   assert.equal(status.running, false);
   assert.equal(setup.store.snapshot().routing.globalProfileId, "proxybridge-local-17891", "the app leaves the squatted port");
+
+  // The next pass fails the bind on the same squat: the same incident, no second rotation.
+  await assert.rejects(relaunched.setRunning(true), /already in use/);
+  assert.equal(gatewayToken(setup.store), newKey);
+
+  // The bridge restarts as a new process: its note clears; MCP's stays.
+  pids.bridge = process.ppid;
+  status = await relaunched.status();
+  assert.deepEqual(status.needsRestart, ["mcp"]);
+
+  // Once a helper serves the new key, CPA's restart hook runs once.
+  await release();
+  status = await relaunched.setRunning(true);
+  assert.equal(status.running, true);
+  assert.deepEqual(rotations, [{ reason: "port_held_after_exit" }]);
+  assert.equal(gatewayToken(setup.store), newKey);
+  await relaunched.setRunning(false);
 });
 
-test("a failed bind rotates the key and calls the rotation hook", async (t) => {
+test("a failed bind rotates the key; the hook runs once a helper serves it", async (t) => {
   trackHelpers(t);
   const setup = tempSetup(t);
   await addUpstream(setup, t);
@@ -1030,12 +1075,58 @@ test("a failed bind rotates the key and calls the rotation hook", async (t) => {
   await controller.setUseForApp(true);
   await controller.setRunning(false);
   const oldKey = gatewayToken(setup.store);
-  await squat(t, port);
+  const release = await squat(t, port, "");
 
   await assert.rejects(controller.setRunning(true), /already in use/);
   assert.notEqual(gatewayToken(setup.store), oldKey);
+  assert.deepEqual(rotations, [], "no CPA restart while the gateway is down");
+  assert.deepEqual((await controller.status()).needsRestart, ["bridge", "mcp"], "pids unknown: both stay listed");
+  await release();
+  await controller.setRunning(true);
   assert.deepEqual(rotations, [{ reason: "bind_failed" }]);
-  assert.deepEqual((await controller.status()).needsRestart, ["bridge", "mcp"]);
+  await controller.setRunning(false);
+});
+
+test("our busy helper (503) or an older helper (407) on the port is not taken for a squatter", async (t) => {
+  for (const answer of [
+    "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"Coding Tools gateway\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+  ]) {
+    const setup = tempSetup(t);
+    await addUpstream(setup, t);
+    const dataPort = await freePort();
+    await squat(t, dataPort, answer);
+    const sockets = new Set();
+    const silent = net.createServer((socket) => {
+      sockets.add(socket);
+      socket.on("error", () => {});
+    });
+    const controlPort = await listen(silent);
+    t.after(async () => {
+      for (const socket of sockets) socket.destroy();
+      await close(silent);
+    });
+    const log = rotationLog();
+    const rotations = [];
+    const controller = controllerFor(setup, [], {
+      logger: log.logger,
+      controlTimeoutMs: 150,
+      verifyRetryDelaysMs: [50],
+      onAccessKeyRotated: (detail) => rotations.push(detail),
+    });
+    await controller.configure({ upstreamProfileId: "isp-upstream", port: await freePort(), tokenlessPort: await freePort() });
+    const statePath = path.join(setup.directory, "providers", "proxy-gateway.state.json");
+    const state = staleState(process.pid, dataPort, controlPort);
+    fs.writeFileSync(statePath, JSON.stringify(state));
+
+    await assert.rejects(controller.setRunning(true), /unverified helper/, answer.slice(0, 12));
+    assert.deepEqual(log.rotated(), [], "no rotation");
+    assert.deepEqual(rotations, []);
+    const status = await controller.status();
+    assert.equal(status.helperState, "unverified", "retried through the unverified path");
+    assert.deepEqual(status.needsRestart, []);
+    assert.deepEqual(JSON.parse(fs.readFileSync(statePath, "utf8")), state, "the live helper's state is kept");
+  }
 });
 
 test("a replaced helper reopens the token-free port while ChatGPT Desktop still runs", async (t) => {
