@@ -13,10 +13,6 @@ const {
 let providerNetworkControllerPromise = null;
 let providerBrowserHostGetter = () => null;
 let providerCpaConnectionGetter = () => null;
-// Proxy Gateway writes are refused until main.cjs installs its focused-main-window check.
-let providerWriteGuard = () => {
-  throw new Error("Use the visible, focused main-window controller for provider consent");
-};
 
 function setProviderBrowserHost(getter) {
   if (typeof getter !== "function") {
@@ -30,13 +26,6 @@ function setProviderCpaConnection(getter) {
     throw new Error("Provider CPA connection getter must be a function");
   }
   providerCpaConnectionGetter = getter;
-}
-
-function setProviderWriteGuard(guard) {
-  if (typeof guard !== "function") {
-    throw new Error("Provider write guard must be a function");
-  }
-  providerWriteGuard = guard;
 }
 
 function providerNetworkReady() {
@@ -257,41 +246,38 @@ function installProviderNetwork({
     () => active.store.setAccountPolicy(input),
   ), "network");
 
-  // Proxy Gateway: the status read is open; every change is a user action from the focused main
-  // window, checked before anything else runs.
-  function handleGateway(channel, callback, { write = true } = {}) {
-    ipcMain.handle(channel, async (event, ...args) => {
-      if (write) providerWriteGuard(event);
-      const active = await controllerPromise;
-      if (!gateway) throw new Error("Proxy Gateway is unavailable; check the launcher log");
-      return callback(active, gateway, ...args);
-    });
+  // Proxy Gateway: the status read needs only the window's own page; every change to the route,
+  // the gateway, its upstream or its key (and the test, which makes outbound requests) is a
+  // "network" change from the visible, focused window.
+  function activeGateway() {
+    if (!gateway) throw new Error("Proxy Gateway is unavailable; check the launcher log");
+    return gateway;
   }
 
   async function gatewayMutation(active, mutate) {
-    const status = await mutate();
+    const status = await mutate(activeGateway());
     publish(active.store.snapshot());
     return publishGateway(status);
   }
 
-  handleGateway("launcher:proxy-gateway-status", (_active, current) => current.status(), { write: false });
-  handleGateway("launcher:proxy-gateway-configure", (active, current, input) => gatewayMutation(
+  handle("launcher:proxy-gateway-status", () => activeGateway().status());
+  handle("launcher:proxy-gateway-configure", (active, _event, input) => gatewayMutation(
     active,
-    () => current.configure(input),
-  ));
-  handleGateway("launcher:proxy-gateway-running", (active, current, running) => gatewayMutation(
+    (current) => current.configure(input),
+  ), "network");
+  handle("launcher:proxy-gateway-running", (active, _event, running) => gatewayMutation(
     active,
-    () => current.setRunning(running === true),
-  ));
-  handleGateway("launcher:proxy-gateway-use-for-app", (active, current, enabled) => gatewayMutation(
+    (current) => current.setRunning(running === true),
+  ), "network");
+  handle("launcher:proxy-gateway-use-for-app", (active, _event, enabled) => gatewayMutation(
     active,
-    () => current.setUseForApp(enabled === true),
-  ));
-  handleGateway("launcher:proxy-gateway-rotate-key", (active, current) => gatewayMutation(
+    (current) => current.setUseForApp(enabled === true),
+  ), "network");
+  handle("launcher:proxy-gateway-rotate-key", (active) => gatewayMutation(
     active,
-    () => current.rotateAccessKey(),
-  ));
-  handleGateway("launcher:proxy-gateway-test",async (_active, current) => publishGateway(await current.test()));
+    (current) => current.rotateAccessKey(),
+  ), "network");
+  handle("launcher:proxy-gateway-test", async () => publishGateway(await activeGateway().test()), "network");
 
   // A normal quit leaves the gateway helper running, like the bridge; the next app adopts it.
   app.on("will-quit", () => {
@@ -310,5 +296,4 @@ module.exports = {
   providerNetworkReady,
   setProviderBrowserHost,
   setProviderCpaConnection,
-  setProviderWriteGuard,
 };

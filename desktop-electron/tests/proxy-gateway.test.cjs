@@ -811,14 +811,26 @@ test("concurrent gateway starts spawn one helper", async (t) => {
   await controller.setRunning(false);
 });
 
-test("Network Proxy cannot overwrite or archive the built-in gateway profile", async () => {
+test("gateway channels use the provider IPC sender check; Network Proxy cannot overwrite the gateway profile", async () => {
   const { EventEmitter } = require("node:events");
   const app = new EventEmitter();
   app.whenReady = () => Promise.resolve();
   app.getPath = () => "unused";
   const handlers = new Map();
   const saved = [];
+  const calls = [];
   const loaded = { exports: {} };
+  const gatewayStub = {
+    startup: async () => ({}),
+    upstreamProfileId: () => null,
+    status: async () => ({ running: false }),
+  };
+  for (const name of ["configure", "setRunning", "setUseForApp", "rotateAccessKey", "test"]) {
+    gatewayStub[name] = async (...args) => {
+      calls.push(name, ...args);
+      return { running: true };
+    };
+  }
   const dependencies = {
     "./provider-network.cjs": {
       createProviderNetworkController: () => ({
@@ -835,27 +847,61 @@ test("Network Proxy cannot overwrite or archive the built-in gateway profile", a
     "./profile.cjs": { resolveLauncherProfile: () => ({ browserPartition: "test", coreHome: "unused" }) },
     "./proxy-gateway.cjs": {
       GATEWAY_PROFILE_ID,
-      createProxyGatewayController: () => ({ startup: async () => ({}), upstreamProfileId: () => null }),
+      createProxyGatewayController: () => gatewayStub,
       resolveHelperRuntime: () => null,
     },
   };
   require("node:vm").runInNewContext(read("electron/provider-bootstrap.cjs"), {
     module: loaded, require: (name) => dependencies[name], console,
   });
+  let focused = true;
+  const mainFrame = {};
+  const page = { mainFrame, isFocused: () => focused, isDestroyed: () => false, send() {} };
+  const window = { webContents: page, isDestroyed: () => false, isVisible: () => true, isMinimized: () => false, isFocused: () => focused };
+  const embedded = { mainFrame: {}, isFocused: () => true };
   loaded.exports.installProviderNetwork({
     app,
-    BrowserWindow: { getAllWindows: () => [] },
+    BrowserWindow: {
+      getAllWindows: () => [window],
+      fromWebContents: (contents) => (contents === page || contents === embedded ? window : null),
+    },
     ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
   });
   await loaded.exports.providerNetworkReady();
+  const own = { sender: page, senderFrame: mainFrame };
+  const call = (channel, event, ...args) => handlers.get(channel)(event, ...args);
+
   await assert.rejects(
-    handlers.get("launcher:proxy-profile-save")({}, { id: GATEWAY_PROFILE_ID, name: "x", endpoint: { protocol: "http", host: "127.0.0.1", port: 1 }, enabled: false }),
+    call("launcher:proxy-profile-save", own, { id: GATEWAY_PROFILE_ID, name: "x", endpoint: { protocol: "http", host: "127.0.0.1", port: 1 }, enabled: false }),
     /managed in Proxy Gateway/,
   );
-  await assert.rejects(handlers.get("launcher:proxy-profile-archive")({}, GATEWAY_PROFILE_ID), /managed in Proxy Gateway/);
+  await assert.rejects(call("launcher:proxy-profile-archive", own, GATEWAY_PROFILE_ID), /managed in Proxy Gateway/);
   assert.deepEqual(saved, []);
-  await assert.rejects(handlers.get("launcher:proxy-gateway-running")({ sender: {} }, true), /focused main-window/,
-    "gateway writes are refused until main installs its focused-window guard");
+
+  const writes = [
+    ["launcher:proxy-gateway-configure", "configure", { port: 18000 }],
+    ["launcher:proxy-gateway-running", "setRunning", true],
+    ["launcher:proxy-gateway-use-for-app", "setUseForApp", true],
+    ["launcher:proxy-gateway-rotate-key", "rotateAccessKey"],
+    ["launcher:proxy-gateway-test", "test"],
+  ];
+  for (const [channel, method, ...args] of writes) {
+    calls.length = 0;
+    await call(channel, own, ...args);
+    assert.equal(calls[0], method, `${channel} reaches the gateway from the focused window`);
+    calls.length = 0;
+    await assert.rejects(call(channel, { sender: embedded, senderFrame: embedded.mainFrame }, ...args), /focused Coding Tools window/,
+      `${channel} refuses web content embedded in the window`);
+    await assert.rejects(call(channel, { sender: page, senderFrame: {} }, ...args), /focused Coding Tools window/,
+      `${channel} refuses an iframe`);
+    focused = false;
+    await assert.rejects(call(channel, own, ...args), /focused Coding Tools window/, `${channel} is a "network" change`);
+    focused = true;
+    assert.deepEqual(calls, [], `${channel} never reached the gateway when refused`);
+  }
+  focused = false;
+  assert.deepEqual(await call("launcher:proxy-gateway-status", own), { running: false }, "the status read needs only the window's own page");
+  await assert.rejects(call("launcher:proxy-gateway-status", { sender: embedded, senderFrame: embedded.mainFrame }), /focused Coding Tools window/);
 });
 
 test("Proxy Gateway is a More tab wired through guarded IPC and packaged for the helper runtime", () => {
@@ -890,12 +936,16 @@ test("Proxy Gateway is a More tab wired through guarded IPC and packaged for the
   }
   assert.match(surface, /17891/);
   assert.match(surface, /cdn-cgi\/trace/);
-  assert.match(bootstrap, /handleGateway\("launcher:proxy-gateway-status", [^\n]*\{ write: false \}/);
+  // Gateway channels go through the provider handle() sender check: status with the default
+  // access, every write with "network".
+  assert.match(bootstrap, /handle\("launcher:proxy-gateway-status", \(\) => activeGateway\(\)\.status\(\)\);/);
   for (const channel of ["configure", "running", "use-for-app", "rotate-key", "test"]) {
-    assert.match(bootstrap, new RegExp(`handleGateway\\("launcher:proxy-gateway-${channel}"`));
+    const start = bootstrap.indexOf(`handle("launcher:proxy-gateway-${channel}"`);
+    assert.ok(start > 0, `${channel} is registered`);
+    const registration = /^[\s\S]*?\);\r?\n/.exec(bootstrap.slice(start))[0];
+    assert.match(registration, /, "network"\);\r?\n$/, `${channel} needs "network" access`);
   }
-  assert.match(bootstrap, /if \(write\) providerWriteGuard\(event\)/);
-  assert.match(main, /setProviderWriteGuard\(\(event\) => assertFocusedMainWindow\(event, true\)\)/);
+  assert.doesNotMatch(main + bootstrap, /setProviderWriteGuard|handleGateway/);
   // The helper is adopted or started before the saved global route is applied at launch.
   assert.ok(bootstrap.indexOf("await gateway.startup()") < bootstrap.indexOf("controller.applyGlobalRouting()"));
   // The bundled Bun runs the relay from app.asar.unpacked; it may require Node built-ins only.
