@@ -26,15 +26,21 @@ const relay = require("./proxy-gateway-relay.cjs");
 // `http://ct:<key>@…` env credentials on plain requests and on CONNECT, verified). CPA's generated
 // proxy-url YAML (cpa-managed.cjs) necessarily holds a plaintext copy. The key survives helper
 // replacements so a kept bridge or CPA never meets a 407. It rotates on the user's "New access
-// key", and also after the helper exits unexpectedly or its port could not be bound: something
-// else may have held the port and collected the key that children send. Between such an exit and
-// the restart (the watchdog interval plus backoff) children keep sending the old key to whatever
-// answers on the port; after the rotation CPA is restarted with the new key and the Codex bridge
-// picks it up on its next start.
+// key", and on evidence of a squat on the data port: the port could not be bound, or something
+// that is not our helper holds it (after our helper died, or answering the control-token probe
+// as another process). After such a rotation the route is re-applied and CPA restarts with the
+// new key; the Codex bridge and the MCP tunnel are never restarted (they carry in-flight work),
+// so the status lists them in needsRestart until they restart on their own.
+// A helper that died while the port stayed free is replaced with the same key. That leaves one
+// window: something that bound the port after the helper died and released it before we looked
+// could have collected the key children sent meanwhile, and the key is not rotated for it.
 //
 // The token-free port is an unauthenticated loopback proxy for ChatGPT Desktop, which receives its
 // route as `--proxy-server` and cannot carry credentials. It is closed by default and opened over
-// the control channel only while a ChatGPT Desktop instance runs (or is being launched).
+// the control channel only while a ChatGPT Desktop instance runs (or is being launched); the app
+// renews a lease with a heartbeat and the helper closes the port by itself once the lease lapses,
+// so a quit or crashed app does not leave it open. A ChatGPT Desktop instance still running after
+// the app quits loses its proxy then.
 // Upstream credentials go to the helper on stdin and are never written to a file.
 const {
   DEFAULT_GATEWAY_PORT,
@@ -294,6 +300,16 @@ function portHeld(port) {
   });
 }
 
+// Held on every check over about a second and a half, not just while a dead process's socket
+// is being torn down.
+async function portHeldPersistently(port, checks = [0, 250, 500, 750]) {
+  for (const delay of checks) {
+    if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+    if (!(await portHeld(port))) return false;
+  }
+  return true;
+}
+
 // Owns the gateway's settings, its helper process and the "Use for this app" switch. Settings and
 // the state file hold no upstream secrets and no access key.
 function createProxyGatewayController({
@@ -320,7 +336,9 @@ function createProxyGatewayController({
   restartBackoffBaseMs = 15_000,
   restartBackoffCapMs = 10 * 60_000,
   tokenlessHoldMs = 2 * 60_000,
-  // Called after the key rotated because of an incident, so kept services can be restarted.
+  tokenlessHeartbeatMs = 10_000,
+  tokenlessLeaseMs = 30_000,
+  // Called after the key rotated on evidence of a squat, so CPA can restart with the new key.
   onAccessKeyRotated = noop,
 }) {
   if (!network?.store || typeof network.applyGlobalRouting !== "function") {
@@ -341,12 +359,19 @@ function createProxyGatewayController({
   let watchdog = null;
   let restartFailures = 0;
   let nextRestartAt = 0;
-  let incidentPending = false;
+  let restartPending = false;
   let lastError = null;
   let lastTest = null;
   let tokenlessDemand = false;
   let tokenlessHoldUntil = 0;
-  let tokenlessTimer = null;
+  let heartbeat = null;
+  // Evidence rotation bookkeeping: the reason waiting for the route/CPA follow-up, the incident
+  // already rotated for (so a retry does not rotate again), a key for the next helper when no
+  // gateway profile exists yet, and the kept services that still hold the old key.
+  let rotationPending = null;
+  let rotatedIncident = null;
+  let pendingKey = null;
+  let needsRestart = [];
 
   // Child processes take the route from HTTP(S)_PROXY, which must carry the gateway's access key.
   network.setEnvironmentRoute?.((profile) => {
@@ -433,7 +458,7 @@ function createProxyGatewayController({
   // The access key children already hold: the encrypted profile secret is the source of truth;
   // a helper started in this session also has it in memory.
   function currentAccessKey() {
-    return validKey(store.proxySecret(GATEWAY_PROFILE_ID)?.password) ?? validKey(helper?.proxyToken);
+    return validKey(store.proxySecret(GATEWAY_PROFILE_ID)?.password) ?? pendingKey ?? validKey(helper?.proxyToken);
   }
 
   function gatewayProfile() {
@@ -538,6 +563,7 @@ function createProxyGatewayController({
       proxyToken,
       upstreamProfileId: settings.upstreamProfileId,
       appVersion,
+      tokenlessLeaseMs,
       upstream,
       ...(helperLimits ? { limits: helperLimits } : {}),
     })}\n`);
@@ -580,28 +606,91 @@ function createProxyGatewayController({
     return started;
   }
 
-  async function ensureHelperOnce({ restart = false, rotateKey = false } = {}) {
+  // What answers on the data port: our helper (by pid), something else, or no definite answer.
+  async function dataPortHolder(target) {
+    try {
+      const answer = await probe({ port: target.dataPort, probeToken: target.controlToken, timeoutMs: controlTimeoutMs });
+      return answer.pid === target.pid ? "ours" : "other";
+    } catch (error) {
+      return /answered|not served|invalid HTTP|incomplete|unexpected token|JSON/i.test(error?.message || "") ? "other" : "unknown";
+    }
+  }
+
+  // Evidence that something other than our helper held the data port: children may have sent it
+  // the key. Store a new key for the next helper; the route and CPA follow once the pass ends.
+  function rotateOnEvidence(reason, incident) {
+    // One rotation per incident and per pass (a squat found after an exit also fails the bind).
+    if (rotatedIncident === incident || rotationPending) return;
+    rotatedIncident = incident;
+    const key = randomToken();
+    if (gatewayProfile()) {
+      saveGatewayProfile(gatewayProfile().endpoint.port, key);
+      // The Codex bridge and the MCP tunnel are kept alive across restarts and carry in-flight
+      // work, so they are never restarted for this; they take the key on their next start.
+      needsRestart = ["bridge", "mcp"];
+    }
+    pendingKey = key;
+    rotationPending = reason;
+    logger.warn("proxy_gateway.access_key_rotated", { reason });
+    if (needsRestart.length) logger.warn("proxy_gateway.restart_needed", { services: needsRestart, reason });
+  }
+
+  // After an evidence rotation: re-apply the route with the new key and let CPA restart.
+  async function finishRotation(running) {
+    if (!rotationPending) return;
+    const reason = rotationPending;
+    rotationPending = null;
+    try {
+      if (running) await routeToHelper();
+      if (routeUsesGateway()) await network.applyGlobalRouting();
+    } catch (error) {
+      logger.warn("proxy_gateway.rotation_route_failed", { message: error instanceof Error ? error.message : String(error) });
+    }
+    await Promise.resolve(onAccessKeyRotated({ reason })).catch(noop);
+  }
+
+  async function ensureHelperOnce(options = {}) {
+    try {
+      const result = await ensureHelperPass(options);
+      await finishRotation(true);
+      return result;
+    } catch (error) {
+      await finishRotation(false);
+      throw error;
+    }
+  }
+
+  async function ensureHelperPass({ restart = false, rotateKey = false } = {}) {
     const upstream = resolveUpstream();
     const fingerprint = relay.upstreamFingerprint(upstream);
-    const accessKey = rotateKey ? randomToken() : currentAccessKey() ?? randomToken();
-    const keyHash = relay.accessKeyHash(accessKey);
-    const keeps = (target, live) => !restart
-      && live.fingerprint === fingerprint
-      && live.keyHash === keyHash
-      && live.scriptHash === scriptHash
-      && (live.appVersion ?? null) === appVersion
-      && target.upstreamProfileId === settings.upstreamProfileId
-      && target.dataPort === settings.port
-      && target.tokenlessPort === settings.tokenlessPort;
     let target = helper;
     if (!target) {
       target = readState();
-      if (target && (Date.parse(target.startedAt) < BOOT_STARTED_AT_MS - BOOT_TIME_TOLERANCE_MS || !processRunning(target.pid))) {
-        logger.warn("proxy_gateway.stale_state_discarded", { pid: target.pid });
+      if (target && Date.parse(target.startedAt) < BOOT_STARTED_AT_MS - BOOT_TIME_TOLERANCE_MS) {
+        logger.warn("proxy_gateway.stale_state_discarded", { pid: target.pid, reason: "previous_boot" });
         clearState(target.pid);
         target = null;
       }
     }
+    if (target && !processRunning(target.pid)) {
+      // Our helper died. Something else on its port now is evidence of a squat; a free port is not.
+      // The dead helper's own socket can linger for a moment, so only a port that stays held counts.
+      if (await portHeldPersistently(target.dataPort)) rotateOnEvidence("port_held_after_exit", `exit:${target.pid}`);
+      logger.warn("proxy_gateway.stale_state_discarded", { pid: target.pid, reason: "exited" });
+      clearState(target.pid);
+      helper = null;
+      target = null;
+    }
+    const accessKey = rotateKey ? randomToken() : currentAccessKey() ?? randomToken();
+    const keyHash = relay.accessKeyHash(accessKey);
+    const keeps = (candidate, live) => !restart
+      && live.fingerprint === fingerprint
+      && live.keyHash === keyHash
+      && live.scriptHash === scriptHash
+      && (live.appVersion ?? null) === appVersion
+      && candidate.upstreamProfileId === settings.upstreamProfileId
+      && candidate.dataPort === settings.port
+      && candidate.tokenlessPort === settings.tokenlessPort;
     if (target) {
       const live = await verify(target);
       if (live && keeps(target, live)) {
@@ -616,22 +705,34 @@ function createProxyGatewayController({
         }
         await stopHelper(target);
       } else if (processRunning(target.pid) && await portHeld(target.dataPort)) {
-        // Never signal it and keep its state (the control token): it may be our helper, busy.
+        // Never signal it and keep its state (the control token). If the port answers as someone
+        // else, that is a squat; otherwise it may be our helper, busy.
         helper = null;
+        if (await dataPortHolder(target) === "other") {
+          rotateOnEvidence("port_held_by_other", `other:${target.pid}:${target.dataPort}`);
+          unverified = null;
+          throw new Error(`Something other than the gateway helper holds port ${target.dataPort}`);
+        }
         unverified = { pid: target.pid, port: target.dataPort, since: unverified?.since ?? new Date().toISOString() };
         throw new Error(`An unverified helper (pid ${target.pid}) holds the gateway port ${target.dataPort}; verification is retried`);
       } else {
-        // Dead, or alive without the port (a reused pid): discard without signalling it.
-        logger.warn("proxy_gateway.stale_state_discarded", { pid: target.pid, alive: processRunning(target.pid) });
+        // Alive without the port (a reused pid): discard without signalling it.
+        logger.warn("proxy_gateway.stale_state_discarded", { pid: target.pid, reason: "port_not_held" });
         clearState(target.pid);
         helper = null;
       }
     }
     unverified = null;
+    // A rotation in this pass (or a pending one) replaces the key the helper starts with.
+    const startKey = rotateKey ? accessKey : currentAccessKey() ?? accessKey;
     try {
-      helper = await spawnHelper(upstream, fingerprint, accessKey);
+      helper = await spawnHelper(upstream, fingerprint, startKey);
+      pendingKey = null;
+      rotatedIncident = null;
     } catch (error) {
-      if (/already in use/.test(error?.message || "")) await rotateAfterIncident("bind_failed");
+      if (/already in use/.test(error?.message || "")) {
+        rotateOnEvidence("bind_failed", `bind:${settings.port}`);
+      }
       throw error;
     }
     return helper;
@@ -655,13 +756,6 @@ function createProxyGatewayController({
     return run;
   }
 
-  // The port may have been held by something else that collected the key children send: store a
-  // new key so the next helper (and every child restarted after it) uses it.
-  async function rotateAfterIncident(reason) {
-    if (gatewayProfile()) saveGatewayProfile(gatewayProfile().endpoint.port, randomToken());
-    logger.warn("proxy_gateway.access_key_rotated", { reason });
-  }
-
   function ensureGatewayProfile() {
     if (!helper) throw new Error("The gateway is not running");
     const existing = store.snapshot().proxyProfiles.find((profile) => profile.id === GATEWAY_PROFILE_ID);
@@ -681,11 +775,14 @@ function createProxyGatewayController({
     return true;
   }
 
-  // A new or adopted helper is listening and verified; only now may the route point at it.
+  // A new or adopted helper is listening and verified; only now may the route point at it. A
+  // replaced helper starts with the token-free port closed, so a standing demand reopens it.
   async function routeToHelper() {
-    if (!gatewayProfile()) return;
-    const changed = ensureGatewayProfile();
-    if (changed && routeUsesGateway()) await network.applyGlobalRouting();
+    if (gatewayProfile()) {
+      const changed = ensureGatewayProfile();
+      if (changed && routeUsesGateway()) await network.applyGlobalRouting();
+    }
+    await reapplyTokenless();
   }
 
   // Puts back the global route that was active before "Use for this app" was switched on.
@@ -732,8 +829,9 @@ function createProxyGatewayController({
     return restored;
   }
 
-  // Restarts an exited helper (with a new key) or retries an unverified one, backing off
-  // exponentially so a helper that crashes right after ready is not respawned forever.
+  // Restarts an exited helper or retries an unverified one, backing off exponentially so a helper
+  // that crashes right after ready is not respawned forever. The key changes only on evidence of a
+  // squat, which the pass itself checks.
   async function watchdogTick() {
     if (!settings.enabled || ensurePromise) return;
     if (helper && processRunning(helper.pid)) {
@@ -742,24 +840,19 @@ function createProxyGatewayController({
     }
     if (helper) {
       logger.warn("proxy_gateway.helper_exited", { pid: helper.pid });
-      clearState(helper.pid);
+      // The state stays so the restart pass can check who holds the port now.
       helper = null;
-      incidentPending = true;
-    } else if (!unverified && !incidentPending) {
+      restartPending = true;
+    } else if (!unverified && !restartPending) {
       return;
     }
     if (Date.now() < nextRestartAt) return;
     nextRestartAt = Date.now() + Math.min(restartBackoffBaseMs * (2 ** restartFailures), restartBackoffCapMs);
     restartFailures += 1;
-    const rotate = incidentPending;
     try {
-      await ensureHelper({ rotateKey: rotate });
-      incidentPending = false;
+      await ensureHelper();
+      restartPending = false;
       await routeToHelper();
-      if (rotate) {
-        logger.warn("proxy_gateway.access_key_rotated", { reason: "helper_exited" });
-        await Promise.resolve(onAccessKeyRotated({ reason: "helper_exited" })).catch(noop);
-      }
     } catch (error) {
       fail(error);
       if (!unverified && routeUsesGateway()) await leaveGatewayRoute("helper_restart_failed").catch(noop);
@@ -774,11 +867,56 @@ function createProxyGatewayController({
 
   // ---- token-free listener for ChatGPT Desktop ---------------------------------------------
 
+  function tokenlessWanted() {
+    return tokenlessDemand || Date.now() < tokenlessHoldUntil;
+  }
+
+  function stopHeartbeat() {
+    if (heartbeat) clearInterval(heartbeat);
+    heartbeat = null;
+  }
+
+  // While the port is wanted, each beat renews the helper's lease; when it is no longer wanted the
+  // beat closes it. If the app quits or crashes the beats stop and the helper closes it itself.
+  function startHeartbeat() {
+    if (heartbeat || !(tokenlessHeartbeatMs > 0)) return;
+    heartbeat = setInterval(() => {
+      if (!tokenlessWanted() || !routeUsesGateway()) {
+        void closeTokenlessIfIdle();
+        return;
+      }
+      if (helper) {
+        controlRequest(helper, "POST", "/tokenless/open", controlTimeoutMs).catch((error) => {
+          logger.warn("proxy_gateway.tokenless_heartbeat_failed", { message: error.message });
+        });
+      }
+    }, tokenlessHeartbeatMs);
+    heartbeat.unref?.();
+  }
+
+  async function openTokenless() {
+    const opened = await controlRequest(helper, "POST", "/tokenless/open", controlTimeoutMs);
+    if (!opened?.tokenlessPort) throw new Error("The token-free gateway port did not open");
+    startHeartbeat();
+    return opened.tokenlessPort;
+  }
+
   async function closeTokenlessIfIdle() {
-    if (tokenlessDemand || Date.now() < tokenlessHoldUntil || !helper) return;
+    if (tokenlessWanted() && routeUsesGateway()) return;
+    stopHeartbeat();
+    if (!helper) return;
     try {
       await controlRequest(helper, "POST", "/tokenless/close", controlTimeoutMs);
     } catch {}
+  }
+
+  async function reapplyTokenless() {
+    if (!helper || !tokenlessWanted() || !routeUsesGateway()) return;
+    try {
+      await openTokenless();
+    } catch (error) {
+      logger.warn("proxy_gateway.tokenless_open_failed", { message: error.message });
+    }
   }
 
   // The ChatGPT Desktop launch route: opens the token-free port (held for a launch window even
@@ -787,12 +925,8 @@ function createProxyGatewayController({
     const profile = gatewayProfile();
     if (!profile || !routeUsesGateway() || !helper) return null;
     tokenlessHoldUntil = Date.now() + tokenlessHoldMs;
-    clearTimeout(tokenlessTimer);
-    tokenlessTimer = setTimeout(() => void closeTokenlessIfIdle(), tokenlessHoldMs + 50);
-    tokenlessTimer.unref?.();
-    const opened = await controlRequest(helper, "POST", "/tokenless/open", controlTimeoutMs);
-    if (!opened?.tokenlessPort) throw new Error("The token-free gateway port did not open");
-    return { url: `http://${GATEWAY_HOST}:${opened.tokenlessPort}`, bypass: [...profile.bypass] };
+    const port = await openTokenless();
+    return { url: `http://${GATEWAY_HOST}:${port}`, bypass: [...profile.bypass] };
   }
 
   // ChatGPT Desktop reports whether any instance is running; the port closes after the last one.
@@ -800,15 +934,8 @@ function createProxyGatewayController({
     const next = running === true;
     if (next === tokenlessDemand) return;
     tokenlessDemand = next;
-    if (next) {
-      if (helper && routeUsesGateway()) {
-        await controlRequest(helper, "POST", "/tokenless/open", controlTimeoutMs).catch((error) => {
-          logger.warn("proxy_gateway.tokenless_open_failed", { message: error.message });
-        });
-      }
-    } else {
-      await closeTokenlessIfIdle();
-    }
+    if (next) await reapplyTokenless();
+    else await closeTokenlessIfIdle();
   }
 
   async function status() {
@@ -836,7 +963,7 @@ function createProxyGatewayController({
       ? "running"
       : unverified
         ? "unverified"
-        : settings.enabled && (incidentPending || restartFailures > 0) && Date.now() < nextRestartAt
+        : settings.enabled && (restartPending || restartFailures > 0) && Date.now() < nextRestartAt
           ? "restarting"
           : "stopped";
     return {
@@ -853,6 +980,8 @@ function createProxyGatewayController({
         ? { pid: helper.pid, runtime: helper.runtime, adopted: helper.adopted === true, startedAt: helper.startedAt }
         : null,
       unverifiedHelper: unverified ? { ...unverified } : null,
+      // Kept services still holding the previous key after an evidence rotation.
+      needsRestart: [...needsRestart],
       watchdog: {
         restarts: restartFailures,
         nextRestartAt: nextRestartAt > Date.now() ? new Date(nextRestartAt).toISOString() : null,
@@ -960,7 +1089,7 @@ function createProxyGatewayController({
     settings.enabled = false;
     settings.useForApp = false;
     persist();
-    incidentPending = false;
+    restartPending = false;
     restartFailures = 0;
     nextRestartAt = 0;
     await ensurePromise?.catch(noop);
@@ -991,6 +1120,7 @@ function createProxyGatewayController({
       persist();
       startWatchdog();
       await network.applyGlobalRouting();
+      await reapplyTokenless();
       logger.info("proxy_gateway.app_route_enabled", { previousProfileId: settings.previousGlobal?.profileId ?? null });
       return status();
     }
@@ -1070,11 +1200,12 @@ function createProxyGatewayController({
   }
 
   // App quit: the helper keeps running for the bridge and CPA, and the next app adopts it. The
-  // token-free port is closed (best effort; the next adoption closes it otherwise).
+  // token-free port is closed best effort; if that request never leaves, the stopped heartbeat
+  // lets the lease lapse and the helper closes it by itself.
   async function close() {
     if (watchdog) clearInterval(watchdog);
     watchdog = null;
-    clearTimeout(tokenlessTimer);
+    stopHeartbeat();
     const target = helper;
     helper = null;
     target?.child?.unref?.();

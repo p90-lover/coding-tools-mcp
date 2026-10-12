@@ -940,7 +940,7 @@ test("the proxy login answers only the challenger the global route names", async
   assert.deepEqual(attempt({ isProxy: true, host: "127.0.0.1", port: 17894 }), { handled: true, prevented: true, answers: [["ct", key]] });
 });
 
-test("an unexpected helper exit restarts it with a new key, re-applies the route and restarts kept services", async (t) => {
+test("a helper that died while its port stayed free is restarted with the same key", async (t) => {
   trackHelpers(t);
   const setup = tempSetup(t);
   await addUpstream(setup, t);
@@ -948,23 +948,155 @@ test("an unexpected helper exit restarts it with a new key, re-applies the route
   const controller = controllerFor(setup, [], { restartBackoffBaseMs: 0, onAccessKeyRotated: (detail) => rotations.push(detail) });
   await controller.configure({ upstreamProfileId: "isp-upstream", port: await freePort(), tokenlessPort: await freePort() });
   const started = await controller.setUseForApp(true);
-  const oldKey = gatewayToken(setup.store);
+  const key = gatewayToken(setup.store);
   process.kill(started.helper.pid);
   assert.ok(await waitFor(() => !processAlive(started.helper.pid)));
-  setup.applied.length = 0;
 
   await controller.watchdogTick();
   const status = await controller.status();
   assert.equal(status.running, true);
   assert.notEqual(status.helper.pid, started.helper.pid);
-  const newKey = gatewayToken(setup.store);
-  assert.notEqual(newKey, oldKey, "something may have collected the old key while the port was free");
-  assert.deepEqual(setup.applied, [GATEWAY_PROFILE_ID], "the env route is re-applied with the new key");
-  assert.deepEqual(rotations, [{ reason: "helper_exited" }], "kept services (CPA) are restarted");
-  const stale = await connectTunnel(status.listen.port, "chatgpt.com:443", oldKey);
-  assert.match(stale.head, /^HTTP\/1\.1 407 /);
-  stale.socket.destroy();
+  assert.equal(gatewayToken(setup.store), key, "no evidence of a squat: the key is kept");
+  assert.deepEqual(rotations, []);
+  assert.deepEqual(status.needsRestart, []);
+  const tunnel = await connectTunnel(status.listen.port, "chatgpt.com:443", key);
+  assert.match(tunnel.head, /^HTTP\/1\.1 200 /, "kept services still work with the key they hold");
+  tunnel.socket.destroy();
   await controller.setRunning(false);
+});
+
+async function squat(t, port) {
+  const sockets = new Set();
+  const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.on("error", () => {});
+    socket.end("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi");
+  });
+  // A just-killed helper's socket can linger for a moment before the port is free to take.
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(port, "127.0.0.1", () => {
+          server.off("error", reject);
+          resolve();
+        });
+      });
+      break;
+    } catch (error) {
+      if (attempt >= 40) throw error;
+      await sleep(100);
+    }
+  }
+  t.after(async () => {
+    for (const socket of sockets) socket.destroy();
+    await close(server);
+  });
+  return server;
+}
+
+test("startup rotates the key when another listener holds the data port after the helper died", async (t) => {
+  trackHelpers(t);
+  const setup = tempSetup(t);
+  await addUpstream(setup, t);
+  const port = await freePort();
+  const first = controllerFor(setup, []);
+  await first.configure({ upstreamProfileId: "isp-upstream", port, tokenlessPort: await freePort() });
+  const started = await first.setUseForApp(true);
+  const oldKey = gatewayToken(setup.store);
+  await first.close();
+  process.kill(started.helper.pid);
+  assert.ok(await waitFor(() => !processAlive(started.helper.pid)));
+  await squat(t, port);
+
+  const rotations = [];
+  const relaunched = controllerFor(setup, [], { onAccessKeyRotated: (detail) => rotations.push(detail) });
+  const status = await relaunched.startup();
+  assert.notEqual(gatewayToken(setup.store), oldKey, "the squatter may have collected the old key");
+  assert.deepEqual(rotations, [{ reason: "port_held_after_exit" }], "one rotation, and CPA's restart hook runs");
+  assert.deepEqual(status.needsRestart, ["bridge", "mcp"], "the bridge and MCP are flagged, never restarted");
+  assert.equal(status.running, false);
+  assert.equal(setup.store.snapshot().routing.globalProfileId, "proxybridge-local-17891", "the app leaves the squatted port");
+});
+
+test("a failed bind rotates the key and calls the rotation hook", async (t) => {
+  trackHelpers(t);
+  const setup = tempSetup(t);
+  await addUpstream(setup, t);
+  const rotations = [];
+  const port = await freePort();
+  const controller = controllerFor(setup, [], { onAccessKeyRotated: (detail) => rotations.push(detail) });
+  await controller.configure({ upstreamProfileId: "isp-upstream", port, tokenlessPort: await freePort() });
+  await controller.setUseForApp(true);
+  await controller.setRunning(false);
+  const oldKey = gatewayToken(setup.store);
+  await squat(t, port);
+
+  await assert.rejects(controller.setRunning(true), /already in use/);
+  assert.notEqual(gatewayToken(setup.store), oldKey);
+  assert.deepEqual(rotations, [{ reason: "bind_failed" }]);
+  assert.deepEqual((await controller.status()).needsRestart, ["bridge", "mcp"]);
+});
+
+test("a replaced helper reopens the token-free port while ChatGPT Desktop still runs", async (t) => {
+  trackHelpers(t);
+  const setup = tempSetup(t);
+  await addUpstream(setup, t);
+  const controller = controllerFor(setup, [], { restartBackoffBaseMs: 0 });
+  const tokenlessPort = await freePort();
+  await controller.configure({ upstreamProfileId: "isp-upstream", port: await freePort(), tokenlessPort });
+  await controller.setUseForApp(true);
+  await controller.setDesktopRunning(true);
+  let status = await controller.status();
+  assert.equal(status.tokenlessOpen, true);
+
+  status = await controller.configure({ port: await freePort() });
+  assert.equal(status.tokenlessOpen, true, "configure replaced the helper and the demand reopened the port");
+  const first = await connectTunnel(tokenlessPort, "chatgpt.com:443", null);
+  assert.match(first.head, /^HTTP\/1\.1 200 /);
+  first.socket.destroy();
+
+  process.kill(status.helper.pid);
+  assert.ok(await waitFor(() => !processAlive(status.helper.pid)));
+  await controller.watchdogTick();
+  status = await controller.status();
+  assert.equal(status.tokenlessOpen, true, "a watchdog restart reopens it too");
+  await controller.setDesktopRunning(false);
+  assert.equal((await controller.status()).tokenlessOpen, false);
+  await controller.setRunning(false);
+});
+
+test("the helper closes the token-free port by itself once the app's heartbeat stops", async (t) => {
+  trackHelpers(t);
+  const setup = tempSetup(t);
+  await addUpstream(setup, t);
+  const controller = controllerFor(setup, [], { tokenlessLeaseMs: 400, tokenlessHeartbeatMs: 100, tokenlessHoldMs: 50 });
+  const tokenlessPort = await freePort();
+  await controller.configure({ upstreamProfileId: "isp-upstream", port: await freePort(), tokenlessPort });
+  await controller.setUseForApp(true);
+  await controller.setDesktopRunning(true);
+  await sleep(900);
+  assert.equal((await controller.status()).tokenlessOpen, true, "the heartbeat renews the lease");
+
+  // An app that opened the port and then crashed: no heartbeat follows.
+  const state = JSON.parse(fs.readFileSync(path.join(setup.directory, "providers", "proxy-gateway.state.json"), "utf8"));
+  await controller.close();
+  await new Promise((resolve, reject) => {
+    const request = require("node:http").request({
+      host: "127.0.0.1", port: state.controlPort, method: "POST", path: "/tokenless/open",
+      headers: { Authorization: `Bearer ${state.controlToken}` },
+    }, (response) => {
+      response.resume();
+      response.on("end", resolve);
+    });
+    request.on("error", reject);
+    request.end();
+  });
+  const open = await connectTunnel(tokenlessPort, "chatgpt.com:443", null);
+  assert.match(open.head, /^HTTP\/1\.1 200 /);
+  open.socket.destroy();
+  await sleep(900);
+  await assert.rejects(connect(tokenlessPort), /ECONNREFUSED/, "the lapsed lease closed the port");
 });
 
 test("the watchdog backs off exponentially when the helper keeps dying", async (t) => {
@@ -1190,6 +1322,13 @@ test("Proxy Gateway is a More tab wired through guarded IPC and packaged for the
     assert.match(registration, /, "network"\);\r?\n$/, `${channel} needs "network" access`);
   }
   assert.doesNotMatch(main + bootstrap, /setProviderWriteGuard|handleGateway/);
+  // After an evidence rotation only CPA restarts; the Codex bridge and MCP tunnel are never killed.
+  const hookStart = main.indexOf("setProxyGatewayKeyRotated(async");
+  const hook = main.slice(hookStart, main.indexOf("\n  });", hookStart));
+  assert.ok(hookStart > 0);
+  assert.match(hook, /externalServicesController\.restart\("cpa"\)/);
+  assert.doesNotMatch(hook, /runtimeSupervisor|runtimeHost|restartDaemon|tunnel|bridge/i);
+  assert.match(surface, /The Codex bridge and MCP still use the old key/);
   // The helper is adopted or started before the saved global route is applied at launch.
   assert.ok(bootstrap.indexOf("await gateway.startup()") < bootstrap.indexOf("controller.applyGlobalRouting()"));
   // The bundled Bun runs the relay from app.asar.unpacked; it may require Node built-ins only.

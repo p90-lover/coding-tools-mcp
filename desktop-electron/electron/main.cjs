@@ -2419,8 +2419,10 @@ async function start() {
     publish: (value) => send("launcher:external-services-changed", value),
   });
   setProviderCpaConnection(() => externalServicesController?.cpaConnection());
-  // After the gateway's key rotated on an incident, a running CPA restarts with the new key (the
-  // same path as Network Proxy's "Apply route to CPA"); the Codex bridge takes it on its next start.
+  // After the gateway's key rotated on evidence of a squat, a running CPA restarts with the new key
+  // (the same path as Network Proxy's "Apply route to CPA"). The Codex bridge and the MCP tunnel
+  // are deliberately never restarted here: they carry in-flight work and take the key on their next
+  // start; the Proxy Gateway tab lists them as needing a restart.
   setProxyGatewayKeyRotated(async () => {
     const cpa = externalServicesController?.snapshot().services.find((service) => service.id === "cpa");
     if (cpa?.status !== "ready") return;

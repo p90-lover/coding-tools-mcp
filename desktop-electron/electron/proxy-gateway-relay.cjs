@@ -13,7 +13,10 @@
 // - token-free port (default 17895): the same relay WITHOUT authentication. It exists only for
 //   ChatGPT Desktop, which receives its route as `--proxy-server` and cannot carry credentials.
 //   It is closed by default; the app opens it over the control port only while a ChatGPT Desktop
-//   instance runs. While open, any local process can use it (ProxyBridge's 17891 exposure).
+//   instance runs, renewing a lease with a heartbeat. The helper closes it by itself when the
+//   lease lapses (about 30 s after the app quits or crashes); a ChatGPT Desktop instance still
+//   running then loses its proxy. While open, any local process can use it (ProxyBridge's 17891
+//   exposure).
 // - control port (ephemeral): status, stop and token-free open/close for the app, guarded by a
 //   random bearer token. The same token lets the app probe which process holds the data port.
 //
@@ -38,6 +41,7 @@ const PROXYBRIDGE_PORTS = Object.freeze([17891, 17892, 17893]);
 const HELPER_SERVICE = "coding-tools-proxy-gateway";
 const PROBE_PATH = "/.well-known/coding-tools-gateway";
 const PROBE_HEADER = "x-coding-tools-probe";
+const DEFAULT_TOKENLESS_LEASE_MS = 30_000;
 const PROXY_USERNAME = "ct";
 const UPSTREAM_PROTOCOLS = new Set(["http", "https", "socks5"]);
 const DEFAULT_TRACE_URL = "https://chatgpt.com/cdn-cgi/trace";
@@ -1095,6 +1099,20 @@ async function runHelper({ stdin = process.stdin, stdout = process.stdout, stder
     });
     await gateway.start();
     const startedAt = new Date().toISOString();
+    // The token-free port is leased: each open (the app's heartbeat) extends it, and the helper
+    // closes the port by itself once the lease lapses, so an app that quits or crashes never
+    // leaves it open.
+    const leaseMs = Number.isFinite(config.tokenlessLeaseMs) && config.tokenlessLeaseMs >= 100
+      ? config.tokenlessLeaseMs
+      : DEFAULT_TOKENLESS_LEASE_MS;
+    let leaseUntil = 0;
+    const leaseTimer = setInterval(() => {
+      if (leaseUntil && Date.now() > leaseUntil) {
+        leaseUntil = 0;
+        log("proxy_gateway.tokenless_lease_lapsed");
+        void gateway.closeTokenless().catch(() => {});
+      }
+    }, Math.max(50, Math.min(1_000, Math.floor(leaseMs / 4))));
     control = http.createServer((request, response) => {
       const send = (status, value) => {
         const body = JSON.stringify(value);
@@ -1132,6 +1150,7 @@ async function runHelper({ stdin = process.stdin, stdout = process.stdout, stder
       }
       if (request.method === "POST" && (request.url === "/tokenless/open" || request.url === "/tokenless/close")) {
         const opening = request.url === "/tokenless/open";
+        leaseUntil = opening ? Date.now() + leaseMs : 0;
         (opening ? gateway.openTokenless() : gateway.closeTokenless())
           .then((address) => send(200, { tokenlessPort: address?.tokenlessPort ?? null }))
           .catch((error) => send(409, { error: error instanceof Error ? error.message : String(error) }));
@@ -1141,6 +1160,7 @@ async function runHelper({ stdin = process.stdin, stdout = process.stdout, stder
         send(200, { ok: true });
         log("proxy_gateway.stop_requested");
         setImmediate(async () => {
+          clearInterval(leaseTimer);
           await gateway.stop().catch(() => {});
           control.close();
           setTimeout(() => exit(0), 50);

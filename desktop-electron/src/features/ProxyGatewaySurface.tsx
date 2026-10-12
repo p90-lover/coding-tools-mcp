@@ -287,6 +287,15 @@ export function ProxyGatewaySurface({
             `テストはゲートウェイ経由で ${TRACE_URL} を取得し、出口 IP と地域を表示します。`,
           )}</small>
         </div>
+        {status?.needsRestart.length ? (
+          <p className="proxy-gateway-test is-failed" role="status">{localText(
+            language,
+            "The access key was changed because something else held the gateway port. The Codex bridge and MCP still use the old key. Restart them when idle (they pick it up on their next start).",
+            "由於有其他程式佔用閘道連接埠，存取金鑰已更換。Codex 橋接與 MCP 仍使用舊金鑰，請在閒置時重新啟動（它們會在下次啟動時取用新金鑰）。",
+            "由于有其他程序占用网关端口，访问密钥已更换。Codex 桥接和 MCP 仍使用旧密钥，请在空闲时重启（它们会在下次启动时取用新密钥）。",
+            "別のプログラムがゲートウェイのポートを使っていたため、アクセスキーを変更しました。Codex ブリッジと MCP はまだ古いキーを使っています。手が空いたときに再起動してください（次回起動時に新しいキーを使います）。",
+          )}</p>
+        ) : null}
         {lastTest ? (
           <p className={`proxy-gateway-test${lastTest.ok ? " is-ok" : " is-failed"}`} role="status">
             {lastTest.ok

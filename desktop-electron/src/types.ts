@@ -165,6 +165,7 @@ export interface ProxyGatewayStatus {
   helperState: "running" | "unverified" | "restarting" | "stopped";
   helper: { pid: number; runtime: string; adopted: boolean; startedAt: string } | null;
   unverifiedHelper: { pid: number; port: number; since: string } | null;
+  needsRestart: Array<"bridge" | "mcp">;
   watchdog: { restarts: number; nextRestartAt: string | null };
   gatewayProfileId: string;
   upstreamProfileId: string | null;
