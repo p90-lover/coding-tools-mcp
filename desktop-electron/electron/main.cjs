@@ -170,6 +170,8 @@ let agentOrchestratorUpstream = null;
 /** Stops the AO change push wired up with the current upstream module. */
 let aoChangeWatch = null;
 let missionWorkflowRuntime = null;
+/** The app's tool server for AO chat agents; one per app run, kept across backend restarts. */
+let chatAgentTools = null;
 let antigravityReauth = null;
 let antigravityAuthBrowser = null;
 // The swappable backend tier (see backend-bundle.cjs): restarted in place, never with the core.
@@ -2142,7 +2144,8 @@ function registerIpc({ logger, stateStore }) {
     return { state, credentialsRequired: false, targetMode: mode };
   });
   handle("launcher:set-preference", (_event, key, value) => {
-    const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "autoConnectExistingMcp";
+    const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "autoConnectExistingMcp"
+      || key === "chatAgentTools";
     if (!ordinary) throw new Error("Unknown preference");
     if (key === "autoConnectExistingMcp") assertFocusedMainWindow(_event, true);
     const state = stateStore.update({ [key]: value === true });
@@ -2499,6 +2502,25 @@ async function start() {
     const { createChangePulse } = backendBundles.requireModule(backend, "ao-session-events.cjs");
     const { createAgentOrchestratorWorkflow, resolveAoNativeConnection, aoWebCatalogForModel } = backendBundles.requireModule(backend, "agent-orchestrator-workflow.cjs");
     const { HeadlessHost } = backendBundles.requireModule(backend, "headless-host.cjs");
+    // Chat agents get the workspace tools (files, terminal, git, screenshots, computer control)
+    // over MCP. Created once: a live session keeps its server URL and token across a backend
+    // restart. Settings > "Give chat agents the app's tools" turns it off for new launches.
+    if (!chatAgentTools) {
+      const { createChatAgentTools } = backendBundles.requireModule(backend, "chat-agent-tools.cjs");
+      chatAgentTools = createChatAgentTools({
+        requestHeadless: (endpoint, body, options) => {
+          if (!headlessHost) throw new Error("Local Coding Tools runtime is unavailable");
+          return headlessHost.request(endpoint, body, options);
+        },
+        enabled: () => stateStore.read().chatAgentTools !== false,
+        version: app.getVersion(),
+        logger,
+      });
+      // Listening before the first launch keeps a pre-warmed session's tools identity stable.
+      void chatAgentTools.listen().catch((error) => logger.warn("chat_agent_tools.listen_failed", {
+        message: error instanceof Error ? error.message : String(error),
+      }));
+    }
     const createCodingToolsAppsHost = loadCreateCodingToolsAppsHost(backend.appHandlerRoot);
     const antigravityCli = createAntigravityCli({
       toolsRoot: path.join(app.getPath("userData"), "tools"),
@@ -2570,6 +2592,7 @@ async function start() {
       },
       missionCall: (operation, args) => agentOrchestratorWorkflow.call(operation, args),
       openAuth: (url) => antigravityAuthBrowser(url),
+      agentTools: chatAgentTools,
       WebContentsView, dialog, shell, logger,
     });
     // Push AO changes to the Mission chat instead of making it poll: AO's session feed (a role's
@@ -2582,6 +2605,8 @@ async function start() {
     const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
       // Stop agents that sat idle for a while; their chats resume them on the next message.
       releaseIdleAgents: true,
+      // A pre-warmed session is reused only by a launch that attaches the same app tools.
+      agentToolsIdentity: (workspaceId) => chatAgentTools?.identity(workspaceId) ?? null,
       // Chat goals (/goal) survive an app restart.
       goalsFile: path.join(app.getPath("userData"), "integrations", "chat-goals.json"),
       // So do deleted chat messages (their hidden runs and fresh-session flags).

@@ -2817,6 +2817,58 @@ test("a new chat's first message runs in the session pre-warmed for its model, a
   assert.equal(spawned[1].prompt, "");
 });
 
+test("a pre-warmed session is used only by a launch that attaches the same app tools", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  const world = chatWorld();
+  const created = new Map();
+  const spawned = [], sent = [];
+  let tools = "on|http://127.0.0.1:41234/mcp/ws-1|first";
+  const asked = [];
+  const request = async (endpoint, body, options) => {
+    if (endpoint === "/api/v1/ao/read" && body.run_id) {
+      const run = created.get(body.run_id) ?? { id: body.run_id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1,
+        grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+      created.set(body.run_id, run);
+      return { ok: true, runs: [run], worker_capacity: { [body.run_id]: 1 } };
+    }
+    const latest = [...created.values()].at(-1);
+    if (endpoint === "/api/v1/ao/grant") return { ok: true, run: latest, grant: { executable_sha256: "a".repeat(64) } };
+    if (endpoint === "/api/v1/ao/external/reserve") { latest.nodes[0].state = "reserved"; return { ok: true, request_key: "key-1", prompt: "fix the login" }; }
+    if (endpoint === "/api/v1/ao/external/submitted") { latest.nodes[0].state = "running"; latest.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run: latest }; }
+    if (endpoint === "/api/v1/ao/external/terminal") { latest.nodes[0].state = "finished"; return { ok: true, run: latest }; }
+    return world.requestHeadless(endpoint, body, options);
+  };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: request, findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    agentToolsIdentity: (workspaceId) => { asked.push(workspaceId); return tools; },
+    aoHarness: {
+      spawn: async input => { spawned.push(input); return input.warm ? `warm-${spawned.length}` : `fresh-${spawned.length}`; },
+      continuable: async () => true,
+      send: async (id, text, key) => { sent.push([id, text, key]); return { turnId: "turn-1", state: "running" }; },
+      observe: async (id, expected) => ({ status: "idle", turnId: expected, turnState: "completed", answer: "fixed" }),
+      warmSessions: async () => [],
+      kill: async () => ({ ok: true }),
+    },
+  });
+  await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route });
+  await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route });
+  assert.equal(spawned.length, 1, "the same tools reuse the waiting session");
+  assert.ok(asked.every(id => id === "ws-1"), "the identity is asked for the chat's workspace");
+
+  // The tool server restarted on another port (or the setting changed): the waiting session's
+  // tools are not this launch's, so a new one is warmed and the old one is never handed out.
+  tools = "on|http://127.0.0.1:50000/mcp/ws-1|second";
+  await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route });
+  assert.equal(spawned.length, 2);
+  tools = "off";
+  await workflow.call("chat_send", { workspaceId: "ws-1", message: "fix the login", executionMode: "single", singleRoute: route });
+  for (let tries = 0; tries < 200 && !sent.length && spawned.length < 3; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.ok(!sent.some(([id]) => id.startsWith("warm-")), "a session warmed with other tools never takes the chat's first message");
+  assert.ok(spawned.some(input => !input.warm && input.prompt === "fix the login"), "the message starts a session of its own");
+});
+
 test("pre-warming skips a team without an orchestrator and native Codex routes", async () => {
   const world = chatWorld();
   const spawned = [];

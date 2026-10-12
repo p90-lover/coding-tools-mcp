@@ -64,7 +64,7 @@ async function allocatePort() {
   return port;
 }
 
-function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), logger = console }) {
+function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, logger = console }) {
   let child = null;
   let gateway = null;
   let view = null;
@@ -262,6 +262,20 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (!binding.projectId) throw new Error("AO harness workers need this workspace to be a git repository registered in AO");
     return binding.projectId;
   }
+  /**
+   * The app's own tool server (files, terminal, git, screenshots, computer control) for a chat
+   * agent, as AO spawn mcpServers. Never fails a launch: without it the agent starts without them.
+   */
+  async function chatToolServers(agent, workspaceId) {
+    if (!agentTools) return [];
+    try {
+      const servers = await agentTools.servers({ agent, workspaceId });
+      return Array.isArray(servers) ? servers : [];
+    } catch (cause) {
+      logger.warn?.("ao.agent_tools_unavailable", { agent, message: String(cause?.message || cause).slice(0, 200) });
+      return [];
+    }
+  }
   const agentInventory = createAgentInventory(internalApi);
   // Watching never starts AO; it connects (with backoff) once the runtime is ready.
   const sessionEvents = createAoSessionEvents({ port: async () => { if (state !== "ready") throw new Error("AO is not running"); return daemonPort; }, logger });
@@ -297,6 +311,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       if (codexWorkspace && !chat) throw new Error("Codex workspace permissions require its capable chat driver; TUI sandbox settings cannot be verified.");
       // AO caps prompts at 16 KiB of UTF-8; leave room for the TUI result instruction.
       const brief = utf8Prefix(prompt, 16384 - Buffer.byteLength(TUI_RESULT_INSTRUCTION, "utf8") - 2);
+      // Chat sessions only: a terminal launch has no controller to attach tool servers to.
+      const mcpServers = chat ? await chatToolServers(agent, workspaceId) : [];
       const launch = (mode) => internalApi("POST", "/api/v1/sessions", {
         projectId, kind: "worker", harness: agentId(agent), mode,
         ...(approvalMode ? { approvalMode } : {}),
@@ -308,6 +324,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         ...(plain ? { plainPrompt: true } : {}),
         // A CPA model runs through the local gateway; AO adds the key from its own environment.
         ...(gateway?.provider === "cpa" && typeof gateway.model === "string" ? { gateway: { provider: "cpa", model: gateway.model.slice(0, 256) } } : {}),
+        ...(mode === "chat" && mcpServers.length ? { mcpServers } : {}),
         displayName: String(name || "AO worker").slice(0, 100),
       });
       let data;
