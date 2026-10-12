@@ -337,7 +337,10 @@ export function AgentOrchestratorChat({
     && (latest.execution_mode === "single" || node.role === "planner")));
   // A running AO card is steerable whether or not this page is driving its run: after an app restart
   // the run goes on without the page's loop, and the user must still be able to reach the agent.
-  const steering = !accepts && steerOn && steerable && Boolean(steer && selectedTaskId);
+  // An agent waiting on a request (a tool approval, ExitPlanMode's plan) must be answered on its
+  // card: steering pre-empts the turn, which cancels the request ("Tool use aborted").
+  const awaitingAnswer = approvals.length > 0;
+  const steering = !accepts && !awaitingAnswer && steerOn && steerable && Boolean(steer && selectedTaskId);
   // Otherwise a message typed while the chat runs waits and is sent when the turn finishes, as in Codex.
   const queueing = !accepts && !steering && runOpen && Boolean(selectedTaskId);
   const canSend = !busy && !sending && Boolean(draft.trim() || attachments.length) && (accepts || steering || queueing);
@@ -824,7 +827,8 @@ export function AgentOrchestratorChat({
             {attachNote ? <span className="cx-attach-note" role="status">{attachNote}</span> : null}
           </div> : null}
           <textarea ref={input} aria-label="Message" maxLength={8192} rows={1} value={draft}
-            placeholder={steering ? "Steer the agent — sent to it right away" : queueing ? "Running — a message now is sent when it finishes" : !accepts ? "Running — you can send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : "Do anything"}
+            placeholder={steering ? "Steer the agent — sent to it right away" : awaitingAnswer && queueing ? "Answer the request above first — a message now is sent after it"
+              : queueing ? "Running — a message now is sent when it finishes" : !accepts ? "Running — you can send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : "Do anything"}
             onChange={(event) => { setDraft(event.target.value); setSlashIndex(0); }}
             onPaste={(event) => { if (event.clipboardData.files.length) { event.preventDefault(); void addFiles(event.clipboardData.files); } }}
             onKeyDown={(event) => {

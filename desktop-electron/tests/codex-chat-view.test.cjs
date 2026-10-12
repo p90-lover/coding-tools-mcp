@@ -459,3 +459,20 @@ test("Delete names the runs its turn showed: a restarted message takes its resta
   buttonIn(turns()[2], "Fork from this message").props.onClick();
   assert.deepEqual(forked, [1]);
 });
+
+test("while the agent waits on a request, a typed message is queued, never steered (steering would cancel it)", async () => {
+  const steered = [];
+  const pending = { nodeId: "w", approval_id: "req-1", source: "ao", kind: "plan", tool: "ExitPlanMode", plan: "1. Add the route",
+    decisions: [{ id: "default", kind: "allow_once", label: "Yes, and manually approve edits" }, { id: "plan", kind: "reject_once", label: "No, keep planning" }] };
+  const { props, calls } = base({ selectedTaskId: "t", working: true, approvals: [pending],
+    runs: [run("r1", "t", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/m" } })], { execution_mode: "single" })],
+    steer: async (input) => { steered.push(input); return true; } });
+  const view = mount(props);
+  const textarea = () => walk(view.render()).find((element) => element.type === "textarea");
+  assert.equal(textarea().props.placeholder, "Answer the request above first — a message now is sent after it");
+  textarea().props.onChange({ target: { value: "yes, go ahead" } });
+  assert.ok(!walk(view.render()).some((element) => element.props?.["aria-label"] === "Steer the agent"), "no Steer button while a request waits");
+  await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+  assert.deepEqual(steered, [], "the message never reaches the agent as a steer");
+  assert.equal(calls.filter(([kind]) => kind === "send").length, 0, "nor as a send into the busy turn: it is queued");
+});

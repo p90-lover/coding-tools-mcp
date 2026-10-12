@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ChatMarkdown } from "./ChatMarkdown";
 
 export type AoApproval = {
   nodeId: string; approval_id: string; kind?: string; method?: string; path?: string; reason?: string; command?: string; cwd?: string;
@@ -7,8 +8,17 @@ export type AoApproval = {
   recommendation?: { action: "allow" | "deny" | "ask"; reason: string };
   /** An AO agent's parked tool request (e.g. Claude Code's Bash): its tool name and AO's summary. */
   source?: "ao"; tool?: string; summary?: string;
+  /** The decisions the AO agent offered; `plan` is the plan of an ExitPlanMode request. */
+  decisions?: { id: string; kind: string; label: string }[]; plan?: string; since?: string;
 };
-export type ApprovalReply = boolean | Record<string, unknown>;
+export type ApprovalReply = boolean | { decisionId: string } | Record<string, unknown>;
+/** How long ago an AO request started waiting (AO ends an unanswered one after 30 minutes). */
+function waited(since?: string) {
+  const at = Date.parse(since ?? "");
+  if (!Number.isFinite(at)) return "";
+  const minutes = Math.max(0, Math.floor((Date.now() - at) / 60_000));
+  return minutes < 1 ? "just now" : `${minutes} min ago`;
+}
 const object = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 
 
@@ -56,6 +66,20 @@ export function AgentOrchestratorApproval({ approval, busy, approve }: {
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
   };
   const supported = !typed || ["command", "file_change", "permissions", "questions", "mcp_form", "mcp_url"].includes(kind || "");
+  // Claude Code finished planning: show the plan and every way it offered to go on.
+  if (approval.source === "ao" && approval.plan) {
+    const when = waited(approval.since);
+    return <div className="ao-msg ao-msg-approval ao-msg-plan">
+      <span className="ao-msg-meta">Plan ready · {approval.tool || "ExitPlanMode"}{when ? ` · asked ${when}` : ""}</span>
+      <div className="ao-plan"><ChatMarkdown text={approval.plan} /></div>
+      <p className="ao-hint">The agent waits for your answer (up to 30 minutes). A message you type now is sent after this request, so it can't cancel it.</p>
+      <fieldset disabled={busy}><div className="ao-msg-actions">
+        {(approval.decisions ?? []).map((decision) => <button key={decision.id} type="button"
+          className={decision.kind.startsWith("reject") ? "button-secondary" : "button-primary"}
+          onClick={() => approve(approval, { decisionId: decision.id })}>{decision.label}</button>)}
+      </div></fieldset>
+    </div>;
+  }
   return <div className="ao-msg ao-msg-approval">
     <span className="ao-msg-meta">{typed ? "Native request" : "Approval needed"} · {kind || "Tool request"}{approval.tool ? " · " + approval.tool : ""}</span>
     <p>{approval.reason || approval.summary || String(request.message || "Tool request")} · {location}</p>

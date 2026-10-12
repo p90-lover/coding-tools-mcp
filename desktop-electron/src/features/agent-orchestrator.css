@@ -69,6 +69,9 @@
 .ao-permissions-panel > button { margin-right: 8px; }
 .ao-permissions-panel > details { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--ao-line); }
 .ao-msg-approval fieldset { border: 0; margin: 0; padding: 0; }
+/* ExitPlanMode: the plan scrolls inside the card, so its answer buttons stay in view. */
+.ao-msg-plan .ao-plan { max-height: min(48vh, 420px); overflow: auto; margin: 8px 0; padding: 4px 12px; border: 1px solid var(--ao-line); border-radius: 8px; }
+.ao-msg-plan .ao-msg-actions { flex-wrap: wrap; }
 .ao-msg-approval fieldset input[type="checkbox"] { width: auto; justify-self: start; }
 .ao-msg-approval pre { max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .ao-msg-approval a { color: var(--ao-blue); }

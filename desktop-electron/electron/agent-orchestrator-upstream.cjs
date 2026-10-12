@@ -209,8 +209,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           .map(decision => ({ id: decision.id.slice(0, 200), kind: decision.kind.slice(0, 40), label: String(decision.label || decision.kind).slice(0, 120) }));
         const command = detail.toolKind === "execute" && typeof input.command === "string" ? input.command : "";
         const path = typeof input.file_path === "string" ? input.file_path : typeof input.path === "string" ? input.path : "";
+        // Claude Code's ExitPlanMode asks to leave plan mode with the plan it wrote; each offered
+        // decision is a different way to go on (auto, accept edits, ask for edits, keep planning).
+        const plan = typeof input.plan === "string" && input.plan.trim() ? utf8Prefix(input.plan, 20000) : "";
         return {
-          approval_id: activity.requestId.slice(0, 200), source: "ao", kind: command ? "command" : "permission",
+          approval_id: activity.requestId.slice(0, 200), source: "ao", kind: plan ? "plan" : command ? "command" : "permission",
+          ...(plan ? { plan } : {}),
+          ...(typeof activity.createdAt === "string" ? { since: activity.createdAt } : {}),
           ...(command ? { command: utf8Prefix(command, 4000) } : {}), ...(path ? { path: utf8Prefix(path, 1000) } : {}),
           ...(typeof input.description === "string" ? { reason: utf8Prefix(input.description, 500) } : {}),
           tool: String(detail.toolName || detail.toolKind || "tool").slice(0, 80),
