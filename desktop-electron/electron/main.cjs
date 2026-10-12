@@ -24,7 +24,7 @@ const {
   powerSaveBlocker,
 } = require("electron");
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
-const { createChatGptDesktopHost } = require("./chatgpt-desktop.cjs");
+const { createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatgpt-desktop.cjs");
 const { createGptBrowserHost, cleanUserAgent } = require("./gpt-browser.cjs");
 const { createEmailHost } = require("./email-host.cjs");
 const { createChatWindows } = require("./chat-windows.cjs");
@@ -52,8 +52,11 @@ const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createGuiUpdateController, guiShellHash } = require("./gui-update.cjs");
 const {
   providerNetworkReady,
+  proxyGatewayDesktopRoute,
   setProviderBrowserHost,
   setProviderCpaConnection,
+  setProxyGatewayDesktopRunning,
+  setProxyGatewayKeyRotated,
 } = require("./provider-bootstrap.cjs");
 
 const { createManagedExternalServicesController, resolveManagedProxyEnvironment } = require("./managed-external-services.cjs");
@@ -239,7 +242,21 @@ function getChatGptDesktop(logger) {
       logger,
       dataRoot: path.join(CORE_HOME, "chatgpt-desktop"),
       resolveCpaAuthDir: cpaAuthDirectory,
-      onChange: (status) => send("launcher:chatgpt-desktop-changed", status),
+      // Through the built-in gateway, ChatGPT Desktop gets its token-free port, which is open only
+      // while an instance runs; otherwise the credential-free env route as before.
+      getProxyRoute: async () => {
+        try {
+          const route = await proxyGatewayDesktopRoute();
+          if (route) return route;
+        } catch (error) {
+          logger.warn("chatgpt_desktop.gateway_route_failed", { message: error instanceof Error ? error.message : String(error) });
+        }
+        return proxyRouteFromEnvironment();
+      },
+      onChange: (status) => {
+        send("launcher:chatgpt-desktop-changed", status);
+        void setProxyGatewayDesktopRunning((status?.runningSlotIds?.length ?? 0) > 0).catch(() => {});
+      },
     });
     chatgptDesktop.ready = chatgptDesktop.initialize().catch((error) => {
       logger.warn("chatgpt_desktop.initialize_failed", { message: error instanceof Error ? error.message : String(error) });
@@ -252,11 +269,17 @@ function getChatGptDesktop(logger) {
 // GPT Browser account partitions take the same route as the main browser (Global Routing
 // publishes it in HTTPS_PROXY/NO_PROXY); chatgpt.com refuses this machine's direct route.
 async function routeGptBrowserSession(browserSession) {
-  const route = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || "";
+  let route = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || "";
   if (!route) {
     await browserSession.setProxy({ mode: "direct" });
     return;
   }
+  // The built-in gateway's env route carries its local token; Chromium takes the bare proxy and
+  // answers the proxy's 407 through the app's login handler instead.
+  try {
+    const parsed = new URL(route);
+    if (parsed.username || parsed.password) route = `${parsed.protocol}//${parsed.host}`;
+  } catch {}
   await browserSession.setProxy({ mode: "fixed_servers", proxyRules: route, proxyBypassRules: process.env.NO_PROXY || "" });
 }
 
@@ -2449,6 +2472,19 @@ async function start() {
     publish: (value) => send("launcher:external-services-changed", value),
   });
   setProviderCpaConnection(() => externalServicesController?.cpaConnection());
+  // After the gateway's key rotated on evidence of a squat, a running CPA restarts with the new key
+  // (the same path as Network Proxy's "Apply route to CPA"). The Codex bridge and the MCP tunnel
+  // are deliberately never restarted here: they carry in-flight work and take the key on their next
+  // start; the Proxy Gateway tab lists them as needing a restart.
+  setProxyGatewayKeyRotated(async () => {
+    const cpa = externalServicesController?.snapshot().services.find((service) => service.id === "cpa");
+    if (cpa?.status !== "ready") return;
+    try {
+      await externalServicesController.restart("cpa");
+    } catch (error) {
+      logger.warn("proxy_gateway.cpa_restart_failed", { message: error instanceof Error ? error.message : String(error) });
+    }
+  });
   managedBootstrapController = createManagedBootstrap({
     snapshot: () => externalServicesController.snapshot(),
     install: (serviceId) => externalServicesController.installManagedComponent(serviceId),

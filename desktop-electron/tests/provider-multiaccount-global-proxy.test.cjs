@@ -137,6 +137,7 @@ test("the global proxy login handler leaves owned Antigravity authentication to 
     },
     "./provider-execution-router.cjs": {},
     "./profile.cjs": { resolveLauncherProfile: () => ({ browserPartition: "test" }) },
+    "./proxy-gateway.cjs": { createProxyGatewayController: () => ({ startup: async () => ({}) }) },
   };
   require("node:vm").runInNewContext(fs.readFileSync(path.join(__dirname, "../electron/provider-bootstrap.cjs"), "utf8"), {
     module: loaded, require: name => dependencies[name], console,
@@ -192,6 +193,7 @@ test("provider and proxy IPC answer only a Coding Tools window's own page; netwo
     "./provider-network.cjs": { createProviderNetworkController: () => ({ store, applyGlobalRouting: async () => ({ routing: {} }), handleProxyLogin() {} }) },
     "./provider-execution-router.cjs": { createProviderExecutionPlan: () => ({}) },
     "./profile.cjs": { resolveLauncherProfile: () => ({ browserPartition: "test" }) },
+    "./proxy-gateway.cjs": { createProxyGatewayController: () => ({ startup: async () => ({}) }) },
   };
   require("node:vm").runInNewContext(fs.readFileSync(path.join(__dirname, "../electron/provider-bootstrap.cjs"), "utf8"), {
     module: loaded, require: name => dependencies[name], console,

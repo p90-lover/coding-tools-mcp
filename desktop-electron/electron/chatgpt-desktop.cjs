@@ -517,7 +517,7 @@ function createChatGptDesktopHost({
     ];
     // The app's Rust backend reads the *_PROXY variables; its Electron window ignores them on
     // Windows and needs Chromium's own switches.
-    let proxy = getProxyRoute();
+    let proxy = await getProxyRoute();
     if (proxy && [proxy.url, ...proxy.bypass].some((value) => CMD_UNSAFE.test(value) || /\s/.test(value))) {
       logger?.warn?.("chatgpt_desktop.proxy_not_passed", { reason: "unsafe_characters" });
       proxy = null;
