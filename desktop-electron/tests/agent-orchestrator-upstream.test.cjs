@@ -377,3 +377,31 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
   status = "exited"; resumeOk = false;
   assert.equal(await upstream.continuable("old"), false, "a failed resume falls back to a fresh session");
 });
+
+test("a terminal agent AO lost the signal of settles as failed once idle past the limit, never while it may still report", async () => {
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const fnStart = source.indexOf("  async function observeTui(");
+  const fnEnd = source.indexOf("  function snapshot()", fnStart);
+  const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
+  const consts = ["TUI_RESULT_FILE", "TUI_SILENT_MS"].map(name => source.match(new RegExp(`const ${name} = .*;`))[0]).join("\n");
+  let report = null;
+  const observeTui = vm.runInNewContext(consts + identity + source.slice(fnStart, fnEnd) + "\nobserveTui", {
+    Date, Number, String,
+    internalApi: async () => { if (!report) throw new Error("no file"); return { content: report }; },
+  });
+  const now = Date.parse("2026-10-12T09:00:00Z");
+  const idleSince = minutes => ({ state: "idle", lastActivityAt: new Date(now - minutes * 60_000).toISOString() });
+  const stuck = await observeTui("reg-machine-7", "no_signal", idleSince(18 * 60), now);
+  assert.equal(stuck.turnState, "failed");
+  assert.equal(stuck.exited, true);
+  assert.match(stuck.error, /stopped reporting.*send a follow-up/);
+  const recent = await observeTui("reg-machine-7", "no_signal", idleSince(5), now);
+  assert.equal(recent.turnState, undefined, "a short silence is not yet a failure");
+  const busy = await observeTui("reg-machine-7", "no_signal", { state: "active", lastActivityAt: idleSince(120).lastActivityAt }, now);
+  assert.equal(busy.turnState, undefined, "an agent still active is left running");
+  report = "Done: registered.";
+  const reported = await observeTui("reg-machine-7", "no_signal", idleSince(18 * 60), now);
+  assert.equal(reported.turnState, "completed", "a report written before it went silent still counts");
+  assert.equal(reported.answer, "Done: registered.");
+});

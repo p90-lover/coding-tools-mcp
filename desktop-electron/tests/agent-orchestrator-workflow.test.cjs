@@ -2869,3 +2869,34 @@ test("idle agents are released on a timer, never a pre-warmed one, and the timer
   workflow.dispose();
   assert.ok(timers.at(-1).cleared, "dispose stops it");
 });
+
+test("an open chat pre-warms only when its next message cannot continue its agent, and at most two wait", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
+  const other = { ...route, model: "cpa/other-model" };
+  const third = { ...route, model: "cpa/third-model" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const stopped = { id: "r1", project_id: "task-1", execution_mode: "single", cancelled: true,
+    nodes: [{ id: "one", role: "planner", state: "cancelled", parents: [], route, receipt: { thread_id: "sess-1" } }] };
+  const world = chatWorld({ tasks: [task], runs: [stopped] });
+  const spawned = [], killed = [], checked = [];
+  let alive = true;
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless,
+    aoHarness: {
+      spawn: async input => { spawned.push(input.model); return `warm-${spawned.length}`; },
+      continuable: async id => { checked.push(id); return id === "sess-1" ? alive : true; },
+      kill: async id => { killed.push(id); return { ok: true }; },
+      warmSessions: async () => [],
+    } });
+  const same = await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route, taskId: "task-1" });
+  assert.equal(same.continues, true, "a stopped card's live agent takes the next message (Stop only interrupts the turn)");
+  assert.deepEqual(checked, ["sess-1"], "checking it also wakes an agent released while idle");
+  assert.equal(spawned.length, 0);
+  alive = false;
+  assert.equal((await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route, taskId: "task-1" })).warmed, true,
+    "an agent that is gone is replaced ahead of the message");
+  await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: other, taskId: "task-1" });
+  await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: third });
+  for (let tries = 0; tries < 50 && !killed.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.deepEqual(spawned, ["test-model", "other-model", "third-model"]);
+  assert.deepEqual(killed, ["warm-1"], "the oldest waiting agent is ended once a third is warmed");
+});

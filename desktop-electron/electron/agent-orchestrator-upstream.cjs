@@ -69,6 +69,8 @@ function agentCatalog({ inventory, settings, readiness = null, lastInstalled = n
 }
 
 const TUI_RESULT_FILE = "AO_RESULT.md";
+/** How long a terminal agent AO lost the signal of may sit idle before its card is settled as failed. */
+const TUI_SILENT_MS = 30 * 60_000;
 // AO conversation turn states after which a turn can no longer change.
 const TERMINAL_TURN_STATES = new Set(["completed", "failed", "interrupted", "cancelled", "recovered"]);
 const TUI_RESULT_INSTRUCTION = `When the assignment is finished, write your complete final report (what you did and the evidence) to ${TUI_RESULT_FILE} at the root of your working directory, then stop and wait.`;
@@ -351,7 +353,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     },
     async observe(id, expectedTurn) {
       const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`);
-      if (record?.session?.mode === "tui") return observeTui(id, record.session.status);
+      if (record?.session?.mode === "tui") return observeTui(id, record.session.status, record.session.activity);
       const [session, conversation] = [record, await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=100`)];
       const turns = Array.isArray(conversation?.turns) ? conversation.turns : [];
       // A follow-up sent into a live session is pinned to its own turn: until AO shows it, the
@@ -504,9 +506,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     },
   });
 
-  async function observeTui(id, status) {
+  async function observeTui(id, status, activity = null, now = Date.now()) {
     const waiting = ["idle", "needs_input"].includes(status);
-    const ended = ["exited", "terminated"].includes(status);
+    // AO lost the terminal's signal (e.g. its pty host restarted with the app) and the agent has
+    // sat idle since: it will not write a report, and its card would read "working" forever.
+    const lostSince = Date.parse(activity?.lastActivityAt ?? "");
+    const silent = status === "no_signal" && activity?.state === "idle" && Number.isFinite(lostSince) && now - lostSince >= TUI_SILENT_MS;
+    const ended = ["exited", "terminated"].includes(status) || silent;
     if (!waiting && !ended) return { status, needsInput: false, exited: false, answer: "" };
     let answer = "";
     try {
@@ -514,6 +520,10 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       if (!file?.deleted && !file?.binary) answer = String(file?.content || "").trim().slice(0, 12000);
     } catch { /* The agent has not written its report yet. */ }
     if (answer) return { status, turnId: `tui-${id}`, turnState: "completed", answer, needsInput: false, exited: ended };
+    if (silent) {
+      return { status, turnId: `tui-${id}`, turnState: "failed", answer: "", exited: true,
+        error: `The terminal agent stopped reporting and has been idle since ${new Date(lostSince).toISOString()} without ${TUI_RESULT_FILE}; send a follow-up to continue in a new session` };
+    }
     if (ended) return { status, turnId: `tui-${id}`, turnState: "failed", error: `AO session ended without ${TUI_RESULT_FILE}`, answer: "", exited: true };
     // Idle without a report: the agent is waiting for the user in its terminal.
     return { status, needsInput: true, exited: false, answer: "" };
