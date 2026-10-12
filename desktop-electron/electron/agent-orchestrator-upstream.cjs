@@ -228,11 +228,32 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           // AO records a steer as a system row tagged event "steer"; it is the user's own words.
           ? { id: String(activity.id), sequence: Number(activity.sequence) || 0, kind: "steer", status: "completed",
             text: utf8Prefix(activity.detail.text.trim(), 4096) }
-          : { id: String(activity.id), sequence: Number(activity.sequence) || 0,
-            kind: activity.activityKind.slice(0, 32), status: String(activity.status || "").slice(0, 32),
-            text: utf8Prefix(String(activity.summary || activity.activityKind), 400) }),
+          : timelineActivity(activity)),
     ];
     return items.sort((a, b) => a.sequence - b.sequence).slice(-40);
+  }
+  // claude-agent-acp reports every tool call, its own Read/Grep/PowerShell included, as AO's
+  // "mcp_tool"; the ACP tool kind says what it did. A real MCP server's tool is named mcp__<server>__.
+  const TOOL_LABELS = { read: "Read", search: "Search", edit: "Edit", delete: "Delete", move: "Move", fetch: "Fetch",
+    think: "Thought", switch_mode: "Plan", execute: "Command", other: "Tool" };
+  function toolLabel(detail, summary) {
+    const name = String(detail?.toolName || "");
+    if (/^mcp__(?!acp__)/.test(name) || /^mcp__(?!acp__)/.test(summary)) return "MCP";
+    return TOOL_LABELS[detail?.toolKind] || "Tool";
+  }
+  function timelineActivity(activity) {
+    const detail = activity.detail && typeof activity.detail === "object" ? activity.detail : {};
+    const input = detail.input && typeof detail.input === "object" ? detail.input : {};
+    const base = { id: String(activity.id), sequence: Number(activity.sequence) || 0, status: String(activity.status || "").slice(0, 32) };
+    const summary = String(activity.summary || "");
+    // A shell call (Bash, PowerShell) shows as the command it ran, like Codex.
+    if (activity.activityKind === "mcp_tool" && typeof input.command === "string" && input.command.trim()) {
+      return { ...base, kind: "command", text: utf8Prefix(input.command.trim(), 400) };
+    }
+    if (activity.activityKind === "mcp_tool") {
+      return { ...base, kind: "tool", label: toolLabel(detail, summary), text: utf8Prefix(summary || detail.toolKind || "tool", 400) };
+    }
+    return { ...base, kind: activity.activityKind.slice(0, 32), text: utf8Prefix(summary || activity.activityKind, 400) };
   }
   /**
    * The session's tool requests waiting on an answer (Claude Code's ACP permission requests, parked
@@ -248,7 +269,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         const decisions = (Array.isArray(detail.decisions) ? detail.decisions : [])
           .filter(decision => typeof decision?.id === "string" && typeof decision?.kind === "string")
           .map(decision => ({ id: decision.id.slice(0, 200), kind: decision.kind.slice(0, 40), label: String(decision.label || decision.kind).slice(0, 120) }));
-        const command = detail.toolKind === "execute" && typeof input.command === "string" ? input.command : "";
+        const command = typeof input.command === "string" && input.command.trim() ? input.command : "";
         const path = typeof input.file_path === "string" ? input.file_path : typeof input.path === "string" ? input.path : "";
         // Claude Code's ExitPlanMode asks to leave plan mode with the plan it wrote; each offered
         // decision is a different way to go on (auto, accept edits, ask for edits, keep planning).
@@ -259,7 +280,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           ...(typeof activity.createdAt === "string" ? { since: activity.createdAt } : {}),
           ...(command ? { command: utf8Prefix(command, 4000) } : {}), ...(path ? { path: utf8Prefix(path, 1000) } : {}),
           ...(typeof input.description === "string" ? { reason: utf8Prefix(input.description, 500) } : {}),
-          tool: String(detail.toolName || detail.toolKind || "tool").slice(0, 80),
+          // The tool's own name when AO has it; otherwise its summary ("PowerShell") rather than ACP's "other".
+          tool: String(detail.toolName || (detail.toolKind && detail.toolKind !== "other" ? detail.toolKind : activity.summary) || "tool").slice(0, 80),
           summary: utf8Prefix(String(activity.summary || ""), 500), turn_id: typeof activity.turnId === "string" ? activity.turnId : undefined,
           decisions,
         };

@@ -447,3 +447,34 @@ test("Claude Code's ExitPlanMode request carries its plan and every way it offer
   assert.equal(request.since, "2026-10-12T02:00:00Z");
   assert.deepEqual(request.decisions.map(decision => decision.id), ["auto", "acceptEdits", "default", "plan"]);
 });
+
+test("Claude Code's own tools are labelled by what they did, a shell call shows its command, and only a real MCP tool reads as MCP", async () => {
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.includes("/conversation") ? {
+      turns: [{ id: "t", state: "running" }], messages: [],
+      activities: [
+        { id: "1", turnId: "t", sequence: 1, activityKind: "mcp_tool", status: "completed", summary: "Read frontend\vite.config.ts", detail: { toolKind: "read", input: { file_path: "x" } } },
+        { id: "2", turnId: "t", sequence: 2, activityKind: "mcp_tool", status: "completed", summary: "Find `src`", detail: { toolKind: "search", input: { path: "src" } } },
+        { id: "3", turnId: "t", sequence: 3, activityKind: "mcp_tool", status: "completed", summary: "PowerShell", detail: { toolKind: "other", input: { command: "Get-ChildItem frontend" } } },
+        { id: "4", turnId: "t", sequence: 4, activityKind: "mcp_tool", status: "completed", summary: "Load skill: run", detail: { toolKind: "other", input: { skill: "run" } } },
+        { id: "5", turnId: "t", sequence: 5, activityKind: "mcp_tool", status: "completed", summary: "mcp__playwright__browser_navigate", detail: { toolKind: "other", input: {} } },
+        { id: "6", turnId: "t", sequence: 6, activityKind: "approval", status: "pending", requestId: "req-1", summary: "PowerShell",
+          detail: { toolKind: "other", input: { command: "npm ci --prefix frontend", description: "安裝前端相依套件" },
+            decisions: [{ id: "allow", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }] } },
+      ],
+    } : { session: { id: "s", mode: "chat", status: "needs_input" } },
+  });
+  const observed = JSON.parse(JSON.stringify(await upstream.observe("s")));
+  assert.deepEqual(observed.timeline.filter(item => item.kind !== "approval").map(item => [item.kind, item.label ?? null, item.text]), [
+    ["tool", "Read", "Read frontend\vite.config.ts"],
+    ["tool", "Search", "Find `src`"],
+    ["command", null, "Get-ChildItem frontend"],
+    ["tool", "Tool", "Load skill: run"],
+    ["tool", "MCP", "mcp__playwright__browser_navigate"],
+  ]);
+  const [request] = observed.approvals;
+  assert.equal(request.kind, "command", "a PowerShell call asks as a command");
+  assert.equal(request.command, "npm ci --prefix frontend");
+  assert.equal(request.tool, "PowerShell", "the tool's name, not ACP's \"other\"");
+  assert.equal(request.reason, "安裝前端相依套件");
+});

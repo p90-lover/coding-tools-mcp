@@ -30,7 +30,7 @@ export type ChatActivity = {
 };
 
 /** One live entry of a working card's turn. `kind` is "message" or AO's activity kind (reasoning, command, …). */
-export type ChatLiveItem = { id: string; kind: string; status: string; text: string };
+export type ChatLiveItem = { id: string; kind: string; status: string; text: string; label?: string };
 
 export type ChatOptions = {
   /** One line per card: harness · model · effort · context · role. */
