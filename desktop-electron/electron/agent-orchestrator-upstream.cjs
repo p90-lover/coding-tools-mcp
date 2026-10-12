@@ -131,7 +131,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (body?.length > 65536) throw new Error("AO API request exceeds 64 KiB");
     const response = await fetch(`http://127.0.0.1:${daemonPort}${endpoint}`, { method, headers: { "content-type": "application/json" }, body, redirect: "error", signal: AbortSignal.timeout(method === "GET" ? 30000 : 180000) });
     const text = await response.text();
-    if (Buffer.byteLength(text) > 900000) throw new Error("AO response exceeds the handler limit");
+    if (Buffer.byteLength(text) > 900000) throw new Error(`AO response exceeds the handler limit (${method} ${endpoint.split("?")[0]})`);
     // AO answers some failures with an empty or non-JSON body; keep the status instead of
     // failing on JSON.parse and losing it.
     let data = {};
@@ -168,6 +168,21 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       socket.once("connect", () => settle(false));
       socket.once("error", error => settle(error?.code === "ECONNREFUSED"));
     });
+  }
+  /**
+   * The newest items of a session's conversation. AO counts messages and tool activities alike,
+   * and a tool's output can be tens of KB (an MCP browser tool's page dumps), so 100 items reached
+   * 1 MB and every poll failed on the response limit. A response that is too big is read again
+   * with fewer items; the chat shows only the newest 40 anyway.
+   */
+  async function conversationTail(id, limits = [100, 40, 10]) {
+    for (let at = 0; ; at += 1) {
+      try {
+        return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${limits[at]}`);
+      } catch (error) {
+        if (at === limits.length - 1 || !/exceeds the handler limit/.test(String(error?.message))) throw error;
+      }
+    }
   }
   /**
    * The current turn as a Codex-style transcript: assistant messages, reasoning and tool calls
@@ -325,7 +340,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     async observe(id, expectedTurn) {
       const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`);
       if (record?.session?.mode === "tui") return observeTui(id, record.session.status, record.session.activity);
-      const [session, conversation] = [record, await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=100`)];
+      const [session, conversation] = [record, await conversationTail(id)];
       const turns = Array.isArray(conversation?.turns) ? conversation.turns : [];
       // A follow-up sent into a live session is pinned to its own turn: until AO shows it, the
       // previous, completed turn must not be read as this card's answer.
