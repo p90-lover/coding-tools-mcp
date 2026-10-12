@@ -576,6 +576,17 @@ export interface ChatGptDesktopStatus {
   accounts: ChatGptDesktopAccount[];
 }
 
+/** A still capture of the user's own ChatGPT desktop window (not a copy Coding Tools runs). */
+export interface ChatGptLocalPreview {
+  state: "ok" | "not-running" | "minimized" | "hidden" | "blank" | "unsupported";
+  title: string | null;
+  /** JPEG data URL when `state` is "ok". */
+  image: string | null;
+  width: number;
+  height: number;
+  capturedAt: number;
+}
+
 export interface EmailStatus {
   configured: boolean;
   origin: string | null;
@@ -660,6 +671,8 @@ export interface LauncherApi {
   clearChatGptDesktopAccount(): Promise<ChatGptDesktopStatus>;
   stopChatGptDesktop(): Promise<ChatGptDesktopStatus>;
   setChatGptDesktopSurfaceActive(active: boolean): Promise<boolean>;
+  chatGptLocalPreview(): Promise<ChatGptLocalPreview>;
+  sendChatGptLocalMessage(text: string): Promise<{ ok: true; sentAt: number }>;
   setChatGptDesktopBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<boolean>;
   onChatGptDesktopChanged(listener: (status: ChatGptDesktopStatus) => void): () => void;
   onChatGptDesktopRemeasure(listener: () => void): () => void;

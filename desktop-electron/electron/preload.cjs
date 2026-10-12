@@ -70,6 +70,8 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   clearChatGptDesktopAccount: () => ipcRenderer.invoke("launcher:chatgpt-desktop-clear"),
   stopChatGptDesktop: () => ipcRenderer.invoke("launcher:chatgpt-desktop-stop"),
   setChatGptDesktopSurfaceActive: (active) => ipcRenderer.invoke("launcher:chatgpt-desktop-surface-active", active === true),
+  chatGptLocalPreview: () => ipcRenderer.invoke("launcher:chatgpt-desktop-local-preview"),
+  sendChatGptLocalMessage: (text) => ipcRenderer.invoke("launcher:chatgpt-desktop-local-send", { text: String(text ?? "") }),
   emailStatus: () => ipcRenderer.invoke("launcher:email-status"),
   connectEmail: (input) => ipcRenderer.invoke("launcher:email-connect", input),
   disconnectEmail: () => ipcRenderer.invoke("launcher:email-disconnect"),

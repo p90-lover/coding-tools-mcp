@@ -1700,6 +1700,23 @@ function registerIpc({ logger, stateStore }) {
     await host.ready;
     return host.stop();
   });
+  // The user's own ChatGPT desktop app, shown in the ChatGPT Desktop page's preview panel. Its
+  // window is a capture of another app, so only the trusted, visible main window may read it.
+  handle("launcher:chatgpt-desktop-local-preview", async (event) => {
+    assertFocusedMainWindow(event, false);
+    return getChatGptDesktop(logger).localPreview();
+  });
+  // Types the panel's message into that app and sends it. Only the user's click or Enter in the
+  // focused main window gets here; focus returns to Coding Tools afterwards.
+  handle("launcher:chatgpt-desktop-local-send", async (event, input) => {
+    assertFocusedMainWindow(event, true);
+    if (!input || typeof input !== "object" || Object.keys(input).some((key) => key !== "text")) {
+      throw new Error("A ChatGPT message needs only its text");
+    }
+    const native = mainWindow.getNativeWindowHandle();
+    const returnTo = Number(native.length >= 8 ? native.readBigUInt64LE(0) : native.readUInt32LE(0));
+    return getChatGptDesktop(logger).localSend(input.text, { returnTo });
+  });
   // Workspace -> GPT Browser. Every change needs the focused main window; status is read-only.
   handle("launcher:gpt-browser-status", () => getGptBrowser(logger).status());
   handle("launcher:gpt-browser-add", (event) => {
