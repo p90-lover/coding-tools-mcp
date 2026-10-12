@@ -95,8 +95,23 @@ function installProviderNetwork({
     controller?.handleProxyLogin(event, authInfo, callback);
   });
 
-  function handle(channel, callback) {
+  // Who may call: every channel answers only a Coding Tools window's own page, never web content
+  // embedded in it (a browser view, a webview or an iframe). Changing the network route or a proxy
+  // also needs that window visible and focused, as only the user's click there does; account writes
+  // can follow a login that holds the focus, so they need only the window's own page.
+  function assertSender(event, access) {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    const own = Boolean(window) && !window.isDestroyed() && window.webContents === event.sender
+      && (!event.senderFrame || event.senderFrame === event.sender.mainFrame);
+    const focused = own && window.isVisible() && !window.isMinimized() && window.isFocused() && event.sender.isFocused();
+    if (!own || (access === "network" && !focused)) {
+      throw new Error("Use the visible, focused Coding Tools window to change network settings");
+    }
+  }
+
+  function handle(channel, callback, access = "app") {
     ipcMain.handle(channel, async (event, ...args) => {
+      assertSender(event, access);
       const active = await controllerPromise;
       return callback(active, event, ...args);
     });
@@ -144,30 +159,30 @@ function installProviderNetwork({
     const refreshGlobal = current.routing.globalEnabled
       && current.routing.globalProfileId === input?.id;
     return publishMutation(active, () => active.store.saveProxyProfile(input), { refreshGlobal });
-  });
+  }, "network");
   handle("launcher:proxy-profile-archive", (active, _event, profileId) => publishMutation(
     active,
     () => active.store.archiveProxyProfile(profileId),
     { refreshGlobal: true },
-  ));
+  ), "network");
   handle("launcher:proxy-profile-test", async (active, _event, profileId) => {
     const result = await active.testProxyProfile(profileId);
     publish(result.snapshot);
     return result;
-  });
+  }, "network");
   handle("launcher:proxy-global-routing", (active, _event, input) => publishMutation(
     active,
     () => active.store.setGlobalRouting(input),
     { refreshGlobal: true },
-  ));
+  ), "network");
   handle("launcher:proxy-provider-policy", (active, _event, input) => publishMutation(
     active,
     () => active.store.setProviderPolicy(input),
-  ));
+  ), "network");
   handle("launcher:proxy-account-policy", (active, _event, input) => publishMutation(
     active,
     () => active.store.setAccountPolicy(input),
-  ));
+  ), "network");
 
   return Object.freeze({
     ready: providerNetworkReady,
