@@ -597,3 +597,14 @@ test("an install command's approval says what it does to the project's own packa
   assert.equal(chat.dependencyInstallNote("Get-ChildItem frontend", links), null);
   assert.equal(chat.dependencyInstallNote("npm install", null), null, "unknown links: no note");
 });
+
+test("the chat's details panel counts its agents by state and names its approval mode", () => {
+  const summary = chat.chatAgentSummary([{ state: "finished" }, { state: "finished" }, { state: "running" }, { state: "held" }, { state: "pending" }]);
+  assert.deepEqual([...summary.dots], ["done", "done", "working", "waiting", "queued"]);
+  assert.equal(summary.text, "1 working · 1 waiting · 2 done · 1 queued");
+  assert.equal(chat.chatAgentSummary([]).text, "No agents yet");
+  assert.equal(chat.chatApprovalMode({ approval_policy: "on-request", approvals_reviewer: "auto_review" }), "Approve for me");
+  assert.equal(chat.chatApprovalMode({ approval_policy: "on-request", approvals_reviewer: "user" }), "Ask me");
+  assert.equal(chat.chatApprovalMode({ approval_policy: "never" }), "Full access, no prompts");
+  assert.equal(chat.chatApprovalMode(null), "Default");
+});

@@ -32,6 +32,31 @@ export type ChatActivity = {
 /** One live entry of a working card's turn. `kind` is "message" or AO's activity kind (reasoning, command, …). */
 export type ChatLiveItem = { id: string; kind: string; status: string; text: string; label?: string };
 
+/** How a card's state reads in the chat's details panel, in the order the counts are listed. */
+const AGENT_STATES = ["working", "waiting", "failed", "done", "queued", "stopped"] as const;
+export type AgentState = typeof AGENT_STATES[number];
+function agentState(state?: string): AgentState {
+  if (state === "finished") return "done";
+  if (state === "running" || state === "reserved") return "working";
+  if (state === "held") return "waiting";
+  if (state === "failed") return "failed";
+  if (state === "cancelled" || state === "archived") return "stopped";
+  return "queued";
+}
+/** The latest run's cards as the details panel shows them: one dot per card and a count line ("3 done · 1 working"). */
+export function chatAgentSummary(nodes: { state?: string }[]): { dots: AgentState[]; text: string } {
+  const dots = nodes.map((node) => agentState(node.state));
+  const text = AGENT_STATES.map((state) => [state, dots.filter((dot) => dot === state).length] as const)
+    .filter(([, count]) => count > 0).map(([state, count]) => `${count} ${state}`).join(" · ");
+  return { dots, text: text || "No agents yet" };
+}
+/** How the card's tool requests are answered, as the details panel names it. */
+export function chatApprovalMode(route?: { approval_policy?: string; approvals_reviewer?: string } | null): string {
+  if (!route?.approval_policy) return "Default";
+  if (route.approval_policy === "never") return "Full access, no prompts";
+  return route.approvals_reviewer === "auto_review" ? "Approve for me" : "Ask me";
+}
+
 /** The folders new worktrees share with the project (`shared`, a link) or get as hard-link farms (`farmed`). */
 export type DependencyLinks = { shared: string[]; farmed: string[] };
 export type DependencyNote = { tone: "warn" | "info"; text: string };

@@ -8,7 +8,7 @@ import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, chatAcceptsMessage, chatDuration, chatList, chatMessageWithAttachments, chatRunOpen,
-  chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
+  chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
 } from "./ao-chat";
 
@@ -222,6 +222,21 @@ export function AgentOrchestratorChat({
   const [attachNote, setAttachNote] = useState("");
   const [slashIndex, setSlashIndex] = useState(0);
   const [showStructure, setShowStructure] = useState(false);
+  // The chat's details panel (like Claude's session panel): changes, agents, setup.
+  const [details, setDetails] = useState<{ left: number; top: number } | null>(null);
+  const detailsPanel = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!details) return;
+    const outside = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (target && (detailsPanel.current?.contains(target) || (target as Element).closest?.("[data-details-toggle]"))) return;
+      setDetails(null);
+    };
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setDetails(null); };
+    document.addEventListener("mousedown", outside, true);
+    document.addEventListener("keydown", escape);
+    return () => { document.removeEventListener("mousedown", outside, true); document.removeEventListener("keydown", escape); };
+  }, [details]);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [menu, setMenu] = useState<ChatMenuState>(null);
   // A menu button toggles its menu: pressing it again closes the menu instead of reopening it.
@@ -649,9 +664,39 @@ export function AgentOrchestratorChat({
             <Icon name="orchestrator" width="16" height="16" /></button> : null}
           {onOpenMissionBoard ? <button type="button" className="cx-icon-button" title="Mission Board" aria-label="Open Mission Board" onClick={onOpenMissionBoard}>
             <Icon name="logs" width="16" height="16" /></button> : null}
+          {selectedTaskId ? <button type="button" className="cx-icon-button" data-details-toggle="" title="Chat details" aria-label="Chat details"
+            aria-haspopup="dialog" aria-expanded={Boolean(details)}
+            onClick={(event) => {
+              const box = event.currentTarget.getBoundingClientRect();
+              setDetails((open) => open ? null : { left: Math.max(8, Math.min(box.right - 300, window.innerWidth - 308)), top: box.bottom + 6 });
+            }}><ChatGlyph name="section" size={16} /></button> : null}
           <button type="button" className="cx-icon-button" title="More" aria-label="More chat actions" aria-haspopup="menu"
             onClick={(event) => toggleMenu(event.currentTarget, (box) => ({ x: box.right - 240, y: box.bottom + 4, items: headerMenu(), label: "Chat actions" }))}>⋯</button>
         </header>
+        {details ? (() => {
+          const nodes = latest?.nodes ?? [];
+          const lead = nodes.find((node) => node.role === "planner") ?? nodes[0];
+          const agents = chatAgentSummary(nodes);
+          return <FloatingLayer className="cx-details" role="dialog" style={{ left: details.left, top: details.top }}>
+            <div ref={detailsPanel} aria-label="Chat details">
+              <div className="cx-details-head"><strong>{projectName || "Project"}</strong>{branch ? <small>{branch}</small> : null}</div>
+              <button type="button" className="cx-details-row" disabled={!commands || !latest}
+                onClick={() => { setDetails(null); void runCommand("diff"); }}>
+                <ChatGlyph name="edit" size={15} /><span>Changes</span></button>
+              <p className="cx-details-label">Agents</p>
+              {latest ? <button type="button" className="cx-details-row" title="Open the cards"
+                onClick={() => { setDetails(null); if (structure) setShowStructure(true); else openStructure(latest.id); }}>
+                <span className="cx-details-dots" aria-hidden="true">{agents.dots.slice(0, 8).map((state, index) =>
+                  <span key={index} className={`cx-details-dot is-${state}`} />)}</span><span>{agents.text}</span></button>
+                : <p className="cx-details-empty">No agents yet; they start with the first message.</p>}
+              <p className="cx-details-label">Setup</p>
+              {lead ? <>
+                <p className="cx-details-line">{describeNode?.(lead) || lead.route?.model || "Model not set"}</p>
+                <p className="cx-details-line">Approvals: {chatApprovalMode(lead.route as { approval_policy?: string; approvals_reviewer?: string } | undefined)}</p>
+              </> : <p className="cx-details-empty">Chosen when you send.</p>}
+            </div>
+          </FloatingLayer>;
+        })() : null}
 
         <div className="cx-scroll" ref={scroller}
           onScroll={(event) => { const box = event.currentTarget; setAtBottom(box.scrollHeight - box.scrollTop - box.clientHeight < 48); }}>
