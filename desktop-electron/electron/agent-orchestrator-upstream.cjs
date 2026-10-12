@@ -263,17 +263,18 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     return binding.projectId;
   }
   /**
-   * The app's own tool server (files, terminal, git, screenshots, computer control) for a chat
-   * agent, as AO spawn mcpServers. Never fails a launch: without it the agent starts without them.
+   * The app's own tools for one chat session about to be spawned (its own credential, rooted at
+   * the worktree AO creates for it), or null. Never fails a launch: without them the agent starts
+   * without them.
    */
-  async function chatToolServers(agent, workspaceId) {
-    if (!agentTools) return [];
+  async function chatTools(agent, workspaceId) {
+    if (!agentTools) return null;
     try {
-      const servers = await agentTools.servers({ agent, workspaceId });
-      return Array.isArray(servers) ? servers : [];
+      const lease = await agentTools.lease({ agent, workspaceId });
+      return Array.isArray(lease?.servers) && lease.servers.length ? lease : null;
     } catch (cause) {
       logger.warn?.("ao.agent_tools_unavailable", { agent, message: String(cause?.message || cause).slice(0, 200) });
-      return [];
+      return null;
     }
   }
   const agentInventory = createAgentInventory(internalApi);
@@ -311,9 +312,21 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       if (codexWorkspace && !chat) throw new Error("Codex workspace permissions require its capable chat driver; TUI sandbox settings cannot be verified.");
       // AO caps prompts at 16 KiB of UTF-8; leave room for the TUI result instruction.
       const brief = utf8Prefix(prompt, 16384 - Buffer.byteLength(TUI_RESULT_INSTRUCTION, "utf8") - 2);
-      // Chat sessions only: a terminal launch has no controller to attach tool servers to.
-      const mcpServers = chat ? await chatToolServers(agent, workspaceId) : [];
-      const launch = (mode) => internalApi("POST", "/api/v1/sessions", {
+      const launch = async (mode) => {
+        // Chat sessions only: a terminal launch has no controller to attach tool servers to. Each
+        // attempt gets its own credential, bound to the session it creates and to nothing else.
+        const tools = mode === "chat" ? await chatTools(agent, workspaceId) : null;
+        let created;
+        try {
+          created = await launchSession(mode, tools?.servers ?? []);
+        } catch (error) {
+          tools?.release();
+          throw error;
+        }
+        if (tools && !tools.bind(created?.session?.id)) tools.release();
+        return created;
+      };
+      const launchSession = (mode, mcpServers) => internalApi("POST", "/api/v1/sessions", {
         projectId, kind: "worker", harness: agentId(agent), mode,
         ...(approvalMode ? { approvalMode } : {}),
         ...(brief ? { prompt: mode === "chat" ? brief : `${brief}\n\n${TUI_RESULT_INSTRUCTION}` } : {}),
@@ -324,7 +337,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         ...(plain ? { plainPrompt: true } : {}),
         // A CPA model runs through the local gateway; AO adds the key from its own environment.
         ...(gateway?.provider === "cpa" && typeof gateway.model === "string" ? { gateway: { provider: "cpa", model: gateway.model.slice(0, 256) } } : {}),
-        ...(mode === "chat" && mcpServers.length ? { mcpServers } : {}),
+        ...(mcpServers.length ? { mcpServers } : {}),
         displayName: String(name || "AO worker").slice(0, 100),
       });
       let data;
@@ -456,7 +469,26 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     /** Ends a session and its agent (a pre-warmed one nobody used). */
     async kill(id) {
       await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/kill`, {});
+      agentTools?.forgetSession?.(id);
       return { ok: true };
+    },
+    /**
+     * Where a chat session's app tools may act: its own worktree once AO has made it, `ready:
+     * false` before that, `ended` once the session is gone. Never starts AO; the path stays in
+     * the main process.
+     */
+    async sessionWorkspace(id) {
+      const record = await requestApi("GET", `/api/v1/sessions/${sessionId(id)}`);
+      if (record.status === 404) return { ended: true };
+      if (!record.ok) throw new Error(aoErrorMessage(record));
+      const session = record.data?.session;
+      if (session?.id !== id) throw new Error("AO returned another session");
+      if (session.isTerminated === true || ["terminated", "killed"].includes(session.status) || session.provisionState === "failed") return { ended: true };
+      const location = await requestApi("GET", `/api/v1/desktop/sessions/${sessionId(id)}/workspace`);
+      if (location.status === 404) return { ready: false };
+      if (!location.ok) throw new Error(aoErrorMessage(location));
+      const root = location.data?.workspacePath;
+      return typeof root === "string" && path.isAbsolute(root) ? { root } : { ready: false };
     },
     /**
      * Live sessions with this display name that never ran a turn: pre-warmed ones nobody used,

@@ -152,6 +152,8 @@ pub type WorkspaceResult<T> = Result<T, WorkspaceError>;
 pub struct Workspace {
     root: PathBuf,
     linked_snapshot: Option<Vec<LinkedProject>>,
+    /// Only the root itself is in scope: no `.mcp-paths` links and no explicit external reads.
+    isolated: bool,
 }
 
 impl Workspace {
@@ -167,7 +169,25 @@ impl Workspace {
         Ok(Self {
             root,
             linked_snapshot: None,
+            isolated: false,
         })
+    }
+
+    /// A workspace of the root alone: reads stay inside it like writes, and `.mcp-paths` mappings
+    /// in the tree link nothing (an agent's own worktree could hold the user's mappings, or write
+    /// new ones from its shell).
+    pub fn isolated(root: PathBuf) -> WorkspaceResult<Self> {
+        let mut workspace = Self::new(root)?;
+        workspace.isolated = true;
+        workspace.linked_snapshot = Some(Vec::new());
+        Ok(workspace)
+    }
+
+    fn listed_links(&self) -> Vec<LinkedProject> {
+        if self.isolated {
+            return Vec::new();
+        }
+        list_linked_projects_for_root(&self.root)
     }
 
     pub fn root(&self) -> &Path {
@@ -185,13 +205,14 @@ impl Workspace {
     pub fn linked_projects(&self) -> Vec<LinkedProject> {
         self.linked_snapshot
             .clone()
-            .unwrap_or_else(|| list_linked_projects_for_root(&self.root))
+            .unwrap_or_else(|| self.listed_links())
     }
 
     pub fn request_snapshot(&self) -> Self {
         Self {
             root: self.root.clone(),
-            linked_snapshot: Some(list_linked_projects_for_root(&self.root)),
+            linked_snapshot: Some(self.listed_links()),
+            isolated: self.isolated,
         }
     }
 
@@ -212,7 +233,7 @@ impl Workspace {
         if self
             .linked_snapshot
             .as_ref()
-            .is_some_and(|roots| *roots != list_linked_projects_for_root(&self.root))
+            .is_some_and(|roots| *roots != self.listed_links())
         {
             return Err(WorkspaceError::Tool {code:"WORKSPACE_ROOTS_CHANGED",message:"Approved project mappings changed during this request. Inspect state before reassessing; an already-submitted effect cannot be undone and must not be automatically replayed.".into(),category:"permission",retryable:false});
         }
@@ -374,7 +395,10 @@ impl Workspace {
             || input
                 .components()
                 .any(|part| matches!(part, Component::ParentDir));
-        if alias_address || (!explicit_external && candidate.starts_with(&self.root)) {
+        if self.isolated
+            || alias_address
+            || (!explicit_external && candidate.starts_with(&self.root))
+        {
             self.ensure_inside_workspace(&candidate, &resolved)?;
         }
         Ok(ResolvedPath {
@@ -685,6 +709,29 @@ mod linked_root_tests {
             )
             .expect_err("outside path must be blocked");
         assert_eq!(denied.to_error_value()["code"], "PATH_OUTSIDE_WORKSPACE");
+    }
+
+    #[test]
+    fn an_isolated_root_has_no_links_and_no_external_reads() {
+        let workspace = tempdir().expect("workspace");
+        let external = tempdir().expect("external");
+        add_mapping(workspace.path(), "coc-macro", external.path(), "read-write");
+        fs::write(external.path().join("existing.txt"), "ok").expect("existing");
+        fs::write(workspace.path().join("inside.txt"), "ok").expect("inside");
+        let outside = external.path().join("existing.txt");
+
+        let open = Workspace::new(workspace.path().to_path_buf()).expect("workspace");
+        assert!(open.resolve_read_path(&outside.to_string_lossy()).is_ok());
+        let ws = Workspace::isolated(workspace.path().to_path_buf()).expect("workspace");
+        assert!(ws.linked_projects().is_empty());
+        assert!(ws.request_snapshot().linked_projects().is_empty());
+        assert!(ws.request_snapshot().ensure_roots_current().is_ok());
+        assert!(ws.resolve_existing("@coc-macro/existing.txt").is_err());
+        assert!(ws.resolve_read_path(&outside.to_string_lossy()).is_err());
+        assert!(ws.resolve_read_path("inside.txt").is_ok());
+        assert!(ws
+            .resolve_for_write(&external.path().join("new.txt").to_string_lossy())
+            .is_err());
     }
 
     #[test]

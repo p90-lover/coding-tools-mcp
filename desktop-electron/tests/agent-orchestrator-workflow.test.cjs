@@ -2823,7 +2823,8 @@ test("a pre-warmed session is used only by a launch that attaches the same app t
   const world = chatWorld();
   const created = new Map();
   const spawned = [], sent = [];
-  let tools = "on|http://127.0.0.1:41234/mcp/ws-1|first";
+  // Nothing per session: the groups a launch would attach and the tool server's lifetime.
+  let tools = "pending";
   const asked = [];
   const request = async (endpoint, body, options) => {
     if (endpoint === "/api/v1/ao/read" && body.run_id) {
@@ -2852,19 +2853,27 @@ test("a pre-warmed session is used only by a launch that attaches the same app t
       kill: async () => ({ ok: true }),
     },
   });
+  // Before the tool server listens nothing is warmed: no launch could match a "pending" key.
+  const early = await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route });
+  assert.equal(early.warmed, false);
+  assert.equal(spawned.length, 0);
+  tools = "on|agent|first";
   await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route });
   await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route });
   assert.equal(spawned.length, 1, "the same tools reuse the waiting session");
   assert.ok(asked.every(id => id === "ws-1"), "the identity is asked for the chat's workspace");
 
-  // The tool server restarted on another port (or the setting changed): the waiting session's
+  // The user let chat agents see the screen (or the tool server restarted): the waiting session's
   // tools are not this launch's, so a new one is warmed and the old one is never handed out.
-  tools = "on|http://127.0.0.1:50000/mcp/ws-1|second";
+  tools = "on|agent+desktop|first";
   await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route });
   assert.equal(spawned.length, 2);
+  tools = "on|agent|second";
+  await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route });
+  assert.equal(spawned.length, 3);
   tools = "off";
   await workflow.call("chat_send", { workspaceId: "ws-1", message: "fix the login", executionMode: "single", singleRoute: route });
-  for (let tries = 0; tries < 200 && !sent.length && spawned.length < 3; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  for (let tries = 0; tries < 200 && !sent.length && spawned.length < 4; tries++) await new Promise(resolve => setTimeout(resolve, 10));
   assert.ok(!sent.some(([id]) => id.startsWith("warm-")), "a session warmed with other tools never takes the chat's first message");
   assert.ok(spawned.some(input => !input.warm && input.prompt === "fix the login"), "the message starts a session of its own");
 });

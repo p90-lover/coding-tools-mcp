@@ -2145,9 +2145,10 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:set-preference", (_event, key, value) => {
     const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "autoConnectExistingMcp"
-      || key === "chatAgentTools";
+      || key === "chatAgentTools" || key === "chatAgentDesktopTools";
     if (!ordinary) throw new Error("Unknown preference");
-    if (key === "autoConnectExistingMcp") assertFocusedMainWindow(_event, true);
+    // Consent: auto-connecting MCP and letting chat agents see and drive the screen are the user's.
+    if (key === "autoConnectExistingMcp" || (key === "chatAgentDesktopTools" && value === true)) assertFocusedMainWindow(_event, true);
     const state = stateStore.update({ [key]: value === true });
     if (key === "autoConnectExistingMcp") {
       automaticMcpAttemptPid = null;
@@ -2502,9 +2503,11 @@ async function start() {
     const { createChangePulse } = backendBundles.requireModule(backend, "ao-session-events.cjs");
     const { createAgentOrchestratorWorkflow, resolveAoNativeConnection, aoWebCatalogForModel } = backendBundles.requireModule(backend, "agent-orchestrator-workflow.cjs");
     const { HeadlessHost } = backendBundles.requireModule(backend, "headless-host.cjs");
-    // Chat agents get the workspace tools (files, terminal, git, screenshots, computer control)
-    // over MCP. Created once: a live session keeps its server URL and token across a backend
-    // restart. Settings > "Give chat agents the app's tools" turns it off for new launches.
+    // Chat agents get tools over MCP, each session rooted at its own AO worktree: files, search,
+    // patches, git and terminal (Settings > "Give chat agents the app's tools", on by default),
+    // and screen capture and computer control only when the user opts in (Settings > "Let chat
+    // agents see and control the screen"). Created once: a live session keeps its server URL and
+    // credential across a backend restart.
     if (!chatAgentTools) {
       const { createChatAgentTools } = backendBundles.requireModule(backend, "chat-agent-tools.cjs");
       chatAgentTools = createChatAgentTools({
@@ -2512,7 +2515,14 @@ async function start() {
           if (!headlessHost) throw new Error("Local Coding Tools runtime is unavailable");
           return headlessHost.request(endpoint, body, options);
         },
+        sessionWorkspace: (id) => {
+          if (!agentOrchestratorUpstream) throw new Error("Agent Orchestrator is unavailable");
+          return agentOrchestratorUpstream.harness.sessionWorkspace(id);
+        },
+        // Every screen or window observation is the user's call, in the focused app window.
+        confirm: confirmAoAction,
         enabled: () => stateStore.read().chatAgentTools !== false,
+        desktopEnabled: () => stateStore.read().chatAgentDesktopTools === true,
         version: app.getVersion(),
         logger,
       });

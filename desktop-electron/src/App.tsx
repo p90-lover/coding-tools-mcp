@@ -2183,6 +2183,15 @@ function SettingsSurface({
               .catch((cause) => setError(messageOf(cause)))}
           />
         </SettingRow>
+        <SettingRow body={copy.chatAgentDesktopToolsBody} label={copy.chatAgentDesktopTools}>
+          <Switch
+            checked={snapshot.state.chatAgentTools !== false && snapshot.state.chatAgentDesktopTools === true}
+            disabled={snapshot.state.chatAgentTools === false}
+            onChange={(checked) => void api!.setPreference("chatAgentDesktopTools", checked)
+              .then(updateState)
+              .catch((cause) => setError(messageOf(cause)))}
+          />
+        </SettingRow>
         <SettingRow
           body={snapshot.state.browserInteractionMode === "manual"
             ? copy.manualBiggerContextUnavailable
