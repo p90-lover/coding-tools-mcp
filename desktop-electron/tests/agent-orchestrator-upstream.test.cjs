@@ -406,3 +406,26 @@ test("a terminal agent AO lost the signal of settles as failed once idle past th
   assert.equal(reported.turnState, "completed", "a report written before it went silent still counts");
   assert.equal(reported.answer, "Done: registered.");
 });
+
+test("a conversation too big for one response is read again with fewer items instead of failing every poll", async () => {
+  const asked = [];
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => {
+      if (!endpoint.includes("/conversation")) return { session: { id: "s", mode: "chat", status: "working" } };
+      const limit = Number(/limit=(\d+)/.exec(endpoint)[1]);
+      asked.push(limit);
+      if (limit > 40) throw new Error("AO response exceeds the handler limit (GET /api/v1/sessions/s/conversation)");
+      return { turns: [{ id: "t", state: "running" }], activities: [],
+        messages: [{ id: "m", role: "assistant", turnId: "t", sequence: 1, text: "still browsing" }] };
+    },
+  });
+  const observed = await upstream.observe("s");
+  assert.deepEqual(asked, [100, 40]);
+  assert.equal(observed.turnState, "running");
+  assert.equal(observed.liveOutput, "still browsing");
+  const failing = observeHarness({ internalApi: async (_method, endpoint) => {
+    if (!endpoint.includes("/conversation")) return { session: { id: "s", mode: "chat", status: "working" } };
+    throw new Error("AO is down");
+  } });
+  await assert.rejects(failing.observe("s"), /AO is down/, "other failures are not retried as size problems");
+});
