@@ -249,6 +249,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (/^mcp__(?!acp__)/.test(name) || /^mcp__(?!acp__)/.test(summary)) return "MCP";
     return TOOL_LABELS[detail?.toolKind] || "Tool";
   }
+  /** How long AO's chat drivers wait for a tool approval before giving up on it (approvalWait). */
+  const APPROVAL_WAIT_MS = 30 * 60_000;
   function timelineActivity(activity) {
     const detail = activity.detail && typeof activity.detail === "object" ? activity.detail : {};
     const input = detail.input && typeof detail.input === "object" ? detail.input : {};
@@ -260,6 +262,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     }
     if (activity.activityKind === "mcp_tool") {
       return { ...base, kind: "tool", label: toolLabel(detail, summary), text: utf8Prefix(summary || detail.toolKind || "tool", 400) };
+    }
+    // A request nobody answered: AO marks it resolved by the provider when its 30-minute wait runs
+    // out, or when the turn ends first. The agent then only says it was "blocked by permissions",
+    // so the timeline says what really happened.
+    if (activity.activityKind === "approval" && activity.status !== "pending" && detail.resolvedBy === "provider") {
+      const open = Date.parse(activity.updatedAt ?? "") - Date.parse(activity.createdAt ?? "");
+      const timedOut = Number.isFinite(open) && open >= APPROVAL_WAIT_MS - 60_000;
+      return { ...base, kind: "approval", label: timedOut ? "Approval timed out" : "Approval cancelled",
+        text: utf8Prefix(`${timedOut ? "Nobody answered within 30 minutes, so the agent could not run it" : "The turn ended before this was answered"}${summary ? `: ${summary}` : ""}. Send a follow-up to try again.`, 400) };
     }
     return { ...base, kind: activity.activityKind.slice(0, 32), text: utf8Prefix(summary || activity.activityKind, 400) };
   }
