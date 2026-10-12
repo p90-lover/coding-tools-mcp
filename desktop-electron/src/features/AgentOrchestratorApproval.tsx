@@ -32,7 +32,10 @@ export function AgentOrchestratorApproval({ approval, busy, approve }: {
   const [granted, setGranted] = useState<Record<string, boolean>>({});
   const request = approval.request ?? {};
   const kind = approval.kind;
-  const location = kind === "command" ? (typeof request.cwd === "string" ? request.cwd : approval.cwd) || approval.path || approval.nodeId : approval.path || approval.cwd || approval.nodeId;
+  // Where it applies: a path or working folder. An AO request has neither for most tools, and its
+  // card id is not a place, so nothing is shown then.
+  const fallback = approval.source === "ao" ? "" : approval.nodeId;
+  const location = kind === "command" ? (typeof request.cwd === "string" ? request.cwd : approval.cwd) || approval.path || fallback : approval.path || approval.cwd || fallback;
   const typed = Boolean(approval.method);
   const scoped = Boolean(approval.thread_id && approval.turn_id);
   const decisions: unknown[] = Array.isArray(request.availableDecisions) ? request.availableDecisions : ["accept", "acceptForSession", "decline", "cancel"];
@@ -82,7 +85,7 @@ export function AgentOrchestratorApproval({ approval, busy, approve }: {
   }
   return <div className="ao-msg ao-msg-approval">
     <span className="ao-msg-meta">{typed ? "Native request" : "Approval needed"} · {kind || "Tool request"}{approval.tool ? " · " + approval.tool : ""}</span>
-    <p>{approval.reason || approval.summary || String(request.message || "Tool request")} · {location}</p>
+    <p>{approval.reason || approval.summary || String(request.message || "Tool request")}{location ? ` · ${location}` : ""}</p>
     {typed ? <p className="ao-hint">{approval.method} · Thread {approval.thread_id || "unknown"} · Turn {approval.turn_id || "unknown"}{approval.item_id ? " · Item " + approval.item_id : ""}</p> : null}
     {approval.command ? <pre>{approval.command}</pre> : null}
     {approval.recommendation ? <p className="ao-hint">Command approver suggests {approval.recommendation.action}: {approval.recommendation.reason}</p> : null}
