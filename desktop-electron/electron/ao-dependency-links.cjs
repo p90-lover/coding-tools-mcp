@@ -11,7 +11,6 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 
 const NODE_FOLDER = "node_modules";
 const PYTHON_FOLDERS = [".venv", "venv"];
@@ -93,8 +92,17 @@ function createAoDependencyLinks({ file, request, logger = console }) {
       };
     } catch { return { enabled: true, projects: {} }; }
   }
+  // A backend-bundle module may only require Node built-ins and other bundle modules, so the
+  // small atomic write is done here: a temp file next to the state, then a rename over it.
   function save(state) {
-    writePrivateFileAtomic(file, `${JSON.stringify(state, null, 2)}\n`, { protectDirectory: false });
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const temporary = `${file}.tmp-${process.pid}-${Date.now()}`;
+    try {
+      fs.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+      fs.renameSync(temporary, file);
+    } finally {
+      fs.rmSync(temporary, { force: true });
+    }
   }
 
   async function syncNow(projectId, folder) {

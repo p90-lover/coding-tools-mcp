@@ -35,6 +35,7 @@ const BACKEND_MODULES = Object.freeze([
   "antigravity-cli.cjs",
   "antigravity-auth-browser.cjs",
   "ao-session-events.cjs",
+  "ao-dependency-links.cjs",
   "cpa-antigravity-reauth.cjs",
   "cpa-oauth-adapter.cjs",
   "headless-host.cjs",
