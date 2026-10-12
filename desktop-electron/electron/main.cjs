@@ -2471,6 +2471,9 @@ async function start() {
       type: "warning", title: "Coding Tools: Agent Orchestrator",
       message: String(message).slice(0, 200), detail: String(detail).slice(0, 65_536),
       buttons: ["Cancel", "Continue"], defaultId: 0, cancelId: 0, noLink: true,
+      // Room for a 72-column line of the detail (chat-agent-tools DISPLAY_COLUMNS) without the
+      // alert wrapping it again; macOS only, Windows sizes the box to its content.
+      textWidth: 640,
     });
     return answer.response === 1;
   };

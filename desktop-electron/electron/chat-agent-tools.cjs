@@ -27,7 +27,9 @@
 //   the user is asked here; on yes this endpoint obtains a one-use grant for that one operation in
 //   the session's own context and retries it once. The grant never reaches the agent.
 // - The user approves only what they were shown: a confirmation shows what will run in full,
-//   every character visible (displaySafe), and a call too long to show in full is refused, never
+//   every character visible (displaySafe), right-to-left letters escaped so every line reads left
+//   to right, and notes naming any character beyond ASCII that could pass for another (with its
+//   script) and any word mixing scripts; a call too long to show in full is refused, never
 //   cut. One prompt is open at a time across every session, and an approval given too quickly to
 //   have been read is asked again.
 // - Not a sandbox: a terminal command can still `cd` anywhere and read or change anything the
@@ -122,6 +124,13 @@ const PROTECTED_NAMES = new Set([".git", ".github", ".mcp-paths"]);
 // scrolls: everything must fit on screen at once (a 720-pixel-high work area, as on a 1080p
 // display at 150%). Shown text is hard-wrapped at DISPLAY_COLUMNS (a wide character counts twice),
 // and a dialog whose text would take more than DIALOG_MAX_LINES lines is refused, never cut.
+// The width is an assumption about the native box, which Electron does not let the app set on
+// Windows (`textWidth` is macOS only; main.cjs sets it there): Electron shows a task dialog sized to
+// its content (TDF_SIZE_TO_CONTENT, cxWidth 0) in Segoe UI 9 pt, 12 px to the em at 100%. A line of
+// 72 columns takes about 470 px of ordinary text and under 800 px at worst (72 capital Ws; 36 wide
+// characters take about 430 px), which with the icon and margins is still less than the 1280 px of
+// a 1080p display at 150%, so the box widens to fit the line instead of wrapping it again. (Not
+// measured in the running app.)
 const DISPLAY_COLUMNS = 72;
 const DIALOG_MAX_LINES = 30;
 // A patch is approved by its list of files, one line each; more than this are refused.
@@ -362,27 +371,45 @@ function criticalFile(target) {
 // as bidi overrides and zero-width spaces (Cf), line and paragraph separators (Zl, Zp), spaces
 // other than U+0020 (Zs), surrogates, private-use and unassigned code points.
 const INVISIBLE = /^[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Zs}]$/u;
+// Right-to-left text: every code point whose Bidi_Class is R or AL, as the ranges where those are
+// the default (DerivedBidiClass.txt): Hebrew, Arabic, Syriac, Thaana, NKo, Samaritan, Mandaic, their
+// presentation forms, and the RTL scripts beyond the BMP (Kharoshthi, Old Turkic, Adlam and more).
+// Drawn as itself, an RTL letter makes the dialog reorder the spaces, quotes and digits around it,
+// so a line no longer reads the way it runs; escaped, every line stays left to right. (JS regular
+// expressions have no \p{Bidi_Class=...}.)
+const RTL_RANGES = "\\u{0590}-\\u{08FF}\\u{FB1D}-\\u{FDCF}\\u{FDF0}-\\u{FDFF}\\u{FE70}-\\u{FEFF}"
+  + "\\u{10800}-\\u{10FFF}\\u{1E800}-\\u{1EFFF}";
+const RTL = new RegExp(`^[${RTL_RANGES}]$`, "u");
+const HAS_RTL = new RegExp(`[${RTL_RANGES}]`, "u");
 const COMBINING = /^\p{M}$/u;
 // The marks displaySafe draws with; a literal one in the text is escaped so a mark always means it.
 const MARKS = new Set(["⏎", "⇥", "␠", "↪"]);
-const WIDE = /^[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦\u{1f300}-\u{1faff}\u{20000}-\u{3fffd}]$/u;
+// Characters that take two columns: East Asian Width W and F (EastAsianWidth.txt, Unicode 16),
+// rounded up to whole blocks where a block is mostly wide (Hangul Jamo and its extensions, CJK,
+// kana, Tangut, Nushu, small and fullwidth forms), plus the symbols the dialog draws from an emoji
+// or symbol font about an em wide: Misc Symbols and Dingbats (U+2600-27BF) and U+1F000-1FAFF.
+// Counting a narrow character as wide only wraps a line earlier; counting a wide one as narrow
+// would let the native dialog wrap the line again, past the line budget.
+const WIDE = new RegExp("^[\\u{1100}-\\u{115F}\\u{231A}\\u{231B}\\u{2329}\\u{232A}\\u{23E9}-\\u{23EC}\\u{23F0}\\u{23F3}"
+  + "\\u{25FD}\\u{25FE}\\u{2600}-\\u{27BF}\\u{2B1B}\\u{2B1C}\\u{2B50}\\u{2B55}\\u{2E80}-\\u{A4CF}\\u{A960}-\\u{A97F}"
+  + "\\u{AC00}-\\u{D7FF}\\u{F900}-\\u{FAFF}\\u{FE10}-\\u{FE19}\\u{FE30}-\\u{FE6F}\\u{FF00}-\\u{FF60}\\u{FFE0}-\\u{FFE6}"
+  + "\\u{16FE0}-\\u{16FFF}\\u{17000}-\\u{18D7F}\\u{1AFF0}-\\u{1B2FF}\\u{1F000}-\\u{1FAFF}\\u{20000}-\\u{3FFFD}]$", "u");
 const escapeCodePoint = (char) => `\\u{${char.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}}`;
 
 /**
- * Text for a confirmation dialog with every character visible: a newline is drawn as `⏎` and
- * breaks the line, a tab as `⇥`, a run of more than 3 spaces as `␠×N`, and any character that is
- * invisible or reorders text (bidi controls, zero-width characters, other controls, separators,
- * unusual spaces, a second combining mark) as `\u{XXXX}`; a backslash that would read as such an
- * escape is escaped itself. Lines are hard-wrapped at DISPLAY_COLUMNS, each continuation starting
- * with `↪`, so nothing runs off the dialog; `column` is where the text starts on its first line.
+ * How displaySafe reads text: its [shown, width] tokens ("\n" for a line break) and the characters
+ * it draws as themselves (all but those it escapes and the space, tab and newline it draws as marks).
  */
-function displaySafe(text, { column = 0 } = {}) {
-  const tokens = []; // [shown, width] or "\n"
+function readForDisplay(text) {
+  const tokens = [];
+  const drawn = [];
   const chars = [...String(text)];
+  // Whether the last character was drawn as itself: a combining mark is drawn only on one.
+  let base = false;
   for (let index = 0; index < chars.length; index += 1) {
     const char = chars[index];
-    if (char === "\n") { tokens.push(["⏎", 1], "\n"); continue; }
-    if (char === "\t") { tokens.push(["⇥", 1]); continue; }
+    if (char === "\n") { tokens.push(["⏎", 1], "\n"); base = false; continue; }
+    if (char === "\t") { tokens.push(["⇥", 1]); base = false; continue; }
     if (char === " ") {
       let run = 1;
       while (chars[index + run] === " ") run += 1;
@@ -392,18 +419,36 @@ function displaySafe(text, { column = 0 } = {}) {
       } else {
         tokens.push([" ", 1]);
       }
+      base = false;
       continue;
     }
-    const escaped = INVISIBLE.test(char) || MARKS.has(char)
-      || (COMBINING.test(char) && (index === 0 || COMBINING.test(chars[index - 1])))
+    const combining = COMBINING.test(char);
+    const escaped = INVISIBLE.test(char) || RTL.test(char) || MARKS.has(char) || (combining && !base)
       || (char === "\\" && chars[index + 1] === "u" && chars[index + 2] === "{");
     if (escaped) {
       const shown = escapeCodePoint(char);
       tokens.push([shown, shown.length]);
+      base = false;
     } else {
-      tokens.push([char, COMBINING.test(char) ? 0 : WIDE.test(char) ? 2 : 1]);
+      tokens.push([char, combining ? 0 : WIDE.test(char) ? 2 : 1]);
+      drawn.push(char);
+      base = !combining;
     }
   }
+  return { tokens, drawn };
+}
+
+/**
+ * Text for a confirmation dialog with every character visible: a newline is drawn as `⏎` and
+ * breaks the line, a tab as `⇥`, a run of more than 3 spaces as `␠×N`, and any character that is
+ * invisible or reorders text (bidi controls, right-to-left letters, zero-width characters, other
+ * controls, separators, unusual spaces, a combining mark with no letter drawn just before it, such
+ * as a second one) as `\u{XXXX}`; a backslash that would read as such an escape is escaped itself.
+ * Lines are hard-wrapped at DISPLAY_COLUMNS, each continuation starting with `↪`, so nothing runs
+ * off the dialog; `column` is where the text starts on its first line.
+ */
+function displaySafe(text, { column = 0 } = {}) {
+  const { tokens } = readForDisplay(text);
   const lines = [];
   let line = "";
   let width = column;
@@ -422,28 +467,118 @@ function displaySafe(text, { column = 0 } = {}) {
   return lines.join("\n");
 }
 
+/** How many columns text displaySafe has drawn takes. */
+const shownWidth = (shown) => [...shown].reduce((sum, char) => sum + (COMBINING.test(char) ? 0 : WIDE.test(char) ? 2 : 1), 0);
+
+// What the notes on top of a dialog list at most: look-alike characters and words that mix scripts.
+const MAX_LISTED_CHARACTERS = 12;
+const MAX_LISTED_WORDS = 3;
+const MAX_WORD_CHARS = 40;
+// Where a word ends in a command line or in JSON arguments; a dot, a slash or a hyphen does not
+// end one, so a mixed-script domain or package name is named whole.
+const WORD_BREAK = /[\s"'`,;=(){}[\]<>|&]+/u;
+const LATIN = /\p{Script=Latin}/u;
+const NON_LATIN_LETTER = /(?=\p{L})\P{Script=Latin}/u;
+// Scripts named in a note, by Unicode's own names; anything else is named by its kind.
+const SCRIPTS = ["Latin", "Greek", "Cyrillic", "Armenian", "Georgian", "Hebrew", "Arabic", "Syriac", "Thaana", "Nko", "Samaritan",
+  "Mandaic", "Devanagari", "Bengali", "Gurmukhi", "Gujarati", "Oriya", "Tamil", "Telugu", "Kannada", "Malayalam", "Sinhala",
+  "Thai", "Lao", "Tibetan", "Myanmar", "Khmer", "Mongolian", "Ethiopic", "Cherokee", "Canadian_Aboriginal", "Runic", "Ogham",
+  "Coptic", "Glagolitic", "Tifinagh", "Hangul", "Hiragana", "Katakana", "Bopomofo", "Han", "Yi", "Vai", "Lisu", "Bamum", "Adlam",
+  "Osage", "Deseret", "Gothic", "Old_Italic", "Cypriot", "Linear_B", "Tai_Le", "Buginese", "Javanese", "Balinese", "Sundanese"]
+  .map((name) => [name.replace(/_/g, " "), new RegExp(`^\\p{Script=${name}}$`, "u")]);
+const KINDS = [["letter", /^\p{L}$/u], ["mark", /^\p{M}$/u], ["number", /^\p{N}$/u], ["punctuation", /^\p{P}$/u], ["symbol", /^\p{S}$/u]];
+const nameOf = (char) => (SCRIPTS.find(([, script]) => script.test(char))
+  ?? KINDS.find(([, kind]) => kind.test(char)) ?? ["character"])[0];
+const codePoint = (char) => `U+${char.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}`;
+
+/**
+ * One note listing `items` (at most `max`, then how many more), as dialogText parts: an item is
+ * never split across lines if it fits on one, so a code point stays next to its character.
+ */
+function listNote(label, items, max) {
+  const shown = items.slice(0, max);
+  if (items.length > max) shown.push(`and ${items.length - max} more`);
+  const parts = [label];
+  let column = shownWidth(label);
+  shown.forEach((item, index) => {
+    const value = index < shown.length - 1 ? `${item},` : item;
+    const width = shownWidth(displaySafe(value));
+    if (index && column + 1 + width > DISPLAY_COLUMNS) {
+      parts.push("\n↪ ");
+      column = 2;
+    } else {
+      parts.push(" ");
+      column += 1;
+    }
+    parts.push({ value });
+    column += width;
+  });
+  return parts;
+}
+
+/**
+ * The notes on top of a dialog, as dialogText parts: right-to-left text anywhere (it is shown
+ * escaped), and, in what the agent asks for (not the app's `own` data), every character beyond
+ * ASCII drawn as itself, which can pass for another (Cyrillic с for Latin c, a one-dot leader for a
+ * full stop), with its code point and script, and every word mixing Latin with another script.
+ */
+function dialogNotes(values) {
+  const notes = [];
+  if (values.some((part) => HAS_RTL.test(String(part.value)))) notes.push(["Contains right-to-left text (shown escaped)."]);
+  const asked = values.filter((part) => part.own !== true).map((part) => String(part.value));
+  const foreign = [...new Set(asked.flatMap((value) => readForDisplay(value).drawn))].filter((char) => char.codePointAt(0) > 0x7f);
+  if (foreign.length) {
+    // A combining mark is named, not drawn: on its own it would sit on the space before it.
+    notes.push(listNote("Contains non-ASCII characters:",
+      foreign.map((char) => `${COMBINING.test(char) ? "" : `${char} `}${codePoint(char)} ${nameOf(char)}`), MAX_LISTED_CHARACTERS));
+  }
+  const mixed = [...new Set(asked.flatMap((value) => value.split(WORD_BREAK)))]
+    .filter((word) => LATIN.test(word) && NON_LATIN_LETTER.test(word));
+  if (mixed.length) {
+    notes.push(listNote("Mixed scripts in:",
+      mixed.map((word) => ([...word].length > MAX_WORD_CHARS ? `${[...word].slice(0, MAX_WORD_CHARS).join("")}…` : word)), MAX_LISTED_WORDS));
+  }
+  return notes.flatMap((note, index) => (index ? ["\n", ...note] : note));
+}
+
+/** Parts drawn one after another, each value with displaySafe from the column the text has reached. */
+function renderParts(parts) {
+  let text = "";
+  for (const part of parts) {
+    text += typeof part === "string" ? part : displaySafe(part.value, { column: shownWidth(text.slice(text.lastIndexOf("\n") + 1)) });
+  }
+  return text;
+}
+
 /**
  * The full dialog text, or null when it would not fit the dialog in full. `parts` are fixed
  * strings (the app's own wording, already wrapped) or `{ value }` for anything else, shown with
- * displaySafe.
+ * displaySafe; `{ value, own: true }` marks the app's own data (the AO session, the worktree, what
+ * the policy says about a risk) as opposed to what the agent asks for. Notes on top say when the
+ * text holds right-to-left letters, characters beyond ASCII or mixed-script words (see
+ * dialogNotes); they count toward DIALOG_MAX_LINES like the rest.
  */
 function dialogText(parts) {
-  let text = "";
-  for (const part of parts) {
-    // Far too long to fit (every shown character takes a column, a lone combining mark aside):
-    // refused before it is drawn at all.
-    if (typeof part !== "string" && String(part.value).length > 4 * DISPLAY_COLUMNS * DIALOG_MAX_LINES) return null;
-    text += typeof part === "string" ? part : displaySafe(part.value, { column: [...text.slice(text.lastIndexOf("\n") + 1)].length });
-  }
+  const values = parts.filter((part) => typeof part !== "string");
+  // Far too long to fit (every shown character takes a column, a lone combining mark aside):
+  // refused before it is drawn at all.
+  if (values.some((part) => String(part.value).length > 4 * DISPLAY_COLUMNS * DIALOG_MAX_LINES)) return null;
+  const notes = dialogNotes(values);
+  const text = `${notes.length ? `${renderParts(notes)}\n\n` : ""}${renderParts(parts)}`;
   return text.split("\n").length <= DIALOG_MAX_LINES ? text : null;
 }
 
 /** The text of what a call would do, for its approval: [label, value] lines, or null if it cannot be shown in full. */
 function describeCall(name, args, root) {
   if (name === "exec_command") {
-    const directory = root ? path.join(root.path, String(args.workdir ?? args.cwd ?? ".")) : String(args.workdir ?? args.cwd ?? ".");
+    const workdir = String(args.workdir ?? args.cwd ?? ".");
+    const full = root ? path.join(root.path, workdir) : workdir;
+    // The worktree is the app's own; what the agent named inside it is the agent's.
+    const directory = root && full.startsWith(root.path)
+      ? [{ value: root.path, own: true }, ...(full.length > root.path.length ? [{ value: full.slice(root.path.length) }] : [])]
+      : [{ value: full }];
     const input = typeof args.stdin === "string" && args.stdin ? ["\nInput:\n", { value: args.stdin }] : [];
-    return ["Directory: ", { value: directory }, "\n\nCommand:\n", { value: String(args.cmd ?? "") }, ...input];
+    return ["Directory: ", ...directory, "\n\nCommand:\n", { value: String(args.cmd ?? "") }, ...input];
   }
   if (name === "write_stdin") {
     return ["Command: ", { value: String(args.command_id ?? args.session_id ?? "") }, "\n\nInput:\n", { value: String(args.chars ?? "") }];
@@ -712,7 +847,7 @@ function createChatAgentTools({
     return { result: operation.result };
   }
 
-  const who = (entry) => [`Agent: ${entry.agent}\nAO session: `, { value: String(entry.aoSession) }, "\n"];
+  const who = (entry) => [`Agent: ${entry.agent}\nAO session: `, { value: String(entry.aoSession), own: true }, "\n"];
 
   /** The user's confirmation of one command or one input to a command, unless the session bypasses permissions. */
   async function confirmTerminal(entry, name, args, root) {
@@ -727,7 +862,7 @@ function createChatAgentTools({
     // An empty write only polls the command's output; it sends nothing.
     if (name === "write_stdin" && typeof args.chars === "string" && args.chars) {
       return ask("A chat agent wants to type into a running command",
-        dialogText([...who(entry), "Worktree: ", { value: root.path }, "\n", ...describeCall(name, args, root), "\n\nSend it once?"]),
+        dialogText([...who(entry), "Worktree: ", { value: root.path, own: true }, "\n", ...describeCall(name, args, root), "\n\nSend it once?"]),
         "The user declined this input; it was not sent.", tooLongToShow(name));
     }
     return false;
@@ -758,9 +893,9 @@ function createChatAgentTools({
       const call = describeCall(name, args, root);
       const answer = await ask(`A chat agent's ${name} call needs your approval${risk ? ` (risk: ${risk})` : ""}`,
         call && dialogText([
-          ...who(entry), "Worktree: ", { value: root ? root.path : "(the workspace)" }, `\nTool: ${name}\n`,
-          ...(risk ? ["Risk: ", { value: risk }, "\n"] : []),
-          ...(reason ? ["\nWhy:\n", { value: reason }, "\n"] : []),
+          ...who(entry), "Worktree: ", { value: root ? root.path : "(the workspace)", own: true }, `\nTool: ${name}\n`,
+          ...(risk ? ["Risk: ", { value: risk, own: true }, "\n"] : []),
+          ...(reason ? ["\nWhy:\n", { value: reason, own: true }, "\n"] : []),
           "\n", ...call, "\n\nAllow it once?",
         ]),
         `The user declined ${name}; it was not run.`, tooLongToShow(name));
@@ -1046,6 +1181,7 @@ module.exports = Object.freeze({
   SERVER_NAME,
   TERMINAL_TOOLS,
   createChatAgentTools,
+  dialogText,
   displaySafe,
   parsePatch,
   patchTargets,
