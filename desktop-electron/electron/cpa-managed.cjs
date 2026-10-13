@@ -224,6 +224,14 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     ...(outboundProxyUrl ? [`      proxy-url: ${yamlString(outboundProxyUrl)}`] : []),
     "    grok-login-provider:",
     "      enabled: true",
+    // Ask OpenAI's Responses models for a reasoning summary. Claude Code never sends the
+    // `thinking.display` that would make CPA request one, so its chats showed no reasoning; CPA
+    // turns the summary into thinking blocks, which the agent then reports as reasoning. A default
+    // only fills a field the request leaves out, so the effort the user chose is unchanged.
+    "payload:",
+    "  default:",
+    "    - models: [{name: \"*\", protocol: \"codex\"}]",
+    "      params: {\"reasoning.summary\": \"auto\"}",
     "debug: false",
     "request-log: false",
     "logging-to-file: true",
