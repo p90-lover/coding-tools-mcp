@@ -179,6 +179,20 @@ function parseHelperMessage(line: string): HelperMessage {
   throw new Error("Launcher browser helper emitted an unknown message type");
 }
 
+/** `promise`, or an AbortError as soon as `signal` aborts (the promise itself goes on). */
+export function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(new DOMException("ChatGPT web turn aborted", "AbortError"));
+  return new Promise<T>((resolveValue, rejectValue) => {
+    const onAbort = () => rejectValue(new DOMException("ChatGPT web turn aborted", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      value => { signal.removeEventListener("abort", onAbort); resolveValue(value); },
+      error => { signal.removeEventListener("abort", onAbort); rejectValue(error); },
+    );
+  });
+}
+
 export class LauncherBrowserHelperClient {
   private child?: ChildProcessWithoutNullStreams;
   private ready?: Promise<void>;
@@ -212,7 +226,7 @@ export class LauncherBrowserHelperClient {
 
   async run(turn: BrowserTurn): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-    await this.ensureChild();
+    await this.ensureChild(turn.abortSignal);
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     if (turn.onMultipartStageAcknowledged && !this.helperFeatures.has("multipart-stage-ack")) {
       throw new Error(
@@ -326,12 +340,13 @@ export class LauncherBrowserHelperClient {
       && this.ready);
   }
 
-  private async ensureChild(): Promise<void> {
+  private async ensureChild(signal?: AbortSignal): Promise<void> {
     if (this.childAlive()) return this.ready;
     // While the app restarts (an update installs) its descriptor is gone for a while: wait for it.
     this.descriptorWait ??= waitForLauncherBrowserHostDescriptor(this.config.browserHostDescriptorPath!)
       .finally(() => { this.descriptorWait = undefined; });
-    const descriptor = await this.descriptorWait;
+    // A turn cancelled meanwhile leaves at once; the shared wait goes on for the others.
+    const descriptor = await abortable(this.descriptorWait, signal);
     // Another turn waiting on the same descriptor may have started the helper already.
     if (this.childAlive()) return this.ready;
     const child = spawn(
