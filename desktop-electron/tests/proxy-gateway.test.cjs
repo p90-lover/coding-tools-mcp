@@ -420,7 +420,10 @@ test("the data port answers 407 without the local token; the token-free port ser
     denied.socket.destroy();
   }
   assert.equal(upstream.requests.length, 0, "an unauthenticated client never reaches the paid upstream");
-  assert.equal(gateway.stats().authFailures, 2);
+  const auth = gateway.stats();
+  assert.equal(auth.authChallenges, 1, "a try without a key is the normal 407 challenge, not a failure");
+  assert.equal(auth.authFailures, 1, "a wrong key is a failure");
+  assert.ok(Number.isInteger(auth.lastAuthFailure.remotePort) && auth.lastAuthFailure.at, "kept with its time and the client's local port");
 
   const open = await connectTunnel(tokenlessPort, "chatgpt.com:443", null);
   assert.match(open.head, /^HTTP\/1\.1 200 /);

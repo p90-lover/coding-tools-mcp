@@ -136,6 +136,10 @@ export interface ProxyGatewayStats {
   rejectedConnections: number;
   pendingConnections: number;
   authFailures: number;
+  /** First tries without a key (the normal 407 challenge); helpers from before this was counted omit it. */
+  authChallenges?: number;
+  /** The newest wrong-key try: when, and from which client port. */
+  lastAuthFailure?: { at: string; remotePort: number | null } | null;
   tunnels: number;
   httpRequests: number;
   failures: number;
