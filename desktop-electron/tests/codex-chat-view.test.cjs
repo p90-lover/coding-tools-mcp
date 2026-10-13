@@ -512,3 +512,13 @@ test("while a single-model turn runs on one model and the picker shows another, 
     composer: { mode: "single", route, onModeChange() {}, onRouteChange() {} } }).props).render();
   assert.equal(walk(same).some((element) => element.props?.className === "cx-route-note"), false, "nothing to say when they match");
 });
+test("a working card's reasoning shows Codex-style: its title as one line, the rest folded", () => {
+  const { props } = base({ selectedTaskId: "t", working: true,
+    runs: [run("r1", "t", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/gpt-6-luna" } })], { execution_mode: "single" })],
+    activity: { "r1:w": { activity: "thinking", last_event_at_ms: Date.now(), turn_started: true, timeline: [
+      { id: "r", kind: "reasoning", status: "completed", text: "**Inspecting the register route**\n\nThe form posts to /api/register." }] } } });
+  const view = mount(props).render();
+  const reasoning = walk(view).find((element) => element.type === "details" && element.props?.className === "cx-reasoning");
+  assert.ok(reasoning, "the reasoning is shown, not just the word Thought");
+  assert.match(text(reasoning), /Thought\s*Inspecting the register route/);
+});

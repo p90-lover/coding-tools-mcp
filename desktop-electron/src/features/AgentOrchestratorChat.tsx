@@ -54,13 +54,29 @@ function stepTone(step: ChatStep): string {
   return step.state;
 }
 
+/**
+ * The model's reasoning summary, as Codex shows it: its first line (a short bold title such as
+ * "**Inspecting the register route**") as one progress line, the rest a click away.
+ */
+function ReasoningItem({ item }: { item: ChatLiveItem }) {
+  const lines = item.text.trim().split(/\r?\n/);
+  if (!lines[0]) return <span className="cx-live-label">{item.status === "running" ? "Thinking…" : "Thought"}</span>;
+  const label = item.status === "running" ? "Thinking" : "Thought";
+  const headline = lines[0].replace(/^\s*\*\*(.+?)\*\*\s*$/, "$1").replace(/[*_`]/g, "").trim();
+  const rest = lines.slice(1).join("\n").trim();
+  return rest
+    ? <details className="cx-reasoning"><summary><span className="cx-live-label">{label}</span><span className="cx-live-text">{headline}</span></summary>
+      <div className="cx-reasoning-body"><ChatMarkdown text={rest} /></div></details>
+    : <><span className="cx-live-label">{label}</span><span className="cx-live-text">{headline}</span></>;
+}
+
 /** A working role's turn so far, as Codex shows it: thinking, tool calls and streamed messages. */
 function LiveTimeline({ items }: { items: ChatLiveItem[] }) {
   return <ol className="cx-live">
     {items.map((item) => <li key={item.id} className={`cx-live-item kind-${item.kind} is-${item.status || "done"}`}>
       {item.kind === "steer" ? <div className="cx-user cx-steer"><div className="cx-bubble"><p>{item.text}</p></div></div>
         : item.kind === "message" ? <ChatMarkdown text={item.text} />
-        : item.kind === "reasoning" ? <span className="cx-live-label">{item.status === "running" ? "Thinking…" : "Thought"}</span>
+        : item.kind === "reasoning" ? <ReasoningItem item={item} />
         : item.kind === "command" ? <><span className="cx-live-label">{item.status === "running" ? "Running" : "Ran"}</span><code>{item.text}</code></>
         : <><span className="cx-live-label">{item.label ?? item.kind.replace(/_/g, " ")}</span><span className="cx-live-text">{item.text}</span></>}
     </li>)}

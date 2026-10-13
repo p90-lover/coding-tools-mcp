@@ -147,6 +147,10 @@
 .cx-head-spacer { flex: 1 1 auto; }
 .cx-icon-button { display: inline-grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--color-text-primary); font-size: 16px; cursor: pointer; }
 .cx-icon-button:hover:not(:disabled), .cx-icon-button[aria-pressed="true"] { background: var(--cx-hover); }
+/* A reasoning summary: its title as one line, the rest folded (Codex keeps them between tool calls). */
+.cx-reasoning summary { display: flex; gap: 8px; cursor: pointer; list-style: none; }
+.cx-reasoning summary::-webkit-details-marker { display: none; }
+.cx-reasoning-body { margin: 4px 0 2px 18px; color: var(--color-text-secondary); font-size: 13px; }
 /* "This turn is running on X; your next message uses Y." above the composer. */
 .cx-route-note { margin: 0 auto 6px; max-width: 760px; padding: 0 12px; color: var(--color-text-secondary); font-size: 12px; }
 /* The chat's details panel (Changes / Agents / Setup), like Claude's session panel. */

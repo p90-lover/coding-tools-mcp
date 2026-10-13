@@ -110,7 +110,7 @@ test("observe returns the current turn's reasoning, tool calls and messages in o
   });
   const observed = await upstream.observe("s");
   assert.deepEqual(JSON.parse(JSON.stringify(observed.timeline)), [
-    { id: "a1", sequence: 2, kind: "reasoning", status: "completed", text: "Reasoning" },
+    { id: "a1", sequence: 2, kind: "reasoning", status: "completed", text: "" },
     { id: "a2", sequence: 3, kind: "command", status: "running", text: "git status" },
     { id: "m1", sequence: 4, kind: "message", status: "running", text: "Checking the files" },
   ], "the prompt and earlier turns are left out");
@@ -454,4 +454,16 @@ test("a tool request nobody answered says it timed out (or was cancelled), not j
   assert.match(items[0].text, /Nobody answered within 30 minutes.*PowerShell.*follow-up/);
   assert.equal(items[1].label, "Approval cancelled", "the turn ended before it was answered");
   assert.equal(items[2].label, undefined, "a request the user answered keeps its normal row");
+});
+test("a reasoning item carries the model's summary text (AO keeps it in detail.text), not just the word Reasoning", async () => {
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.includes("/conversation") ? {
+      turns: [{ id: "t", state: "running" }], messages: [],
+      activities: [{ id: "r", turnId: "t", sequence: 1, activityKind: "reasoning", status: "completed", summary: "Reasoning",
+        detail: { text: "**Inspecting the register route**\n\nThe form posts to /api/register; checking validation." } }],
+    } : { session: { id: "s", mode: "chat", status: "working" } },
+  });
+  const [item] = JSON.parse(JSON.stringify((await upstream.observe("s")).timeline));
+  assert.equal(item.kind, "reasoning");
+  assert.match(item.text, /^\*\*Inspecting the register route\*\*/);
 });

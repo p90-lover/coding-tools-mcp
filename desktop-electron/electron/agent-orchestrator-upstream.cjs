@@ -222,6 +222,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (activity.activityKind === "mcp_tool") {
       return { ...base, kind: "tool", label: toolLabel(detail, summary), text: utf8Prefix(summary || detail.toolKind || "tool", 400) };
     }
+    // The model's reasoning summary: AO streams it into the activity's text (detail.text); its
+    // summary is only the word "Reasoning".
+    if (activity.activityKind === "reasoning") {
+      return { ...base, kind: "reasoning", text: utf8Prefix(typeof detail.text === "string" ? detail.text.trim() : "", 4096) };
+    }
     // A request nobody answered: AO marks it resolved by the provider when its 30-minute wait runs
     // out, or when the turn ends first. The agent then only says it was "blocked by permissions",
     // so the timeline says what really happened.
