@@ -442,3 +442,74 @@ test("the side panel reads the agent's worktree: its changes, folders and files,
   assert.deepEqual(listing.commands.map((command) => [command.id, command.user]), [["shell-1", true]]);
   await assert.rejects(env.tools.changes({ sessionId: "ao-2" }), /session has ended/);
 });
+function leasedServer(statePath, root) {
+  return createChatAgentTools({
+    statePath, minAnswerMs: 0, logger: { info() {}, warn() {} }, confirm: async () => true,
+    sessionWorkspace: async () => ({ root }),
+    requestHeadless: async (endpoint, body) => (endpoint.startsWith("/api/v1/tools/catalog?")
+      ? { tools: [{ name: "read_file", inputSchema: { type: "object" } }] }
+      : { ok: true, operation: { state: "completed", result: { ok: true, tool: body.tool, entries: [] } } }),
+  });
+}
+
+test("a running agent keeps its tools across an app restart: same port, its credential honoured (only its hash is kept)", async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "chat-leases-"));
+  const root = path.join(base, "worktrees", "p1");
+  fs.mkdirSync(root, { recursive: true });
+  const statePath = path.join(base, "chat-agent-tools.json");
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const first = leasedServer(statePath, root);
+  const lease = await first.lease({ agent: "claude-code", workspaceId: "ws1" });
+  lease.bind("ao-7");
+  const [{ url, headers }] = lease.servers;
+  await first.close();
+  const kept = fs.readFileSync(statePath, "utf8");
+  assert.equal(kept.includes(headers.Authorization.slice("Bearer ".length)), false, "the credential itself is never written");
+  assert.match(kept, /"aoSession":"ao-7"/);
+  const second = leasedServer(statePath, root);
+  t.after(() => second.close());
+  await second.listen();
+  const list = await post(url, { jsonrpc: "2.0", id: id++, method: "tools/list" }, { authorization: headers.Authorization });
+  assert.deepEqual(list.result.tools.map((tool) => tool.name), ["read_file"], "the old address and credential still work");
+  const forged = await new Promise((resolve) => {
+    const request = http.request(url, { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer forged" } },
+      (response) => { response.resume(); resolve(response.statusCode); });
+    request.end(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }));
+  });
+  assert.equal(forged, 401);
+});
+
+test("when another program holds the old port the saved leases are dropped, not honoured on a new one", async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "chat-leases-"));
+  const root = path.join(base, "worktrees", "p1");
+  fs.mkdirSync(root, { recursive: true });
+  const statePath = path.join(base, "chat-agent-tools.json");
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const first = leasedServer(statePath, root);
+  const lease = await first.lease({ agent: "claude-code", workspaceId: "ws1" });
+  lease.bind("ao-8");
+  const oldPort = Number(new URL(lease.servers[0].url).port);
+  const auth = lease.servers[0].headers.Authorization;
+  const key = lease.servers[0].url.split("/").pop();
+  await first.close();
+  const squatter = http.createServer((request, response) => response.end());
+  await new Promise((resolve) => squatter.listen(oldPort, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => squatter.close(resolve)));
+  const second = leasedServer(statePath, root);
+  t.after(() => second.close());
+  const port = await second.listen();
+  assert.notEqual(port, oldPort);
+  const moved = await post(`http://127.0.0.1:${port}/mcp/ws1/${key}`, { jsonrpc: "2.0", id: id++, method: "tools/list" }, { authorization: auth });
+  assert.equal(moved?.error?.code, -32001, "a credential that may have reached the squatter is not honoured");
+});
+
+test("the side panel reaches a session the app holds no lease for through the chat's workspace", async (t) => {
+  const env = server({ results: { git_status: { ok: true, branch: "b", entries: [] }, git_diff: { ok: true, diff: "" } } });
+  t.after(env.cleanup);
+  await assert.rejects(env.tools.changes({ sessionId: "ao-old" }), /session has ended/, "without the workspace there is nothing to reach it by");
+  const changes = await env.tools.changes({ sessionId: "ao-old", workspaceId: "ws1" });
+  assert.equal(changes.branch, "b");
+  assert.equal(env.headless.at(-1).workspace_id, "ws1");
+  const [listing] = await env.tools.processes(["ao-old"], "ws1");
+  assert.deepEqual(listing.commands, []);
+});

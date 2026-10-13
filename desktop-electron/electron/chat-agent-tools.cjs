@@ -150,6 +150,8 @@ const ROOT_RECHECK_MS = 30_000;
 const UNBOUND_TTL_MS = 10 * 60_000;
 const SWEEP_MS = 10 * 60_000;
 const MAX_SESSIONS = 512;
+/** A credential as it is compared and kept: its SHA-256, so neither memory nor disk holds it. */
+const hashBearer = (value) => crypto.createHash("sha256").update(String(value), "utf8").digest();
 
 class ScopeError extends Error {}
 
@@ -705,6 +707,8 @@ function createChatAgentTools({
   previews = null, previewEnabled = () => true,
   // Why a command line is a routine project command "Approve for me" may run unasked, or null.
   routineCommand = () => null,
+  // Where the leases (credential hashes, never credentials) and the port are kept across restarts.
+  statePath = null,
   worktreesRoot = null,
   logger = console, version = "1", now = Date.now,
   // How long the user must have had a prompt open for an approval to count (see MIN_ANSWER_MS),
@@ -742,6 +746,7 @@ function createChatAgentTools({
     if (!entry) return;
     sessions.delete(key);
     entry.expected = null;
+    save();
     if (ended && entry.aoSession && ![...sessions.values()].some((other) => other.aoSession === entry.aoSession)) {
       try { previews?.close(entry.aoSession); } catch { /* the window is gone */ }
     }
@@ -755,7 +760,8 @@ function createChatAgentTools({
     const key = crypto.randomBytes(18).toString("base64url");
     const token = crypto.randomBytes(32).toString("base64url");
     const entry = {
-      key, agent, workspaceId, groups: currentGroups(), expected: Buffer.from(`Bearer ${token}`),
+      // Only the credential's hash is held (and kept on disk), never the credential itself.
+      key, agent, workspaceId, groups: currentGroups(), expected: hashBearer(`Bearer ${token}`),
       // Only a session launched to bypass permissions runs commands without a confirmation each.
       // Captured once, at spawn time, from the mode the session was launched with: changing the
       // session's mode in AO later does not change it here, either way (a relaunch gets a new lease).
@@ -767,15 +773,73 @@ function createChatAgentTools({
       commands: new Map(), origins: new Set(),
     };
     sessions.set(key, entry);
+    save();
     return { entry, token };
   }
 
   function authorized(request, entry) {
-    const given = Buffer.from(String(request.headers.authorization || ""));
-    const expected = entry?.expected ?? Buffer.from(`Bearer ${crypto.randomBytes(32).toString("base64url")}`);
-    const match = given.length === expected.length && crypto.timingSafeEqual(given, expected);
-    return match && Boolean(entry?.expected);
+    const given = hashBearer(String(request.headers.authorization || ""));
+    const expected = entry?.expected ?? crypto.randomBytes(32);
+    return crypto.timingSafeEqual(given, expected) && Boolean(entry?.expected);
   }
+
+  // ---- Leases kept across app restarts ---------------------------------------------------------
+  // A chat session outlives the app (AO keeps it running through an update), but its MCP server
+  // address and credential were this process's: after a restart the agent lost the app's tools.
+  // The leases (each credential's hash, never the credential) and the port are kept in `statePath`;
+  // the next app listens on the same port and honours them, so a running agent keeps its tools.
+  // They are restored only when that port is ours again: had something else taken it, it may have
+  // collected the agents' credentials, and those are dropped instead.
+  const LEASE_FILE_VERSION = 1;
+  const LEASE_MAX_IDLE_MS = 7 * 24 * 60 * 60_000;
+  let saveTimer = null;
+  let restored = { port: 0, entries: [] };
+
+  function writeLeases() {
+    if (typeof statePath !== "string" || !statePath || !port) return;
+    const data = {
+      version: LEASE_FILE_VERSION, port,
+      sessions: [...sessions.values()].filter((entry) => entry.expected).map((entry) => ({
+        key: entry.key, hash: entry.expected.toString("hex"), agent: entry.agent, workspaceId: entry.workspaceId, aoSession: entry.aoSession,
+        groups: entry.groups, bypass: entry.bypass, autoReview: entry.autoReview, createdAt: entry.createdAt, usedAt: entry.usedAt,
+        origins: [...entry.origins].slice(0, 50),
+      })),
+    };
+    try {
+      fs.mkdirSync(path.dirname(statePath), { recursive: true, mode: 0o700 });
+      const temporary = `${statePath}.${process.pid}.tmp`;
+      fs.writeFileSync(temporary, `${JSON.stringify(data)}\n`, { mode: 0o600 });
+      fs.renameSync(temporary, statePath);
+    } catch (error) {
+      logger.warn?.("chat_agent_tools.leases_not_saved", { message: errorMessage(error) });
+    }
+  }
+  let closing = false;
+  function save() {
+    if (closing || typeof statePath !== "string" || !statePath || saveTimer) return;
+    saveTimer = setTimeout(() => { saveTimer = null; writeLeases(); }, 200);
+    saveTimer.unref?.();
+  }
+  function readLeases() {
+    if (typeof statePath !== "string" || !statePath) return { port: 0, entries: [] };
+    let data;
+    try { data = JSON.parse(fs.readFileSync(statePath, "utf8")); } catch { return { port: 0, entries: [] }; }
+    if (data?.version !== LEASE_FILE_VERSION || !Number.isInteger(data.port) || data.port <= 0 || data.port > 65535) return { port: 0, entries: [] };
+    const entries = (Array.isArray(data.sessions) ? data.sessions : []).slice(0, MAX_SESSIONS)
+      .filter((saved) => SESSION_KEY.test(String(saved?.key)) && /^[0-9a-f]{64}$/.test(String(saved?.hash))
+        && MCP_HTTP_AGENTS.has(saved.agent) && WORKSPACE_ID.test(String(saved.workspaceId))
+        && (saved.aoSession === null || /^[a-zA-Z0-9_-]{1,128}$/.test(String(saved.aoSession)))
+        && Number.isFinite(saved.usedAt) && now() - saved.usedAt < LEASE_MAX_IDLE_MS)
+      .map((saved) => ({
+        key: saved.key, agent: saved.agent, workspaceId: saved.workspaceId, expected: Buffer.from(saved.hash, "hex"),
+        groups: (Array.isArray(saved.groups) ? saved.groups : []).filter((group) => GROUPS.includes(group)),
+        bypass: saved.bypass === true, controlAllowed: false, autoReview: saved.autoReview === true,
+        aoSession: saved.aoSession ?? null, root: null, checkedAt: 0, createdAt: Number(saved.createdAt) || now(), usedAt: saved.usedAt,
+        commands: new Map(), origins: new Set((Array.isArray(saved.origins) ? saved.origins : []).filter((origin) => typeof origin === "string").slice(0, 50)),
+      }));
+    return { port: data.port, entries };
+  }
+  restored = readLeases();
 
   /** AO's worktrees folder, resolved, when the app named it. */
   function worktreesBase() {
@@ -1098,6 +1162,7 @@ function createChatAgentTools({
       if (answer !== true) return answer;
     }
     entry.origins.add(origin);
+    save();
     return true;
   }
 
@@ -1220,6 +1285,24 @@ function createChatAgentTools({
     return [...sessions.values()].filter((entry) => entry.aoSession === sessionId).sort((left, right) => right.usedAt - left.usedAt)[0] ?? null;
   }
 
+  // The panes reach a session the app holds no lease for (one started before the app restarted
+  // and lost it, or with the tools off) through its AO worktree all the same: the user's own view
+  // of it, with no credential and none of the agent's tools.
+  const paneEntries = new Map(); // AO session -> its pane-only entry
+  function paneEntry(sessionId, workspaceId) {
+    const leased = entryFor(sessionId);
+    if (leased) return leased;
+    if (typeof sessionId !== "string" || !SESSION_ID.test(sessionId) || typeof workspaceId !== "string" || !WORKSPACE_ID.test(workspaceId)) return null;
+    let entry = paneEntries.get(sessionId);
+    if (!entry || entry.workspaceId !== workspaceId) {
+      entry = { key: `pane-${sessionId}`, agent: "user", workspaceId, groups: [], expected: null, bypass: false, autoReview: false, controlAllowed: false,
+        aoSession: sessionId, root: null, checkedAt: 0, createdAt: now(), usedAt: now(), commands: entry?.commands ?? new Map(), origins: new Set(), pane: true };
+      paneEntries.set(sessionId, entry);
+      while (paneEntries.size > 64) paneEntries.delete(paneEntries.keys().next().value);
+    }
+    return entry;
+  }
+
   /**
    * A call the user made from a pane (stop a command, type into it): their click is the consent,
    * so a routine approval or a confirmation the workspace policy asks for is granted for that one
@@ -1277,19 +1360,38 @@ function createChatAgentTools({
   function listen() {
     listening ??= new Promise((resolve, reject) => {
       const created = http.createServer(handle);
+      // The previous app's port first, so agents it leased keep reaching their tools.
+      let wanted = restored.port || 0;
       created.on("error", (error) => {
+        if (!port && wanted && error?.code === "EADDRINUSE") {
+          logger.warn?.("chat_agent_tools.port_taken", { port: wanted });
+          wanted = 0;
+          created.listen(0, "127.0.0.1");
+          return;
+        }
         if (listening && !port) { listening = null; reject(error); }
         else logger.warn?.("chat_agent_tools.server_error", { message: errorMessage(error) });
       });
-      created.listen(0, "127.0.0.1", () => {
+      created.once("listening", () => {
         server = created;
         port = created.address().port;
         created.unref();
+        if (restored.entries.length) {
+          if (restored.port === port) {
+            for (const entry of restored.entries) if (!sessions.has(entry.key)) sessions.set(entry.key, entry);
+            logger.info?.("chat_agent_tools.leases_restored", { count: restored.entries.length });
+          } else {
+            logger.warn?.("chat_agent_tools.leases_dropped", { count: restored.entries.length, reason: "port_changed" });
+          }
+        }
+        restored = { port: 0, entries: [] };
+        writeLeases();
         sweeper ??= setInterval(() => { void sweep().catch(() => undefined); }, SWEEP_MS);
         sweeper.unref?.();
         logger.info?.("chat_agent_tools.listening", { port });
         resolve(port);
       });
+      created.listen(wanted, "127.0.0.1");
     });
     return listening;
   }
@@ -1325,6 +1427,7 @@ function createChatAgentTools({
             forget(other.key);
           }
           entry.aoSession = sessionId;
+          save();
           return true;
         },
         release() { forget(entry.key); },
@@ -1345,10 +1448,10 @@ function createChatAgentTools({
       return port ? `on|${groups.join("+")}|${instance}` : "pending";
     },
     /** The commands each of these AO sessions started, newest first, with whether they still run. */
-    async processes(sessionIds = []) {
+    async processes(sessionIds = [], workspaceId = null) {
       const out = [];
       for (const sessionId of [...new Set(Array.isArray(sessionIds) ? sessionIds : [])].slice(0, 32)) {
-        const entry = entryFor(sessionId);
+        const entry = paneEntry(sessionId, workspaceId);
         if (!entry) continue;
         const commands = [...entry.commands.values()].sort((left, right) => right.startedAt - left.startedAt);
         // A running command is asked about once per listing; finished ones stay as they ended.
@@ -1358,15 +1461,15 @@ function createChatAgentTools({
       return out;
     },
     /** A command's output (stdout or stderr) from `offset`; `nextOffset` continues it. */
-    async processOutput({ sessionId, commandId, stream = "stdout", offset = 0 } = {}) {
-      const entry = entryFor(sessionId);
+    async processOutput({ sessionId, workspaceId, commandId, stream = "stdout", offset = 0 } = {}) {
+      const entry = paneEntry(sessionId, workspaceId);
       if (!entry) throw new Error("That chat agent's session has ended");
       if (stream !== "stdout" && stream !== "stderr") throw new Error("stream must be stdout or stderr");
       return readCommand(entry, commandOf(entry, commandId), stream, offset);
     },
     /** The user stops one of the chat's commands. */
-    async processStop({ sessionId, commandId } = {}) {
-      const entry = entryFor(sessionId);
+    async processStop({ sessionId, workspaceId, commandId } = {}) {
+      const entry = paneEntry(sessionId, workspaceId);
       if (!entry) throw new Error("That chat agent's session has ended");
       const command = commandOf(entry, commandId);
       const value = await invokeAsUser(entry, "kill_command", { command_id: command.id, wait_ms: 3000 });
@@ -1374,8 +1477,8 @@ function createChatAgentTools({
       return { ok: true, status: command.status };
     },
     /** The user types into one of the chat's running commands (a newline is sent as typed). */
-    async processInput({ sessionId, commandId, text } = {}) {
-      const entry = entryFor(sessionId);
+    async processInput({ sessionId, workspaceId, commandId, text } = {}) {
+      const entry = paneEntry(sessionId, workspaceId);
       if (!entry) throw new Error("That chat agent's session has ended");
       if (typeof text !== "string" || !text || text.length > 4000) throw new Error("Type 1 to 4000 characters");
       const command = commandOf(entry, commandId);
@@ -1387,8 +1490,8 @@ function createChatAgentTools({
      * a terminal, listed with the session's commands so its output and input use the same panes.
      * The user started it, so no dialog asks.
      */
-    async terminalStart({ sessionId } = {}) {
-      const entry = entryFor(sessionId);
+    async terminalStart({ sessionId, workspaceId } = {}) {
+      const entry = paneEntry(sessionId, workspaceId);
       if (!entry) throw new Error("That chat agent's session has ended");
       const cmd = WINDOWS ? 'powershell.exe -NoLogo -NoProfile -NoExit -Command "Remove-Module PSReadLine -ErrorAction SilentlyContinue"' : "bash -i";
       const value = await invokeAsUser(entry, "exec_command", { cmd, workdir: ".", tty: true, yield_time_ms: 500, max_output_bytes: 4096 });
@@ -1401,8 +1504,8 @@ function createChatAgentTools({
      * The session worktree's changes for the side panel's Changes tab: git's status (with new files)
      * and the diff of tracked files, as headless reads them in that worktree.
      */
-    async changes({ sessionId } = {}) {
-      const entry = entryFor(sessionId);
+    async changes({ sessionId, workspaceId } = {}) {
+      const entry = paneEntry(sessionId, workspaceId);
       if (!entry) throw new Error("That chat agent's session has ended");
       const status = await invokeAsUser(entry, "git_status", { include_untracked: true, max_entries: 500 });
       const diff = await invokeAsUser(entry, "git_diff", { context_lines: 3, max_bytes: 512 * 1024 });
@@ -1413,16 +1516,16 @@ function createChatAgentTools({
       };
     },
     /** One folder of the session's worktree for the Files tab (`path` relative to its root). */
-    async files({ sessionId, path: folder = "." } = {}) {
-      const entry = entryFor(sessionId);
+    async files({ sessionId, workspaceId, path: folder = "." } = {}) {
+      const entry = paneEntry(sessionId, workspaceId);
       if (!entry) throw new Error("That chat agent's session has ended");
       const root = await rootOf(entry);
       const listed = await invokeAsUser(entry, "list_dir", { path: scopePath(root, folder || ".", "path") });
       return { ok: true, path: folder || ".", entries: Array.isArray(listed?.entries) ? listed.entries.slice(0, 1000) : [], truncated: listed?.truncated === true };
     },
     /** One file of the session's worktree for the Files tab, as text. */
-    async file({ sessionId, path: target } = {}) {
-      const entry = entryFor(sessionId);
+    async file({ sessionId, workspaceId, path: target } = {}) {
+      const entry = paneEntry(sessionId, workspaceId);
       if (!entry) throw new Error("That chat agent's session has ended");
       const root = await rootOf(entry);
       const read = await invokeAsUser(entry, "read_file", { path: scopePath(root, target, "path"), max_bytes: 512 * 1024 });
@@ -1456,6 +1559,10 @@ function createChatAgentTools({
     listen,
     sweep,
     async close() {
+      // The leases stay on disk for the next app; closing forgets them only in this process.
+      if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+      writeLeases();
+      closing = true;
       const current = server;
       server = null; listening = null; port = 0;
       if (sweeper) clearInterval(sweeper);

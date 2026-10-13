@@ -320,7 +320,7 @@ export function AgentOrchestratorChat({
   const [workbench, setWorkbench] = useState<WorkbenchTab | null>(null);
   const agentSessions = useMemo(() => chatAgentSessions(chatRuns), [chatRuns]);
   const agentSessionIds = useMemo(() => agentSessions.map((session) => session.id), [agentSessions]);
-  useWorkbenchAutoOpen(selectedTaskId ? agentSessionIds : [], workbench !== null, (tab) => setWorkbench(tab));
+  useWorkbenchAutoOpen(selectedTaskId ? agentSessionIds : [], workbench !== null, (tab) => setWorkbench(tab), projectId);
   useEffect(() => { setWorkbench(null); }, [selectedTaskId]);
   useEffect(() => { if (atBottom) scroller.current?.scrollTo({ top: scroller.current.scrollHeight }); }, [turns.length, stepCount, atBottom]);
   // The cards panel can be dragged wider for more board room; the width is kept per viewer.
@@ -977,7 +977,7 @@ export function AgentOrchestratorChat({
           <Icon name="close" width="14" height="14" /></button></header>
         <div className="cx-structure-body">{structure}</div>
       </aside> : null}
-      {workbench && selectedTaskId ? <ChatWorkbench sessions={agentSessions} tab={workbench} onTab={setWorkbench} onClose={() => setWorkbench(null)} /> : null}
+      {workbench && selectedTaskId ? <ChatWorkbench sessions={agentSessions} workspaceId={projectId} tab={workbench} onTab={setWorkbench} onClose={() => setWorkbench(null)} /> : null}
       <ChatMenu menu={menu} onClose={() => setMenu(null)} />
     </div>
   );
