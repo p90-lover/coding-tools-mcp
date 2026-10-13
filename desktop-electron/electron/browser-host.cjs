@@ -3211,15 +3211,20 @@ class BrowserHost {
 // it, with when the restart should be over by; a turn that reaches the bridge meanwhile waits for
 // the new app instead of failing. The new app removes it once its descriptor is written. A crash
 // writes none, so the bridge still fails fast then (runtime-web launcher-browser-host.ts reads it).
+// `until` is at most 15 minutes away, which every bridge honours; an update has taken 12, so
+// `holdUntil` (30 minutes) is read by bridges that know it. An older bridge ignores a marker whose
+// `until` is further than 15 minutes, which is why that one field stays within it.
 const RESTART_MARKER_MAX_MS = 15 * 60_000;
+const RESTART_MARKER_HOLD_MS = 30 * 60_000;
 function restartMarkerPath(descriptorPath) {
   return path.join(path.dirname(descriptorPath), "launcher-browser.restarting.json");
 }
 function writeRestartMarker(descriptorPath, { reason, withinMs = RESTART_MARKER_MAX_MS, now = Date.now() } = {}) {
   const until = now + Math.max(0, Math.min(withinMs, RESTART_MARKER_MAX_MS));
+  const holdUntil = now + RESTART_MARKER_HOLD_MS;
   writePrivateFileAtomic(restartMarkerPath(descriptorPath), `${JSON.stringify({
     version: 1, pid: process.pid, reason: String(reason || "restart").slice(0, 40),
-    createdAt: new Date(now).toISOString(), until: new Date(until).toISOString(),
+    createdAt: new Date(now).toISOString(), until: new Date(until).toISOString(), holdUntil: new Date(holdUntil).toISOString(),
   }, null, 2)}\n`);
 }
 

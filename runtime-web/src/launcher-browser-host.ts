@@ -181,8 +181,10 @@ export function readLauncherBrowserHostDescriptor(configuredPath: string): Launc
 
 /** How long a turn waits for the app to come back when it is gone without saying why (a crash). */
 export const LAUNCHER_RESTART_WAIT_MS = 120_000;
-/** The longest a restart the app announced (its marker) keeps a turn waiting. */
+/** The longest a restart the app announced (its marker's `until`) keeps a turn waiting. */
 export const LAUNCHER_ANNOUNCED_RESTART_MAX_MS = 15 * 60_000;
+/** The longest its `holdUntil` (newer apps: an update can take more than 15 minutes) keeps one waiting. */
+export const LAUNCHER_ANNOUNCED_HOLD_MAX_MS = 30 * 60_000;
 
 /**
  * When an announced restart should be over (ms since the epoch), or null. The app writes
@@ -193,13 +195,18 @@ export const LAUNCHER_ANNOUNCED_RESTART_MAX_MS = 15 * 60_000;
 export function launcherRestartAnnouncedUntil(configuredPath: string, now = Date.now()): number | null {
   const markerPath = join(dirname(resolve(expandUserPath(configuredPath))), "launcher-browser.restarting.json");
   try {
-    const marker = JSON.parse(readFileSync(markerPath, "utf8")) as { version?: unknown; createdAt?: unknown; until?: unknown };
+    const marker = JSON.parse(readFileSync(markerPath, "utf8")) as { version?: unknown; createdAt?: unknown; until?: unknown; holdUntil?: unknown };
     if (marker.version !== 1 || typeof marker.until !== "string" || typeof marker.createdAt !== "string") return null;
-    const until = Date.parse(marker.until);
     const created = Date.parse(marker.createdAt);
-    if (!Number.isFinite(until) || !Number.isFinite(created) || until <= now) return null;
-    if (until - created > LAUNCHER_ANNOUNCED_RESTART_MAX_MS || until - now > LAUNCHER_ANNOUNCED_RESTART_MAX_MS) return null;
-    return until;
+    if (!Number.isFinite(created)) return null;
+    // Each end counts only within its own limit; the later valid one wins.
+    const within = (value: unknown, max: number) => {
+      const at = typeof value === "string" ? Date.parse(value) : Number.NaN;
+      return Number.isFinite(at) && at > now && at - created <= max && at - now <= max ? at : null;
+    };
+    const ends = [within(marker.until, LAUNCHER_ANNOUNCED_RESTART_MAX_MS), within(marker.holdUntil, LAUNCHER_ANNOUNCED_HOLD_MAX_MS)]
+      .filter((value): value is number => value !== null);
+    return ends.length ? Math.max(...ends) : null;
   } catch {
     return null;
   }
