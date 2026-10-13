@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
 import { expandUserPath } from "./config";
 import { processRunning } from "./process";
@@ -179,8 +179,31 @@ export function readLauncherBrowserHostDescriptor(configuredPath: string): Launc
   return descriptor;
 }
 
-/** How long a turn waits for the app to come back while it restarts (an update installs). */
+/** How long a turn waits for the app to come back when it is gone without saying why (a crash). */
 export const LAUNCHER_RESTART_WAIT_MS = 120_000;
+/** The longest a restart the app announced (its marker) keeps a turn waiting. */
+export const LAUNCHER_ANNOUNCED_RESTART_MAX_MS = 15 * 60_000;
+
+/**
+ * When an announced restart should be over (ms since the epoch), or null. The app writes
+ * `launcher-browser.restarting.json` next to its descriptor when it quits leaving this bridge
+ * running (an update install takes minutes), and the new app removes it. A marker that is
+ * unreadable, expired, or claims more than LAUNCHER_ANNOUNCED_RESTART_MAX_MS is ignored.
+ */
+export function launcherRestartAnnouncedUntil(configuredPath: string, now = Date.now()): number | null {
+  const markerPath = join(dirname(resolve(expandUserPath(configuredPath))), "launcher-browser.restarting.json");
+  try {
+    const marker = JSON.parse(readFileSync(markerPath, "utf8")) as { version?: unknown; createdAt?: unknown; until?: unknown };
+    if (marker.version !== 1 || typeof marker.until !== "string" || typeof marker.createdAt !== "string") return null;
+    const until = Date.parse(marker.until);
+    const created = Date.parse(marker.createdAt);
+    if (!Number.isFinite(until) || !Number.isFinite(created) || until <= now) return null;
+    if (until - created > LAUNCHER_ANNOUNCED_RESTART_MAX_MS || until - now > LAUNCHER_ANNOUNCED_RESTART_MAX_MS) return null;
+    return until;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * The descriptor, waiting while the app restarts. The app removes its descriptor when it quits and
@@ -204,16 +227,19 @@ export async function waitForLauncherBrowserHostDescriptor(
     signal?: AbortSignal;
   } = {},
 ): Promise<LauncherBrowserHostDescriptor> {
-  const deadline = now() + timeoutMs;
+  const started = now();
+  const deadline = started + timeoutMs;
   for (;;) {
     try {
       return readLauncherBrowserHostDescriptor(configuredPath);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const restarting = /descriptor is missing|host process is not running/.test(message);
-      if (!restarting || signal?.aborted || now() >= deadline) {
+      // An announced restart (an update installing) keeps the turn waiting until it should be over.
+      const announced = restarting && timeoutMs > 0 ? launcherRestartAnnouncedUntil(configuredPath, now()) : null;
+      if (!restarting || signal?.aborted || now() >= Math.max(deadline, announced ?? 0)) {
         if (restarting && !signal?.aborted && timeoutMs > 0) {
-          throw new Error(`${message} (waited ${Math.round(timeoutMs / 1000)} s for Coding Tools to start again)`);
+          throw new Error(`${message} (waited ${Math.round((now() - started) / 1000)} s for Coding Tools to start again)`);
         }
         throw error;
       }

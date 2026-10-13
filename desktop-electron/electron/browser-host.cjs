@@ -3148,6 +3148,8 @@ class BrowserHost {
       createdAt: new Date().toISOString(),
     };
     writePrivateFileAtomic(this.descriptorPath, `${JSON.stringify(descriptor, null, 2)}\n`);
+    // The app is back: the bridge no longer needs to wait out a restart.
+    try { fs.rmSync(restartMarkerPath(this.descriptorPath), { force: true }); } catch {}
   }
 
   async persistSession() {
@@ -3204,7 +3206,27 @@ class BrowserHost {
   }
 }
 
+// While the app restarts and leaves the Codex bridge running (an update install, "Restart app (keep
+// Codex bridge)"), there is no descriptor for minutes. The quitting app writes this marker next to
+// it, with when the restart should be over by; a turn that reaches the bridge meanwhile waits for
+// the new app instead of failing. The new app removes it once its descriptor is written. A crash
+// writes none, so the bridge still fails fast then (runtime-web launcher-browser-host.ts reads it).
+const RESTART_MARKER_MAX_MS = 15 * 60_000;
+function restartMarkerPath(descriptorPath) {
+  return path.join(path.dirname(descriptorPath), "launcher-browser.restarting.json");
+}
+function writeRestartMarker(descriptorPath, { reason, withinMs = RESTART_MARKER_MAX_MS, now = Date.now() } = {}) {
+  const until = now + Math.max(0, Math.min(withinMs, RESTART_MARKER_MAX_MS));
+  writePrivateFileAtomic(restartMarkerPath(descriptorPath), `${JSON.stringify({
+    version: 1, pid: process.pid, reason: String(reason || "restart").slice(0, 40),
+    createdAt: new Date(now).toISOString(), until: new Date(until).toISOString(),
+  }, null, 2)}\n`);
+}
+
 module.exports = {
+  RESTART_MARKER_MAX_MS,
+  restartMarkerPath,
+  writeRestartMarker,
   allowedAuthUrl,
   BrowserHost,
   BrowserTurnCancelledError,

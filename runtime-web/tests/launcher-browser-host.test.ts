@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { createServer } from "node:http";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   LAUNCHER_BROWSER_HOST_KIND,
   LAUNCHER_BROWSER_IDLE_URL,
@@ -23,6 +23,7 @@ import {
   waitForLauncherManualSent,
   waitForLauncherManualTerminal,
   waitForLauncherBrowserHostDescriptor,
+  launcherRestartAnnouncedUntil,
 } from "../src/launcher-browser-host";
 import type { Browser, BrowserContext, Page } from "playwright-core";
 
@@ -97,6 +98,27 @@ test("a turn waits for the app's descriptor while it restarts, and only then", a
   await expect(waitForLauncherBrowserHostDescriptor(path, {
     timeoutMs: 1_000, now: () => clock, sleep: async () => { clock += 500; },
   })).rejects.toThrow(/descriptor is missing.*waited 1 s for Coding Tools to start again/);
+
+  // An announced restart (an update installing) keeps the turn waiting past the plain wait.
+  const base = Date.now();
+  clock = base;
+  const markerPath = join(dirname(path), "launcher-browser.restarting.json");
+  writeFileSync(markerPath, JSON.stringify({ version: 1, pid: 1, reason: "update",
+    createdAt: new Date(base).toISOString(), until: new Date(base + 600_000).toISOString() }));
+  const announced = await waitForLauncherBrowserHostDescriptor(path, {
+    timeoutMs: 1_000, now: () => clock,
+    sleep: async () => { clock += 60_000; if (clock >= base + 480_000) writeFileSync(path, contents, { mode: 0o600 }); },
+  });
+  expect(announced.pid).toBe(process.pid);
+  expect(clock - base).toBe(480_000);
+  rmSync(path);
+  // Past the announced end, or a marker claiming more than 15 minutes, it fails like any other wait.
+  clock = base + 600_000;
+  await expect(waitForLauncherBrowserHostDescriptor(path, { timeoutMs: 1_000, now: () => clock, sleep: async () => { clock += 500; } }))
+    .rejects.toThrow(/descriptor is missing.*waited 1 s/);
+  writeFileSync(markerPath, JSON.stringify({ version: 1, createdAt: new Date(base).toISOString(), until: new Date(base + 3_600_000).toISOString() }));
+  expect(launcherRestartAnnouncedUntil(path, base)).toBeNull();
+  rmSync(markerPath);
 
   // A broken descriptor is not a restart: it fails at once.
   writeFileSync(path, "{not json", { mode: 0o600 });
