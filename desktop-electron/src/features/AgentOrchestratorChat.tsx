@@ -93,11 +93,12 @@ function StepRow({ step, now }: { step: ChatStep; now: number }) {
   </li>;
 }
 
-function WorkGroup({ turn, now, idle = false }: { turn: ChatTurn; now: number; idle?: boolean }) {
+function WorkGroup({ turn, now, idle = false, expanded = false }: { turn: ChatTurn; now: number; idle?: boolean; expanded?: boolean }) {
   const working = turn.steps.find((step) => step.working);
-  // Live and failed work opens by itself until the user toggles it; after that their choice holds.
+  // Live and failed work opens by itself, and finished work too when the chat shows its details
+  // (single-model chats by default); a toggle on the turn itself holds over both.
   const [chosen, setChosen] = useState<boolean | null>(null);
-  const open = chosen ?? (Boolean(working) || turn.steps.some((step) => step.error));
+  const open = chosen ?? (expanded || Boolean(working) || turn.steps.some((step) => step.error));
   if (!turn.steps.length) {
     return !idle && (turn.status === "running" || turn.status === "queued")
       ? <div className="cx-work is-live"><span className="cx-shimmer">Starting…</span></div> : null;
@@ -222,6 +223,21 @@ export function AgentOrchestratorChat({
   const [attachNote, setAttachNote] = useState("");
   const [slashIndex, setSlashIndex] = useState(0);
   const [showStructure, setShowStructure] = useState(false);
+  // Whether a finished turn's work (its steps and their messages) shows unfolded. Single-model chats
+  // show it by default, Team chats fold the workers' activity; the turn's answer always shows. Each
+  // mode remembers the choice made from the ⋯ menu.
+  const workMode = latest?.execution_mode === "single" ? "single" : "team";
+  const workKey = `coding-tools:ao:work-details:${workMode}`;
+  const [workPrefs, setWorkPrefs] = useState<Record<string, boolean>>({});
+  const showWork = workPrefs[workKey] ?? (() => {
+    try { const saved = localStorage.getItem(workKey); if (saved === "on" || saved === "off") return saved === "on"; } catch { /* default */ }
+    return workMode === "single";
+  })();
+  const toggleWork = () => {
+    const next = !showWork;
+    try { localStorage.setItem(workKey, next ? "on" : "off"); } catch { /* the choice still applies now */ }
+    setWorkPrefs((current) => ({ ...current, [workKey]: next }));
+  };
   // The chat's details panel (like Claude's session panel): changes, agents, setup.
   const [details, setDetails] = useState<{ left: number; top: number } | null>(null);
   const detailsPanel = useRef<HTMLDivElement>(null);
@@ -623,6 +639,7 @@ export function AgentOrchestratorChat({
       { label: "Copy conversation", run: thread.copyConversation },
     ] as ChatMenuItem[] : []),
     ...(steer ? [{ label: "Steer while working", checked: steerOn, run: toggleSteer } as ChatMenuItem] : []),
+    { label: workMode === "single" ? "Show work details" : "Show workers' activity", checked: showWork, run: toggleWork } as ChatMenuItem,
     { kind: "separator" },
     latest && chat?.status === "paused" && onResume ? { label: "Resume mission", run: onResume }
       : { label: "Pause mission", ...(latest && chat?.status === "running" && onPause ? { run: onPause } : { reason: "Only a running mission can be paused" }) },
@@ -727,7 +744,7 @@ export function AgentOrchestratorChat({
                   <div className="cx-bubble"><p>{steer.text}</p></div>
                   <span className="cx-stamp">Steered · {steer.stamp} UTC</span>
                 </div>) : null}
-              <WorkGroup turn={turn} now={now} idle={notStarted && turn.runId === latest?.id} />
+              <WorkGroup key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} now={now} idle={notStarted && turn.runId === latest?.id} expanded={showWork} />
               {turn.final ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`}>
                 <div className="cx-answer-meta">
                   <span>{turn.final.name}</span>
