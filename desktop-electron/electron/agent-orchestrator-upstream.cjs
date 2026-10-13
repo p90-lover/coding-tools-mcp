@@ -950,6 +950,41 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       if (!projectId) return { ok: true, shared: [], farmed: [] };
       return { ok: true, ...await dependencyLinks.inEffect(projectId) };
     }
+    // The chat composer's context meter: how full each agent session's context is, what it has
+    // spent, its account's rate limits and tool servers, as AO keeps them on the conversation
+    // snapshot (absent until the agent reports). Read-only; a stopped AO answers with nothing.
+    if (operation === "chat_context") {
+      const ids = Array.isArray(args.sessionIds) ? [...new Set(args.sessionIds.filter((id) => typeof id === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(id)))].slice(0, 8) : [];
+      if (state !== "ready" || !ids.length) return { ok: true, sessions: {} };
+      const number = (value) => (Number.isFinite(value) ? value : null);
+      const sessions = {};
+      await Promise.all(ids.map(async (id) => {
+        const conversation = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=1`).catch(() => null);
+        if (!conversation || typeof conversation !== "object") return;
+        const usage = conversation.usage && typeof conversation.usage === "object" ? conversation.usage : null;
+        const limits = conversation.rateLimits && typeof conversation.rateLimits === "object" ? conversation.rateLimits : null;
+        sessions[id] = {
+          controller: typeof conversation.controller === "string" ? conversation.controller : null,
+          usage: usage ? {
+            contextUsed: number(usage.contextUsed), contextWindow: number(usage.contextWindow),
+            inputTokens: number(usage.inputTokens), outputTokens: number(usage.outputTokens),
+            cachedTokens: number(usage.cachedTokens), totalTokens: number(usage.totalTokens),
+            cost: number(usage.cost), currency: typeof usage.currency === "string" ? usage.currency.slice(0, 8) : null,
+          } : null,
+          rateLimits: limits ? {
+            primaryUsedPercent: number(limits.primaryUsedPercent), secondaryUsedPercent: number(limits.secondaryUsedPercent),
+            primaryResetsInSeconds: number(limits.primaryResetsInSeconds), secondaryResetsInSeconds: number(limits.secondaryResetsInSeconds),
+            planLabel: typeof limits.planLabel === "string" ? limits.planLabel.slice(0, 80) : null,
+          } : null,
+          compactedAt: typeof conversation.compactedAt === "string" ? conversation.compactedAt : null,
+          planLabel: typeof conversation.account?.planLabel === "string" ? conversation.account.planLabel.slice(0, 80) : null,
+          mcpServers: (Array.isArray(conversation.mcpServers) ? conversation.mcpServers : []).slice(0, 40)
+            .filter((server) => typeof server?.name === "string")
+            .map((server) => ({ name: server.name.slice(0, 80), status: String(server.status ?? "").slice(0, 40) })),
+        };
+      }));
+      return { ok: true, sessions };
+    }
     // A chat's Terminal and Preview panes: the user's view of each card's agent session, through
     // the agent tools server that started its commands and owns its preview (chat-agent-tools.cjs).
     if (operation.startsWith("chat_process") || operation.startsWith("chat_preview_")) {

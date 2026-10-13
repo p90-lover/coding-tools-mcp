@@ -625,3 +625,15 @@ test("a chat's AO agent sessions for its Preview and Terminal panes: newest firs
   assert.deepEqual(plain(chat.chatAgentSessions([run("r1", "t", [card("a", "s1", { settings: { name: "Builder" } })])])),
     [{ id: "s1", label: "Builder · cpa/gpt-6-luna" }], "a single session keeps its plain name");
 });
+
+test("the context meter's numbers: short token counts, and fullness only when the agent gives its window", () => {
+  assert.equal(chat.tokensShort(537523), "537.5k");
+  assert.equal(chat.tokensShort(1_000_000), "1M");
+  assert.equal(chat.tokensShort(1_250_000), "1.25M");
+  assert.equal(chat.tokensShort(950), "950");
+  assert.equal(chat.tokensShort(null), "—");
+  assert.equal(chat.contextFraction({ contextUsed: 537_500, contextWindow: 1_000_000 }), 0.5375);
+  assert.equal(chat.contextFraction({ contextUsed: 2_000, contextWindow: 0 }), null, "no window: tokens without a fullness claim");
+  assert.equal(chat.contextFraction({ contextUsed: 1_200_000, contextWindow: 1_000_000 }), 1, "never more than full");
+  assert.equal(chat.contextFraction(null), null);
+});
