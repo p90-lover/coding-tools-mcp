@@ -790,6 +790,11 @@ function createChatAgentTools({
   // the next app listens on the same port and honours them, so a running agent keeps its tools.
   // They are restored only when that port is ours again: had something else taken it, it may have
   // collected the agents' credentials, and those are dropped instead.
+  // Residual risk, accepted: a process running as the user could take the port while the app is
+  // away (an update leaves it free for minutes), collect the credentials agents keep sending, and
+  // free it again before the app returns; the leases would then be honoured. Dropping leases no
+  // agent reuses soon would not stop it (the collector can use one first), and such a process can
+  // already read the agents' own MCP configuration, so nothing more is done here.
   const LEASE_FILE_VERSION = 1;
   const LEASE_MAX_IDLE_MS = 7 * 24 * 60 * 60_000;
   let saveTimer = null;
