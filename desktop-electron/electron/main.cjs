@@ -2678,6 +2678,9 @@ async function start() {
       });
       chatAgentTools = createChatAgentTools({
         previews: chatPreviews,
+        // "Approve for me" runs the same routine project commands through the app's terminal as it
+        // allows from the agent's own shell (the workflow's list), without a dialog each.
+        routineCommand: (command) => agentOrchestratorWorkflow.routineCommand(command),
         previewEnabled: () => stateStore.read().chatAgentPreviewTools !== false,
         requestHeadless: (endpoint, body, options) => {
           if (!headlessHost) throw new Error("Local Coding Tools runtime is unavailable");

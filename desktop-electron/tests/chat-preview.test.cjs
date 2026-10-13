@@ -287,7 +287,7 @@ function server({ confirm = async () => true, preview = () => true, results = {}
       return { ok: true, operation: { state: "completed", result } };
     },
   });
-  return { tools, previewCalls, closed, headless, confirmations, cleanup: async () => { await tools.close(); fs.rmSync(base, { recursive: true, force: true }); } };
+  return { tools, root, previewCalls, closed, headless, confirmations, cleanup: async () => { await tools.close(); fs.rmSync(base, { recursive: true, force: true }); } };
 }
 
 let id = 1;
@@ -380,4 +380,36 @@ test("a session that ends closes its preview; a credential retired for a newer o
   assert.deepEqual(env.closed, [], "the older credential of ao-1 is retired, the session goes on");
   env.tools.forgetSession("ao-1");
   assert.deepEqual(env.closed, ["ao-1"]);
+});
+
+test("a session set to Approve for me runs routine commands through the app's terminal without a dialog; others still ask", async (t) => {
+  const routine = (cmd) => (/^npm (ci|run dev)$/.test(cmd) ? "routine" : null);
+  const env = server({ results: { exec_command: { ok: true, command_id: "c1", status: "running" } } });
+  t.after(env.cleanup);
+  // The fixture's server has no routine rule; one with it, for an Approve-for-me lease:
+  const withRule = createChatAgentTools({
+    terminalEnabled: () => true, minAnswerMs: 0, logger: { info() {}, warn() {} }, routineCommand: routine,
+    confirm: async (request) => { env.confirmations.push(request); return true; },
+    sessionWorkspace: async () => ({ root: env.root }),
+    requestHeadless: async (endpoint, body) => (endpoint.startsWith("/api/v1/tools/catalog?")
+      ? { tools: [{ name: "exec_command", inputSchema: { type: "object" } }] }
+      : { ok: true, operation: { state: "completed", result: { ok: true, command_id: "c1", status: "running", ran: body.arguments.cmd } } }),
+  });
+  t.after(() => withRule.close());
+  const lease = await withRule.lease({ agent: "claude-code", workspaceId: "ws1", approvalMode: "accept-edits", autoReview: true });
+  lease.bind("ao-9");
+  const [{ url, headers }] = lease.servers;
+  const call = (args) => post(url, { jsonrpc: "2.0", id: id++, method: "tools/call", params: { name: "exec_command", arguments: args } },
+    { authorization: headers.Authorization }).then((reply) => reply.result);
+  const before = env.confirmations.length;
+  assert.equal((await call({ cmd: "npm ci" })).isError, false);
+  assert.equal((await call({ cmd: "npm run dev" })).isError, false);
+  assert.equal(env.confirmations.length, before, "routine commands ran without a dialog");
+  await call({ cmd: "npm install left-pad" });
+  assert.equal(env.confirmations.length, before + 1, "anything else is still the person's call");
+  const plain = await withRule.lease({ agent: "claude-code", workspaceId: "ws1", approvalMode: "accept-edits" });
+  plain.bind("ao-10");
+  await post(plain.servers[0].url, { jsonrpc: "2.0", id: id++, method: "tools/call", params: { name: "exec_command", arguments: { cmd: "npm ci" } } },
+    { authorization: plain.servers[0].headers.Authorization });
+  assert.equal(env.confirmations.length, before + 2, "without Approve for me every command asks");
 });

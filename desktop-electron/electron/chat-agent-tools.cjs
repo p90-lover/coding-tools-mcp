@@ -703,6 +703,8 @@ function createChatAgentTools({
   enabled = () => true, terminalEnabled = () => false, desktopEnabled = () => false,
   // The chat's own browser (chat-preview.cjs), on unless the user turns it off.
   previews = null, previewEnabled = () => true,
+  // Why a command line is a routine project command "Approve for me" may run unasked, or null.
+  routineCommand = () => null,
   worktreesRoot = null,
   logger = console, version = "1", now = Date.now,
   // How long the user must have had a prompt open for an approval to count (see MIN_ANSWER_MS),
@@ -745,7 +747,7 @@ function createChatAgentTools({
     }
   }
 
-  function mint({ agent, workspaceId, approvalMode }) {
+  function mint({ agent, workspaceId, approvalMode, autoReview = false }) {
     while (sessions.size >= MAX_SESSIONS) {
       const oldest = [...sessions.values()].sort((left, right) => left.usedAt - right.usedAt)[0];
       forget(oldest.key);
@@ -758,6 +760,8 @@ function createChatAgentTools({
       // Captured once, at spawn time, from the mode the session was launched with: changing the
       // session's mode in AO later does not change it here, either way (a relaunch gets a new lease).
       bypass: approvalMode === "bypass-permissions", controlAllowed: false,
+      // Launched with "Approve for me": its routine project commands run without a dialog each.
+      autoReview: autoReview === true,
       aoSession: null, root: null, checkedAt: 0, createdAt: now(), usedAt: now(),
       // The commands it started (for the Terminal pane) and the preview origins it may open.
       commands: new Map(), origins: new Set(),
@@ -897,6 +901,12 @@ function createChatAgentTools({
   async function confirmTerminal(entry, name, args, root) {
     if (entry.bypass) return false;
     if (name === "exec_command") {
+      // "Approve for me": a routine project command (an install from the lockfile, the project's
+      // own scripts and checks, a version check) runs as it would from the agent's own shell. It
+      // counts as confirmed, so a routine approval the workspace asks for is not asked again.
+      let routine = null;
+      try { routine = entry.autoReview && !(typeof args.stdin === "string" && args.stdin) ? routineCommand(String(args.cmd ?? "")) : null; } catch { routine = null; }
+      if (routine) return true;
       return ask("A chat agent wants to run a command",
         dialogText([...who(entry), ...describeCall(name, args, root),
           "\n\nThe command starts in the chat's worktree but is not confined to it:\n"
@@ -1290,12 +1300,13 @@ function createChatAgentTools({
      * agent's driver cannot take an HTTP server, or the workspace id is unusable. `servers` go into
      * the spawn's mcpServers; `bind(sessionId)` ties the credential to the session AO created (its
      * worktree becomes the root), and `release()` forgets it when the spawn failed. `approvalMode`
-     * is the session's AO permission mode: only "bypass-permissions" runs commands unconfirmed.
+     * is the session's AO permission mode: only "bypass-permissions" runs every command unconfirmed;
+     * `autoReview` (the card is set to "Approve for me") runs its routine project commands unconfirmed.
      */
-    async lease({ agent, workspaceId, approvalMode = null } = {}) {
+    async lease({ agent, workspaceId, approvalMode = null, autoReview = false } = {}) {
       if (!isEnabled() || !MCP_HTTP_AGENTS.has(agent) || typeof workspaceId !== "string" || !WORKSPACE_ID.test(workspaceId)) return null;
       await listen();
-      const { entry, token } = mint({ agent, workspaceId, approvalMode });
+      const { entry, token } = mint({ agent, workspaceId, approvalMode, autoReview });
       const url = `http://127.0.0.1:${port}/mcp/${encodeURIComponent(workspaceId)}/${entry.key}`;
       return Object.freeze({
         servers: [{ name: SERVER_NAME, type: "http", url, headers: { Authorization: `Bearer ${token}` } }],
