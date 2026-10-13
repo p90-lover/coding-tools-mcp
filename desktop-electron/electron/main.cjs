@@ -23,7 +23,7 @@ const {
   webFrameMain,
   powerSaveBlocker,
 } = require("electron");
-const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
+const { BrowserHost, navigationErrorForLog, writeRestartMarker } = require("./browser-host.cjs");
 const { createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatgpt-desktop.cjs");
 const { createGptBrowserHost, cleanUserAgent } = require("./gpt-browser.cjs");
 const { createEmailHost } = require("./email-host.cjs");
@@ -2351,6 +2351,12 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
       return null;
     }) : null;
     if (detached?.status !== "detached") await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
+    else {
+      // The bridge stays up without this app's browser until the next app starts (an update can take
+      // minutes): a Codex turn that reaches it meanwhile waits for the new app instead of failing.
+      try { writeRestartMarker(BROWSER_DESCRIPTOR_PATH, { reason: relaunch ? "relaunch" : "update" }); }
+      catch (error) { quitLogger?.warn("launcher.restart_marker_failed", { message: error instanceof Error ? error.message : String(error) }); }
+    }
     stopBridgeWatchdog();
     // Each awaited stop has a deadline: one that never settled left the app running after the
     // bridge was already detached, with nothing logged. An overrun is logged and the quit goes on.

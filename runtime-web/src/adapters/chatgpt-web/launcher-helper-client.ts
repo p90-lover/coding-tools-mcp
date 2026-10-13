@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
-import { notifyLauncherTurn, readLauncherBrowserHostDescriptor } from "../../launcher-browser-host";
+import { notifyLauncherTurn, waitForLauncherBrowserHostDescriptor, type LauncherBrowserHostDescriptor } from "../../launcher-browser-host";
 import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError } from "./adapter-error";
 import type { CompiledChatGptWebPrompt } from "./prompt";
 import type { BrowserTurn, ResolvedBrowserConfig } from "./browser-worker";
@@ -182,6 +182,8 @@ function parseHelperMessage(line: string): HelperMessage {
 export class LauncherBrowserHelperClient {
   private child?: ChildProcessWithoutNullStreams;
   private ready?: Promise<void>;
+  // Turns that arrive while the app restarts share one wait for its new descriptor.
+  private descriptorWait?: Promise<LauncherBrowserHostDescriptor>;
   private readyResolve?: () => void;
   private readyReject?: (error: Error) => void;
   private readonly pending = new Map<string, PendingTurn>();
@@ -316,15 +318,22 @@ export class LauncherBrowserHelperClient {
     await this.terminateChild(child, 2_000);
   }
 
-  private async ensureChild(): Promise<void> {
-    if (this.child
+  private childAlive(): boolean {
+    return Boolean(this.child
       && !this.child.killed
       && this.child.exitCode === null
       && this.child.signalCode === null
-      && this.ready) {
-      return this.ready;
-    }
-    const descriptor = readLauncherBrowserHostDescriptor(this.config.browserHostDescriptorPath!);
+      && this.ready);
+  }
+
+  private async ensureChild(): Promise<void> {
+    if (this.childAlive()) return this.ready;
+    // While the app restarts (an update installs) its descriptor is gone for a while: wait for it.
+    this.descriptorWait ??= waitForLauncherBrowserHostDescriptor(this.config.browserHostDescriptorPath!)
+      .finally(() => { this.descriptorWait = undefined; });
+    const descriptor = await this.descriptorWait;
+    // Another turn waiting on the same descriptor may have started the helper already.
+    if (this.childAlive()) return this.ready;
     const child = spawn(
       descriptor.helper.executable,
       [this.config.browserHelperScriptPath ?? this.bundledHelperScript() ?? descriptor.helper.script],
