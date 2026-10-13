@@ -61,8 +61,15 @@ export type ChatActivity = {
   timeline?: ChatLiveItem[];
 };
 
-/** One live entry of a working card's turn. `kind` is "message" or AO's activity kind (reasoning, command, …). */
-export type ChatLiveItem = { id: string; kind: string; status: string; text: string; label?: string };
+/**
+ * One entry of a card's turn. `kind` is "message" or AO's activity kind (reasoning, command, tool, …).
+ * A tool call also carries the agent's one-line `description`, its arguments (`input`, JSON) and
+ * what came back (`output`), shown when its row is opened.
+ */
+export type ChatLiveItem = {
+  id: string; kind: string; status: string; text: string; label?: string;
+  description?: string; input?: string; output?: string;
+};
 
 /** How a card's state reads in the chat's details panel, in the order the counts are listed. */
 const AGENT_STATES = ["working", "waiting", "failed", "done", "queued", "stopped"] as const;
@@ -411,6 +418,8 @@ export type ChatStep = {
   /** For a working card: runtime, current step and when it was last heard. */
   working?: { detail: string; stalled: boolean; activity?: string; timeline?: ChatLiveItem[] };
   startedAtMs?: number;
+  /** The card ran in an AO session, so its finished work can be read back (turn_timeline). */
+  hasWork?: boolean;
 };
 
 export type ChatTurn = {
@@ -434,6 +443,8 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
   const step: ChatStep = {
     key, nodeId: node.id, role: node.role, name: chatNodeName(node), detail: options.describe?.(node, run) ?? "", state: node.state,
     ...(node.receipt?.started_at_ms ? { startedAtMs: node.receipt.started_at_ms } : {}),
+    ...(node.receipt?.thread_id && node.route?.harness_id?.startsWith("ao:") && node.state !== "running" && node.state !== "reserved"
+      ? { hasWork: true } : {}),
   };
   if (node.receipt?.error) step.error = node.receipt.error;
   if (node.receipt?.answer) step.text = run.solo && node.role === "planner" ? withoutSoloBlock(node.receipt.answer) : node.receipt.answer;

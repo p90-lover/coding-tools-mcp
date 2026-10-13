@@ -516,3 +516,54 @@ test("a reasoning item carries the model's summary text (AO keeps it in detail.t
   assert.equal(item.kind, "reasoning");
   assert.match(item.text, /^\*\*Inspecting the register route\*\*/);
 });
+
+test("a tool call carries its description, arguments and output, so its row can open on them as Claude Code's do", async () => {
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.includes("/conversation") ? {
+      turns: [{ id: "t", state: "running" }], messages: [],
+      activities: [
+        { id: "1", turnId: "t", sequence: 1, activityKind: "mcp_tool", status: "failed", summary: "PowerShell",
+          detail: { toolKind: "other", providerToolName: "PowerShell", input: { command: "npm config list", description: "Inspect npm registry configuration" },
+            output: "User refused permission to run tool" } },
+        { id: "2", turnId: "t", sequence: 2, activityKind: "mcp_tool", status: "completed", summary: "mcp__coding-tools__read_file",
+          detail: { toolKind: "other", providerToolName: "mcp__coding-tools__read_file", input: { path: "main.py", limit: 40 },
+            output: "", content: [{ type: "content", content: { type: "text", text: "from fastapi import FastAPI" } }] } },
+        { id: "3", turnId: "t", sequence: 3, activityKind: "mcp_tool", status: "pending", summary: "Read x", detail: { toolKind: "read", input: {} } },
+      ],
+    } : { session: { id: "s", mode: "chat", status: "working" } },
+  });
+  const [shell, read, waiting] = JSON.parse(JSON.stringify((await upstream.observe("s")).timeline));
+  assert.equal(shell.kind, "command");
+  assert.equal(shell.status, "failed");
+  assert.equal(shell.description, "Inspect npm registry configuration");
+  assert.equal(shell.input, undefined, "the command and description are shown already, not again as arguments");
+  assert.equal(shell.output, "User refused permission to run tool");
+  assert.equal(read.label, "MCP", "AO names the tool providerToolName");
+  assert.deepEqual(JSON.parse(read.input), { path: "main.py", limit: 40 });
+  assert.equal(read.output, "from fastapi import FastAPI", "the ACP content blocks when there is no plain output");
+  assert.equal(waiting.input, undefined);
+  assert.equal(waiting.output, undefined);
+});
+
+test("a finished turn's work is read back from AO, paging back until it reaches the turn before", async () => {
+  const requests = [];
+  const page = (entries, oldest, more) => ({ turns: [], messages: [], activities: entries, oldestSequence: oldest, hasMoreBefore: more });
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => {
+      requests.push(endpoint);
+      if (!endpoint.includes("beforeSequence")) {
+        return page([{ id: "9", turnId: "later", sequence: 90, activityKind: "mcp_tool", status: "completed", summary: "Edit", detail: { toolKind: "edit", input: {} } },
+          { id: "5", turnId: "mine", sequence: 50, activityKind: "reasoning", status: "completed", detail: { text: "Checking the route" } }], 50, true);
+      }
+      if (endpoint.includes("beforeSequence=50")) {
+        return page([{ id: "4", turnId: "mine", sequence: 40, activityKind: "mcp_tool", status: "completed", summary: "PowerShell", detail: { toolKind: "other", input: { command: "ls" } } }], 40, true);
+      }
+      return page([{ id: "1", turnId: "earlier", sequence: 10, activityKind: "mcp_tool", status: "completed", summary: "Read a", detail: { toolKind: "read", input: {} } },
+        { id: "3", turnId: "mine", sequence: 30, activityKind: "mcp_tool", status: "completed", summary: "Read b", detail: { toolKind: "read", input: {} } }], 10, true);
+    },
+  });
+  const items = JSON.parse(JSON.stringify(await upstream.timeline("s", "mine")));
+  assert.deepEqual(items.map(item => item.id), ["3", "4", "5"], "only this turn's items, oldest first, across three pages");
+  assert.equal(requests.filter(endpoint => endpoint.includes("beforeSequence")).length, 2, "it stops once a page reaches the turn before");
+  assert.equal((await upstream.timeline("s", "")).length, 0, "no turn, nothing to read");
+});

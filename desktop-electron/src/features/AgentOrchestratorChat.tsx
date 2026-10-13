@@ -71,25 +71,87 @@ function ReasoningItem({ item }: { item: ChatLiveItem }) {
     : <><span className="cx-live-label">{label}</span><span className="cx-live-text">{headline}</span></>;
 }
 
-/** A working role's turn so far, as Codex shows it: thinking, tool calls and streamed messages. */
+/**
+ * The one line a tool call's row shows next to its name (Claude Code's "Read(src/app.ts)" line).
+ * `item.text` is the command for a shell call and AO's summary (the tool's name) for any other;
+ * `description` is the agent's own words for what the call is for, when it gave them.
+ */
+function toolHeadline(item: ChatLiveItem): string {
+  // The agent's own words say what the call is for; the command itself is one click away.
+  if (item.description) return item.description;
+  return item.text.replace(/^mcp__[\w-]+__/, "").replace(/\s+/g, " ").trim();
+}
+
+/** How a tool call ended, for its dot: AO's activity status, "pending" while it waits on approval. */
+function toolTone(status: string): "ok" | "failed" | "running" {
+  if (/fail|error|reject|denied|cancel/i.test(status)) return "failed";
+  return /complet|done|success/i.test(status) ? "ok" : "running";
+}
+
+/** A tool call as Claude Code shows it: a dot, its name and one line, opening on what it ran and got back. */
+function ToolItem({ item }: { item: ChatLiveItem }) {
+  const tone = toolTone(item.status);
+  const name = item.kind === "command" ? (tone === "running" ? "Running" : "Ran") : item.label ?? item.kind.replace(/_/g, " ");
+  const head = <><span className="cx-tool-dot" aria-hidden="true" /><span className="cx-live-label">{name}</span>
+    <span className="cx-live-text">{toolHeadline(item)}</span></>;
+  const opens = item.kind === "command" || item.input || item.output;
+  return opens
+    ? <details className={`cx-tool tone-${tone}`}><summary>{head}</summary>
+      <div className="cx-tool-body">
+        {item.kind === "command" ? <pre className="cx-tool-io"><code>{item.text}</code></pre> : null}
+        {item.input ? <pre className="cx-tool-io"><code>{item.input}</code></pre> : null}
+        {item.output ? <pre className="cx-tool-io is-output"><code>{item.output}</code></pre>
+          : tone === "running" ? null : <p className="cx-tool-empty">No output</p>}
+      </div></details>
+    : <div className={`cx-tool tone-${tone}`}><div className="cx-tool-row">{head}</div></div>;
+}
+
+/** A role's turn, as Codex and Claude Code show it: thinking, tool calls and streamed messages. */
 function LiveTimeline({ items }: { items: ChatLiveItem[] }) {
   return <ol className="cx-live">
     {items.map((item) => <li key={item.id} className={`cx-live-item kind-${item.kind} is-${item.status || "done"}`}>
       {item.kind === "steer" ? <div className="cx-user cx-steer"><div className="cx-bubble"><p>{item.text}</p></div></div>
         : item.kind === "message" ? <ChatMarkdown text={item.text} />
         : item.kind === "reasoning" ? <ReasoningItem item={item} />
-        : item.kind === "command" ? <><span className="cx-live-label">{item.status === "running" ? "Running" : "Ran"}</span><code>{item.text}</code></>
+        : item.kind === "command" || item.kind === "tool" ? <ToolItem item={item} />
         : <><span className="cx-live-label">{item.label ?? item.kind.replace(/_/g, " ")}</span><span className="cx-live-text">{item.text}</span></>}
     </li>)}
   </ol>;
 }
 
-function StepRow({ step, now }: { step: ChatStep; now: number }) {
+/**
+ * Each card's work (step key → its turn's timeline), kept for the app's lifetime: the live timeline
+ * is copied in while the card works, so its thinking and tool calls stay when the answer lands, and
+ * a card finished before is read back from AO once, when its work is first opened.
+ */
+const CHAT_WORK = new Map<string, ChatLiveItem[]>();
+type LoadWork = (runId: string, nodeId: string) => Promise<ChatLiveItem[]>;
+
+function useStepWork(step: ChatStep, runId: string, wanted: boolean, loadWork?: LoadWork): ChatLiveItem[] | null {
+  const live = step.working?.timeline;
+  const [, setLoaded] = useState(0);
+  if (live?.length) CHAT_WORK.set(step.key, live);
+  const known = CHAT_WORK.get(step.key) ?? null;
+  useEffect(() => {
+    if (!wanted || known || !step.hasWork || !loadWork) return;
+    let current = true;
+    void loadWork(runId, step.nodeId).then((items) => {
+      if (!items.length) return;
+      CHAT_WORK.set(step.key, items);
+      if (current) setLoaded((count) => count + 1);
+    }).catch(() => undefined);
+    return () => { current = false; };
+  }, [wanted, known, step.hasWork, step.key, step.nodeId, runId, loadWork]);
+  return known;
+}
+
+function StepRow({ step, runId, now, loadWork }: { step: ChatStep; runId: string; now: number; loadWork?: LoadWork }) {
   // A failed step opens on its error and a working one on its live turn, as Codex shows them;
   // once the user toggles a row, their choice wins.
   const [chosen, setOpen] = useState<boolean | null>(null);
   const open = chosen ?? Boolean(step.error || step.working?.timeline?.length);
-  const body = step.error || step.text || (step.working?.timeline?.length ? "live" : "");
+  const work = useStepWork(step, runId, open, loadWork);
+  const body = step.error || step.text || (work?.length || step.hasWork ? "work" : "");
   const elapsed = step.working && step.startedAtMs ? chatDuration(now - step.startedAtMs) : "";
   return <li className={`cx-step tone-${stepTone(step)}`}>
     <button type="button" className="cx-step-head" aria-expanded={open} disabled={!body && !step.working} onClick={() => setOpen(!open)}>
@@ -104,19 +166,39 @@ function StepRow({ step, now }: { step: ChatStep; now: number }) {
     {open ? <div className="cx-step-body">
       {step.detail ? <p className="cx-step-detail">{step.detail}</p> : null}
       {step.working ? <p className="cx-step-detail">{step.working.detail}</p> : null}
-      {step.working?.timeline?.length ? <LiveTimeline items={step.working.timeline} /> : null}
+      {work?.length ? <LiveTimeline items={work} /> : null}
       {step.error ? <p className="cx-step-error">{step.error}</p> : step.text ? <ChatMarkdown text={step.text} /> : null}
     </div> : null}
   </li>;
 }
 
-function WorkGroup({ turn, now, idle = false, expanded = false }: { turn: ChatTurn; now: number; idle?: boolean; expanded?: boolean }) {
+/**
+ * The work behind an answer that closes its turn itself (a single model's, a solo orchestrator's):
+ * folded under "Worked" as Claude Code keeps it, its thinking and tool calls a click away.
+ */
+function AnswerWork({ step, runId, expanded, loadWork }: { step: ChatStep; runId: string; expanded: boolean; loadWork?: LoadWork }) {
+  const [chosen, setChosen] = useState<boolean | null>(null);
+  const open = chosen ?? expanded;
+  const work = useStepWork(step, runId, open, loadWork);
+  if (!work?.length && !step.hasWork) return null;
+  const tools = work?.filter((item) => item.kind === "command" || item.kind === "tool").length ?? 0;
+  return <div className="cx-work">
+    <button type="button" className="cx-work-head" aria-expanded={open} onClick={() => setChosen(!open)}>
+      <span>{tools ? `Worked · ${tools} ${tools === 1 ? "tool call" : "tool calls"}` : "Worked"}</span>
+      <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
+    </button>
+    {open ? work?.length ? <LiveTimeline items={work} /> : <p className="cx-tool-empty">Loading…</p> : null}
+  </div>;
+}
+
+function WorkGroup({ turn, now, idle = false, expanded = false, loadWork }: { turn: ChatTurn; now: number; idle?: boolean; expanded?: boolean; loadWork?: LoadWork }) {
   const working = turn.steps.find((step) => step.working);
   // Live and failed work opens by itself, and finished work too when the chat shows its details
   // (single-model chats by default); a toggle on the turn itself holds over both.
   const [chosen, setChosen] = useState<boolean | null>(null);
   const open = chosen ?? (expanded || Boolean(working) || turn.steps.some((step) => step.error));
   if (!turn.steps.length) {
+    if (turn.final) return <AnswerWork step={turn.final} runId={turn.runId} expanded={expanded} loadWork={loadWork} />;
     return !idle && (turn.status === "running" || turn.status === "queued")
       ? <div className="cx-work is-live"><span className="cx-shimmer">Starting…</span></div> : null;
   }
@@ -128,7 +210,7 @@ function WorkGroup({ turn, now, idle = false, expanded = false }: { turn: ChatTu
       <span className={working ? "cx-shimmer" : undefined}>{label}</span>
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
     </button>
-    {open ? <ol className="cx-steps">{turn.steps.map((step) => <StepRow key={step.key} step={step} now={now} />)}</ol> : null}
+    {open ? <ol className="cx-steps">{turn.steps.map((step) => <StepRow key={step.key} step={step} runId={turn.runId} now={now} loadWork={loadWork} />)}</ol> : null}
   </div>;
 }
 
@@ -156,8 +238,10 @@ export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, working = false, describeNode, activity, permissions, composer, onOpenTeam, onOpenMissionBoard,
   projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject, projectBranch: branch, steer,
-  pendingMessage, pendingTitle, pendingCreation = false, commands,
+  pendingMessage, pendingTitle, pendingCreation = false, commands, loadWork,
 }: {
+  /** A finished card's thinking and tool calls, read back from its AO session (turn_timeline). */
+  loadWork?: LoadWork;
   /** Codex slash commands that need the page: goal, compact, diff, MCP, status, recent chats, plan mode. */
   commands?: ChatCommands;
   /** A message being sent into a chat that has no run yet (shown at once, as Codex does). */
@@ -767,7 +851,7 @@ export function AgentOrchestratorChat({
                   <div className="cx-bubble"><p>{steer.text}</p></div>
                   <span className="cx-stamp">Steered · {steer.stamp} UTC</span>
                 </div>) : null}
-              <WorkGroup key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} now={now} idle={notStarted && turn.runId === latest?.id} expanded={showWork} />
+              <WorkGroup key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} now={now} idle={notStarted && turn.runId === latest?.id} expanded={showWork} loadWork={loadWork} />
               {turn.final ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`}>
                 <div className="cx-answer-meta">
                   <span>{turn.final.name}</span>

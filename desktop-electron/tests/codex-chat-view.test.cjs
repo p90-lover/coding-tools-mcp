@@ -522,3 +522,45 @@ test("a working card's reasoning shows Codex-style: its title as one line, the r
   assert.ok(reasoning, "the reasoning is shown, not just the word Thought");
   assert.match(text(reasoning), /Thought\s*Inspecting the register route/);
 });
+
+test("a tool call opens on what it ran and what came back, with a dot for how it ended (Claude Code's tool rows)", () => {
+  const { props } = base({ selectedTaskId: "t", working: true,
+    runs: [run("r1", "t", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/m" } })], { execution_mode: "single" })],
+    activity: { "r1:w": { activity: "running", last_event_at_ms: Date.now(), turn_started: true, timeline: [
+      { id: "c", kind: "command", status: "failed", text: "npm config list", description: "Inspect npm registry configuration", output: "User refused permission to run tool" },
+      { id: "m", kind: "tool", status: "completed", label: "MCP", text: "mcp__coding-tools__read_file", input: "{\"path\":\"main.py\"}", output: "from fastapi import FastAPI" },
+      { id: "p", kind: "tool", status: "pending", label: "Read", text: "Read x" }] } } });
+  const tools = walk(mount(props).render()).filter((element) => /(^|\s)cx-tool(\s|$)/.test(element.props?.className ?? ""));
+  const [command, mcp, waiting] = tools;
+  assert.equal(command.type, "details");
+  assert.match(command.props.className, /tone-failed/);
+  assert.match(text(command), /Ran/);
+  assert.match(text(command), /npm config list/);
+  assert.match(text(command), /User refused permission to run tool/, "the output is in the opened row");
+  assert.match(mcp.props.className, /tone-ok/);
+  assert.match(text(mcp), /"path":"main\.py"/);
+  assert.match(text(mcp), /from fastapi import FastAPI/);
+  assert.equal(waiting.type, "div", "nothing to open on yet");
+  assert.match(waiting.props.className, /tone-running/);
+});
+
+test("a single model's thinking and tool calls stay folded under its answer once it lands, and an older one loads when opened", () => {
+  const route = { harness_id: "ao:claude-code", model: "cpa/m" };
+  const timeline = [{ id: "r", kind: "reasoning", status: "completed", text: "Checking the route" },
+    { id: "c", kind: "command", status: "completed", text: "ls", output: "main.py" }];
+  const { props } = base({ selectedTaskId: "t", working: true,
+    runs: [run("r1", "t", [node("w", "planner", "running", { route, receipt: { thread_id: "s1" } })], { execution_mode: "single" })],
+    activity: { "r1:w": { activity: "running", last_event_at_ms: Date.now(), turn_started: true, timeline } } });
+  const view = mount(props);
+  view.render();
+  const finished = view.render({ working: false, activity: {},
+    runs: [run("r1", "t", [node("w", "planner", "finished", { route, receipt: { thread_id: "s1", answer: "All set." } })], { execution_mode: "single" })] });
+  const head = walk(finished).find((element) => element.props?.className === "cx-work-head");
+  assert.ok(head, "the work is still there after the answer");
+  assert.match(text(head), /Worked · 1 tool call/);
+  assert.ok(walk(finished).some((element) => element.type === "Markdown" && element.props.text === "All set."), "and the answer below it");
+
+  const older = mount(base({ selectedTaskId: "t",
+    runs: [run("r0", "t", [node("w", "planner", "finished", { route, receipt: { thread_id: "s0", answer: "Done before." } })], { execution_mode: "single" })] }).props).render();
+  assert.match(text(walk(older).find((element) => element.props?.className === "cx-work-head")), /^Worked/, "a card from before this session can still show its work");
+});
