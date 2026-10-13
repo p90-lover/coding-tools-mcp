@@ -865,6 +865,15 @@ export function AgentOrchestratorChat({
           {commands?.planMode ? <span className="cx-plan-chip" role="status">Plan mode
             <button type="button" aria-label="Turn plan mode off" title="Turn plan mode off" onClick={() => commands.setPlanMode(false)}><Icon name="close" width="11" height="11" /></button></span> : null}
         </div> : null}
+        {(() => {
+          // A turn keeps the model it started with; say so when the picker now shows another, so the
+          // switch is never silent: the next message (and a retry) uses the new one.
+          const lead = latest?.nodes.find((node) => node.role === "planner") ?? latest?.nodes[0];
+          const running = lead?.route?.model;
+          const picked = composer?.mode === "single" ? composer.route?.model : undefined;
+          return runOpen && latest?.execution_mode === "single" && running && picked && picked !== running
+            ? <p className="cx-route-note" role="status">This turn is running on <b>{running}</b>; your next message uses <b>{picked}</b>.</p> : null;
+        })()}
         <form className="cx-composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}
           onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
           onDrop={(event) => { if (event.dataTransfer.files.length) { event.preventDefault(); void addFiles(event.dataTransfer.files); } }}>

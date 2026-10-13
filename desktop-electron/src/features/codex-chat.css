@@ -147,6 +147,8 @@
 .cx-head-spacer { flex: 1 1 auto; }
 .cx-icon-button { display: inline-grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--color-text-primary); font-size: 16px; cursor: pointer; }
 .cx-icon-button:hover:not(:disabled), .cx-icon-button[aria-pressed="true"] { background: var(--cx-hover); }
+/* "This turn is running on X; your next message uses Y." above the composer. */
+.cx-route-note { margin: 0 auto 6px; max-width: 760px; padding: 0 12px; color: var(--color-text-secondary); font-size: 12px; }
 /* The chat's details panel (Changes / Agents / Setup), like Claude's session panel. */
 .cx-details { position: fixed; z-index: 60; width: 300px; padding: 12px; border: 1px solid var(--ao-line); border-radius: 14px;
   background: var(--color-bg-primary); color: var(--color-text-primary); box-shadow: 0 12px 32px rgb(0 0 0 / 0.14); font-size: 13px; }
