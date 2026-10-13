@@ -1057,9 +1057,24 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     return response.pending_approvals ? { ...response, pending_approvals: withAdvice(response.pending_approvals) } : response;
   }
 
-  async function approveAoHarness({ workspaceId, runId, nodeId, approvalId, allow, response, threadId, turnId, decisionId } = {}) {
+  async function approveAoHarness({ workspaceId, runId, nodeId, approvalId, allow, response, threadId, turnId, decisionId, answer } = {}) {
     const id = clean(workspaceId, 128), run = clean(runId, 80), node = clean(nodeId, 80);
     const approval = clean(approvalId, 128);
+    // A question the agent asked (AskUserQuestion): the person's own answer goes back as they gave
+    // it, or they decline or dismiss it. Answering is the person's act in the chat, so no dialog.
+    if (answer !== undefined) {
+      if (!answer || typeof answer !== "object" || Array.isArray(answer) || !["accept", "decline", "cancel"].includes(answer.action)) {
+        throw new Error("Answer, decline or dismiss the question");
+      }
+      const content = answer.action === "accept" && answer.content && typeof answer.content === "object" && !Array.isArray(answer.content)
+        ? JSON.parse(JSON.stringify(answer.content)) : undefined;
+      if (content && Buffer.byteLength(JSON.stringify(content), "utf8") > 32 * 1024) throw new Error("The answer is too long");
+      const current = await harnessStatus({ workspaceId: id, runId: run, nodeId: node });
+      const pending = current.status?.pending_approvals?.find((entry) => entry.approval_id === approval);
+      if (!pending || pending.kind !== "question") throw new Error("The agent's question is no longer waiting for an answer");
+      await harnessService().resolveInput(pending.thread_id, approval, answer.action, content);
+      return { ok: true, result: { ok: true } };
+    }
     const typed = response !== undefined;
     // An AO agent's request answered with one of the decisions it offered (e.g. ExitPlanMode's
     // "auto" / "acceptEdits" / "default" / "plan"), named by its id.
@@ -1388,7 +1403,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         ? { route: own.route, settings: { instructions: "", auto_decide: true } } : null);
       if (!approver) continue;
       for (const approval of result?.pending_approvals ?? []) {
-        const screened = approval?.kind === "command" || approval?.source === "ao";
+        // A question the agent asked is the person's to answer: never screened or answered for them.
+        const screened = approval?.kind !== "question" && (approval?.kind === "command" || approval?.source === "ao");
         if (!screened || !approval.approval_id || approverAdvice.has(approval.approval_id)) continue;
         const request = describeRequest(approval);
         // The command advisor must not decide from a truncated command or permission scope.

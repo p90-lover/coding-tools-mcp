@@ -72,6 +72,23 @@
 /* ExitPlanMode: the plan scrolls inside the card, so its answer buttons stay in view. */
 .ao-msg-plan .ao-plan { max-height: min(48vh, 420px); overflow: auto; margin: 8px 0; padding: 4px 12px; border: 1px solid var(--ao-line); border-radius: 8px; }
 .ao-msg-plan .ao-msg-actions { flex-wrap: wrap; }
+/* A question the agent asked (AskUserQuestion): each question with its options, then Send or Skip. */
+.ao-msg-question { border-color: color-mix(in srgb, var(--ao-blue, #2f6fdd) 45%, transparent); }
+.ao-msg-question fieldset { display: grid; gap: 12px; margin: 8px 0 0; padding: 0; border: 0; min-width: 0; }
+.ao-question-message { max-height: min(30vh, 260px); overflow: auto; }
+.ao-question-field { display: grid; gap: 6px; }
+.ao-question-header { font-size: 12px; text-transform: none; color: var(--ao-muted); }
+.ao-question-text { margin: 0; }
+.ao-question-options { display: grid; gap: 6px; }
+.ao-question-option { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px; border: 1px solid var(--ao-line); border-radius: 8px; cursor: pointer; }
+.ao-question-option:hover { background: var(--cx-hover, rgb(0 0 0 / 4%)); }
+.ao-question-option.is-checked { border-color: var(--ao-blue, #2f6fdd); background: color-mix(in srgb, var(--ao-blue, #2f6fdd) 8%, transparent); }
+.ao-question-option input { margin-top: 2px; }
+.ao-question-option > span { display: grid; gap: 2px; min-width: 0; }
+.ao-question-option small { color: var(--ao-muted); }
+.ao-question-label { font-weight: 500; }
+.ao-question-input { width: 100%; box-sizing: border-box; height: 32px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 8px; background: transparent; color: inherit; font: inherit; }
+.ao-msg-question .ao-msg-actions { flex-wrap: wrap; }
 /* An install that changes the project's own packages (a shared Python environment). */
 .ao-dependency-note.is-warn { color: var(--color-text-warning, #b45309); font-weight: 600; }
 .ao-msg-approval fieldset input[type="checkbox"] { width: auto; justify-self: start; }

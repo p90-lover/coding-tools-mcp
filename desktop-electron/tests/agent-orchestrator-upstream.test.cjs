@@ -452,6 +452,44 @@ test("Claude Code's ExitPlanMode request carries its plan and every way it offer
   assert.deepEqual(request.decisions.map(decision => decision.id), ["auto", "acceptEdits", "default", "plan"]);
 });
 
+test("a question the agent asks (AskUserQuestion) waits in the chat with its options, and the answer goes back to AO", async () => {
+  const posted = [];
+  const upstream = observeHarness({
+    internalApi: async (method, endpoint, body) => {
+      if (method === "POST") { posted.push([endpoint, body]); return {}; }
+      return endpoint.includes("/conversation") ? {
+        turns: [{ id: "t", state: "running" }], messages: [],
+        activities: [{ id: "q1", turnId: "t", sequence: 3, activityKind: "user_input", status: "pending", requestId: "req-q",
+          summary: "Please answer the following questions.", createdAt: "2026-10-13T14:23:00Z",
+          detail: { inputMode: "form", message: "Please answer the following questions.", schema: { type: "object", properties: {
+            question_0: { type: "string", title: "Lockfile", description: "Rewrite the lockfile hosts or regenerate it?",
+              oneOf: [{ const: "Rewrite hosts", title: "Rewrite hosts", description: "Keep every pinned version" }, { const: "Regenerate", title: "Regenerate" }] },
+            question_0_custom: { type: "string", title: "Other" },
+            question_1: { type: "array", title: "Backend", items: { anyOf: [{ const: "fastapi", title: "fastapi" }, { const: "uvicorn", title: "uvicorn" }] } },
+          } } } },
+        { id: "q0", turnId: "t", sequence: 2, activityKind: "user_input", status: "resolved", requestId: "req-old", detail: {} }],
+      } : { session: { id: "s", mode: "chat", status: "needs_input" } };
+    },
+  });
+  const approvals = JSON.parse(JSON.stringify((await upstream.observe("s")).approvals));
+  assert.equal(approvals.length, 1, "only the pending one");
+  const [question] = approvals;
+  assert.equal(question.kind, "question");
+  assert.equal(question.approval_id, "req-q");
+  assert.equal(question.message, "Please answer the following questions.");
+  assert.deepEqual(question.fields.map((field) => [field.key, field.type, field.customKey ?? null]),
+    [["question_0", "choice", "question_0_custom"], ["question_1", "multi", null]], "the Other field belongs to its question, not a question of its own");
+  assert.deepEqual(question.fields[0].options.map((option) => option.label), ["Rewrite hosts", "Regenerate"]);
+  assert.equal(question.fields[0].options[0].description, "Keep every pinned version");
+  await upstream.resolveInput("s", "req-q", "accept", { question_0: "Rewrite hosts", question_1: ["fastapi"] });
+  await upstream.resolveInput("s", "req-q", "decline", { ignored: true });
+  assert.deepEqual(JSON.parse(JSON.stringify(posted)), [
+    ["/api/v1/sessions/s/conversation/inputs/req-q/resolve", { action: "accept", content: { question_0: "Rewrite hosts", question_1: ["fastapi"] } }],
+    ["/api/v1/sessions/s/conversation/inputs/req-q/resolve", { action: "decline" }],
+  ]);
+  await assert.rejects(upstream.resolveInput("s", "req-q", "allow"), /Answer, decline or cancel/);
+});
+
 test("Claude Code's own tools are labelled by what they did, a shell call shows its command, and only a real MCP tool reads as MCP", async () => {
   const upstream = observeHarness({
     internalApi: async (_method, endpoint) => endpoint.includes("/conversation") ? {
