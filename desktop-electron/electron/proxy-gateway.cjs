@@ -914,6 +914,7 @@ function createProxyGatewayController({
     if (closed || !settings.enabled || ensurePromise) return;
     if (helper && processRunning(helper.pid)) {
       if (Date.now() - Date.parse(helper.startedAt) > restartBackoffCapMs) restartFailures = 0;
+      await reportHelperError();
       return;
     }
     if (helper) {
@@ -935,6 +936,23 @@ function createProxyGatewayController({
       fail(error);
       if (!unverified && routeUsesGateway()) await leaveGatewayRoute("helper_restart_failed").catch(noop);
     }
+  }
+
+  // The helper's newest relay error (an upstream that refuses tunnels, say) goes to the app's log
+  // once, so a route that stops working shows there and not only in the gateway tab.
+  let reportedHelperError = null;
+  async function reportHelperError() {
+    let live;
+    try {
+      live = await controlRequest(helper, "GET", "/status", controlTimeoutMs);
+    } catch {
+      return;
+    }
+    const error = live?.lastError;
+    if (!error?.at || error.at === reportedHelperError) return;
+    reportedHelperError = error.at;
+    logger.warn("proxy_gateway.relay_error", { message: String(error.message ?? "").slice(0, 300), at: error.at,
+      authFailures: live.stats?.authFailures ?? null });
   }
 
   function startWatchdog() {

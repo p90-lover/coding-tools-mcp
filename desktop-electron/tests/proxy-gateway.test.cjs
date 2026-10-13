@@ -1515,6 +1515,47 @@ test("gateway channels use the provider IPC sender check; Network Proxy cannot o
   await assert.rejects(call("launcher:proxy-gateway-status", { sender: embedded, senderFrame: embedded.mainFrame }), /focused Coding Tools window/);
 });
 
+test("Provider Network and the gateway log to the launcher log, launch events included", async () => {
+  const { EventEmitter } = require("node:events");
+  const app = new EventEmitter();
+  app.whenReady = () => Promise.resolve();
+  app.getPath = () => "unused";
+  app.getVersion = () => "0.0.0-test";
+  const loaded = { exports: {} };
+  let gatewayLogger = null;
+  const dependencies = {
+    "./provider-network.cjs": {
+      createProviderNetworkController: () => ({
+        store: { snapshot: () => ({ routing: { globalEnabled: false, globalProfileId: null } }) },
+        applyGlobalRouting: async () => ({}),
+        handleProxyLogin() {},
+      }),
+    },
+    "./provider-execution-router.cjs": {},
+    "./profile.cjs": { resolveLauncherProfile: () => ({ browserPartition: "test", coreHome: "unused" }) },
+    "./proxy-gateway.cjs": {
+      GATEWAY_PROFILE_ID,
+      createProxyGatewayController: ({ logger }) => {
+        gatewayLogger = logger;
+        return { startup: async () => { logger.info("proxy_gateway.helper_adopted", { pid: 7 }); return {}; } };
+      },
+      resolveHelperRuntime: () => null,
+    },
+  };
+  const quiet = { info() {}, warn() {} };
+  require("node:vm").runInNewContext(read("electron/provider-bootstrap.cjs"), {
+    module: loaded, require: (name) => dependencies[name], console: quiet,
+  });
+  loaded.exports.installProviderNetwork({ app, BrowserWindow: { getAllWindows: () => [] }, ipcMain: { handle() {} } });
+  await loaded.exports.providerNetworkReady();
+  const written = [];
+  loaded.exports.setProviderLogger({ info: (event, detail) => written.push(["info", event, detail]), warn: (event, detail) => written.push(["warn", event, detail]) });
+  assert.deepEqual(written, [["info", "proxy_gateway.helper_adopted", { pid: 7 }]], "the launch event, logged before main's log existed, is written");
+  gatewayLogger.warn("proxy_gateway.relay_error", { message: "Upstream proxy refused the tunnel: HTTP/1.1 403 Forbidden" });
+  assert.equal(written.at(-1)[1], "proxy_gateway.relay_error", "and later ones go straight to it");
+  assert.throws(() => loaded.exports.setProviderLogger({}), /info and warn/);
+});
+
 test("Proxy Gateway is a More tab wired through guarded IPC and packaged for the helper runtime", () => {
   const app = read("src/App.tsx");
   const types = read("src/types.ts");

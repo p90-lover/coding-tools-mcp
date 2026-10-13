@@ -16,6 +16,31 @@ let providerBrowserHostGetter = () => null;
 let providerCpaConnectionGetter = () => null;
 let proxyGatewayInstance = null;
 let proxyGatewayKeyRotated = () => {};
+// The launcher's own log (launcher.jsonl, which redacts proxy credentials and bearer tokens) once
+// main has created it. Provider Network starts first: its events until then (the gateway helper's
+// adoption, start or failure at launch) are kept and written when the log arrives.
+const EARLY_LOG_LIMIT = 200;
+let launcherLogger = null;
+const earlyLog = [];
+
+function setProviderLogger(logger) {
+  if (!logger || typeof logger.info !== "function" || typeof logger.warn !== "function") {
+    throw new Error("Provider logger must have info and warn");
+  }
+  launcherLogger = logger;
+  for (const [level, event, detail] of earlyLog.splice(0)) {
+    try { logger[level](event, detail); } catch {}
+  }
+}
+
+function providerLog(level, event, detail) {
+  console[level](`[provider-network] ${event}`, detail);
+  if (launcherLogger) {
+    try { launcherLogger[level](event, detail); } catch {}
+  } else if (earlyLog.length < EARLY_LOG_LIMIT) {
+    earlyLog.push([level, event, detail]);
+  }
+}
 
 function setProviderBrowserHost(getter) {
   if (typeof getter !== "function") {
@@ -75,10 +100,10 @@ function installProviderNetwork({
 
   const logger = Object.freeze({
     info(event, detail = {}) {
-      console.info(`[provider-network] ${event}`, detail);
+      providerLog("info", event, detail);
     },
     warn(event, detail = {}) {
-      console.warn(`[provider-network] ${event}`, detail);
+      providerLog("warn", event, detail);
     },
   });
 
@@ -328,6 +353,7 @@ module.exports = {
   proxyGatewayDesktopRoute,
   setProxyGatewayDesktopRunning,
   setProxyGatewayKeyRotated,
+  setProviderLogger,
   setProviderBrowserHost,
   setProviderCpaConnection,
 };
