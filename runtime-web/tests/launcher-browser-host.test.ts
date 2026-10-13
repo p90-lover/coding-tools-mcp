@@ -118,6 +118,15 @@ test("a turn waits for the app's descriptor while it restarts, and only then", a
     .rejects.toThrow(/descriptor is missing.*waited 1 s/);
   writeFileSync(markerPath, JSON.stringify({ version: 1, createdAt: new Date(base).toISOString(), until: new Date(base + 3_600_000).toISOString() }));
   expect(launcherRestartAnnouncedUntil(path, base)).toBeNull();
+  // A newer app's marker: `until` within 15 minutes for older bridges, `holdUntil` 30 for this one.
+  writeFileSync(markerPath, JSON.stringify({ version: 1, createdAt: new Date(base).toISOString(),
+    until: new Date(base + 900_000).toISOString(), holdUntil: new Date(base + 1_800_000).toISOString() }));
+  expect(launcherRestartAnnouncedUntil(path, base + 1_000_000)).toBe(base + 1_800_000);
+  expect(launcherRestartAnnouncedUntil(path, base + 1_800_001)).toBeNull();
+  writeFileSync(markerPath, JSON.stringify({ version: 1, createdAt: new Date(base).toISOString(),
+    until: new Date(base + 900_000).toISOString(), holdUntil: new Date(base + 7_200_000).toISOString() }));
+  // A holdUntil past 30 minutes is ignored; its until still counts.
+  expect(launcherRestartAnnouncedUntil(path, base)).toBe(base + 900_000);
   rmSync(markerPath);
 
   // A broken descriptor is not a restart: it fails at once.

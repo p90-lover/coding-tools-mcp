@@ -19,6 +19,7 @@ test("a keep-bridge quit announces the restart next to the browser descriptor, f
   assert.equal(marker.reason, "update");
   assert.equal(marker.pid, process.pid);
   assert.equal(Date.parse(marker.until) - Date.parse(marker.createdAt), RESTART_MARKER_MAX_MS);
+  assert.equal(Date.parse(marker.holdUntil) - Date.parse(marker.createdAt), 30 * 60_000, "newer bridges wait up to 30 minutes (an update took 12)");
   writeRestartMarker(descriptor, { reason: "relaunch", withinMs: 10 * RESTART_MARKER_MAX_MS, now });
   const capped = JSON.parse(fs.readFileSync(restartMarkerPath(descriptor), "utf8"));
   assert.equal(Date.parse(capped.until) - now, RESTART_MARKER_MAX_MS, "never longer than the cap");
