@@ -317,6 +317,47 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       })
       .filter(approval => approval.decisions.length);
   }
+  /**
+   * What the agent asked the person and is waiting on (Claude Code's AskUserQuestion, or any ACP
+   * form or URL request): AO parks it as a pending "user_input" activity with the form's schema.
+   * Each becomes a "question" the chat shows and answers through resolveInput. A field is a choice
+   * (oneOf/enum), a multiple choice (an array of them), free text, a yes/no or a number; Claude
+   * Code's "<field>_custom" text is that field's "Other" answer.
+   */
+  function pendingInputs(conversation) {
+    const text = (value, max) => (typeof value === "string" ? utf8Prefix(value, max) : "");
+    const options = (list) => (Array.isArray(list) ? list : []).slice(0, 40)
+      .map((option) => (option && typeof option === "object"
+        ? { value: option.const ?? option.title, label: text(String(option.title ?? option.const ?? ""), 200), description: text(option.description, 500) }
+        : { value: option, label: text(String(option), 200), description: "" }))
+      .filter((option) => typeof option.value === "string" && option.value);
+    return (Array.isArray(conversation?.activities) ? conversation.activities : [])
+      .filter((activity) => activity.activityKind === "user_input" && activity.status === "pending" && typeof activity.requestId === "string")
+      .map((activity) => {
+        const detail = activity.detail && typeof activity.detail === "object" ? activity.detail : {};
+        const properties = detail.schema && typeof detail.schema === "object" && detail.schema.properties && typeof detail.schema.properties === "object"
+          ? detail.schema.properties : {};
+        const required = new Set(Array.isArray(detail.schema?.required) ? detail.schema.required : []);
+        const fields = Object.entries(properties).slice(0, 20)
+          .filter(([key, schema]) => schema && typeof schema === "object" && !(key.endsWith("_custom") && properties[key.slice(0, -"_custom".length)]))
+          .map(([key, schema]) => {
+            const many = schema.type === "array";
+            const choices = options(many ? schema.items?.anyOf ?? schema.items?.oneOf ?? schema.items?.enum : schema.oneOf ?? schema.anyOf ?? schema.enum);
+            const type = choices.length ? (many ? "multi" : "choice") : schema.type === "boolean" ? "boolean"
+              : schema.type === "number" || schema.type === "integer" ? "number" : "text";
+            return { key: key.slice(0, 80), type, title: text(schema.title, 200), description: text(schema.description, 2000), options: choices,
+              ...(properties[`${key}_custom`] ? { customKey: `${key}_custom`.slice(0, 90) } : {}), ...(required.has(key) ? { required: true } : {}) };
+          });
+        return {
+          approval_id: activity.requestId.slice(0, 200), source: "ao", kind: "question",
+          mode: detail.inputMode === "url" ? "url" : "form", message: text(detail.message || activity.summary, 4000),
+          ...(detail.inputMode === "url" && typeof detail.url === "string" && /^https?:\/\//i.test(detail.url) ? { url: utf8Prefix(detail.url, 2000) } : {}),
+          fields, tool: "AskUserQuestion", summary: text(activity.summary, 500),
+          ...(typeof activity.createdAt === "string" ? { since: activity.createdAt } : {}),
+          turn_id: typeof activity.turnId === "string" ? activity.turnId : undefined, decisions: [],
+        };
+      });
+  }
   /** A chat start that failed only for time (the persistent host's startup window, a deadline). */
   const TRANSIENT_CHAT_START = /persistent (ACP )?host|timed out|timeout|deadline exceeded|context canceled/i;
   const CHAT_RETRY_PAUSE_MS = 2000;
@@ -494,7 +535,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         status, turnId: turn?.id, turnState: turn?.state, error: turn?.errorMessage,
         needsInput: status === "needs_input", exited: ["exited", "terminated"].includes(status),
         answer: answer.slice(0, 12000), liveOutput: utf8Prefix(liveOutput, 4096), timeline,
-        approvals: pendingApprovals(conversation),
+        // A question the agent asked waits like an approval: the chat shows it and the card needs you.
+        approvals: [...pendingApprovals(conversation), ...pendingInputs(conversation)],
       };
     },
     /**
@@ -600,6 +642,18 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         return conversation && Array.isArray(conversation.turns) && conversation.turns.length === 0 ? String(session.id) : null;
       }));
       return unused.filter(Boolean);
+    },
+    /**
+     * Answers a question the agent asked (a parked "user_input"): `accept` with the form's
+     * `content`, or `decline` / `cancel` without. AO checks the content against the form.
+     */
+    async resolveInput(id, requestId, action, content = undefined) {
+      if (typeof requestId !== "string" || !requestId) throw new Error("A question to answer is required");
+      if (!["accept", "decline", "cancel"].includes(action)) throw new Error("Answer, decline or cancel the question");
+      const body = action === "accept" && content && typeof content === "object" && !Array.isArray(content) ? { action, content } : { action };
+      if (JSON.stringify(body).length > 65536) throw new Error("The answer is too long");
+      await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/inputs/${encodeURIComponent(requestId)}/resolve`, body);
+      return { ok: true };
     },
     /** Answers one parked tool request with one of the decisions AO offered for it. */
     async resolveApproval(id, requestId, decisionId) {

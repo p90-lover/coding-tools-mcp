@@ -2483,6 +2483,8 @@ test("a single AO card set to Approve for me has its parked tool requests review
     { approval_id: "safe", source: "ao", kind: "command", command: "npm test", tool: "Bash", summary: "Bash", decisions },
     { approval_id: "push", source: "ao", kind: "command", command: "git push origin main", tool: "Bash", summary: "Bash", decisions },
     { approval_id: "unclear", source: "ao", kind: "permission", path: "C:/elsewhere/file", tool: "Write", summary: "Write", decisions },
+    // A question the agent asked is the person's: never reviewed or answered for them.
+    { approval_id: "ask", source: "ao", kind: "question", message: "Rewrite or regenerate?", tool: "AskUserQuestion", summary: "Question", decisions: [], fields: [] },
   ];
   const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
     { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
@@ -2520,6 +2522,36 @@ test("a single AO card set to Approve for me has its parked tool requests review
   assert.deepEqual(JSON.parse(JSON.stringify(resolved)).sort(), [["session-1", "push", "no"], ["session-1", "safe", "yes"]],
     "allowed once by the reviewer, git push denied by the hard rules, the unclear write left for the person; never an always-grant");
   assert.ok(advised.length >= 1 && advised.every(model => model === "test-model"), "the card's own CPA model reviews");
+  assert.equal(advised.length, 1, "the reviewer is asked only about the unclear write, never about the agent's question");
+});
+
+test("the person's answer to an AO agent's question goes back through AO's input endpoint, without a dialog", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", nodes: [
+    { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const answered = [];
+  let dialogs = 0;
+  let pending = [{ approval_id: "ask", source: "ao", kind: "question", message: "Lockfile?", tool: "AskUserQuestion", decisions: [],
+    fields: [{ key: "question_0", type: "choice", title: "Lockfile", description: "", options: [{ value: "Rewrite hosts", label: "Rewrite hosts", description: "" }] }] }];
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission] }
+      : endpoint.endsWith("/harness/status") ? { ok: true, status: { connected: false } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async () => ({ status: "needs_input", turnId: "t", turnState: "running", needsInput: true, approvals: pending }),
+      resolveInput: async (...args) => { answered.push(args); pending = []; return { ok: true }; },
+      resolveApproval: async () => { throw new Error("a question is not an approval"); },
+    },
+    confirm: async () => { dialogs += 1; return true; },
+  });
+  const base = { workspaceId: "ws", runId: "run", nodeId: "one", approvalId: "ask" };
+  await assert.rejects(workflow.call("approve_harness", { ...base, answer: { action: "allow" } }), /Answer, decline or dismiss/);
+  const result = await workflow.call("approve_harness", { ...base, answer: { action: "accept", content: { question_0: "Rewrite hosts" } } });
+  assert.equal(result.ok, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(answered)), [["session-1", "ask", "accept", { question_0: "Rewrite hosts" }]]);
+  assert.equal(dialogs, 0, "answering is the person's own act in the chat");
+  await assert.rejects(workflow.call("approve_harness", { ...base, answer: { action: "decline" } }), /no longer waiting/);
 });
 
 test("the pinned executable digest is reused only while the file is unchanged", async () => {

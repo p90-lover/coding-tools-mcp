@@ -105,3 +105,22 @@ test("an open chat's composer carries the context meter; a new chat's does not",
   const fresh = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, { ...props, runs: [], selectedTaskId: "" }));
   assert.equal(fresh.includes("cx-context-meter"), false);
 });
+
+test("an AO agent's question shows as a card with its options, an Other box, and Send / Skip", () => {
+  const approvalUi = load("AgentOrchestratorApproval.tsx", { "./ChatMarkdown": markdown });
+  const question = { nodeId: "one", approval_id: "ask", source: "ao", kind: "question", message: "Please answer the following questions.",
+    fields: [
+      { key: "question_0", type: "choice", title: "Lockfile", description: "Rewrite the lockfile hosts or regenerate it?", customKey: "question_0_custom",
+        options: [{ value: "Rewrite hosts", label: "Rewrite hosts", description: "Keep every pinned version" }, { value: "Regenerate", label: "Regenerate", description: "" }] },
+      { key: "question_1", type: "multi", title: "Backend", description: "", options: [{ value: "fastapi", label: "fastapi", description: "" }] },
+    ] };
+  const html = renderToStaticMarkup(React.createElement(approvalUi.AgentOrchestratorApproval, { approval: question, busy: false, approve() {} }));
+  assert.match(html, /Question from the agent/);
+  assert.match(html, /Rewrite the lockfile hosts or regenerate it\?/);
+  assert.match(html, /type="radio"[^>]*name="ask-question_0"/);
+  assert.match(html, /type="checkbox"/);
+  assert.match(html, /Keep every pinned version/);
+  assert.match(html, /placeholder="Other: type your own answer"/);
+  assert.match(html, /<button[^>]*disabled=""[^>]*>Send answer<\/button>/, "nothing chosen yet");
+  assert.match(html, />Skip<\/button>/);
+});
