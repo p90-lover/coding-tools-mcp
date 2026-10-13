@@ -648,3 +648,17 @@ export function chatMessageWithAttachments(message: string, attachments: ChatAtt
     : `Attached file \`${item.name}\`:\n\`\`\`\n${(item.text ?? "").replace(/\`\`\`/g, "\`\`\u200b\`")}\n\`\`\``);
   return [message.trim(), ...blocks].filter(Boolean).join("\n\n");
 }
+
+/** A token count as the context meter shows it: 537523 → "537.5k", 1000000 → "1M". */
+export function tokensShort(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "—";
+  if (value >= 1_000_000) return `${Number((value / 1_000_000).toFixed(value % 1_000_000 ? 2 : 0))}M`;
+  if (value >= 1_000) return `${Number((value / 1_000).toFixed(1))}k`;
+  return String(Math.round(value));
+}
+
+/** How full an agent's context is (0..1), or null when it has not said or gives no window size. */
+export function contextFraction(usage: { contextUsed: number | null; contextWindow: number | null } | null | undefined): number | null {
+  if (!usage || !usage.contextWindow || usage.contextWindow <= 0 || usage.contextUsed === null) return null;
+  return Math.max(0, Math.min(1, usage.contextUsed / usage.contextWindow));
+}

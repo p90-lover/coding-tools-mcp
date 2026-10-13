@@ -5,6 +5,7 @@ import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { ChatWorkbench, type WorkbenchTab } from "./ChatWorkbench";
+import { ChatContextMeter } from "./ChatContextMeter";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
@@ -1030,6 +1031,8 @@ export function AgentOrchestratorChat({
             <input ref={picker} type="file" multiple hidden onChange={(event) => { if (event.target.files) void addFiles(event.target.files); event.target.value = ""; }} />
             {composer ? <AgentOrchestratorComposerControls {...composer} permissions={permissions} busy={busy || sending} /> : permissions}
             <span className="cx-head-spacer" />
+            {selectedTaskId ? <ChatContextMeter sessionId={agentSessions[0]?.id} agentLabel={agentSessions[0]?.label}
+              canCompact={Boolean(commands && accepts)} onCompact={() => void runCommand("compact")} /> : null}
             <button type="button" className="cx-icon-button cx-mic" aria-label="Voice input" title="Voice input isn't available yet" disabled>
               <ChatGlyph name="mic" size={16} /></button>
             {latest && runOpen && stop && !accepts && !((steering || queueing) && canSend)

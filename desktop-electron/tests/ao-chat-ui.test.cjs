@@ -20,7 +20,10 @@ const chat = load("ao-chat.ts");
 const roles = load("AgentOrchestratorRoleEditor.tsx", { "./ao-chat": chat });
 const markdown = load("ChatMarkdown.tsx", { "./chat-markdown": load("chat-markdown.ts") });
 const menu = load("ChatMenu.tsx");
+const meter = load("ChatContextMeter.tsx", { "./ao-chat": chat, "./ChatMenu": menu,
+  "../api/client": { getCodingToolsClient: () => ({ apps: { call: async () => ({ result: { sessions: {} } }) } }) } });
 const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
+  "./ChatContextMeter": meter,
   "./ChatThreadList": load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu }) });
 
 test("opening a working role shows live step and output, not a final-result placeholder", () => {
@@ -89,4 +92,16 @@ test("mission inspectors keep Retry structural changes in saved team templates",
     draft: { ...team, nodes: team.nodes.map(role => role.id === node.id ? retry : role) },
   }));
   assert.match(locked, /<label>Role<select[^>]*disabled/);
+});
+
+
+test("an open chat's composer carries the context meter; a new chat's does not", () => {
+  const props = { runs: [{ id: "run", project_id: "task", cancelled: false, nodes: [{ id: "lead", role: "planner", state: "finished",
+    route: { harness_id: "ao:claude-code", model: "m" }, receipt: { thread_id: "sess-1", answer: "ok" } }] }],
+    tasks: [{ id: "task", title: "Task" }], selectedTaskId: "task", busy: false, approvals: [],
+    loadDescription: async () => "", send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {} };
+  const open = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, props));
+  assert.match(open, /class="cx-icon-button cx-context-meter is-unknown"[^>]*aria-label="The agent has not reported its context yet"/);
+  const fresh = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, { ...props, runs: [], selectedTaskId: "" }));
+  assert.equal(fresh.includes("cx-context-meter"), false);
 });

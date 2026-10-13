@@ -153,6 +153,43 @@
 .cx-reasoning-body { margin: 4px 0 2px 18px; color: var(--color-text-secondary); font-size: 13px; }
 /* "This turn is running on X; your next message uses Y." above the composer. */
 .cx-route-note { margin: 0 auto 6px; max-width: 760px; padding: 0 12px; color: var(--color-text-secondary); font-size: 12px; }
+/* The composer's context meter (ChatContextMeter): a ring that fills with the agent's context, and its panel. */
+.cx-context-meter { width: 28px; height: 28px; }
+.cx-context-meter .cx-context-track { stroke: color-mix(in srgb, var(--ao-muted) 35%, transparent); }
+.cx-context-meter.is-unknown .cx-context-track { stroke-dasharray: 2 2.4; }
+.cx-context-meter .cx-context-fill { stroke: var(--color-text-primary); transition: stroke-dasharray .3s ease; }
+.cx-context-meter.is-mid .cx-context-fill { stroke: var(--ao-amber, #c98a12); }
+.cx-context-meter.is-high .cx-context-fill { stroke: var(--ao-red, #c0392b); }
+.cx-context-panel { position: fixed; z-index: 60; width: 320px; max-height: min(560px, 75vh); padding: 12px 14px; overflow-y: auto; border: 1px solid var(--ao-line);
+  border-radius: 14px; background: var(--color-bg-primary); color: var(--color-text-primary); box-shadow: 0 12px 32px rgb(0 0 0 / 0.14); font-size: 13px; }
+.cx-context-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.cx-context-head span { color: var(--ao-muted); font-variant-numeric: tabular-nums; }
+.cx-context-bar { height: 6px; margin: 8px 0 4px; overflow: hidden; border-radius: 3px; background: color-mix(in srgb, var(--ao-muted) 22%, transparent); }
+.cx-context-bar > span { display: block; height: 100%; border-radius: 3px; background: var(--ao-blue, #2f6fdd); }
+.cx-context-bar.is-mid > span { background: var(--ao-amber, #c98a12); }
+.cx-context-bar.is-high > span { background: var(--ao-red, #c0392b); }
+.cx-context-note { margin: 4px 0; color: var(--ao-muted); font-size: 12px; }
+.cx-context-note.is-quiet { margin-top: 10px; font-size: 11px; }
+.cx-context-label { margin: 12px 0 4px; padding-top: 10px; border-top: 1px solid var(--ao-line); color: var(--ao-muted); font-size: 12px; }
+.cx-context-rows { display: grid; grid-template-columns: 1fr auto; gap: 3px 12px; margin: 0; }
+.cx-context-rows dt { margin: 0; }
+.cx-context-rows dd { margin: 0; color: var(--ao-muted); font-variant-numeric: tabular-nums; text-align: right; }
+.cx-context-limit { margin: 6px 0; }
+.cx-context-limit > div:first-child { display: flex; align-items: baseline; gap: 8px; }
+.cx-context-limit small { margin-left: auto; color: var(--ao-muted); font-size: 11px; }
+.cx-context-limit b { font-weight: 500; font-variant-numeric: tabular-nums; }
+.cx-context-servers { margin: 0; padding: 0; list-style: none; }
+.cx-context-servers li { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+.cx-context-servers small { margin-left: auto; color: var(--ao-muted); font-size: 11px; }
+.cx-context-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ao-muted); }
+.cx-context-dot.is-ok { background: var(--ao-green, #2e9d5b); }
+.cx-context-dot.is-failed { background: var(--ao-red, #c0392b); }
+.cx-context-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--ao-line); }
+.cx-context-foot span { color: var(--ao-muted); font-size: 12px; }
+.cx-context-foot button { height: 26px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 7px; background: transparent; color: inherit; font: inherit; font-size: 12px; cursor: pointer; }
+.cx-context-foot button:hover:not(:disabled) { background: var(--cx-hover); }
+.cx-context-foot button:disabled { opacity: .5; cursor: default; }
+
 /* The chat's details panel (Changes / Agents / Setup), like Claude's session panel. */
 .cx-details { position: fixed; z-index: 60; width: 300px; padding: 12px; border: 1px solid var(--ao-line); border-radius: 14px;
   background: var(--color-bg-primary); color: var(--color-text-primary); box-shadow: 0 12px 32px rgb(0 0 0 / 0.14); font-size: 13px; }
