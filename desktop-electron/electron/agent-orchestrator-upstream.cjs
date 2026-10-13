@@ -1095,14 +1095,14 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       const ids = Array.isArray(args.sessionIds) ? args.sessionIds.filter((id) => typeof id === "string").slice(0, 32) : [];
       const pathArgument = (value) => (typeof value === "string" && value.length <= 1024 && !value.includes("\0") ? value : ".");
       switch (operation) {
-        case "chat_terminal_start": return agentTools.terminalStart({ sessionId: args.sessionId });
-        case "chat_changes": return agentTools.changes({ sessionId: args.sessionId });
-        case "chat_files": return agentTools.files({ sessionId: args.sessionId, path: pathArgument(args.path) });
+        case "chat_terminal_start": return agentTools.terminalStart({ sessionId: args.sessionId, workspaceId: args.workspaceId });
+        case "chat_changes": return agentTools.changes({ sessionId: args.sessionId, workspaceId: args.workspaceId });
+        case "chat_files": return agentTools.files({ sessionId: args.sessionId, workspaceId: args.workspaceId, path: pathArgument(args.path) });
         case "chat_file": {
           if (typeof args.path !== "string" || !args.path || args.path.length > 1024) throw new Error("Choose a file");
-          return agentTools.file({ sessionId: args.sessionId, path: args.path });
+          return agentTools.file({ sessionId: args.sessionId, workspaceId: args.workspaceId, path: args.path });
         }
-        case "chat_processes": return { ok: true, sessions: await agentTools.processes(ids) };
+        case "chat_processes": return { ok: true, sessions: await agentTools.processes(ids, typeof args.workspaceId === "string" ? args.workspaceId : null) };
         case "chat_process_output": return { ok: true, ...await agentTools.processOutput(args) };
         case "chat_process_stop": return agentTools.processStop(args);
         case "chat_process_input": return agentTools.processInput(args);

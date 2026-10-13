@@ -34,7 +34,7 @@ function rememberPage(sessionId: string, url: string, title: string) {
  * as Codex shows the browser or terminal when its agent uses one. Each page and command opens it
  * once; closing the panel is respected until the agent does something new.
  */
-export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen: (tab: WorkbenchTab) => void) {
+export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen: (tab: WorkbenchTab) => void, workspaceId?: string) {
   const seen = useRef(new Set<string>());
   const primed = useRef(false);
   const key = sessionIds.join(",");
@@ -46,7 +46,7 @@ export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen
       if (document.visibilityState !== "visible") return;
       try {
         const [previews, processes] = await Promise.all([
-          paneCall("chat_preview_state", { sessionIds }), paneCall("chat_processes", { sessionIds }),
+          paneCall("chat_preview_state", { sessionIds }), paneCall("chat_processes", { sessionIds, ...(workspaceId ? { workspaceId } : {}) }),
         ]);
         if (!live) return;
         const pages = Object.entries((previews.previews as Record<string, PreviewState> | undefined) ?? {})
@@ -88,8 +88,10 @@ function since(startedAt: number, now: number) {
   return seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
 }
 
-export function ChatWorkbench({ sessions, tab, onTab, onClose }: {
+export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId }: {
   sessions: ChatAgentSession[];
+  /** The chat's workspace: reaches an agent's worktree even when the app holds no lease for it. */
+  workspaceId?: string;
   /** The tab to show: asking for a kind brings its tab forward, opening one if needed. */
   tab: WorkbenchTab;
   onTab: (tab: WorkbenchTab) => void;
@@ -177,9 +179,9 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose }: {
     {!sessionId
       ? <p className="cx-workbench-empty">No agent has started in this chat yet. The pages it opens, its changes, files and commands show here.</p>
       : current?.kind === "preview" ? <PreviewPane key={sessionId} sessionId={sessionId} />
-        : current?.kind === "terminal" ? <TerminalPane key={sessionId} sessionId={sessionId} />
-          : current?.kind === "changes" ? <ChangesPane key={sessionId} sessionId={sessionId} />
-            : current?.kind === "files" ? <FilesPane key={sessionId} sessionId={sessionId} />
+        : current?.kind === "terminal" ? <TerminalPane key={sessionId} sessionId={sessionId} workspaceId={workspaceId} />
+          : current?.kind === "changes" ? <ChangesPane key={sessionId} sessionId={sessionId} workspaceId={workspaceId} />
+            : current?.kind === "files" ? <FilesPane key={sessionId} sessionId={sessionId} workspaceId={workspaceId} />
               : <NewTabPage sessionId={sessionId} onTool={show} />}
   </aside>;
 }
@@ -284,7 +286,7 @@ function PreviewPane({ sessionId }: { sessionId: string }) {
   </div>;
 }
 
-function TerminalPane({ sessionId }: { sessionId: string }) {
+function TerminalPane({ sessionId, workspaceId }: { sessionId: string; workspaceId?: string }) {
   const [commands, setCommands] = useState<Command[]>([]);
   const [selected, setSelected] = useState("");
   const [output, setOutput] = useState("");
@@ -297,7 +299,7 @@ function TerminalPane({ sessionId }: { sessionId: string }) {
 
   useEffect(() => {
     let live = true;
-    const tick = () => void paneCall("chat_processes", { sessionIds: [sessionId] })
+    const tick = () => void paneCall("chat_processes", { sessionIds: [sessionId], ...(workspaceId ? { workspaceId } : {}) })
       .then((result) => {
         if (!live) return;
         const found = ((result.sessions as { commands: Command[] }[] | undefined)?.[0]?.commands) ?? [];
@@ -327,7 +329,7 @@ function TerminalPane({ sessionId }: { sessionId: string }) {
       try {
         let added = "";
         for (const stream of ["stdout", "stderr"] as const) {
-          const result = await paneCall("chat_process_output", { sessionId, commandId: selected, stream, offset: offsets.current[stream] });
+          const result = await paneCall("chat_process_output", { sessionId, ...(workspaceId ? { workspaceId } : {}), commandId: selected, stream, offset: offsets.current[stream] });
           offsets.current[stream] = Number(result.nextOffset) || offsets.current[stream];
           if (result.gap === true) added += "\n[earlier output was dropped]\n";
           if (typeof result.content === "string" && result.content) added += plain(result.content);
@@ -345,7 +347,7 @@ function TerminalPane({ sessionId }: { sessionId: string }) {
 
   const stop = () => {
     setError("");
-    void paneCall("chat_process_stop", { sessionId, commandId: selected }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+    void paneCall("chat_process_stop", { sessionId, ...(workspaceId ? { workspaceId } : {}), commandId: selected }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
   };
   const send = () => {
     if (!input && !command?.user) return;
@@ -353,13 +355,13 @@ function TerminalPane({ sessionId }: { sessionId: string }) {
     // The user's own shell runs on a terminal, where Enter is a carriage return.
     const text = `${input}${command?.user ? "\r" : "\n"}`;
     setInput("");
-    void paneCall("chat_process_input", { sessionId, commandId: selected, text }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+    void paneCall("chat_process_input", { sessionId, ...(workspaceId ? { workspaceId } : {}), commandId: selected, text }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
   };
   const [starting, setStarting] = useState(false);
   const startShell = () => {
     setError("");
     setStarting(true);
-    void paneCall("chat_terminal_start", { sessionId })
+    void paneCall("chat_terminal_start", { sessionId, ...(workspaceId ? { workspaceId } : {}) })
       .then((result) => { if (typeof result.commandId === "string") setSelected(result.commandId); })
       .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
       .finally(() => setStarting(false));
@@ -428,7 +430,7 @@ function parseDiff(text: string): DiffFile[] {
 }
 
 /** The Changes tab: the agent worktree's diff, one file at a time, with every changed file listed. */
-function ChangesPane({ sessionId }: { sessionId: string }) {
+function ChangesPane({ sessionId, workspaceId }: { sessionId: string; workspaceId?: string }) {
   const [data, setData] = useState<{ branch: string; entries: { path: string; index_status: string; worktree_status: string }[]; diff: string; truncated: boolean } | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -438,7 +440,7 @@ function ChangesPane({ sessionId }: { sessionId: string }) {
   const load = () => {
     setLoading(true);
     setError("");
-    void paneCall("chat_changes", { sessionId })
+    void paneCall("chat_changes", { sessionId, ...(workspaceId ? { workspaceId } : {}) })
       .then((result) => setData({ branch: String(result.branch ?? ""), entries: (result.entries as never[]) ?? [], diff: String(result.diff ?? ""), truncated: result.truncated === true }))
       .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
       .finally(() => setLoading(false));
@@ -455,7 +457,7 @@ function ChangesPane({ sessionId }: { sessionId: string }) {
   useEffect(() => {
     setFresh(null);
     if (!selected || files.some((file) => file.path === selected)) return;
-    void paneCall("chat_file", { sessionId, path: selected }).then((result) => setFresh({ path: selected, content: String(result.content ?? "") })).catch(() => undefined);
+    void paneCall("chat_file", { sessionId, ...(workspaceId ? { workspaceId } : {}), path: selected }).then((result) => setFresh({ path: selected, content: String(result.content ?? "") })).catch(() => undefined);
   }, [selected, sessionId, files]);
   return <div className="cx-changes">
     <div className="cx-changes-bar">
@@ -497,7 +499,7 @@ function ChangesPane({ sessionId }: { sessionId: string }) {
 type FileEntry = { name: string; path: string; type: string };
 
 /** The Files tab: the agent worktree's tree, opened folder by folder, and the chosen file's text. */
-function FilesPane({ sessionId }: { sessionId: string }) {
+function FilesPane({ sessionId, workspaceId }: { sessionId: string; workspaceId?: string }) {
   const [folders, setFolders] = useState<Record<string, FileEntry[]>>({});
   const [open, setOpen] = useState<Set<string>>(() => new Set(["."]));
   const [file, setFile] = useState<{ path: string; content: string; truncated: boolean } | null>(null);
@@ -505,7 +507,7 @@ function FilesPane({ sessionId }: { sessionId: string }) {
   const [error, setError] = useState("");
   const load = (folder: string) => {
     if (folders[folder]) return;
-    void paneCall("chat_files", { sessionId, path: folder })
+    void paneCall("chat_files", { sessionId, ...(workspaceId ? { workspaceId } : {}), path: folder })
       .then((result) => setFolders((current) => ({ ...current, [folder]: ((result.entries as FileEntry[]) ?? [])
         .sort((left, right) => Number(right.type === "directory") - Number(left.type === "directory") || left.name.localeCompare(right.name)) })))
       .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
@@ -516,7 +518,7 @@ function FilesPane({ sessionId }: { sessionId: string }) {
   };
   const view = (path: string) => {
     setError("");
-    void paneCall("chat_file", { sessionId, path })
+    void paneCall("chat_file", { sessionId, ...(workspaceId ? { workspaceId } : {}), path })
       .then((result) => setFile({ path, content: String(result.content ?? ""), truncated: result.truncated === true }))
       .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
   };
