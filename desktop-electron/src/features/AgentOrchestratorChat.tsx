@@ -4,11 +4,12 @@ import { AgentOrchestratorComposerControls, type ComposerControlsProps } from ".
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { ChatMarkdown } from "./ChatMarkdown";
+import { ChatWorkbench, type WorkbenchTab } from "./ChatWorkbench";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, chatAcceptsMessage, chatDuration, chatList, chatMessageWithAttachments, chatRunOpen,
-  chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
+  chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
 } from "./ao-chat";
 
@@ -297,6 +298,9 @@ export function AgentOrchestratorChat({
     [chatRuns, descriptions, selectedTaskId, describeNode, activity, now, pendingMessage],
   );
   const stepCount = turns.reduce((total, turn) => total + turn.steps.length + (turn.final ? 1 : 0), 0);
+  // The Preview and Terminal panes beside the thread (ChatWorkbench), for the chat's AO agents.
+  const [workbench, setWorkbench] = useState<WorkbenchTab | null>(null);
+  const agentSessions = useMemo(() => chatAgentSessions(chatRuns), [chatRuns]);
   useEffect(() => { if (atBottom) scroller.current?.scrollTo({ top: scroller.current.scrollHeight }); }, [turns.length, stepCount, atBottom]);
   // The cards panel can be dragged wider for more board room; the width is kept per viewer.
   const [cardsWidth, setCardsWidth] = useState<number | null>(() => {
@@ -679,6 +683,9 @@ export function AgentOrchestratorChat({
           {structure || latest ? <button type="button" className="cx-icon-button" aria-pressed={showStructure} title="Show cards (Structure)" aria-label="Show cards"
             disabled={!latest} onClick={() => structure ? setShowStructure((value) => !value) : latest && openStructure(latest.id)}>
             <Icon name="orchestrator" width="16" height="16" /></button> : null}
+          {selectedTaskId ? <button type="button" className="cx-icon-button" aria-pressed={workbench !== null} title="Preview and terminal"
+            aria-label="Show preview and terminal" onClick={() => setWorkbench((open) => (open ? null : "preview"))}>
+            <Icon name="browser" width="16" height="16" /></button> : null}
           {onOpenMissionBoard ? <button type="button" className="cx-icon-button" title="Mission Board" aria-label="Open Mission Board" onClick={onOpenMissionBoard}>
             <Icon name="logs" width="16" height="16" /></button> : null}
           {selectedTaskId ? <button type="button" className="cx-icon-button" data-details-toggle="" title="Chat details" aria-label="Chat details"
@@ -938,6 +945,7 @@ export function AgentOrchestratorChat({
           <Icon name="close" width="14" height="14" /></button></header>
         <div className="cx-structure-body">{structure}</div>
       </aside> : null}
+      {workbench && selectedTaskId ? <ChatWorkbench sessions={agentSessions} tab={workbench} onTab={setWorkbench} onClose={() => setWorkbench(null)} /> : null}
       <ChatMenu menu={menu} onClose={() => setMenu(null)} />
     </div>
   );

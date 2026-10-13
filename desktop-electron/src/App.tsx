@@ -2208,6 +2208,15 @@ function SettingsSurface({
               .catch((cause) => setError(messageOf(cause)))}
           />
         </SettingRow>
+        <SettingRow body={copy.chatAgentPreviewToolsBody} label={copy.chatAgentPreviewTools}>
+          <Switch
+            checked={snapshot.state.chatAgentTools !== false && snapshot.state.chatAgentPreviewTools !== false}
+            disabled={snapshot.state.chatAgentTools === false}
+            onChange={(checked) => void api!.setPreference("chatAgentPreviewTools", checked)
+              .then(updateState)
+              .catch((cause) => setError(messageOf(cause)))}
+          />
+        </SettingRow>
         <SettingRow body={copy.chatAgentDesktopToolsBody} label={copy.chatAgentDesktopTools}>
           <Switch
             checked={snapshot.state.chatAgentTools !== false && snapshot.state.chatAgentDesktopTools === true}

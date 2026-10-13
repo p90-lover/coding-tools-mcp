@@ -13,8 +13,29 @@ export type ChatNode = {
   x: number;
   settings?: { name?: string; role_name?: string };
   route?: { harness_id: string; model: string; effort?: string; context_window?: number };
-  receipt?: { answer?: string; error?: string; verdict?: string; started_at_ms?: number };
+  /** `thread_id` is the card's AO session id when its harness is an AO agent ("ao:…"). */
+  receipt?: { answer?: string; error?: string; verdict?: string; started_at_ms?: number; thread_id?: string };
 };
+
+/** One AO agent session of a chat, for its Preview and Terminal panes. */
+export type ChatAgentSession = { id: string; label: string };
+
+/**
+ * The chat's AO agent sessions, newest first, each once (a follow-up reuses its session): the cards
+ * whose harness is an AO agent and that have started one. Native Codex threads are not AO sessions.
+ */
+export function chatAgentSessions(runs: { nodes: ChatNode[] }[]): ChatAgentSession[] {
+  const seen = new Map<string, ChatAgentSession>();
+  for (const run of [...runs].reverse()) {
+    for (const node of [...run.nodes].reverse()) {
+      const id = node.receipt?.thread_id;
+      if (!id || seen.has(id) || !node.route?.harness_id?.startsWith("ao:")) continue;
+      const name = node.settings?.name || node.settings?.role_name || node.role;
+      seen.set(id, { id, label: node.route.model ? `${name} · ${node.route.model}` : name });
+    }
+  }
+  return [...seen.values()];
+}
 
 /** What a working card is doing now (the workflow's "activity" operation). */
 export type ChatActivity = {

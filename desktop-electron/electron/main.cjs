@@ -1676,8 +1676,12 @@ function registerIpc({ logger, stateStore }) {
   handle("coding-tools:apps:call", (event, input = {}) => {
     if (!appsHost) throw new Error("Apps host is unavailable");
     const passiveAoLayout = input.moduleId === "agent-orchestrator"
-      && ["upstream_bounds", "upstream_hide"].includes(input.operation);
+      && ["upstream_bounds", "upstream_hide", "chat_preview_show", "chat_preview_hide"].includes(input.operation);
     assertFocusedMainWindow(event, !passiveAoLayout && !appsHost.isReadOnly(input.moduleId, input.operation));
+    // A chat's preview is drawn at the pane's CSS bounds, scaled by the page's own zoom.
+    if (input.moduleId === "agent-orchestrator" && input.operation === "chat_preview_show") {
+      input = { ...input, arguments: { ...(input.arguments || {}), zoom: event.sender.getZoomFactor() } };
+    }
     return appsHost.call(input.moduleId, input.operation, input.arguments || {});
   });
 
@@ -2233,7 +2237,7 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:set-preference", (_event, key, value) => {
     const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "autoConnectExistingMcp"
-      || key === "chatAgentTools" || key === "chatAgentDesktopTools" || key === "chatAgentTerminalTools";
+      || key === "chatAgentTools" || key === "chatAgentDesktopTools" || key === "chatAgentTerminalTools" || key === "chatAgentPreviewTools";
     if (!ordinary) throw new Error("Unknown preference");
     // Consent: auto-connecting MCP, and letting chat agents see and drive the screen or run
     // commands, are the user's.
@@ -2633,7 +2637,30 @@ async function start() {
     // server URL and credential across a backend restart.
     if (!chatAgentTools) {
       const { createChatAgentTools } = backendBundles.requireModule(backend, "chat-agent-tools.cjs");
+      const { createChatPreviews } = backendBundles.requireModule(backend, "chat-preview.cjs");
+      // Each chat agent's own browser for previewing its dev server (Settings > "Let chat agents
+      // preview their pages", on by default): loopback pages only, never the app's own services.
+      const portOf = (url) => { try { return Number(new URL(url).port) || null; } catch { return null; } };
+      const appServicePorts = () => [
+        cdpPort, 17891, 17892, 17893, 17894, 17895, chatAgentTools?.servicePort?.(),
+        portOf(headlessHost?.control?.endpoint),
+        (() => { try { return runtimeHost.runtimeConfigSnapshot().config?.port; } catch { return null; } })(),
+        (() => { try { return agentOrchestratorUpstream?.snapshot?.().port; } catch { return null; } })(),
+        (() => { try { return portOf(externalServicesController.cpaConnection()?.baseUrl); } catch { return null; } })(),
+      ].filter((port) => Number.isInteger(port) && port > 0);
+      const chatPreviews = createChatPreviews({
+        createView: (partition) => new WebContentsView({
+          webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: false, backgroundThrottling: false },
+        }),
+        attachView: (view) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.contentView.addChildView(view); },
+        detachView: (view) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.contentView.removeChildView(view); },
+        contentSize: () => (mainWindow && !mainWindow.isDestroyed() ? mainWindow.getContentSize() : [1280, 800]),
+        blockedPorts: appServicePorts,
+        logger,
+      });
       chatAgentTools = createChatAgentTools({
+        previews: chatPreviews,
+        previewEnabled: () => stateStore.read().chatAgentPreviewTools !== false,
         requestHeadless: (endpoint, body, options) => {
           if (!headlessHost) throw new Error("Local Coding Tools runtime is unavailable");
           return headlessHost.request(endpoint, body, options);
