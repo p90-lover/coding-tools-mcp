@@ -208,14 +208,16 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
     session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     session.setPermissionCheckHandler?.(() => false);
     session.on("will-download", (event, item) => { event.preventDefault?.(); item.cancel?.(); });
-    // The app's own services stay unreachable from the page, whoever loads it.
+    // The app's own services stay unreachable from the page, whoever loads it. Matched by port on
+    // any host: a name that resolves to this machine (localtest.me, a rebinding domain, 0.0.0.0,
+    // [::ffff:127.0.0.1]) reaches the same listener as localhost does.
     session.webRequest.onBeforeRequest({ urls: ["<all_urls>"] }, (details, callback) => {
       let cancel = false;
       try {
         const url = new URL(details.url);
         cancel = (url.protocol === "http:" || url.protocol === "https:" || url.protocol === "ws:" || url.protocol === "wss:")
-          && isLoopbackHost(url.hostname) && blocked().includes(Number(url.port || (url.protocol === "https:" || url.protocol === "wss:" ? 443 : 80)));
-      } catch { cancel = false; }
+          && blocked().includes(Number(url.port || (url.protocol === "https:" || url.protocol === "wss:" ? 443 : 80)));
+      } catch { cancel = true; }
       if (cancel) remember(preview, preview.failures, MAX_FAILURES, { url: details.url.slice(0, 300), error: "blocked: an app service port" });
       callback({ cancel });
     });

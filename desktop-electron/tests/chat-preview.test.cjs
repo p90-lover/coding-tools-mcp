@@ -131,6 +131,10 @@ test("the page stays away from the app's services and anything of the user's, an
   assert.equal(cancel, true, "a request to an app port is cancelled");
   session.handlers.before({ url: "ws://localhost:4000/socket" }, (answer) => { cancel = answer.cancel; });
   assert.equal(cancel, true, "a websocket too");
+  for (const rebound of ["http://localtest.me:4000/", "http://0.0.0.0:4000/", "http://[::ffff:127.0.0.1]:4000/", "http://2130706433:4000/"]) {
+    session.handlers.before({ url: rebound }, (answer) => { cancel = answer.cancel; });
+    assert.equal(cancel, true, `${rebound}: any name for this machine reaches the same listener`);
+  }
   session.handlers.before({ url: "http://localhost:5173/src/main.ts" }, (answer) => { cancel = answer.cancel; });
   assert.equal(cancel, false);
   let granted;
