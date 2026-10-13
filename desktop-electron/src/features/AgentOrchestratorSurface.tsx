@@ -11,7 +11,7 @@ import { ProjectEditDialog } from "./ProjectEditDialog";
 import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
-import { GOAL_SUMMARY, chatArchived, chatList, chatMarkdown, chatMessagesFromDescription, chatTurns, dependencyInstallNote, goalElapsed, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatGoal, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
+import { GOAL_SUMMARY, chatArchived, chatList, chatMarkdown, chatMessagesFromDescription, chatTurns, dependencyInstallNote, goalElapsed, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
 import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { createLatestConfigQueue } from "./ao-config";
 import {
@@ -1471,6 +1471,12 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const openFolder = (item: ThreadWorkspace) => {
     if (item.path) void window.codexWebLauncher?.openFolder?.(item.path).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
   };
+  // A finished card's thinking and tool calls, read back from AO when its folded work is opened.
+  const loadChatWork = useCallback(async (runId: string, nodeId: string) => {
+    if (!workspaceId) return [];
+    const result = await moduleCall("turn_timeline", { workspaceId, runId, nodeId }) as { timeline?: ChatLiveItem[] };
+    return Array.isArray(result?.timeline) ? result.timeline : [];
+  }, [workspaceId]);
   const restartChatRun = (runId: string) => void run("restart-run", async () => {
     // Retry and Restart run on the model picked now, as the next message would.
     const result = await moduleCall("restart_run", { workspaceId, runId, ...executableArg(),
@@ -1790,7 +1796,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
                 runs={missions.map(mission => ({...mission, replaces_run_id: taskLifecycle.flatMap(item=>item.reconfigure || []).find(intent=>intent.replacement_run_id===mission.id)?.previous_run_id}))}
                 tasks={allTasks} selectedTaskId={chatTaskId ?? ""}
                 projectName={workspaces.find((item) => item.id === workspaceId)?.name} projectBranch={projectBranch}
-                stop={stopChatRun} restart={restartChatRun}
+                stop={stopChatRun} restart={restartChatRun} loadWork={loadChatWork}
                 thread={chatTaskId ? { newChat: startNewChat, rename: (title) => renameChat(chatTaskId, title), archive: () => missionAction(chatTaskId, "archive"),
                   fork: (turnIndex) => forkChat(chatTaskId, turnIndex), rewind: (turnIndex) => rewindChat(chatTaskId, turnIndex),
                   deleteMessage: (messageIndex, runIds) => deleteChatMessage(chatTaskId, messageIndex, runIds),

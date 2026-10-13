@@ -45,6 +45,7 @@ const SPECS = Object.freeze({
   restart_run: { readOnly: false, description: "Stop a stuck or settled mission (kept in history) and start a fresh run of the same task with the current team." },
   control_run: { readOnly: false, description: "Pause queued work, resume a paused mission, or stop only that mission's owned harnesses from the local GUI." },
   activity: { readOnly: true, description: "Read what each working card of a run is doing now: start time, current step and last activity." },
+  turn_timeline: { readOnly: true, description: "Read a finished card's thinking, tool calls (with their arguments and output) and messages back from its AO session." },
   run_status: { readOnly: true, description: "Read background AO run progress and held state." },
   approve_harness: { readOnly: false, description: "Respond to one visible native consent request with its typed decision and exact thread/turn scope after local confirmation; legacy Allow/Deny remains supported." },
   next: { readOnly: true, description: "Return the next actionable plan clause for the active Codex harness." },

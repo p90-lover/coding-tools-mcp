@@ -240,17 +240,58 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     ];
     return items.sort((a, b) => a.sequence - b.sequence).slice(-40);
   }
+  /**
+   * A finished turn's transcript, read back from AO for the chat's folded "Worked" row. AO keeps
+   * the whole conversation; an earlier turn is found by paging back (beforeSequence) a few pages,
+   * stopping once a page reaches a turn before it.
+   */
+  async function pastTurnTimeline(id, turnId, pages = 6) {
+    let conversation = await conversationTail(id, [60, 20]);
+    const merged = { messages: [], activities: [] };
+    for (let page = 0; conversation && page < pages; page += 1) {
+      const messages = Array.isArray(conversation.messages) ? conversation.messages : [];
+      const activities = Array.isArray(conversation.activities) ? conversation.activities : [];
+      merged.messages.push(...messages);
+      merged.activities.push(...activities);
+      const oldest = [...messages, ...activities].sort((a, b) => (Number(a.sequence) || 0) - (Number(b.sequence) || 0))[0];
+      const seen = merged.messages.some(entry => entry.turnId === turnId) || merged.activities.some(entry => entry.turnId === turnId);
+      if (seen && oldest && oldest.turnId !== turnId) break;
+      if (!conversation.hasMoreBefore || !(Number(conversation.oldestSequence) > 0)) break;
+      conversation = await internalApi("GET",
+        `/api/v1/sessions/${sessionId(id)}/conversation?limit=60&beforeSequence=${Number(conversation.oldestSequence)}`).catch(() => null);
+    }
+    return turnTimeline(merged, turnId);
+  }
   // claude-agent-acp reports every tool call, its own Read/Grep/PowerShell included, as AO's
   // "mcp_tool"; the ACP tool kind says what it did. A real MCP server's tool is named mcp__<server>__.
   const TOOL_LABELS = { read: "Read", search: "Search", edit: "Edit", delete: "Delete", move: "Move", fetch: "Fetch",
     think: "Thought", switch_mode: "Plan", execute: "Command", other: "Tool" };
   function toolLabel(detail, summary) {
-    const name = String(detail?.toolName || "");
+    // AO's ACP activities name the tool providerToolName.
+    const name = String(detail?.toolName || detail?.providerToolName || "");
     if (/^mcp__(?!acp__)/.test(name) || /^mcp__(?!acp__)/.test(summary)) return "MCP";
     return TOOL_LABELS[detail?.toolKind] || "Tool";
   }
   /** How long AO's chat drivers wait for a tool approval before giving up on it (approvalWait). */
   const APPROVAL_WAIT_MS = 30 * 60_000;
+  /**
+   * What a tool call did, for the row that opens on it (as Claude Code's do): the agent's own
+   * one-line description, its arguments as JSON (without the command and description, which the row
+   * shows already) and what came back. Capped: every working card's timeline is polled.
+   */
+  function toolDetails(detail, input) {
+    const description = typeof input.description === "string" ? input.description.trim() : "";
+    const { command: _command, description: _description, ...rest } = input;
+    const args = Object.keys(rest).length ? utf8Prefix(JSON.stringify(rest, null, 2), 1000) : "";
+    const output = typeof detail.output === "string" && detail.output.trim() ? detail.output
+      : (Array.isArray(detail.content) ? detail.content : [])
+        .map(entry => entry?.content?.text).filter(text => typeof text === "string").join("\n");
+    return {
+      ...(description ? { description: utf8Prefix(description, 200) } : {}),
+      ...(args ? { input: args } : {}),
+      ...(output.trim() ? { output: utf8Prefix(output.trim(), 2000) } : {}),
+    };
+  }
   function timelineActivity(activity) {
     const detail = activity.detail && typeof activity.detail === "object" ? activity.detail : {};
     const input = detail.input && typeof detail.input === "object" ? detail.input : {};
@@ -258,10 +299,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     const summary = String(activity.summary || "");
     // A shell call (Bash, PowerShell) shows as the command it ran, like Codex.
     if (activity.activityKind === "mcp_tool" && typeof input.command === "string" && input.command.trim()) {
-      return { ...base, kind: "command", text: utf8Prefix(input.command.trim(), 400) };
+      return { ...base, kind: "command", text: utf8Prefix(input.command.trim(), 400), ...toolDetails(detail, input) };
     }
     if (activity.activityKind === "mcp_tool") {
-      return { ...base, kind: "tool", label: toolLabel(detail, summary), text: utf8Prefix(summary || detail.toolKind || "tool", 400) };
+      return { ...base, kind: "tool", label: toolLabel(detail, summary), text: utf8Prefix(summary || detail.toolKind || "tool", 400),
+        ...toolDetails(detail, input) };
     }
     // The model's reasoning summary: AO streams it into the activity's text (detail.text); its
     // summary is only the word "Reasoning".
@@ -606,6 +648,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       if (typeof requestId !== "string" || !requestId || typeof decisionId !== "string" || !decisionId) throw new Error("Choose an offered decision");
       await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/approvals/${encodeURIComponent(requestId)}/resolve`, { decisionId });
       return { ok: true };
+    },
+    /** A finished turn's reasoning, tool calls and messages (the chat's "Worked" row, opened). */
+    async timeline(id, turnId) {
+      if (typeof turnId !== "string" || !turnId) return [];
+      return pastTurnTimeline(id, turnId);
     },
     async interrupt(id) {
       await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/interrupt`, {}).catch(() => undefined);

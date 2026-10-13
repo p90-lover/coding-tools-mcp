@@ -255,6 +255,32 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-live-item code { min-width: 0; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .cx-live-text { min-width: 0; overflow-wrap: anywhere; }
 @media (prefers-reduced-motion: reduce) { .cx-live-item.is-running .cx-live-label { animation: none; } }
+/* Thinking reads as an aside, as Claude Code sets it: italic and quieter than the tool calls. */
+.cx-live-item.kind-reasoning .cx-live-text { font-style: italic; }
+.cx-live-item.kind-reasoning .cx-reasoning { width: 100%; }
+.cx-reasoning summary { margin: 0 -6px; padding: 2px 6px; border-radius: 6px; }
+.cx-reasoning summary:hover { background: var(--cx-hover); color: var(--color-text-primary); }
+/* A tool call: a dot for how it ended, its name, one line; opening shows what it ran and got back. */
+.cx-live-item.kind-command, .cx-live-item.kind-tool { display: block; }
+.cx-tool summary, .cx-tool-row { display: flex; align-items: baseline; gap: 8px; min-width: 0; margin: 0 -6px; padding: 2px 6px; border-radius: 6px; list-style: none; }
+.cx-tool summary { cursor: pointer; }
+.cx-tool summary::-webkit-details-marker { display: none; }
+.cx-tool summary:hover { background: var(--cx-hover); color: var(--color-text-primary); }
+.cx-tool .cx-live-label { color: var(--color-text-primary); text-transform: none; }
+.cx-tool .cx-live-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; }
+.cx-tool[open] .cx-live-text { white-space: normal; }
+.cx-tool-dot { flex: 0 0 auto; align-self: center; width: 7px; height: 7px; border-radius: 50%; background: var(--ao-muted); }
+.cx-tool.tone-ok .cx-tool-dot { background: var(--ao-green); }
+.cx-tool.tone-failed .cx-tool-dot { background: var(--ao-red); }
+.cx-tool.tone-failed .cx-live-label { color: var(--ao-red); }
+.cx-tool.tone-running .cx-tool-dot { animation: cx-pulse 1.4s ease-in-out infinite; }
+.cx-tool-body { display: grid; gap: 4px; margin: 4px 0 6px 15px; }
+.cx-tool-io { max-height: 280px; margin: 0; padding: 8px 10px; overflow: auto; border: 1px solid var(--ao-line); border-radius: 8px;
+  background: var(--cx-tray, rgb(127 127 127 / 6%)); color: var(--color-text-primary); font-size: 12px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cx-tool-io.is-output { color: var(--color-text-secondary); }
+.cx-tool.tone-failed .cx-tool-io.is-output { color: var(--ao-red); }
+.cx-tool-empty { margin: 2px 0; color: var(--ao-muted); font-size: 12px; font-style: italic; }
+@media (prefers-reduced-motion: reduce) { .cx-tool.tone-running .cx-tool-dot { animation: none; } }
 
 .cx-answer { display: grid; gap: 4px; }
 .cx-answer-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--ao-muted); font-size: 12px; }

@@ -828,6 +828,30 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     return text.slice(0, limit);
   }
 
+  /**
+   * A role's reasoning, tool calls and messages for the chat, every field through publicText (a
+   * tool's output can carry a key). Reasoning keeps its full summary: its first line is the headline,
+   * the rest opens under it.
+   */
+  function publicTimeline(items) {
+    return (Array.isArray(items) ? items : []).slice(-40).map(item => ({
+      id: publicText(item.id, 80), kind: publicText(item.kind, 32), status: publicText(item.status, 32),
+      text: publicText(item.text, item.kind === "message" || item.kind === "reasoning" ? 4096 : 400),
+      ...(item.label ? { label: publicText(item.label, 40) } : {}),
+      ...(item.description ? { description: publicText(item.description, 200) } : {}),
+      ...(item.input ? { input: publicText(item.input, 1000) } : {}),
+      ...(item.output ? { output: publicText(item.output, 2000) } : {}),
+    }));
+  }
+
+  /** turn_timeline: a finished card's work, read back from its AO session when the chat opens it. */
+  async function turnTimeline({ workspaceId, runId, nodeId } = {}) {
+    const { node } = await savedNode(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80));
+    const session = node?.receipt?.thread_id, turnId = node?.receipt?.turn_id;
+    if (!node || !externalAgent(node) || !session || !turnId) return { ok: true, timeline: [] };
+    return { ok: true, timeline: publicTimeline(await harnessService().timeline(session, turnId)) };
+  }
+
   const activityFrames = new Map();
   const activityAttempt = (workspace, run, node) => JSON.stringify([
     workspace, run, node.id, node.receipt?.request_key || node.request_key || null,
@@ -880,9 +904,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
                   step: publicText(observed.activity || observed.turnState || "working", 120),
                   output: currentTurn ? publicText(observed.liveOutput ?? observed.answer) : "",
                   // The role's reasoning, tool calls and messages, as Codex shows them while it works.
-                  timeline: currentTurn && Array.isArray(observed.timeline) ? observed.timeline.slice(-40).map(item => ({
-                    id: publicText(item.id, 80), kind: publicText(item.kind, 32), status: publicText(item.status, 32),
-                    text: publicText(item.text, item.kind === "message" ? 4096 : 400) })) : [],
+                  timeline: currentTurn ? publicTimeline(observed.timeline) : [],
                   error: publicText(observed.error, 500) };
               }
             } else {
@@ -2562,6 +2584,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "chat_send": return chatSend(args);
       case "chat_steer": return chatSteer(args);
       case "chat_prewarm": return chatPrewarm(args);
+      case "turn_timeline": return turnTimeline(args);
       case "codex_executable": return { ok: true, executable: findCodexExecutable() };
       case "inspect": return { ok: true, status: "graph_ready", source: "coding-tools-plan", plannerRoute: "webgpt-on-codex-required", execution: "not_connected" };
       case "board": return board(args);

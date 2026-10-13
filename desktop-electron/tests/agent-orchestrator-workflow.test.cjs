@@ -1815,6 +1815,39 @@ test("activity reports each working card's runtime and current step without adva
   assert.ok(calls.every((endpoint) => endpoint === "/api/v1/ao/read" || endpoint === "/api/v1/ao/harness/status"), "read-only calls only");
 });
 
+test("a finished AO card's work is read back for the chat (turn_timeline), redacted, with labels, details and full reasoning", async () => {
+  const asked = [];
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna" };
+  const finished = { id: "p", role: "planner", state: "finished", route, receipt: { status: "completed", thread_id: "sess-1", turn_id: "turn-1" } };
+  const native = { id: "n", role: "worker", state: "finished", route: { harness_id: "codex-native", model: "gpt-5" }, receipt: { thread_id: "thread-9", turn_id: "t" } };
+  const longThought = `**Checking the route**\n${"x".repeat(1000)}`;
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [finished, native] }] };
+      throw new Error(`unexpected ${endpoint}`);
+    },
+    aoHarness: { timeline: async (session, turnId) => {
+      asked.push([session, turnId]);
+      return [
+        { id: "r", kind: "reasoning", status: "completed", text: longThought },
+        { id: "c", kind: "command", status: "failed", text: "curl -H 'Authorization: Bearer SECRET_TOKEN' x", description: "Probe the API", output: "denied Bearer SECRET_TOKEN" },
+        { id: "m", kind: "tool", status: "completed", label: "MCP", text: "mcp__coding-tools__read_file", input: "{\"path\":\"main.py\"}", output: "ok" },
+      ];
+    } },
+    confirm: async () => true,
+  });
+  const { timeline } = await workflow.call("turn_timeline", { workspaceId: "ws-1", runId: "run-1", nodeId: "p" });
+  assert.deepEqual(asked, [["sess-1", "turn-1"]], "its own session and turn");
+  assert.equal(timeline[0].text, longThought, "reasoning keeps its whole summary, not the first 400 characters");
+  assert.equal(timeline[1].description, "Probe the API");
+  assert.doesNotMatch(JSON.stringify(timeline), /SECRET_TOKEN/, "arguments and output are redacted like the rest");
+  assert.equal(timeline[2].label, "MCP", "the label reaches the chat");
+  assert.equal(timeline[2].input, "{\"path\":\"main.py\"}");
+  assert.deepEqual((await workflow.call("turn_timeline", { workspaceId: "ws-1", runId: "run-1", nodeId: "n" })).timeline, [],
+    "a native Codex card has no AO session to read");
+  assert.equal(asked.length, 1);
+});
+
 test("AO chat reads native managed capability for exactly one consented node", async () => {
   const calls = [];
   const capability = { supported: true, profiles: [{ id: ":workspace", allowed: true }],
