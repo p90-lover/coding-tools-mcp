@@ -770,6 +770,17 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [projectBranch, setProjectBranch] = useState("");
   // /goal state per chat, from the bridge, and /plan (a composer mode, kept for this session).
   const [goals, setGoals] = useState<Record<string, ChatGoal>>({});
+  // A model picked while the open chat's goal runs is used from its next round on (the running
+  // round keeps the model it started with; the composer says so).
+  const goalRouteKey = chatTaskId && composerMode === "single" && goals[chatTaskId]?.status === "active"
+    ? JSON.stringify([workspaceId, chatTaskId, singleRoute]) : "";
+  useEffect(() => {
+    if (!goalRouteKey || !chatTaskId || !singleRoute.model || singleRoute.model === "default") return;
+    const timer = setTimeout(() => {
+      void moduleCall("chat_goal", { workspaceId, taskId: chatTaskId, action: "route", singleRoute: { ...singleRoute } as unknown as JsonObject }).catch(() => undefined);
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [goalRouteKey]);
   const [planMode, setPlanMode] = useState(false);
   useEffect(() => {
     setProjectBranch("");
@@ -1461,7 +1472,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
     if (item.path) void window.codexWebLauncher?.openFolder?.(item.path).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
   };
   const restartChatRun = (runId: string) => void run("restart-run", async () => {
-    const result = await moduleCall("restart_run", { workspaceId, runId, ...executableArg() });
+    // Retry and Restart run on the model picked now, as the next message would.
+    const result = await moduleCall("restart_run", { workspaceId, runId, ...executableArg(),
+      ...(composerMode === "single" && singleRoute.model && singleRoute.model !== "default" ? { singleRoute: { ...singleRoute } as unknown as JsonObject } : {}) });
     if (result.cancelled) return;
     if (typeof result.runId === "string") setSelectedRunId(result.runId);
     if (result.status === "failed" && typeof result.detail === "string") setError(result.detail);

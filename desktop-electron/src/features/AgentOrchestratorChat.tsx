@@ -54,13 +54,29 @@ function stepTone(step: ChatStep): string {
   return step.state;
 }
 
+/**
+ * The model's reasoning summary, as Codex shows it: its first line (a short bold title such as
+ * "**Inspecting the register route**") as one progress line, the rest a click away.
+ */
+function ReasoningItem({ item }: { item: ChatLiveItem }) {
+  const lines = item.text.trim().split(/\r?\n/);
+  if (!lines[0]) return <span className="cx-live-label">{item.status === "running" ? "Thinking…" : "Thought"}</span>;
+  const label = item.status === "running" ? "Thinking" : "Thought";
+  const headline = lines[0].replace(/^\s*\*\*(.+?)\*\*\s*$/, "$1").replace(/[*_`]/g, "").trim();
+  const rest = lines.slice(1).join("\n").trim();
+  return rest
+    ? <details className="cx-reasoning"><summary><span className="cx-live-label">{label}</span><span className="cx-live-text">{headline}</span></summary>
+      <div className="cx-reasoning-body"><ChatMarkdown text={rest} /></div></details>
+    : <><span className="cx-live-label">{label}</span><span className="cx-live-text">{headline}</span></>;
+}
+
 /** A working role's turn so far, as Codex shows it: thinking, tool calls and streamed messages. */
 function LiveTimeline({ items }: { items: ChatLiveItem[] }) {
   return <ol className="cx-live">
     {items.map((item) => <li key={item.id} className={`cx-live-item kind-${item.kind} is-${item.status || "done"}`}>
       {item.kind === "steer" ? <div className="cx-user cx-steer"><div className="cx-bubble"><p>{item.text}</p></div></div>
         : item.kind === "message" ? <ChatMarkdown text={item.text} />
-        : item.kind === "reasoning" ? <span className="cx-live-label">{item.status === "running" ? "Thinking…" : "Thought"}</span>
+        : item.kind === "reasoning" ? <ReasoningItem item={item} />
         : item.kind === "command" ? <><span className="cx-live-label">{item.status === "running" ? "Running" : "Ran"}</span><code>{item.text}</code></>
         : <><span className="cx-live-label">{item.label ?? item.kind.replace(/_/g, " ")}</span><span className="cx-live-text">{item.text}</span></>}
     </li>)}
@@ -865,6 +881,15 @@ export function AgentOrchestratorChat({
           {commands?.planMode ? <span className="cx-plan-chip" role="status">Plan mode
             <button type="button" aria-label="Turn plan mode off" title="Turn plan mode off" onClick={() => commands.setPlanMode(false)}><Icon name="close" width="11" height="11" /></button></span> : null}
         </div> : null}
+        {(() => {
+          // A turn keeps the model it started with; say so when the picker now shows another, so the
+          // switch is never silent: the next message (and a retry) uses the new one.
+          const lead = latest?.nodes.find((node) => node.role === "planner") ?? latest?.nodes[0];
+          const running = lead?.route?.model;
+          const picked = composer?.mode === "single" ? composer.route?.model : undefined;
+          return runOpen && latest?.execution_mode === "single" && running && picked && picked !== running
+            ? <p className="cx-route-note" role="status">This turn is running on <b>{running}</b>; your next message uses <b>{picked}</b>.</p> : null;
+        })()}
         <form className="cx-composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}
           onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
           onDrop={(event) => { if (event.dataTransfer.files.length) { event.preventDefault(); void addFiles(event.dataTransfer.files); } }}>

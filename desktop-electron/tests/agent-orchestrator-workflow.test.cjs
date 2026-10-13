@@ -3116,3 +3116,29 @@ test("an AO request can be answered with any decision the agent offered, and onl
   await assert.rejects(workflow.call("approve_harness", { ...input, decisionId: "bypassPermissions" }), /did not offer that answer/);
   await assert.rejects(workflow.call("approve_harness", { ...input, decisionId: "plan", allow: true }), /typed native reply or legacy Allow\/Deny/);
 });
+
+test("a model picked mid-chat is what Retry and the next goal round run on, never the earlier run's model", async () => {
+  const oldRoute = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
+  const picked = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/deepseek-v4", permission_profile: ":ao-default", effort: "high" };
+  // Retry / Restart with the picker's route.
+  const mission = { id: "old-single", project_id: "task-1", workspace_id: "ws-1", revision: 6, cancelled: false, execution_mode: "single",
+    nodes: [{ id: "attempt", state: "finished", route: oldRoute, receipt: { status: "finished", answer: "old" } }] };
+  const world = chatWorld({ runs: [mission], tasks: [{ id: "task-1", title: "Single", description: "Task", state: "backlog", clauses: [] }] });
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/Codex/codex.exe",
+    resolveHarness: async () => { throw new Error("fixture stop before dispatch"); } });
+  await workflow.call("restart_run", { workspaceId: "ws-1", runId: "old-single", singleRoute: picked });
+  assert.deepEqual(world.updates.find(change => change.operation === "create_from_team").single_route, picked, "Retry runs on the model picked now");
+  await assert.rejects(workflow.call("restart_run", { workspaceId: "ws-1", runId: "old-single", singleRoute: { model: "default" } }), /explicit model route/);
+
+  // A goal: the model picked while it runs takes over from the next round.
+  const { world: goalWorld, workflow: goalFlow } = await goalChat();
+  goalWorld.runs.push({ id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route: oldRoute, receipt: { answer: "Half done.\nGOAL: CONTINUE — more" } }] });
+  await goalFlow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "route", singleRoute: picked });
+  const before = goalWorld.updates.length;
+  await goalFlow.goalAfterRun("ws-1", "r1", "finished", null);
+  const next = goalWorld.updates.slice(before);
+  assert.equal(next.length, 1);
+  assert.equal(next[0].execution_mode, "single");
+  assert.deepEqual(next[0].single_route, picked, "the next round uses the newly picked model");
+});

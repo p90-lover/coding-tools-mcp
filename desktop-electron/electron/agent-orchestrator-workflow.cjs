@@ -1902,7 +1902,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
 
   // Restart = a fresh run of the same task with the current team; the old run stays in history.
-  async function restartRun({ workspaceId, runId, executable } = {}) {
+  /** A single-model route from the renderer's picker, checked as chat_send checks it; returns a copy. */
+  function checkedSingleRoute(route) {
+    if (!route || typeof route !== "object" || Array.isArray(route)
+      || Object.keys(route).some(key => !SINGLE_ROUTE_FIELDS.includes(key))
+      || typeof route.model !== "string" || !route.model || route.model === "default") {
+      throw new Error("Choose one explicit model route without saved-team fields");
+    }
+    clean(route.model, 128); clean(route.harness_id, 128); clean(route.permission_profile, 128);
+    return { ...route };
+  }
+  async function restartRun({ workspaceId, runId, executable, singleRoute: picked } = {}) {
     const id = clean(workspaceId, 128);
     const previous = clean(runId, 80);
     const selectedExecutable = codexExecutable(executable);
@@ -1914,7 +1924,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const team = mission.team?.id ? (saved.teams ?? [saved.team]).find(item => item?.id === mission.team.id) : saved.team;
     if (!single && (!team?.id || !Number.isSafeInteger(team.revision))) throw new Error("Save the selected team for this workspace first");
     let singleRoute;
-    if (single) {
+    // The model picked now, when the chat sends one: Retry and Restart then run on it, as the next
+    // message would, instead of silently keeping the model the earlier run used.
+    const chosen = picked === undefined ? null : checkedSingleRoute(picked);
+    if (single && chosen) singleRoute = chosen;
+    else if (single) {
       const node = mission.nodes[0];
       if (!node?.route) throw new Error("Single model route unavailable");
       singleRoute = { ...node.route };
@@ -2096,9 +2110,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const SINGLE_ROUTE_FIELDS = ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile", "approval_policy", "approvals_reviewer", "effort", "context_window"];
   async function continueGoal(id, task, goal, previous) {
     const round = goal.round + 1;
-    const selection = previous?.execution_mode === "single" && previous.nodes?.[0]?.route
-      ? { executionMode: "single", singleRoute: Object.fromEntries(Object.entries(previous.nodes[0].route).filter(([name, value]) => SINGLE_ROUTE_FIELDS.includes(name) && value !== undefined && value !== null)) }
-      : {};
+    // A model picked while the goal ran (chat_goal "route") takes over from the next round on.
+    const selection = goal.route && typeof goal.route === "object"
+      ? { executionMode: "single", singleRoute: { ...goal.route } }
+      : previous?.execution_mode === "single" && previous.nodes?.[0]?.route
+        ? { executionMode: "single", singleRoute: Object.fromEntries(Object.entries(previous.nodes[0].route).filter(([name, value]) => SINGLE_ROUTE_FIELDS.includes(name) && value !== undefined && value !== null)) }
+        : {};
     goals.update(id, task, { round, note: "" });
     try {
       // Started in the background: a failed start settles the run, which marks the goal stalled.
@@ -2140,15 +2157,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
 
   // /goal clear | pause | resume (setting one goes through chat_send with `goal`).
-  async function chatGoal({ workspaceId, taskId, action, objective } = {}) {
+  async function chatGoal({ workspaceId, taskId, action, objective, singleRoute } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
     const goal = goals.get(id, task);
     if (action === "clear") return { ok: true, cleared: goals.clear(id, task) };
     if (!goal) throw new Error("No goal is currently set");
+    // The model picker changed while the goal runs: its next round uses the new model.
+    if (action === "route") return { ok: true, goal: goals.update(id, task, { route: checkedSingleRoute(singleRoute) }) };
     if (action === "pause") return { ok: true, goal: goals.update(id, task, { status: "paused", note: "" }) };
     // Edit goal: a new objective for the rounds still to come; the running round is left alone.
     if (action === "edit") return { ok: true, goal: goals.update(id, task, { objective: cleanObjective(objective) }) };
-    if (action !== "resume") throw new Error("Choose clear, pause, resume or edit");
+    if (action !== "resume") throw new Error("Choose clear, pause, resume, edit or route");
     // Resuming a goal that ran out of rounds allows it as many more rounds again.
     const rounds = goal.status === "limited" ? goal.round + goal.rounds : goal.rounds;
     goals.update(id, task, { status: "active", rounds, note: "" });
