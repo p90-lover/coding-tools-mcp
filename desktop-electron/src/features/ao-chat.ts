@@ -34,7 +34,18 @@ export function chatAgentSessions(runs: { nodes: ChatNode[] }[]): ChatAgentSessi
       seen.set(id, { id, label: node.route.model ? `${name} · ${node.route.model}` : name });
     }
   }
-  return [...seen.values()];
+  // The same agent in several sessions (a follow-up that started a fresh one): the newest is the
+  // current one, the others are told apart by how far back they are.
+  const sessions = [...seen.values()];
+  const repeats = new Map<string, number>();
+  for (const session of sessions) repeats.set(session.label, (repeats.get(session.label) ?? 0) + 1);
+  const seenLabel = new Map<string, number>();
+  return sessions.map((session) => {
+    if ((repeats.get(session.label) ?? 0) < 2) return session;
+    const index = seenLabel.get(session.label) ?? 0;
+    seenLabel.set(session.label, index + 1);
+    return { ...session, label: `${session.label} · ${index ? `earlier ${index}` : "current"}` };
+  });
 }
 
 /** What a working card is doing now (the workflow's "activity" operation). */

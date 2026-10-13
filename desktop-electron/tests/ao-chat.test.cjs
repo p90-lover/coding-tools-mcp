@@ -608,3 +608,20 @@ test("the chat's details panel counts its agents by state and names its approval
   assert.equal(chat.chatApprovalMode({ approval_policy: "never" }), "Full access, no prompts");
   assert.equal(chat.chatApprovalMode(null), "Default");
 });
+
+test("a chat's AO agent sessions for its Preview and Terminal panes: newest first, each once, repeats told apart", () => {
+  const card = (id, session, extra = {}) => node(id, "planner", "finished", { route: { harness_id: "ao:claude-code", model: "cpa/gpt-6-luna" }, receipt: { thread_id: session }, ...extra });
+  const sessions = chat.chatAgentSessions([
+    run("r1", "t", [card("a", "s1")]),
+    run("r2", "t", [card("a", "s2")]),
+    run("r3", "t", [card("a", "s2")]),
+    run("r4", "t", [card("a", "s3"), node("n", "worker", "finished", { route: { harness_id: "native-codex", model: "m" }, receipt: { thread_id: "codex-thread" } })]),
+  ]);
+  assert.deepEqual(plain(sessions), [
+    { id: "s3", label: "planner · cpa/gpt-6-luna · current" },
+    { id: "s2", label: "planner · cpa/gpt-6-luna · earlier 1" },
+    { id: "s1", label: "planner · cpa/gpt-6-luna · earlier 2" },
+  ], "a native Codex thread is not an AO session");
+  assert.deepEqual(plain(chat.chatAgentSessions([run("r1", "t", [card("a", "s1", { settings: { name: "Builder" } })])])),
+    [{ id: "s1", label: "Builder · cpa/gpt-6-luna" }], "a single session keeps its plain name");
+});
