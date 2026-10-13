@@ -22,6 +22,7 @@ import {
   startLauncherManualTurn,
   waitForLauncherManualSent,
   waitForLauncherManualTerminal,
+  waitForLauncherBrowserHostDescriptor,
 } from "../src/launcher-browser-host";
 import type { Browser, BrowserContext, Page } from "playwright-core";
 
@@ -75,6 +76,33 @@ test("launcher descriptor is owner-only, loopback-only, and process-bound", () =
     chmodSync(path, 0o644);
     expect(() => readLauncherBrowserHostDescriptor(path)).toThrow("unsafe permissions");
   }
+});
+
+test("a turn waits for the app's descriptor while it restarts, and only then", async () => {
+  const path = descriptorFile();
+  const contents = readFileSync(path, "utf8");
+  rmSync(path);
+  // The app is restarting: the descriptor appears on the third look.
+  let looks = 0;
+  const waited = await waitForLauncherBrowserHostDescriptor(path, {
+    intervalMs: 1,
+    sleep: async () => { looks += 1; if (looks === 2) writeFileSync(path, contents, { mode: 0o600 }); },
+  });
+  expect(waited.pid).toBe(process.pid);
+  expect(looks).toBe(2);
+
+  // It never comes back: the turn fails after the wait, saying so.
+  rmSync(path);
+  let clock = 0;
+  await expect(waitForLauncherBrowserHostDescriptor(path, {
+    timeoutMs: 1_000, now: () => clock, sleep: async () => { clock += 500; },
+  })).rejects.toThrow(/descriptor is missing.*waited 1 s for Coding Tools to start again/);
+
+  // A broken descriptor is not a restart: it fails at once.
+  writeFileSync(path, "{not json", { mode: 0o600 });
+  let slept = 0;
+  await expect(waitForLauncherBrowserHostDescriptor(path, { sleep: async () => { slept += 1; } })).rejects.toThrow("invalid JSON");
+  expect(slept).toBe(0);
 });
 
 test("launcher turn control sends authenticated lifecycle events", async () => {

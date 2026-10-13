@@ -179,6 +179,49 @@ export function readLauncherBrowserHostDescriptor(configuredPath: string): Launc
   return descriptor;
 }
 
+/** How long a turn waits for the app to come back while it restarts (an update installs). */
+export const LAUNCHER_RESTART_WAIT_MS = 120_000;
+
+/**
+ * The descriptor, waiting while the app restarts. The app removes its descriptor when it quits and
+ * writes a new one once its browser is up again, so for the length of an update a turn would find
+ * it missing (or naming the old, exited process) and fail at once; it waits for the new one
+ * instead, up to `timeoutMs`. Any other problem with the descriptor fails at once.
+ */
+export async function waitForLauncherBrowserHostDescriptor(
+  configuredPath: string,
+  {
+    timeoutMs = LAUNCHER_RESTART_WAIT_MS,
+    intervalMs = 500,
+    now = Date.now,
+    sleep = (ms: number) => new Promise<void>(resolveSleep => setTimeout(resolveSleep, ms)),
+    signal,
+  }: {
+    timeoutMs?: number;
+    intervalMs?: number;
+    now?: () => number;
+    sleep?: (ms: number) => Promise<void>;
+    signal?: AbortSignal;
+  } = {},
+): Promise<LauncherBrowserHostDescriptor> {
+  const deadline = now() + timeoutMs;
+  for (;;) {
+    try {
+      return readLauncherBrowserHostDescriptor(configuredPath);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const restarting = /descriptor is missing|host process is not running/.test(message);
+      if (!restarting || signal?.aborted || now() >= deadline) {
+        if (restarting && !signal?.aborted && timeoutMs > 0) {
+          throw new Error(`${message} (waited ${Math.round(timeoutMs / 1000)} s for Coding Tools to start again)`);
+        }
+        throw error;
+      }
+    }
+    await sleep(intervalMs);
+  }
+}
+
 async function assertCdpReady(descriptor: LauncherBrowserHostDescriptor, timeoutMs: number): Promise<void> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
