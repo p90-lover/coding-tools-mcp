@@ -476,3 +476,16 @@ test("while the agent waits on a request, a typed message is queued, never steer
   assert.deepEqual(steered, [], "the message never reaches the agent as a steer");
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0, "nor as a send into the busy turn: it is queued");
 });
+
+test("a single-model chat shows its finished work unfolded; a Team chat folds the workers but always shows the answer", () => {
+  const cards = () => [node("p", "planner", "finished", { receipt: { answer: "plan" } }),
+    node("rev", "reviewer", "finished", { receipt: { answer: "All done", verdict: "APPROVED" } })];
+  const steps = (view) => walk(view).some((element) => element.type === "ol" && element.props?.className === "cx-steps");
+  const answer = (view) => walk(view).some((element) => String(element.props?.className || "").startsWith("cx-answer"));
+  const team = mount(base({ selectedTaskId: "t", runs: [run("r1", "t", cards())] }).props).render();
+  assert.equal(steps(team), false, "a Team chat folds the workers' activity");
+  assert.ok(answer(team), "the Team chat's answer still shows");
+  const single = mount(base({ selectedTaskId: "t", runs: [run("r1", "t", cards(), { execution_mode: "single" })] }).props).render();
+  assert.equal(steps(single), true, "a single-model chat shows its work");
+  assert.ok(answer(single));
+});
