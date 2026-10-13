@@ -41,6 +41,32 @@ test("HTTP turn tracking follows the response stream instead of Bun's global req
   await waitForTurnCount(turns, 0);
 });
 
+test("a stream whose answer is done stops counting as generating while its client still holds it open", async () => {
+  for (const platform of ["win32", "linux"] as const) {
+    const turns = new HttpTurnCounter();
+    let source!: ReadableStreamDefaultController<Uint8Array>;
+    const response = await turns.track(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) { source = controller; },
+    })), undefined, platform, "responses");
+    const reader = response.body!.getReader();
+    const send = async (text: string) => {
+      source.enqueue(new TextEncoder().encode(text));
+      await reader.read();
+      await Bun.sleep(5);
+    };
+    await send('event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"say \\"type\\":\\"response.completed\\""}\n\n');
+    expect(turns.generatingCount()).toBe(1);
+    // The terminal event split across two chunks is still found.
+    await send('event: response.comp');
+    await send('leted\ndata: {"type":"response.completed","response":{}}\n\n');
+    expect(turns.generatingCount()).toBe(0);
+    expect(turns.count()).toBe(1);
+    source.close();
+    await reader.read();
+    await waitForTurnCount(turns, 0);
+  }
+});
+
 test("HTTP turn tracking releases a cancelled response stream", async () => {
   const failures: unknown[] = [];
   const turns = new HttpTurnCounter(failure => failures.push(failure));
