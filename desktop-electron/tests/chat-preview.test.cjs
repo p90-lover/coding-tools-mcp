@@ -149,6 +149,12 @@ test("the page stays away from the app's services and anything of the user's, an
     session.handlers.before({ url: outside }, (answer) => { cancel = answer.cancel; });
     assert.equal(cancel, true, `${outside}: only origins this chat opened, nothing else on the internet, the LAN or this machine`);
   }
+  // A redirect is a new request to the filter (Electron runs onBeforeRequest for each hop): an
+  // allowed page's 302 to an app port or another loopback service is cancelled at the next hop.
+  for (const hop of ["http://127.0.0.1:4000/api/v1/tools/call", "http://localhost:11434/api/tags"]) {
+    session.handlers.before({ url: hop, redirectedFrom: "http://localhost:5173/go" }, (answer) => { cancel = answer.cancel; });
+    assert.equal(cancel, true, `the redirect to ${hop} is cancelled`);
+  }
   assert.equal(session.proxy.proxyRules, "127.0.0.1:9", "a dead proxy: whatever the filter missed goes nowhere, with no outside DNS lookup");
   assert.equal(contents.webrtc, "disable_non_proxied_udp", "WebRTC sends no UDP around it");
   let framed = false;
@@ -198,6 +204,33 @@ test("the pane draws one agent's preview at its slot, scaled by the page zoom, a
   assert.equal(attached.has(views[0]), false);
   assert.equal(views[0].webContents.destroyed, true);
   assert.equal(service.state("a"), null);
+});
+
+test("no page opens when the preview's network guard cannot be set up", async () => {
+  const service = createChatPreviews({
+    createView: () => {
+      const view = fakeView();
+      view.webContents.session.setProxy = async () => { throw new Error("proxy failed"); };
+      return view;
+    },
+    logger: { warn() {} },
+  });
+  const answer = await service.call("s1", "preview_open", { url: "http://localhost:5173/" });
+  assert.equal(answer.isError, true);
+  assert.match(answer.content[0].text, /network guard could not be set up/);
+  assert.equal((await service.navigate("s1", { url: "http://localhost:5173/" })).ok, false, "nor from the pane");
+});
+
+test("a full-page screenshot is scaled to 1280 wide and cut at 6000 tall", async () => {
+  const { service, views } = previews();
+  await service.call("s1", "preview_open", { url: "http://localhost:5173/" });
+  const send = views[0].webContents.debugger.sendCommand.bind(views[0].webContents.debugger);
+  views[0].webContents.debugger.sendCommand = async (method, params) => (method === "Page.getLayoutMetrics"
+    ? { cssContentSize: { width: 2560, height: 40_000 } } : send(method, params));
+  await service.call("s1", "preview_screenshot", { full_page: true });
+  const [, params] = views[0].sent.filter(([method]) => method === "Page.captureScreenshot").at(-1);
+  assert.deepEqual(params.clip, { x: 0, y: 0, width: 2560, height: 12_000, scale: 0.5 });
+  assert.ok(params.clip.width * params.clip.scale <= 1280 && params.clip.height * params.clip.scale <= 6000);
 });
 
 // --- The agent tools server's preview group and the Terminal pane ---------------------------------

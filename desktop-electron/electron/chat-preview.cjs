@@ -32,6 +32,7 @@ const MAX_TYPED = 4_000;
 const EVALUATE_TIMEOUT_MS = 5_000;
 // A full-page screenshot is cut at this height (CSS pixels).
 const MAX_SHOT_HEIGHT = 6_000;
+const MAX_SHOT_WIDTH = 1_280;
 // How far outside the window a hidden preview sits.
 const OFFSCREEN_MARGIN = 20_000;
 // The partition's proxy: a port nothing serves (discard), which loopback bypasses implicitly.
@@ -118,7 +119,7 @@ const refArgument = { type: "string", description: "An element's ref from previe
 /** The preview tools as MCP tool definitions. */
 const PREVIEW_TOOL_DEFS = Object.freeze([
   { name: "preview_open", title: "Open a page in the preview",
-    description: "Open a page your dev server serves on this machine (http://localhost:<port>/...) in this chat's preview, which the user sees in the chat's Preview pane. Waits for the page to load. Only localhost, 127.0.0.1 and [::1] addresses open; the first time this chat opens an address, the user may be asked.",
+    description: "Open a page your dev server serves on this machine (http://localhost:<port>/...) in this chat's preview, which the user sees in the chat's Preview pane. Waits for the page to load. Only localhost, 127.0.0.1 and [::1] addresses open; the first time this chat opens an address, the user may be asked. The page may only reach addresses this chat opened: another port (an API on :3000, a separate hot-reload port), the other spelling of the host (localhost vs 127.0.0.1) and anything on the internet (CDN scripts, web fonts) are blocked and show in preview_console. Open a second local address with preview_open (then return to the page) if the app needs it.",
     inputSchema: object({ url: { type: "string", description: "e.g. http://localhost:5173/" } }, ["url"]) },
   { name: "preview_read", title: "Read the preview page",
     description: "The page's URL, title, visible text and the elements you can use (links, buttons, fields), each with a ref for preview_click and preview_type.",
@@ -236,7 +237,12 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
     // Nothing leaves this machine: every request is held to the origins this chat opened (below),
     // and as a second wall the partition's proxy is a dead port with loopback bypassing it, so a
     // request the filter missed (and the DNS lookup a direct connection would make) goes nowhere.
-    preview.ready = Promise.resolve(session.setProxy?.({ proxyRules: BLACK_HOLE_PROXY, proxyBypassRules: "" })).catch(() => undefined);
+    // Without that wall no page loads (load() rethrows this).
+    preview.ready = typeof session.setProxy === "function"
+      ? Promise.resolve(session.setProxy({ proxyRules: BLACK_HOLE_PROXY, proxyBypassRules: "" }))
+        .then(() => undefined, () => { throw new PreviewError("The preview's network guard could not be set up, so no page opens"); })
+      : Promise.reject(new PreviewError("The preview's network guard is unavailable, so no page opens"));
+    preview.ready.catch(() => undefined);
     // WebRTC may not send UDP around the proxy (a STUN request is not a web request).
     try { contents.setWebRTCIPHandlingPolicy?.("disable_non_proxied_udp"); } catch { /* older Electron */ }
     // The app's own services stay unreachable whoever asks, matched by port on any host: a name
@@ -399,7 +405,11 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
           // The whole page, cut at MAX_SHOT_HEIGHT so a very long page cannot make a huge image.
           const metrics = await protocol(preview, "Page.getLayoutMetrics");
           const size = metrics?.cssContentSize ?? metrics?.contentSize;
-          if (size?.width && size?.height) clip = { x: 0, y: 0, width: Math.min(size.width, 4_000), height: Math.min(size.height, MAX_SHOT_HEIGHT), scale: 1 };
+          if (size?.width && size?.height) {
+            // At most MAX_SHOT_WIDTH wide (scaled down to fit) and MAX_SHOT_HEIGHT tall after scaling.
+            const scale = Math.min(1, MAX_SHOT_WIDTH / size.width);
+            clip = { x: 0, y: 0, width: size.width, height: Math.min(size.height, Math.floor(MAX_SHOT_HEIGHT / scale)), scale };
+          }
         }
         const shot = await protocol(preview, "Page.captureScreenshot", { format: "png", ...(clip ? { clip, captureBeyondViewport: true } : {}) });
         if (!shot?.data) throw new PreviewError("The preview could not be captured");
