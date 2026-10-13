@@ -950,6 +950,29 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       if (!projectId) return { ok: true, shared: [], farmed: [] };
       return { ok: true, ...await dependencyLinks.inEffect(projectId) };
     }
+    // A chat's Terminal and Preview panes: the user's view of each card's agent session, through
+    // the agent tools server that started its commands and owns its preview (chat-agent-tools.cjs).
+    if (operation.startsWith("chat_process") || operation.startsWith("chat_preview_")) {
+      if (!agentTools?.processes) throw new Error("The chat agent tools are unavailable");
+      const ids = Array.isArray(args.sessionIds) ? args.sessionIds.filter((id) => typeof id === "string").slice(0, 32) : [];
+      switch (operation) {
+        case "chat_processes": return { ok: true, sessions: await agentTools.processes(ids) };
+        case "chat_process_output": return { ok: true, ...await agentTools.processOutput(args) };
+        case "chat_process_stop": return agentTools.processStop(args);
+        case "chat_process_input": return agentTools.processInput(args);
+        case "chat_preview_state": return { ok: true, previews: agentTools.previewState(ids) };
+        case "chat_preview_show": {
+          const bounds = args.bounds;
+          if (!bounds || !["x", "y", "width", "height"].every((key) => Number.isFinite(bounds[key]))) throw new Error("bounds must be finite numbers");
+          return { ok: agentTools.previewShow(args.sessionId, bounds, Number(args.zoom) || 1) };
+        }
+        case "chat_preview_hide": agentTools.previewHide(); return { ok: true };
+        case "chat_preview_navigate": return agentTools.previewNavigate(args.sessionId, {
+          ...(typeof args.url === "string" ? { url: args.url } : {}), ...(typeof args.action === "string" ? { action: args.action } : {}),
+        });
+        default: throw new Error("Unsupported chat pane operation");
+      }
+    }
     if (operation === "upstream_show") return show(args.bounds, args.projectBoard === true, args.workspaceId, args.terminal || null);
     if (operation === "upstream_hide") return hide();
     if (operation === "upstream_bounds") return setBounds(args.bounds);

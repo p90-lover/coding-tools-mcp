@@ -627,6 +627,21 @@ pub fn read_output(store: &SessionStore, args: &Value) -> Result<Value, Workspac
         None
     };
 
+    // Whether the command still runs, so a reader following its output knows when it ended
+    // without sending it anything.
+    let status = if session.has_exited() {
+        "exited"
+    } else {
+        "running"
+    };
+    let exit_code = *session.exit_code.lock().expect("exit_code lock");
+    let termination_reason = session
+        .termination_reason
+        .lock()
+        .expect("termination lock")
+        .clone()
+        .unwrap_or_else(|| status.into());
+
     let mut warnings = Vec::<String>::new();
     if parts[0] == "session" {
         warnings.push(
@@ -660,6 +675,9 @@ pub fn read_output(store: &SessionStore, args: &Value) -> Result<Value, Workspac
         "total_retained_bytes": data.len(),
         "total_stream_bytes": total_stream_bytes,
         "truncated": next_offset.is_some(),
+        "status": status,
+        "exit_code": exit_code,
+        "termination_reason": termination_reason,
         "retention_seconds": COMPLETED_COMMAND_RETENTION_SECONDS,
         "warnings": warnings
     })))

@@ -56,6 +56,14 @@ const SPECS = Object.freeze({
   chat_delete_message: { readOnly: false, description: "Delete one message of a settled chat with its reply: the message leaves the task, its run is hidden from the chat, and the next turn starts a fresh agent session." },
   chat_diff: { readOnly: true, description: "Read the project's uncommitted git changes (/diff)." },
   codex_executable: { readOnly: true, description: "Locate the installed Codex desktop app's codex.exe used to run missions." },
+  chat_processes: { readOnly: true, description: "List the commands a chat's agents started through the app's terminal (the chat's Terminal pane), with whether each still runs." },
+  chat_process_output: { readOnly: true, description: "Read one of a chat's commands' output (stdout or stderr) from an offset." },
+  chat_process_stop: { readOnly: false, description: "Stop one of a chat's running commands for the user." },
+  chat_process_input: { readOnly: false, description: "Type the user's input into one of a chat's running commands." },
+  chat_preview_state: { readOnly: true, description: "Read what each of a chat's agents shows in its preview browser (URL, title, errors)." },
+  chat_preview_show: { readOnly: false, description: "Draw one chat agent's preview browser in the chat's Preview pane at the given bounds." },
+  chat_preview_hide: { readOnly: false, description: "Take the chat's preview browser out of the Preview pane; it keeps running for the agent." },
+  chat_preview_navigate: { readOnly: false, description: "The user's own navigation in a chat agent's preview: back, forward, reload or a localhost URL." },
 
   create: { readOnly: false, description: "Create a task for the Coding Tools mission board at its expected revision." },
   append: { readOnly: false, description: "Append reviewed clauses to the old plan board with its expected revision." },
@@ -65,7 +73,8 @@ const SPECS = Object.freeze({
 });
 
 // Operations served by the AO runtime service although their names do not start with "upstream_".
-const UPSTREAM_OPERATIONS = new Set(["dependency_link_info"]);
+const UPSTREAM_OPERATIONS = new Set(["dependency_link_info", "chat_processes", "chat_process_output", "chat_process_stop",
+  "chat_process_input", "chat_preview_state", "chat_preview_show", "chat_preview_hide", "chat_preview_navigate"]);
 
 module.exports = Object.freeze({
   operations: Object.freeze(Object.keys(SPECS)),

@@ -347,6 +347,45 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-structure > header { display: flex; align-items: center; justify-content: space-between; height: 48px; padding: 0 10px 0 16px; font-size: 13px; }
 .cx-structure-body { position: relative; display: flex; flex: 1 1 auto; min-height: 0; }
 
+/* Preview and Terminal panes (ChatWorkbench): the agent's page and its commands beside the thread. */
+.cx-workbench { flex-basis: min(48%, 640px); min-width: 340px; }
+.cx-workbench > header { gap: 8px; }
+.cx-workbench-tabs { display: inline-flex; gap: 2px; padding: 2px; border-radius: 8px; background: color-mix(in srgb, var(--ao-line) 50%, transparent); }
+.cx-workbench-tabs button { height: 26px; padding: 0 12px; border: 0; border-radius: 6px; background: transparent; color: var(--ao-muted); font: inherit; font-size: 12px; cursor: pointer; }
+.cx-workbench-tabs button[aria-selected="true"] { background: var(--color-bg-primary); color: var(--color-text-primary); box-shadow: 0 1px 2px rgb(0 0 0 / 8%); }
+.cx-workbench-agent { flex: 1 1 auto; min-width: 0; max-width: 260px; height: 26px; margin-left: auto; padding: 0 6px; border: 1px solid var(--ao-line); border-radius: 6px;
+  background: var(--color-bg-primary); color: var(--color-text-primary); font: inherit; font-size: 12px; }
+.cx-workbench-empty { margin: 24px 20px; color: var(--ao-muted); font-size: 13px; line-height: 1.5; }
+.cx-workbench-error { margin: 6px 12px 0; color: var(--ao-red, #c0392b); font-size: 12px; }
+.cx-preview { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
+.cx-preview-bar { display: flex; align-items: center; gap: 4px; padding: 0 10px 8px; }
+.cx-preview-bar input { flex: 1 1 auto; min-width: 0; height: 28px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 14px;
+  background: var(--color-bg-primary); color: var(--color-text-primary); font: inherit; font-size: 12px; }
+.cx-preview-errors { flex: 0 0 auto; padding: 2px 8px; border-radius: 10px; background: color-mix(in srgb, var(--ao-red, #c0392b) 14%, transparent);
+  color: var(--ao-red, #c0392b); font-size: 11px; }
+/* The page itself is a native view the app draws over this slot. */
+.cx-preview-slot { flex: 1 1 auto; min-height: 0; margin: 0 10px 10px; border: 1px solid var(--ao-line); border-radius: 8px; background: #fff; }
+.cx-terminal { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
+.cx-terminal-list { flex: 0 0 auto; max-height: 30%; margin: 0; padding: 0 8px 6px; overflow: auto; list-style: none; }
+.cx-terminal-list button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 5px 8px; border: 0; border-radius: 6px; background: transparent;
+  color: var(--color-text-primary); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.cx-terminal-list button[aria-pressed="true"], .cx-terminal-list button:hover { background: color-mix(in srgb, var(--ao-line) 55%, transparent); }
+.cx-terminal-list code { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cx-terminal-list small { flex: 0 0 auto; color: var(--ao-muted); }
+.cx-terminal-dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: var(--ao-muted); }
+.cx-terminal-dot.is-running { background: var(--ao-green, #2e9d5b); animation: cx-pulse 1.6s ease-in-out infinite; }
+.cx-terminal-dot.is-ok { background: var(--ao-green, #2e9d5b); }
+.cx-terminal-dot.is-failed { background: var(--ao-red, #c0392b); }
+.cx-terminal-head { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-top: 1px solid var(--ao-line); }
+.cx-terminal-head code { flex: 1 1 auto; min-width: 0; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.cx-terminal-stop { height: 24px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 6px; background: var(--color-bg-primary);
+  color: var(--color-text-primary); font: inherit; font-size: 12px; cursor: pointer; }
+.cx-terminal-output { flex: 1 1 auto; min-height: 0; margin: 0 10px; padding: 10px 12px; overflow: auto; border-radius: 8px; background: #111418; color: #d7dde4;
+  font: 12px/1.45 ui-monospace, "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
+.cx-terminal-input { padding: 8px 10px 10px; }
+.cx-terminal-input input { box-sizing: border-box; width: 100%; height: 28px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 6px;
+  background: var(--color-bg-primary); color: var(--color-text-primary); font: 12px ui-monospace, "Cascadia Mono", Consolas, monospace; }
+
 @keyframes cx-pulse { 50% { opacity: .35; } }
 @keyframes cx-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 @media (prefers-reduced-motion: reduce) {

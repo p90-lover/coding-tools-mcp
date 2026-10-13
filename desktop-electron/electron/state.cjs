@@ -62,6 +62,8 @@ function readState(filePath) {
     if (Object.hasOwn(state, "chatAgentDesktopTools") && state.chatAgentDesktopTools !== true) delete state.chatAgentDesktopTools;
     // Their commands through the app's terminal only when this is true; absent means off.
     if (Object.hasOwn(state, "chatAgentTerminalTools") && state.chatAgentTerminalTools !== true) delete state.chatAgentTerminalTools;
+    // Their own preview browser unless this is false; absent means on.
+    if (Object.hasOwn(state, "chatAgentPreviewTools") && typeof state.chatAgentPreviewTools !== "boolean") delete state.chatAgentPreviewTools;
     if (state.browserInteractionMode !== "automatic" && state.browserInteractionMode !== "manual") {
       state.browserInteractionMode = DEFAULT_STATE.browserInteractionMode;
     }
