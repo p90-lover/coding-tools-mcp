@@ -65,6 +65,10 @@ const SPECS = Object.freeze({
   chat_preview_hide: { readOnly: false, description: "Take the chat's preview browser out of the Preview pane; it keeps running for the agent." },
   chat_preview_navigate: { readOnly: false, description: "The user's own navigation in a chat agent's preview: back, forward, reload or a localhost URL." },
   chat_context: { readOnly: true, description: "Read how full each of a chat's agent sessions' context is, its token spend, rate limits and tool servers (the composer's context meter)." },
+  chat_terminal_start: { readOnly: false, description: "Start the user's own shell in a chat agent's worktree (the side panel's Terminal tab)." },
+  chat_changes: { readOnly: true, description: "Read a chat agent's worktree changes: git status with new files and the diff (the side panel's Changes tab)." },
+  chat_files: { readOnly: true, description: "List one folder of a chat agent's worktree (the side panel's Files tab)." },
+  chat_file: { readOnly: true, description: "Read one file of a chat agent's worktree as text (the side panel's Files tab)." },
 
   create: { readOnly: false, description: "Create a task for the Coding Tools mission board at its expected revision." },
   append: { readOnly: false, description: "Append reviewed clauses to the old plan board with its expected revision." },
@@ -75,7 +79,8 @@ const SPECS = Object.freeze({
 
 // Operations served by the AO runtime service although their names do not start with "upstream_".
 const UPSTREAM_OPERATIONS = new Set(["dependency_link_info", "chat_processes", "chat_process_output", "chat_process_stop",
-  "chat_process_input", "chat_preview_state", "chat_preview_show", "chat_preview_hide", "chat_preview_navigate", "chat_context"]);
+  "chat_process_input", "chat_preview_state", "chat_preview_show", "chat_preview_hide", "chat_preview_navigate", "chat_context",
+  "chat_terminal_start", "chat_changes", "chat_files", "chat_file"]);
 
 module.exports = Object.freeze({
   operations: Object.freeze(Object.keys(SPECS)),

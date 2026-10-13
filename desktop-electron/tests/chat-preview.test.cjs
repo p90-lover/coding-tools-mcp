@@ -413,3 +413,32 @@ test("a session set to Approve for me runs routine commands through the app's te
     { authorization: plain.servers[0].headers.Authorization });
   assert.equal(env.confirmations.length, before + 2, "without Approve for me every command asks");
 });
+test("the side panel reads the agent's worktree: its changes, folders and files, and opens the user's own terminal there", async (t) => {
+  const env = server({ results: {
+    git_status: { ok: true, branch: "ao/reg-machine-31", entries: [{ path: "api/new.py", index_status: "?", worktree_status: "?" }] },
+    git_diff: { ok: true, diff: "diff --git a/api/x.py b/api/x.py\n@@ -1 +1 @@\n-a\n+b\n", truncated: false },
+    list_dir: (body) => ({ ok: true, entries: [{ name: "api", path: "api", type: "directory" }], echoed: body.arguments.path }),
+    read_file: (body) => ({ ok: true, content: `content of ${body.arguments.path}`, truncated: false }),
+    exec_command: (body) => ({ ok: true, command_id: "shell-1", status: "running", echoed: body.arguments }),
+  } });
+  t.after(env.cleanup);
+  await leased(env.tools);
+  const changes = await env.tools.changes({ sessionId: "ao-1" });
+  assert.equal(changes.branch, "ao/reg-machine-31");
+  assert.match(changes.diff, /\+b/);
+  assert.equal(changes.entries[0].path, "api/new.py");
+  assert.equal((await env.tools.files({ sessionId: "ao-1", path: "." })).entries[0].type, "directory");
+  assert.equal((await env.tools.file({ sessionId: "ao-1", path: "api/x.py" })).content, "content of api/x.py");
+  await assert.rejects(env.tools.file({ sessionId: "ao-1", path: "../../outside.txt" }), /outside this chat's worktree/, "only inside the worktree");
+  await assert.rejects(env.tools.files({ sessionId: "ao-1", path: "C:/Windows" }), /refused/);
+  const before = env.confirmations.length;
+  const shell = await env.tools.terminalStart({ sessionId: "ao-1" });
+  assert.equal(shell.commandId, "shell-1");
+  const exec = env.headless.find((body) => body.tool === "exec_command");
+  assert.equal(exec.arguments.tty, true, "a terminal, so it reads what the user types");
+  assert.equal(exec.arguments.workdir, ".", "in the worktree");
+  assert.equal(env.confirmations.length, before, "the user opened it themselves: no dialog");
+  const [listing] = await env.tools.processes(["ao-1"]);
+  assert.deepEqual(listing.commands.map((command) => [command.id, command.user]), [["shell-1", true]]);
+  await assert.rejects(env.tools.changes({ sessionId: "ao-2" }), /session has ended/);
+});

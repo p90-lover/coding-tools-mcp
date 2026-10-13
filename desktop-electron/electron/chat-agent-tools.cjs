@@ -1353,7 +1353,7 @@ function createChatAgentTools({
         const commands = [...entry.commands.values()].sort((left, right) => right.startedAt - left.startedAt);
         // A running command is asked about once per listing; finished ones stay as they ended.
         for (const command of commands) if (command.status === "running") await readCommand(entry, command, "stdout", Number.MAX_SAFE_INTEGER).catch(() => undefined);
-        out.push({ sessionId, agent: entry.agent, commands: commands.map(({ id, cmd, workdir, startedAt, status, exitCode }) => ({ id, cmd, workdir, startedAt, status, exitCode })) });
+        out.push({ sessionId, agent: entry.agent, commands: commands.map(({ id, cmd, workdir, startedAt, status, exitCode, user }) => ({ id, cmd, workdir, startedAt, status, exitCode, user: user === true })) });
       }
       return out;
     },
@@ -1381,6 +1381,53 @@ function createChatAgentTools({
       const command = commandOf(entry, commandId);
       await invokeAsUser(entry, "write_stdin", { command_id: command.id, chars: text, yield_time_ms: 200, max_output_bytes: 0 });
       return { ok: true };
+    },
+    /**
+     * The user's own shell in the session's worktree (the side panel's Terminal tab): PowerShell on
+     * a terminal, listed with the session's commands so its output and input use the same panes.
+     * The user started it, so no dialog asks.
+     */
+    async terminalStart({ sessionId } = {}) {
+      const entry = entryFor(sessionId);
+      if (!entry) throw new Error("That chat agent's session has ended");
+      const cmd = WINDOWS ? 'powershell.exe -NoLogo -NoProfile -NoExit -Command "Remove-Module PSReadLine -ErrorAction SilentlyContinue"' : "bash -i";
+      const value = await invokeAsUser(entry, "exec_command", { cmd, workdir: ".", tty: true, yield_time_ms: 500, max_output_bytes: 4096 });
+      const id = typeof value?.command_id === "string" && COMMAND_ID.test(value.command_id) ? value.command_id : null;
+      if (!id) throw new Error("The terminal did not start");
+      entry.commands.set(id, { id, cmd: "Terminal", workdir: ".", startedAt: now(), status: "running", exitCode: null, user: true });
+      return { ok: true, commandId: id };
+    },
+    /**
+     * The session worktree's changes for the side panel's Changes tab: git's status (with new files)
+     * and the diff of tracked files, as headless reads them in that worktree.
+     */
+    async changes({ sessionId } = {}) {
+      const entry = entryFor(sessionId);
+      if (!entry) throw new Error("That chat agent's session has ended");
+      const status = await invokeAsUser(entry, "git_status", { include_untracked: true, max_entries: 500 });
+      const diff = await invokeAsUser(entry, "git_diff", { context_lines: 3, max_bytes: 512 * 1024 });
+      return {
+        ok: true, root: entry.root?.path ?? null, branch: typeof status?.branch === "string" ? status.branch : "",
+        entries: Array.isArray(status?.entries) ? status.entries.slice(0, 500) : [],
+        diff: typeof diff?.diff === "string" ? diff.diff : "", truncated: diff?.truncated === true,
+      };
+    },
+    /** One folder of the session's worktree for the Files tab (`path` relative to its root). */
+    async files({ sessionId, path: folder = "." } = {}) {
+      const entry = entryFor(sessionId);
+      if (!entry) throw new Error("That chat agent's session has ended");
+      const root = await rootOf(entry);
+      const listed = await invokeAsUser(entry, "list_dir", { path: scopePath(root, folder || ".", "path") });
+      return { ok: true, path: folder || ".", entries: Array.isArray(listed?.entries) ? listed.entries.slice(0, 1000) : [], truncated: listed?.truncated === true };
+    },
+    /** One file of the session's worktree for the Files tab, as text. */
+    async file({ sessionId, path: target } = {}) {
+      const entry = entryFor(sessionId);
+      if (!entry) throw new Error("That chat agent's session has ended");
+      const root = await rootOf(entry);
+      const read = await invokeAsUser(entry, "read_file", { path: scopePath(root, target, "path"), max_bytes: 512 * 1024 });
+      return { ok: true, path: target, content: typeof read?.content === "string" ? read.content : "", encoding: read?.encoding ?? null,
+        truncated: read?.truncated === true };
     },
     /** What each session's preview shows, for the Preview pane (sessions without one are left out). */
     previewState(sessionIds = []) {

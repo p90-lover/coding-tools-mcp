@@ -24,6 +24,8 @@ const meter = load("ChatContextMeter.tsx", { "./ao-chat": chat, "./ChatMenu": me
   "../api/client": { getCodingToolsClient: () => ({ apps: { call: async () => ({ result: { sessions: {} } }) } }) } });
 const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
   "./ChatContextMeter": meter,
+  // The side panel opens on demand; the chat only needs its auto-open hook to exist here.
+  "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => {} },
   "./ChatThreadList": load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu }) });
 
 test("opening a working role shows live step and output, not a final-result placeholder", () => {

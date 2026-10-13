@@ -4,7 +4,7 @@ import { AgentOrchestratorComposerControls, type ComposerControlsProps } from ".
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { ChatWorkbench, type WorkbenchTab } from "./ChatWorkbench";
+import { ChatWorkbench, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
 import { ChatContextMeter } from "./ChatContextMeter";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
@@ -315,9 +315,13 @@ export function AgentOrchestratorChat({
     [chatRuns, descriptions, selectedTaskId, describeNode, activity, now, pendingMessage],
   );
   const stepCount = turns.reduce((total, turn) => total + turn.steps.length + (turn.final ? 1 : 0), 0);
-  // The Preview and Terminal panes beside the thread (ChatWorkbench), for the chat's AO agents.
+  // The side panel beside the thread (ChatWorkbench: preview, changes, files, terminal) for the
+  // chat's AO agents; it opens by itself when an agent first opens a page or starts a command.
   const [workbench, setWorkbench] = useState<WorkbenchTab | null>(null);
   const agentSessions = useMemo(() => chatAgentSessions(chatRuns), [chatRuns]);
+  const agentSessionIds = useMemo(() => agentSessions.map((session) => session.id), [agentSessions]);
+  useWorkbenchAutoOpen(selectedTaskId ? agentSessionIds : [], workbench !== null, (tab) => setWorkbench(tab));
+  useEffect(() => { setWorkbench(null); }, [selectedTaskId]);
   useEffect(() => { if (atBottom) scroller.current?.scrollTo({ top: scroller.current.scrollHeight }); }, [turns.length, stepCount, atBottom]);
   // The cards panel can be dragged wider for more board room; the width is kept per viewer.
   const [cardsWidth, setCardsWidth] = useState<number | null>(() => {
