@@ -28,6 +28,14 @@ const MAX_WAIT_MS = 10_000;
 const MAX_TEXT = 40_000;
 const MAX_ELEMENTS = 250;
 const MAX_TYPED = 4_000;
+// A page script that does not answer within this fails the call.
+const EVALUATE_TIMEOUT_MS = 5_000;
+// A full-page screenshot is cut at this height (CSS pixels).
+const MAX_SHOT_HEIGHT = 6_000;
+// How far outside the window a hidden preview sits.
+const OFFSCREEN_MARGIN = 20_000;
+// The partition's proxy: a port nothing serves (discard), which loopback bypasses implicitly.
+const BLACK_HOLE_PROXY = "127.0.0.1:9";
 const LOOPBACK_NAMES = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 
 class PreviewError extends Error {}
@@ -164,9 +172,26 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
   const target = (raw) => previewTarget(raw, { blockedPorts: blocked() });
 
   function offscreen() {
-    const [width, height] = contentSize();
-    // Wholly outside the content area, at a real size, so the page keeps a viewport and paints.
-    return { x: Math.max(VIEWPORT.width, Math.round(width || 0)) + 1, y: Math.max(VIEWPORT.height, Math.round(height || 0)) + 1, ...VIEWPORT };
+    // Wholly outside the window at a real size, so the page keeps a viewport and paints. Above and
+    // to the left of it: no later resize or maximize can bring a hidden page into view.
+    return { x: -(VIEWPORT.width + OFFSCREEN_MARGIN), y: -(VIEWPORT.height + OFFSCREEN_MARGIN), ...VIEWPORT };
+  }
+
+  /**
+   * Whether the page may make this request: http(s) and ws(s) only to an origin this chat opened
+   * (a websocket counts as its page's origin), never to an app service port; inline data, blobs and
+   * error pages stay local. Anything else (a CDN, another loopback service, the LAN) is refused.
+   */
+  function requestAllowed(preview, raw) {
+    let url;
+    try { url = new URL(raw); } catch { return { allowed: false, why: "not a URL" }; }
+    if (["data:", "blob:", "about:", "chrome-error:"].includes(url.protocol)) return { allowed: true };
+    const web = { "http:": "http:", "https:": "https:", "ws:": "http:", "wss:": "https:" }[url.protocol];
+    if (!web) return { allowed: false, why: `${url.protocol} requests are not allowed` };
+    const port = Number(url.port || (web === "https:" ? 443 : 80));
+    if (blocked().includes(port)) return { allowed: false, why: "an app service port" };
+    const origin = `${web}//${url.host}`;
+    return preview.origins.has(origin) ? { allowed: true } : { allowed: false, why: "an address this chat has not opened" };
   }
 
   function place(preview) {
@@ -208,18 +233,19 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
     session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     session.setPermissionCheckHandler?.(() => false);
     session.on("will-download", (event, item) => { event.preventDefault?.(); item.cancel?.(); });
-    // The app's own services stay unreachable from the page, whoever loads it. Matched by port on
-    // any host: a name that resolves to this machine (localtest.me, a rebinding domain, 0.0.0.0,
-    // [::ffff:127.0.0.1]) reaches the same listener as localhost does.
+    // Nothing leaves this machine: every request is held to the origins this chat opened (below),
+    // and as a second wall the partition's proxy is a dead port with loopback bypassing it, so a
+    // request the filter missed (and the DNS lookup a direct connection would make) goes nowhere.
+    preview.ready = Promise.resolve(session.setProxy?.({ proxyRules: BLACK_HOLE_PROXY, proxyBypassRules: "" })).catch(() => undefined);
+    // WebRTC may not send UDP around the proxy (a STUN request is not a web request).
+    try { contents.setWebRTCIPHandlingPolicy?.("disable_non_proxied_udp"); } catch { /* older Electron */ }
+    // The app's own services stay unreachable whoever asks, matched by port on any host: a name
+    // that resolves to this machine (localtest.me, a rebinding domain, 0.0.0.0, [::ffff:7f00:1])
+    // reaches the same listener as localhost does.
     session.webRequest.onBeforeRequest({ urls: ["<all_urls>"] }, (details, callback) => {
-      let cancel = false;
-      try {
-        const url = new URL(details.url);
-        cancel = (url.protocol === "http:" || url.protocol === "https:" || url.protocol === "ws:" || url.protocol === "wss:")
-          && blocked().includes(Number(url.port || (url.protocol === "https:" || url.protocol === "wss:" ? 443 : 80)));
-      } catch { cancel = true; }
-      if (cancel) remember(preview, preview.failures, MAX_FAILURES, { url: details.url.slice(0, 300), error: "blocked: an app service port" });
-      callback({ cancel });
+      const verdict = previews.get(key) === preview ? requestAllowed(preview, details.url) : { allowed: false, why: "the preview closed" };
+      if (!verdict.allowed) remember(preview, preview.failures, MAX_FAILURES, { url: details.url.slice(0, 300), error: `blocked: ${verdict.why}` });
+      callback({ cancel: !verdict.allowed });
     });
     session.webRequest.onCompleted({ urls: ["<all_urls>"] }, (details) => {
       if (details.statusCode >= 400) remember(preview, preview.failures, MAX_FAILURES, { url: details.url.slice(0, 300), status: details.statusCode, method: details.method });
@@ -240,6 +266,11 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
     };
     contents.on("will-navigate", guard);
     contents.on("will-redirect", guard);
+    // Frames too: an iframe navigates within the origins this chat opened, like the page.
+    contents.on("will-frame-navigate", (details) => {
+      if (details?.isMainFrame) return;
+      guard({ preventDefault: () => details.preventDefault?.() }, details?.url);
+    });
     contents.on("console-message", (event, level, message, line, sourceId) => {
       // Electron passes the details on the event; older versions pass them as arguments.
       const details = typeof level === "number"
@@ -268,7 +299,18 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
     previews.delete(key);
     if (shown?.key === key) shown = null;
     try { detachView?.(preview.view); } catch { /* the window is gone */ }
-    try { if (!preview.view.webContents.isDestroyed()) preview.view.webContents.close?.(); } catch { /* already closed */ }
+    const contents = preview.view.webContents;
+    // The partition outlives its page in Electron: drop what the page stored and the handlers that
+    // hold this preview, so a closed preview keeps nothing.
+    try {
+      const session = contents.session;
+      session.webRequest.onBeforeRequest(null);
+      session.webRequest.onCompleted(null);
+      session.webRequest.onErrorOccurred(null);
+      void Promise.resolve(session.clearStorageData?.()).catch(() => undefined);
+      void Promise.resolve(session.clearCache?.()).catch(() => undefined);
+    } catch { /* already gone */ }
+    try { if (!contents.isDestroyed()) contents.close?.(); } catch { /* already closed */ }
   }
 
   async function protocol(preview, method, params = {}) {
@@ -276,19 +318,33 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
     if (!preview.debuggerReady) {
       if (!debug.isAttached()) debug.attach("1.3");
       preview.debuggerReady = true;
-      debug.on("detach", () => { preview.debuggerReady = false; });
+      if (!preview.detachHooked) {
+        preview.detachHooked = true;
+        debug.on("detach", () => { preview.debuggerReady = false; });
+      }
     }
     return debug.sendCommand(method, params);
   }
 
+  /** A page script's value; a page that never answers fails the call instead of hanging it. */
   async function evaluate(preview, expression) {
-    const answer = await protocol(preview, "Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
-    if (answer?.exceptionDetails) throw new PreviewError(`The page script failed: ${answer.exceptionDetails.text ?? "exception"}`);
-    return answer?.result?.value;
+    let timer;
+    try {
+      const answer = await Promise.race([
+        protocol(preview, "Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true, timeout: EVALUATE_TIMEOUT_MS }),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new PreviewError("The page did not answer in time")), EVALUATE_TIMEOUT_MS + 1_000); }),
+      ]);
+      if (answer?.exceptionDetails) throw new PreviewError(`The page script failed: ${answer.exceptionDetails.text ?? "exception"}`);
+      return answer?.result?.value;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async function load(preview, url) {
     const contents = preview.view.webContents;
+    // The black-hole proxy is in place before the first request.
+    await preview.ready;
     let timer;
     try {
       await Promise.race([
@@ -338,7 +394,14 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
         return textResult(await evaluate(preview, snapshotScript(max, MAX_ELEMENTS)));
       }
       case "preview_screenshot": {
-        const shot = await protocol(preview, "Page.captureScreenshot", { format: "png", captureBeyondViewport: args.full_page === true });
+        let clip;
+        if (args.full_page === true) {
+          // The whole page, cut at MAX_SHOT_HEIGHT so a very long page cannot make a huge image.
+          const metrics = await protocol(preview, "Page.getLayoutMetrics");
+          const size = metrics?.cssContentSize ?? metrics?.contentSize;
+          if (size?.width && size?.height) clip = { x: 0, y: 0, width: Math.min(size.width, 4_000), height: Math.min(size.height, MAX_SHOT_HEIGHT), scale: 1 };
+        }
+        const shot = await protocol(preview, "Page.captureScreenshot", { format: "png", ...(clip ? { clip, captureBeyondViewport: true } : {}) });
         if (!shot?.data) throw new PreviewError("The preview could not be captured");
         return { content: [{ type: "image", data: shot.data, mimeType: "image/png" }, { type: "text", text: JSON.stringify(summary(preview)) }], isError: false };
       }

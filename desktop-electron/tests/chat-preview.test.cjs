@@ -28,6 +28,7 @@ function fakeView({ page = {} } = {}) {
     reload() { sent.push(["reload"]); },
     navigationHistory: { canGoBack: () => false, canGoForward: () => false },
     close() { this.destroyed = true; },
+    setWebRTCIPHandlingPolicy(policy) { this.webrtc = policy; },
     debugger: {
       attached: false,
       isAttached() { return this.attached; },
@@ -44,6 +45,9 @@ function fakeView({ page = {} } = {}) {
       setPermissionRequestHandler(fn) { session.handlers.permission = fn; },
       setPermissionCheckHandler(fn) { session.handlers.check = fn; },
       on(event, fn) { session.handlers[event] = fn; },
+      async setProxy(config) { session.proxy = config; },
+      async clearStorageData() { session.cleared = true; },
+      async clearCache() {},
       webRequest: {
         onBeforeRequest(_filter, fn) { session.handlers.before = fn; },
         onCompleted(_filter, fn) { session.handlers.completed = fn; },
@@ -91,7 +95,8 @@ test("the agent opens its page once allowed, and reads, screenshots, clicks and 
   assert.deepEqual(asked, ["http://localhost:5173"]);
   assert.equal(views.length, 1);
   assert.ok(attached.has(views[0]), "the view lives in the window");
-  assert.ok(views[0].bounds.x >= 1600 && views[0].webContents.emulated, "but just outside it, with a real viewport, while the pane does not show it");
+  assert.ok(views[0].bounds.x < -1280 && views[0].bounds.y < -800 && views[0].webContents.emulated,
+    "but above and left of it, with a real viewport, while the pane does not show it: no resize can bring it into view");
   await service.call("s1", "preview_open", { url: "http://localhost:5173/other" }, { permit });
   assert.deepEqual(asked, ["http://localhost:5173"], "an origin already opened is not asked about again");
 
@@ -136,7 +141,19 @@ test("the page stays away from the app's services and anything of the user's, an
     assert.equal(cancel, true, `${rebound}: any name for this machine reaches the same listener`);
   }
   session.handlers.before({ url: "http://localhost:5173/src/main.ts" }, (answer) => { cancel = answer.cancel; });
-  assert.equal(cancel, false);
+  assert.equal(cancel, false, "the page's own origin loads");
+  session.handlers.before({ url: "ws://localhost:5173/?token=hmr" }, (answer) => { cancel = answer.cancel; });
+  assert.equal(cancel, false, "and its own websocket (a dev server's hot reload)");
+  for (const outside of ["https://attacker.example/x?d=c2VjcmV0", "https://fonts.googleapis.com/css", "http://192.168.1.1/admin",
+    "http://localhost:11434/api/generate", "ws://127.0.0.1:8888/api/kernels", "ftp://localhost:5173/x"]) {
+    session.handlers.before({ url: outside }, (answer) => { cancel = answer.cancel; });
+    assert.equal(cancel, true, `${outside}: only origins this chat opened, nothing else on the internet, the LAN or this machine`);
+  }
+  assert.equal(session.proxy.proxyRules, "127.0.0.1:9", "a dead proxy: whatever the filter missed goes nowhere, with no outside DNS lookup");
+  assert.equal(contents.webrtc, "disable_non_proxied_udp", "WebRTC sends no UDP around it");
+  let framed = false;
+  contents.emit("will-frame-navigate", { isMainFrame: false, url: "https://attacker.example/frame", preventDefault() { framed = true; } });
+  assert.ok(framed, "a frame stays within the opened origins too");
   let granted;
   session.handlers.permission(contents, "media", (answer) => { granted = answer; });
   assert.equal(granted, false, "no permission is ever granted");
@@ -169,12 +186,15 @@ test("the pane draws one agent's preview at its slot, scaled by the page zoom, a
   assert.equal(service.show("a", { x: 100, y: 50, width: 400, height: 300 }, 1.25), true);
   assert.deepEqual(views[0].bounds, { x: 125, y: 63, width: 500, height: 375 });
   assert.equal(views[0].webContents.emulated, false, "drawn for real while shown");
-  assert.ok(views[1].bounds.x >= 1600, "the other agent's stays outside");
+  assert.ok(views[1].bounds.x < 0, "the other agent's stays outside");
   assert.equal(service.state("a").shown, true);
   service.hide();
-  assert.ok(views[0].bounds.x >= 1600);
+  assert.ok(views[0].bounds.x < 0);
   assert.equal(service.show("nobody", { x: 0, y: 0, width: 1, height: 1 }), false);
+  const closedSession = views[0].session;
   service.close("a");
+  assert.equal(closedSession.cleared, true, "a closed preview's partition keeps nothing");
+  assert.equal(closedSession.handlers.before, undefined, "and no handler holds the closed preview");
   assert.equal(attached.has(views[0]), false);
   assert.equal(views[0].webContents.destroyed, true);
   assert.equal(service.state("a"), null);

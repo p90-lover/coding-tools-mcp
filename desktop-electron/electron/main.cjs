@@ -2648,11 +2648,20 @@ async function start() {
         (() => { try { return agentOrchestratorUpstream?.snapshot?.().port; } catch { return null; } })(),
         (() => { try { return portOf(externalServicesController.cpaConnection()?.baseUrl); } catch { return null; } })(),
       ].filter((port) => Number.isInteger(port) && port > 0);
+      const previewWindows = new WeakSet();
       const chatPreviews = createChatPreviews({
         createView: (partition) => new WebContentsView({
           webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: false, backgroundThrottling: false },
         }),
-        attachView: (view) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.contentView.addChildView(view); },
+        attachView: (view) => {
+          if (!mainWindow || mainWindow.isDestroyed()) return;
+          mainWindow.contentView.addChildView(view);
+          // A preview never outlives the window it is drawn in (a re-created window starts without).
+          if (!previewWindows.has(mainWindow)) {
+            previewWindows.add(mainWindow);
+            mainWindow.once("closed", () => chatPreviews.closeAll());
+          }
+        },
         detachView: (view) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.contentView.removeChildView(view); },
         contentSize: () => (mainWindow && !mainWindow.isDestroyed() ? mainWindow.getContentSize() : [1280, 800]),
         blockedPorts: appServicePorts,

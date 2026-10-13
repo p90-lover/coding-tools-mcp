@@ -640,7 +640,7 @@ pub fn read_output(store: &SessionStore, args: &Value) -> Result<Value, Workspac
         .lock()
         .expect("termination lock")
         .clone()
-        .unwrap_or_else(|| "running".into());
+        .unwrap_or_else(|| status.into());
 
     let mut warnings = Vec::<String>::new();
     if parts[0] == "session" {

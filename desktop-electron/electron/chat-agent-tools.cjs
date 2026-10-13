@@ -671,7 +671,8 @@ function instructionsFor(groups, { bypass = false } = {}) {
  * has already refused anything that is not http(s) on localhost/127.x/[::1] and every port of the
  * app's own services. `origin` is like "http://localhost:5173"; `bypass` is true when the session
  * was launched to bypass permissions; `servedHere` is true when one of this chat's own running
- * commands printed that host and port (its dev server).
+ * commands printed that host and port (usually its dev server). It is a hint, not proof: the agent
+ * writes those commands, so `echo localhost:8888` would set it for a port it never served.
  */
 function previewOriginDecision({ origin, bypass, servedHere }) {
   // TODO(human): decide when a new origin opens without a prompt.
@@ -1058,7 +1059,10 @@ function createChatAgentTools({
   async function servedHere(entry, origin) {
     const { hostname, port } = new URL(origin);
     const number = port || (origin.startsWith("https:") ? "443" : "80");
-    const mention = new RegExp(`(?:localhost|127\\.0\\.0\\.1|\\[::1\\]|${hostname.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}):${number}(?![0-9])`, "i");
+    // The same host (localhost, 127.0.0.1 and [::1] count as one), then the port.
+    const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const hosts = ["localhost", "127.0.0.1", "[::1]"].includes(hostname) ? ["localhost", "127.0.0.1", "[::1]"] : [hostname];
+    const mention = new RegExp(`(?<![\\w.-])(?:${hosts.map(escape).join("|")}):${number}(?![0-9])`, "i");
     for (const command of entry.commands.values()) {
       if (command.status !== "running") continue;
       for (const stream of ["stdout", "stderr"]) {
