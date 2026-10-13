@@ -287,7 +287,7 @@ function server({ confirm = async () => true, preview = () => true, results = {}
       return { ok: true, operation: { state: "completed", result } };
     },
   });
-  return { tools, previewCalls, closed, headless, confirmations, cleanup: async () => { await tools.close(); fs.rmSync(base, { recursive: true, force: true }); } };
+  return { tools, root, previewCalls, closed, headless, confirmations, cleanup: async () => { await tools.close(); fs.rmSync(base, { recursive: true, force: true }); } };
 }
 
 let id = 1;
@@ -380,4 +380,65 @@ test("a session that ends closes its preview; a credential retired for a newer o
   assert.deepEqual(env.closed, [], "the older credential of ao-1 is retired, the session goes on");
   env.tools.forgetSession("ao-1");
   assert.deepEqual(env.closed, ["ao-1"]);
+});
+
+test("a session set to Approve for me runs routine commands through the app's terminal without a dialog; others still ask", async (t) => {
+  const routine = (cmd) => (/^npm (ci|run dev)$/.test(cmd) ? "routine" : null);
+  const env = server({ results: { exec_command: { ok: true, command_id: "c1", status: "running" } } });
+  t.after(env.cleanup);
+  // The fixture's server has no routine rule; one with it, for an Approve-for-me lease:
+  const withRule = createChatAgentTools({
+    terminalEnabled: () => true, minAnswerMs: 0, logger: { info() {}, warn() {} }, routineCommand: routine,
+    confirm: async (request) => { env.confirmations.push(request); return true; },
+    sessionWorkspace: async () => ({ root: env.root }),
+    requestHeadless: async (endpoint, body) => (endpoint.startsWith("/api/v1/tools/catalog?")
+      ? { tools: [{ name: "exec_command", inputSchema: { type: "object" } }] }
+      : { ok: true, operation: { state: "completed", result: { ok: true, command_id: "c1", status: "running", ran: body.arguments.cmd } } }),
+  });
+  t.after(() => withRule.close());
+  const lease = await withRule.lease({ agent: "claude-code", workspaceId: "ws1", approvalMode: "accept-edits", autoReview: true });
+  lease.bind("ao-9");
+  const [{ url, headers }] = lease.servers;
+  const call = (args) => post(url, { jsonrpc: "2.0", id: id++, method: "tools/call", params: { name: "exec_command", arguments: args } },
+    { authorization: headers.Authorization }).then((reply) => reply.result);
+  const before = env.confirmations.length;
+  assert.equal((await call({ cmd: "npm ci" })).isError, false);
+  assert.equal((await call({ cmd: "npm run dev" })).isError, false);
+  assert.equal(env.confirmations.length, before, "routine commands ran without a dialog");
+  await call({ cmd: "npm install left-pad" });
+  assert.equal(env.confirmations.length, before + 1, "anything else is still the person's call");
+  const plain = await withRule.lease({ agent: "claude-code", workspaceId: "ws1", approvalMode: "accept-edits" });
+  plain.bind("ao-10");
+  await post(plain.servers[0].url, { jsonrpc: "2.0", id: id++, method: "tools/call", params: { name: "exec_command", arguments: { cmd: "npm ci" } } },
+    { authorization: plain.servers[0].headers.Authorization });
+  assert.equal(env.confirmations.length, before + 2, "without Approve for me every command asks");
+});
+test("the side panel reads the agent's worktree: its changes, folders and files, and opens the user's own terminal there", async (t) => {
+  const env = server({ results: {
+    git_status: { ok: true, branch: "ao/reg-machine-31", entries: [{ path: "api/new.py", index_status: "?", worktree_status: "?" }] },
+    git_diff: { ok: true, diff: "diff --git a/api/x.py b/api/x.py\n@@ -1 +1 @@\n-a\n+b\n", truncated: false },
+    list_dir: (body) => ({ ok: true, entries: [{ name: "api", path: "api", type: "directory" }], echoed: body.arguments.path }),
+    read_file: (body) => ({ ok: true, content: `content of ${body.arguments.path}`, truncated: false }),
+    exec_command: (body) => ({ ok: true, command_id: "shell-1", status: "running", echoed: body.arguments }),
+  } });
+  t.after(env.cleanup);
+  await leased(env.tools);
+  const changes = await env.tools.changes({ sessionId: "ao-1" });
+  assert.equal(changes.branch, "ao/reg-machine-31");
+  assert.match(changes.diff, /\+b/);
+  assert.equal(changes.entries[0].path, "api/new.py");
+  assert.equal((await env.tools.files({ sessionId: "ao-1", path: "." })).entries[0].type, "directory");
+  assert.equal((await env.tools.file({ sessionId: "ao-1", path: "api/x.py" })).content, "content of api/x.py");
+  await assert.rejects(env.tools.file({ sessionId: "ao-1", path: "../../outside.txt" }), /outside this chat's worktree/, "only inside the worktree");
+  await assert.rejects(env.tools.files({ sessionId: "ao-1", path: "C:/Windows" }), /refused/);
+  const before = env.confirmations.length;
+  const shell = await env.tools.terminalStart({ sessionId: "ao-1" });
+  assert.equal(shell.commandId, "shell-1");
+  const exec = env.headless.find((body) => body.tool === "exec_command");
+  assert.equal(exec.arguments.tty, true, "a terminal, so it reads what the user types");
+  assert.equal(exec.arguments.workdir, ".", "in the worktree");
+  assert.equal(env.confirmations.length, before, "the user opened it themselves: no dialog");
+  const [listing] = await env.tools.processes(["ao-1"]);
+  assert.deepEqual(listing.commands.map((command) => [command.id, command.user]), [["shell-1", true]]);
+  await assert.rejects(env.tools.changes({ sessionId: "ao-2" }), /session has ended/);
 });

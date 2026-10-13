@@ -239,6 +239,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       // edit. Claude Code therefore accepts edits and its tool requests go to our reviewer.
       ...(node.route.approval_policy ? { approvalMode: node.route.approval_policy === "never" ? "bypass-permissions"
         : node.route.approvals_reviewer === "auto_review" && agent !== "claude-code" ? "auto" : "accept-edits" } : {}),
+      // The app's own terminal follows "Approve for me" too: routine project commands run unasked.
+      ...(node.route.approvals_reviewer === "auto_review" ? { autoReview: true } : {}),
       ...(viaCpa ? { gateway: { provider: "cpa", model: wireModel } } : {}),
       ...(node.route.context_window != null ? { contextWindow: node.route.context_window } : {}),
       ...(plain ? { plain: true } : {}),
@@ -1330,10 +1332,26 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const name = String(tool ?? "");
     if (!name.startsWith(APP_TOOL_PREFIX)) return null;
     const short = name.slice(APP_TOOL_PREFIX.length);
+    // The chat's own preview browser: loopback pages only, each new address allowed by the person.
+    if (/^preview_(?:open|read|screenshot|click|type|press|scroll|navigate|wait|console)$/.test(short)) {
+      return "The chat's own preview browser: pages on this machine only, each new address allowed by you";
+    }
     if (!APP_TOOLS_ALLOWED.has(short)) return null;
     return short === "apply_patch" || short === "patch_check"
       ? "An edit through the app's tools, confined to the agent's worktree (like Claude's own edits)"
       : "A read through the app's tools, confined to the agent's worktree";
+  }
+  /**
+   * Why the app's exec_command call may run without asking: its command line (from the call's
+   * arguments, complete JSON only) is a routine project command. The app runs it unasked for a
+   * session launched with "Approve for me" too; anything else still asks.
+   */
+  function routineAppCommand(approval) {
+    if (String(approval?.tool ?? "") !== `${APP_TOOL_PREFIX}exec_command` || typeof approval.toolInput !== "string") return null;
+    let input;
+    try { input = JSON.parse(approval.toolInput); } catch { return null; }
+    if (!input || typeof input.cmd !== "string" || (typeof input.stdin === "string" && input.stdin)) return null;
+    return routineCommand(input.cmd);
   }
   const approverAdvice = new Map(); // approval_id -> { action, reason }
   /** AO's offered decision id for allow-once / deny-once; an "always" choice is never made for the user. */
@@ -1413,6 +1431,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // from reading its arguments, so a long patch is no reason to ask.
         let advice = routineAppTool(approval.tool)
           ? { action: "allow", reason: routineAppTool(approval.tool) }
+          : routineAppCommand(approval)
+          ? { action: "allow", reason: routineAppCommand(approval) }
           : incomplete
           ? { action: "ask", reason: "Inspect the complete native command and requested permission scope yourself" }
           : HARD_DENY.some((pattern) => pattern.test(request))
@@ -2650,7 +2670,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
 
   // goalAfterRun runs on its own when a run settles (reportRun); it is exposed for tests and recovery.
-  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, routineCommand, routineAppTool });
+  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, routineCommand, routineAppTool, routineAppCommand });
 }
 
 module.exports = { createAgentOrchestratorWorkflow, delayToMilliseconds, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

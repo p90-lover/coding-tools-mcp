@@ -703,6 +703,8 @@ function createChatAgentTools({
   enabled = () => true, terminalEnabled = () => false, desktopEnabled = () => false,
   // The chat's own browser (chat-preview.cjs), on unless the user turns it off.
   previews = null, previewEnabled = () => true,
+  // Why a command line is a routine project command "Approve for me" may run unasked, or null.
+  routineCommand = () => null,
   worktreesRoot = null,
   logger = console, version = "1", now = Date.now,
   // How long the user must have had a prompt open for an approval to count (see MIN_ANSWER_MS),
@@ -745,7 +747,7 @@ function createChatAgentTools({
     }
   }
 
-  function mint({ agent, workspaceId, approvalMode }) {
+  function mint({ agent, workspaceId, approvalMode, autoReview = false }) {
     while (sessions.size >= MAX_SESSIONS) {
       const oldest = [...sessions.values()].sort((left, right) => left.usedAt - right.usedAt)[0];
       forget(oldest.key);
@@ -758,6 +760,8 @@ function createChatAgentTools({
       // Captured once, at spawn time, from the mode the session was launched with: changing the
       // session's mode in AO later does not change it here, either way (a relaunch gets a new lease).
       bypass: approvalMode === "bypass-permissions", controlAllowed: false,
+      // Launched with "Approve for me": its routine project commands run without a dialog each.
+      autoReview: autoReview === true,
       aoSession: null, root: null, checkedAt: 0, createdAt: now(), usedAt: now(),
       // The commands it started (for the Terminal pane) and the preview origins it may open.
       commands: new Map(), origins: new Set(),
@@ -897,6 +901,12 @@ function createChatAgentTools({
   async function confirmTerminal(entry, name, args, root) {
     if (entry.bypass) return false;
     if (name === "exec_command") {
+      // "Approve for me": a routine project command (an install from the lockfile, the project's
+      // own scripts and checks, a version check) runs as it would from the agent's own shell. It
+      // counts as confirmed, so a routine approval the workspace asks for is not asked again.
+      let routine = null;
+      try { routine = entry.autoReview && !(typeof args.stdin === "string" && args.stdin) ? routineCommand(String(args.cmd ?? "")) : null; } catch { routine = null; }
+      if (routine) return true;
       return ask("A chat agent wants to run a command",
         dialogText([...who(entry), ...describeCall(name, args, root),
           "\n\nThe command starts in the chat's worktree but is not confined to it:\n"
@@ -1290,12 +1300,13 @@ function createChatAgentTools({
      * agent's driver cannot take an HTTP server, or the workspace id is unusable. `servers` go into
      * the spawn's mcpServers; `bind(sessionId)` ties the credential to the session AO created (its
      * worktree becomes the root), and `release()` forgets it when the spawn failed. `approvalMode`
-     * is the session's AO permission mode: only "bypass-permissions" runs commands unconfirmed.
+     * is the session's AO permission mode: only "bypass-permissions" runs every command unconfirmed;
+     * `autoReview` (the card is set to "Approve for me") runs its routine project commands unconfirmed.
      */
-    async lease({ agent, workspaceId, approvalMode = null } = {}) {
+    async lease({ agent, workspaceId, approvalMode = null, autoReview = false } = {}) {
       if (!isEnabled() || !MCP_HTTP_AGENTS.has(agent) || typeof workspaceId !== "string" || !WORKSPACE_ID.test(workspaceId)) return null;
       await listen();
-      const { entry, token } = mint({ agent, workspaceId, approvalMode });
+      const { entry, token } = mint({ agent, workspaceId, approvalMode, autoReview });
       const url = `http://127.0.0.1:${port}/mcp/${encodeURIComponent(workspaceId)}/${entry.key}`;
       return Object.freeze({
         servers: [{ name: SERVER_NAME, type: "http", url, headers: { Authorization: `Bearer ${token}` } }],
@@ -1342,7 +1353,7 @@ function createChatAgentTools({
         const commands = [...entry.commands.values()].sort((left, right) => right.startedAt - left.startedAt);
         // A running command is asked about once per listing; finished ones stay as they ended.
         for (const command of commands) if (command.status === "running") await readCommand(entry, command, "stdout", Number.MAX_SAFE_INTEGER).catch(() => undefined);
-        out.push({ sessionId, agent: entry.agent, commands: commands.map(({ id, cmd, workdir, startedAt, status, exitCode }) => ({ id, cmd, workdir, startedAt, status, exitCode })) });
+        out.push({ sessionId, agent: entry.agent, commands: commands.map(({ id, cmd, workdir, startedAt, status, exitCode, user }) => ({ id, cmd, workdir, startedAt, status, exitCode, user: user === true })) });
       }
       return out;
     },
@@ -1370,6 +1381,53 @@ function createChatAgentTools({
       const command = commandOf(entry, commandId);
       await invokeAsUser(entry, "write_stdin", { command_id: command.id, chars: text, yield_time_ms: 200, max_output_bytes: 0 });
       return { ok: true };
+    },
+    /**
+     * The user's own shell in the session's worktree (the side panel's Terminal tab): PowerShell on
+     * a terminal, listed with the session's commands so its output and input use the same panes.
+     * The user started it, so no dialog asks.
+     */
+    async terminalStart({ sessionId } = {}) {
+      const entry = entryFor(sessionId);
+      if (!entry) throw new Error("That chat agent's session has ended");
+      const cmd = WINDOWS ? 'powershell.exe -NoLogo -NoProfile -NoExit -Command "Remove-Module PSReadLine -ErrorAction SilentlyContinue"' : "bash -i";
+      const value = await invokeAsUser(entry, "exec_command", { cmd, workdir: ".", tty: true, yield_time_ms: 500, max_output_bytes: 4096 });
+      const id = typeof value?.command_id === "string" && COMMAND_ID.test(value.command_id) ? value.command_id : null;
+      if (!id) throw new Error("The terminal did not start");
+      entry.commands.set(id, { id, cmd: "Terminal", workdir: ".", startedAt: now(), status: "running", exitCode: null, user: true });
+      return { ok: true, commandId: id };
+    },
+    /**
+     * The session worktree's changes for the side panel's Changes tab: git's status (with new files)
+     * and the diff of tracked files, as headless reads them in that worktree.
+     */
+    async changes({ sessionId } = {}) {
+      const entry = entryFor(sessionId);
+      if (!entry) throw new Error("That chat agent's session has ended");
+      const status = await invokeAsUser(entry, "git_status", { include_untracked: true, max_entries: 500 });
+      const diff = await invokeAsUser(entry, "git_diff", { context_lines: 3, max_bytes: 512 * 1024 });
+      return {
+        ok: true, root: entry.root?.path ?? null, branch: typeof status?.branch === "string" ? status.branch : "",
+        entries: Array.isArray(status?.entries) ? status.entries.slice(0, 500) : [],
+        diff: typeof diff?.diff === "string" ? diff.diff : "", truncated: diff?.truncated === true,
+      };
+    },
+    /** One folder of the session's worktree for the Files tab (`path` relative to its root). */
+    async files({ sessionId, path: folder = "." } = {}) {
+      const entry = entryFor(sessionId);
+      if (!entry) throw new Error("That chat agent's session has ended");
+      const root = await rootOf(entry);
+      const listed = await invokeAsUser(entry, "list_dir", { path: scopePath(root, folder || ".", "path") });
+      return { ok: true, path: folder || ".", entries: Array.isArray(listed?.entries) ? listed.entries.slice(0, 1000) : [], truncated: listed?.truncated === true };
+    },
+    /** One file of the session's worktree for the Files tab, as text. */
+    async file({ sessionId, path: target } = {}) {
+      const entry = entryFor(sessionId);
+      if (!entry) throw new Error("That chat agent's session has ended");
+      const root = await rootOf(entry);
+      const read = await invokeAsUser(entry, "read_file", { path: scopePath(root, target, "path"), max_bytes: 512 * 1024 });
+      return { ok: true, path: target, content: typeof read?.content === "string" ? read.content : "", encoding: read?.encoding ?? null,
+        truncated: read?.truncated === true };
     },
     /** What each session's preview shows, for the Preview pane (sessions without one are left out). */
     previewState(sessionIds = []) {

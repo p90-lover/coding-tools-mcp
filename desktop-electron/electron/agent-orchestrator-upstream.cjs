@@ -442,12 +442,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
    * the worktree AO creates for it), or null. Never fails a launch: without them the agent starts
    * without them.
    */
-  async function chatTools(agent, workspaceId, approvalMode) {
+  async function chatTools(agent, workspaceId, approvalMode, autoReview = false) {
     if (!agentTools) return null;
     try {
       // The session's permission mode goes with its credential: only a session launched to
-      // bypass permissions runs terminal commands without the user confirming each one.
-      const lease = await agentTools.lease({ agent, workspaceId, ...(approvalMode ? { approvalMode } : {}) });
+      // bypass permissions runs every terminal command without the user confirming each one, and
+      // one set to "Approve for me" (autoReview) its routine project commands.
+      const lease = await agentTools.lease({ agent, workspaceId, ...(approvalMode ? { approvalMode } : {}), ...(autoReview ? { autoReview: true } : {}) });
       return Array.isArray(lease?.servers) && lease.servers.length ? lease : null;
     } catch (cause) {
       logger.warn?.("ao.agent_tools_unavailable", { agent, message: String(cause?.message || cause).slice(0, 200) });
@@ -479,7 +480,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         .slice(0, 100).map(model => ({ id: model.id, label: String(model.label || model.id).slice(0, 128), isDefault: model.isDefault === true,
           efforts: Array.isArray(model.efforts) ? model.efforts.filter(value => typeof value === "string" && value.length <= 32).slice(0, 16) : [] }));
     },
-    async spawn({ workspaceId, agent, model, prompt, name, gateway = null, effort = null, contextWindow = null, approvalMode = null, plain = false, warm = false }) {
+    async spawn({ workspaceId, agent, model, prompt, name, gateway = null, effort = null, contextWindow = null, approvalMode = null, autoReview = false, plain = false, warm = false }) {
       if (approvalMode !== null && !["default", "accept-edits", "auto", "bypass-permissions"].includes(approvalMode)) throw new Error("Unsupported AO permission mode");
       const projectId = await projectFor(workspaceId);
       const settings = await internalApi("GET", "/api/v1/settings");
@@ -495,7 +496,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       const launch = async (mode) => {
         // Chat sessions only: a terminal launch has no controller to attach tool servers to. Each
         // attempt gets its own credential, bound to the session it creates and to nothing else.
-        const tools = mode === "chat" ? await chatTools(agent, workspaceId, approvalMode) : null;
+        const tools = mode === "chat" ? await chatTools(agent, workspaceId, approvalMode, autoReview === true) : null;
         let created;
         try {
           created = await launchSession(mode, tools?.servers ?? []);
@@ -1088,10 +1089,19 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     }
     // A chat's Terminal and Preview panes: the user's view of each card's agent session, through
     // the agent tools server that started its commands and owns its preview (chat-agent-tools.cjs).
-    if (operation.startsWith("chat_process") || operation.startsWith("chat_preview_")) {
+    if (operation.startsWith("chat_process") || operation.startsWith("chat_preview_")
+      || ["chat_terminal_start", "chat_changes", "chat_files", "chat_file"].includes(operation)) {
       if (!agentTools?.processes) throw new Error("The chat agent tools are unavailable");
       const ids = Array.isArray(args.sessionIds) ? args.sessionIds.filter((id) => typeof id === "string").slice(0, 32) : [];
+      const pathArgument = (value) => (typeof value === "string" && value.length <= 1024 && !value.includes("\0") ? value : ".");
       switch (operation) {
+        case "chat_terminal_start": return agentTools.terminalStart({ sessionId: args.sessionId });
+        case "chat_changes": return agentTools.changes({ sessionId: args.sessionId });
+        case "chat_files": return agentTools.files({ sessionId: args.sessionId, path: pathArgument(args.path) });
+        case "chat_file": {
+          if (typeof args.path !== "string" || !args.path || args.path.length > 1024) throw new Error("Choose a file");
+          return agentTools.file({ sessionId: args.sessionId, path: args.path });
+        }
         case "chat_processes": return { ok: true, sessions: await agentTools.processes(ids) };
         case "chat_process_output": return { ok: true, ...await agentTools.processOutput(args) };
         case "chat_process_stop": return agentTools.processStop(args);
