@@ -560,7 +560,11 @@ function createProxyGateway({
   const totals = {
     totalConnections: 0,
     rejectedConnections: 0,
+    // A client's first try without a key is a challenge (it retries with the key after the 407); a
+    // key that does not match is a failure, kept with when and from which local port it came.
+    authChallenges: 0,
     authFailures: 0,
+    lastAuthFailure: null,
     tunnels: 0,
     httpRequests: 0,
     failures: 0,
@@ -689,7 +693,12 @@ function createProxyGateway({
         return;
       }
       if (!allowed) {
-        totals.authFailures += 1;
+        if (parsed.headers.some((entry) => entry.name === "proxy-authorization")) {
+          totals.authFailures += 1;
+          totals.lastAuthFailure = { at: new Date().toISOString(), remotePort: client.remotePort ?? null };
+        } else {
+          totals.authChallenges += 1;
+        }
         reader.release();
         client.end(plainResponse(407, "Proxy authentication required", 'Proxy-Authenticate: Basic realm="Coding Tools gateway"\r\n'));
         return;

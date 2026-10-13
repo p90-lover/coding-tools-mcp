@@ -949,11 +949,21 @@ function createProxyGatewayController({
       return;
     }
     const error = live?.lastError;
-    if (!error?.at || error.at === reportedHelperError) return;
-    reportedHelperError = error.at;
-    logger.warn("proxy_gateway.relay_error", { message: String(error.message ?? "").slice(0, 300), at: error.at,
-      authFailures: live.stats?.authFailures ?? null });
+    if (error?.at && error.at !== reportedHelperError) {
+      reportedHelperError = error.at;
+      logger.warn("proxy_gateway.relay_error", { message: String(error.message ?? "").slice(0, 300), at: error.at,
+        authFailures: live.stats?.authFailures ?? null });
+    }
+    // A client that sent a key the gateway does not hold (a service started with an old one): its
+    // port at that moment, to match against the connections of the services still running.
+    const denied = live?.stats?.lastAuthFailure;
+    if (denied?.at && denied.at !== reportedAuthFailure) {
+      reportedAuthFailure = denied.at;
+      logger.warn("proxy_gateway.auth_failed", { at: denied.at, remotePort: denied.remotePort ?? null,
+        authFailures: live.stats.authFailures ?? null, authChallenges: live.stats.authChallenges ?? null });
+    }
   }
+  let reportedAuthFailure = null;
 
   function startWatchdog() {
     if (closed || watchdog || !(watchdogMs > 0)) return;
