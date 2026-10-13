@@ -427,7 +427,8 @@ export function chatTurns(runs: ChatRun[], description: string | undefined, opti
     const steps = chatNodeOrder(run.nodes)
       .filter((node) => node.state !== "pending" || node.receipt)
       .map((node) => chatStep(run, node, options, now));
-    const closing = run.solo
+    // A single-model run's one card answers the message itself, as a solo orchestrator's does.
+    const closing = run.solo || run.execution_mode === "single"
       ? steps.find((step) => step.role === "planner" && step.state === "finished" && step.text)
       : [...steps].reverse().find((step) => step.role === "reviewer" && step.state === "finished" && step.text);
     const starts = steps.map((step) => step.startedAtMs).filter((value): value is number => Boolean(value));

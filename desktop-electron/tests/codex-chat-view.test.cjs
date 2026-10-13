@@ -489,3 +489,12 @@ test("a single-model chat shows its finished work unfolded; a Team chat folds th
   assert.equal(steps(single), true, "a single-model chat shows its work");
   assert.ok(answer(single));
 });
+
+test("a single-model chat's reply shows as the turn's answer, never inside a folded step", () => {
+  // The real single shape: one planner card, not solo, its reply in the receipt.
+  const one = () => [node("one", "planner", "finished", { receipt: { answer: "Registered the account" } })];
+  const view = mount(base({ selectedTaskId: "t", runs: [run("r1", "t", one(), { execution_mode: "single" })] }).props).render();
+  const answers = walk(view).filter((element) => String(element.props?.className || "").startsWith("cx-answer"));
+  assert.equal(answers.length > 0, true, "the reply is the turn's answer");
+  assert.ok(walk(answers[0]).some((element) => element.props?.text === "Registered the account"), "and the answer carries the reply");
+});
