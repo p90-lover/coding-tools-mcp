@@ -57,6 +57,7 @@ const {
   setProviderCpaConnection,
   setProxyGatewayDesktopRunning,
   setProxyGatewayKeyRotated,
+  setProviderLogger,
 } = require("./provider-bootstrap.cjs");
 
 const { createManagedExternalServicesController, resolveManagedProxyEnvironment } = require("./managed-external-services.cjs");
@@ -2389,6 +2390,8 @@ async function start() {
     publish: (record) => send("launcher:log", record),
   });
   quitLogger = logger;
+  // Provider Network and the Proxy Gateway log here too (their launch events are kept until now).
+  setProviderLogger(logger);
   if (autostartStartupError) logger.warn("launcher.autostart_unavailable", { message: autostartStartupError });
   const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
   updateController = createGuiUpdateController({
