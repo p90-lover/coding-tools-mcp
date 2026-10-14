@@ -211,8 +211,25 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   // Everything that decides how an agent is launched; two routes alike in these share a session.
   const ROUTE_IDENTITY = ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile",
     "approval_policy", "approvals_reviewer", "effort", "context_window"];
+  /**
+   * The window a card with none set starts with: its model's full known limit, where the harness can
+   * set one and the catalog reports a real limit for the model. Null leaves the agent's own default.
+   */
+  async function defaultContextWindow(workspaceId, node) {
+    if (node.route.context_window != null) return null;
+    try {
+      const catalog = await models({ harness: node.route.harness_id, workspaceId });
+      const baseModel = node.route.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
+      const capability = catalog.capabilities?.[node.route.model] ?? catalog.capabilities?.[baseModel];
+      const setting = capability?.contextWindow, limit = capability?.contextLimit;
+      if (!setting || !Number.isSafeInteger(limit) || limit <= 0) return null;
+      const tokens = Math.min(limit, setting.max ?? limit);
+      return tokens >= setting.min ? tokens : null;
+    } catch { return null; }
+  }
   /** The AO spawn arguments for a card, without its prompt; throws when the route cannot be honored. */
-  function aoLaunchArgs(workspaceId, node, plain) {
+  function aoLaunchArgs(workspaceId, node, plain, contextDefault = null) {
+    const contextWindow = node.route.context_window ?? contextDefault;
     const agent = externalAgent(node);
     const profile = node.route.native_permission_profile ?? node.route.permission_profile;
     if ((node.route.approval_policy !== undefined || node.route.native_permission_profile !== undefined) && (!["claude-code", "codex"].includes(agent)
@@ -242,7 +259,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       // The app's own terminal follows "Approve for me" too: routine project commands run unasked.
       ...(node.route.approvals_reviewer === "auto_review" ? { autoReview: true } : {}),
       ...(viaCpa ? { gateway: { provider: "cpa", model: wireModel } } : {}),
-      ...(node.route.context_window != null ? { contextWindow: node.route.context_window } : {}),
+      // A card left blank gets its model's full known limit (defaultContextWindow).
+      ...(contextWindow != null ? { contextWindow } : {}),
       ...(plain ? { plain: true } : {}),
       // Native effort validation stays skipped for foreign models; CPA reads the suffix.
       ...(!viaCpa && node.route.effort ? { effort: node.route.effort } : {}) };
@@ -277,7 +295,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     if (toolsKey(workspaceId) === "pending") return { ok: true, warmed: false, reason: "The app's tools are still starting" };
     const key = warmKey(workspaceId, route, plain);
     if (warm.has(key)) return { ok: true, warmed: true };
-    const args = aoLaunchArgs(workspaceId, node, plain);
+    const args = aoLaunchArgs(workspaceId, node, plain, await defaultContextWindow(workspaceId, node));
     while (warm.size >= WARM_MAX) {
       const [oldKey, oldest] = warm.entries().next().value;
       warm.delete(oldKey);
@@ -429,6 +447,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   }
 
   const tuningEfforts = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "auto"]);
+  /** The window CPA reports for any provider-plugin model it knows no limit for (GPT-5's default). */
+  const CPA_STOCK_WINDOW = 272_000;
   const reportedEfforts = values => [...new Set((Array.isArray(values) ? values : [])
     .map(value => typeof value === "string" ? value : value?.effort)
     .filter(value => typeof value === "string" && tuningEfforts.has(value)))];
@@ -518,7 +538,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       const efforts = reportedEfforts(entry.supported_reasoning_levels ?? entry.thinking?.levels);
       // context_window is the default the client starts with; max_context_window is how far the
       // model goes (Luna: 272K by default, up to 1M).
-      const limit = entry.max_context_window ?? entry.context_window ?? entry.context_length;
+      // CPA gives every model of its provider plugins (cline-pass/…, commandcode-go/…) the same stock
+      // window, whatever the model really takes: that number is no limit, so it is left unknown
+      // instead of capping the card (and of becoming its default).
+      const reported = entry.max_context_window ?? entry.context_window ?? entry.context_length;
+      const stock = id.includes("/") && reported === CPA_STOCK_WINDOW && (entry.context_window ?? reported) === CPA_STOCK_WINDOW;
+      const limit = stock ? undefined : reported;
       // CPA names the upstream that serves the model (e.g. antigravity, codex, cline-pass).
       const provider = [entry.provider, entry.owned_by, entry.ownedBy].find(value => typeof value === "string" && value.trim());
       capabilities[id] = { efforts, ...(!efforts.length ? { effortReason: "CPA did not advertise reasoning levels for this model." } : {}),
@@ -578,7 +603,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       let session = null;
       let failure = null;
       try {
-        const launch = aoLaunchArgs(workspaceId, node, plain);
+        const launch = aoLaunchArgs(workspaceId, node, plain, await defaultContextWindow(workspaceId, node));
         // A single-model follow-up continues the chat's live session as its next turn: no new
         // session, worktree or replayed prompt, and the agent keeps what it already read and ran.
         const continued = continuations.get(runId);
@@ -1324,6 +1349,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // enforce that) are allowed like Claude's own reads and edits; the terminal and the screen are not,
   // and keep their own confirm in the app. Matched on the exact server prefix and an exact name.
   const APP_TOOL_PREFIX = "mcp__coding-tools__";
+  /** Codex's command-review model, which CPA serves from the ChatGPT account. */
+  const AUTO_REVIEW_MODEL = "codex-auto-review";
   const APP_TOOLS_ALLOWED = new Set(["read_file", "list_dir", "list_files", "search_text", "grep_text", "get_current_time",
     "get_plan", "update_plan", "tool_search", "server_info", "git_status", "git_diff", "git_log", "git_show", "git_blame",
     "view_image", "image_info", "compare_images", "check_exec_environment", "read_output", "apply_patch", "patch_check"]);
@@ -1374,14 +1401,25 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     approval.cwd && `in ${approval.cwd}`, approval.reason]
     .filter(Boolean).join(" · ").slice(0, 1500);
 
-  async function askApprover({ approver, mission, approval }) {
-    const { baseUrl, key } = connection();
+  /**
+   * The models a request is reviewed with, first that answers wins. "Approve for me" uses Codex's
+   * own auto-review model (free on a ChatGPT account through CPA) rather than the worker reviewing
+   * its own request; a team's Command approver card keeps the model it was given. Either falls back
+   * to the next while CPA cannot serve one (e.g. its Codex sign-in has expired).
+   */
+  function reviewerModels(approver, catalog) {
     const route = approver.route ?? {};
     const own = route.provider_id === "cliproxyapi-antigravity" ? route.model
       : typeof route.model === "string" && route.model.startsWith(CPA_MODEL_PREFIX) ? route.model.slice(CPA_MODEL_PREFIX.length) : null;
-    const catalog = (await models()).models;
-    const model = own && catalog.includes(own) ? own : catalog[0];
-    if (!model) throw new Error("CPA has no model for the command approver");
+    const card = approver.role === "approver";
+    const order = card ? [own, AUTO_REVIEW_MODEL, catalog[0]] : [AUTO_REVIEW_MODEL, own, catalog[0]];
+    return [...new Set(order.filter(model => model && catalog.includes(model)))];
+  }
+
+  async function askApprover({ approver, mission, approval }) {
+    const { baseUrl, key } = connection();
+    const candidates = reviewerModels(approver, (await models()).models);
+    if (!candidates.length) throw new Error("CPA has no model for the command approver");
     const prompt = [
       "You are the command approver for an orchestrated coding mission. A worker asks to run a tool request.",
       `Workspace: ${mission.workspace_id}. Approver rules: ${String(approver.settings?.instructions || "none").slice(0, 1500)}`,
@@ -1390,17 +1428,23 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       'Answer with JSON only: {"action":"allow"|"deny"|"ask","reason":"<one sentence for the user>"}.',
       "allow: clearly safe and needed for the task. deny: destructive, outside the workspace, secret-touching or unrelated. ask: anything unclear.",
     ].filter(Boolean).join("\n");
-    const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, temperature: 0, max_tokens: 200, messages: [{ role: "user", content: prompt }] }),
-      signal: AbortSignal.timeout(45_000),
-    });
-    if (!response.ok) throw new Error(`Command approver returned HTTP ${response.status}`);
-    const text = String((await response.json())?.choices?.[0]?.message?.content ?? "");
-    const decision = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
-    if (!["allow", "deny", "ask"].includes(decision?.action)) throw new Error("Command approver gave no decision");
-    return { action: decision.action, reason: String(decision.reason || "").slice(0, 300) };
+    let failure = null;
+    for (const model of candidates) {
+      try {
+        const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ model, temperature: 0, max_tokens: 200, messages: [{ role: "user", content: prompt }] }),
+          signal: AbortSignal.timeout(45_000),
+        });
+        if (!response.ok) throw new Error(`Command approver ${model} returned HTTP ${response.status}`);
+        const text = String((await response.json())?.choices?.[0]?.message?.content ?? "");
+        const decision = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
+        if (!["allow", "deny", "ask"].includes(decision?.action)) throw new Error(`Command approver ${model} gave no decision`);
+        return { action: decision.action, reason: String(decision.reason || "").slice(0, 300) };
+      } catch (error) { failure = error; }
+    }
+    throw failure;
   }
 
   /**
@@ -1441,7 +1485,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
               // (an MCP tool with a command) keeps going to the reviewer and the app's confirm.
               : approval.kind === "command" && !/^mcp__/.test(String(approval.tool ?? "")) && routineCommand(approval.command)
                 ? { action: "allow", reason: routineCommand(approval.command) }
-                : await askApprover({ approver, mission, approval });
+                // A reviewer that cannot answer leaves the request to the person, and its card says why.
+                : await askApprover({ approver, mission, approval }).catch((error) => ({ action: "ask",
+                  reason: `The command reviewer could not answer (${publicText(error?.message || error, 160)}); check it yourself` }));
         const offered = approval.request?.availableDecisions;
         if (Array.isArray(offered) && advice.action !== "ask"
           && !offered.includes(advice.action === "allow" ? "accept" : "decline")) {

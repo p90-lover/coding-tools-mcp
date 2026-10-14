@@ -2113,6 +2113,38 @@ test("external Codex-style permission tuples map to the real AO approval mode at
   }
 });
 
+test("a card left blank starts with its model's full known window; CPA's stock 272,000 for plugin models is no limit", async () => {
+  const catalog = { data: [
+    { id: "gpt-6-luna", context_window: 272000, max_context_window: 872000 },
+    { id: "cline-pass/deepseek-v4.1-flash", context_window: 272000, max_context_window: 272000 },
+  ] };
+  async function launch(model, contextWindow) {
+    let launched;
+    const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: `cpa/${model}`,
+      permission_profile: ":ao-default", ...(contextWindow ? { context_window: contextWindow } : {}) };
+    const mission = { id: "run", workspace_id: "ws", revision: 1, nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+    const workflow = createAgentOrchestratorWorkflow({
+      cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+      fetchImpl: async url => String(url).includes("/v1/models") ? { ok: true, json: async () => catalog } : { ok: false, status: 404, json: async () => ({}) },
+      requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } }
+        : endpoint.endsWith("/reserve") ? { ok: true, request_key: "key", prompt: "direct task" } : { ok: true, run: mission },
+      aoHarness: { spawn: async input => { launched = input; return "session"; } },
+      confirm: async () => true,
+    });
+    await workflow.call("advance", { workspaceId: "ws", runId: "run", executable: "C:/codex.exe" });
+    return { launched, models: await workflow.call("models", { harness: "ao:claude-code" }) };
+  }
+  const luna = await launch("gpt-6-luna");
+  assert.equal(luna.launched.contextWindow, 872000, "the model's full limit, not the 272K it starts at");
+  const deepseek = await launch("cline-pass/deepseek-v4.1-flash");
+  assert.equal(deepseek.launched.contextWindow, undefined, "an unknown limit leaves the agent's own default");
+  const capability = deepseek.models.capabilities["cpa/cline-pass/deepseek-v4.1-flash"];
+  assert.equal(capability.contextLimit, undefined, "CPA's stock window is not reported as the model's limit");
+  assert.equal(capability.contextWindow.max, 2000000, "so it no longer caps what the card may set");
+  assert.equal(deepseek.models.capabilities["cpa/gpt-6-luna"].contextLimit, 872000, "a real limit is kept");
+  assert.equal((await launch("gpt-6-luna", 300000)).launched.contextWindow, 300000, "a window the card sets wins");
+});
+
 test("permission capabilities use installed AO adapter modes without fabricating native metadata", async () => {
   const reads = [], launches = [];
   const workflow = createAgentOrchestratorWorkflow({
@@ -2556,6 +2588,61 @@ test("a single AO card set to Approve for me has its parked tool requests review
     "allowed once by the reviewer, git push denied by the hard rules, the unclear write left for the person; never an always-grant");
   assert.ok(advised.length >= 1 && advised.every(model => model === "test-model"), "the card's own CPA model reviews");
   assert.equal(advised.length, 1, "the reviewer is asked only about the unclear write, never about the agent's question");
+});
+
+test("Approve for me is reviewed by codex-auto-review first, the card's model when CPA cannot serve it, and the person when neither answers", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
+  async function review(failing) {
+    const request = { approval_id: "write", source: "ao", kind: "permission", path: "C:/elsewhere/file", tool: "Write", summary: "Write", decisions };
+    const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+      { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+    const asked = [], resolved = [];
+    let detail = "";
+    const workflow = createAgentOrchestratorWorkflow({
+      findCodexExecutable: () => process.execPath,
+      resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+      cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+      fetchImpl: async (url, init) => {
+        if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
+        const model = JSON.parse(init.body).model;
+        asked.push(model);
+        if (failing.includes(model)) return { ok: false, status: 503, json: async () => ({}) };
+        return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"allow","reason":"fixture"}' } }] }) };
+      },
+      requestHeadless: async (endpoint, body) => {
+        if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+        if (typeof body?.detail === "string") detail = body.detail;
+        return { ok: true, run: mission };
+      },
+      aoHarness: {
+        observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: resolved.length ? [] : [request] }),
+        resolveApproval: async (session, requestId, decisionId) => { resolved.push(decisionId); return { ok: true }; },
+      },
+      confirm: async () => true,
+    });
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 200 && !resolved.length && asked.length < 2; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    await new Promise(resolve => setTimeout(resolve, 30));
+    mission.nodes[0].state = "finished";
+    for (let tries = 0; tries < 100; tries++) {
+      const status = await workflow.call("run_status", { workspaceId: "ws", runId: "run" });
+      if (status.status !== "running") { detail ||= JSON.stringify(status); break; }
+      detail ||= JSON.stringify(status);
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    return { asked, resolved, detail };
+  }
+  const healthy = await review([]);
+  assert.deepEqual(healthy.asked, ["codex-auto-review"], "Codex's reviewer, not the worker reviewing itself");
+  assert.deepEqual(healthy.resolved, ["yes"]);
+  const signedOut = await review(["codex-auto-review"]);
+  assert.deepEqual(signedOut.asked, ["codex-auto-review", "test-model"], "the card's own model takes over");
+  assert.deepEqual(signedOut.resolved, ["yes"]);
+  const down = await review(["codex-auto-review", "test-model"]);
+  assert.deepEqual(down.resolved, [], "nothing is answered for the person when no reviewer answers");
+  assert.match(down.detail, /could not answer/, "and the request says why it is waiting for them");
 });
 
 test("the person's answer to an AO agent's question goes back through AO's input endpoint, without a dialog", async () => {
