@@ -73,9 +73,16 @@ test("a fresh read is cached; a stale or unchecked account is refreshed once per
 test("an account at its limit, a disabled one and one with an error are told apart", () => {
   assert.equal(accountOf(item({ priority: -1 })).paused, true);
   assert.equal(accountOf(item({ disabled: true })).disabled, true);
-  const failed = accountOf(item({ quota: { error: "HTTP 401", checked_ms: NOW } }));
-  assert.equal(failed.error, "HTTP 401");
+  const failed = accountOf(item({ quota: { error: "HTTP 500", checked_ms: NOW } }));
+  assert.equal(failed.error, "HTTP 500");
   assert.equal(failed.session, null);
+  // As the installed app saw it: every account's sign-in expired, before any quota check.
+  for (const error of ["unauthorized", "HTTP 401", "Encountered invalidated oauth token"]) {
+    assert.match(accountOf(item({ quota: { error } })).error, /^Signed out: .*Sign in to it again in CPA\.$/, error);
+  }
+  assert.equal(accountOf(item({ plan: "oauth", quota: null })).plan, null, "a credential type is not a plan");
+  assert.equal(accountOf(item({ quota: { plan: "unknown" } })).plan, null);
+  assert.equal(accountOf(item({ quota: { plan: "pro" } })).plan, "pro");
   assert.equal(accountOf({ auth_index: 7, name: "codex-x.json" }).label, "codex-x.json");
   assert.equal(accountOf(item({ quota: { primary: { used_percent: 140 } } })).session.usedPercent, 100);
 });
