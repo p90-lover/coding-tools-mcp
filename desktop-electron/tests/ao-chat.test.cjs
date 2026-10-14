@@ -619,12 +619,12 @@ test("a chat's AO agent sessions for its Preview and Terminal panes: newest firs
     run("r4", "t", [card("a", "s3"), node("n", "worker", "finished", { route: { harness_id: "native-codex", model: "m" }, receipt: { thread_id: "codex-thread" } })]),
   ]);
   assert.deepEqual(plain(sessions), [
-    { id: "s3", label: "planner · cpa/gpt-6-luna · current" },
-    { id: "s2", label: "planner · cpa/gpt-6-luna · earlier 1" },
-    { id: "s1", label: "planner · cpa/gpt-6-luna · earlier 2" },
+    { id: "s3", label: "planner · cpa/gpt-6-luna · current", model: "cpa/gpt-6-luna" },
+    { id: "s2", label: "planner · cpa/gpt-6-luna · earlier 1", model: "cpa/gpt-6-luna" },
+    { id: "s1", label: "planner · cpa/gpt-6-luna · earlier 2", model: "cpa/gpt-6-luna" },
   ], "a native Codex thread is not an AO session");
   assert.deepEqual(plain(chat.chatAgentSessions([run("r1", "t", [card("a", "s1", { settings: { name: "Builder" } })])])),
-    [{ id: "s1", label: "Builder · cpa/gpt-6-luna" }], "a single session keeps its plain name");
+    [{ id: "s1", label: "Builder · cpa/gpt-6-luna", model: "cpa/gpt-6-luna" }], "a single session keeps its plain name");
 });
 
 test("the context meter's numbers: short token counts, and fullness only when the agent gives its window", () => {

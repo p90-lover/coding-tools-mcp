@@ -20,7 +20,7 @@ const chat = load("ao-chat.ts");
 const roles = load("AgentOrchestratorRoleEditor.tsx", { "./ao-chat": chat });
 const markdown = load("ChatMarkdown.tsx", { "./chat-markdown": load("chat-markdown.ts") });
 const menu = load("ChatMenu.tsx");
-const meter = load("ChatContextMeter.tsx", { "./ao-chat": chat, "./ChatMenu": menu,
+const meter = load("ChatContextMeter.tsx", { "./ao-chat": chat, "./ChatMenu": menu, "./AgentOrchestratorRoleEditor": roles,
   "../api/client": { getCodingToolsClient: () => ({ apps: { call: async () => ({ result: { sessions: {} } }) } }) } });
 const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
   "./ChatContextMeter": meter,
@@ -106,6 +106,25 @@ test("an open chat's composer carries the context meter; a new chat's does not",
   assert.match(open, /class="cx-icon-button cx-context-meter is-unknown"[^>]*aria-label="The agent has not reported its context yet"/);
   const fresh = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, { ...props, runs: [], selectedTaskId: "" }));
   assert.equal(fresh.includes("cx-context-meter"), false);
+});
+
+test("CPA's Codex accounts' limits apply only to a model CPA serves from Codex, and read as Claude Code's", () => {
+  roles.rememberCpaProviders({ "cpa/gpt-5.5": { provider: "codex" }, "cpa/deepseek-v4.1-flash": { provider: "cline-pass" } });
+  assert.equal(roles.cpaProviderOf("cpa/gpt-5.5"), "codex");
+  assert.equal(roles.cpaProviderOf("cpa/deepseek-v4.1-flash"), "cline-pass", "a Cline Pass model has no 5-hour or weekly window");
+  assert.equal(roles.cpaProviderOf("cpa/codex/gpt-unknown"), "codex", "an unlisted model falls back to its id's prefix");
+  assert.equal(roles.cpaProviderOf("gpt-5.5"), null, "not a CPA route");
+  assert.equal(roles.cpaProviderOf(undefined), null);
+
+  const now = new Date(2026, 9, 14, 13, 0).getTime();
+  const later = new Date(2026, 9, 14, 19, 5).getTime();
+  const nextWeek = new Date(2026, 9, 21, 10, 0).getTime();
+  assert.match(meter.resetLabel(later, now), /^Resets 7:05\s?PM$/i, "today: the time only");
+  assert.match(meter.resetLabel(nextWeek, now), /^Resets Oct 21, 10:00\s?AM$/i, "another day: the date and time");
+  assert.equal(meter.resetLabel(now - 1, now), "", "a reset already past says nothing");
+  assert.equal(meter.resetLabel(null, now), "");
+  const chats = chat.chatAgentSessions([{ nodes: [{ role: "planner", route: { harness_id: "ao:claude-code", model: "cpa/gpt-5.5" }, receipt: { thread_id: "s1" } }] }]);
+  assert.equal(chats[0].model, "cpa/gpt-5.5", "the chat passes the session's model to the meter");
 });
 
 test("an answer's Markdown is parsed once per text, not on every chat re-render", () => {

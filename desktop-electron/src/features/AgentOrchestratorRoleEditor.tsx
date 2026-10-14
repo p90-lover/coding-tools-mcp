@@ -160,6 +160,13 @@ const PROVIDER_NAMES: Record<string, string> = {
   zhipu: "Zhipu", glm: "Zhipu", openrouter: "OpenRouter", commandcode: "CommandCode",
 };
 const providerName = (provider: string) => PROVIDER_NAMES[provider.toLowerCase()] ?? provider;
+/** The CPA provider serving a "cpa/<id>" route model (as CPA reported it, else the id's own prefix); null for other models. */
+export function cpaProviderOf(model: string | undefined): string | null {
+  if (!model?.startsWith("cpa/")) return null;
+  const id = model.slice(4);
+  const slash = id.indexOf("/");
+  return cpaProviders.get(id) ?? (slash > 0 ? id.slice(0, slash) : null);
+}
 /** "CPA · <provider> · <model>": the provider CPA reported, else the model id's own prefix or family. */
 function cpaLabel(id: string): string {
   const slash = id.indexOf("/");
