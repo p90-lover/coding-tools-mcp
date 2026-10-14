@@ -104,6 +104,304 @@ public static class CgdWin {
 }
 `;
 
+// The user's own ChatGPT window (not a docked copy): a still capture for the preview panel and
+// keyboard input for the panel's send box. Compiled only on first use, so the docking helper
+// never pays for System.Drawing.
+const LOCAL_SOURCE = String.raw`
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+
+public class CgdShot { public byte[] Jpeg; public int Width, Height; }
+
+public static class CgdLocal {
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  [StructLayout(LayoutKind.Sequential)] struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public IntPtr dwExtraInfo; }
+  [StructLayout(LayoutKind.Sequential)] struct KEYBDINPUT { public ushort wVk, wScan; public uint dwFlags, time; public IntPtr dwExtraInfo; }
+  [StructLayout(LayoutKind.Explicit)] struct INPUTUNION { [FieldOffset(0)] public MOUSEINPUT mi; [FieldOffset(0)] public KEYBDINPUT ki; }
+  [StructLayout(LayoutKind.Sequential)] struct INPUT { public uint type; public INPUTUNION u; }
+  [DllImport("user32.dll")] static extern bool IsWindow(IntPtr hwnd);
+  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
+  [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hwnd);
+  [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int max);
+  [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
+  [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hwnd);
+  [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr hwnd);
+  [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hwnd, int cmd);
+  [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+  [DllImport("user32.dll")] static extern bool AttachThreadInput(uint from, uint to, bool attach);
+  [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll", SetLastError = true)] static extern uint SendInput(uint count, INPUT[] inputs, int size);
+  [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out RECT rect, int size);
+  [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+
+  const uint PW_RENDERFULLCONTENT = 2, GA_ROOTOWNER = 3;
+  const int SW_RESTORE = 9, DWMWA_EXTENDED_FRAME_BOUNDS = 9;
+  const uint INPUT_KEYBOARD = 1, KEYEVENTF_EXTENDEDKEY = 0x1, KEYEVENTF_KEYUP = 0x2, KEYEVENTF_UNICODE = 0x4;
+  const ushort VK_RETURN = 0x0D, VK_SHIFT = 0x10, VK_CONTROL = 0x11, VK_END = 0x23;
+  // Small batches, each after a foreground check: if the user switches windows mid-message,
+  // typing stops instead of landing in whatever app is now in front.
+  const int TYPE_BATCH = 48;
+
+  static void PerMonitor() { SetThreadDpiAwarenessContext(new IntPtr(-4)); }
+
+  // "gone" also covers a recycled handle that now belongs to another process.
+  public static string State(long hwnd, uint pid) {
+    IntPtr h = new IntPtr(hwnd);
+    uint owner;
+    if (hwnd == 0 || !IsWindow(h)) return "gone";
+    GetWindowThreadProcessId(h, out owner);
+    if (owner != pid) return "gone";
+    if (IsIconic(h)) return "minimized";
+    return IsWindowVisible(h) ? "visible" : "hidden";
+  }
+
+  public static string Title(long hwnd) {
+    StringBuilder text = new StringBuilder(256);
+    GetWindowText(new IntPtr(hwnd), text, text.Capacity);
+    return text.ToString();
+  }
+
+  // PW_RENDERFULLCONTENT captures Chromium's GPU-composited content even while the window is
+  // covered; a minimized window has nothing to capture.
+  public static CgdShot Capture(long hwnd, int maxWidth) {
+    PerMonitor();
+    IntPtr h = new IntPtr(hwnd);
+    RECT r;
+    if (!GetWindowRect(h, out r)) return null;
+    int w = r.Right - r.Left, ht = r.Bottom - r.Top;
+    if (w < 16 || ht < 16 || w > 16384 || ht > 16384) return null;
+    Rectangle crop = new Rectangle(0, 0, w, ht);
+    RECT f;
+    // The window rect includes invisible resize borders; crop to what is actually drawn.
+    if (DwmGetWindowAttribute(h, DWMWA_EXTENDED_FRAME_BOUNDS, out f, Marshal.SizeOf(typeof(RECT))) == 0) {
+      Rectangle frame = Rectangle.FromLTRB(f.Left - r.Left, f.Top - r.Top, f.Right - r.Left, f.Bottom - r.Top);
+      frame.Intersect(crop);
+      if (frame.Width >= 16 && frame.Height >= 16) crop = frame;
+    }
+    using (Bitmap full = new Bitmap(w, ht, PixelFormat.Format32bppRgb)) {
+      using (Graphics g = Graphics.FromImage(full)) {
+        IntPtr hdc = g.GetHdc();
+        bool ok;
+        try { ok = PrintWindow(h, hdc, PW_RENDERFULLCONTENT); } finally { g.ReleaseHdc(hdc); }
+        if (!ok) return null;
+      }
+      double scale = Math.Min(1.0, (double)Math.Max(160, maxWidth) / crop.Width);
+      int ow = Math.Max(1, (int)Math.Round(crop.Width * scale)), oh = Math.Max(1, (int)Math.Round(crop.Height * scale));
+      using (Bitmap output = new Bitmap(ow, oh, PixelFormat.Format24bppRgb)) {
+        using (Graphics g = Graphics.FromImage(output)) {
+          g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+          g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+          g.DrawImage(full, new Rectangle(0, 0, ow, oh), crop, GraphicsUnit.Pixel);
+        }
+        byte[] jpeg = Encode(output, 72L);
+        if (jpeg.Length > 1000000) jpeg = Encode(output, 45L);
+        CgdShot shot = new CgdShot();
+        shot.Jpeg = jpeg; shot.Width = ow; shot.Height = oh;
+        return shot;
+      }
+    }
+  }
+
+  static byte[] Encode(Bitmap image, long quality) {
+    ImageCodecInfo codec = null;
+    foreach (ImageCodecInfo candidate in ImageCodecInfo.GetImageEncoders()) {
+      if (candidate.FormatID == ImageFormat.Jpeg.Guid) codec = candidate;
+    }
+    using (MemoryStream stream = new MemoryStream())
+    using (EncoderParameters options = new EncoderParameters(1)) {
+      options.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, quality);
+      image.Save(stream, codec, options);
+      return stream.ToArray();
+    }
+  }
+
+  public static bool IsForeground(long hwnd) {
+    IntPtr h = new IntPtr(hwnd), front = GetForegroundWindow();
+    return front == h || GetAncestor(front, GA_ROOTOWNER) == h;
+  }
+
+  // Windows hands focus only to a process the foreground app allows; this helper is a child of
+  // Coding Tools, which the user just clicked. Joining the foreground thread's input is the
+  // documented fallback when the plain call is refused.
+  public static bool Activate(long hwnd) {
+    IntPtr h = new IntPtr(hwnd);
+    if (!IsWindow(h)) return false;
+    if (IsIconic(h)) ShowWindow(h, SW_RESTORE);
+    if (!IsForeground(hwnd)) SetForegroundWindow(h);
+    if (!IsForeground(hwnd)) {
+      uint ignored;
+      uint front = GetWindowThreadProcessId(GetForegroundWindow(), out ignored), self = GetCurrentThreadId();
+      bool joined = front != 0 && front != self && AttachThreadInput(self, front, true);
+      try { BringWindowToTop(h); SetForegroundWindow(h); }
+      finally { if (joined) AttachThreadInput(self, front, false); }
+    }
+    for (int i = 0; i < 20 && !IsForeground(hwnd); i++) Thread.Sleep(25);
+    return IsForeground(hwnd);
+  }
+
+  static INPUT Key(ushort vk, ushort scan, uint flags) {
+    INPUT input = new INPUT();
+    input.type = INPUT_KEYBOARD;
+    input.u.ki.wVk = vk; input.u.ki.wScan = scan; input.u.ki.dwFlags = flags;
+    return input;
+  }
+
+  static bool Send(List<INPUT> inputs) {
+    if (inputs.Count == 0) return true;
+    INPUT[] batch = inputs.ToArray();
+    return SendInput((uint)batch.Length, batch, Marshal.SizeOf(typeof(INPUT))) == batch.Length;
+  }
+
+  // Types text into the focused control as Unicode key events (no clipboard involved). A line
+  // break is Shift+Enter, which starts a new line in ChatGPT's composer instead of sending.
+  // Returns null on success, otherwise why it stopped.
+  public static string TypeText(long hwnd, string text) {
+    List<INPUT> inputs = new List<INPUT>();
+    // Caret to the end, so any draft already in the box is kept, not overwritten.
+    inputs.Add(Key(VK_CONTROL, 0, 0));
+    inputs.Add(Key(VK_END, 0, KEYEVENTF_EXTENDEDKEY));
+    inputs.Add(Key(VK_END, 0, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP));
+    inputs.Add(Key(VK_CONTROL, 0, KEYEVENTF_KEYUP));
+    if (!IsForeground(hwnd)) return "focus-lost";
+    if (!Send(inputs)) return "blocked";
+    int i = 0;
+    while (i < text.Length) {
+      if (!IsForeground(hwnd)) return "focus-lost";
+      inputs.Clear();
+      int end = Math.Min(text.Length, i + TYPE_BATCH);
+      if (end < text.Length && char.IsHighSurrogate(text[end - 1])) end++;
+      for (; i < end; i++) {
+        char c = text[i];
+        if (c == '\n') {
+          inputs.Add(Key(VK_SHIFT, 0, 0));
+          inputs.Add(Key(VK_RETURN, 0, 0));
+          inputs.Add(Key(VK_RETURN, 0, KEYEVENTF_KEYUP));
+          inputs.Add(Key(VK_SHIFT, 0, KEYEVENTF_KEYUP));
+        } else {
+          inputs.Add(Key(0, c, KEYEVENTF_UNICODE));
+          inputs.Add(Key(0, c, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
+        }
+      }
+      if (!Send(inputs)) return "blocked";
+      Thread.Sleep(15);
+    }
+    return null;
+  }
+
+  public static string Submit(long hwnd) {
+    if (!IsForeground(hwnd)) return "focus-lost";
+    List<INPUT> inputs = new List<INPUT>();
+    inputs.Add(Key(VK_RETURN, 0, 0));
+    inputs.Add(Key(VK_RETURN, 0, KEYEVENTF_KEYUP));
+    return Send(inputs) ? null : "blocked";
+  }
+}
+`;
+
+// PowerShell for the user's own ChatGPT window. Sent over stdin with the first local-* request
+// (see call below) rather than baked into -EncodedCommand, which Windows caps at 32K characters.
+const LOCAL_SCRIPT = `
+Add-Type -AssemblyName System.Drawing, UIAutomationClient, UIAutomationTypes
+Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @'
+${LOCAL_SOURCE}
+'@
+# The user's own ChatGPT: a main ChatGPT.exe process that is not one of Coding Tools' copies.
+# A copy is known by its pid, or by a child whose command line carries the slots folder.
+function script:Find-Local($exclude, $ownedPids) {
+  $all = @(Get-CimInstance Win32_Process -Filter "Name='ChatGPT.exe'")
+  $owned = @{}
+  foreach ($id in @($ownedPids)) { if ($id) { $owned[[int]$id] = $true } }
+  foreach ($p in $all) {
+    if ($exclude -and $p.CommandLine -and $p.CommandLine.Contains($exclude)) {
+      $owned[[int]$p.ProcessId] = $true
+      $owned[[int]$p.ParentProcessId] = $true
+    }
+  }
+  foreach ($p in $all) {
+    if ($owned.ContainsKey([int]$p.ProcessId)) { continue }
+    if ($p.CommandLine -and $p.CommandLine.Contains('--type=')) { continue }
+    $hwnd = [CgdWin]::MainWindow([uint32]$p.ProcessId)
+    if ($hwnd -eq 0) { continue }
+    $state = [CgdLocal]::State([long]$hwnd, [uint32]$p.ProcessId)
+    if ($state -eq 'visible' -or $state -eq 'minimized') {
+      return @{ pid = [int]$p.ProcessId; hwnd = $hwnd; state = $state; title = [CgdLocal]::Title([long]$hwnd) }
+    }
+  }
+  return @{ pid = $null; hwnd = 0 }
+}
+function script:Capture-Local($hwnd, $procId, $maxWidth) {
+  $state = [CgdLocal]::State([long]$hwnd, [uint32]$procId)
+  if ($state -ne 'visible') { return @{ state = $state } }
+  $shot = [CgdLocal]::Capture([long]$hwnd, [int]$maxWidth)
+  if ($null -eq $shot) { return @{ state = 'blank' } }
+  return @{ state = 'ok'; title = [CgdLocal]::Title([long]$hwnd); width = $shot.Width; height = $shot.Height; data = [Convert]::ToBase64String($shot.Jpeg) }
+}
+function script:Test-Editable($el) {
+  if ($el.Current.ControlType -eq [System.Windows.Automation.ControlType]::Edit) { return $true }
+  $vp = $null
+  if ($el.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vp)) { return -not $vp.Current.IsReadOnly }
+  return $false
+}
+# ChatGPT's composer is the lowest editable control in its window. Chromium builds its
+# accessibility tree on the first UI Automation query, so an empty first look is retried.
+function script:Focus-Composer($hwnd) {
+  $ae = [System.Windows.Automation.AutomationElement]
+  $condition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition($ae::IsKeyboardFocusableProperty, $true)),
+    (New-Object System.Windows.Automation.PropertyCondition($ae::IsEnabledProperty, $true)))
+  $best = $null
+  for ($attempt = 0; $attempt -lt 4 -and -not $best; $attempt++) {
+    if ($attempt) { Start-Sleep -Milliseconds 400 }
+    $bottom = [double]::MinValue
+    foreach ($el in $ae::FromHandle([IntPtr][long]$hwnd).FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition)) {
+      try {
+        $r = $el.Current.BoundingRectangle
+        if ($el.Current.IsOffscreen -or $r.IsEmpty -or $r.Width -lt 40 -or -not (Test-Editable $el)) { continue }
+        if ($r.Bottom -gt $bottom) { $best = $el; $bottom = $r.Bottom }
+      } catch {}
+    }
+  }
+  if (-not $best) { throw "Could not find ChatGPT's message box" }
+  $best.SetFocus()
+  Start-Sleep -Milliseconds 120
+  # The editor may report focus on itself or on an editable part of it; anything else means
+  # the keys would go somewhere other than the message box.
+  $focused = $ae::FocusedElement
+  $ok = $false
+  try { $ok = $focused -and ([System.Windows.Automation.Automation]::Compare($focused, $best) -or (Test-Editable $focused)) } catch {}
+  if (-not $ok) { throw "ChatGPT's message box did not take focus" }
+}
+function script:Send-Local($hwnd, $procId, $text, $returnTo) {
+  $state = [CgdLocal]::State([long]$hwnd, [uint32]$procId)
+  if ($state -ne 'visible' -and $state -ne 'minimized') { throw "ChatGPT's window is not open" }
+  try {
+    if (-not [CgdLocal]::Activate([long]$hwnd)) { throw "Windows did not let Coding Tools bring ChatGPT to the front" }
+    Start-Sleep -Milliseconds 150
+    Focus-Composer $hwnd
+    if (-not [CgdLocal]::IsForeground([long]$hwnd)) { throw "ChatGPT lost focus before the message was typed" }
+    $problem = [CgdLocal]::TypeText([long]$hwnd, [string]$text)
+    if ($problem -eq 'focus-lost') { throw "Typing stopped because ChatGPT lost focus; part of the message may be in its box" }
+    if ($problem) { throw "Windows blocked the typed input (is ChatGPT running as administrator?)" }
+    Start-Sleep -Milliseconds 200
+    $problem = [CgdLocal]::Submit([long]$hwnd)
+    if ($problem) { throw "The message was typed but not sent: ChatGPT lost focus before Enter" }
+  } finally {
+    if ($returnTo) { Start-Sleep -Milliseconds 150; [void][CgdLocal]::Activate([long]$returnTo) }
+  }
+  $true
+}
+`;
+
 // PowerShell side: JSON request per stdin line, JSON response per stdout line.
 const HELPER_SCRIPT = `
 $ErrorActionPreference = 'Stop'
@@ -122,6 +420,7 @@ function Find-Instance($marker) {
   }
   return @{ pid = $null; hwnd = 0 }
 }
+$script:localReady = $false
 while ($true) {
   $line = [Console]::In.ReadLine()
   if ($null -eq $line) { break }
@@ -148,6 +447,13 @@ while ($true) {
       'close' { [CgdWin]::Close([long]$a.hwnd); $true }
       'kill-tree' { & taskkill.exe /PID ([int]$a.pid) /T /F 2>&1 | Out-Null; $true }
       'running' { [bool](Get-Process -Id ([int]$a.pid) -ErrorAction SilentlyContinue) }
+      'local-init' {
+        if (-not $script:localReady) { . ([ScriptBlock]::Create([string]$a.script)); $script:localReady = $true }
+        $true
+      }
+      'local-find' { Find-Local $a.exclude $a.ownedPids }
+      'local-capture' { Capture-Local $a.hwnd $a.pid $a.maxWidth }
+      'local-send' { Send-Local $a.hwnd $a.pid $a.text $a.returnTo }
       default { throw "Unknown operation $($req.op)" }
     }
     [Console]::Out.WriteLine((@{ id = $id; ok = $true; result = $result } | ConvertTo-Json -Compress -Depth 5))
@@ -156,6 +462,12 @@ while ($true) {
   }
 }
 `;
+
+// PowerShell reads stdin in the console's OEM code page, which mangles anything past ASCII
+// (a typed message, a non-English profile path). JSON \u escapes keep every request ASCII.
+function requestLine(request) {
+  return JSON.stringify(request).replace(/[^\x20-\x7e]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
 
 function createWin32Helper({ logger, spawnProcess = spawn } = {}) {
   let child = null;
@@ -207,7 +519,7 @@ function createWin32Helper({ logger, spawnProcess = spawn } = {}) {
     return child;
   }
 
-  function call(op, args = {}, timeoutMs = 20_000) {
+  function request(op, args, timeoutMs) {
     const process = ensure();
     const id = ++sequence;
     return new Promise((resolve, reject) => {
@@ -219,8 +531,22 @@ function createWin32Helper({ logger, spawnProcess = spawn } = {}) {
         resolve: (value) => { clearTimeout(timer); resolve(value); },
         reject: (error) => { clearTimeout(timer); reject(error); },
       });
-      process.stdin.write(`${JSON.stringify({ id, op, args })}\n`);
+      process.stdin.write(`${requestLine({ id, op, args })}\n`);
     });
+  }
+
+  // The local-* operations need LOCAL_SCRIPT, loaded once into each helper process.
+  let localInit = null; // { process, ready }
+  function call(op, args = {}, timeoutMs = 20_000) {
+    if (!op.startsWith("local-")) return request(op, args, timeoutMs);
+    const process = ensure();
+    if (localInit?.process !== process) {
+      const current = { process, ready: request("local-init", { script: LOCAL_SCRIPT }, 60_000) };
+      // A failed load is retried by the next local request instead of failing every one after it.
+      current.ready.catch(() => { if (localInit === current) localInit = null; });
+      localInit = current;
+    }
+    return localInit.ready.then(() => request(op, args, timeoutMs));
   }
 
   function dispose() {
@@ -236,4 +562,4 @@ function createWin32Helper({ logger, spawnProcess = spawn } = {}) {
   return { call, dispose };
 }
 
-module.exports = { createWin32Helper };
+module.exports = { createWin32Helper, requestLine };

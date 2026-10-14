@@ -28,6 +28,10 @@
 .cx-project svg { flex: 0 0 auto; color: var(--ao-muted); transition: transform var(--duration-micro, 140ms); }
 .cx-project svg.is-open { transform: rotate(90deg); }
 .cx-project-pin { margin-left: auto; font-size: 10px; opacity: .7; }
+/* A project folder's git label ("worktree", "not git"): quiet, amber when chats can't use the folder. */
+.cx-project-tag { flex: none; padding: 0 5px; border: 1px solid var(--ao-line); border-radius: 4px; color: var(--ao-muted); font-size: 10px; line-height: 15px; }
+.cx-project-tag.is-warn { border-color: color-mix(in srgb, var(--ao-amber, #c98a12) 55%, transparent); color: var(--ao-amber, #c98a12); }
+.cx-project-tag + .cx-project-pin { margin-left: 4px; }
 .cx-projects > li > ul { padding-left: 10px; }
 .cx-thread-row { position: relative; display: flex; align-items: center; border-radius: 8px; }
 .cx-thread-row:hover { background: var(--cx-hover); }
@@ -70,6 +74,8 @@
 .cx-project-card-line { display: flex; align-items: flex-start; gap: 6px; color: var(--ao-muted); }
 .cx-project-card-line svg, .cx-project-card-line .cx-thread-dot { flex: 0 0 auto; margin-top: 2px; }
 .cx-project-card-line.is-path { overflow-wrap: anywhere; font-family: var(--font-mono, ui-monospace, Consolas, monospace); font-size: 11px; }
+.cx-project-card-line.is-git { overflow-wrap: anywhere; }
+.cx-project-card-line.is-warn { color: var(--ao-amber, #c98a12); }
 .cx-project-card hr { width: 100%; margin: 2px 0; border: 0; border-top: 1px solid var(--ao-line); }
 .cx-project-card-action { display: flex; align-items: center; gap: 6px; padding: 4px 2px; border: 0; background: transparent; color: var(--color-text-primary);
   font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
@@ -147,6 +153,76 @@
 .cx-head-spacer { flex: 1 1 auto; }
 .cx-icon-button { display: inline-grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--color-text-primary); font-size: 16px; cursor: pointer; }
 .cx-icon-button:hover:not(:disabled), .cx-icon-button[aria-pressed="true"] { background: var(--cx-hover); }
+/* A reasoning summary: its title as one line, the rest folded (Codex keeps them between tool calls). */
+.cx-reasoning summary { display: flex; gap: 8px; cursor: pointer; list-style: none; }
+.cx-reasoning summary::-webkit-details-marker { display: none; }
+.cx-reasoning-body { margin: 4px 0 2px 18px; color: var(--color-text-secondary); font-size: 13px; }
+/* "This turn is running on X; your next message uses Y." above the composer. */
+.cx-route-note { margin: 0 auto 6px; max-width: 760px; padding: 0 12px; color: var(--color-text-secondary); font-size: 12px; }
+/* The composer's context meter (ChatContextMeter): a ring that fills with the agent's context, and its panel. */
+.cx-context-meter { width: 28px; height: 28px; }
+.cx-context-meter .cx-context-track { stroke: color-mix(in srgb, var(--ao-muted) 35%, transparent); }
+.cx-context-meter.is-unknown .cx-context-track { stroke-dasharray: 2 2.4; }
+.cx-context-meter .cx-context-fill { stroke: var(--color-text-primary); transition: stroke-dasharray .3s ease; }
+.cx-context-meter.is-mid .cx-context-fill { stroke: var(--ao-amber, #c98a12); }
+.cx-context-meter.is-high .cx-context-fill { stroke: var(--ao-red, #c0392b); }
+.cx-context-panel { position: fixed; z-index: 60; width: 320px; max-height: min(560px, 75vh); padding: 12px 14px; overflow-y: auto; border: 1px solid var(--ao-line);
+  border-radius: 14px; background: var(--color-bg-primary); color: var(--color-text-primary); box-shadow: 0 12px 32px rgb(0 0 0 / 0.14); font-size: 13px; }
+.cx-context-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.cx-context-head span { color: var(--ao-muted); font-variant-numeric: tabular-nums; }
+.cx-context-bar { height: 6px; margin: 8px 0 4px; overflow: hidden; border-radius: 3px; background: color-mix(in srgb, var(--ao-muted) 22%, transparent); }
+.cx-context-bar > span { display: block; height: 100%; border-radius: 3px; background: var(--ao-blue, #2f6fdd); }
+.cx-context-bar.is-mid > span { background: var(--ao-amber, #c98a12); }
+.cx-context-bar.is-high > span { background: var(--ao-red, #c0392b); }
+.cx-context-note { margin: 4px 0; color: var(--ao-muted); font-size: 12px; }
+.cx-context-note.is-quiet { margin-top: 10px; font-size: 11px; }
+.cx-context-label { margin: 12px 0 4px; padding-top: 10px; border-top: 1px solid var(--ao-line); color: var(--ao-muted); font-size: 12px; }
+.cx-context-rows { display: grid; grid-template-columns: 1fr auto; gap: 3px 12px; margin: 0; }
+.cx-context-rows dt { margin: 0; }
+.cx-context-rows dd { margin: 0; color: var(--ao-muted); font-variant-numeric: tabular-nums; text-align: right; }
+/* Plan usage limits, as Claude Code's /usage: the name and "N% used" over the bar, when it resets below. */
+.cx-context-limit { margin: 8px 0; }
+.cx-context-limit > div:first-child { display: flex; align-items: baseline; gap: 8px; }
+.cx-context-limit > div:first-child b { margin-left: auto; }
+.cx-context-limit > .cx-context-bar { margin: 5px 0 3px; }
+.cx-context-limit small { display: block; color: var(--ao-muted); font-size: 11px; }
+.cx-context-limit b { font-weight: 500; font-variant-numeric: tabular-nums; }
+.cx-context-account { margin: 6px 0 10px; }
+.cx-context-account + .cx-context-account { padding-top: 8px; border-top: 1px dashed var(--ao-line); }
+.cx-context-account.is-resting { opacity: 0.6; }
+.cx-context-account-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.cx-context-account-head span { overflow: hidden; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.cx-context-account-head small { flex: none; margin-left: auto; color: var(--ao-muted); font-size: 11px; }
+.cx-context-panel > div { max-height: min(70vh, 640px); overflow-y: auto; }
+.cx-context-servers { margin: 0; padding: 0; list-style: none; }
+.cx-context-servers li { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+.cx-context-servers small { margin-left: auto; color: var(--ao-muted); font-size: 11px; }
+.cx-context-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ao-muted); }
+.cx-context-dot.is-ok { background: var(--ao-green, #2e9d5b); }
+.cx-context-dot.is-failed { background: var(--ao-red, #c0392b); }
+.cx-context-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--ao-line); }
+.cx-context-foot span { color: var(--ao-muted); font-size: 12px; }
+.cx-context-foot button { height: 26px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 7px; background: transparent; color: inherit; font: inherit; font-size: 12px; cursor: pointer; }
+.cx-context-foot button:hover:not(:disabled) { background: var(--cx-hover); }
+.cx-context-foot button:disabled { opacity: .5; cursor: default; }
+
+/* The chat's details panel (Changes / Agents / Setup), like Claude's session panel. */
+.cx-details { position: fixed; z-index: 60; width: 300px; padding: 12px; border: 1px solid var(--ao-line); border-radius: 14px;
+  background: var(--color-bg-primary); color: var(--color-text-primary); box-shadow: 0 12px 32px rgb(0 0 0 / 0.14); font-size: 13px; }
+.cx-details-head { display: flex; align-items: baseline; gap: 8px; margin: 0 4px 8px; }
+.cx-details-head small { color: var(--color-text-secondary); font-size: 12px; }
+.cx-details-label { margin: 12px 4px 4px; color: var(--color-text-secondary); font-size: 12px; }
+.cx-details-row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 6px; border: 0; border-radius: 8px;
+  background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.cx-details-row:hover:not(:disabled) { background: var(--cx-hover); }
+.cx-details-row:disabled { opacity: 0.5; cursor: default; }
+.cx-details-dots { display: inline-flex; gap: 3px; }
+.cx-details-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--color-text-secondary); }
+.cx-details-dot.is-working { background: #2f80ed; }
+.cx-details-dot.is-waiting { background: #d97706; }
+.cx-details-dot.is-failed { background: #dc2626; }
+.cx-details-dot.is-done { background: #16a34a; }
+.cx-details-line, .cx-details-empty { margin: 4px 6px; color: var(--color-text-secondary); overflow-wrap: anywhere; }
 .cx-icon-button:disabled { cursor: default; opacity: .4; }
 
 .cx-scroll { position: relative; flex: 1 1 auto; min-height: 0; overflow: auto; }
@@ -187,6 +263,9 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-empty p { margin: 0; color: var(--ao-muted); font-size: 13px; }
 .cx-turn { display: flex; flex-direction: column; gap: 10px; }
 .cx-user { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+/* A message steered into a working turn: the user's own bubble, in the live timeline where it was sent. */
+.cx-live-item.kind-steer { display: block; margin: 6px 0; }
+.cx-live-item.kind-steer .cx-user { width: 100%; }
 .cx-bubble { max-width: 82%; padding: 10px 14px; border-radius: 18px; background: var(--cx-bubble); }
 .cx-bubble p { margin: 0; font-size: 14px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .cx-stamp { color: var(--ao-muted); font-size: 11px; }
@@ -229,6 +308,32 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-live-item code { min-width: 0; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .cx-live-text { min-width: 0; overflow-wrap: anywhere; }
 @media (prefers-reduced-motion: reduce) { .cx-live-item.is-running .cx-live-label { animation: none; } }
+/* Thinking reads as an aside, as Claude Code sets it: italic and quieter than the tool calls. */
+.cx-live-item.kind-reasoning .cx-live-text { font-style: italic; }
+.cx-live-item.kind-reasoning .cx-reasoning { width: 100%; }
+.cx-reasoning summary { margin: 0 -6px; padding: 2px 6px; border-radius: 6px; }
+.cx-reasoning summary:hover { background: var(--cx-hover); color: var(--color-text-primary); }
+/* A tool call: a dot for how it ended, its name, one line; opening shows what it ran and got back. */
+.cx-live-item.kind-command, .cx-live-item.kind-tool { display: block; }
+.cx-tool summary, .cx-tool-row { display: flex; align-items: baseline; gap: 8px; min-width: 0; margin: 0 -6px; padding: 2px 6px; border-radius: 6px; list-style: none; }
+.cx-tool summary { cursor: pointer; }
+.cx-tool summary::-webkit-details-marker { display: none; }
+.cx-tool summary:hover { background: var(--cx-hover); color: var(--color-text-primary); }
+.cx-tool .cx-live-label { color: var(--color-text-primary); text-transform: none; }
+.cx-tool .cx-live-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; }
+.cx-tool[open] .cx-live-text { white-space: normal; }
+.cx-tool-dot { flex: 0 0 auto; align-self: center; width: 7px; height: 7px; border-radius: 50%; background: var(--ao-muted); }
+.cx-tool.tone-ok .cx-tool-dot { background: var(--ao-green); }
+.cx-tool.tone-failed .cx-tool-dot { background: var(--ao-red); }
+.cx-tool.tone-failed .cx-live-label { color: var(--ao-red); }
+.cx-tool.tone-running .cx-tool-dot { animation: cx-pulse 1.4s ease-in-out infinite; }
+.cx-tool-body { display: grid; gap: 4px; margin: 4px 0 6px 15px; }
+.cx-tool-io { max-height: 280px; margin: 0; padding: 8px 10px; overflow: auto; border: 1px solid var(--ao-line); border-radius: 8px;
+  background: var(--cx-tray, rgb(127 127 127 / 6%)); color: var(--color-text-primary); font-size: 12px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cx-tool-io.is-output { color: var(--color-text-secondary); }
+.cx-tool.tone-failed .cx-tool-io.is-output { color: var(--ao-red); }
+.cx-tool-empty { margin: 2px 0; color: var(--ao-muted); font-size: 12px; font-style: italic; }
+@media (prefers-reduced-motion: reduce) { .cx-tool.tone-running .cx-tool-dot { animation: none; } }
 
 .cx-answer { display: grid; gap: 4px; }
 .cx-answer-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--ao-muted); font-size: 12px; }
@@ -320,6 +425,99 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-structure-resize:hover, .cx-structure-resize:focus-visible { background: color-mix(in srgb, var(--ao-blue) 35%, transparent); outline: none; }
 .cx-structure > header { display: flex; align-items: center; justify-content: space-between; height: 48px; padding: 0 10px 0 16px; font-size: 13px; }
 .cx-structure-body { position: relative; display: flex; flex: 1 1 auto; min-height: 0; }
+
+/* The side panel (ChatWorkbench): tabs for the agent's page, changes, files and terminal, as in Codex. */
+.cx-workbench { flex-basis: min(52%, 820px); min-width: 360px; }
+.cx-workbench > header.cx-workbench-head { justify-content: flex-start; gap: 6px; padding: 0 8px 0 10px; border-bottom: 1px solid var(--ao-line); }
+.cx-workbench-tabstrip { display: flex; flex: 1 1 auto; align-items: center; gap: 2px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.cx-workbench-tab { display: flex; flex: 0 1 auto; align-items: center; min-width: 72px; max-width: 200px; height: 30px; border-radius: 8px; color: var(--ao-muted); }
+.cx-workbench-tab.is-active { background: color-mix(in srgb, var(--ao-line) 55%, transparent); color: var(--color-text-primary); }
+.cx-workbench-tab:hover:not(.is-active) { background: var(--cx-hover); }
+.cx-workbench-tab > button:first-child { flex: 1 1 auto; min-width: 0; height: 100%; padding: 0 4px 0 10px; overflow: hidden; border: 0; background: transparent;
+  color: inherit; font: inherit; font-size: 12px; text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.cx-workbench-tab-close { flex: 0 0 auto; width: 20px; height: 20px; margin-right: 4px; padding: 0; border: 0; border-radius: 5px; background: transparent;
+  color: var(--ao-muted); font-size: 14px; line-height: 1; cursor: pointer; opacity: 0; }
+.cx-workbench-tab:hover .cx-workbench-tab-close, .cx-workbench-tab.is-active .cx-workbench-tab-close { opacity: 1; }
+.cx-workbench-tab-close:hover { background: var(--cx-hover); color: var(--color-text-primary); }
+.cx-workbench-add { flex: 0 0 auto; width: 26px; height: 26px; }
+/* New-tab page: the panel's tools and recent pages. */
+.cx-newtab { flex: 1 1 auto; min-height: 0; padding: 18px 24px; overflow: auto; }
+.cx-newtab-label { margin: 14px 0 8px; font-size: 13px; font-weight: 600; }
+.cx-newtab-tools { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.cx-newtab-tools button { display: grid; gap: 2px; padding: 10px 12px; border: 1px solid var(--ao-line); border-radius: 10px; background: var(--color-bg-primary);
+  color: inherit; font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.cx-newtab-tools button:hover { background: var(--cx-hover); }
+.cx-newtab-tools small, .cx-newtab-recents small, .cx-newtab-recents time { color: var(--ao-muted); font-size: 11px; }
+.cx-newtab-recents { margin: 0; padding: 0; list-style: none; }
+.cx-newtab-recents button { display: grid; grid-template-columns: 1fr auto; gap: 0 10px; width: 100%; padding: 8px 10px; border: 0; border-bottom: 1px solid var(--ao-line);
+  background: transparent; color: inherit; font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.cx-newtab-recents button:hover { background: var(--cx-hover); }
+.cx-newtab-recents time { grid-row: 1 / span 2; grid-column: 2; align-self: center; }
+/* Changes and Files: the content on the left, the file list or tree on the right. */
+.cx-changes, .cx-files { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
+.cx-files { flex-direction: row; }
+.cx-changes-bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--ao-line); font-size: 12px; }
+.cx-changes-branch { padding: 2px 8px; border: 1px solid var(--ao-line); border-radius: 12px; }
+.cx-changes-add { color: var(--ao-green, #2e9d5b); }
+.cx-changes-del { color: var(--ao-red, #c0392b); }
+.cx-changes-body { display: flex; flex: 1 1 auto; min-height: 0; }
+.cx-diff, .cx-files-view { flex: 1 1 auto; min-width: 0; overflow: auto; }
+.cx-diff-file { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--ao-line);
+  background: var(--color-bg-primary); font-size: 12px; }
+.cx-diff-file code { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cx-diff table, .cx-files-code { width: 100%; border-collapse: collapse; font: 12px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace; }
+.cx-diff-num { width: 1%; padding: 0 8px; color: var(--ao-muted); text-align: right; white-space: nowrap; user-select: none; }
+.cx-diff-text { padding: 0 12px 0 4px; white-space: pre-wrap; word-break: break-word; }
+.cx-diff tr.is-add { background: color-mix(in srgb, var(--ao-green, #2e9d5b) 14%, transparent); }
+.cx-diff tr.is-del { background: color-mix(in srgb, var(--ao-red, #c0392b) 13%, transparent); }
+.cx-diff tr.is-hunk td, .cx-diff tr.is-meta td { padding-top: 4px; padding-bottom: 4px; background: color-mix(in srgb, var(--ao-line) 40%, transparent); color: var(--ao-muted); }
+.cx-changes-files { display: flex; flex: 0 0 min(42%, 300px); flex-direction: column; min-height: 0; border-left: 1px solid var(--ao-line); }
+.cx-changes-files input { box-sizing: border-box; margin: 8px; height: 28px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 8px;
+  background: transparent; color: inherit; font: inherit; font-size: 12px; }
+.cx-changes-files ul { flex: 1 1 auto; margin: 0; padding: 0 4px 8px; overflow: auto; list-style: none; }
+.cx-changes-files li button { display: flex; align-items: center; gap: 6px; width: 100%; padding: 4px 6px; border: 0; border-radius: 6px; background: transparent;
+  color: inherit; font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.cx-changes-files li button > span:first-of-type { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.cx-changes-files li button:hover, .cx-changes-files li button[aria-pressed="true"] { background: var(--cx-hover); }
+.cx-files .cx-changes-files li button > span:first-of-type { direction: ltr; }
+.cx-files-icon { flex: 0 0 auto; width: 10px; color: var(--ao-muted); }
+.cx-terminal-new { height: 24px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 6px; background: var(--color-bg-primary);
+  color: var(--color-text-primary); font: inherit; font-size: 12px; cursor: pointer; }
+.cx-workbench-tabs { display: inline-flex; gap: 2px; padding: 2px; border-radius: 8px; background: color-mix(in srgb, var(--ao-line) 50%, transparent); }
+.cx-workbench-tabs button { height: 26px; padding: 0 12px; border: 0; border-radius: 6px; background: transparent; color: var(--ao-muted); font: inherit; font-size: 12px; cursor: pointer; }
+.cx-workbench-tabs button[aria-selected="true"] { background: var(--color-bg-primary); color: var(--color-text-primary); box-shadow: 0 1px 2px rgb(0 0 0 / 8%); }
+.cx-workbench-agent { flex: 1 1 auto; min-width: 0; max-width: 260px; height: 26px; margin-left: auto; padding: 0 6px; border: 1px solid var(--ao-line); border-radius: 6px;
+  background: var(--color-bg-primary); color: var(--color-text-primary); font: inherit; font-size: 12px; }
+.cx-workbench-empty { margin: 24px 20px; color: var(--ao-muted); font-size: 13px; line-height: 1.5; }
+.cx-workbench-error { margin: 6px 12px 0; color: var(--ao-red, #c0392b); font-size: 12px; }
+.cx-preview { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
+.cx-preview-bar { display: flex; align-items: center; gap: 4px; padding: 0 10px 8px; }
+.cx-preview-bar input { flex: 1 1 auto; min-width: 0; height: 28px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 14px;
+  background: var(--color-bg-primary); color: var(--color-text-primary); font: inherit; font-size: 12px; }
+.cx-preview-errors { flex: 0 0 auto; padding: 2px 8px; border-radius: 10px; background: color-mix(in srgb, var(--ao-red, #c0392b) 14%, transparent);
+  color: var(--ao-red, #c0392b); font-size: 11px; }
+/* The page itself is a native view the app draws over this slot. */
+.cx-preview-slot { flex: 1 1 auto; min-height: 0; margin: 0 10px 10px; border: 1px solid var(--ao-line); border-radius: 8px; background: #fff; }
+.cx-terminal { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
+.cx-terminal-list { flex: 0 0 auto; max-height: 30%; margin: 0; padding: 0 8px 6px; overflow: auto; list-style: none; }
+.cx-terminal-list button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 5px 8px; border: 0; border-radius: 6px; background: transparent;
+  color: var(--color-text-primary); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.cx-terminal-list button[aria-pressed="true"], .cx-terminal-list button:hover { background: color-mix(in srgb, var(--ao-line) 55%, transparent); }
+.cx-terminal-list code { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cx-terminal-list small { flex: 0 0 auto; color: var(--ao-muted); }
+.cx-terminal-dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: var(--ao-muted); }
+.cx-terminal-dot.is-running { background: var(--ao-green, #2e9d5b); animation: cx-pulse 1.6s ease-in-out infinite; }
+.cx-terminal-dot.is-ok { background: var(--ao-green, #2e9d5b); }
+.cx-terminal-dot.is-failed { background: var(--ao-red, #c0392b); }
+.cx-terminal-head { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-top: 1px solid var(--ao-line); }
+.cx-terminal-head code { flex: 1 1 auto; min-width: 0; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.cx-terminal-stop { height: 24px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 6px; background: var(--color-bg-primary);
+  color: var(--color-text-primary); font: inherit; font-size: 12px; cursor: pointer; }
+.cx-terminal-output { flex: 1 1 auto; min-height: 0; margin: 0 10px; padding: 10px 12px; overflow: auto; border-radius: 8px; background: #111418; color: #d7dde4;
+  font: 12px/1.45 ui-monospace, "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
+.cx-terminal-input { padding: 8px 10px 10px; }
+.cx-terminal-input input { box-sizing: border-box; width: 100%; height: 28px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 6px;
+  background: var(--color-bg-primary); color: var(--color-text-primary); font: 12px ui-monospace, "Cascadia Mono", Consolas, monospace; }
 
 @keyframes cx-pulse { 50% { opacity: .35; } }
 @keyframes cx-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
@@ -425,3 +623,10 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-goal-editor .cx-text-button { background: transparent; color: var(--ao-muted); }
 .cx-goal-editor .cx-primary-button { background: var(--color-text-primary); color: var(--color-bg-primary); }
 .cx-goal-editor .cx-primary-button:disabled { opacity: .4; cursor: default; }
+/* Delete message: the same in-chat confirmation, its Delete button in the danger colour. */
+.cx-delete-confirm footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.cx-delete-confirm .cx-text-button, .cx-delete-confirm .cx-primary-button { padding: 5px 12px; border: 0; border-radius: 8px; font-size: 12px; cursor: pointer; }
+.cx-delete-confirm .cx-text-button { background: transparent; color: var(--ao-muted); }
+.cx-delete-confirm .cx-primary-button { background: var(--ao-red); color: #fff; }
+.cx-delete-confirm .cx-primary-button:disabled { opacity: .4; cursor: default; }
+.cx-delete-confirm .cx-delete-reason { margin-top: 6px; color: var(--ao-muted); }

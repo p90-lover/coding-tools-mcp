@@ -22,6 +22,137 @@ pub const DEFAULT_EXCLUDED_NAMES: &[&str] = &[
     "__pycache__",
 ];
 
+/// Names no file tool writes into: git's own data (a `.git` directory, or a linked worktree's
+/// `.git` file naming its gitdir), CI definitions, and the workspace's path mappings.
+pub(crate) const PROTECTED_WRITE_NAMES: &[&str] = &[".git", ".github", ".mcp-paths"];
+
+/// The name Windows opens for a path part, lower-cased: a `:stream` suffix names a stream of the
+/// same file and trailing dots and spaces are dropped, so `.git.`, `.GIT ` and `.git::$DATA` all
+/// open `.git`. Compare protected names against this, never against the raw part.
+pub(crate) fn effective_name(part: &str) -> String {
+    part.split(':')
+        .next()
+        .unwrap_or(part)
+        .trim_end_matches(['.', ' '])
+        .to_ascii_lowercase()
+}
+
+/// Whether a path part names one of `names` (lower-case), however it is spelled.
+pub(crate) fn is_protected_name(part: &str, names: &[&str]) -> bool {
+    !matches!(part, "." | "..") && names.contains(&effective_name(part).as_str())
+}
+
+/// Why Windows would open something other than what a path part names, if it would: trailing
+/// dots or spaces (dropped) and `:` (an alternate data stream), always; when `device_names` is set,
+/// a reserved device name (CON, PRN, AUX, NUL, COM0-9, LPT0-9, with or without an extension); and
+/// when `short_names` is set, an 8.3 short name (`~` and a digit, e.g. `GIT~1`), which the file
+/// system expands to a long name. The last two are also ordinary names (`file~2.txt`, and `aux.ts`
+/// on Windows 11), so they are only checked where a write could reach a session root's git data.
+pub(crate) fn windows_quirk(
+    part: &str,
+    device_names: bool,
+    short_names: bool,
+) -> Option<&'static str> {
+    if matches!(part, "." | "..") || part.is_empty() {
+        return None;
+    }
+    if part.ends_with(['.', ' ']) {
+        return Some("a path part ends with a dot or a space");
+    }
+    if part.contains(':') {
+        return Some("a path part names an alternate data stream");
+    }
+    if !device_names {
+        return None;
+    }
+    let stem = part
+        .split('.')
+        .next()
+        .unwrap_or(part)
+        .trim_end_matches(' ')
+        .to_ascii_uppercase();
+    let numbered = {
+        let chars: Vec<char> = stem.chars().collect();
+        chars.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && matches!(chars[3], '0'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}')
+    };
+    if numbered
+        || matches!(
+            stem.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+        )
+    {
+        return Some("a path part is a reserved device name");
+    }
+    if short_names {
+        let bytes = part.as_bytes();
+        if bytes
+            .windows(2)
+            .any(|pair| pair[0] == b'~' && pair[1].is_ascii_digit())
+        {
+            return Some("a path part is an 8.3 short name");
+        }
+    }
+    None
+}
+
+/// Refuses a path spelled with a Windows quirk (see `windows_quirk`). Device names and short names
+/// are checked only for a `session_write` (a write into a session's own root). Short names are
+/// checked in relative paths; an absolute path may legitimately pass through one (a short temp
+/// directory), and its protected names are compared after canonicalization instead.
+fn reject_windows_quirks(raw_path: &str, session_write: bool) -> WorkspaceResult<()> {
+    if !cfg!(windows) {
+        return Ok(());
+    }
+    let path = Path::new(raw_path);
+    let short_names = session_write && !path.is_absolute() && !raw_path.starts_with(['\\', '/']);
+    for part in path.components() {
+        if let Component::Normal(name) = part {
+            if let Some(reason) = windows_quirk(&name.to_string_lossy(), session_write, short_names)
+            {
+                return Err(WorkspaceError::Tool {
+                    code: "UNSAFE_PATH_SPELLING",
+                    message: format!("Path refused: {reason}: {raw_path}"),
+                    category: "security",
+                    retryable: false,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The path an open file really is, from its handle.
+#[cfg(windows)]
+fn opened_path(file: &std::fs::File) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED};
+    let handle = HANDLE(file.as_raw_handle());
+    let mut buffer = vec![0u16; 512];
+    loop {
+        // SAFETY: the handle stays open for the borrow of `file`, and the buffer is ours.
+        let length = unsafe { GetFinalPathNameByHandleW(handle, &mut buffer, FILE_NAME_NORMALIZED) }
+            as usize;
+        if length == 0 {
+            return None;
+        }
+        if length < buffer.len() {
+            return Some(PathBuf::from(std::ffi::OsString::from_wide(
+                &buffer[..length],
+            )));
+        }
+        buffer.resize(length + 1, 0);
+    }
+}
+
+#[cfg(not(windows))]
+fn opened_path(_file: &std::fs::File) -> Option<PathBuf> {
+    None
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedPath {
     pub display: String,
@@ -152,6 +283,8 @@ pub type WorkspaceResult<T> = Result<T, WorkspaceError>;
 pub struct Workspace {
     root: PathBuf,
     linked_snapshot: Option<Vec<LinkedProject>>,
+    /// Only the root itself is in scope: no `.mcp-paths` links and no explicit external reads.
+    isolated: bool,
 }
 
 impl Workspace {
@@ -167,7 +300,32 @@ impl Workspace {
         Ok(Self {
             root,
             linked_snapshot: None,
+            isolated: false,
         })
+    }
+
+    /// A workspace of the root alone: reads stay inside it like writes, and `.mcp-paths` mappings
+    /// in the tree link nothing (an agent's own worktree could hold the user's mappings, or write
+    /// new ones from its shell).
+    ///
+    /// Paths are resolved (links followed) before they are opened, so a directory swapped for a
+    /// junction in between could redirect the open. Reads re-check the opened handle
+    /// (`verify_opened`). Writes resolve their target again just before staging and renaming,
+    /// which narrows but does not close that window. Swapping needs a process running in the tree
+    /// while the call runs; for a chat session that is only a terminal command, which is opt-in
+    /// and confirmed by the user each time.
+    pub fn isolated(root: PathBuf) -> WorkspaceResult<Self> {
+        let mut workspace = Self::new(root)?;
+        workspace.isolated = true;
+        workspace.linked_snapshot = Some(Vec::new());
+        Ok(workspace)
+    }
+
+    fn listed_links(&self) -> Vec<LinkedProject> {
+        if self.isolated {
+            return Vec::new();
+        }
+        list_linked_projects_for_root(&self.root)
     }
 
     pub fn root(&self) -> &Path {
@@ -185,13 +343,14 @@ impl Workspace {
     pub fn linked_projects(&self) -> Vec<LinkedProject> {
         self.linked_snapshot
             .clone()
-            .unwrap_or_else(|| list_linked_projects_for_root(&self.root))
+            .unwrap_or_else(|| self.listed_links())
     }
 
     pub fn request_snapshot(&self) -> Self {
         Self {
             root: self.root.clone(),
-            linked_snapshot: Some(list_linked_projects_for_root(&self.root)),
+            linked_snapshot: Some(self.listed_links()),
+            isolated: self.isolated,
         }
     }
 
@@ -212,7 +371,7 @@ impl Workspace {
         if self
             .linked_snapshot
             .as_ref()
-            .is_some_and(|roots| *roots != list_linked_projects_for_root(&self.root))
+            .is_some_and(|roots| *roots != self.listed_links())
         {
             return Err(WorkspaceError::Tool {code:"WORKSPACE_ROOTS_CHANGED",message:"Approved project mappings changed during this request. Inspect state before reassessing; an already-submitted effect cannot be undone and must not be automatically replayed.".into(),category:"permission",retryable:false});
         }
@@ -344,6 +503,17 @@ impl Workspace {
                 return Err(WorkspaceError::path_outside_workspace());
             }
         }
+        reject_windows_quirks(raw_path, false)
+    }
+
+    /// `reject_unsafe_text` for a path a tool writes: in a session's own root (see `isolated`)
+    /// device names and 8.3 short names are refused too, so no write reaches git's own data, or a
+    /// device, by another name. Elsewhere such names are ordinary files.
+    pub fn reject_unsafe_write_text(&self, raw_path: &str) -> WorkspaceResult<()> {
+        self.reject_unsafe_text(raw_path)?;
+        if self.isolated {
+            reject_windows_quirks(raw_path, true)?;
+        }
         Ok(())
     }
 
@@ -374,7 +544,10 @@ impl Workspace {
             || input
                 .components()
                 .any(|part| matches!(part, Component::ParentDir));
-        if alias_address || (!explicit_external && candidate.starts_with(&self.root)) {
+        if self.isolated
+            || alias_address
+            || (!explicit_external && candidate.starts_with(&self.root))
+        {
             self.ensure_inside_workspace(&candidate, &resolved)?;
         }
         Ok(ResolvedPath {
@@ -407,7 +580,7 @@ impl Workspace {
 
     pub fn resolve_for_write(&self, raw_path: &str) -> WorkspaceResult<ResolvedPath> {
         self.ensure_roots_current()?;
-        self.reject_unsafe_text(raw_path)?;
+        self.reject_unsafe_write_text(raw_path)?;
         self.reject_protected_write_path(raw_path)?;
         let pure = Path::new(raw_path);
         if pure.file_name().is_none() || raw_path == "." || raw_path == ".." {
@@ -510,7 +683,7 @@ impl Workspace {
     }
 
     pub fn reject_write_symlink(&self, raw_path: &str) -> WorkspaceResult<()> {
-        self.reject_unsafe_text(raw_path)?;
+        self.reject_unsafe_write_text(raw_path)?;
         let (candidate, project) = self.candidate_from_raw(&self.root, raw_path)?;
         if project.as_ref().is_some_and(LinkedProject::read_only)
             || self
@@ -531,7 +704,7 @@ impl Workspace {
     }
 
     pub fn reject_protected_write_path(&self, raw_path: &str) -> WorkspaceResult<()> {
-        self.reject_unsafe_text(raw_path)?;
+        self.reject_unsafe_write_text(raw_path)?;
         let (candidate, project) = self.candidate_from_raw(&self.root, raw_path)?;
         if project.as_ref().is_some_and(LinkedProject::read_only)
             || self
@@ -552,14 +725,15 @@ impl Workspace {
         let relative = candidate
             .strip_prefix(root)
             .map_err(|_| WorkspaceError::path_outside_workspace())?;
-        let first = relative.components().find_map(|part| match part {
-            Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
-            _ => None,
+        // Every part, by the name the file system opens (any case, trailing dots, streams): a
+        // nested repository's or worktree's `.git` is as much git's own as the root's.
+        let protected = relative.components().any(|part| match part {
+            Component::Normal(name) => {
+                is_protected_name(&name.to_string_lossy(), PROTECTED_WRITE_NAMES)
+            }
+            _ => false,
         });
-        if first
-            .as_deref()
-            .is_some_and(|value| matches!(value, ".git" | ".github" | ".mcp-paths"))
-        {
+        if protected {
             return Err(WorkspaceError::Tool {
                 code: "PROTECTED_PATH",
                 message: format!("禁止普通文件操作写入受保护目录: {raw_path}"),
@@ -573,6 +747,28 @@ impl Workspace {
     fn validate_read_text(&self, raw_path: &str) -> WorkspaceResult<()> {
         if raw_path.contains('\0') {
             return Err(WorkspaceError::invalid_argument("Path contains a NUL byte"));
+        }
+        reject_windows_quirks(raw_path, false)
+    }
+
+    /// Whether this is a session's own root alone (see `isolated`).
+    pub fn is_isolated(&self) -> bool {
+        self.isolated
+    }
+
+    /// For a session's own root: re-checks, through the open handle, that a file a tool opened is
+    /// still inside the root. A directory swapped for a junction or link between resolving the
+    /// path and opening it is caught here (on Windows from the handle's final path; elsewhere the
+    /// path is resolved again, which narrows the window but does not close it).
+    pub fn verify_opened(&self, file: &std::fs::File, path: &Path) -> WorkspaceResult<()> {
+        if !self.isolated {
+            return Ok(());
+        }
+        let actual = opened_path(file)
+            .or_else(|| path.canonicalize().ok())
+            .ok_or_else(WorkspaceError::path_outside_workspace)?;
+        if self.allowed_root_for_path(&actual).is_none() {
+            return Err(WorkspaceError::symlink_escape());
         }
         Ok(())
     }
@@ -688,6 +884,29 @@ mod linked_root_tests {
     }
 
     #[test]
+    fn an_isolated_root_has_no_links_and_no_external_reads() {
+        let workspace = tempdir().expect("workspace");
+        let external = tempdir().expect("external");
+        add_mapping(workspace.path(), "coc-macro", external.path(), "read-write");
+        fs::write(external.path().join("existing.txt"), "ok").expect("existing");
+        fs::write(workspace.path().join("inside.txt"), "ok").expect("inside");
+        let outside = external.path().join("existing.txt");
+
+        let open = Workspace::new(workspace.path().to_path_buf()).expect("workspace");
+        assert!(open.resolve_read_path(&outside.to_string_lossy()).is_ok());
+        let ws = Workspace::isolated(workspace.path().to_path_buf()).expect("workspace");
+        assert!(ws.linked_projects().is_empty());
+        assert!(ws.request_snapshot().linked_projects().is_empty());
+        assert!(ws.request_snapshot().ensure_roots_current().is_ok());
+        assert!(ws.resolve_existing("@coc-macro/existing.txt").is_err());
+        assert!(ws.resolve_read_path(&outside.to_string_lossy()).is_err());
+        assert!(ws.resolve_read_path("inside.txt").is_ok());
+        assert!(ws
+            .resolve_for_write(&external.path().join("new.txt").to_string_lossy())
+            .is_err());
+    }
+
+    #[test]
     fn read_only_linked_root_rejects_writes() {
         let workspace = tempdir().expect("workspace");
         let external = tempdir().expect("external");
@@ -698,6 +917,204 @@ mod linked_root_tests {
             .resolve_for_write("@reference/new.txt")
             .expect_err("read-only mapping must reject writes");
         assert_eq!(denied.to_error_value()["code"], "READ_ONLY_LINKED_PROJECT");
+    }
+}
+
+#[cfg(test)]
+mod path_spelling_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn protected_names_match_whatever_name_the_file_system_opens() {
+        for part in [
+            ".git",
+            ".GIT",
+            ".git.",
+            ".git ",
+            ".git. .",
+            ".git::$DATA",
+            ".Github.",
+            ".mcp-paths ",
+        ] {
+            assert!(is_protected_name(part, PROTECTED_WRITE_NAMES), "{part}");
+        }
+        for part in [".gitignore", ".git.bak", "git", ".githubx", ".", ".."] {
+            assert!(!is_protected_name(part, PROTECTED_WRITE_NAMES), "{part}");
+        }
+    }
+
+    #[test]
+    fn windows_quirks_are_named() {
+        for part in [".git.", ".git ", "a.", "b ", ".git::$DATA", "x:y", "PRN "] {
+            assert!(windows_quirk(part, false, false).is_some(), "{part}");
+        }
+        for part in [
+            "CON",
+            "con",
+            "nul.txt",
+            "Aux.tar.gz",
+            "aux.ts",
+            "con.go",
+            "COM1",
+            "lpt9.log",
+            "COM0",
+            "conin$",
+        ] {
+            assert!(windows_quirk(part, true, false).is_some(), "{part}");
+            assert!(
+                windows_quirk(part, false, false).is_none(),
+                "{part}: a device name only matters for a session write"
+            );
+        }
+        assert!(windows_quirk("GIT~1", true, true).is_some());
+        assert!(windows_quirk("GITHUB~2.TXT", true, true).is_some());
+        assert!(windows_quirk("file~2.txt", true, true).is_some());
+        assert!(
+            windows_quirk("GIT~1", true, false).is_none(),
+            "absolute paths and reads skip it"
+        );
+        for part in [
+            "src",
+            ".git",
+            "console.log",
+            "nullable.rs",
+            "COM10",
+            "LPT",
+            "a~b",
+            ".",
+            "..",
+        ] {
+            assert!(windows_quirk(part, true, true).is_none(), "{part}");
+        }
+    }
+
+    #[test]
+    fn writes_into_git_data_are_refused_in_any_case_and_at_any_depth() {
+        let workspace = tempdir().expect("workspace");
+        fs::create_dir_all(workspace.path().join(".git")).expect("git dir");
+        fs::create_dir_all(workspace.path().join("nested").join(".git")).expect("nested git");
+        let ws = Workspace::isolated(workspace.path().to_path_buf()).expect("workspace");
+        for target in [
+            ".git/config",
+            ".GIT/config",
+            ".Github/workflows/ci.yml",
+            "nested/.git/config",
+            "nested/.Git/hooks/pre-commit",
+            ".mcp-paths/x.txt",
+        ] {
+            let denied = ws.resolve_for_write(target).expect_err(target);
+            assert_eq!(denied.code(), "PROTECTED_PATH", "{target}");
+        }
+        assert!(ws.resolve_for_write("src/main.rs").is_ok());
+        assert!(ws.resolve_for_write(".gitignore").is_ok());
+    }
+
+    #[test]
+    fn a_file_is_checked_again_through_its_open_handle() {
+        let workspace = tempdir().expect("workspace");
+        let outside = tempdir().expect("outside");
+        fs::write(workspace.path().join("inside.txt"), "in").expect("inside");
+        fs::write(outside.path().join("secret.txt"), "out").expect("outside");
+        let ws = Workspace::isolated(workspace.path().to_path_buf()).expect("workspace");
+        let inside = ws.root().join("inside.txt");
+        let opened = fs::File::open(&inside).expect("open inside");
+        assert!(ws.verify_opened(&opened, &inside).is_ok());
+        // As if a directory on the resolved path had been swapped for a junction before the open.
+        let swapped = fs::File::open(outside.path().join("secret.txt")).expect("open outside");
+        if cfg!(windows) {
+            assert_eq!(
+                ws.verify_opened(&swapped, &inside).unwrap_err().code(),
+                "SYMLINK_ESCAPE"
+            );
+        }
+        let open = Workspace::new(workspace.path().to_path_buf()).expect("workspace");
+        assert!(
+            open.verify_opened(&swapped, &inside).is_ok(),
+            "only a session root is limited"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_spellings_of_git_data_are_refused_for_reads_and_writes() {
+        let workspace = tempdir().expect("workspace");
+        fs::create_dir_all(workspace.path().join(".git")).expect("git dir");
+        fs::write(workspace.path().join(".git").join("config"), "[core]\n").expect("config");
+        fs::write(workspace.path().join("a.txt"), "a").expect("file");
+        let ws = Workspace::isolated(workspace.path().to_path_buf()).expect("workspace");
+        for target in [
+            ".git./config",
+            ".git /config",
+            ".git::$INDEX_ALLOCATION/config",
+            ".git:stream",
+            "GIT~1/config",
+            ".github./workflows/ci.yml",
+            "a.txt.",
+            "a.txt ",
+            "a.txt::$DATA",
+            "CON",
+            "nul.txt",
+            "src/COM1.rs",
+            "LPT1",
+        ] {
+            let write = ws.resolve_for_write(target).expect_err(target);
+            assert!(
+                matches!(write.code(), "UNSAFE_PATH_SPELLING" | "PROTECTED_PATH"),
+                "{target}: {}",
+                write.code()
+            );
+        }
+        // Reads refuse only the spellings that are never an ordinary name.
+        for target in [
+            ".git./config",
+            ".git /config",
+            ".git::$INDEX_ALLOCATION/config",
+            ".git:stream",
+            ".github./workflows/ci.yml",
+            "a.txt.",
+            "a.txt ",
+            "a.txt::$DATA",
+        ] {
+            assert!(ws.resolve_existing(target).is_err(), "{target}");
+            assert!(ws.resolve_read_path(target).is_err(), "{target}");
+        }
+        // An absolute short name still lands on the canonical `.git`, and is refused by name.
+        let short = workspace.path().join("GIT~1").join("config");
+        if short.exists() {
+            let denied = ws
+                .resolve_for_write(&short.to_string_lossy())
+                .expect_err("short name of .git");
+            assert_eq!(denied.code(), "PROTECTED_PATH");
+        }
+        assert!(ws.resolve_read_path("a.txt").is_ok());
+    }
+
+    #[test]
+    fn short_and_device_like_names_are_refused_only_for_session_writes() {
+        let workspace = tempdir().expect("workspace");
+        let names: Vec<&str> = ["file~2.txt", "foo.~1~", "aux.ts", "con.go"]
+            .into_iter()
+            .filter(|name| fs::write(workspace.path().join(name), "x").is_ok())
+            .collect();
+        assert!(names.contains(&"file~2.txt") && names.contains(&"foo.~1~"));
+        let open = Workspace::new(workspace.path().to_path_buf()).expect("workspace");
+        let session = Workspace::isolated(workspace.path().to_path_buf()).expect("workspace");
+        for name in &names {
+            for ws in [&open, &session] {
+                assert!(ws.resolve_existing(name).is_ok(), "{name}");
+                assert!(ws.resolve_read_path(name).is_ok(), "{name}");
+            }
+            assert!(open.resolve_for_write(name).is_ok(), "{name}");
+            if cfg!(windows) {
+                assert_eq!(
+                    session.resolve_for_write(name).unwrap_err().code(),
+                    "UNSAFE_PATH_SPELLING",
+                    "{name}"
+                );
+            }
+        }
     }
 }
 

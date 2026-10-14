@@ -60,6 +60,10 @@ fn exclusive() -> Result<MutexGuard<'static, ()>> {
     })
 }
 
+/// The one local control lease the user arms in the app. It is bound to a workspace root, not to
+/// a caller: every client of that workspace's tools (its MCP listener, and every AO chat session
+/// the user let use desktop tools) can drive it while it is armed. The app's chat-agent endpoint
+/// asks the user once per chat before forwarding that chat's first control call.
 #[derive(Clone)]
 struct Lease {
     id: String,

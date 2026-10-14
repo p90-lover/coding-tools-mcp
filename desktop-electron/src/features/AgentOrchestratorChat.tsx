@@ -1,15 +1,17 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../icons";
 import { AgentOrchestratorComposerControls, type ComposerControlsProps } from "./AgentOrchestratorComposerControls";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { ChatMarkdown } from "./ChatMarkdown";
+import { ChatWorkbench, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
+import { ChatContextMeter } from "./ChatContextMeter";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, chatAcceptsMessage, chatDuration, chatList, chatMessageWithAttachments, chatRunOpen,
-  chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
-  type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
+  chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
+  type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -19,6 +21,13 @@ const STATUS_LABEL: Record<ChatStatus, string> = {
 };
 /** Text files up to this size are attached inline when their path is unknown. */
 const INLINE_ATTACHMENT_BYTES = 200 * 1024;
+/**
+ * Each chat's queued messages (task id → queue), kept for the app's lifetime outside the chat view so
+ * they survive the view closing (another page, the board) and switching chats.
+ */
+const CHAT_QUEUES = new Map<string, QueuedChatMessage[]>();
+/** Each chat's unsent draft (task id → text; "" is the new-chat composer), kept while another chat is open. */
+const CHAT_DRAFTS = new Map<string, string>();
 /** The cards panel's dragged width (px), kept on this computer. */
 const CARDS_WIDTH_KEY = "coding-tools:ao:cards-panel-width";
 
@@ -27,11 +36,33 @@ export type ChatThreadActions = {
   newChat: () => void;
   rename: (title: string) => Promise<void>;
   archive: () => void;
-  fork: (turnIndex?: number) => void;
+  /** Fork from here: a new chat with the messages up to this one (its index in the chat's messages). */
+  fork: (messageIndex?: number) => void;
+  /** Rewind: a new chat with the messages before this one, this message ready to edit. */
+  rewind?: (messageIndex: number) => void;
+  /**
+   * Delete a message and its reply from the chat (asked to confirm first). `runIds` are the runs
+   * its turn showed: the run it started first, then any restart or replacement of that run.
+   */
+  deleteMessage?: (messageIndex: number, runIds: string[]) => Promise<void>;
   copyConversation: () => void;
   togglePin: () => void;
   pinned: boolean;
 };
+
+/**
+ * How long since `since`, counting up once a second by itself while `live`: only this label
+ * re-renders on a tick, never the transcript around it. Stopped, it holds at `until`.
+ */
+function Elapsed({ since, live = true, until, format = chatDuration }: { since: number; live?: boolean; until?: number; format?: (ms: number) => string }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!live) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [live]);
+  return <>{format((live ? now : until ?? now) - since)}</>;
+}
 
 function stepTone(step: ChatStep): string {
   if (step.error) return "error";
@@ -39,62 +70,185 @@ function stepTone(step: ChatStep): string {
   return step.state;
 }
 
-/** A working role's turn so far, as Codex shows it: thinking, tool calls and streamed messages. */
+/**
+ * The model's reasoning summary, as Codex shows it: its first line (a short bold title such as
+ * "**Inspecting the register route**") as one progress line, the rest a click away.
+ */
+function ReasoningItem({ item }: { item: ChatLiveItem }) {
+  const lines = item.text.trim().split(/\r?\n/);
+  if (!lines[0]) return <span className="cx-live-label">{item.status === "running" ? "Thinking…" : "Thought"}</span>;
+  const label = item.status === "running" ? "Thinking" : "Thought";
+  const headline = lines[0].replace(/^\s*\*\*(.+?)\*\*\s*$/, "$1").replace(/[*_`]/g, "").trim();
+  const rest = lines.slice(1).join("\n").trim();
+  return rest
+    ? <details className="cx-reasoning"><summary><span className="cx-live-label">{label}</span><span className="cx-live-text">{headline}</span></summary>
+      <div className="cx-reasoning-body"><ChatMarkdown text={rest} /></div></details>
+    : <><span className="cx-live-label">{label}</span><span className="cx-live-text">{headline}</span></>;
+}
+
+/**
+ * The one line a tool call's row shows next to its name (Claude Code's "Read(src/app.ts)" line).
+ * `item.text` is the command for a shell call and AO's summary (the tool's name) for any other;
+ * `description` is the agent's own words for what the call is for, when it gave them.
+ */
+function toolHeadline(item: ChatLiveItem): string {
+  // The agent's own words say what the call is for; the command itself is one click away.
+  if (item.description) return item.description;
+  return item.text.replace(/^mcp__[\w-]+__/, "").replace(/\s+/g, " ").trim();
+}
+
+/** How a tool call ended, for its dot: AO's activity status, "pending" while it waits on approval. */
+function toolTone(status: string): "ok" | "failed" | "running" {
+  if (/fail|error|reject|denied|cancel/i.test(status)) return "failed";
+  return /complet|done|success/i.test(status) ? "ok" : "running";
+}
+
+/** A tool call as Claude Code shows it: a dot, its name and one line, opening on what it ran and got back. */
+function ToolItem({ item }: { item: ChatLiveItem }) {
+  const tone = toolTone(item.status);
+  const name = item.kind === "command" ? (tone === "running" ? "Running" : "Ran") : item.label ?? item.kind.replace(/_/g, " ");
+  const head = <><span className="cx-tool-dot" aria-hidden="true" /><span className="cx-live-label">{name}</span>
+    <span className="cx-live-text">{toolHeadline(item)}</span></>;
+  const opens = item.kind === "command" || item.input || item.output;
+  return opens
+    ? <details className={`cx-tool tone-${tone}`}><summary>{head}</summary>
+      <div className="cx-tool-body">
+        {item.kind === "command" ? <pre className="cx-tool-io"><code>{item.text}</code></pre> : null}
+        {item.input ? <pre className="cx-tool-io"><code>{item.input}</code></pre> : null}
+        {item.output ? <pre className="cx-tool-io is-output"><code>{item.output}</code></pre>
+          : tone === "running" ? null : <p className="cx-tool-empty">No output</p>}
+      </div></details>
+    : <div className={`cx-tool tone-${tone}`}><div className="cx-tool-row">{head}</div></div>;
+}
+
+/** A role's turn, as Codex and Claude Code show it: thinking, tool calls and streamed messages. */
 function LiveTimeline({ items }: { items: ChatLiveItem[] }) {
   return <ol className="cx-live">
     {items.map((item) => <li key={item.id} className={`cx-live-item kind-${item.kind} is-${item.status || "done"}`}>
-      {item.kind === "message" ? <ChatMarkdown text={item.text} />
-        : item.kind === "reasoning" ? <span className="cx-live-label">{item.status === "running" ? "Thinking…" : "Thought"}</span>
-        : item.kind === "command" ? <><span className="cx-live-label">{item.status === "running" ? "Running" : "Ran"}</span><code>{item.text}</code></>
-        : <><span className="cx-live-label">{item.kind.replace(/_/g, " ")}</span><span className="cx-live-text">{item.text}</span></>}
+      {item.kind === "steer" ? <div className="cx-user cx-steer"><div className="cx-bubble"><p>{item.text}</p></div></div>
+        : item.kind === "message" ? <ChatMarkdown text={item.text} />
+        : item.kind === "reasoning" ? <ReasoningItem item={item} />
+        : item.kind === "command" || item.kind === "tool" ? <ToolItem item={item} />
+        : <><span className="cx-live-label">{item.label ?? item.kind.replace(/_/g, " ")}</span><span className="cx-live-text">{item.text}</span></>}
     </li>)}
   </ol>;
 }
 
-function StepRow({ step, now }: { step: ChatStep; now: number }) {
+/**
+ * Each card's work (step key → its turn's timeline), kept for the app's lifetime: the live timeline
+ * is copied in while the card works, so its thinking and tool calls stay when the answer lands, and
+ * a card finished before is read back from AO once, when its work is first opened.
+ */
+const CHAT_WORK = new Map<string, ChatLiveItem[]>();
+type LoadWork = (runId: string, nodeId: string) => Promise<ChatLiveItem[]>;
+
+function useStepWork(step: ChatStep, runId: string, wanted: boolean, loadWork?: LoadWork): ChatLiveItem[] | null {
+  const live = step.working?.timeline;
+  const [, setLoaded] = useState(0);
+  if (live?.length) CHAT_WORK.set(step.key, live);
+  const known = CHAT_WORK.get(step.key) ?? null;
+  useEffect(() => {
+    if (!wanted || known || !step.hasWork || !loadWork) return;
+    let current = true;
+    void loadWork(runId, step.nodeId).then((items) => {
+      if (!items.length) return;
+      CHAT_WORK.set(step.key, items);
+      if (current) setLoaded((count) => count + 1);
+    }).catch(() => undefined);
+    return () => { current = false; };
+  }, [wanted, known, step.hasWork, step.key, step.nodeId, runId, loadWork]);
+  return known;
+}
+
+function StepRow({ step, runId, loadWork }: { step: ChatStep; runId: string; loadWork?: LoadWork }) {
   // A failed step opens on its error and a working one on its live turn, as Codex shows them;
   // once the user toggles a row, their choice wins.
   const [chosen, setOpen] = useState<boolean | null>(null);
   const open = chosen ?? Boolean(step.error || step.working?.timeline?.length);
-  const body = step.error || step.text || (step.working?.timeline?.length ? "live" : "");
-  const elapsed = step.working && step.startedAtMs ? chatDuration(now - step.startedAtMs) : "";
+  const work = useStepWork(step, runId, open, loadWork);
+  const body = step.error || step.text || (work?.length || step.hasWork ? "work" : "");
   return <li className={`cx-step tone-${stepTone(step)}`}>
     <button type="button" className="cx-step-head" aria-expanded={open} disabled={!body && !step.working} onClick={() => setOpen(!open)}>
       <span className="cx-step-dot" aria-hidden="true" />
       <span className="cx-step-name">{step.name}</span>
       <span className="cx-step-meta">
         {step.working ? (step.working.stalled ? "may be stuck" : step.working.activity || "working") : step.error ? "failed" : step.verdict || (step.state === "finished" ? "done" : step.state)}
-        {elapsed ? ` · ${elapsed}` : ""}
+        {step.working && step.startedAtMs ? <> · <Elapsed since={step.startedAtMs} /></> : null}
       </span>
       {body ? <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} /> : null}
     </button>
     {open ? <div className="cx-step-body">
       {step.detail ? <p className="cx-step-detail">{step.detail}</p> : null}
       {step.working ? <p className="cx-step-detail">{step.working.detail}</p> : null}
-      {step.working?.timeline?.length ? <LiveTimeline items={step.working.timeline} /> : null}
+      {work?.length ? <LiveTimeline items={work} /> : null}
       {step.error ? <p className="cx-step-error">{step.error}</p> : step.text ? <ChatMarkdown text={step.text} /> : null}
     </div> : null}
   </li>;
 }
 
-function WorkGroup({ turn, now, idle = false }: { turn: ChatTurn; now: number; idle?: boolean }) {
-  const working = turn.steps.find((step) => step.working);
-  // Live and failed work opens by itself until the user toggles it; after that their choice holds.
+/**
+ * The work behind an answer that closes its turn itself (a single model's, a solo orchestrator's):
+ * folded under "Worked" as Claude Code keeps it, its thinking and tool calls a click away.
+ */
+function AnswerWork({ step, runId, expanded, loadWork }: { step: ChatStep; runId: string; expanded: boolean; loadWork?: LoadWork }) {
   const [chosen, setChosen] = useState<boolean | null>(null);
-  const open = chosen ?? (Boolean(working) || turn.steps.some((step) => step.error));
+  const open = chosen ?? expanded;
+  const work = useStepWork(step, runId, open, loadWork);
+  if (!work?.length && !step.hasWork) return null;
+  const tools = work?.filter((item) => item.kind === "command" || item.kind === "tool").length ?? 0;
+  return <div className="cx-work">
+    <button type="button" className="cx-work-head" aria-expanded={open} onClick={() => setChosen(!open)}>
+      <span>{tools ? `Worked · ${tools} ${tools === 1 ? "tool call" : "tool calls"}` : "Worked"}</span>
+      <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
+    </button>
+    {open ? work?.length ? <LiveTimeline items={work} /> : <p className="cx-tool-empty">Loading…</p> : null}
+  </div>;
+}
+
+type WorkGroupProps = { turn: ChatTurn; idle?: boolean; expanded?: boolean; loadWork?: LoadWork };
+
+/** A turn still being worked on: its steps change on every update, so it always re-renders. */
+const liveTurn = (turn: ChatTurn) => turn.status === "running" || turn.status === "queued"
+  || turn.steps.some((step) => step.working) || Boolean(turn.final?.working);
+const stepShape = (step: ChatStep) => [step.key, step.name, step.detail, step.state, step.verdict ?? "", step.error ?? "", step.text ?? "", step.hasWork ?? false];
+/** What a finished turn's work shows; equal shapes render the same rows. */
+const workShape = (turn: ChatTurn) => JSON.stringify([turn.runId, turn.status, turn.startedAtMs ?? 0, turn.steps.map(stepShape), turn.final ? stepShape(turn.final) : null]);
+
+/**
+ * A finished turn's work is skipped on re-render unless it changed. The chat rebuilds every turn
+ * object on each update, and re-diffing a long chat's finished work (thousands of rows) blocked
+ * the page for up to a second each time; only the live turn needs the work.
+ */
+export function sameWork(prev: WorkGroupProps, next: WorkGroupProps): boolean {
+  if (prev.idle !== next.idle || prev.expanded !== next.expanded || prev.loadWork !== next.loadWork) return false;
+  if (prev.turn === next.turn) return true;
+  if (liveTurn(prev.turn) || liveTurn(next.turn)) return false;
+  return workShape(prev.turn) === workShape(next.turn);
+}
+
+const WorkGroup = memo(WorkGroupView, sameWork);
+
+function WorkGroupView({ turn, idle = false, expanded = false, loadWork }: WorkGroupProps) {
+  const working = turn.steps.find((step) => step.working);
+  // Live and failed work opens by itself, and finished work too when the chat shows its details
+  // (single-model chats by default); a toggle on the turn itself holds over both.
+  const [chosen, setChosen] = useState<boolean | null>(null);
+  const open = chosen ?? (expanded || Boolean(working) || turn.steps.some((step) => step.error));
   if (!turn.steps.length) {
+    if (turn.final) return <AnswerWork step={turn.final} runId={turn.runId} expanded={expanded} loadWork={loadWork} />;
     return !idle && (turn.status === "running" || turn.status === "queued")
       ? <div className="cx-work is-live"><span className="cx-shimmer">Starting…</span></div> : null;
   }
   const label = working
-    ? `${working.working!.stalled ? "May be stuck" : "Working"}${turn.startedAtMs ? ` for ${chatDuration(now - turn.startedAtMs)}` : ""} · ${working.name}${working.working!.activity ? ` — ${working.working!.activity}` : ""}`
+    ? <>{working.working!.stalled ? "May be stuck" : "Working"}{turn.startedAtMs ? <> for <Elapsed since={turn.startedAtMs} /></> : null}
+      {` · ${working.name}${working.working!.activity ? ` — ${working.working!.activity}` : ""}`}</>
     : `Worked · ${turn.steps.length} ${turn.steps.length === 1 ? "step" : "steps"}`;
   return <div className={`cx-work${working ? " is-live" : ""}${working?.working?.stalled ? " is-stalled" : ""}`}>
     <button type="button" className="cx-work-head" aria-expanded={open} onClick={() => setChosen(!open)}>
       <span className={working ? "cx-shimmer" : undefined}>{label}</span>
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
     </button>
-    {open ? <ol className="cx-steps">{turn.steps.map((step) => <StepRow key={step.key} step={step} now={now} />)}</ol> : null}
+    {open ? <ol className="cx-steps">{turn.steps.map((step) => <StepRow key={step.key} step={step} runId={turn.runId} loadWork={loadWork} />)}</ol> : null}
   </div>;
 }
 
@@ -121,9 +275,11 @@ function GoalGlyph({ name }: { name: "target" | "trash" | "play" | "pause" | "ex
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, working = false, describeNode, activity, permissions, composer, onOpenTeam, onOpenMissionBoard,
-  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject, projectBranch: branch,
-  pendingMessage, pendingTitle, pendingCreation = false, commands,
+  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject, projectBranch: branch, steer,
+  pendingMessage, pendingTitle, pendingCreation = false, commands, loadWork,
 }: {
+  /** A finished card's thinking and tool calls, read back from its AO session (turn_timeline). */
+  loadWork?: LoadWork;
   /** Codex slash commands that need the page: goal, compact, diff, MCP, status, recent chats, plan mode. */
   commands?: ChatCommands;
   /** A message being sent into a chat that has no run yet (shown at once, as Codex does). */
@@ -142,6 +298,8 @@ export function AgentOrchestratorChat({
   loadDescription: (taskId: string) => Promise<string>;
   /** `goal` starts (or replaces) the chat’s goal with this objective; the message is its first round. */
   send: (input: { taskId?: string; title?: string; message: string; goal?: string }) => Promise<void>;
+  /** Hands a message to the running agent at once (Codex's steer); false when its turn already ended. */
+  steer?: (input: { taskId: string; message: string }) => Promise<boolean>;
   openStructure: (runId: string) => void;
   approvals: ChatApproval[];
   approve: (approval: ChatApproval, reply: ApprovalReply) => void;
@@ -166,7 +324,7 @@ export function AgentOrchestratorChat({
   /** The path of a dropped or picked file, when the app can tell. */
   filePath?: (file: File) => string;
   /** A new chat's starting draft ("Continue in project"); taken once, then onSeedUsed clears it. */
-  seed?: { key: string; title: string; text: string };
+  seed?: { key: string; title: string; text: string; context?: string[] };
   onSeedUsed?: () => void;
   /** Extra header controls before the header buttons (the chat's team picker). */
   headerExtra?: ReactNode;
@@ -204,6 +362,36 @@ export function AgentOrchestratorChat({
   const [attachNote, setAttachNote] = useState("");
   const [slashIndex, setSlashIndex] = useState(0);
   const [showStructure, setShowStructure] = useState(false);
+  // Whether a finished turn's work (its steps and their messages) shows unfolded. Single-model chats
+  // show it by default, Team chats fold the workers' activity; the turn's answer always shows. Each
+  // mode remembers the choice made from the ⋯ menu.
+  const workMode = latest?.execution_mode === "single" ? "single" : "team";
+  const workKey = `coding-tools:ao:work-details:${workMode}`;
+  const [workPrefs, setWorkPrefs] = useState<Record<string, boolean>>({});
+  const showWork = workPrefs[workKey] ?? (() => {
+    try { const saved = localStorage.getItem(workKey); if (saved === "on" || saved === "off") return saved === "on"; } catch { /* default */ }
+    return workMode === "single";
+  })();
+  const toggleWork = () => {
+    const next = !showWork;
+    try { localStorage.setItem(workKey, next ? "on" : "off"); } catch { /* the choice still applies now */ }
+    setWorkPrefs((current) => ({ ...current, [workKey]: next }));
+  };
+  // The chat's details panel (like Claude's session panel): changes, agents, setup.
+  const [details, setDetails] = useState<{ left: number; top: number } | null>(null);
+  const detailsPanel = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!details) return;
+    const outside = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (target && (detailsPanel.current?.contains(target) || (target as Element).closest?.("[data-details-toggle]"))) return;
+      setDetails(null);
+    };
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setDetails(null); };
+    document.addEventListener("mousedown", outside, true);
+    document.addEventListener("keydown", escape);
+    return () => { document.removeEventListener("mousedown", outside, true); document.removeEventListener("keydown", escape); };
+  }, [details]);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [menu, setMenu] = useState<ChatMenuState>(null);
   // A menu button toggles its menu: pressing it again closes the menu instead of reopening it.
@@ -235,12 +423,14 @@ export function AgentOrchestratorChat({
     return () => { live = false; };
   }, [selectedTaskId, chatRuns.length, loadDescription]);
 
-  // Runtimes count up while a card works.
+  // Stall checks and "last heard" read a clock that moves every 10 seconds while a card works: each
+  // move rebuilds the turns and re-renders the transcript (every message), which ticking once a
+  // second made the chat lag. The per-second counters (<Elapsed>) tick on their own.
   const [now, setNow] = useState(() => Date.now());
   const anyWorking = chatRuns.some((run) => run.nodes.some((node) => node.state === "running" || node.state === "reserved"));
   useEffect(() => {
     if (!anyWorking) return;
-    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    const timer = window.setInterval(() => setNow(Date.now()), 10_000);
     return () => window.clearInterval(timer);
   }, [anyWorking]);
   const turns: ChatTurn[] = useMemo(
@@ -248,7 +438,16 @@ export function AgentOrchestratorChat({
     [chatRuns, descriptions, selectedTaskId, describeNode, activity, now, pendingMessage],
   );
   const stepCount = turns.reduce((total, turn) => total + turn.steps.length + (turn.final ? 1 : 0), 0);
-  useEffect(() => { if (atBottom) scroller.current?.scrollTo({ top: scroller.current.scrollHeight }); }, [turns.length, stepCount, atBottom]);
+  // The side panel beside the thread (ChatWorkbench: preview, changes, files, terminal) for the
+  // chat's AO agents; it opens by itself when an agent first opens a page or starts a command.
+  const [workbench, setWorkbench] = useState<WorkbenchTab | null>(null);
+  const agentSessions = useMemo(() => chatAgentSessions(chatRuns), [chatRuns]);
+  const agentSessionIds = useMemo(() => agentSessions.map((session) => session.id), [agentSessions]);
+  useWorkbenchAutoOpen(selectedTaskId ? agentSessionIds : [], workbench !== null, (tab) => setWorkbench(tab), projectId);
+  useEffect(() => { setWorkbench(null); }, [selectedTaskId]);
+  // Following new output jumps, even under a theme's smooth scrolling: an animated follow lags the
+  // stream and flashes the ↓ button. Only that button scrolls smoothly.
+  useEffect(() => { if (atBottom) scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "instant" }); }, [turns.length, stepCount, atBottom]);
   // The cards panel can be dragged wider for more board room; the width is kept per viewer.
   const [cardsWidth, setCardsWidth] = useState<number | null>(() => {
     try { const value = Number(localStorage.getItem(CARDS_WIDTH_KEY)); return Number.isFinite(value) && value >= 280 ? value : null; } catch { return null; }
@@ -278,10 +477,23 @@ export function AgentOrchestratorChat({
   };
   // A new chat starts at the bottom.
   useEffect(() => { setAtBottom(true); setShowStructure(false); setRenaming(null); }, [selectedTaskId]);
-  // Continue in project: the new chat opens with the carried messages, ready to review and send.
+  // Each chat keeps its own unsent draft, as Codex does (the new-chat composer is "" here): opening
+  // another chat puts this one's draft aside and brings that chat's back.
+  const draftOwner = useRef(selectedTaskId);
+  useEffect(() => {
+    if (draftOwner.current === selectedTaskId) return;
+    if (draft) CHAT_DRAFTS.set(draftOwner.current, draft); else CHAT_DRAFTS.delete(draftOwner.current);
+    setDraft(CHAT_DRAFTS.get(selectedTaskId) ?? "");
+    CHAT_DRAFTS.delete(selectedTaskId);
+    draftOwner.current = selectedTaskId;
+  }, [selectedTaskId]);
+  // Messages a rewound chat carries as context ahead of its first message; the composer holds only
+  // the chosen message. Dropped with the chip's ×, or sent once with that first message.
+  const [carried, setCarried] = useState<string[] | null>(null);
+  // Continue in project / Rewind: the new chat opens with the seeded message, ready to review and send.
   useEffect(() => {
     if (!seed || selectedTaskId) return;
-    setDraft(seed.text); setTitle(seed.title);
+    setDraft(seed.text); setTitle(seed.title); setCarried(seed.context?.length ? seed.context : null);
     onSeedUsed?.();
     window.setTimeout(() => input.current?.focus(), 0);
   }, [seed?.key]);
@@ -295,30 +507,44 @@ export function AgentOrchestratorChat({
 
   const runOpen = Boolean(latest) && chatRunOpen(chat?.status);
   const accepts = chatAcceptsMessage(chat?.status, working);
-  const canSend = !busy && !sending && Boolean(draft.trim() || attachments.length) && accepts;
+  // "Steer while working": a message typed while the agent works goes to it right away.
+  const [steerOn, setSteerOn] = useState(() => { try { return localStorage.getItem("coding-tools:ao:steer") !== "off"; } catch { return true; } });
+  const toggleSteer = () => setSteerOn((current) => {
+    try { localStorage.setItem("coding-tools:ao:steer", current ? "off" : "on"); } catch { /* the choice still applies now */ }
+    return !current;
+  });
+  // Only an AO agent can be steered: a single chat's card, or a team's orchestrator (see chat_steer).
+  const steerable = Boolean(latest?.nodes.some((node) => node.state === "running" && node.route?.harness_id?.startsWith("ao:")
+    && (latest.execution_mode === "single" || node.role === "planner")));
+  // A running AO card is steerable whether or not this page is driving its run: after an app restart
+  // the run goes on without the page's loop, and the user must still be able to reach the agent.
+  // An agent waiting on a request (a tool approval, ExitPlanMode's plan) must be answered on its
+  // card: steering pre-empts the turn, which cancels the request ("Tool use aborted").
+  const awaitingAnswer = approvals.length > 0;
+  const steering = !accepts && !awaitingAnswer && steerOn && steerable && Boolean(steer && selectedTaskId);
+  // Otherwise a message typed while the chat runs waits and is sent when the turn finishes, as in Codex.
+  const queueing = !accepts && !steering && runOpen && Boolean(selectedTaskId);
+  const canSend = !busy && !sending && Boolean(draft.trim() || attachments.length) && (accepts || steering || queueing);
   const slash = chatSlashMatches(draft, { chat: Boolean(selectedTaskId), run: Boolean(latest), open: runOpen });
 
   // What a command shows above the composer (its result, or why it couldn't run).
   const [card, setCard] = useState<ChatCommandCard | null>(null);
   // Edit goal: the objective being edited, or null.
   const [goalEditing, setGoalEditing] = useState<string | null>(null);
-  // A goal being pursued shows how long it has run, to the second, as Codex does.
-  const [, setTick] = useState(0);
-  const pursuing = commands?.goal?.status === "active";
-  useEffect(() => {
-    if (!pursuing) return;
-    const timer = window.setInterval(() => setTick((value) => value + 1), 1000);
-    return () => window.clearInterval(timer);
-  }, [pursuing]);
   const say = (title: string, text: string) => setCard({ title, text });
 
   /** Sends a message the way the composer does: into this chat, or as a new chat. */
   const deliver = async (message: string, goal?: string) => {
     setSending(true);
     try {
-      await send(selectedTaskId ? { taskId: selectedTaskId, message, ...(goal ? { goal } : {}) }
-        : { title: title.trim() || undefined, message, ...(goal ? { goal } : {}) });
+      // A steer the turn outran (it ended first) is sent as an ordinary follow-up instead; a goal is never steered.
+      const steered = !goal && steering && steer && selectedTaskId ? await steer({ taskId: selectedTaskId, message }) : false;
+      // A rewound chat's first message takes the earlier messages along ahead of it, as context.
+      const first = !selectedTaskId && carried?.length ? [...carried, message].join("\n\n").slice(-8192) : message;
+      if (!steered) await send(selectedTaskId ? { taskId: selectedTaskId, message, ...(goal ? { goal } : {}) }
+        : { title: title.trim() || undefined, message: first, ...(goal ? { goal } : {}) });
       setDraft(""); setTitle(""); setAttachments([]); setAttachNote(""); setAtBottom(true);
+      if (!selectedTaskId) setCarried(null);
       return true;
     } catch {
       // The surface already shows the error; keep the message so it can be sent again.
@@ -332,14 +558,80 @@ export function AgentOrchestratorChat({
     if (command) { await runCommand(command.name, command.arg); return; }
     if (!canSend) return;
     const message = chatMessageWithAttachments(draft, attachments);
-    await deliver(commands?.planMode ? planMessage(message) : message);
+    const text = commands?.planMode ? planMessage(message) : message;
+    if (queueing) {
+      // Several messages typed during one turn go together, in order.
+      setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what: "Message", message: text }));
+      setDraft(""); setAttachments([]); setAttachNote("");
+      say("Queued", `It's sent when the current turn finishes.${latest && runOpen && stop ? " Send /stop to end the turn now." : ""}`);
+      return;
+    }
+    await deliver(text);
   };
 
-  /** A command that sends a message needs the chat to be free, like any message. */
-  const sendable = (what: string) => {
-    if (!accepts) { say(what, "This chat is still working. Wait for it to finish, or stop it first."); return false; }
+  // Messages (or commands' messages) waiting for their chat's turn to end, as Codex queues them. Each
+  // chat has its own queue in CHAT_QUEUES, outside this component, so opening another chat or another
+  // view keeps it; a queue is sent only into its own chat, one item per finished turn.
+  const [queueVersion, setQueueVersion] = useState(0);
+  const queueOf = (taskId: string) => CHAT_QUEUES.get(taskId) ?? [];
+  const setQueue = (taskId: string, queue: QueuedChatMessage[]) => {
+    if (queue.length) CHAT_QUEUES.set(taskId, queue); else CHAT_QUEUES.delete(taskId);
+    setQueueVersion((value) => value + 1);
+  };
+  const queued = queueOf(selectedTaskId);
+  useEffect(() => {
+    if (queued.length) say("Queued", `${queued.length === 1 ? "A message is" : `${queued.length} messages are`} waiting for this chat's turn to finish; sent then.`);
+  }, [selectedTaskId]);
+  // One queued item per free spell: right after a send the chat may still read as free for a moment,
+  // and the next item must wait for the turn that send started.
+  const sentWhileFree = useRef(false);
+  useEffect(() => { sentWhileFree.current = false; }, [accepts, selectedTaskId]);
+  useEffect(() => {
+    const task = selectedTaskId, [next, ...rest] = queueOf(task);
+    if (!task || !next || !accepts || busy || sending || sentWhileFree.current) return;
+    sentWhileFree.current = true;
+    setQueue(task, rest);
+    void deliver(next.message, next.goal).then((sent) => {
+      if (sent) { if (!rest.length) setCard(null); return; }
+      // Nothing is lost: a plain message goes back into the composer to send again.
+      if (next.what === "Message") setDraft(next.message);
+      say(next.what, next.what === "Message" ? "The queued message couldn't be sent; it's back in the composer." : "The queued message couldn't be sent; run the command again.");
+    });
+  }, [queueVersion, selectedTaskId, accepts, busy, sending]);
+  /**
+   * Sends a command's message now when the chat is free, steers it into the working agent when it
+   * can be steered (never a goal), and otherwise queues it for when the current turn finishes.
+   */
+  const dispatch = async (what: string, message: string, goal?: string): Promise<"sent" | "queued" | false> => {
     if (busy || sending) { say(what, "Another action is still running; try again in a moment."); return false; }
-    return true;
+    if (accepts || (steering && !goal)) return await deliver(message, goal) ? "sent" : false;
+    setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what, message, ...(goal ? { goal } : {}) }));
+    say(what, `Queued: it's sent when the current turn finishes.${latest && runOpen && stop ? " Send /stop to end the turn now." : ""}`);
+    return "queued";
+  };
+  // The messages /rewind can go back to, oldest first, with the turn each one opened.
+  const rewindPoints = turns.flatMap((turn, turnIndex) => turn.user ? [{ turnIndex, messageIndex: turn.messageIndex ?? turnIndex, text: turn.user.text }] : []);
+  // Delete message: the turn whose message waits for the in-chat confirmation, or null. A message
+  // goes with its reply and the steers sent during its turn; the agent's files stay as they are.
+  const [deleting, setDeleting] = useState<number | null>(null);
+  const [deletingBusy, setDeletingBusy] = useState(false);
+  useEffect(() => { setDeleting(null); }, [selectedTaskId]);
+  const deleteBlocked = runOpen || working ? "Stop the chat first to delete a message"
+    : rewindPoints.length <= 1 ? "This is the chat's only message; archive or delete the chat instead" : "";
+  // A message is deleted with the runs its turn showed, so exactly that reply leaves the chat.
+  const deletion = (turn: ChatTurn | undefined) => turn?.user && turn.runId && turn.messageIndex !== undefined
+    ? { index: turn.messageIndex, runIds: chatRunsOfMessage(chatRuns, turn.runId) } : null;
+  const notYet = "This message hasn't run yet; it can be deleted once its turn has run";
+  const confirmDelete = async () => {
+    const target = deleting === null ? null : deletion(turns[deleting]), task = selectedTaskId;
+    if (!target || !thread?.deleteMessage || deleteBlocked) return;
+    setDeletingBusy(true);
+    try {
+      await thread.deleteMessage(target.index, target.runIds);
+      void loadDescription(task).then((text) => setDescriptions((current) => ({ ...current, [task]: text }))).catch(() => {});
+    } catch {
+      // The surface already shows why it could not be deleted.
+    } finally { setDeletingBusy(false); setDeleting(null); }
   };
 
   const runCommand = async (name: string, arg = "") => {
@@ -358,6 +650,9 @@ export function AgentOrchestratorChat({
             break;
           }
           if (["pause", "resume", "clear"].includes(action)) {
+            if (action === "clear" && queued.some((item) => item.goal)) {
+              setQueue(selectedTaskId, queued.filter((item) => !item.goal)); say("Goal", "The queued goal was dropped."); break;
+            }
             if (!commands) break;
             if (!goal) { say("Goal", "No goal is currently set."); break; }
             await commands.goalAction(action as "pause" | "resume" | "clear");
@@ -371,9 +666,10 @@ export function AgentOrchestratorChat({
           }
           if (goal && ["active", "paused"].includes(goal.status)
             && !window.confirm("Replace current goal?\n\nThis keeps the chat but replaces the saved goal with this one.")) { setDraft(`/goal ${arg}`); break; }
-          if (!sendable("Goal")) { setDraft(`/goal ${arg}`); break; }
-          if (!await deliver(arg, arg)) setDraft(`/goal ${arg}`);
-          else setCard(null);
+          // While a turn is working the goal is queued; it starts once the turn finishes.
+          const outcome = await dispatch("Goal", arg, arg);
+          if (!outcome) setDraft(`/goal ${arg}`);
+          else if (outcome === "sent") setCard(null);
           break;
         }
         case "plan":
@@ -387,11 +683,43 @@ export function AgentOrchestratorChat({
           say("Compact", await commands.compact());
           break;
         case "review":
-          if (sendable("Review")) await deliver(reviewPrompt(arg));
+          if (await dispatch("Review", reviewPrompt(arg)) === "sent" && !accepts) say("Review", "Sent to the working agent.");
           break;
         case "init":
-          if (sendable("Init")) await deliver(INIT_PROMPT);
+          if (await dispatch("Init", INIT_PROMPT) === "sent" && !accepts) say("Init", "Sent to the working agent.");
           break;
+        case "rewind": {
+          if (!thread?.rewind) break;
+          if (!rewindPoints.length) { say("Rewind", "There is no message to go back to yet."); break; }
+          const pick = Number(arg);
+          if (arg) {
+            const point = Number.isInteger(pick) ? rewindPoints[pick - 1] : undefined;
+            if (point) thread.rewind(point.messageIndex);
+            else say("Rewind", `Choose a message from 1 to ${rewindPoints.length}, e.g. /rewind ${rewindPoints.length}.`);
+            break;
+          }
+          setCard({ title: "Rewind",
+            text: "Go back to a message: a new chat opens with the conversation up to it and that message ready to edit. This chat and the files on disk stay as they are.",
+            items: rewindPoints.map((point, index) => ({ label: `${index + 1}. ${point.text.replace(/\s+/g, " ").slice(0, 90)}`,
+              run: () => { setCard(null); thread.rewind?.(point.messageIndex); } })).reverse() });
+          break;
+        }
+        case "delete": {
+          if (!thread?.deleteMessage) break;
+          if (deleteBlocked) { say("Delete message", `${deleteBlocked}.`); break; }
+          const pick = Number(arg);
+          if (arg) {
+            const point = Number.isInteger(pick) ? rewindPoints[pick - 1] : undefined;
+            if (point && !deletion(turns[point.turnIndex])) say("Delete message", `${notYet}.`);
+            else if (point) { setCard(null); setDeleting(point.turnIndex); }
+            else say("Delete message", `Choose a message from 1 to ${rewindPoints.length}, e.g. /delete ${rewindPoints.length}.`);
+            break;
+          }
+          setCard({ title: "Delete message", text: "Choose the message to delete; you are asked to confirm.",
+            items: rewindPoints.map((point, index) => ({ label: `${index + 1}. ${point.text.replace(/\s+/g, " ").slice(0, 90)}`,
+              run: () => deletion(turns[point.turnIndex]) ? setDeleting(point.turnIndex) : say("Delete message", `${notYet}.`) })).reverse() });
+          break;
+        }
         case "status": if (commands) setCard(commands.status()); break;
         case "diff":
           if (!commands) break;
@@ -452,6 +780,8 @@ export function AgentOrchestratorChat({
       { label: "Fork", run: () => thread.fork() },
       { label: "Copy conversation", run: thread.copyConversation },
     ] as ChatMenuItem[] : []),
+    ...(steer ? [{ label: "Steer while working", checked: steerOn, run: toggleSteer } as ChatMenuItem] : []),
+    { label: workMode === "single" ? "Show work details" : "Show workers' activity", checked: showWork, run: toggleWork } as ChatMenuItem,
     { kind: "separator" },
     latest && chat?.status === "paused" && onResume ? { label: "Resume mission", run: onResume }
       : { label: "Pause mission", ...(latest && chat?.status === "running" && onPause ? { run: onPause } : { reason: "Only a running mission can be paused" }) },
@@ -491,11 +821,44 @@ export function AgentOrchestratorChat({
           {structure || latest ? <button type="button" className="cx-icon-button" aria-pressed={showStructure} title="Show cards (Structure)" aria-label="Show cards"
             disabled={!latest} onClick={() => structure ? setShowStructure((value) => !value) : latest && openStructure(latest.id)}>
             <Icon name="orchestrator" width="16" height="16" /></button> : null}
+          {selectedTaskId ? <button type="button" className="cx-icon-button" aria-pressed={workbench !== null} title="Preview and terminal"
+            aria-label="Show preview and terminal" onClick={() => setWorkbench((open) => (open ? null : "preview"))}>
+            <Icon name="browser" width="16" height="16" /></button> : null}
           {onOpenMissionBoard ? <button type="button" className="cx-icon-button" title="Mission Board" aria-label="Open Mission Board" onClick={onOpenMissionBoard}>
             <Icon name="logs" width="16" height="16" /></button> : null}
+          {selectedTaskId ? <button type="button" className="cx-icon-button" data-details-toggle="" title="Chat details" aria-label="Chat details"
+            aria-haspopup="dialog" aria-expanded={Boolean(details)}
+            onClick={(event) => {
+              const box = event.currentTarget.getBoundingClientRect();
+              setDetails((open) => open ? null : { left: Math.max(8, Math.min(box.right - 300, window.innerWidth - 308)), top: box.bottom + 6 });
+            }}><ChatGlyph name="section" size={16} /></button> : null}
           <button type="button" className="cx-icon-button" title="More" aria-label="More chat actions" aria-haspopup="menu"
             onClick={(event) => toggleMenu(event.currentTarget, (box) => ({ x: box.right - 240, y: box.bottom + 4, items: headerMenu(), label: "Chat actions" }))}>⋯</button>
         </header>
+        {details ? (() => {
+          const nodes = latest?.nodes ?? [];
+          const lead = nodes.find((node) => node.role === "planner") ?? nodes[0];
+          const agents = chatAgentSummary(nodes);
+          return <FloatingLayer className="cx-details" role="dialog" style={{ left: details.left, top: details.top }}>
+            <div ref={detailsPanel} aria-label="Chat details">
+              <div className="cx-details-head"><strong>{projectName || "Project"}</strong>{branch ? <small>{branch}</small> : null}</div>
+              <button type="button" className="cx-details-row" disabled={!commands || !latest}
+                onClick={() => { setDetails(null); void runCommand("diff"); }}>
+                <ChatGlyph name="edit" size={15} /><span>Changes</span></button>
+              <p className="cx-details-label">Agents</p>
+              {latest ? <button type="button" className="cx-details-row" title="Open the cards"
+                onClick={() => { setDetails(null); if (structure) setShowStructure(true); else openStructure(latest.id); }}>
+                <span className="cx-details-dots" aria-hidden="true">{agents.dots.slice(0, 8).map((state, index) =>
+                  <span key={index} className={`cx-details-dot is-${state}`} />)}</span><span>{agents.text}</span></button>
+                : <p className="cx-details-empty">No agents yet; they start with the first message.</p>}
+              <p className="cx-details-label">Setup</p>
+              {lead ? <>
+                <p className="cx-details-line">{describeNode?.(lead) || lead.route?.model || "Model not set"}</p>
+                <p className="cx-details-line">Approvals: {chatApprovalMode(lead.route as { approval_policy?: string; approvals_reviewer?: string } | undefined)}</p>
+              </> : <p className="cx-details-empty">Chosen when you send.</p>}
+            </div>
+          </FloatingLayer>;
+        })() : null}
 
         <div className="cx-scroll" ref={scroller}
           onScroll={(event) => { const box = event.currentTarget; setAtBottom(box.scrollHeight - box.scrollTop - box.clientHeight < 48); }}>
@@ -512,11 +875,21 @@ export function AgentOrchestratorChat({
               {turn.user ? <div className="cx-user">
                 <div className="cx-bubble"><p>{turn.user.text}</p></div>
                 <MessageActions text={turn.user.text}>
-                  {thread ? <button type="button" title="Fork from here" aria-label="Fork from this message" onClick={() => thread.fork(turnIndex)}>⑂</button> : null}
+                  {thread ? <button type="button" title="Fork from here" aria-label="Fork from this message" onClick={() => thread.fork(turn.messageIndex ?? turnIndex)}>⑂</button> : null}
+                  {thread?.rewind ? <button type="button" title="Rewind: edit this message in a new chat" aria-label="Rewind to this message" onClick={() => thread.rewind?.(turn.messageIndex ?? turnIndex)}>↶</button> : null}
+                  {thread?.deleteMessage ? <button type="button" title={deleteBlocked || (deletion(turn) ? "Delete this message and its reply" : notYet)} aria-label="Delete this message"
+                    disabled={Boolean(deleteBlocked) || !deletion(turn) || deletingBusy} onClick={() => setDeleting(turnIndex)}>🗑</button> : null}
                 </MessageActions>
                 {turn.user.stamp ? <span className="cx-stamp">{turn.user.stamp} UTC</span> : null}
               </div> : null}
-              <WorkGroup turn={turn} now={now} idle={notStarted && turn.runId === latest?.id} />
+              {/* Messages steered into this turn. While it works they show in its live timeline, where
+                  they were sent; once it is done, here under the turn's message. */}
+              {turn.user?.steers?.length && !turn.steps.some((step) => step.working?.timeline?.some((item) => item.kind === "steer"))
+                ? turn.user.steers.map((steer, index) => <div key={`steer:${index}`} className="cx-user cx-steer">
+                  <div className="cx-bubble"><p>{steer.text}</p></div>
+                  <span className="cx-stamp">Steered · {steer.stamp} UTC</span>
+                </div>) : null}
+              <WorkGroup key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} idle={notStarted && turn.runId === latest?.id} expanded={showWork} loadWork={loadWork} />
               {turn.final ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`}>
                 <div className="cx-answer-meta">
                   <span>{turn.final.name}</span>
@@ -602,6 +975,14 @@ export function AgentOrchestratorChat({
           {card.items?.length ? <ul>{card.items.map((item, index) => <li key={`${item.label}:${index}`}>
             <button type="button" onClick={() => { setCard(null); item.run(); }}><span>{item.label}</span>{item.detail ? <small>{item.detail}</small> : null}</button></li>)}</ul> : null}
         </section> : null}
+        {deleting !== null ? <section className="cx-command-card cx-delete-confirm" role="alertdialog" aria-label="Delete message">
+          <header><strong>Delete message</strong>
+            <button type="button" className="cx-icon-button" aria-label="Cancel" onClick={() => setDeleting(null)}><Icon name="close" width="12" height="12" /></button></header>
+          <p>Delete this message? It and its reply are removed from this chat. The agent's files are not changed.</p>
+          {deleteBlocked ? <p className="cx-delete-reason">{deleteBlocked}.</p> : null}
+          <footer><button type="button" className="cx-text-button" onClick={() => setDeleting(null)}>Cancel</button>
+            <button type="button" className="cx-primary-button" disabled={Boolean(deleteBlocked) || deletingBusy} onClick={() => void confirmDelete()}>Delete</button></footer>
+        </section> : null}
         {goalEditing !== null && commands?.goal ? <section className="cx-command-card cx-goal-editor" aria-label="Edit goal">
           <header><strong>Edit goal</strong>
             <button type="button" className="cx-icon-button" aria-label="Cancel" onClick={() => setGoalEditing(null)}><Icon name="close" width="12" height="12" /></button></header>
@@ -619,7 +1000,9 @@ export function AgentOrchestratorChat({
             <span className="cx-goal-objective" title={commands.goal.objective}>{commands.goal.objective}</span>
             {commands.goal.note ? <span className="cx-goal-note" title={commands.goal.note}>{commands.goal.note}</span> : null}
             <span className="cx-goal-meta" title={`Round ${commands.goal.round} of ${commands.goal.rounds}`}>
-              {goalElapsed(commands.goal.startedAt, commands.goal.status === "active" ? Date.now() : commands.goal.updatedAt)}</span>
+              {/* A goal being pursued counts to the second, as Codex shows it; the label ticks alone. */}
+              <Elapsed since={commands.goal.startedAt} live={commands.goal.status === "active"} until={commands.goal.updatedAt}
+                format={(ms) => goalElapsed(0, ms)} /></span>
             <button type="button" className="cx-goal-icon" title="Clear goal" aria-label="Clear goal" onClick={() => void runCommand("goal", "clear")}><GoalGlyph name="trash" /></button>
             {commands.goal.status === "active"
               ? <button type="button" className="cx-goal-icon" title="Pause goal" aria-label="Pause goal" onClick={() => void runCommand("goal", "pause")}><GoalGlyph name="pause" /></button>
@@ -629,6 +1012,15 @@ export function AgentOrchestratorChat({
           {commands?.planMode ? <span className="cx-plan-chip" role="status">Plan mode
             <button type="button" aria-label="Turn plan mode off" title="Turn plan mode off" onClick={() => commands.setPlanMode(false)}><Icon name="close" width="11" height="11" /></button></span> : null}
         </div> : null}
+        {(() => {
+          // A turn keeps the model it started with; say so when the picker now shows another, so the
+          // switch is never silent: the next message (and a retry) uses the new one.
+          const lead = latest?.nodes.find((node) => node.role === "planner") ?? latest?.nodes[0];
+          const running = lead?.route?.model;
+          const picked = composer?.mode === "single" ? composer.route?.model : undefined;
+          return runOpen && latest?.execution_mode === "single" && running && picked && picked !== running
+            ? <p className="cx-route-note" role="status">This turn is running on <b>{running}</b>; your next message uses <b>{picked}</b>.</p> : null;
+        })()}
         <form className="cx-composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}
           onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
           onDrop={(event) => { if (event.dataTransfer.files.length) { event.preventDefault(); void addFiles(event.dataTransfer.files); } }}>
@@ -639,6 +1031,12 @@ export function AgentOrchestratorChat({
             </li>)}
           </ul> : null}
           {typing && !slash.length ? <p className="cx-slash-usage" role="status">/{typing.name} {typing.args} — {typing.hint}. Press Enter to run it.</p> : null}
+          {carried?.length && !selectedTaskId ? <div className="cx-attachments">
+            <span className="cx-attachment" title={carried.join("\n\n").slice(0, 600)}>
+              ↶ Includes {carried.length} earlier message{carried.length === 1 ? "" : "s"} as context
+              <button type="button" aria-label="Drop the earlier messages" onClick={() => setCarried(null)}>×</button>
+            </span>
+          </div> : null}
           {attachments.length || attachNote ? <div className="cx-attachments">
             {attachments.map((item, index) => <span key={`${item.name}:${index}`} className="cx-attachment" title={item.path || `${item.name} (inline)`}>
               {item.image ? "🖼" : "📄"} {item.name}
@@ -647,7 +1045,8 @@ export function AgentOrchestratorChat({
             {attachNote ? <span className="cx-attach-note" role="status">{attachNote}</span> : null}
           </div> : null}
           <textarea ref={input} aria-label="Message" maxLength={8192} rows={1} value={draft}
-            placeholder={!accepts ? "Running — you can send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : "Do anything"}
+            placeholder={steering ? "Steer the agent — sent to it right away" : awaitingAnswer && queueing ? "Answer the request above first — a message now is sent after it"
+              : queueing ? "Running — a message now is sent when it finishes" : !accepts ? "Running — you can send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : "Do anything"}
             onChange={(event) => { setDraft(event.target.value); setSlashIndex(0); }}
             onPaste={(event) => { if (event.clipboardData.files.length) { event.preventDefault(); void addFiles(event.clipboardData.files); } }}
             onKeyDown={(event) => {
@@ -671,11 +1070,14 @@ export function AgentOrchestratorChat({
             <input ref={picker} type="file" multiple hidden onChange={(event) => { if (event.target.files) void addFiles(event.target.files); event.target.value = ""; }} />
             {composer ? <AgentOrchestratorComposerControls {...composer} permissions={permissions} busy={busy || sending} /> : permissions}
             <span className="cx-head-spacer" />
+            {selectedTaskId ? <ChatContextMeter sessionId={agentSessions[0]?.id} agentLabel={agentSessions[0]?.label} model={agentSessions[0]?.model}
+              canCompact={Boolean(commands && accepts)} onCompact={() => void runCommand("compact")} /> : null}
             <button type="button" className="cx-icon-button cx-mic" aria-label="Voice input" title="Voice input isn't available yet" disabled>
               <ChatGlyph name="mic" size={16} /></button>
-            {latest && runOpen && stop && !accepts
+            {latest && runOpen && stop && !accepts && !((steering || queueing) && canSend)
               ? <button className="cx-send is-stop" type="button" aria-label="Stop (Esc)" title="Stop (Esc)" onClick={() => stop(latest.id)}><span aria-hidden="true" /></button>
-              : <button className="cx-send" type="submit" aria-label={sending ? "Starting…" : "Send message"} title="Send (Enter)" disabled={!canSend}>
+              : <button className="cx-send" type="submit" aria-label={sending ? "Starting…" : steering ? "Steer the agent" : queueing ? "Queue message" : "Send message"}
+                title={steering ? "Steer — sent to the working agent now (Enter)" : queueing ? "Queue — sent when the current turn finishes (Enter)" : "Send (Enter)"} disabled={!canSend}>
                   <Icon name="forward" width="18" height="18" /></button>}
           </div>
         </form>
@@ -694,6 +1096,7 @@ export function AgentOrchestratorChat({
           <Icon name="close" width="14" height="14" /></button></header>
         <div className="cx-structure-body">{structure}</div>
       </aside> : null}
+      {workbench && selectedTaskId ? <ChatWorkbench sessions={agentSessions} workspaceId={projectId} tab={workbench} onTab={setWorkbench} onClose={() => setWorkbench(null)} /> : null}
       <ChatMenu menu={menu} onClose={() => setMenu(null)} />
     </div>
   );

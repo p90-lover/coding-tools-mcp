@@ -170,6 +170,47 @@ function navigationOriginForLog(value) {
   }
 }
 
+// Chromium net errors that mean the proxy, not the site, could not be reached.
+const PROXY_NET_ERRORS = new Set([-130, -111, -127, -336]);
+const FAILURE_PAGE_PREFIX = "data:text/html;charset=utf-8,";
+const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
+/**
+ * A proxy as the failure page may name it: scheme, host and port only. The route's proxy URL can
+ * carry credentials (the built-in gateway's token, an upstream password) that must not reach the
+ * page; anything that is not a parseable URL is not shown at all.
+ */
+function proxyLabel(proxy) {
+  try {
+    const parsed = new URL(String(proxy));
+    return parsed.host ? `${parsed.protocol}//${parsed.host}` : "";
+  } catch { return ""; }
+}
+
+/**
+ * What the ChatGPT view shows when its page fails to load: Electron leaves the view blank otherwise,
+ * and the app's own error text sits behind the native view where nobody can see it. A proxy error
+ * names the proxy to start. Retry loads the failed page again (only an http(s) one).
+ */
+function navigationFailurePage({ url = "", errorCode, errorDescription = "", proxy = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || "" } = {}) {
+  let retry = "";
+  try { const parsed = new URL(url); if (parsed.protocol === "https:" || parsed.protocol === "http:") retry = parsed.toString(); } catch { /* no retry link */ }
+  const proxied = PROXY_NET_ERRORS.has(errorCode);
+  const host = (() => { try { return new URL(retry).host; } catch { return "the page"; } })();
+  const named = proxyLabel(proxy);
+  const hint = proxied
+    ? `The app reaches the internet through the proxy ${named ? `<b>${escapeHtml(named)}</b>` : "set for this route"}, and nothing is answering there. Start your proxy app (ProxyBridge), then retry.`
+    : "Check your connection, then retry.";
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Can't reach ${escapeHtml(host)}</title><style>
+body{margin:0;height:100vh;display:grid;place-items:center;font:14px/1.5 system-ui,sans-serif;background:#fff;color:#1f1f1f}
+@media (prefers-color-scheme:dark){body{background:#212121;color:#ececec}a{color:#8ab4ff}}
+main{max-width:460px;padding:24px}h1{font-size:18px;margin:0 0 8px}code{font-size:12px;opacity:.7}
+a.retry{display:inline-block;margin-top:14px;padding:6px 14px;border-radius:8px;background:#1f1f1f;color:#fff;text-decoration:none}
+@media (prefers-color-scheme:dark){a.retry{background:#ececec;color:#1f1f1f}}</style></head><body><main>
+<h1>Can't reach ${escapeHtml(host)}</h1><p>${hint}</p><code>${escapeHtml(errorDescription || "Load failed")} (${escapeHtml(errorCode ?? "")})</code><br>
+${retry ? `<a class="retry" href="${escapeHtml(retry)}">Retry</a>` : ""}</main></body></html>`;
+  return FAILURE_PAGE_PREFIX + encodeURIComponent(html);
+}
+
 function navigationErrorForLog(error) {
   if (!error || typeof error !== "object") return { errorType: typeof error };
   const detail = {
@@ -1131,7 +1172,7 @@ class BrowserHost {
       return { action: "deny" };
     });
     contents.on("did-start-navigation", (_event, url, inPlace, mainFrame) => {
-      if (!mainFrame) return;
+      if (!mainFrame || String(url).startsWith(FAILURE_PAGE_PREFIX)) return;
       if (inPlace) {
         this.setState({ url });
         return;
@@ -1149,6 +1190,8 @@ class BrowserHost {
     });
     contents.on("did-finish-load", () => {
       this.clearHomeNavigationTimeout();
+      // The failure page is not ChatGPT: keep the error state and its URL.
+      if (contents.getURL().startsWith(FAILURE_PAGE_PREFIX)) return;
       if (this.manualOperation === "ChatGPT login") {
         this.logger.info("browser.auth_navigation_completed", {
           surface: "primary",
@@ -1204,7 +1247,7 @@ class BrowserHost {
       if (mainFrame) this.setState({ url });
     });
     contents.on("did-fail-load", (_event, errorCode, errorDescription, url, mainFrame) => {
-      if (!mainFrame || errorCode === -3) return;
+      if (!mainFrame || errorCode === -3 || String(url).startsWith(FAILURE_PAGE_PREFIX)) return;
       this.clearHomeNavigationTimeout();
       this.logger.error(
         this.manualOperation === "ChatGPT login"
@@ -1218,6 +1261,8 @@ class BrowserHost {
         },
       );
       this.setState({ status: "error", message: errorDescription, url, loading: false });
+      // Show why in the view itself instead of a blank page; the state above keeps the real URL.
+      void contents.loadURL(navigationFailurePage({ url, errorCode, errorDescription })).catch(() => {});
     });
     contents.on("render-process-gone", (_event, details) => {
       this.clearHomeNavigationTimeout();
@@ -3115,6 +3160,8 @@ class BrowserHost {
       createdAt: new Date().toISOString(),
     };
     writePrivateFileAtomic(this.descriptorPath, `${JSON.stringify(descriptor, null, 2)}\n`);
+    // The app is back: the bridge no longer needs to wait out a restart.
+    try { fs.rmSync(restartMarkerPath(this.descriptorPath), { force: true }); } catch {}
   }
 
   async persistSession() {
@@ -3171,7 +3218,32 @@ class BrowserHost {
   }
 }
 
+// While the app restarts and leaves the Codex bridge running (an update install, "Restart app (keep
+// Codex bridge)"), there is no descriptor for minutes. The quitting app writes this marker next to
+// it, with when the restart should be over by; a turn that reaches the bridge meanwhile waits for
+// the new app instead of failing. The new app removes it once its descriptor is written. A crash
+// writes none, so the bridge still fails fast then (runtime-web launcher-browser-host.ts reads it).
+// `until` is at most 15 minutes away, which every bridge honours; an update has taken 12, so
+// `holdUntil` (30 minutes) is read by bridges that know it. An older bridge ignores a marker whose
+// `until` is further than 15 minutes, which is why that one field stays within it.
+const RESTART_MARKER_MAX_MS = 15 * 60_000;
+const RESTART_MARKER_HOLD_MS = 30 * 60_000;
+function restartMarkerPath(descriptorPath) {
+  return path.join(path.dirname(descriptorPath), "launcher-browser.restarting.json");
+}
+function writeRestartMarker(descriptorPath, { reason, withinMs = RESTART_MARKER_MAX_MS, now = Date.now() } = {}) {
+  const until = now + Math.max(0, Math.min(withinMs, RESTART_MARKER_MAX_MS));
+  const holdUntil = now + RESTART_MARKER_HOLD_MS;
+  writePrivateFileAtomic(restartMarkerPath(descriptorPath), `${JSON.stringify({
+    version: 1, pid: process.pid, reason: String(reason || "restart").slice(0, 40),
+    createdAt: new Date(now).toISOString(), until: new Date(until).toISOString(), holdUntil: new Date(holdUntil).toISOString(),
+  }, null, 2)}\n`);
+}
+
 module.exports = {
+  RESTART_MARKER_MAX_MS,
+  restartMarkerPath,
+  writeRestartMarker,
   allowedAuthUrl,
   BrowserHost,
   BrowserTurnCancelledError,
@@ -3183,6 +3255,7 @@ module.exports = {
   MANUAL_SUBMIT_TIMEOUT_MS,
   MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS,
   navigationErrorForLog,
+  navigationFailurePage,
   navigationOriginForLog,
   TEMPORARY_CHAT_URL,
 };

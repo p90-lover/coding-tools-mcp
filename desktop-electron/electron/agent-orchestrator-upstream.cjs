@@ -9,6 +9,7 @@ const { createAgentOrchestratorGateway } = require("./agent-orchestrator-gateway
 const { createAoWorkspaceBoard } = require("./agent-orchestrator-workspace.cjs");
 const { readCpaCatalog, collectMissionAccounting } = require("./agent-orchestrator-accounting.cjs");
 const { createAoSessionEvents } = require("./ao-session-events.cjs");
+const { createAoDependencyLinks } = require("./ao-dependency-links.cjs");
 
 const API_OPERATIONS = Object.freeze({
   upstream_projects: { method: "GET", endpoint: "/api/v1/projects" },
@@ -42,7 +43,35 @@ function createAgentInventory(api, { now = Date.now, recheckMs = AGENT_RECHECK_M
   };
 }
 
+// AO install checks that have not finished: right after AO starts most agents are "not_checked".
+const PENDING_INSTALL_CHECKS = new Set(["checking", "not_checked"]);
+
+/**
+ * The harness list from AO's inventory. AO lists only agents its latest check proved installed; a
+ * check that is unfinished, timed out or failed leaves an agent "unknown", which AO calls advisory,
+ * not missing. An unknown agent is offered only with evidence: it was installed last time
+ * (`lastInstalled`: id → auth status) or AO found its binary and is confirming it. One whose check
+ * hasn't finished is marked `checking` (not offered yet) so the list is read again once it has.
+ */
+function agentCatalog({ inventory, settings, readiness = null, lastInstalled = new Map() }) {
+  const chat = new Set(Array.isArray(settings?.chatHarnesses) ? settings.chatHarnesses : []);
+  const installed = new Map((inventory?.installed ?? []).map(item => [item?.id, item]));
+  const checks = new Map((Array.isArray(readiness?.agents) ? readiness.agents : []).map(agent => [agent?.id, agent?.installation ?? {}]));
+  return (inventory?.supported ?? []).filter(item => typeof item?.id === "string" && /^[a-z0-9-]{1,40}$/.test(item.id)).map(item => {
+    const check = checks.get(item.id);
+    const unknown = !installed.has(item.id) && check?.state !== "not_installed";
+    const offered = installed.has(item.id) || (unknown && (lastInstalled.has(item.id) || check?.reasonCode === "install_identity_pending"));
+    return {
+      id: item.id, label: String(item.label || item.id).slice(0, 80), installed: offered,
+      authStatus: installed.get(item.id)?.authStatus || (offered && lastInstalled.get(item.id)) || "unknown", chat: chat.has(item.id),
+      ...(!offered && unknown && check?.state === "unknown" && PENDING_INSTALL_CHECKS.has(check.reasonCode) ? { checking: true } : {}),
+    };
+  });
+}
+
 const TUI_RESULT_FILE = "AO_RESULT.md";
+/** How long a terminal agent AO lost the signal of may sit idle before its card is settled as failed. */
+const TUI_SILENT_MS = 30 * 60_000;
 // AO conversation turn states after which a turn can no longer change.
 const TERMINAL_TURN_STATES = new Set(["completed", "failed", "interrupted", "cancelled", "recovered"]);
 const TUI_RESULT_INSTRUCTION = `When the assignment is finished, write your complete final report (what you did and the evidence) to ${TUI_RESULT_FILE} at the root of your working directory, then stop and wait.`;
@@ -62,7 +91,7 @@ async function allocatePort() {
   return port;
 }
 
-function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), logger = console }) {
+function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, cpaQuota = null, logger = console }) {
   let child = null;
   let gateway = null;
   let view = null;
@@ -96,9 +125,16 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     } else await shell.openExternal(url.toString());
     return true;
   }
+  // Gives each new worktree the project's installed node_modules (AO hardLinkFarms) and, when
+  // the user allows it, its .venv/venv (AO symlinks).
+  const dependencyLinks = createAoDependencyLinks({
+    file: path.join(dataRoot, "coding-tools-dependency-links.json"),
+    request: (method, endpoint, body) => internalApi(method, endpoint, body), logger,
+  });
   const workspaceBoard = typeof getWorkspaces === "function" && typeof missionCall === "function"
     ? createAoWorkspaceBoard({
       listWorkspaces: getWorkspaces, missionCall,
+      syncProject: (project, folder) => dependencyLinks.sync(project.id, folder),
       readAccounting: async scope => collectMissionAccounting({
         ...scope, catalog: readCpaCatalog(getCpaPricesPath()),
         readSession: async id => {
@@ -129,7 +165,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (body?.length > 65536) throw new Error("AO API request exceeds 64 KiB");
     const response = await fetch(`http://127.0.0.1:${daemonPort}${endpoint}`, { method, headers: { "content-type": "application/json" }, body, redirect: "error", signal: AbortSignal.timeout(method === "GET" ? 30000 : 180000) });
     const text = await response.text();
-    if (Buffer.byteLength(text) > 900000) throw new Error("AO response exceeds the handler limit");
+    if (Buffer.byteLength(text) > 900000) throw new Error(`AO response exceeds the handler limit (${method} ${endpoint.split("?")[0]})`);
     // AO answers some failures with an empty or non-JSON body; keep the status instead of
     // failing on JSON.parse and losing it.
     let data = {};
@@ -168,6 +204,21 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     });
   }
   /**
+   * The newest items of a session's conversation. AO counts messages and tool activities alike,
+   * and a tool's output can be tens of KB (an MCP browser tool's page dumps), so 100 items reached
+   * 1 MB and every poll failed on the response limit. A response that is too big is read again
+   * with fewer items; the chat shows only the newest 40 anyway.
+   */
+  async function conversationTail(id, limits = [100, 40, 10]) {
+    for (let at = 0; ; at += 1) {
+      try {
+        return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${limits[at]}`);
+      } catch (error) {
+        if (at === limits.length - 1 || !/exceeds the handler limit/.test(String(error?.message))) throw error;
+      }
+    }
+  }
+  /**
    * The current turn as a Codex-style transcript: assistant messages, reasoning and tool calls
    * in AO sequence order. Bounded to the newest 40 items so a long turn stays a small IPC frame;
    * the prompt (user message) is left out because the chat already shows it.
@@ -181,12 +232,177 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           status: message.streaming ? "running" : "completed", text: utf8Prefix(message.text.trim(), 4096) })),
       ...(Array.isArray(conversation?.activities) ? conversation.activities : [])
         .filter(activity => activity.turnId === turnId && typeof activity.activityKind === "string")
-        .map(activity => ({ id: String(activity.id), sequence: Number(activity.sequence) || 0,
-          kind: activity.activityKind.slice(0, 32), status: String(activity.status || "").slice(0, 32),
-          text: utf8Prefix(String(activity.summary || activity.activityKind), 400) })),
+        .map(activity => activity.activityKind === "system" && activity.detail?.event === "steer" && typeof activity.detail.text === "string"
+          // AO records a steer as a system row tagged event "steer"; it is the user's own words.
+          ? { id: String(activity.id), sequence: Number(activity.sequence) || 0, kind: "steer", status: "completed",
+            text: utf8Prefix(activity.detail.text.trim(), 4096) }
+          : timelineActivity(activity)),
     ];
     return items.sort((a, b) => a.sequence - b.sequence).slice(-40);
   }
+  /**
+   * A finished turn's transcript, read back from AO for the chat's folded "Worked" row. AO keeps
+   * the whole conversation; an earlier turn is found by paging back (beforeSequence) a few pages,
+   * stopping once a page reaches a turn before it.
+   */
+  async function pastTurnTimeline(id, turnId, pages = 6) {
+    let conversation = await conversationTail(id, [60, 20]);
+    const merged = { messages: [], activities: [] };
+    for (let page = 0; conversation && page < pages; page += 1) {
+      const messages = Array.isArray(conversation.messages) ? conversation.messages : [];
+      const activities = Array.isArray(conversation.activities) ? conversation.activities : [];
+      merged.messages.push(...messages);
+      merged.activities.push(...activities);
+      const oldest = [...messages, ...activities].sort((a, b) => (Number(a.sequence) || 0) - (Number(b.sequence) || 0))[0];
+      const seen = merged.messages.some(entry => entry.turnId === turnId) || merged.activities.some(entry => entry.turnId === turnId);
+      if (seen && oldest && oldest.turnId !== turnId) break;
+      if (!conversation.hasMoreBefore || !(Number(conversation.oldestSequence) > 0)) break;
+      conversation = await internalApi("GET",
+        `/api/v1/sessions/${sessionId(id)}/conversation?limit=60&beforeSequence=${Number(conversation.oldestSequence)}`).catch(() => null);
+    }
+    return turnTimeline(merged, turnId);
+  }
+  // claude-agent-acp reports every tool call, its own Read/Grep/PowerShell included, as AO's
+  // "mcp_tool"; the ACP tool kind says what it did. A real MCP server's tool is named mcp__<server>__.
+  const TOOL_LABELS = { read: "Read", search: "Search", edit: "Edit", delete: "Delete", move: "Move", fetch: "Fetch",
+    think: "Thought", switch_mode: "Plan", execute: "Command", other: "Tool" };
+  function toolLabel(detail, summary) {
+    // AO's ACP activities name the tool providerToolName.
+    const name = String(detail?.toolName || detail?.providerToolName || "");
+    if (/^mcp__(?!acp__)/.test(name) || /^mcp__(?!acp__)/.test(summary)) return "MCP";
+    return TOOL_LABELS[detail?.toolKind] || "Tool";
+  }
+  /** How long AO's chat drivers wait for a tool approval before giving up on it (approvalWait). */
+  const APPROVAL_WAIT_MS = 30 * 60_000;
+  /**
+   * What a tool call did, for the row that opens on it (as Claude Code's do): the agent's own
+   * one-line description, its arguments as JSON (without the command and description, which the row
+   * shows already) and what came back. Capped: every working card's timeline is polled.
+   */
+  function toolDetails(detail, input) {
+    const description = typeof input.description === "string" ? input.description.trim() : "";
+    const { command: _command, description: _description, ...rest } = input;
+    const args = Object.keys(rest).length ? utf8Prefix(JSON.stringify(rest, null, 2), 1000) : "";
+    const output = typeof detail.output === "string" && detail.output.trim() ? detail.output
+      : (Array.isArray(detail.content) ? detail.content : [])
+        .map(entry => entry?.content?.text).filter(text => typeof text === "string").join("\n");
+    return {
+      ...(description ? { description: utf8Prefix(description, 200) } : {}),
+      ...(args ? { input: args } : {}),
+      ...(output.trim() ? { output: utf8Prefix(output.trim(), 2000) } : {}),
+    };
+  }
+  function timelineActivity(activity) {
+    const detail = activity.detail && typeof activity.detail === "object" ? activity.detail : {};
+    const input = detail.input && typeof detail.input === "object" ? detail.input : {};
+    const base = { id: String(activity.id), sequence: Number(activity.sequence) || 0, status: String(activity.status || "").slice(0, 32) };
+    const summary = String(activity.summary || "");
+    // A shell call (Bash, PowerShell) shows as the command it ran, like Codex.
+    if (activity.activityKind === "mcp_tool" && typeof input.command === "string" && input.command.trim()) {
+      return { ...base, kind: "command", text: utf8Prefix(input.command.trim(), 400), ...toolDetails(detail, input) };
+    }
+    if (activity.activityKind === "mcp_tool") {
+      return { ...base, kind: "tool", label: toolLabel(detail, summary), text: utf8Prefix(summary || detail.toolKind || "tool", 400),
+        ...toolDetails(detail, input) };
+    }
+    // The model's reasoning summary: AO streams it into the activity's text (detail.text); its
+    // summary is only the word "Reasoning".
+    if (activity.activityKind === "reasoning") {
+      return { ...base, kind: "reasoning", text: utf8Prefix(typeof detail.text === "string" ? detail.text.trim() : "", 4096) };
+    }
+    // A request nobody answered: AO marks it resolved by the provider when its 30-minute wait runs
+    // out, or when the turn ends first. The agent then only says it was "blocked by permissions",
+    // so the timeline says what really happened.
+    if (activity.activityKind === "approval" && activity.status !== "pending" && detail.resolvedBy === "provider") {
+      const open = Date.parse(activity.updatedAt ?? "") - Date.parse(activity.createdAt ?? "");
+      const timedOut = Number.isFinite(open) && open >= APPROVAL_WAIT_MS - 60_000;
+      return { ...base, kind: "approval", label: timedOut ? "Approval timed out" : "Approval cancelled",
+        text: utf8Prefix(`${timedOut ? "Nobody answered within 30 minutes, so the agent could not run it" : "The turn ended before this was answered"}${summary ? `: ${summary}` : ""}. Send a follow-up to try again.`, 400) };
+    }
+    return { ...base, kind: activity.activityKind.slice(0, 32), text: utf8Prefix(summary || activity.activityKind, 400) };
+  }
+  /**
+   * The session's tool requests waiting on an answer (Claude Code's ACP permission requests, parked
+   * by AO). Each keeps AO's request id and the provider's own offered decisions, so an answer is
+   * always one of those; a Bash call is a "command", other tools a "permission".
+   */
+  function pendingApprovals(conversation) {
+    return (Array.isArray(conversation?.activities) ? conversation.activities : [])
+      .filter(activity => activity.activityKind === "approval" && activity.status === "pending" && typeof activity.requestId === "string")
+      .map(activity => {
+        const detail = activity.detail && typeof activity.detail === "object" ? activity.detail : {};
+        const input = detail.input && typeof detail.input === "object" ? detail.input : {};
+        const decisions = (Array.isArray(detail.decisions) ? detail.decisions : [])
+          .filter(decision => typeof decision?.id === "string" && typeof decision?.kind === "string")
+          .map(decision => ({ id: decision.id.slice(0, 200), kind: decision.kind.slice(0, 40), label: String(decision.label || decision.kind).slice(0, 120) }));
+        const command = typeof input.command === "string" && input.command.trim() ? input.command : "";
+        const path = typeof input.file_path === "string" ? input.file_path : typeof input.path === "string" ? input.path : "";
+        // Claude Code's ExitPlanMode asks to leave plan mode with the plan it wrote; each offered
+        // decision is a different way to go on (auto, accept edits, ask for edits, keep planning).
+        const plan = typeof input.plan === "string" && input.plan.trim() ? utf8Prefix(input.plan, 20000) : "";
+        // An MCP tool's arguments (read_file's path, search_text's pattern) are what it will do; the card
+        // and the reviewer need them. Shown as JSON, so control characters arrive escaped.
+        const toolName = String(detail.toolName || "");
+        const toolInput = /^mcp__/.test(toolName) && Object.keys(input).length ? utf8Prefix(JSON.stringify(input), 1500) : "";
+        return {
+          approval_id: activity.requestId.slice(0, 200), source: "ao", kind: plan ? "plan" : command ? "command" : "permission",
+          ...(plan ? { plan } : {}),
+          ...(toolInput ? { toolInput } : {}),
+          ...(typeof activity.createdAt === "string" ? { since: activity.createdAt } : {}),
+          ...(command ? { command: utf8Prefix(command, 4000) } : {}), ...(path ? { path: utf8Prefix(path, 1000) } : {}),
+          ...(typeof input.description === "string" ? { reason: utf8Prefix(input.description, 500) } : {}),
+          // The tool's own name when AO has it; otherwise its summary ("PowerShell") rather than ACP's "other".
+          tool: String(detail.toolName || (detail.toolKind && detail.toolKind !== "other" ? detail.toolKind : activity.summary) || "tool").slice(0, 80),
+          summary: utf8Prefix(String(activity.summary || ""), 500), turn_id: typeof activity.turnId === "string" ? activity.turnId : undefined,
+          decisions,
+        };
+      })
+      .filter(approval => approval.decisions.length);
+  }
+  /**
+   * What the agent asked the person and is waiting on (Claude Code's AskUserQuestion, or any ACP
+   * form or URL request): AO parks it as a pending "user_input" activity with the form's schema.
+   * Each becomes a "question" the chat shows and answers through resolveInput. A field is a choice
+   * (oneOf/enum), a multiple choice (an array of them), free text, a yes/no or a number; Claude
+   * Code's "<field>_custom" text is that field's "Other" answer.
+   */
+  function pendingInputs(conversation) {
+    const text = (value, max) => (typeof value === "string" ? utf8Prefix(value, max) : "");
+    const options = (list) => (Array.isArray(list) ? list : []).slice(0, 40)
+      .map((option) => (option && typeof option === "object"
+        ? { value: option.const ?? option.title, label: text(String(option.title ?? option.const ?? ""), 200), description: text(option.description, 500) }
+        : { value: option, label: text(String(option), 200), description: "" }))
+      .filter((option) => typeof option.value === "string" && option.value);
+    return (Array.isArray(conversation?.activities) ? conversation.activities : [])
+      .filter((activity) => activity.activityKind === "user_input" && activity.status === "pending" && typeof activity.requestId === "string")
+      .map((activity) => {
+        const detail = activity.detail && typeof activity.detail === "object" ? activity.detail : {};
+        const properties = detail.schema && typeof detail.schema === "object" && detail.schema.properties && typeof detail.schema.properties === "object"
+          ? detail.schema.properties : {};
+        const required = new Set(Array.isArray(detail.schema?.required) ? detail.schema.required : []);
+        const fields = Object.entries(properties).slice(0, 20)
+          .filter(([key, schema]) => schema && typeof schema === "object" && !(key.endsWith("_custom") && properties[key.slice(0, -"_custom".length)]))
+          .map(([key, schema]) => {
+            const many = schema.type === "array";
+            const choices = options(many ? schema.items?.anyOf ?? schema.items?.oneOf ?? schema.items?.enum : schema.oneOf ?? schema.anyOf ?? schema.enum);
+            const type = choices.length ? (many ? "multi" : "choice") : schema.type === "boolean" ? "boolean"
+              : schema.type === "number" || schema.type === "integer" ? "number" : "text";
+            return { key: key.slice(0, 80), type, title: text(schema.title, 200), description: text(schema.description, 2000), options: choices,
+              ...(properties[`${key}_custom`] ? { customKey: `${key}_custom`.slice(0, 90) } : {}), ...(required.has(key) ? { required: true } : {}) };
+          });
+        return {
+          approval_id: activity.requestId.slice(0, 200), source: "ao", kind: "question",
+          mode: detail.inputMode === "url" ? "url" : "form", message: text(detail.message || activity.summary, 4000),
+          ...(detail.inputMode === "url" && typeof detail.url === "string" && /^https?:\/\//i.test(detail.url) ? { url: utf8Prefix(detail.url, 2000) } : {}),
+          fields, tool: "AskUserQuestion", summary: text(activity.summary, 500),
+          ...(typeof activity.createdAt === "string" ? { since: activity.createdAt } : {}),
+          turn_id: typeof activity.turnId === "string" ? activity.turnId : undefined, decisions: [],
+        };
+      });
+  }
+  /** A chat start that failed only for time (the persistent host's startup window, a deadline). */
+  const TRANSIENT_CHAT_START = /persistent (ACP )?host|timed out|timeout|deadline exceeded|context canceled/i;
+  const CHAT_RETRY_PAUSE_MS = 2000;
   /** The longest prefix of `text` that is at most `maxBytes` of UTF-8 (AO limits prompts in bytes). */
   function utf8Prefix(text, maxBytes) {
     const value = String(text);
@@ -221,7 +437,27 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (!binding.projectId) throw new Error("AO harness workers need this workspace to be a git repository registered in AO");
     return binding.projectId;
   }
+  /**
+   * The app's own tools for one chat session about to be spawned (its own credential, rooted at
+   * the worktree AO creates for it), or null. Never fails a launch: without them the agent starts
+   * without them.
+   */
+  async function chatTools(agent, workspaceId, approvalMode, autoReview = false) {
+    if (!agentTools) return null;
+    try {
+      // The session's permission mode goes with its credential: only a session launched to
+      // bypass permissions runs every terminal command without the user confirming each one, and
+      // one set to "Approve for me" (autoReview) its routine project commands.
+      const lease = await agentTools.lease({ agent, workspaceId, ...(approvalMode ? { approvalMode } : {}), ...(autoReview ? { autoReview: true } : {}) });
+      return Array.isArray(lease?.servers) && lease.servers.length ? lease : null;
+    } catch (cause) {
+      logger.warn?.("ao.agent_tools_unavailable", { agent, message: String(cause?.message || cause).slice(0, 200) });
+      return null;
+    }
+  }
   const agentInventory = createAgentInventory(internalApi);
+  // Agents the last catalog listed as installed, with their auth status.
+  let lastInstalled = new Map();
   // Watching never starts AO; it connects (with backoff) once the runtime is ready.
   const sessionEvents = createAoSessionEvents({ port: async () => { if (state !== "ready") throw new Error("AO is not running"); return daemonPort; }, logger });
   const harness = Object.freeze({
@@ -229,12 +465,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     watch(listener) { return sessionEvents.subscribe(listener); },
     async catalog() {
       const [inventory, settings] = await Promise.all([agentInventory(), internalApi("GET", "/api/v1/settings")]);
-      const chat = new Set(Array.isArray(settings?.chatHarnesses) ? settings.chatHarnesses : []);
-      const installed = new Map((inventory?.installed ?? []).map(item => [item.id, item]));
-      return (inventory?.supported ?? []).filter(item => typeof item?.id === "string" && /^[a-z0-9-]{1,40}$/.test(item.id)).map(item => ({
-        id: item.id, label: String(item.label || item.id).slice(0, 80),
-        installed: installed.has(item.id), authStatus: installed.get(item.id)?.authStatus || "unknown", chat: chat.has(item.id),
-      }));
+      const proven = new Set((inventory?.installed ?? []).map(item => item?.id));
+      // AO's readiness (its cached snapshots; no new checks) tells an unproven agent from a missing one.
+      const readiness = (inventory?.supported ?? []).some(item => !proven.has(item?.id))
+        ? await internalApi("GET", "/api/v1/agents/readiness").catch(() => null) : null;
+      const catalog = agentCatalog({ inventory, settings, readiness, lastInstalled });
+      lastInstalled = new Map(catalog.filter(item => item.installed).map(item => [item.id, item.authStatus]));
+      return catalog;
     },
     async models(agent, workspaceId) {
       const projectId = workspaceId ? await projectFor(workspaceId).catch(() => "") : "";
@@ -243,21 +480,37 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         .slice(0, 100).map(model => ({ id: model.id, label: String(model.label || model.id).slice(0, 128), isDefault: model.isDefault === true,
           efforts: Array.isArray(model.efforts) ? model.efforts.filter(value => typeof value === "string" && value.length <= 32).slice(0, 16) : [] }));
     },
-    async spawn({ workspaceId, agent, model, prompt, name, gateway = null, effort = null, contextWindow = null, approvalMode = null, plain = false }) {
+    async spawn({ workspaceId, agent, model, prompt, name, gateway = null, effort = null, contextWindow = null, approvalMode = null, autoReview = false, plain = false, warm = false }) {
       if (approvalMode !== null && !["default", "accept-edits", "auto", "bypass-permissions"].includes(approvalMode)) throw new Error("Unsupported AO permission mode");
       const projectId = await projectFor(workspaceId);
       const settings = await internalApi("GET", "/api/v1/settings");
       // Chat-capable agents return their answer as a conversation turn. Every other
       // installed agent runs in its own terminal UI and hands back a result file.
       const chat = Array.isArray(settings?.chatHarnesses) && settings.chatHarnesses.includes(agentId(agent));
+      // A pre-warmed session must be a chat: it takes its first message later, which a terminal session cannot.
+      if (warm && !chat) throw new Error("Only a chat agent can be pre-warmed");
       const codexWorkspace = agent === "codex" && ["accept-edits", "auto"].includes(approvalMode);
       if (codexWorkspace && !chat) throw new Error("Codex workspace permissions require its capable chat driver; TUI sandbox settings cannot be verified.");
       // AO caps prompts at 16 KiB of UTF-8; leave room for the TUI result instruction.
       const brief = utf8Prefix(prompt, 16384 - Buffer.byteLength(TUI_RESULT_INSTRUCTION, "utf8") - 2);
-      const launch = (mode) => internalApi("POST", "/api/v1/sessions", {
+      const launch = async (mode) => {
+        // Chat sessions only: a terminal launch has no controller to attach tool servers to. Each
+        // attempt gets its own credential, bound to the session it creates and to nothing else.
+        const tools = mode === "chat" ? await chatTools(agent, workspaceId, approvalMode, autoReview === true) : null;
+        let created;
+        try {
+          created = await launchSession(mode, tools?.servers ?? []);
+        } catch (error) {
+          tools?.release();
+          throw error;
+        }
+        if (tools && !tools.bind(created?.session?.id)) tools.release();
+        return created;
+      };
+      const launchSession = (mode, mcpServers) => internalApi("POST", "/api/v1/sessions", {
         projectId, kind: "worker", harness: agentId(agent), mode,
         ...(approvalMode ? { approvalMode } : {}),
-        prompt: mode === "chat" ? brief : `${brief}\n\n${TUI_RESULT_INSTRUCTION}`,
+        ...(brief ? { prompt: mode === "chat" ? brief : `${brief}\n\n${TUI_RESULT_INSTRUCTION}` } : {}),
         ...(model && model !== "default" ? { model: String(model).slice(0, 256) } : {}),
         ...(effort && !gateway ? { effort: String(effort).slice(0, 32) } : {}),
         ...(contextWindow != null ? { contextWindow } : {}),
@@ -265,6 +518,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         ...(plain ? { plainPrompt: true } : {}),
         // A CPA model runs through the local gateway; AO adds the key from its own environment.
         ...(gateway?.provider === "cpa" && typeof gateway.model === "string" ? { gateway: { provider: "cpa", model: gateway.model.slice(0, 256) } } : {}),
+        ...(mcpServers.length ? { mcpServers } : {}),
         displayName: String(name || "AO worker").slice(0, 100),
       });
       let data;
@@ -274,16 +528,28 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // Chat mode needs AO's packaged ACP runtime (Claude's chat driver). Without it the agent
         // still runs in its own terminal and hands back a result file.
         if (!chat || codexWorkspace || !/CHAT_DRIVER_UNAVAILABLE/.test(String(error?.message))) throw error;
-        data = await launch("tui");
+        if (warm) throw error;
+        if (TRANSIENT_CHAT_START.test(String(error?.message))) {
+          // A chat host that was merely slow to start (a busy machine) is retried as chat: a terminal
+          // session cannot show progress, take approvals or be steered. A second failure is reported.
+          await new Promise((resolve) => setTimeout(resolve, CHAT_RETRY_PAUSE_MS));
+          data = await launch("chat");
+        } else data = await launch("tui");
       }
       return sessionId(data?.session?.id);
     },
-    async observe(id) {
+    async observe(id, expectedTurn) {
       const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`);
-      if (record?.session?.mode === "tui") return observeTui(id, record.session.status);
-      const [session, conversation] = [record, await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=100`)];
+      if (record?.session?.mode === "tui") return observeTui(id, record.session.status, record.session.activity);
+      const [session, conversation] = [record, await conversationTail(id)];
       const turns = Array.isArray(conversation?.turns) ? conversation.turns : [];
-      const turn = turns[turns.length - 1];
+      // A follow-up sent into a live session is pinned to its own turn: until AO shows it, the
+      // previous, completed turn must not be read as this card's answer.
+      const turn = typeof expectedTurn === "string" && expectedTurn ? turns.find(entry => entry.id === expectedTurn) : turns[turns.length - 1];
+      if (typeof expectedTurn === "string" && expectedTurn && !turn) {
+        return { status: session?.session?.status, turnId: expectedTurn, turnState: "queued", needsInput: false, exited: false,
+          answer: "", liveOutput: "", timeline: [], approvals: [] };
+      }
       const answer = (Array.isArray(conversation?.messages) ? conversation.messages : [])
         .filter(message => message.role === "assistant" && message.turnId === turn?.id && !message.streaming)
         .map(message => message.text).join("\n\n").trim();
@@ -312,7 +578,136 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         status, turnId: turn?.id, turnState: turn?.state, error: turn?.errorMessage,
         needsInput: status === "needs_input", exited: ["exited", "terminated"].includes(status),
         answer: answer.slice(0, 12000), liveOutput: utf8Prefix(liveOutput, 4096), timeline,
+        // A question the agent asked waits like an approval: the chat shows it and the card needs you.
+        approvals: [...pendingApprovals(conversation), ...pendingInputs(conversation)],
       };
+    },
+    /**
+     * Whether a chat session can take another turn: it exists, runs as a chat, and its host is up.
+     * A follow-up then continues it instead of starting a new session and worktree.
+     */
+    async continuable(id) {
+      const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`).catch(() => null);
+      const status = record?.session?.status;
+      if (!record?.session || record.session.mode === "tui" || record.session.isTerminated || ["terminated", "killed", "errored"].includes(status)) return false;
+      if (status === "exited") {
+        // An agent released while idle (exitAgent) keeps its session, worktree and conversation:
+        // bring it back (a few seconds) rather than start over and replay the whole chat.
+        const resumed = await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/resume-agent`, {}).catch(() => null);
+        if (resumed?.ok !== true) return false;
+      }
+      return !(await chatHostGone(id));
+    },
+    /**
+     * Stops a session's agent (its chat host and model process) but keeps the session, worktree and
+     * provider conversation; continuable() resumes it on the next message.
+     */
+    async exitAgent(id) {
+      await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/exit-agent`, {});
+      return { ok: true };
+    },
+    /**
+     * Chat sessions whose agent is up but idle, with their last turn finished at least `idleMs`
+     * ago. Sessions that never ran a turn (pre-warmed ones) and terminal sessions are left out.
+     */
+    async idleChatSessions(idleMs, now = Date.now()) {
+      const list = await internalApi("GET", "/api/v1/sessions");
+      const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
+      const candidates = sessions.filter(session => session?.mode === "chat" && session.status === "idle" && !session.isTerminated);
+      const idle = await Promise.all(candidates.map(async session => {
+        const conversation = await internalApi("GET", `/api/v1/sessions/${sessionId(session.id)}/conversation?limit=1`).catch(() => null);
+        const turns = Array.isArray(conversation?.turns) ? conversation.turns : [];
+        const last = turns[turns.length - 1];
+        if (!last || !TERMINAL_TURN_STATES.has(last.state)) return null;
+        // The newest sign of use; the session's activity time restarts with its host and says nothing.
+        const used = Math.max(...[last.completedAt, last.startedAt, last.requestedAt, session.lastUserMessageAt]
+          .map(stamp => Date.parse(stamp ?? "")).filter(Number.isFinite));
+        return Number.isFinite(used) && now - used >= idleMs ? String(session.id) : null;
+      }));
+      return idle.filter(Boolean);
+    },
+    /** Sends a follow-up as a new turn of the same session; AO de-duplicates by client message id. */
+    async send(id, text, clientMessageId) {
+      const data = await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/messages`,
+        { text: utf8Prefix(String(text), 64 * 1024), ...(clientMessageId ? { clientMessageId: String(clientMessageId).slice(0, 200) } : {}) });
+      if (typeof data?.turnId !== "string" || !data.turnId) throw new Error("AO did not start a turn for the follow-up");
+      return { turnId: data.turnId, state: data.state };
+    },
+    /**
+     * Hands guidance to the running turn at once (ACP steering). If the turn already ended, AO
+     * returns the text instead of starting a detached turn, and this reports `steered: false`.
+     */
+    async steer(id, text, clientMessageId) {
+      try {
+        const data = await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/steer`,
+          { text: utf8Prefix(String(text), 64 * 1024), ...(clientMessageId ? { clientMessageId: String(clientMessageId).slice(0, 200) } : {}) });
+        return { steered: true, turnId: data?.providerTurnId ?? null };
+      } catch (error) {
+        // AO answers CHAT_NO_ACTIVE_TURN when the turn ended before the guidance arrived.
+        if (/CHAT_NO_ACTIVE_TURN|no turn in flight|no active turn/i.test(String(error?.message))) return { steered: false };
+        throw error;
+      }
+    },
+    /** Ends a session and its agent (a pre-warmed one nobody used). */
+    async kill(id) {
+      await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/kill`, {});
+      agentTools?.forgetSession?.(id);
+      return { ok: true };
+    },
+    /**
+     * Where a chat session's app tools may act: its own worktree once AO has made it, `ready:
+     * false` before that, `ended` once the session is gone. Never starts AO; the path stays in
+     * the main process.
+     */
+    async sessionWorkspace(id) {
+      const record = await requestApi("GET", `/api/v1/sessions/${sessionId(id)}`);
+      if (record.status === 404) return { ended: true };
+      if (!record.ok) throw new Error(aoErrorMessage(record));
+      const session = record.data?.session;
+      if (session?.id !== id) throw new Error("AO returned another session");
+      if (session.isTerminated === true || ["terminated", "killed"].includes(session.status) || session.provisionState === "failed") return { ended: true };
+      const location = await requestApi("GET", `/api/v1/desktop/sessions/${sessionId(id)}/workspace`);
+      if (location.status === 404) return { ready: false };
+      if (!location.ok) throw new Error(aoErrorMessage(location));
+      const root = location.data?.workspacePath;
+      return typeof root === "string" && path.isAbsolute(root) ? { root } : { ready: false };
+    },
+    /**
+     * Live sessions with this display name that never ran a turn: pre-warmed ones nobody used,
+     * e.g. left from an earlier run. One that took a chat keeps the name but has turns.
+     */
+    async warmSessions(name) {
+      const list = await internalApi("GET", "/api/v1/sessions");
+      const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
+      const candidates = sessions.filter(session => session?.displayName === name && !session.isTerminated && session.status !== "working");
+      const unused = await Promise.all(candidates.map(async session => {
+        const conversation = await internalApi("GET", `/api/v1/sessions/${sessionId(session.id)}/conversation?limit=1`).catch(() => null);
+        return conversation && Array.isArray(conversation.turns) && conversation.turns.length === 0 ? String(session.id) : null;
+      }));
+      return unused.filter(Boolean);
+    },
+    /**
+     * Answers a question the agent asked (a parked "user_input"): `accept` with the form's
+     * `content`, or `decline` / `cancel` without. AO checks the content against the form.
+     */
+    async resolveInput(id, requestId, action, content = undefined) {
+      if (typeof requestId !== "string" || !requestId) throw new Error("A question to answer is required");
+      if (!["accept", "decline", "cancel"].includes(action)) throw new Error("Answer, decline or cancel the question");
+      const body = action === "accept" && content && typeof content === "object" && !Array.isArray(content) ? { action, content } : { action };
+      if (JSON.stringify(body).length > 65536) throw new Error("The answer is too long");
+      await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/inputs/${encodeURIComponent(requestId)}/resolve`, body);
+      return { ok: true };
+    },
+    /** Answers one parked tool request with one of the decisions AO offered for it. */
+    async resolveApproval(id, requestId, decisionId) {
+      if (typeof requestId !== "string" || !requestId || typeof decisionId !== "string" || !decisionId) throw new Error("Choose an offered decision");
+      await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/approvals/${encodeURIComponent(requestId)}/resolve`, { decisionId });
+      return { ok: true };
+    },
+    /** A finished turn's reasoning, tool calls and messages (the chat's "Worked" row, opened). */
+    async timeline(id, turnId) {
+      if (typeof turnId !== "string" || !turnId) return [];
+      return pastTurnTimeline(id, turnId);
     },
     async interrupt(id) {
       await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/interrupt`, {}).catch(() => undefined);
@@ -335,9 +730,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     },
   });
 
-  async function observeTui(id, status) {
+  async function observeTui(id, status, activity = null, now = Date.now()) {
     const waiting = ["idle", "needs_input"].includes(status);
-    const ended = ["exited", "terminated"].includes(status);
+    // AO lost the terminal's signal (e.g. its pty host restarted with the app) and the agent has
+    // sat idle since: it will not write a report, and its card would read "working" forever.
+    const lostSince = Date.parse(activity?.lastActivityAt ?? "");
+    const silent = status === "no_signal" && activity?.state === "idle" && Number.isFinite(lostSince) && now - lostSince >= TUI_SILENT_MS;
+    const ended = ["exited", "terminated"].includes(status) || silent;
     if (!waiting && !ended) return { status, needsInput: false, exited: false, answer: "" };
     let answer = "";
     try {
@@ -345,6 +744,10 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       if (!file?.deleted && !file?.binary) answer = String(file?.content || "").trim().slice(0, 12000);
     } catch { /* The agent has not written its report yet. */ }
     if (answer) return { status, turnId: `tui-${id}`, turnState: "completed", answer, needsInput: false, exited: ended };
+    if (silent) {
+      return { status, turnId: `tui-${id}`, turnState: "failed", answer: "", exited: true,
+        error: `The terminal agent stopped reporting and has been idle since ${new Date(lostSince).toISOString()} without ${TUI_RESULT_FILE}; send a follow-up to continue in a new session` };
+    }
     if (ended) return { status, turnId: `tui-${id}`, turnState: "failed", error: `AO session ended without ${TUI_RESULT_FILE}`, answer: "", exited: true };
     // Idle without a report: the agent is waiting for the user in its terminal.
     return { status, needsInput: true, exited: false, answer: "" };
@@ -631,6 +1034,97 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       if (!workspaceBoard) throw new Error("Coding Tools mission service is unavailable");
       return { ok: true, ...await workspaceBoard.bind(args.workspaceId) };
     }
+    // "Reuse installed Node packages" (`enabled`, default on) and "Share the Python environment"
+    // (`python`, default off).
+    if (operation === "upstream_dependency_links") return { ok: true, ...dependencyLinks.settings() };
+    if (operation === "upstream_set_dependency_links") {
+      const given = ["enabled", "python"].filter(name => args[name] !== undefined);
+      if (!given.length || given.some(name => typeof args[name] !== "boolean")) throw new Error("enabled or python must be true or false");
+      return { ok: true, ...dependencyLinks.set({ enabled: args.enabled, python: args.python }) };
+    }
+    // The folders new worktrees of this workspace's AO project share with it or get as hard-link
+    // farms, for the approval card. Read-only: it neither registers a project nor starts AO.
+    if (operation === "dependency_link_info") {
+      if (!workspaceBoard) throw new Error("Coding Tools mission service is unavailable");
+      // With AO stopped no session runs, so nothing is in effect.
+      if (state !== "ready") return { ok: true, shared: [], farmed: [] };
+      const { projectId } = await workspaceBoard.project(args.workspaceId);
+      if (!projectId) return { ok: true, shared: [], farmed: [] };
+      return { ok: true, ...await dependencyLinks.inEffect(projectId) };
+    }
+    // The chat composer's context meter: how full each agent session's context is, what it has
+    // spent, its account's rate limits and tool servers, as AO keeps them on the conversation
+    // snapshot (absent until the agent reports). Read-only; a stopped AO answers with nothing.
+    if (operation === "chat_context") {
+      const ids = Array.isArray(args.sessionIds) ? [...new Set(args.sessionIds.filter((id) => typeof id === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(id)))].slice(0, 8) : [];
+      if (state !== "ready" || !ids.length) return { ok: true, sessions: {} };
+      const number = (value) => (Number.isFinite(value) ? value : null);
+      const sessions = {};
+      await Promise.all(ids.map(async (id) => {
+        const conversation = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=1`).catch(() => null);
+        if (!conversation || typeof conversation !== "object") return;
+        const usage = conversation.usage && typeof conversation.usage === "object" ? conversation.usage : null;
+        const limits = conversation.rateLimits && typeof conversation.rateLimits === "object" ? conversation.rateLimits : null;
+        sessions[id] = {
+          controller: typeof conversation.controller === "string" ? conversation.controller : null,
+          usage: usage ? {
+            contextUsed: number(usage.contextUsed), contextWindow: number(usage.contextWindow),
+            inputTokens: number(usage.inputTokens), outputTokens: number(usage.outputTokens),
+            cachedTokens: number(usage.cachedTokens), totalTokens: number(usage.totalTokens),
+            cost: number(usage.cost), currency: typeof usage.currency === "string" ? usage.currency.slice(0, 8) : null,
+          } : null,
+          rateLimits: limits ? {
+            primaryUsedPercent: number(limits.primaryUsedPercent), secondaryUsedPercent: number(limits.secondaryUsedPercent),
+            primaryResetsInSeconds: number(limits.primaryResetsInSeconds), secondaryResetsInSeconds: number(limits.secondaryResetsInSeconds),
+            planLabel: typeof limits.planLabel === "string" ? limits.planLabel.slice(0, 80) : null,
+          } : null,
+          compactedAt: typeof conversation.compactedAt === "string" ? conversation.compactedAt : null,
+          planLabel: typeof conversation.account?.planLabel === "string" ? conversation.account.planLabel.slice(0, 80) : null,
+          mcpServers: (Array.isArray(conversation.mcpServers) ? conversation.mcpServers : []).slice(0, 40)
+            .filter((server) => typeof server?.name === "string")
+            .map((server) => ({ name: server.name.slice(0, 80), status: String(server.status ?? "").slice(0, 40) })),
+        };
+      }));
+      return { ok: true, sessions };
+    }
+    // The context meter's plan usage limits for chats on CPA's Codex accounts: each account's
+    // 5-hour and weekly use, from CPA Helper (cpa-quota.cjs). Read-only; works with AO stopped.
+    if (operation === "cpa_quota") {
+      if (!cpaQuota) return { ok: true, available: false, reason: "CPA is not set up in this app" };
+      return cpaQuota.read();
+    }
+    // A chat's Terminal and Preview panes: the user's view of each card's agent session, through
+    // the agent tools server that started its commands and owns its preview (chat-agent-tools.cjs).
+    if (operation.startsWith("chat_process") || operation.startsWith("chat_preview_")
+      || ["chat_terminal_start", "chat_changes", "chat_files", "chat_file"].includes(operation)) {
+      if (!agentTools?.processes) throw new Error("The chat agent tools are unavailable");
+      const ids = Array.isArray(args.sessionIds) ? args.sessionIds.filter((id) => typeof id === "string").slice(0, 32) : [];
+      const pathArgument = (value) => (typeof value === "string" && value.length <= 1024 && !value.includes("\0") ? value : ".");
+      switch (operation) {
+        case "chat_terminal_start": return agentTools.terminalStart({ sessionId: args.sessionId, workspaceId: args.workspaceId });
+        case "chat_changes": return agentTools.changes({ sessionId: args.sessionId, workspaceId: args.workspaceId });
+        case "chat_files": return agentTools.files({ sessionId: args.sessionId, workspaceId: args.workspaceId, path: pathArgument(args.path) });
+        case "chat_file": {
+          if (typeof args.path !== "string" || !args.path || args.path.length > 1024) throw new Error("Choose a file");
+          return agentTools.file({ sessionId: args.sessionId, workspaceId: args.workspaceId, path: args.path });
+        }
+        case "chat_processes": return { ok: true, sessions: await agentTools.processes(ids, typeof args.workspaceId === "string" ? args.workspaceId : null) };
+        case "chat_process_output": return { ok: true, ...await agentTools.processOutput(args) };
+        case "chat_process_stop": return agentTools.processStop(args);
+        case "chat_process_input": return agentTools.processInput(args);
+        case "chat_preview_state": return { ok: true, previews: agentTools.previewState(ids) };
+        case "chat_preview_show": {
+          const bounds = args.bounds;
+          if (!bounds || !["x", "y", "width", "height"].every((key) => Number.isFinite(bounds[key]))) throw new Error("bounds must be finite numbers");
+          return { ok: agentTools.previewShow(args.sessionId, bounds, Number(args.zoom) || 1) };
+        }
+        case "chat_preview_hide": agentTools.previewHide(); return { ok: true };
+        case "chat_preview_navigate": return agentTools.previewNavigate(args.sessionId, {
+          ...(typeof args.url === "string" ? { url: args.url } : {}), ...(typeof args.action === "string" ? { action: args.action } : {}),
+        });
+        default: throw new Error("Unsupported chat pane operation");
+      }
+    }
     if (operation === "upstream_show") return show(args.bounds, args.projectBoard === true, args.workspaceId, args.terminal || null);
     if (operation === "upstream_hide") return hide();
     if (operation === "upstream_bounds") return setBounds(args.bounds);
@@ -651,4 +1145,4 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   return { call, start, stop, show, hide, snapshot, harness };
 }
 
-module.exports = { createAgentOrchestratorUpstream, createAgentInventory, API_OPERATIONS };
+module.exports = { agentCatalog, createAgentOrchestratorUpstream, createAgentInventory, API_OPERATIONS };

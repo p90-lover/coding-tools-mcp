@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ChatGptDesktopAccount, ChatGptDesktopStatus, LauncherApi } from "../types";
+import { ChatGptLocalPanel, LOCAL_PANEL_KEY, readFlag, writeFlag } from "./ChatGptLocalPanel";
 import "./chatgpt-desktop.css";
 
 const CONFIRM_WINDOW_MS = 4_000;
@@ -28,6 +29,8 @@ export function ChatGptDesktopSurface({ api, active, setError }: {
   const [selected, setSelected] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
   const [slot, setSlot] = useState<HTMLDivElement | null>(null);
+  // The panel previewing the user's own ChatGPT app; remembered per computer.
+  const [localOpen, setLocalOpen] = useState(() => readFlag(LOCAL_PANEL_KEY, true));
   const confirmTimer = useRef<number | undefined>(undefined);
 
   useEffect(() => {
@@ -134,6 +137,18 @@ export function ChatGptDesktopSurface({ api, active, setError }: {
           </button>
         </> : null}
         <span className="cgd-spacer" />
+        <button
+          type="button"
+          className="button-secondary"
+          aria-pressed={localOpen}
+          onClick={() => {
+            setLocalOpen(!localOpen);
+            writeFlag(LOCAL_PANEL_KEY, !localOpen);
+          }}
+          title="Show or hide the preview of the ChatGPT app you run yourself"
+        >
+          {localOpen ? "Hide your ChatGPT" : "Your ChatGPT"}
+        </button>
         {status?.activeSlotId ? (
           <button
             type="button"
@@ -178,6 +193,7 @@ export function ChatGptDesktopSurface({ api, active, setError }: {
                   </>}
           </div>
         )}
+        {localOpen ? <ChatGptLocalPanel api={api} active={active} installed={status ? status.installed : null} /> : null}
       </div>
     </section>
   );

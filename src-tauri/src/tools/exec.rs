@@ -297,6 +297,7 @@ async fn run_command(
         .env("PYTHONUTF8", "1")
         .env("PYTHONIOENCODING", "utf-8")
         .env("PYTHONLEGACYWINDOWSSTDIO", "0");
+    remove_secret_env(command.as_std_mut());
 
     let mut process_tree =
         super::process_tree::ProcessTree::prepare(&mut command).map_err(|e| {
@@ -424,6 +425,41 @@ async fn run_command(
             return Ok(merge_exec_result(snapshot, start, cmd, cwd, true));
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Whether an environment variable carries one of the app's own secrets: the headless control
+/// token file and descriptor (a bearer for `/api/v1/tools/call`, unrooted, and `codex_*`), the
+/// local UI channel, and the proxy and service keys. Every `CODING_TOOLS_*` name with one of these
+/// markers counts, so a secret added later is covered too.
+pub(crate) fn is_secret_env_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    let Some(rest) = upper.strip_prefix("CODING_TOOLS_") else {
+        return false;
+    };
+    [
+        "TOKEN",
+        "KEY",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "CREDENTIAL",
+        "AUTH",
+        "DESCRIPTOR",
+        "PROXY",
+        "LOCAL_UI",
+    ]
+    .iter()
+    .any(|marker| rest.contains(marker))
+}
+
+/// A process started for a tool call (a command, git) never inherits the app's secrets from this
+/// process: whoever drives the tool must not be able to read them with `set` or `env`.
+pub(crate) fn remove_secret_env(command: &mut std::process::Command) {
+    for (name, _) in std::env::vars_os() {
+        if is_secret_env_name(&name.to_string_lossy()) {
+            command.env_remove(&name);
+        }
     }
 }
 
@@ -807,6 +843,73 @@ mod tests {
     }
 
     #[test]
+    fn the_apps_secrets_are_recognised_by_name() {
+        for name in [
+            "CODING_TOOLS_CONTROL_TOKEN_FILE",
+            "CODING_TOOLS_CONTROL_DESCRIPTOR_FILE",
+            "CODING_TOOLS_LOCAL_UI_STDIN",
+            "CODING_TOOLS_CPA_KEY",
+            "CODING_TOOLS_CPA_MANAGEMENT_KEY",
+            "CODING_TOOLS_CPA_PROXY_API_KEY",
+            "CODING_TOOLS_CPA_OUTBOUND_PROXY_URL",
+            "CODING_TOOLS_AO_WEB_KEY",
+            "CODING_TOOLS_CODEX_ROUTER_CALLER_KEY",
+            "coding_tools_control_token_file",
+        ] {
+            assert!(is_secret_env_name(name), "{name}");
+        }
+        for name in [
+            "PATH",
+            "CODING_TOOLS_APP_DATA_DIR",
+            "CODING_TOOLS_HOME",
+            "GITHUB_TOKEN",
+        ] {
+            assert!(!is_secret_env_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_child_command_is_built_without_the_apps_secrets() {
+        // A name of its own, so no other test sees it; it carries the same marker.
+        std::env::set_var("CODING_TOOLS_TEST_STRIP_TOKEN_FILE", "fake-token-path.txt");
+        let mut command = std::process::Command::new("child");
+        remove_secret_env(&mut command);
+        assert!(command.get_envs().any(|(name, value)| {
+            name == "CODING_TOOLS_TEST_STRIP_TOKEN_FILE" && value.is_none()
+        }));
+        std::env::remove_var("CODING_TOOLS_TEST_STRIP_TOKEN_FILE");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn exec_command_children_do_not_inherit_the_control_token_file() {
+        std::env::set_var(
+            "CODING_TOOLS_TEST_EXEC_TOKEN_FILE",
+            r"C:\fake\headless-control\token.txt",
+        );
+        std::env::set_var("CODING_TOOLS_TEST_EXEC_VISIBLE", "visible-marker");
+        let workspace = tempdir().expect("workspace");
+        let harness = tempdir().expect("harness");
+        let ctx =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("context");
+        let output = call_tool(
+            &ctx,
+            "exec_command",
+            // Under a loaded full test run a cold cmd.exe can take several seconds to start.
+            &json!({ "cmd": "cmd /d /c set CODING_TOOLS_TEST_EXEC", "timeout_ms": 30_000, "yield_time_ms": 30_000 }),
+        );
+        std::env::remove_var("CODING_TOOLS_TEST_EXEC_TOKEN_FILE");
+        std::env::remove_var("CODING_TOOLS_TEST_EXEC_VISIBLE");
+        let stdout = output["stdout"].as_str().unwrap_or_default();
+        assert!(
+            stdout.contains("CODING_TOOLS_TEST_EXEC_VISIBLE=visible-marker"),
+            "{output}"
+        );
+        assert!(!stdout.contains("TOKEN_FILE"), "{output}");
+    }
+
+    #[test]
     fn resolves_an_arbitrarily_named_workspace_local_entry() {
         let workspace = tempdir().expect("workspace");
         let entry = workspace.path().join("scripts").join("anything.cmd");
@@ -966,6 +1069,30 @@ mod tests {
                 .unwrap_or_default()
                 .contains("workflow-ok"));
         }
+    }
+
+    #[test]
+    fn a_store_keeping_a_command_is_not_idle() {
+        // A cache of tool contexts may drop only an idle one: a kept command (running, or finished
+        // with its output retained for read_output) would otherwise vanish from later calls.
+        let workspace = tempdir().expect("workspace");
+        let harness = tempdir().expect("harness");
+        let ctx =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("context");
+        assert!(ctx.sessions.is_idle(), "a fresh store holds nothing");
+        // A spawned, allowlisted process on every host (plain `echo` is answered natively, without
+        // one, and `sh` is not on the command allowlist).
+        let output = call_tool(
+            &ctx,
+            "exec_command",
+            &json!({ "cmd": "git --version", "timeout_ms": 30_000 }),
+        );
+        assert_eq!(output["ok"], true, "{output}");
+        assert!(
+            !ctx.sessions.is_idle(),
+            "the finished command's output is kept, so the store is in use"
+        );
     }
 
     #[cfg(windows)]

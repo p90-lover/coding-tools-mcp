@@ -353,7 +353,11 @@ impl OperationStore {
 struct ContextEntry {
     fingerprint: String,
     context: Arc<tools::ToolContext>,
+    used: std::time::Instant,
 }
+
+/// Contexts rooted at AO chat sessions' worktrees kept at once; the least recently used goes first.
+const MAX_SESSION_CONTEXTS: usize = 128;
 
 type AoHubMap = HashMap<(String, String, String), Arc<AoCodexHub>>;
 
@@ -366,6 +370,9 @@ struct ServiceState {
     contexts: Arc<Mutex<HashMap<String, ContextEntry>>>,
     ao_hubs: Arc<Mutex<AoHubMap>>,
     ao_home_root: PathBuf,
+    /// AO's directory of session worktrees, when the app named it: a rooted call's root must lie
+    /// inside it (see `session_root`).
+    ao_worktrees_root: Option<PathBuf>,
     operations: Arc<Mutex<OperationStore>>,
     shutdown_tx: tokio::sync::watch::Sender<Option<String>>,
     drain_timeout: Duration,
@@ -373,6 +380,17 @@ struct ServiceState {
 
 impl ServiceState {
     fn context(&self, workspace_id: &str) -> Result<Arc<tools::ToolContext>, String> {
+        self.context_at(workspace_id, None)
+    }
+
+    /// The workspace's tool context or, with `root`, one rooted at an AO chat session's own git
+    /// worktree of the workspace repository: the same auth, policy and tool profile, but every
+    /// path, command directory, terminal session, approval and plan belongs to that tree alone.
+    fn context_at(
+        &self,
+        workspace_id: &str,
+        root: Option<&str>,
+    ) -> Result<Arc<tools::ToolContext>, String> {
         let profile = self
             .core
             .with_data(|store| {
@@ -382,18 +400,67 @@ impl ServiceState {
                 })
             })
             .map_err(text_error)?;
-        let bytes = serde_json::to_vec(&profile).map_err(text_error)?;
+        let root = root
+            .map(|root| {
+                session_root(
+                    Path::new(&profile.path),
+                    root,
+                    self.ao_worktrees_root.as_deref(),
+                )
+            })
+            .transpose()?;
+        let mut bytes = serde_json::to_vec(&profile).map_err(text_error)?;
+        let key = match &root {
+            Some(root) => {
+                bytes.extend_from_slice(root.to_string_lossy().as_bytes());
+                format!("{workspace_id}\n{}", root.to_string_lossy())
+            }
+            None => workspace_id.to_string(),
+        };
         let fingerprint = format!("{:x}", Sha256::digest(bytes));
         let mut contexts = self
             .contexts
             .lock()
             .map_err(|_| "context cache unavailable")?;
-        if let Some(entry) = contexts.get(workspace_id) {
+        if let Some(entry) = contexts.get_mut(&key) {
             if entry.fingerprint == fingerprint {
+                entry.used = std::time::Instant::now();
                 return Ok(entry.context.clone());
             }
         }
-        let mut context = tools::ToolContext::new(PathBuf::from(&profile.path))?;
+        if root.is_some() {
+            let rooted = |key: &String| key.contains('\n');
+            // Only an idle context is evicted: each owns its command sessions, and dropping one with
+            // a running command or kept output would leave later read_output, write_stdin and
+            // kill_command calls unable to find it while the process runs on. With none idle the
+            // cache stays over its size until commands finish and their output expires.
+            while contexts.keys().filter(|other| rooted(other)).count() >= MAX_SESSION_CONTEXTS {
+                let Some(oldest) = contexts
+                    .iter()
+                    .filter(|(other, entry)| {
+                        rooted(other)
+                            && Arc::strong_count(&entry.context) == 1
+                            && entry.context.sessions.is_idle()
+                    })
+                    .min_by_key(|(_, entry)| entry.used)
+                    .map(|(other, _)| other.clone())
+                else {
+                    break;
+                };
+                contexts.remove(&oldest);
+            }
+        }
+        let mut context = match root {
+            // The worktree alone: no `.mcp-paths` links and no reads outside it.
+            Some(root) => tools::ToolContext::from_workspace(
+                tools::Workspace::isolated(root).map_err(|error| error.message())?,
+                profile.auth.clone(),
+                tools::PolicySettings::from_runtime(&profile.runtime),
+                profile.runtime.tool_profile.clone(),
+                String::new(),
+            ),
+            None => tools::ToolContext::new(PathBuf::from(&profile.path))?,
+        };
         context.bind_workspace_id(workspace_id);
         context.auth = profile.auth.clone();
         context.policy = tools::PolicySettings::from_runtime(&profile.runtime);
@@ -402,10 +469,11 @@ impl ServiceState {
         context.permission_mode = context.policy.canonical_permission_mode().to_string();
         let context = Arc::new(context);
         contexts.insert(
-            workspace_id.to_string(),
+            key,
             ContextEntry {
                 fingerprint,
                 context: context.clone(),
+                used: std::time::Instant::now(),
             },
         );
         Ok(context)
@@ -558,6 +626,10 @@ struct ToolCallRequest {
     tool: String,
     #[serde(default)]
     arguments: Value,
+    /// Roots this call at an AO chat session's own git worktree of the workspace repository
+    /// instead of the workspace path (see `session_root`).
+    #[serde(default)]
+    root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1958,6 +2030,7 @@ mod workspace_auth_tests {
             contexts: Arc::new(Mutex::new(HashMap::new())),
             ao_hubs: Arc::new(Mutex::new(HashMap::new())),
             ao_home_root: PathBuf::from("aiTemp/ao-test-home"),
+            ao_worktrees_root: None,
             operations: Arc::new(Mutex::new(OperationStore::default())),
             shutdown_tx,
             drain_timeout: Duration::from_secs(1),
@@ -2035,6 +2108,7 @@ mod workspace_auth_tests {
                 workspace_id: "ws-1".into(),
                 tool: "codex_runtime_status".into(),
                 arguments: json!({}),
+                root: None,
             }),
         )
         .await;
@@ -2769,6 +2843,344 @@ const AO_CPA_CONFIG: &str = concat!(ao_cpa_provider!(), ao_card_features!());
 /// upgraded once, not refused.
 const AO_CPA_CONFIG_V1: &str = ao_cpa_provider!();
 const AO_CPA_CONFIG_V2: &str = concat!(ao_cpa_provider!(), ao_card_features_v2!());
+
+/// Where a rooted tool call may run: an AO chat session's own *linked* git worktree of the
+/// workspace's repository (its top directory, whose `.git` file names a gitdir that shares the
+/// workspace's git directory), and, when the app named AO's worktrees directory
+/// (`CODING_TOOLS_AO_WORKTREES_DIR`), one inside it. The main checkout itself, a directory inside
+/// it, and anything else are refused, so a caller cannot point the workspace's tool policy at an
+/// arbitrary directory or at the user's own checkout.
+fn session_root(
+    workspace: &Path,
+    requested: &str,
+    worktrees_base: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let requested = Path::new(requested);
+    if requested.as_os_str().is_empty() || !requested.is_absolute() {
+        return Err("The session root must be an absolute path".into());
+    }
+    let root = requested
+        .canonicalize()
+        .map_err(|_| "The session root does not exist".to_string())?;
+    if !root.is_dir() || root.parent().is_none() {
+        return Err("The session root must be a directory below a drive root".into());
+    }
+    let workspace = workspace
+        .canonicalize()
+        .map_err(|_| "The workspace path does not exist".to_string())?;
+    if root == workspace {
+        return Err("The session root cannot be the workspace's own checkout".into());
+    }
+    if let Some(base) = worktrees_base {
+        let base = base
+            .canonicalize()
+            .map_err(|_| "The session root is not in AO's worktrees directory".to_string())?;
+        if !root.starts_with(&base) || root == base {
+            return Err("The session root is not in AO's worktrees directory".into());
+        }
+    }
+    match (
+        linked_worktree_common_dir(&root),
+        git_common_dir(&workspace),
+    ) {
+        (Some(session), Some(repository)) if session == repository => Ok(root),
+        _ => Err("The session root is not a linked worktree of this workspace's repository".into()),
+    }
+}
+
+/// The shared git directory of a linked worktree's top: its `.git` is a file naming a gitdir at
+/// `<common>/worktrees/<name>` whose `commondir` leads back to `<common>`, as `git worktree add`
+/// leaves it. A checkout with its own `.git` directory, or a `.git` file pointing straight at a
+/// repository's git directory, is not a linked worktree.
+fn linked_worktree_common_dir(top: &Path) -> Option<PathBuf> {
+    let marker = top.join(".git");
+    if !fs::symlink_metadata(&marker).ok()?.is_file() {
+        return None;
+    }
+    let text = fs::read_to_string(&marker).ok()?;
+    let gitdir = text
+        .lines()
+        .find_map(|line| line.strip_prefix("gitdir:"))?
+        .trim();
+    let gitdir = top.join(gitdir).canonicalize().ok()?;
+    let common = fs::read_to_string(gitdir.join("commondir")).ok()?;
+    let common = gitdir.join(common.trim()).canonicalize().ok()?;
+    (gitdir.parent()? == common.join("worktrees")).then_some(common)
+}
+
+/// A checkout's shared git directory: the nearest `.git` directory, or for a linked worktree
+/// (a `.git` file naming its `gitdir:`), the `commondir` that git directory points to.
+fn git_common_dir(checkout: &Path) -> Option<PathBuf> {
+    let mut cursor = Some(checkout);
+    while let Some(directory) = cursor {
+        let marker = directory.join(".git");
+        if let Ok(meta) = fs::symlink_metadata(&marker) {
+            if meta.is_dir() {
+                return marker.canonicalize().ok();
+            }
+            let text = fs::read_to_string(&marker).ok()?;
+            let gitdir = text
+                .lines()
+                .find_map(|line| line.strip_prefix("gitdir:"))?
+                .trim();
+            let gitdir = directory.join(gitdir).canonicalize().ok()?;
+            return match fs::read_to_string(gitdir.join("commondir")) {
+                Ok(common) => gitdir.join(common.trim()).canonicalize().ok(),
+                Err(_) => Some(gitdir),
+            };
+        }
+        cursor = directory.parent();
+    }
+    None
+}
+
+#[cfg(test)]
+mod session_root_tests {
+    use super::*;
+
+    /// A repository at `<base>/repo` with a linked worktree at `<base>/worktrees/one`, laid out
+    /// as `git worktree add` leaves it.
+    fn repository(base: &Path) -> (PathBuf, PathBuf) {
+        let repo = base.join("repo");
+        let admin = repo.join(".git").join("worktrees").join("one");
+        fs::create_dir_all(&admin).unwrap();
+        fs::write(admin.join("commondir"), "../..\n").unwrap();
+        let worktree = base.join("worktrees").join("one");
+        fs::create_dir_all(worktree.join("src")).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", admin.to_string_lossy().replace('\\', "/")),
+        )
+        .unwrap();
+        (repo, worktree)
+    }
+
+    fn session_root(workspace: &Path, requested: &str) -> Result<PathBuf, String> {
+        super::session_root(workspace, requested, None)
+    }
+
+    #[test]
+    fn a_session_root_is_the_workspace_repositorys_own_worktree() {
+        let base = tempfile::tempdir().unwrap();
+        let (repo, worktree) = repository(base.path());
+        let root = session_root(&repo, &worktree.to_string_lossy()).unwrap();
+        assert_eq!(root, worktree.canonicalize().unwrap());
+        // Bound to AO's worktrees directory when the app names it.
+        let worktrees = base.path().join("worktrees");
+        assert!(super::session_root(&repo, &worktree.to_string_lossy(), Some(&worktrees)).is_ok());
+        let elsewhere = base.path().join("elsewhere-worktrees");
+        fs::create_dir_all(&elsewhere).unwrap();
+        assert!(
+            super::session_root(&repo, &worktree.to_string_lossy(), Some(&elsewhere)).is_err(),
+            "a worktree outside AO's directory"
+        );
+        assert!(
+            super::session_root(&repo, &worktrees.to_string_lossy(), Some(&worktrees)).is_err(),
+            "the directory itself"
+        );
+    }
+
+    #[test]
+    fn the_main_checkout_and_directories_inside_it_are_not_session_roots() {
+        let base = tempfile::tempdir().unwrap();
+        let (repo, _worktree) = repository(base.path());
+        assert!(
+            session_root(&repo, &repo.to_string_lossy()).is_err(),
+            "the checkout"
+        );
+        fs::create_dir_all(repo.join("sub")).unwrap();
+        assert!(
+            session_root(&repo, &repo.join("sub").to_string_lossy()).is_err(),
+            "inside the checkout"
+        );
+        // A checkout whose .git file points straight at the repository's git directory.
+        let alias = base.path().join("alias");
+        fs::create_dir_all(&alias).unwrap();
+        fs::write(
+            alias.join(".git"),
+            format!(
+                "gitdir: {}\n",
+                repo.join(".git").to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        assert!(session_root(&repo, &alias.to_string_lossy()).is_err());
+        // A linked worktree placed inside the checkout is still a linked worktree.
+        let admin = repo.join(".git").join("worktrees").join("inner");
+        fs::create_dir_all(&admin).unwrap();
+        fs::write(admin.join("commondir"), "../..\n").unwrap();
+        let inner = repo.join("inner-worktree");
+        fs::create_dir_all(&inner).unwrap();
+        fs::write(
+            inner.join(".git"),
+            format!("gitdir: {}\n", admin.to_string_lossy().replace('\\', "/")),
+        )
+        .unwrap();
+        assert!(session_root(&repo, &inner.to_string_lossy()).is_ok());
+    }
+
+    #[test]
+    fn other_directories_are_not_session_roots() {
+        let base = tempfile::tempdir().unwrap();
+        let (repo, worktree) = repository(base.path());
+        assert!(session_root(&repo, "worktrees/one").is_err(), "relative");
+        assert!(session_root(&repo, "").is_err());
+        assert!(
+            session_root(&repo, &base.path().to_string_lossy()).is_err(),
+            "a parent"
+        );
+        assert!(
+            session_root(&repo, &worktree.join("src").to_string_lossy()).is_err(),
+            "below a worktree's top"
+        );
+        assert!(session_root(&repo, &base.path().join("missing").to_string_lossy()).is_err());
+        // Another repository's worktree.
+        let (other, other_worktree) = repository(&base.path().join("elsewhere"));
+        assert!(session_root(&repo, &other_worktree.to_string_lossy()).is_err());
+        assert!(session_root(&other, &other_worktree.to_string_lossy()).is_ok());
+        // A plain directory claiming a gitdir that does not exist.
+        let fake = base.path().join("fake");
+        fs::create_dir_all(&fake).unwrap();
+        fs::write(fake.join(".git"), "gitdir: /nowhere/at/all\n").unwrap();
+        assert!(session_root(&repo, &fake.to_string_lossy()).is_err());
+    }
+
+    async fn call(
+        state: &ServiceState,
+        id: &str,
+        tool: &str,
+        arguments: Value,
+        root: Option<&Path>,
+    ) -> (StatusCode, Value) {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {}", state.auth.token).parse().unwrap(),
+        );
+        let response = tool_call(
+            State(state.clone()),
+            headers,
+            Json(ToolCallRequest {
+                request_id: id.into(),
+                workspace_id: "ws-1".into(),
+                tool: tool.into(),
+                arguments,
+                root: root.map(|root| root.to_string_lossy().into_owned()),
+            }),
+        )
+        .await;
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_rooted_call_sees_only_the_session_worktree() {
+        let base = tempfile::tempdir().unwrap();
+        let (repo, worktree) = repository(base.path());
+        fs::write(repo.join("main.txt"), "main checkout").unwrap();
+        fs::write(worktree.join("only-here.txt"), "worktree").unwrap();
+        // Mappings carried in the worktree link nothing for its session.
+        let external = base.path().join("external");
+        fs::create_dir_all(&external).unwrap();
+        fs::write(external.join("x.txt"), "external").unwrap();
+        fs::create_dir_all(worktree.join(".mcp-paths")).unwrap();
+        fs::write(
+            worktree.join(".mcp-paths").join("ext.txt"),
+            format!("name=ext\npath={}\nmode=read-write\n", external.display()),
+        )
+        .unwrap();
+        let data = serde_json::from_value(json!({
+            "profiles": [{
+                "id": "ws-1", "name": "Demo", "path": repo.to_string_lossy(),
+                "tunnel": {}, "auth": {"type": "bearer"}, "runtime": {}, "actions": {}
+            }]
+        }))
+        .unwrap();
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(None);
+        let state = ServiceState {
+            lifecycle: Lifecycle::new(4),
+            auth: ControlAuth::generate(),
+            local_ui_token: None,
+            core: Arc::new(CoreState::from_data(data).unwrap()),
+            contexts: Arc::new(Mutex::new(HashMap::new())),
+            ao_hubs: Arc::new(Mutex::new(HashMap::new())),
+            ao_home_root: PathBuf::from("aiTemp/ao-test-home"),
+            ao_worktrees_root: Some(base.path().join("worktrees")),
+            operations: Arc::new(Mutex::new(OperationStore::default())),
+            shutdown_tx,
+            drain_timeout: Duration::from_secs(1),
+        };
+
+        let read = |path: &str| json!({ "path": path });
+        let (status, value) = call(
+            &state,
+            "r1",
+            "read_file",
+            read("only-here.txt"),
+            Some(&worktree),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["operation"]["state"], "completed", "{value}");
+        assert_eq!(value["operation"]["result"]["ok"], true, "{value}");
+        assert!(value.to_string().contains("worktree"));
+        let (_, value) = call(&state, "r2", "read_file", read("main.txt"), Some(&worktree)).await;
+        assert_eq!(
+            value["operation"]["result"]["ok"], false,
+            "the main checkout is not in its root"
+        );
+        let (_, value) = call(
+            &state,
+            "r3",
+            "read_file",
+            read("@ext/x.txt"),
+            Some(&worktree),
+        )
+        .await;
+        assert_eq!(value["operation"]["result"]["ok"], false, "{value}");
+        for (id, escape) in [
+            ("e1", "../../repo/main.txt".to_string()),
+            ("e2", repo.join("main.txt").to_string_lossy().into_owned()),
+            ("e3", external.join("x.txt").to_string_lossy().into_owned()),
+        ] {
+            let (_, value) = call(&state, id, "read_file", read(&escape), Some(&worktree)).await;
+            assert_eq!(
+                value["operation"]["result"]["ok"], false,
+                "{escape}: {value}"
+            );
+        }
+        let (_, value) = call(&state, "r4", "read_file", read("main.txt"), None).await;
+        assert_eq!(
+            value["operation"]["result"]["ok"], true,
+            "unrooted calls keep the workspace"
+        );
+
+        let (status, value) = call(&state, "r5", "read_file", read("x.txt"), Some(&external)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
+        let (status, value) = call(&state, "r7", "read_file", read("main.txt"), Some(&repo)).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "the main checkout is never a session root: {value}"
+        );
+        let (status, _) = call(
+            &state,
+            "r6",
+            "codex_runtime_status",
+            json!({}),
+            Some(&worktree),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "native Codex tools are never rooted"
+        );
+    }
+}
 
 fn prepare_ao_home(root: &Path, requested: &Path) -> Result<PathBuf, String> {
     let parent = root.parent().ok_or("AO app data is unavailable")?;
@@ -4739,8 +5151,13 @@ async fn tool_call(
     let fingerprint = format!(
         "{:x}",
         Sha256::digest(
-            serde_json::to_vec(&json!([body.workspace_id, body.tool, body.arguments]))
-                .unwrap_or_default(),
+            serde_json::to_vec(&json!([
+                body.workspace_id,
+                body.tool,
+                body.arguments,
+                body.root
+            ]))
+            .unwrap_or_default(),
         )
     );
     {
@@ -4768,16 +5185,19 @@ async fn tool_call(
             .into_response();
         }
     }
-    let context = match if matches!(
+    let native = matches!(
         body.tool.as_str(),
         "codex_runtime_status" | "codex_agent_read" | "codex_agent_control" | "codex_command_exec"
-    ) {
+    );
+    let context = match if native && body.root.is_some() {
+        Err("Native Codex tools belong to the workspace and cannot be rooted elsewhere".into())
+    } else if native {
         state
             .core
             .with_runtime(|runtime| runtime.native_bridge_context(&body.workspace_id))
             .map_err(text_error)
     } else {
-        state.context(&body.workspace_id)
+        state.context_at(&body.workspace_id, body.root.as_deref())
     } {
         Ok(context) => context,
         Err(error) => {
@@ -5001,6 +5421,9 @@ impl HeadlessService {
             contexts: Arc::new(Mutex::new(HashMap::new())),
             ao_hubs: Arc::new(Mutex::new(HashMap::new())),
             ao_home_root: config.app_data_dir.join("ao-homes"),
+            ao_worktrees_root: std::env::var_os("CODING_TOOLS_AO_WORKTREES_DIR")
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute()),
             operations: Arc::new(Mutex::new(OperationStore::default())),
             shutdown_tx: shutdown_tx.clone(),
             drain_timeout: config.drain_timeout,

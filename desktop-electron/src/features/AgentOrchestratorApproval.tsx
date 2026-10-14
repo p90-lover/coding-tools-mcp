@@ -1,12 +1,109 @@
 import { useState } from "react";
+import { ChatMarkdown } from "./ChatMarkdown";
 
 export type AoApproval = {
   nodeId: string; approval_id: string; kind?: string; method?: string; path?: string; reason?: string; command?: string; cwd?: string;
   thread_id?: string; turn_id?: string; item_id?: string; request?: Record<string, unknown>;
   permissions?: Record<string, unknown>; seconds_remaining?: number;
   recommendation?: { action: "allow" | "deny" | "ask"; reason: string };
+  /** An AO agent's parked tool request (e.g. Claude Code's Bash): its tool name and AO's summary. */
+  source?: "ao"; tool?: string; summary?: string;
+  /** The decisions the AO agent offered; `plan` is the plan of an ExitPlanMode request. */
+  decisions?: { id: string; kind: string; label: string }[]; plan?: string; since?: string;
+  /** An MCP tool's arguments, as JSON (what read_file reads, what search_text looks for). */
+  toolInput?: string;
+  /** What an install command does to the project's own packages (see dependencyInstallNote). */
+  dependencyNote?: { tone: "warn" | "info"; text: string };
+  /** A question the AO agent asked (kind "question"): its message, form fields or a URL to visit. */
+  message?: string; mode?: "form" | "url"; url?: string; fields?: QuestionField[];
 };
-export type ApprovalReply = boolean | Record<string, unknown>;
+/** One field of an AO agent's question; `customKey` is the free-text "Other" answer's own field. */
+export type QuestionField = {
+  key: string; type: "choice" | "multi" | "text" | "boolean" | "number"; title: string; description: string;
+  options: { value: string; label: string; description: string }[]; customKey?: string; required?: boolean;
+};
+
+/**
+ * A question the AO agent asked (Claude Code's AskUserQuestion), answered in the chat: one choice,
+ * several, or the person's own words for each, then sent back as the agent's form expects.
+ */
+function AoQuestion({ approval, busy, approve }: { approval: AoApproval; busy: boolean; approve: (approval: AoApproval, reply: ApprovalReply) => void }) {
+  const fields = approval.fields ?? [];
+  const [values, setValues] = useState<Record<string, string | string[] | boolean>>({});
+  const [other, setOther] = useState<Record<string, string>>({});
+  const set = (key: string, value: string | string[] | boolean) => setValues((current) => ({ ...current, [key]: value }));
+  const answered = (field: QuestionField) => {
+    const value = values[field.key];
+    return Boolean((field.customKey && other[field.key]?.trim()) || (Array.isArray(value) ? value.length : value !== undefined && value !== ""));
+  };
+  const ready = fields.every((field) => !field.required || answered(field)) && (fields.length === 0 || fields.some(answered));
+  const send = () => {
+    const content: Record<string, unknown> = {};
+    for (const field of fields) {
+      const value = values[field.key];
+      if (field.customKey && other[field.key]?.trim()) content[field.customKey] = other[field.key].trim();
+      if (value === undefined || value === "" || (Array.isArray(value) && !value.length)) continue;
+      content[field.key] = field.type === "number" ? Number(value) : value;
+    }
+    approve(approval, { action: "accept", content });
+  };
+  const when = waited(approval.since);
+  const single = fields.length === 1;
+  return <div className="ao-msg ao-msg-approval ao-msg-question" role="group" aria-label="The agent's question">
+    <span className="ao-msg-meta">Question from the agent{when ? ` · asked ${when}` : ""}</span>
+    {approval.message && !(single && fields[0].description === approval.message) ? <div className="ao-question-message"><ChatMarkdown text={approval.message} /></div> : null}
+    <fieldset disabled={busy}>
+      {approval.mode === "url" ? <>
+        {approval.url ? <a href={approval.url} target="_blank" rel="noreferrer">Open the page the agent asks you to visit</a> : <p>The page address is unavailable.</p>}
+        <div className="ao-msg-actions">
+          <button type="button" className="button-primary" onClick={() => approve(approval, { action: "accept" })}>Done</button>
+          <button type="button" className="button-secondary" onClick={() => approve(approval, { action: "decline" })}>Decline</button>
+        </div>
+      </> : <>
+        {fields.map((field) => <div key={field.key} className="ao-question-field">
+          {field.title ? <strong className="ao-question-header">{field.title}</strong> : null}
+          {field.description ? <p className="ao-question-text">{field.description}</p> : null}
+          {field.type === "choice" || field.type === "multi" ? <div className="ao-question-options" role={field.type === "choice" ? "radiogroup" : "group"}>
+            {field.options.map((option) => {
+              const current = values[field.key];
+              const checked = field.type === "multi" ? Array.isArray(current) && current.includes(option.value) : current === option.value;
+              return <label key={option.value} className={`ao-question-option${checked ? " is-checked" : ""}`}>
+                <input type={field.type === "multi" ? "checkbox" : "radio"} name={`${approval.approval_id}-${field.key}`} checked={checked}
+                  onChange={(event) => {
+                    if (field.type === "multi") {
+                      const list = Array.isArray(current) ? current : [];
+                      set(field.key, event.target.checked ? [...list, option.value] : list.filter((value) => value !== option.value));
+                    } else set(field.key, option.value);
+                  }} />
+                <span><span className="ao-question-label">{option.label}</span>{option.description ? <small>{option.description}</small> : null}</span>
+              </label>;
+            })}
+          </div>
+            : field.type === "boolean" ? <label className="ao-question-option"><input type="checkbox" checked={values[field.key] === true}
+              onChange={(event) => set(field.key, event.target.checked)} /><span>Yes</span></label>
+            : <input className="ao-question-input" type={field.type === "number" ? "number" : "text"} aria-label={field.title || field.key}
+              value={String(values[field.key] ?? "")} onChange={(event) => set(field.key, event.target.value)} />}
+          {field.customKey ? <input className="ao-question-input" type="text" placeholder="Other: type your own answer" aria-label={`${field.title || "Answer"}: other`}
+            value={other[field.key] ?? ""} onChange={(event) => setOther((current) => ({ ...current, [field.key]: event.target.value }))} /> : null}
+        </div>)}
+        <div className="ao-msg-actions">
+          <button type="button" className="button-primary" disabled={!ready} onClick={send}>Send answer</button>
+          <button type="button" className="button-secondary" title="Tell the agent you won't answer; it goes on without one"
+            onClick={() => approve(approval, { action: "decline" })}>Skip</button>
+        </div>
+      </>}
+    </fieldset>
+    <p className="ao-hint">The agent waits for your answer (up to 30 minutes).</p>
+  </div>;
+}
+export type ApprovalReply = boolean | { decisionId: string } | Record<string, unknown>;
+/** How long ago an AO request started waiting (AO ends an unanswered one after 30 minutes). */
+function waited(since?: string) {
+  const at = Date.parse(since ?? "");
+  if (!Number.isFinite(at)) return "";
+  const minutes = Math.max(0, Math.floor((Date.now() - at) / 60_000));
+  return minutes < 1 ? "just now" : `${minutes} min ago`;
+}
 const object = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 
 
@@ -20,7 +117,10 @@ export function AgentOrchestratorApproval({ approval, busy, approve }: {
   const [granted, setGranted] = useState<Record<string, boolean>>({});
   const request = approval.request ?? {};
   const kind = approval.kind;
-  const location = kind === "command" ? (typeof request.cwd === "string" ? request.cwd : approval.cwd) || approval.path || approval.nodeId : approval.path || approval.cwd || approval.nodeId;
+  // Where it applies: a path or working folder. An AO request has neither for most tools, and its
+  // card id is not a place, so nothing is shown then.
+  const fallback = approval.source === "ao" ? "" : approval.nodeId;
+  const location = kind === "command" ? (typeof request.cwd === "string" ? request.cwd : approval.cwd) || approval.path || fallback : approval.path || approval.cwd || fallback;
   const typed = Boolean(approval.method);
   const scoped = Boolean(approval.thread_id && approval.turn_id);
   const decisions: unknown[] = Array.isArray(request.availableDecisions) ? request.availableDecisions : ["accept", "acceptForSession", "decline", "cancel"];
@@ -54,11 +154,28 @@ export function AgentOrchestratorApproval({ approval, busy, approve }: {
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
   };
   const supported = !typed || ["command", "file_change", "permissions", "questions", "mcp_form", "mcp_url"].includes(kind || "");
+  if (approval.source === "ao" && approval.kind === "question") return <AoQuestion approval={approval} busy={busy} approve={approve} />;
+  // Claude Code finished planning: show the plan and every way it offered to go on.
+  if (approval.source === "ao" && approval.plan) {
+    const when = waited(approval.since);
+    return <div className="ao-msg ao-msg-approval ao-msg-plan">
+      <span className="ao-msg-meta">Plan ready · {approval.tool || "ExitPlanMode"}{when ? ` · asked ${when}` : ""}</span>
+      <div className="ao-plan"><ChatMarkdown text={approval.plan} /></div>
+      <p className="ao-hint">The agent waits for your answer (up to 30 minutes). A message you type now is sent after this request, so it can't cancel it.</p>
+      <fieldset disabled={busy}><div className="ao-msg-actions">
+        {(approval.decisions ?? []).map((decision) => <button key={decision.id} type="button"
+          className={decision.kind.startsWith("reject") ? "button-secondary" : "button-primary"}
+          onClick={() => approve(approval, { decisionId: decision.id })}>{decision.label}</button>)}
+      </div></fieldset>
+    </div>;
+  }
   return <div className="ao-msg ao-msg-approval">
-    <span className="ao-msg-meta">{typed ? "Native request" : "Approval needed"} · {kind || "Tool request"}</span>
-    <p>{approval.reason || String(request.message || "Tool request")} · {location}</p>
+    <span className="ao-msg-meta">{typed ? "Native request" : "Approval needed"} · {kind || "Tool request"}{approval.tool ? " · " + approval.tool : ""}</span>
+    <p>{approval.reason || approval.summary || String(request.message || "Tool request")}{location ? ` · ${location}` : ""}</p>
     {typed ? <p className="ao-hint">{approval.method} · Thread {approval.thread_id || "unknown"} · Turn {approval.turn_id || "unknown"}{approval.item_id ? " · Item " + approval.item_id : ""}</p> : null}
-    {approval.command ? <pre>{approval.command}</pre> : null}
+    {approval.command ? <pre>{approval.command}</pre> : approval.toolInput ? <pre aria-label="Tool input">{approval.toolInput}</pre> : null}
+    {approval.dependencyNote ? <p className={`ao-hint ao-dependency-note is-${approval.dependencyNote.tone}`}
+      role={approval.dependencyNote.tone === "warn" ? "alert" : "note"}>{approval.dependencyNote.text}</p> : null}
     {approval.recommendation ? <p className="ao-hint">Command approver suggests {approval.recommendation.action}: {approval.recommendation.reason}</p> : null}
     {typed ? <details><summary>Exact native request</summary><pre>{JSON.stringify(request, null, 2)}</pre></details> : null}
     {typed && !scoped ? <p role="alert">Missing live thread/turn scope. Refresh the request or reconnect this role through its normal consent flow; no response can be sent.</p> : null}

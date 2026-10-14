@@ -181,6 +181,7 @@ pub fn git_log(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
         })));
     }
 
+    ensure_rev_in_history(ws, ref_name)?;
     let max_count_arg = format!("--max-count={}", max_count + 1);
     let skip_arg = format!("--skip={skip}");
     let pretty = "--pretty=format:%H%x1f%h%x1f%an%x1f%ae%x1f%ad%x1f%s%x1e";
@@ -274,6 +275,7 @@ pub fn git_show(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
     for p in &path_filters {
         ws.reject_unsafe_text(p)?;
     }
+    ensure_rev_in_history(ws, rev)?;
 
     let unified = format!("--unified={context}");
     let mut cmd_args = vec!["show", "--no-ext-diff", "--format=fuller", unified.as_str()];
@@ -336,6 +338,9 @@ pub fn git_blame(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> 
 
     let ref_arg = args.get("rev").and_then(Value::as_str);
     let git_ref = ref_arg.map(validate_git_ref).transpose()?;
+    if let Some(rev) = git_ref {
+        ensure_rev_in_history(ws, rev)?;
+    }
     let start_line = args
         .get("start_line")
         .and_then(Value::as_u64)
@@ -393,6 +398,98 @@ pub fn git_blame(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> 
         "truncated": truncated,
         "warnings": if truncated { vec!["line limit reached"] } else { Vec::<&str>::new() }
     })))
+}
+
+/// In a session's own worktree (an isolated workspace) a revision must be part of that worktree's
+/// history: the object store is shared with the main checkout and every other worktree, so
+/// `main:secrets.env`, another session's branch, or a raw object id would otherwise read what the
+/// worktree does not hold. Each commit a revision names (both ends of `A..B` / `A...B`, the commit
+/// of `rev:path`, a `:/message` search) must resolve to a commit that HEAD contains. `:path` and
+/// `:N:path` read this worktree's own index and stay allowed. The main workspace is not limited.
+fn ensure_rev_in_history(ws: &Workspace, rev: &str) -> Result<(), WorkspaceError> {
+    if !ws.is_isolated() {
+        return Ok(());
+    }
+    let ends: Vec<&str> = if rev.starts_with(":/") {
+        // A message search over every ref: resolved, then required to be in HEAD's history.
+        vec![rev]
+    } else if rev.starts_with(':') {
+        return Ok(());
+    } else {
+        let commit_part = rev.split_once(':').map_or(rev, |(commit, _)| commit);
+        match commit_part
+            .split_once("...")
+            .or_else(|| commit_part.split_once(".."))
+        {
+            Some((left, right)) => vec![left, right],
+            None => vec![commit_part],
+        }
+        .into_iter()
+        .map(without_parent_set_suffix)
+        .collect()
+    };
+    let outside = || {
+        WorkspaceError::Tool {
+        code: "REVISION_OUTSIDE_WORKTREE",
+        message: format!(
+            "Revision refused: {rev} is not part of this worktree's history (only commits reachable from its HEAD can be read)"
+        ),
+        category: "security",
+        retryable: false,
+    }
+    };
+    for end in ends {
+        let end = if end.is_empty() { "HEAD" } else { end };
+        let object = run_git(
+            ws.root(),
+            &["rev-parse", "--verify", "--quiet", "--end-of-options", end],
+            Duration::from_secs(10),
+        )?;
+        let object = object.stdout.trim().to_string();
+        if object.is_empty() {
+            return Err(outside());
+        }
+        let peeled = format!("{object}^{{commit}}");
+        let commit = run_git(
+            ws.root(),
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "--end-of-options",
+                &peeled,
+            ],
+            Duration::from_secs(10),
+        )?;
+        let commit = commit.stdout.trim().to_string();
+        if commit.is_empty() {
+            return Err(outside());
+        }
+        let contained = run_git(
+            ws.root(),
+            &["merge-base", "--is-ancestor", &commit, "HEAD"],
+            Duration::from_secs(10),
+        )?;
+        if !contained.success {
+            return Err(outside());
+        }
+    }
+    Ok(())
+}
+
+/// The commit a revision-set shorthand is built on: `X^!`, `X^@` and `X^-` / `X^-<n>` name X and
+/// some of its ancestors, never a commit X does not contain, so they stay in a worktree's history
+/// exactly when X does. Anything else is returned as it is.
+fn without_parent_set_suffix(end: &str) -> &str {
+    if let Some(base) = end.strip_suffix("^!").or_else(|| end.strip_suffix("^@")) {
+        return base;
+    }
+    if let Some(index) = end.rfind("^-") {
+        if end[index + 2..].chars().all(|c| c.is_ascii_digit()) {
+            return &end[..index];
+        }
+    }
+    end
 }
 
 fn validate_git_ref(ref_name: &str) -> Result<&str, WorkspaceError> {
@@ -487,6 +584,8 @@ fn run_git(
     cmd.stdin(Stdio::null())
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0");
+    // Hooks and config-driven helpers run as git's children: none gets the app's secrets.
+    crate::tools::exec::remove_secret_env(&mut cmd);
     let mut child = cmd
         .spawn()
         .map_err(|e| git_error(&format!("git not available: {e}")))?;
@@ -676,5 +775,108 @@ fn git_error(message: &str) -> WorkspaceError {
         message: message.to_string(),
         category: "runtime",
         retryable: false,
+    }
+}
+
+#[cfg(test)]
+mod revision_scope_tests {
+    use super::*;
+
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// A repository on `main` with `a.txt`, and a branch `other` whose commit holds `secret.txt`.
+    fn repository() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("repo");
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+        git(dir.path(), &["add", "a.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "first"]);
+        git(dir.path(), &["checkout", "-q", "-b", "other"]);
+        std::fs::write(dir.path().join("secret.txt"), "secret\n").unwrap();
+        git(dir.path(), &["add", "secret.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "secret commit"]);
+        git(dir.path(), &["checkout", "-q", "main"]);
+        std::fs::write(dir.path().join("a.txt"), "a\nb\n").unwrap();
+        git(dir.path(), &["commit", "-q", "-am", "second"]);
+        dir
+    }
+
+    #[test]
+    fn a_session_worktree_reads_only_revisions_in_its_own_history() {
+        let repo = repository();
+        let blob = git(repo.path(), &["rev-parse", "other:secret.txt"]);
+        let ws = Workspace::isolated(repo.path().to_path_buf()).expect("workspace");
+        for rev in [
+            "other:secret.txt",
+            "other",
+            "main..other",
+            "other...main",
+            "..other",
+            ":/secret",
+            blob.as_str(),
+            "no-such-branch",
+            // Revision-set shorthands are judged by the commit they are built on.
+            "other^!",
+            "other^@",
+            "other^-1",
+        ] {
+            let refused = git_show(&ws, &json!({ "rev": rev })).expect_err(rev);
+            assert_eq!(refused.code(), "REVISION_OUTSIDE_WORKTREE", "{rev}");
+            let refused = git_log(&ws, &json!({ "ref": rev })).expect_err(rev);
+            assert_eq!(refused.code(), "REVISION_OUTSIDE_WORKTREE", "{rev}");
+        }
+        let blame = git_blame(&ws, &json!({ "path": "a.txt", "rev": "other" })).expect_err("blame");
+        assert_eq!(blame.code(), "REVISION_OUTSIDE_WORKTREE");
+
+        for rev in [
+            "HEAD",
+            "HEAD~1",
+            "HEAD:a.txt",
+            "main",
+            "HEAD~1..HEAD",
+            ":/first",
+            ":a.txt",
+        ] {
+            let shown = git_show(&ws, &json!({ "rev": rev, "include_diff": false }))
+                .unwrap_or_else(|error| panic!("{rev}: {error}"));
+            assert_eq!(shown["ok"], true, "{rev}");
+        }
+        let log = git_log(&ws, &json!({ "ref": "HEAD~1..HEAD" })).expect("log");
+        assert_eq!(log["commits"].as_array().map(Vec::len), Some(1));
+        // HEAD^! (HEAD without its parents), HEAD^@ and HEAD^-1 name only HEAD and its ancestors.
+        for rev in ["HEAD^!", "HEAD^@", "HEAD^-1", "HEAD^-"] {
+            let log = git_log(&ws, &json!({ "ref": rev }))
+                .unwrap_or_else(|error| panic!("{rev}: {error}"));
+            assert_eq!(log["ok"], true, "{rev}");
+        }
+        assert!(git_blame(&ws, &json!({ "path": "a.txt", "rev": "HEAD~1" })).is_ok());
+    }
+
+    #[test]
+    fn the_main_workspace_keeps_every_revision() {
+        let repo = repository();
+        let ws = Workspace::new(repo.path().to_path_buf()).expect("workspace");
+        let shown = git_show(&ws, &json!({ "rev": "other:secret.txt" })).expect("show");
+        assert!(shown["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("secret"));
     }
 }

@@ -23,12 +23,12 @@ const {
   webFrameMain,
   powerSaveBlocker,
 } = require("electron");
-const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
-const { createChatGptDesktopHost } = require("./chatgpt-desktop.cjs");
+const { BrowserHost, navigationErrorForLog, writeRestartMarker } = require("./browser-host.cjs");
+const { createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatgpt-desktop.cjs");
 const { createGptBrowserHost, cleanUserAgent } = require("./gpt-browser.cjs");
 const { createEmailHost } = require("./email-host.cjs");
 const { createChatWindows } = require("./chat-windows.cjs");
-const { readBranch, readRemote } = require("./git-remote.cjs");
+const { readBranch, readGitInfo, readRemote } = require("./git-remote.cjs");
 const { boundedQuitStep } = require("./quit-steps.cjs");
 const { installKeysmithIpc } = require("./keysmith-ipc.cjs");
 const { parseMessage, sanitizeHtml } = require("./email-mime.cjs");
@@ -52,8 +52,12 @@ const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createGuiUpdateController, guiShellHash } = require("./gui-update.cjs");
 const {
   providerNetworkReady,
+  proxyGatewayDesktopRoute,
   setProviderBrowserHost,
   setProviderCpaConnection,
+  setProxyGatewayDesktopRunning,
+  setProxyGatewayKeyRotated,
+  setProviderLogger,
 } = require("./provider-bootstrap.cjs");
 
 const { createManagedExternalServicesController, resolveManagedProxyEnvironment } = require("./managed-external-services.cjs");
@@ -170,6 +174,8 @@ let agentOrchestratorUpstream = null;
 /** Stops the AO change push wired up with the current upstream module. */
 let aoChangeWatch = null;
 let missionWorkflowRuntime = null;
+/** The app's tool server for AO chat agents; one per app run, kept across backend restarts. */
+let chatAgentTools = null;
 let antigravityReauth = null;
 let antigravityAuthBrowser = null;
 // The swappable backend tier (see backend-bundle.cjs): restarted in place, never with the core.
@@ -239,7 +245,21 @@ function getChatGptDesktop(logger) {
       logger,
       dataRoot: path.join(CORE_HOME, "chatgpt-desktop"),
       resolveCpaAuthDir: cpaAuthDirectory,
-      onChange: (status) => send("launcher:chatgpt-desktop-changed", status),
+      // Through the built-in gateway, ChatGPT Desktop gets its token-free port, which is open only
+      // while an instance runs; otherwise the credential-free env route as before.
+      getProxyRoute: async () => {
+        try {
+          const route = await proxyGatewayDesktopRoute();
+          if (route) return route;
+        } catch (error) {
+          logger.warn("chatgpt_desktop.gateway_route_failed", { message: error instanceof Error ? error.message : String(error) });
+        }
+        return proxyRouteFromEnvironment();
+      },
+      onChange: (status) => {
+        send("launcher:chatgpt-desktop-changed", status);
+        void setProxyGatewayDesktopRunning((status?.runningSlotIds?.length ?? 0) > 0).catch(() => {});
+      },
     });
     chatgptDesktop.ready = chatgptDesktop.initialize().catch((error) => {
       logger.warn("chatgpt_desktop.initialize_failed", { message: error instanceof Error ? error.message : String(error) });
@@ -252,11 +272,17 @@ function getChatGptDesktop(logger) {
 // GPT Browser account partitions take the same route as the main browser (Global Routing
 // publishes it in HTTPS_PROXY/NO_PROXY); chatgpt.com refuses this machine's direct route.
 async function routeGptBrowserSession(browserSession) {
-  const route = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || "";
+  let route = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || "";
   if (!route) {
     await browserSession.setProxy({ mode: "direct" });
     return;
   }
+  // The built-in gateway's env route carries its local token; Chromium takes the bare proxy and
+  // answers the proxy's 407 through the app's login handler instead.
+  try {
+    const parsed = new URL(route);
+    if (parsed.username || parsed.password) route = `${parsed.protocol}//${parsed.host}`;
+  } catch {}
   await browserSession.setProxy({ mode: "fixed_servers", proxyRules: route, proxyBypassRules: process.env.NO_PROXY || "" });
 }
 
@@ -406,6 +432,33 @@ async function refreshPart(part, logger) {
 
 const AUTHENTICATION_RETRY_DELAYS_MS = [30_000, 60_000, 120_000, 300_000];
 const STARTUP_AUTH_WAIT_MS = 20_000;
+const PROXY_STARTUP_WAIT_MS = 10_000;
+/**
+ * Resolves once the proxy in HTTPS_PROXY/HTTP_PROXY accepts a connection, or after `timeoutMs`
+ * (the caller's navigation then reports the real error). No proxy, or a malformed one: at once.
+ */
+async function waitForProxyRoute(timeoutMs) {
+  let target;
+  try {
+    const route = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || "";
+    if (!route) return;
+    target = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(route) ? route : `http://${route}`);
+  } catch { return; }
+  const port = Number(target.port) || (target.protocol === "https:" ? 443 : 80);
+  const host = target.hostname.replace(/^\[|\]$/g, "");
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const open = await new Promise((resolve) => {
+      const socket = net.connect({ host, port });
+      const done = (ok) => { socket.destroy(); resolve(ok); };
+      socket.setTimeout(1_000, () => done(false));
+      socket.once("connect", () => done(true));
+      socket.once("error", () => done(false));
+    });
+    if (open) return;
+    await delay(500);
+  }
+}
 const delay = (ms) => new Promise((resolve) => { setTimeout(resolve, ms).unref?.(); });
 function scheduleAuthenticationRetry(logger, attempt = 0) {
   if (attempt >= AUTHENTICATION_RETRY_DELAYS_MS.length) return;
@@ -922,6 +975,27 @@ function smokePassedForCurrentVersion(state) {
 }
 
 
+// An agent waiting on a tool approval stops until it is answered (AO gives up after 30 minutes and
+// the agent reports it was blocked). When a run starts waiting and the app is not in front, say so:
+// a notification and a flashing taskbar button. Once per wait, not on every observation.
+const aoApprovalWaits = new Set();
+function noticeAoApproval(update) {
+  const key = `${update?.workspaceId}:${update?.runId}`;
+  if (update?.attention !== "pending_approval") { aoApprovalWaits.delete(key); return; }
+  if (aoApprovalWaits.has(key)) return;
+  aoApprovalWaits.add(key);
+  if (aoApprovalWaits.size > 200) aoApprovalWaits.delete(aoApprovalWaits.values().next().value);
+  const window = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  if (window?.isFocused()) return;
+  window?.flashFrame(true);
+  if (Notification.isSupported()) {
+    const notice = new Notification({ title: "An agent is waiting for your approval",
+      body: "Open Coding Tools to allow or deny its request. Unanswered requests expire after 30 minutes." });
+    notice.on("click", () => { if (window) { if (window.isMinimized()) window.restore(); window.show(); window.focus(); } });
+    notice.show();
+  }
+}
+
 function assertFocusedMainWindow(event, write = false) {
   const window = BrowserWindow.fromWebContents(event.sender);
   const valid = window
@@ -956,6 +1030,7 @@ function launcherSnapshotPayload(stateStore, logger) {
       manual: "Codex Zero Risk",
     },
     mcpCredentialsConfigured: runtimeHost?.mcpCredentialsConfigured?.() ?? false,
+    chatAgentSandbox: safeRead("launcher.chat_sandbox_snapshot", () => chatAgentTools?.sandboxed?.() ?? false, false, logger),
     logs: logger.recent(),
     urls: { github: GITHUB_URL, x: X_URL, connectors: CONNECTORS_URL, tunnels: TUNNELS_URL, keys: KEYS_URL },
     platform: process.platform,
@@ -1413,6 +1488,12 @@ function registerIpc({ logger, stateStore }) {
     assertFocusedMainWindow(event, false);
     return readBranch(folder);
   });
+  // What each project's folder is in git (a repository, a worktree of one, a folder inside one,
+  // not git at all, or gone), for the chat list's project labels. Read-only.
+  handle("launcher:project-git", async (event, folder) => {
+    assertFocusedMainWindow(event, false);
+    return readGitInfo(folder);
+  });
 
   // "Open in new window" for a Mission chat. Only the main window sends content; the chat
   // window itself is a script-free viewer with no preload (see chat-windows.cjs).
@@ -1603,8 +1684,12 @@ function registerIpc({ logger, stateStore }) {
   handle("coding-tools:apps:call", (event, input = {}) => {
     if (!appsHost) throw new Error("Apps host is unavailable");
     const passiveAoLayout = input.moduleId === "agent-orchestrator"
-      && ["upstream_bounds", "upstream_hide"].includes(input.operation);
+      && ["upstream_bounds", "upstream_hide", "chat_preview_show", "chat_preview_hide"].includes(input.operation);
     assertFocusedMainWindow(event, !passiveAoLayout && !appsHost.isReadOnly(input.moduleId, input.operation));
+    // A chat's preview is drawn at the pane's CSS bounds, scaled by the page's own zoom.
+    if (input.moduleId === "agent-orchestrator" && input.operation === "chat_preview_show") {
+      input = { ...input, arguments: { ...(input.arguments || {}), zoom: event.sender.getZoomFactor() } };
+    }
     return appsHost.call(input.moduleId, input.operation, input.arguments || {});
   });
 
@@ -1699,6 +1784,23 @@ function registerIpc({ logger, stateStore }) {
     const host = getChatGptDesktop(logger);
     await host.ready;
     return host.stop();
+  });
+  // The user's own ChatGPT desktop app, shown in the ChatGPT Desktop page's preview panel. Its
+  // window is a capture of another app, so only the trusted, visible main window may read it.
+  handle("launcher:chatgpt-desktop-local-preview", async (event) => {
+    assertFocusedMainWindow(event, false);
+    return getChatGptDesktop(logger).localPreview();
+  });
+  // Types the panel's message into that app and sends it. Only the user's click or Enter in the
+  // focused main window gets here; focus returns to Coding Tools afterwards.
+  handle("launcher:chatgpt-desktop-local-send", async (event, input) => {
+    assertFocusedMainWindow(event, true);
+    if (!input || typeof input !== "object" || Object.keys(input).some((key) => key !== "text")) {
+      throw new Error("A ChatGPT message needs only its text");
+    }
+    const native = mainWindow.getNativeWindowHandle();
+    const returnTo = Number(native.length >= 8 ? native.readBigUInt64LE(0) : native.readUInt32LE(0));
+    return getChatGptDesktop(logger).localSend(input.text, { returnTo });
   });
   // Workspace -> GPT Browser. Every change needs the focused main window; status is read-only.
   handle("launcher:gpt-browser-status", () => getGptBrowser(logger).status());
@@ -2142,9 +2244,16 @@ function registerIpc({ logger, stateStore }) {
     return { state, credentialsRequired: false, targetMode: mode };
   });
   handle("launcher:set-preference", (_event, key, value) => {
-    const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "autoConnectExistingMcp";
+    const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "autoConnectExistingMcp"
+      || key === "chatAgentTools" || key === "chatAgentDesktopTools" || key === "chatAgentTerminalTools" || key === "chatAgentPreviewTools"
+      || key === "confirmAgentToolRequests";
     if (!ordinary) throw new Error("Unknown preference");
-    if (key === "autoConnectExistingMcp") assertFocusedMainWindow(_event, true);
+    // Consent: auto-connecting MCP, letting chat agents see and drive the screen or run commands,
+    // and dropping the dialog that confirms their tool requests, are the user's.
+    if (key === "autoConnectExistingMcp" || ((key === "chatAgentDesktopTools" || key === "chatAgentTerminalTools") && value === true)
+      || (key === "confirmAgentToolRequests" && value === false)) {
+      assertFocusedMainWindow(_event, true);
+    }
     const state = stateStore.update({ [key]: value === true });
     if (key === "autoConnectExistingMcp") {
       automaticMcpAttemptPid = null;
@@ -2251,6 +2360,12 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
       return null;
     }) : null;
     if (detached?.status !== "detached") await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
+    else {
+      // The bridge stays up without this app's browser until the next app starts (an update can take
+      // minutes): a Codex turn that reaches it meanwhile waits for the new app instead of failing.
+      try { writeRestartMarker(BROWSER_DESCRIPTOR_PATH, { reason: relaunch ? "relaunch" : "update" }); }
+      catch (error) { quitLogger?.warn("launcher.restart_marker_failed", { message: error instanceof Error ? error.message : String(error) }); }
+    }
     stopBridgeWatchdog();
     // Each awaited stop has a deadline: one that never settled left the app running after the
     // bridge was already detached, with nothing logged. An overrun is logged and the quit goes on.
@@ -2324,6 +2439,15 @@ async function start() {
   app.commandLine.appendSwitch("remote-debugging-port", String(cdpPort));
 
   await app.whenReady();
+  // Remove agent executables an update set aside (in-use-files.cjs) once nothing runs them.
+  if (process.platform === "win32" && app.isPackaged) {
+    setImmediate(() => {
+      try {
+        const { sweepSetAside, agentRuntimeRoots } = require("./in-use-files.cjs");
+        sweepSetAside(agentRuntimeRoots(process.resourcesPath));
+      } catch { /* best-effort cleanup */ }
+    });
+  }
 
   const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
   if (IS_DEV_PROFILE && !stateStore.read().onboardingComplete) {
@@ -2366,6 +2490,8 @@ async function start() {
     publish: (record) => send("launcher:log", record),
   });
   quitLogger = logger;
+  // Provider Network and the Proxy Gateway log here too (their launch events are kept until now).
+  setProviderLogger(logger);
   if (autostartStartupError) logger.warn("launcher.autostart_unavailable", { message: autostartStartupError });
   const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
   updateController = createGuiUpdateController({
@@ -2396,6 +2522,19 @@ async function start() {
     publish: (value) => send("launcher:external-services-changed", value),
   });
   setProviderCpaConnection(() => externalServicesController?.cpaConnection());
+  // After the gateway's key rotated on evidence of a squat, a running CPA restarts with the new key
+  // (the same path as Network Proxy's "Apply route to CPA"). The Codex bridge and the MCP tunnel
+  // are deliberately never restarted here: they carry in-flight work and take the key on their next
+  // start; the Proxy Gateway tab lists them as needing a restart.
+  setProxyGatewayKeyRotated(async () => {
+    const cpa = externalServicesController?.snapshot().services.find((service) => service.id === "cpa");
+    if (cpa?.status !== "ready") return;
+    try {
+      await externalServicesController.restart("cpa");
+    } catch (error) {
+      logger.warn("proxy_gateway.cpa_restart_failed", { message: error instanceof Error ? error.message : String(error) });
+    }
+  });
   managedBootstrapController = createManagedBootstrap({
     snapshot: () => externalServicesController.snapshot(),
     install: (serviceId) => externalServicesController.installManagedComponent(serviceId),
@@ -2464,7 +2603,30 @@ async function start() {
       type: "warning", title: "Coding Tools: Agent Orchestrator",
       message: String(message).slice(0, 200), detail: String(detail).slice(0, 65_536),
       buttons: ["Cancel", "Continue"], defaultId: 0, cancelId: 0, noLink: true,
+      // Room for a 72-column line of the detail (chat-agent-tools DISPLAY_COLUMNS) without the
+      // alert wrapping it again; macOS only, Windows sizes the box to its content.
+      textWidth: 640,
     });
+    return answer.response === 1;
+  };
+  // An agent's tool request the person answered on its card in the chat: confirmed once more in a
+  // dialog, which offers "Don't ask again". Either way the answer must come from the visible,
+  // focused window, so it is still the person's click.
+  const confirmToolRequest = async ({ message, detail }) => {
+    if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() || !mainWindow.isFocused()) {
+      throw new Error("Use the focused Coding Tools window to answer the agent's request");
+    }
+    if (stateStore.read().confirmAgentToolRequests === false) return true;
+    const answer = await dialog.showMessageBox(mainWindow, {
+      type: "warning", title: "Coding Tools: Agent Orchestrator",
+      message: String(message).slice(0, 200), detail: String(detail).slice(0, 65_536),
+      buttons: ["Cancel", "Continue"], defaultId: 0, cancelId: 0, noLink: true, textWidth: 640,
+      checkboxLabel: "Don't ask again (turn it back on in Settings)", checkboxChecked: false,
+    });
+    if (answer.response === 1 && answer.checkboxChecked === true) {
+      stateStore.update({ confirmAgentToolRequests: false });
+      logger.info("launcher.agent_tool_confirmation_off", {});
+    }
     return answer.response === 1;
   };
   const listHeadlessWorkspaces = async () => {
@@ -2499,6 +2661,92 @@ async function start() {
     const { createChangePulse } = backendBundles.requireModule(backend, "ao-session-events.cjs");
     const { createAgentOrchestratorWorkflow, resolveAoNativeConnection, aoWebCatalogForModel } = backendBundles.requireModule(backend, "agent-orchestrator-workflow.cjs");
     const { HeadlessHost } = backendBundles.requireModule(backend, "headless-host.cjs");
+    const aoDataRoot = process.env.CODING_TOOLS_AO_DATA_DIR
+      ? path.resolve(process.env.CODING_TOOLS_AO_DATA_DIR)
+      : path.join(app.getPath("home"), ".ao", IS_DEV_PROFILE ? "coding-tools-development" : "coding-tools");
+    // AO keeps every session's worktree here; a chat agent's tools are rooted only inside it.
+    const aoWorktreesRoot = path.join(aoDataRoot, "worktrees");
+    // Chat agents get tools over MCP, each session rooted at its own AO worktree: files, search,
+    // patches and git (Settings > "Give chat agents the app's tools", on by default); commands
+    // through the app's terminal only when the user opts in (Settings > "Let chat agents run
+    // commands through the app's terminal"), each confirmed here unless the session bypasses
+    // permissions; and screen capture and computer control only when the user opts in (Settings >
+    // "Let chat agents see and control the screen"). Created once: a live session keeps its
+    // server URL and credential across a backend restart.
+    if (!chatAgentTools) {
+      const { createChatAgentTools } = backendBundles.requireModule(backend, "chat-agent-tools.cjs");
+      const { createChatPreviews } = backendBundles.requireModule(backend, "chat-preview.cjs");
+      // Each chat agent's own browser for previewing its dev server (Settings > "Let chat agents
+      // preview their pages", on by default): loopback pages only, never the app's own services.
+      const portOf = (url) => { try { return Number(new URL(url).port) || null; } catch { return null; } };
+      const appServicePorts = () => [
+        cdpPort, 17891, 17892, 17893, 17894, 17895, chatAgentTools?.servicePort?.(),
+        portOf(headlessHost?.control?.endpoint),
+        (() => { try { return runtimeHost.runtimeConfigSnapshot().config?.port; } catch { return null; } })(),
+        (() => { try { return agentOrchestratorUpstream?.snapshot?.().port; } catch { return null; } })(),
+        (() => { try { return portOf(externalServicesController.cpaConnection()?.baseUrl); } catch { return null; } })(),
+      ].filter((port) => Number.isInteger(port) && port > 0);
+      const previewWindows = new WeakSet();
+      const chatPreviews = createChatPreviews({
+        createView: (partition) => new WebContentsView({
+          webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: false, backgroundThrottling: false },
+        }),
+        attachView: (view) => {
+          if (!mainWindow || mainWindow.isDestroyed()) return;
+          mainWindow.contentView.addChildView(view);
+          // A preview never outlives the window it is drawn in (a re-created window starts without).
+          if (!previewWindows.has(mainWindow)) {
+            previewWindows.add(mainWindow);
+            mainWindow.once("closed", () => chatPreviews.closeAll());
+          }
+        },
+        detachView: (view) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.contentView.removeChildView(view); },
+        contentSize: () => (mainWindow && !mainWindow.isDestroyed() ? mainWindow.getContentSize() : [1280, 800]),
+        blockedPorts: appServicePorts,
+        logger,
+      });
+      // Agents' commands run in Codex's Windows sandbox when it is installed (its unelevated mode:
+      // the worktree and package caches writable, the network on), as Codex runs its own.
+      const { createSandboxRunner } = backendBundles.requireModule(backend, "chat-sandbox.cjs");
+      const chatSandbox = createSandboxRunner({ logger });
+      app.on("will-quit", () => chatSandbox.killAll());
+      chatAgentTools = createChatAgentTools({
+        previews: chatPreviews,
+        sandbox: chatSandbox,
+        // "Approve for me" runs the same routine project commands through the app's terminal as it
+        // allows from the agent's own shell (the workflow's list), without a dialog each.
+        routineCommand: (command) => agentOrchestratorWorkflow.routineCommand(command),
+        // Running agents keep their tools across app restarts (credential hashes and the port only).
+        statePath: path.join(app.getPath("userData"), "chat-agent-tools.json"),
+        previewEnabled: () => stateStore.read().chatAgentPreviewTools !== false,
+        requestHeadless: (endpoint, body, options) => {
+          if (!headlessHost) throw new Error("Local Coding Tools runtime is unavailable");
+          return headlessHost.request(endpoint, body, options);
+        },
+        sessionWorkspace: (id) => {
+          if (!agentOrchestratorUpstream) throw new Error("Agent Orchestrator is unavailable");
+          return agentOrchestratorUpstream.harness.sessionWorkspace(id);
+        },
+        worktreesRoot: aoWorktreesRoot,
+        // Every command, sensitive operation and screen or window observation is the user's call,
+        // in the focused app window.
+        confirm: confirmAoAction,
+        enabled: () => stateStore.read().chatAgentTools !== false,
+        // On by default when its commands run sandboxed (each still reviewed); without the sandbox
+        // only when the user turned it on; off whenever the user turned it off.
+        terminalEnabled: () => {
+          const choice = stateStore.read().chatAgentTerminalTools;
+          return choice === true || (choice !== false && chatSandbox.available());
+        },
+        desktopEnabled: () => stateStore.read().chatAgentDesktopTools === true,
+        version: app.getVersion(),
+        logger,
+      });
+      // Listening before the first launch keeps a pre-warmed session's tools identity stable.
+      void chatAgentTools.listen().catch((error) => logger.warn("chat_agent_tools.listen_failed", {
+        message: error instanceof Error ? error.message : String(error),
+      }));
+    }
     const createCodingToolsAppsHost = loadCreateCodingToolsAppsHost(backend.appHandlerRoot);
     const antigravityCli = createAntigravityCli({
       toolsRoot: path.join(app.getPath("userData"), "tools"),
@@ -2551,9 +2799,7 @@ async function start() {
         : app.isPackaged
           ? path.join(process.resourcesPath, "agent-orchestrator")
           : path.join(__dirname, "..", "build", "agent-orchestrator"),
-      dataRoot: process.env.CODING_TOOLS_AO_DATA_DIR
-        ? path.resolve(process.env.CODING_TOOLS_AO_DATA_DIR)
-        : path.join(app.getPath("home"), ".ao", IS_DEV_PROFILE ? "coding-tools-development" : "coding-tools"),
+      dataRoot: aoDataRoot,
       confirm: confirmAoAction, getWindow: () => mainWindow,
       getWorkspaces: listHeadlessWorkspaces,
       getCpaPricesPath: () => require("./cpa-managed.cjs").helperPricesPath(
@@ -2570,6 +2816,11 @@ async function start() {
       },
       missionCall: (operation, args) => agentOrchestratorWorkflow.call(operation, args),
       openAuth: (url) => antigravityAuthBrowser(url),
+      agentTools: chatAgentTools,
+      // The context meter's plan usage limits for chats on CPA's Codex accounts (CPA Helper).
+      cpaQuota: backendBundles.requireModule(backend, "cpa-quota.cjs").createCpaQuota({
+        getConnection: () => externalServicesController?.cpaConnection(), logger,
+      }),
       WebContentsView, dialog, shell, logger,
     });
     // Push AO changes to the Mission chat instead of making it poll: AO's session feed (a role's
@@ -2580,8 +2831,14 @@ async function start() {
     aoChangeWatch = () => { stopAoWatch(); aoPulse.stop(); };
     missionWorkflowRuntime?.dispose();
     const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
+      // Stop agents that sat idle for a while; their chats resume them on the next message.
+      releaseIdleAgents: true,
+      // A pre-warmed session is reused only by a launch that attaches the same app tools.
+      agentToolsIdentity: (workspaceId) => chatAgentTools?.identity(workspaceId) ?? null,
       // Chat goals (/goal) survive an app restart.
       goalsFile: path.join(app.getPath("userData"), "integrations", "chat-goals.json"),
+      // So do deleted chat messages (their hidden runs and fresh-session flags).
+      chatEditsFile: path.join(app.getPath("userData"), "integrations", "chat-edits.json"),
       requestHeadless: (endpoint, body, options) => {
         if (!headlessHost) throw new Error("Local Coding Tools runtime is unavailable");
         return headlessHost.request(endpoint, body, options);
@@ -2621,7 +2878,12 @@ async function start() {
       resolveHarness: (selection) => resolveAoNativeConnection({ ...selection, userData: app.getPath("userData") }),
       aoHarness: agentOrchestratorUpstream.harness,
       confirm: confirmAoAction,
-      onRunState: (update) => { mcpEventMonitor.runState(update); aoPulse.run(update.workspaceId, update.runId); },
+      confirmToolRequest,
+      onRunState: (update) => {
+        mcpEventMonitor.runState(update);
+        aoPulse.run(update.workspaceId, update.runId);
+        noticeAoApproval(update);
+      },
     });
     try {
       appsHost = createCodingToolsAppsHost({
@@ -2657,6 +2919,7 @@ async function start() {
       logger,
       sourceRoot: SOURCE_ROOT,
       binaryRoot: backend.source === "bundle" ? backend.resourcesRoot : null,
+      aoWorktreesRoot,
     });
     activeBackend = backend;
     missionWorkflowRuntime = agentOrchestratorWorkflow;
@@ -2860,7 +3123,9 @@ async function start() {
     });
   }
   if (!launcherSmokeTest && stateStore.read().browserInteractionMode === "automatic") {
-    startupAuthenticationRefresh = browserHost.refreshAuthentication().catch((error) => {
+    // The local proxy (ProxyBridge) can still be starting when the app opens: loading chatgpt.com
+    // through it then fails at once and the saved sign-in reads as signed out until the 30 s retry.
+    startupAuthenticationRefresh = waitForProxyRoute(PROXY_STARTUP_WAIT_MS).then(() => browserHost.refreshAuthentication()).catch((error) => {
       logger.warn("browser.session_refresh_failed", {
         ...navigationErrorForLog(error),
       });

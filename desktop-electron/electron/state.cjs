@@ -56,6 +56,18 @@ function readState(filePath) {
     ]) {
       if (typeof state[key] !== "boolean") state[key] = DEFAULT_STATE[key];
     }
+    // AO chat agents get the app's own tools unless this is false; absent means on.
+    if (Object.hasOwn(state, "chatAgentTools") && typeof state.chatAgentTools !== "boolean") delete state.chatAgentTools;
+    // Their screen capture and computer control only when this is true; absent means off.
+    if (Object.hasOwn(state, "chatAgentDesktopTools") && state.chatAgentDesktopTools !== true) delete state.chatAgentDesktopTools;
+    // Their commands through the app's terminal: false is off; absent is on when Codex's sandbox runs
+    // them, otherwise off; true is on (unsandboxed, each command asked, when there is no sandbox).
+    if (Object.hasOwn(state, "chatAgentTerminalTools") && typeof state.chatAgentTerminalTools !== "boolean") delete state.chatAgentTerminalTools;
+    // Their own preview browser unless this is false; absent means on.
+    if (Object.hasOwn(state, "chatAgentPreviewTools") && typeof state.chatAgentPreviewTools !== "boolean") delete state.chatAgentPreviewTools;
+    // An agent's tool request answered in the chat is confirmed again in a dialog unless this is
+    // false (the dialog's "Don't ask again"); absent means it asks.
+    if (Object.hasOwn(state, "confirmAgentToolRequests") && state.confirmAgentToolRequests !== false) delete state.confirmAgentToolRequests;
     if (state.browserInteractionMode !== "automatic" && state.browserInteractionMode !== "manual") {
       state.browserInteractionMode = DEFAULT_STATE.browserInteractionMode;
     }

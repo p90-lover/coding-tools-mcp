@@ -229,3 +229,21 @@ test("archived chats sit in their own section and can be restored", () => {
   walk(list.render()).find((element) => element.props?.className === "cx-restore").props.onClick();
   assert.deepEqual(calls, [["lifecycle", "t3", "restore"]]);
 });
+
+test("a project's git label: none for a repository's root, worktree said plainly, anything chats can't use flagged", () => {
+  const { projectGitLabel } = compile("ChatThreadList.tsx", (name) => name === "react" ? { useState() {}, useRef() {}, useEffect() {} }
+    : name === "react/jsx-runtime" ? { jsx() {}, jsxs() {} } : name === "./ao-chat" ? chat : {});
+  const label = (git) => JSON.parse(JSON.stringify(projectGitLabel(git)));
+  assert.deepEqual(label({ kind: "repo", root: "G:\\repo", mainRepo: null, branch: "main" }), { tag: null, line: "Git repository · main", warn: false });
+  assert.deepEqual(label({ kind: "worktree", root: "C:\\wt", mainRepo: "G:\\repo", branch: "feat/x" }),
+    { tag: "worktree", line: "Worktree of G:\\repo · feat/x", warn: false });
+  const inside = label({ kind: "inside", root: "G:\\repo", mainRepo: null, branch: "main" });
+  assert.equal(inside.tag, "subfolder");
+  assert.equal(inside.warn, true);
+  assert.match(inside.line, /inside the repository G:\\repo/);
+  const none = label({ kind: "none", root: null, mainRepo: null, branch: null });
+  assert.deepEqual([none.tag, none.warn], ["not git", true]);
+  assert.match(none.line, /Not a git repository/);
+  assert.deepEqual([label({ kind: "missing", root: null, mainRepo: null, branch: null }).tag], ["missing"]);
+  assert.equal(projectGitLabel(null), null, "not read yet: no label");
+});

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
-import { LauncherBrowserHelperClient } from "../src/adapters/chatgpt-web/launcher-helper-client";
+import { LauncherBrowserHelperClient, abortable } from "../src/adapters/chatgpt-web/launcher-helper-client";
 import type { BrowserTurn, ResolvedBrowserConfig } from "../src/adapters/chatgpt-web/browser-worker";
 import {
   expectedLauncherBrowserPartition,
@@ -403,4 +403,19 @@ test("structured helper errors preserve the ChatGPT adapter failure contract", a
     code: "rate_limit_exceeded",
     retryable: true,
   });
+});
+
+
+test("a turn cancelled while the app restarts leaves the shared wait at once; the wait goes on for the others", async () => {
+  let finish!: (value: string) => void;
+  const shared = new Promise<string>(resolveShared => { finish = resolveShared; });
+  const cancelled = new AbortController();
+  const leaving = abortable(shared, cancelled.signal);
+  const staying = abortable(shared, new AbortController().signal);
+  cancelled.abort();
+  await expect(leaving).rejects.toThrow("aborted");
+  finish("descriptor");
+  expect(await staying).toBe("descriptor");
+  expect(await abortable(Promise.resolve(1))).toBe(1);
+  await expect(abortable(Promise.resolve(1), AbortSignal.abort())).rejects.toThrow("aborted");
 });

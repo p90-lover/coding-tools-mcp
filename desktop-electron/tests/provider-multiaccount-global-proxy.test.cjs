@@ -137,6 +137,7 @@ test("the global proxy login handler leaves owned Antigravity authentication to 
     },
     "./provider-execution-router.cjs": {},
     "./profile.cjs": { resolveLauncherProfile: () => ({ browserPartition: "test" }) },
+    "./proxy-gateway.cjs": { createProxyGatewayController: () => ({ startup: async () => ({}) }) },
   };
   require("node:vm").runInNewContext(fs.readFileSync(path.join(__dirname, "../electron/provider-bootstrap.cjs"), "utf8"), {
     module: loaded, require: name => dependencies[name], console,
@@ -178,4 +179,47 @@ test("renderer and Electron IPC expose the Provider Hub and global proxy control
   assert.match(wrapper, /installProviderNetwork/);
   assert.equal(packageJson.main, "electron/main-with-provider.cjs");
   assert.match(styles, /\.provider-manager/);
+});
+
+test("provider and proxy IPC answer only a Coding Tools window's own page; network changes need it focused", async () => {
+  const { EventEmitter } = require("node:events");
+  const app = new EventEmitter();
+  app.whenReady = () => Promise.resolve();
+  app.getPath = () => "unused";
+  const loaded = { exports: {} };
+  const routed = [];
+  const store = { snapshot: () => ({ routing: {} }), setGlobalRouting: input => { routed.push(input); return { routing: {} }; }, saveAccount: () => ({ routing: {} }) };
+  const dependencies = {
+    "./provider-network.cjs": { createProviderNetworkController: () => ({ store, applyGlobalRouting: async () => ({ routing: {} }), handleProxyLogin() {} }) },
+    "./provider-execution-router.cjs": { createProviderExecutionPlan: () => ({}) },
+    "./profile.cjs": { resolveLauncherProfile: () => ({ browserPartition: "test" }) },
+    "./proxy-gateway.cjs": { createProxyGatewayController: () => ({ startup: async () => ({}) }) },
+  };
+  require("node:vm").runInNewContext(fs.readFileSync(path.join(__dirname, "../electron/provider-bootstrap.cjs"), "utf8"), {
+    module: loaded, require: name => dependencies[name], console,
+  });
+  const handlers = new Map();
+  const mainFrame = {};
+  const page = { mainFrame, isFocused: () => focused, isDestroyed: () => false, send() {} };
+  let focused = true;
+  const window = { webContents: page, isDestroyed: () => false, isVisible: () => true, isMinimized: () => false, isFocused: () => focused };
+  const embedded = { mainFrame: {}, isFocused: () => true };
+  const BrowserWindow = { getAllWindows: () => [window], fromWebContents: contents => (contents === page || contents === embedded ? window : null) };
+  loaded.exports.installProviderNetwork({ app, BrowserWindow, ipcMain: { handle: (channel, run) => handlers.set(channel, run) } });
+  await loaded.exports.providerNetworkReady();
+  const call = (channel, event, ...args) => handlers.get(channel)(event, ...args);
+  const own = { sender: page, senderFrame: mainFrame };
+
+  await call("launcher:proxy-global-routing", own, { enabled: false });
+  assert.equal(routed.length, 1, "the focused window's own page changes the route");
+  await assert.rejects(call("launcher:proxy-global-routing", { sender: embedded, senderFrame: embedded.mainFrame }, { enabled: true }), /focused Coding Tools window/,
+    "web content embedded in the window (a browser view) is refused");
+  await assert.rejects(call("launcher:proxy-global-routing", { sender: page, senderFrame: {} }, { enabled: true }), /focused Coding Tools window/,
+    "an iframe in the window's page is refused");
+  await assert.rejects(call("launcher:provider-snapshot", { sender: {}, senderFrame: null }), /focused Coding Tools window/, "a page in no window is refused");
+  focused = false;
+  await assert.rejects(call("launcher:proxy-global-routing", own, { enabled: true }), /focused Coding Tools window/, "network changes need the focused window");
+  await call("launcher:provider-account-save", own, {});
+  await call("launcher:provider-snapshot", own);
+  assert.equal(routed.length, 1, "account saves and reads still work while a login holds the focus");
 });

@@ -13,8 +13,40 @@ export type ChatNode = {
   x: number;
   settings?: { name?: string; role_name?: string };
   route?: { harness_id: string; model: string; effort?: string; context_window?: number };
-  receipt?: { answer?: string; error?: string; verdict?: string; started_at_ms?: number };
+  /** `thread_id` is the card's AO session id when its harness is an AO agent ("ao:…"). */
+  receipt?: { answer?: string; error?: string; verdict?: string; started_at_ms?: number; thread_id?: string };
 };
+
+/** One AO agent session of a chat, for its Preview and Terminal panes. */
+export type ChatAgentSession = { id: string; label: string; model?: string };
+
+/**
+ * The chat's AO agent sessions, newest first, each once (a follow-up reuses its session): the cards
+ * whose harness is an AO agent and that have started one. Native Codex threads are not AO sessions.
+ */
+export function chatAgentSessions(runs: { nodes: ChatNode[] }[]): ChatAgentSession[] {
+  const seen = new Map<string, ChatAgentSession>();
+  for (const run of [...runs].reverse()) {
+    for (const node of [...run.nodes].reverse()) {
+      const id = node.receipt?.thread_id;
+      if (!id || seen.has(id) || !node.route?.harness_id?.startsWith("ao:")) continue;
+      const name = node.settings?.name || node.settings?.role_name || node.role;
+      seen.set(id, { id, label: node.route.model ? `${name} · ${node.route.model}` : name, ...(node.route.model ? { model: node.route.model } : {}) });
+    }
+  }
+  // The same agent in several sessions (a follow-up that started a fresh one): the newest is the
+  // current one, the others are told apart by how far back they are.
+  const sessions = [...seen.values()];
+  const repeats = new Map<string, number>();
+  for (const session of sessions) repeats.set(session.label, (repeats.get(session.label) ?? 0) + 1);
+  const seenLabel = new Map<string, number>();
+  return sessions.map((session) => {
+    if ((repeats.get(session.label) ?? 0) < 2) return session;
+    const index = seenLabel.get(session.label) ?? 0;
+    seenLabel.set(session.label, index + 1);
+    return { ...session, label: `${session.label} · ${index ? `earlier ${index}` : "current"}` };
+  });
+}
 
 /** What a working card is doing now (the workflow's "activity" operation). */
 export type ChatActivity = {
@@ -29,8 +61,68 @@ export type ChatActivity = {
   timeline?: ChatLiveItem[];
 };
 
-/** One live entry of a working card's turn. `kind` is "message" or AO's activity kind (reasoning, command, …). */
-export type ChatLiveItem = { id: string; kind: string; status: string; text: string };
+/**
+ * One entry of a card's turn. `kind` is "message" or AO's activity kind (reasoning, command, tool, …).
+ * A tool call also carries the agent's one-line `description`, its arguments (`input`, JSON) and
+ * what came back (`output`), shown when its row is opened.
+ */
+export type ChatLiveItem = {
+  id: string; kind: string; status: string; text: string; label?: string;
+  description?: string; input?: string; output?: string;
+};
+
+/** How a card's state reads in the chat's details panel, in the order the counts are listed. */
+const AGENT_STATES = ["working", "waiting", "failed", "done", "queued", "stopped"] as const;
+export type AgentState = typeof AGENT_STATES[number];
+function agentState(state?: string): AgentState {
+  if (state === "finished") return "done";
+  if (state === "running" || state === "reserved") return "working";
+  if (state === "held") return "waiting";
+  if (state === "failed") return "failed";
+  if (state === "cancelled" || state === "archived") return "stopped";
+  return "queued";
+}
+/** The latest run's cards as the details panel shows them: one dot per card and a count line ("3 done · 1 working"). */
+export function chatAgentSummary(nodes: { state?: string }[]): { dots: AgentState[]; text: string } {
+  const dots = nodes.map((node) => agentState(node.state));
+  const text = AGENT_STATES.map((state) => [state, dots.filter((dot) => dot === state).length] as const)
+    .filter(([, count]) => count > 0).map(([state, count]) => `${count} ${state}`).join(" · ");
+  return { dots, text: text || "No agents yet" };
+}
+/** How the card's tool requests are answered, as the details panel names it. */
+export function chatApprovalMode(route?: { approval_policy?: string; approvals_reviewer?: string } | null): string {
+  if (!route?.approval_policy) return "Default";
+  if (route.approval_policy === "never") return "Full access, no prompts";
+  return route.approvals_reviewer === "auto_review" ? "Approve for me" : "Ask me";
+}
+
+/** The folders new worktrees share with the project (`shared`, a link) or get as hard-link farms (`farmed`). */
+export type DependencyLinks = { shared: string[]; farmed: string[] };
+export type DependencyNote = { tone: "warn" | "info"; text: string };
+const NODE_INSTALL = /\b(?:npm|pnpm|yarn)(?:\.cmd)?\s+(?:ci|install|i|add|remove|rm|uninstall|un|update|up|upgrade)\b/i;
+const PYTHON_INSTALL = /\b(?:pip3?|python3?\s+-m\s+pip|py\s+-m\s+pip|uv\s+pip|uv|poetry|pipenv)(?:\.exe)?\s+(?:install|add|sync|uninstall|remove|update|lock)\b/i;
+const isVenv = (dir: string) => /(?:^|\/)\.?venv$/i.test(dir);
+const isNodeModules = (dir: string) => /(?:^|\/)node_modules$/i.test(dir);
+/**
+ * What an agent's install command does to the project's own packages, shown on its approval card:
+ * a folder linked to the project (the opt-in shared Python environment, or a user's own link) is
+ * changed for the project too; a hard-link farm (node_modules by default) installs privately.
+ */
+export function dependencyInstallNote(command: string | undefined, links: DependencyLinks | null): DependencyNote | null {
+  if (!command || !links) return null;
+  if (PYTHON_INSTALL.test(command) && links.shared.some(isVenv)) {
+    return { tone: "warn", text: "This worktree shares the project's Python environment: installing here changes the project's packages too." };
+  }
+  if (NODE_INSTALL.test(command)) {
+    if (links.shared.some(isNodeModules)) {
+      return { tone: "warn", text: "This worktree shares the project's node_modules: installing here changes the project's packages too." };
+    }
+    if (links.farmed.some(isNodeModules)) {
+      return { tone: "info", text: "Node packages install privately in this worktree; the project's own stay as they are." };
+    }
+  }
+  return null;
+}
 
 export type ChatOptions = {
   /** One line per card: harness · model · effort · context · role. */
@@ -84,6 +176,8 @@ export type TaskLifecycleView = {
 };
 export type ChatRun = {
   replaces_run_id?: string;
+  /** Restart mission: this run answers the same message again (set by the bridge). */
+  restarts_run_id?: string;
   id: string;
   project_id: string;
   cancelled: boolean;
@@ -139,13 +233,25 @@ export const CHAT_DEFAULT_TITLE = "New task";
 const FOLLOW_UP = /\n\nFollow-up \(([^)]+) UTC\):\n/;
 const SETTLED = ["finished", "cancelled", "archived"];
 
+// A message handed to the working agent mid-turn ("steer"), saved under the turn's message by chat_steer.
+const STEER = /\n\n↳ Steer \(([^)]+) UTC\): /;
+export type ChatSteer = { text: string; stamp: string };
+
+/** Splits the steers off a message: the message itself, then each steer in the order they were sent. */
+function withSteers(raw: string): { text: string; steers?: ChatSteer[] } {
+  const parts = raw.split(STEER);
+  const steers: ChatSteer[] = [];
+  for (let index = 1; index < parts.length; index += 2) steers.push({ stamp: parts[index], text: (parts[index + 1] ?? "").trim() });
+  return { text: parts[0].trim(), ...(steers.length ? { steers } : {}) };
+}
+
 /** The user's messages in a chat, oldest first: the task description plus each follow-up. */
-export function chatMessagesFromDescription(description: string | undefined): { text: string; stamp?: string }[] {
+export function chatMessagesFromDescription(description: string | undefined): { text: string; stamp?: string; steers?: ChatSteer[] }[] {
   const parts = (description ?? "").split(FOLLOW_UP);
-  const messages: { text: string; stamp?: string }[] = [];
-  if (parts[0]?.trim()) messages.push({ text: parts[0].trim() });
+  const messages: { text: string; stamp?: string; steers?: ChatSteer[] }[] = [];
+  if (parts[0]?.trim()) messages.push(withSteers(parts[0]));
   for (let index = 1; index < parts.length; index += 2) {
-    messages.push({ stamp: parts[index], text: (parts[index + 1] ?? "").trim() });
+    messages.push({ stamp: parts[index], ...withSteers(parts[index + 1] ?? "") });
   }
   return messages;
 }
@@ -312,12 +418,16 @@ export type ChatStep = {
   /** For a working card: runtime, current step and when it was last heard. */
   working?: { detail: string; stalled: boolean; activity?: string; timeline?: ChatLiveItem[] };
   startedAtMs?: number;
+  /** The card ran in an AO session, so its finished work can be read back (turn_timeline). */
+  hasWork?: boolean;
 };
 
 export type ChatTurn = {
   key: string;
   runId: string;
-  user?: { text: string; stamp?: string };
+  user?: { text: string; stamp?: string; steers?: ChatSteer[] };
+  /** Which of the chat's messages `user` is (its place in the task description). */
+  messageIndex?: number;
   /** The cards' work, in pipeline order, without the answer that closes the turn. */
   steps: ChatStep[];
   /** The answer shown in full: the final reviewer's, or the orchestrator's when it went solo. */
@@ -333,6 +443,8 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
   const step: ChatStep = {
     key, nodeId: node.id, role: node.role, name: chatNodeName(node), detail: options.describe?.(node, run) ?? "", state: node.state,
     ...(node.receipt?.started_at_ms ? { startedAtMs: node.receipt.started_at_ms } : {}),
+    ...(node.receipt?.thread_id && node.route?.harness_id?.startsWith("ao:") && node.state !== "running" && node.state !== "reserved"
+      ? { hasWork: true } : {}),
   };
   if (node.receipt?.error) step.error = node.receipt.error;
   if (node.receipt?.answer) step.text = run.solo && node.role === "planner" ? withoutSoloBlock(node.receipt.answer) : node.receipt.answer;
@@ -350,33 +462,51 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
 export function chatTurns(runs: ChatRun[], description: string | undefined, options: ChatOptions = {}): ChatTurn[] {
   const said = chatMessagesFromDescription(description);
   const now = options.now ?? Date.now();
-  const turns: ChatTurn[] = runs.map((run, index) => {
+  // Each run answers the next message, except a restart or a reconfigured replacement: that one
+  // answers its earlier run's message again, so it shows as a turn of its own without a message.
+  let messageIndex = 0;
+  const turns: ChatTurn[] = runs.map((run) => {
+    const index = run.restarts_run_id || run.replaces_run_id ? -1 : messageIndex++;
     const steps = chatNodeOrder(run.nodes)
       .filter((node) => node.state !== "pending" || node.receipt)
       .map((node) => chatStep(run, node, options, now));
-    const closing = run.solo
+    // A single-model run's one card answers the message itself, as a solo orchestrator's does.
+    const closing = run.solo || run.execution_mode === "single"
       ? steps.find((step) => step.role === "planner" && step.state === "finished" && step.text)
       : [...steps].reverse().find((step) => step.role === "reviewer" && step.state === "finished" && step.text);
     const starts = steps.map((step) => step.startedAtMs).filter((value): value is number => Boolean(value));
     return {
       key: run.id, runId: run.id,
-      ...(said[index] ? { user: said[index] } : {}),
+      ...(said[index] ? { user: said[index], messageIndex: index } : {}),
       steps: closing ? steps.filter((step) => step !== closing) : steps,
       ...(closing ? { final: closing } : {}),
       status: chatRunStatus(run), solo: Boolean(run.solo),
       ...(starts.length ? { startedAtMs: Math.min(...starts) } : {}),
     };
   });
-  for (let index = runs.length; index < said.length; index += 1) {
-    turns.push({ key: `pending:${index}`, runId: "", user: said[index], steps: [], status: "queued", solo: false });
+  for (let index = messageIndex; index < said.length; index += 1) {
+    turns.push({ key: `pending:${index}`, runId: "", user: said[index], messageIndex: index, steps: [], status: "queued", solo: false });
   }
   return turns;
+}
+
+/** Every run of the message whose turn ran `runId`: that run, then each restart or replacement of it (and of those). */
+export function chatRunsOfMessage(runs: ChatRun[], runId: string): string[] {
+  const found = runId ? [runId] : [];
+  for (let at = 0; at < found.length; at += 1) {
+    for (const run of runs) {
+      if ((run.restarts_run_id === found[at] || run.replaces_run_id === found[at]) && !found.includes(run.id)) found.push(run.id);
+    }
+  }
+  return found;
 }
 
 /** The description up to and including the user's message at `turnIndex`, for "Fork from here". */
 export function chatDescriptionUpTo(description: string | undefined, turnIndex: number): string {
   const said = chatMessagesFromDescription(description).slice(0, turnIndex + 1);
-  return said.map((message, index) => index === 0 ? message.text : `Follow-up (${message.stamp ?? "earlier"} UTC):\n${message.text}`).join("\n\n");
+  const full = (message: { text: string; steers?: ChatSteer[] }) =>
+    [message.text, ...(message.steers ?? []).map((steer) => `↳ Steer (${steer.stamp} UTC): ${steer.text}`)].join("\n\n");
+  return said.map((message, index) => index === 0 ? full(message) : `Follow-up (${message.stamp ?? "earlier"} UTC):\n${full(message)}`).join("\n\n");
 }
 
 /** One chat as Markdown, for "Copy › Conversation". */
@@ -414,6 +544,8 @@ export const CHAT_SLASH_COMMANDS: ChatSlashCommand[] = [
   { name: "new", hint: "Start a new chat" },
   { name: "resume", hint: "Resume a recent chat" },
   { name: "fork", hint: "Start a new chat from this conversation", needsChat: true },
+  { name: "rewind", hint: "Go back to an earlier message and edit it", args: "[message number]", needsChat: true },
+  { name: "delete", hint: "Delete a message and its reply from this chat", args: "[message number]", needsChat: true },
   { name: "rename", hint: "Rename this chat", needsChat: true },
   { name: "archive", hint: "Archive this chat", needsChat: true },
   { name: "copy", hint: "Copy this conversation as Markdown", needsChat: true },
@@ -456,6 +588,17 @@ export type ChatGoal = {
 export const GOAL_SUMMARY: Record<ChatGoal["status"], string> = {
   active: "Pursuing goal", paused: "Paused goal", achieved: "Goal achieved", stalled: "Goal stalled", limited: "Goal limited",
 };
+/** Something typed while a chat's turn runs, sent when the turn finishes: a message, or a command's message. */
+export type QueuedChatMessage = { what: string; message: string; goal?: string };
+/**
+ * Adds to one chat's queue. A plain message joins a plain message queued just before it (they are
+ * sent together); anything else (a command, a goal) waits for a turn of its own. Nothing is replaced.
+ */
+export function chatQueueAdd(queue: QueuedChatMessage[], item: QueuedChatMessage): QueuedChatMessage[] {
+  const last = queue[queue.length - 1];
+  if (last && item.what === "Message" && last.what === "Message") return [...queue.slice(0, -1), { ...last, message: `${last.message}\n\n${item.message}` }];
+  return [...queue, item];
+}
 /** What a command shows above the composer: a few facts, a block of text, or a list to pick from. */
 export type ChatCommandCard = {
   title: string; rows?: [string, string][]; text?: string; mono?: boolean;
@@ -504,4 +647,18 @@ export function chatMessageWithAttachments(message: string, attachments: ChatAtt
     ? `${item.image ? "Attached image" : "Attached file"}: ${item.path}`
     : `Attached file \`${item.name}\`:\n\`\`\`\n${(item.text ?? "").replace(/\`\`\`/g, "\`\`\u200b\`")}\n\`\`\``);
   return [message.trim(), ...blocks].filter(Boolean).join("\n\n");
+}
+
+/** A token count as the context meter shows it: 537523 → "537.5k", 1000000 → "1M". */
+export function tokensShort(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "—";
+  if (value >= 1_000_000) return `${Number((value / 1_000_000).toFixed(value % 1_000_000 ? 2 : 0))}M`;
+  if (value >= 1_000) return `${Number((value / 1_000).toFixed(1))}k`;
+  return String(Math.round(value));
+}
+
+/** How full an agent's context is (0..1), or null when it has not said or gives no window size. */
+export function contextFraction(usage: { contextUsed: number | null; contextWindow: number | null } | null | undefined): number | null {
+  if (!usage || !usage.contextWindow || usage.contextWindow <= 0 || usage.contextUsed === null) return null;
+  return Math.max(0, Math.min(1, usage.contextUsed / usage.contextWindow));
 }

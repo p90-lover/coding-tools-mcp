@@ -181,10 +181,11 @@ test("a new chat's prompt is Codex's \"Do anything\" in either mode; follow-up a
   const component = {};
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
   const jsx = (type, props) => ({ type, props: props || {} });
-  const react = { useMemo: calculate => calculate(), useEffect() {}, useRef: initial => ({ current: initial }),
+  const react = { useMemo: calculate => calculate(), useEffect() {}, useRef: initial => ({ current: initial }), memo: component => component,
     useState: initial => [typeof initial === "function" ? initial() : initial, () => {}] };
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
-    exports: component, require: name => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : name === "./ao-chat" ? chat : {},
+    exports: component, require: name => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : name === "./ao-chat" ? chat
+      : name === "./ChatWorkbench" ? { useWorkbenchAutoOpen() {} } : {},
   });
   const walk = item => !item || typeof item !== "object" ? [] : Array.isArray(item) ? item.flatMap(walk) : [item, ...walk(item.props?.children)];
   const base = { runs: [], tasks: [], selectedTaskId: "", busy: false, loadDescription: async () => "", send: async () => {}, openStructure() {}, approvals: [], approve() {}, describeRoute: () => "", retryStart() {} };
@@ -193,7 +194,7 @@ test("a new chat's prompt is Codex's \"Do anything\" in either mode; follow-up a
   assert.equal(placeholder({ composer: { mode: "team" } }), "Do anything");
   assert.equal(placeholder({ composer: { mode: "single" }, selectedTaskId: "task" }), "Send a follow-up…");
   assert.equal(placeholder({ composer: { mode: "single" }, selectedTaskId: "task", working: true,
-    runs: [run("active", "task", [node("worker", "worker", "running")])] }), "Running — you can send a follow-up when it finishes");
+    runs: [run("active", "task", [node("worker", "worker", "running")])] }), "Running — a message now is sent when it finishes");
 });
 
 test("mission drafts retain actual role routes and instructions rather than another task's newer global template",()=>{
@@ -573,4 +574,67 @@ test("a single-model chat passes its run to describe, so its one card shows no o
   assert.doesNotMatch(JSON.stringify(single), /Orchestrator/);
   assert.match(JSON.stringify(team), /Orchestrator/);
   assert.ok(seen.includes("single") && seen.includes("none"));
+});
+
+test("a steer saved under a message is its own message, and a fork keeps it", () => {
+  const description = "first ask\n\n↳ Steer (2026-10-11 05:30 UTC): use pnpm\n\nFollow-up (2026-10-11 05:40 UTC):\nnow tests\n\n↳ Steer (2026-10-11 05:41 UTC): only unit tests";
+  assert.deepEqual(plain(chat.chatMessagesFromDescription(description)), [
+    { text: "first ask", steers: [{ stamp: "2026-10-11 05:30", text: "use pnpm" }] },
+    { stamp: "2026-10-11 05:40", text: "now tests", steers: [{ stamp: "2026-10-11 05:41", text: "only unit tests" }] },
+  ]);
+  assert.equal(chat.chatDescriptionUpTo(description, 1), description, "a fork reproduces the steers it contains");
+});
+
+test("an install command's approval says what it does to the project's own packages", () => {
+  const links = { shared: [".venv"], farmed: ["frontend/node_modules", "node_modules"] };
+  assert.equal(chat.dependencyInstallNote("pip install requests", links).tone, "warn", "a shared Python environment changes for the project");
+  assert.equal(chat.dependencyInstallNote("python -m pip install -r requirements.txt", links).tone, "warn");
+  assert.equal(chat.dependencyInstallNote("uv sync", links).tone, "warn");
+  assert.equal(chat.dependencyInstallNote("npm ci --prefix frontend", links).tone, "info", "a farmed node_modules installs privately");
+  assert.match(chat.dependencyInstallNote("pnpm add zod", links).text, /privately/);
+  assert.equal(chat.dependencyInstallNote("npm ci", { shared: ["node_modules"], farmed: [] }).tone, "warn", "a user's own node_modules link is shared");
+  assert.equal(chat.dependencyInstallNote("pip install requests", { shared: [], farmed: ["node_modules"] }), null, "no shared venv, nothing to say");
+  assert.equal(chat.dependencyInstallNote("npm run dev", links), null, "not an install");
+  assert.equal(chat.dependencyInstallNote("Get-ChildItem frontend", links), null);
+  assert.equal(chat.dependencyInstallNote("npm install", null), null, "unknown links: no note");
+});
+
+test("the chat's details panel counts its agents by state and names its approval mode", () => {
+  const summary = chat.chatAgentSummary([{ state: "finished" }, { state: "finished" }, { state: "running" }, { state: "held" }, { state: "pending" }]);
+  assert.deepEqual([...summary.dots], ["done", "done", "working", "waiting", "queued"]);
+  assert.equal(summary.text, "1 working · 1 waiting · 2 done · 1 queued");
+  assert.equal(chat.chatAgentSummary([]).text, "No agents yet");
+  assert.equal(chat.chatApprovalMode({ approval_policy: "on-request", approvals_reviewer: "auto_review" }), "Approve for me");
+  assert.equal(chat.chatApprovalMode({ approval_policy: "on-request", approvals_reviewer: "user" }), "Ask me");
+  assert.equal(chat.chatApprovalMode({ approval_policy: "never" }), "Full access, no prompts");
+  assert.equal(chat.chatApprovalMode(null), "Default");
+});
+
+test("a chat's AO agent sessions for its Preview and Terminal panes: newest first, each once, repeats told apart", () => {
+  const card = (id, session, extra = {}) => node(id, "planner", "finished", { route: { harness_id: "ao:claude-code", model: "cpa/gpt-6-luna" }, receipt: { thread_id: session }, ...extra });
+  const sessions = chat.chatAgentSessions([
+    run("r1", "t", [card("a", "s1")]),
+    run("r2", "t", [card("a", "s2")]),
+    run("r3", "t", [card("a", "s2")]),
+    run("r4", "t", [card("a", "s3"), node("n", "worker", "finished", { route: { harness_id: "native-codex", model: "m" }, receipt: { thread_id: "codex-thread" } })]),
+  ]);
+  assert.deepEqual(plain(sessions), [
+    { id: "s3", label: "planner · cpa/gpt-6-luna · current", model: "cpa/gpt-6-luna" },
+    { id: "s2", label: "planner · cpa/gpt-6-luna · earlier 1", model: "cpa/gpt-6-luna" },
+    { id: "s1", label: "planner · cpa/gpt-6-luna · earlier 2", model: "cpa/gpt-6-luna" },
+  ], "a native Codex thread is not an AO session");
+  assert.deepEqual(plain(chat.chatAgentSessions([run("r1", "t", [card("a", "s1", { settings: { name: "Builder" } })])])),
+    [{ id: "s1", label: "Builder · cpa/gpt-6-luna", model: "cpa/gpt-6-luna" }], "a single session keeps its plain name");
+});
+
+test("the context meter's numbers: short token counts, and fullness only when the agent gives its window", () => {
+  assert.equal(chat.tokensShort(537523), "537.5k");
+  assert.equal(chat.tokensShort(1_000_000), "1M");
+  assert.equal(chat.tokensShort(1_250_000), "1.25M");
+  assert.equal(chat.tokensShort(950), "950");
+  assert.equal(chat.tokensShort(null), "—");
+  assert.equal(chat.contextFraction({ contextUsed: 537_500, contextWindow: 1_000_000 }), 0.5375);
+  assert.equal(chat.contextFraction({ contextUsed: 2_000, contextWindow: 0 }), null, "no window: tokens without a fullness claim");
+  assert.equal(chat.contextFraction({ contextUsed: 1_200_000, contextWindow: 1_000_000 }), 1, "never more than full");
+  assert.equal(chat.contextFraction(null), null);
 });
