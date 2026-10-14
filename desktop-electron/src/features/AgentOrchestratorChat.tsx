@@ -50,6 +50,20 @@ export type ChatThreadActions = {
   pinned: boolean;
 };
 
+/**
+ * How long since `since`, counting up once a second by itself while `live`: only this label
+ * re-renders on a tick, never the transcript around it. Stopped, it holds at `until`.
+ */
+function Elapsed({ since, live = true, until, format = chatDuration }: { since: number; live?: boolean; until?: number; format?: (ms: number) => string }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!live) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [live]);
+  return <>{format((live ? now : until ?? now) - since)}</>;
+}
+
 function stepTone(step: ChatStep): string {
   if (step.error) return "error";
   if (step.working) return step.working.stalled ? "stalled" : "working";
@@ -146,21 +160,20 @@ function useStepWork(step: ChatStep, runId: string, wanted: boolean, loadWork?: 
   return known;
 }
 
-function StepRow({ step, runId, now, loadWork }: { step: ChatStep; runId: string; now: number; loadWork?: LoadWork }) {
+function StepRow({ step, runId, loadWork }: { step: ChatStep; runId: string; loadWork?: LoadWork }) {
   // A failed step opens on its error and a working one on its live turn, as Codex shows them;
   // once the user toggles a row, their choice wins.
   const [chosen, setOpen] = useState<boolean | null>(null);
   const open = chosen ?? Boolean(step.error || step.working?.timeline?.length);
   const work = useStepWork(step, runId, open, loadWork);
   const body = step.error || step.text || (work?.length || step.hasWork ? "work" : "");
-  const elapsed = step.working && step.startedAtMs ? chatDuration(now - step.startedAtMs) : "";
   return <li className={`cx-step tone-${stepTone(step)}`}>
     <button type="button" className="cx-step-head" aria-expanded={open} disabled={!body && !step.working} onClick={() => setOpen(!open)}>
       <span className="cx-step-dot" aria-hidden="true" />
       <span className="cx-step-name">{step.name}</span>
       <span className="cx-step-meta">
         {step.working ? (step.working.stalled ? "may be stuck" : step.working.activity || "working") : step.error ? "failed" : step.verdict || (step.state === "finished" ? "done" : step.state)}
-        {elapsed ? ` · ${elapsed}` : ""}
+        {step.working && step.startedAtMs ? <> · <Elapsed since={step.startedAtMs} /></> : null}
       </span>
       {body ? <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} /> : null}
     </button>
@@ -192,7 +205,7 @@ function AnswerWork({ step, runId, expanded, loadWork }: { step: ChatStep; runId
   </div>;
 }
 
-function WorkGroup({ turn, now, idle = false, expanded = false, loadWork }: { turn: ChatTurn; now: number; idle?: boolean; expanded?: boolean; loadWork?: LoadWork }) {
+function WorkGroup({ turn, idle = false, expanded = false, loadWork }: { turn: ChatTurn; idle?: boolean; expanded?: boolean; loadWork?: LoadWork }) {
   const working = turn.steps.find((step) => step.working);
   // Live and failed work opens by itself, and finished work too when the chat shows its details
   // (single-model chats by default); a toggle on the turn itself holds over both.
@@ -204,14 +217,15 @@ function WorkGroup({ turn, now, idle = false, expanded = false, loadWork }: { tu
       ? <div className="cx-work is-live"><span className="cx-shimmer">Starting…</span></div> : null;
   }
   const label = working
-    ? `${working.working!.stalled ? "May be stuck" : "Working"}${turn.startedAtMs ? ` for ${chatDuration(now - turn.startedAtMs)}` : ""} · ${working.name}${working.working!.activity ? ` — ${working.working!.activity}` : ""}`
+    ? <>{working.working!.stalled ? "May be stuck" : "Working"}{turn.startedAtMs ? <> for <Elapsed since={turn.startedAtMs} /></> : null}
+      {` · ${working.name}${working.working!.activity ? ` — ${working.working!.activity}` : ""}`}</>
     : `Worked · ${turn.steps.length} ${turn.steps.length === 1 ? "step" : "steps"}`;
   return <div className={`cx-work${working ? " is-live" : ""}${working?.working?.stalled ? " is-stalled" : ""}`}>
     <button type="button" className="cx-work-head" aria-expanded={open} onClick={() => setChosen(!open)}>
       <span className={working ? "cx-shimmer" : undefined}>{label}</span>
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
     </button>
-    {open ? <ol className="cx-steps">{turn.steps.map((step) => <StepRow key={step.key} step={step} runId={turn.runId} now={now} loadWork={loadWork} />)}</ol> : null}
+    {open ? <ol className="cx-steps">{turn.steps.map((step) => <StepRow key={step.key} step={step} runId={turn.runId} loadWork={loadWork} />)}</ol> : null}
   </div>;
 }
 
@@ -386,12 +400,14 @@ export function AgentOrchestratorChat({
     return () => { live = false; };
   }, [selectedTaskId, chatRuns.length, loadDescription]);
 
-  // Runtimes count up while a card works.
+  // Stall checks and "last heard" read a clock that moves every 10 seconds while a card works: each
+  // move rebuilds the turns and re-renders the transcript (every message), which ticking once a
+  // second made the chat lag. The per-second counters (<Elapsed>) tick on their own.
   const [now, setNow] = useState(() => Date.now());
   const anyWorking = chatRuns.some((run) => run.nodes.some((node) => node.state === "running" || node.state === "reserved"));
   useEffect(() => {
     if (!anyWorking) return;
-    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    const timer = window.setInterval(() => setNow(Date.now()), 10_000);
     return () => window.clearInterval(timer);
   }, [anyWorking]);
   const turns: ChatTurn[] = useMemo(
@@ -492,14 +508,6 @@ export function AgentOrchestratorChat({
   const [card, setCard] = useState<ChatCommandCard | null>(null);
   // Edit goal: the objective being edited, or null.
   const [goalEditing, setGoalEditing] = useState<string | null>(null);
-  // A goal being pursued shows how long it has run, to the second, as Codex does.
-  const [, setTick] = useState(0);
-  const pursuing = commands?.goal?.status === "active";
-  useEffect(() => {
-    if (!pursuing) return;
-    const timer = window.setInterval(() => setTick((value) => value + 1), 1000);
-    return () => window.clearInterval(timer);
-  }, [pursuing]);
   const say = (title: string, text: string) => setCard({ title, text });
 
   /** Sends a message the way the composer does: into this chat, or as a new chat. */
@@ -858,7 +866,7 @@ export function AgentOrchestratorChat({
                   <div className="cx-bubble"><p>{steer.text}</p></div>
                   <span className="cx-stamp">Steered · {steer.stamp} UTC</span>
                 </div>) : null}
-              <WorkGroup key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} now={now} idle={notStarted && turn.runId === latest?.id} expanded={showWork} loadWork={loadWork} />
+              <WorkGroup key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} idle={notStarted && turn.runId === latest?.id} expanded={showWork} loadWork={loadWork} />
               {turn.final ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`}>
                 <div className="cx-answer-meta">
                   <span>{turn.final.name}</span>
@@ -969,7 +977,9 @@ export function AgentOrchestratorChat({
             <span className="cx-goal-objective" title={commands.goal.objective}>{commands.goal.objective}</span>
             {commands.goal.note ? <span className="cx-goal-note" title={commands.goal.note}>{commands.goal.note}</span> : null}
             <span className="cx-goal-meta" title={`Round ${commands.goal.round} of ${commands.goal.rounds}`}>
-              {goalElapsed(commands.goal.startedAt, commands.goal.status === "active" ? Date.now() : commands.goal.updatedAt)}</span>
+              {/* A goal being pursued counts to the second, as Codex shows it; the label ticks alone. */}
+              <Elapsed since={commands.goal.startedAt} live={commands.goal.status === "active"} until={commands.goal.updatedAt}
+                format={(ms) => goalElapsed(0, ms)} /></span>
             <button type="button" className="cx-goal-icon" title="Clear goal" aria-label="Clear goal" onClick={() => void runCommand("goal", "clear")}><GoalGlyph name="trash" /></button>
             {commands.goal.status === "active"
               ? <button type="button" className="cx-goal-icon" title="Pause goal" aria-label="Pause goal" onClick={() => void runCommand("goal", "pause")}><GoalGlyph name="pause" /></button>

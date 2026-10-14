@@ -64,6 +64,9 @@ function readState(filePath) {
     if (Object.hasOwn(state, "chatAgentTerminalTools") && state.chatAgentTerminalTools !== true) delete state.chatAgentTerminalTools;
     // Their own preview browser unless this is false; absent means on.
     if (Object.hasOwn(state, "chatAgentPreviewTools") && typeof state.chatAgentPreviewTools !== "boolean") delete state.chatAgentPreviewTools;
+    // An agent's tool request answered in the chat is confirmed again in a dialog unless this is
+    // false (the dialog's "Don't ask again"); absent means it asks.
+    if (Object.hasOwn(state, "confirmAgentToolRequests") && state.confirmAgentToolRequests !== false) delete state.confirmAgentToolRequests;
     if (state.browserInteractionMode !== "automatic" && state.browserInteractionMode !== "manual") {
       state.browserInteractionMode = DEFAULT_STATE.browserInteractionMode;
     }

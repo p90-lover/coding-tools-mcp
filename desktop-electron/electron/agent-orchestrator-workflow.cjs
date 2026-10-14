@@ -162,7 +162,7 @@ function delayToMilliseconds(value, unit) {
   }
   return ms;
 }
-function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, chatEditsFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, chatEditsFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null }) {
   const goals = createGoalStore({ file: goalsFile, now });
   // Deleted chat messages: their runs are hidden from the chat, and the next follow-up starts afresh.
   const chatEdits = createChatEditStore({ file: chatEditsFile });
@@ -1127,7 +1127,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       const decision = chosen ? offered.id : aoDecision(pending, allow);
       if (!decision) throw new Error(`The agent did not offer a "${allow ? "allow" : "deny"}" answer for this request`);
       const approving = chosen ? !offered.kind.startsWith("reject") : allow;
-      if (!await confirm({
+      // The person answered on the request's card; the app may confirm it once more (a dialog the
+      // person can turn off with "Don't ask again"), still only from the focused window.
+      if (!await (confirmToolRequest ?? confirm)({
         message: chosen ? `${offered.label}?` : approving ? "Allow this tool request once?" : "Deny this tool request?",
         detail: `Run: ${run}
 Node: ${node}

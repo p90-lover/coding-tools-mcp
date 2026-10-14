@@ -3269,6 +3269,35 @@ test("an AO request can be answered with any decision the agent offered, and onl
   await assert.rejects(workflow.call("approve_harness", { ...input, decisionId: "plan", allow: true }), /typed native reply or legacy Allow\/Deny/);
 });
 
+test("an agent's request answered in the chat is confirmed by the tool-request confirmation (with its Don't ask again), not the workflow dialog", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) },
+    nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1" } }] };
+  const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
+  const resolved = [], general = [], toolRequests = [];
+  let answer = true;
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } }
+      : endpoint.endsWith("/harness/status") ? { ok: true, status: { connected: false } } : { ok: true, run: mission },
+    confirm: async input => { general.push(input.message); return true; },
+    confirmToolRequest: async input => { toolRequests.push(input.message); return answer; },
+    aoHarness: {
+      observe: async () => ({ status: "needs_input", turnState: "running", approvals: [{ approval_id: "req", source: "ao", kind: "command", tool: "PowerShell",
+        command: "git status", decisions }] }),
+      resolveApproval: async (session, request, decision) => { resolved.push(decision); return { ok: true }; },
+    },
+  });
+  const input = { workspaceId: "ws", runId: "run", nodeId: "one", approvalId: "req" };
+  await workflow.call("approve_harness", { ...input, allow: true });
+  await workflow.call("approve_harness", { ...input, allow: false });
+  assert.deepEqual(toolRequests, ["Allow this tool request once?", "Deny this tool request?"]);
+  assert.deepEqual(general, [], "the general workflow dialog is not shown for it");
+  assert.deepEqual(resolved, ["yes", "no"]);
+  answer = false;
+  assert.equal((await workflow.call("approve_harness", { ...input, allow: true })).cancelled, true, "Cancel in that dialog answers nothing");
+  assert.deepEqual(resolved, ["yes", "no"]);
+});
+
 test("a model picked mid-chat is what Retry and the next goal round run on, never the earlier run's model", async () => {
   const oldRoute = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
   const picked = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/deepseek-v4", permission_profile: ":ao-default", effort: "high" };
