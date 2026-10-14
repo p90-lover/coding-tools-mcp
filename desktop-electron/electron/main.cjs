@@ -2811,6 +2811,10 @@ async function start() {
       missionCall: (operation, args) => agentOrchestratorWorkflow.call(operation, args),
       openAuth: (url) => antigravityAuthBrowser(url),
       agentTools: chatAgentTools,
+      // The context meter's plan usage limits for chats on CPA's Codex accounts (CPA Helper).
+      cpaQuota: backendBundles.requireModule(backend, "cpa-quota.cjs").createCpaQuota({
+        getConnection: () => externalServicesController?.cpaConnection(), logger,
+      }),
       WebContentsView, dialog, shell, logger,
     });
     // Push AO changes to the Mission chat instead of making it poll: AO's session feed (a role's

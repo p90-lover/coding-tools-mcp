@@ -1,0 +1,109 @@
+"use strict";
+
+// The 5-hour and weekly usage limits of the Codex accounts CPA serves Codex models from, for the
+// chat's context meter (shown as Claude Code shows plan usage limits). CPA Helper, the bundled CPA
+// plugin, keeps each account's quota from chatgpt.com's usage endpoint; this reads its cached list
+// with CPA's management key, which stays in the main process. Only usage numbers and each
+// account's own label reach the renderer, never a token. A quota older than STALE_MS is asked
+// to refresh (CPA Helper's own refresh, at most once per account per STALE_MS), so the next read
+// is current without the user opening CPA.
+
+const CACHE_MS = 20_000;
+const STALE_MS = 10 * 60_000;
+const REFRESH_PER_READ = 4;
+const TIMEOUT_MS = 8_000;
+const MAX_ACCOUNTS = 12;
+
+const finite = (value) => (Number.isFinite(value) ? value : null);
+const text = (value, max = 120) => (typeof value === "string" ? value.trim().slice(0, max) : "");
+
+/** One quota window from CPA Helper: { used_percent, reset_at_ms, window_seconds }. */
+function windowOf(value) {
+  if (!value || typeof value !== "object") return null;
+  const used = finite(value.used_percent);
+  if (used === null) return null;
+  return { usedPercent: Math.max(0, Math.min(100, used)), resetsAt: finite(value.reset_at_ms), windowSeconds: finite(value.window_seconds) };
+}
+
+/** An item of CPA Helper's codex/accounts, as the meter shows it. */
+function accountOf(item) {
+  const quota = item?.quota && typeof item.quota === "object" ? item.quota : {};
+  return {
+    id: text(String(item?.auth_index ?? ""), 64),
+    label: text(item?.email) || text(item?.label) || text(item?.account) || text(item?.name) || "Codex account",
+    plan: text(quota.plan, 40) || text(item?.plan, 40) || null,
+    disabled: item?.disabled === true,
+    // CPA Helper's keeper lowers an account at its limit to priority -1 until it recovers.
+    paused: Number(item?.priority) === -1,
+    session: windowOf(quota.primary),
+    week: windowOf(quota.secondary),
+    checkedAt: finite(quota.checked_ms) || null,
+    error: text(quota.error, 200) || (item?.unavailable ? text(item?.status_message, 200) || "Unavailable" : "") || null,
+  };
+}
+
+function createCpaQuota({ getConnection, fetchImpl = fetch, now = Date.now, logger = console } = {}) {
+  let cached = null; // { at, value }
+  let pending = null;
+  const refreshedAt = new Map(); // auth_index -> ms
+
+  function connection() {
+    const value = getConnection?.();
+    if (!value?.baseUrl || !value.managementKey) return null;
+    const url = new URL(value.baseUrl);
+    // Only the managed loopback CPA ever receives the management key.
+    if (url.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) return null;
+    return { base: url.origin, key: value.managementKey };
+  }
+
+  async function request(target, method, path, body) {
+    const response = await fetchImpl(`${target.base}/v0/management/cpa-helper${path}`, {
+      method, headers: { Authorization: `Bearer ${target.key}`, ...(body ? { "Content-Type": "application/json" } : {}) },
+      ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    return response;
+  }
+
+  /** Asks CPA Helper to re-check stale accounts, in the background; their next read is current. */
+  function refreshStale(target, accounts) {
+    const at = now();
+    const stale = accounts.filter((account) => account.id && !account.disabled
+      && (!account.checkedAt || at - account.checkedAt > STALE_MS) && at - (refreshedAt.get(account.id) ?? 0) > STALE_MS)
+      .slice(0, REFRESH_PER_READ);
+    for (const account of stale) {
+      refreshedAt.set(account.id, at);
+      void request(target, "POST", "/codex/refresh", { auth_index: account.id })
+        .then(() => { cached = null; })
+        .catch((error) => logger.warn?.("cpa_quota.refresh_failed", { message: String(error?.message ?? error).slice(0, 200) }));
+    }
+  }
+
+  async function load() {
+    const target = connection();
+    if (!target) return { ok: true, available: false, reason: "CPA is not running" };
+    let response;
+    try { response = await request(target, "GET", "/codex/accounts"); }
+    catch { return { ok: true, available: false, reason: "CPA did not answer" }; }
+    if (response.status === 404) return { ok: true, available: false, reason: "CPA Helper is not installed in CPA" };
+    if (response.status === 401 || response.status === 403) return { ok: true, available: false, reason: "CPA refused the management key" };
+    if (!response.ok) return { ok: true, available: false, reason: `CPA answered HTTP ${response.status}` };
+    const payload = await response.json().catch(() => null);
+    const items = Array.isArray(payload?.items) ? payload.items : [];
+    const accounts = items.slice(0, MAX_ACCOUNTS).map(accountOf);
+    refreshStale(target, accounts);
+    return { ok: true, available: true, accounts };
+  }
+
+  /** The accounts' limits, cached CACHE_MS; concurrent reads share one request. */
+  async function read() {
+    if (cached && now() - cached.at < CACHE_MS) return cached.value;
+    if (!pending) {
+      pending = load().then((value) => { cached = { at: now(), value }; return value; }).finally(() => { pending = null; });
+    }
+    return pending;
+  }
+
+  return Object.freeze({ read });
+}
+
+module.exports = Object.freeze({ createCpaQuota, accountOf, windowOf, STALE_MS });

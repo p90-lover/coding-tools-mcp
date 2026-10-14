@@ -91,7 +91,7 @@ async function allocatePort() {
   return port;
 }
 
-function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, logger = console }) {
+function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, cpaQuota = null, logger = console }) {
   let child = null;
   let gateway = null;
   let view = null;
@@ -1086,6 +1086,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         };
       }));
       return { ok: true, sessions };
+    }
+    // The context meter's plan usage limits for chats on CPA's Codex accounts: each account's
+    // 5-hour and weekly use, from CPA Helper (cpa-quota.cjs). Read-only; works with AO stopped.
+    if (operation === "cpa_quota") {
+      if (!cpaQuota) return { ok: true, available: false, reason: "CPA is not set up in this app" };
+      return cpaQuota.read();
     }
     // A chat's Terminal and Preview panes: the user's view of each card's agent session, through
     // the agent tools server that started its commands and owns its preview (chat-agent-tools.cjs).

@@ -174,10 +174,20 @@
 .cx-context-rows { display: grid; grid-template-columns: 1fr auto; gap: 3px 12px; margin: 0; }
 .cx-context-rows dt { margin: 0; }
 .cx-context-rows dd { margin: 0; color: var(--ao-muted); font-variant-numeric: tabular-nums; text-align: right; }
-.cx-context-limit { margin: 6px 0; }
+/* Plan usage limits, as Claude Code's /usage: the name and "N% used" over the bar, when it resets below. */
+.cx-context-limit { margin: 8px 0; }
 .cx-context-limit > div:first-child { display: flex; align-items: baseline; gap: 8px; }
-.cx-context-limit small { margin-left: auto; color: var(--ao-muted); font-size: 11px; }
+.cx-context-limit > div:first-child b { margin-left: auto; }
+.cx-context-limit > .cx-context-bar { margin: 5px 0 3px; }
+.cx-context-limit small { display: block; color: var(--ao-muted); font-size: 11px; }
 .cx-context-limit b { font-weight: 500; font-variant-numeric: tabular-nums; }
+.cx-context-account { margin: 6px 0 10px; }
+.cx-context-account + .cx-context-account { padding-top: 8px; border-top: 1px dashed var(--ao-line); }
+.cx-context-account.is-resting { opacity: 0.6; }
+.cx-context-account-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.cx-context-account-head span { overflow: hidden; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.cx-context-account-head small { flex: none; margin-left: auto; color: var(--ao-muted); font-size: 11px; }
+.cx-context-panel > div { max-height: min(70vh, 640px); overflow-y: auto; }
 .cx-context-servers { margin: 0; padding: 0; list-style: none; }
 .cx-context-servers li { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
 .cx-context-servers small { margin-left: auto; color: var(--ao-muted); font-size: 11px; }
