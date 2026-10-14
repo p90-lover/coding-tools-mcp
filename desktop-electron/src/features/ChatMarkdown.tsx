@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { parseMarkdown, type MdInline } from "./chat-markdown";
 
@@ -24,9 +24,13 @@ function CodeBlock({ lang, text }: { lang: string; text: string }) {
   </div>;
 }
 
-/** An agent's answer rendered as Markdown (headings, lists, code, links), never as raw HTML. */
-export function ChatMarkdown({ text }: { text: string }) {
-  const blocks = parseMarkdown(text);
+/**
+ * An agent's answer rendered as Markdown (headings, lists, code, links), never as raw HTML.
+ * Memoized on its text: the chat re-renders every second while an agent works, and re-parsing
+ * every earlier answer each time made long chats lag; an unchanged answer now skips both.
+ */
+export const ChatMarkdown = memo(function ChatMarkdown({ text }: { text: string }) {
+  const blocks = useMemo(() => parseMarkdown(text), [text]);
   return <div className="cx-md">{blocks.map((block, index): ReactNode => {
     switch (block.kind) {
       case "heading": {
@@ -42,4 +46,4 @@ export function ChatMarkdown({ text }: { text: string }) {
       default: return <p key={index}><Inline parts={block.inline} /></p>;
     }
   })}</div>;
-}
+});
