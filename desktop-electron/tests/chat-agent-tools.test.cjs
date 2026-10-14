@@ -64,8 +64,8 @@ function fixture({ enabled = () => true, desktop = () => false, terminal = () =>
 }
 
 /** A leased, bound session: its URL and auth header. */
-async function session(tools, { agent = "codex", workspaceId = "ws1", id = "ao-1", approvalMode = undefined } = {}) {
-  const lease = await tools.lease({ agent, workspaceId, ...(approvalMode ? { approvalMode } : {}) });
+async function session(tools, { agent = "codex", workspaceId = "ws1", id = "ao-1", approvalMode = undefined, autoReview = false } = {}) {
+  const lease = await tools.lease({ agent, workspaceId, ...(approvalMode ? { approvalMode } : {}), ...(autoReview ? { autoReview: true } : {}) });
   assert.ok(lease, "leased");
   if (id) assert.equal(lease.bind(id), true);
   const [{ url, headers }] = lease.servers;
@@ -428,16 +428,16 @@ function fakeSandbox({ installed = true } = {}) {
   };
 }
 
-test("with Codex's sandbox installed, commands run there in the worktree without a dialog, and the agent is told so", async () => {
+test("on Approve for me, the reviewed command runs in Codex's sandbox in the worktree with no second dialog here", async () => {
   const tree = tempTree();
   const sandbox = fakeSandbox();
   const { tools, calls, confirmations } = fixture({ root: tree.root, terminal: () => true, sandbox });
   try {
-    const { url, auth } = await session(tools);
+    const { url, auth } = await session(tools, { autoReview: true });
     const init = await post(url, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, auth);
     assert.match(init.body.result.instructions, /Codex's Windows sandbox/);
-    assert.match(init.body.result.instructions, /No confirmation is needed/);
-    assert.doesNotMatch(init.body.result.instructions, /NOT confined/);
+    assert.match(init.body.result.instructions, /reviewed before it runs/);
+    assert.doesNotMatch(init.body.result.instructions, /NOT confined|No confirmation/);
 
     const ran = await callTool(url, auth, "exec_command", { cmd: 'npm run dev -- --host "127.0.0.1"', workdir: "src" });
     assert.equal(ran.isError, false);
@@ -472,6 +472,47 @@ test("with Codex's sandbox installed, commands run there in the worktree without
     assert.deepEqual(sandbox.written.at(-1), { id: "sbx-1", chars: "r" });
     assert.equal((await tools.processStop({ sessionId: "ao-1", commandId: "sbx-1" })).status, "killed");
     assert.deepEqual(sandbox.killed, ["sbx-1"]);
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("in plain ask mode a sandboxed command is still confirmed here, and a declined one never starts", async () => {
+  const tree = tempTree();
+  const sandbox = fakeSandbox();
+  let answer = async () => true;
+  const { tools, calls, confirmations } = fixture({ root: tree.root, terminal: () => true, sandbox, confirm: (request) => answer(request) });
+  try {
+    const { url, auth } = await session(tools);
+    const init = await post(url, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, auth);
+    assert.match(init.body.result.instructions, /The user confirms each command/);
+    assert.equal((await callTool(url, auth, "exec_command", { cmd: "npm test" })).isError, false);
+    assert.equal(confirmations.length, 1, "being sandboxed approves nothing by itself");
+    assert.match(unwrapped(confirmations[0].detail), /runs in Codex's Windows sandbox/);
+    assert.doesNotMatch(confirmations[0].detail, /not confined/);
+    assert.equal(sandbox.started.length, 1);
+
+    assert.equal((await callTool(url, auth, "write_stdin", { command_id: "sbx-1", chars: "y\n" })).isError, false);
+    assert.equal(confirmations.length, 2, "an input to it is confirmed too");
+    assert.equal((await callTool(url, auth, "read_output", { output_ref: "command:sbx-1:stdout" })).isError, false);
+    assert.equal((await callTool(url, auth, "kill_command", { command_id: "sbx-1" })).isError, false);
+    assert.equal(confirmations.length, 2, "reading and stopping it are not asked");
+
+    answer = async () => false;
+    const declined = await callTool(url, auth, "exec_command", { cmd: "npm run build" });
+    assert.equal(declined.isError, true);
+    assert.equal(sandbox.started.length, 1, "a declined command never starts");
+    assert.ok(!calls.some((call) => call.body?.tool === "exec_command"), "nor goes to the unsandboxed terminal");
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("a session launched to bypass permissions runs sandboxed commands unasked", async () => {
+  const tree = tempTree();
+  const sandbox = fakeSandbox();
+  const { tools, confirmations } = fixture({ root: tree.root, terminal: () => true, sandbox });
+  try {
+    const { url, auth } = await session(tools, { approvalMode: "bypass-permissions" });
+    assert.equal((await callTool(url, auth, "exec_command", { cmd: "npm test" })).isError, false);
+    assert.equal(confirmations.length, 0);
+    assert.equal(sandbox.started.length, 1);
   } finally { await tools.close(); tree.cleanup(); }
 });
 

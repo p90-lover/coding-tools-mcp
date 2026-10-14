@@ -2704,8 +2704,8 @@ async function start() {
         // in the focused app window.
         confirm: confirmAoAction,
         enabled: () => stateStore.read().chatAgentTools !== false,
-        // On by default when its commands run sandboxed; without the sandbox only when the user
-        // turned it on (each command then asks); off whenever the user turned it off.
+        // On by default when its commands run sandboxed (each still reviewed); without the sandbox
+        // only when the user turned it on; off whenever the user turned it off.
         terminalEnabled: () => {
           const choice = stateStore.read().chatAgentTerminalTools;
           return choice === true || (choice !== false && chatSandbox.available());

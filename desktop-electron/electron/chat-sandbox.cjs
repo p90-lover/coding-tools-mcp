@@ -4,8 +4,8 @@
 // Windows sandbox (`codex sandbox`, its unelevated restricted-token mode, the one the app already
 // uses for Codex mission cards), with the agent's worktree writable, the package managers' caches
 // writable, everything else read-only, and the network on (installs need it; a dev server it
-// starts is reachable on this machine's loopback for the chat's preview). Because the sandbox is
-// the boundary, a command needs no confirmation, as in Codex.
+// starts is reachable on this machine's loopback for the chat's preview). The sandbox limits what
+// a command can change; whether it runs at all is still reviewed (chat-agent-tools.cjs).
 //
 // - Never Codex's elevated mode, whose setup creates local Windows accounts: only "unelevated".
 // - The command reaches cmd.exe through a script file outside the worktree (readable by the
