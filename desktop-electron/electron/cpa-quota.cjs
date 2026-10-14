@@ -25,20 +25,30 @@ function windowOf(value) {
   return { usedPercent: Math.max(0, Math.min(100, used)), resetsAt: finite(value.reset_at_ms), windowSeconds: finite(value.window_seconds) };
 }
 
+/** A quota check's error in words: a sign-in CPA can no longer use reads as such. */
+function errorText(value) {
+  const message = text(value, 200);
+  if (!message) return null;
+  return /unauthori[sz]ed|\b40[12]\b|invalidated|expired/i.test(message)
+    ? "Signed out: this account's sign-in has expired. Sign in to it again in CPA." : message;
+}
+
 /** An item of CPA Helper's codex/accounts, as the meter shows it. */
 function accountOf(item) {
   const quota = item?.quota && typeof item.quota === "object" ? item.quota : {};
+  // Only a quota check knows the plan; before one, CPA Helper reports the credential's type ("oauth").
+  const plan = text(quota.plan, 40);
   return {
     id: text(String(item?.auth_index ?? ""), 64),
     label: text(item?.email) || text(item?.label) || text(item?.account) || text(item?.name) || "Codex account",
-    plan: text(quota.plan, 40) || text(item?.plan, 40) || null,
+    plan: plan && !/^(unknown|oauth|api[_-]?key)$/i.test(plan) ? plan : null,
     disabled: item?.disabled === true,
     // CPA Helper's keeper lowers an account at its limit to priority -1 until it recovers.
     paused: Number(item?.priority) === -1,
     session: windowOf(quota.primary),
     week: windowOf(quota.secondary),
     checkedAt: finite(quota.checked_ms) || null,
-    error: text(quota.error, 200) || (item?.unavailable ? text(item?.status_message, 200) || "Unavailable" : "") || null,
+    error: errorText(quota.error) || (item?.unavailable ? errorText(item?.status_message) || "Unavailable" : null),
   };
 }
 
