@@ -20,6 +20,7 @@ import {
 } from "./AgentOrchestratorRoleEditor";
 import "./agent-orchestrator.css";
 import "./codex-chat.css";
+import "./claude-theme.css";
 import { onAoPush, pageHidden } from "./page-visibility";
 
 type Clause = { id: string; title: string; detail?: string; state: string };
