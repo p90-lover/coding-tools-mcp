@@ -31,6 +31,8 @@ function mount(props) {
       return [states[at], (value) => { states[at] = typeof value === "function" ? value(states[at]) : value; }];
     },
     useMemo: (calculate) => calculate(), useEffect() {}, useRef: (initial) => ({ current: initial }),
+    // Every render here is a fresh one, so a memoized component renders as itself.
+    memo: (component) => component,
   };
   // Function components render inline, so their output (work lines, steps, actions) is visible.
   const jsx = (type, props) => typeof type === "function" ? type(props || {}) : ({ type, props: props || {} });
