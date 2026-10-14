@@ -60,8 +60,9 @@ function readState(filePath) {
     if (Object.hasOwn(state, "chatAgentTools") && typeof state.chatAgentTools !== "boolean") delete state.chatAgentTools;
     // Their screen capture and computer control only when this is true; absent means off.
     if (Object.hasOwn(state, "chatAgentDesktopTools") && state.chatAgentDesktopTools !== true) delete state.chatAgentDesktopTools;
-    // Their commands through the app's terminal only when this is true; absent means off.
-    if (Object.hasOwn(state, "chatAgentTerminalTools") && state.chatAgentTerminalTools !== true) delete state.chatAgentTerminalTools;
+    // Their commands through the app's terminal: false is off; absent is on when Codex's sandbox runs
+    // them, otherwise off; true is on (unsandboxed, each command asked, when there is no sandbox).
+    if (Object.hasOwn(state, "chatAgentTerminalTools") && typeof state.chatAgentTerminalTools !== "boolean") delete state.chatAgentTerminalTools;
     // Their own preview browser unless this is false; absent means on.
     if (Object.hasOwn(state, "chatAgentPreviewTools") && typeof state.chatAgentPreviewTools !== "boolean") delete state.chatAgentPreviewTools;
     if (state.browserInteractionMode !== "automatic" && state.browserInteractionMode !== "manual") {

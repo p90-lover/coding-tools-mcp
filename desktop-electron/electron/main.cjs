@@ -1030,6 +1030,7 @@ function launcherSnapshotPayload(stateStore, logger) {
       manual: "Codex Zero Risk",
     },
     mcpCredentialsConfigured: runtimeHost?.mcpCredentialsConfigured?.() ?? false,
+    chatAgentSandbox: safeRead("launcher.chat_sandbox_snapshot", () => chatAgentTools?.sandboxed?.() ?? false, false, logger),
     logs: logger.recent(),
     urls: { github: GITHUB_URL, x: X_URL, connectors: CONNECTORS_URL, tunnels: TUNNELS_URL, keys: KEYS_URL },
     platform: process.platform,
@@ -2676,8 +2677,14 @@ async function start() {
         blockedPorts: appServicePorts,
         logger,
       });
+      // Agents' commands run in Codex's Windows sandbox when it is installed (its unelevated mode:
+      // the worktree and package caches writable, the network on), as Codex runs its own.
+      const { createSandboxRunner } = backendBundles.requireModule(backend, "chat-sandbox.cjs");
+      const chatSandbox = createSandboxRunner({ logger });
+      app.on("will-quit", () => chatSandbox.killAll());
       chatAgentTools = createChatAgentTools({
         previews: chatPreviews,
+        sandbox: chatSandbox,
         // "Approve for me" runs the same routine project commands through the app's terminal as it
         // allows from the agent's own shell (the workflow's list), without a dialog each.
         routineCommand: (command) => agentOrchestratorWorkflow.routineCommand(command),
@@ -2697,7 +2704,12 @@ async function start() {
         // in the focused app window.
         confirm: confirmAoAction,
         enabled: () => stateStore.read().chatAgentTools !== false,
-        terminalEnabled: () => stateStore.read().chatAgentTerminalTools === true,
+        // On by default when its commands run sandboxed; without the sandbox only when the user
+        // turned it on (each command then asks); off whenever the user turned it off.
+        terminalEnabled: () => {
+          const choice = stateStore.read().chatAgentTerminalTools;
+          return choice === true || (choice !== false && chatSandbox.available());
+        },
         desktopEnabled: () => stateStore.read().chatAgentDesktopTools === true,
         version: app.getVersion(),
         logger,

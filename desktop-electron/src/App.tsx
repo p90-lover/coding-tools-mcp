@@ -2201,7 +2201,8 @@ function SettingsSurface({
         </SettingRow>
         <SettingRow body={copy.chatAgentTerminalToolsBody} label={copy.chatAgentTerminalTools}>
           <Switch
-            checked={snapshot.state.chatAgentTools !== false && snapshot.state.chatAgentTerminalTools === true}
+            checked={snapshot.state.chatAgentTools !== false && (snapshot.state.chatAgentTerminalTools === true
+              || (snapshot.state.chatAgentTerminalTools !== false && snapshot.chatAgentSandbox === true))}
             disabled={snapshot.state.chatAgentTools === false}
             onChange={(checked) => void api!.setPreference("chatAgentTerminalTools", checked)
               .then(updateState)

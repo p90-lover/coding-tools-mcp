@@ -639,14 +639,19 @@ function scopeArguments(name, args, root) {
   return scoped;
 }
 
-function instructionsFor(groups, { bypass = false } = {}) {
+function instructionsFor(groups, { bypass = false, sandboxed = false } = {}) {
   return "Coding Tools tools for this chat's own git worktree: read_file, list_dir, search_text and apply_patch "
     + "for files; git_* for this worktree's history. Paths are relative to the worktree root and paths outside it are refused. "
     + (groups.includes("terminal")
-      ? "exec_command, write_stdin, read_output and kill_command run commands through the app's terminal. A command "
-        + "starts in the worktree but is NOT confined to it: it can read and write anything the user's account can. "
-        + (bypass ? "" : "The user confirms each command and each input sent to one, shown in full: a command with its "
-          + "input must fit about 20 short lines, so write anything longer to a script file with apply_patch and run that. ")
+      ? sandboxed
+        ? "exec_command, write_stdin, read_output and kill_command run commands in a sandbox (Codex's Windows sandbox), "
+          + "through cmd.exe in the worktree: a command may write only inside this worktree and the package managers' caches, "
+          + "reads the rest of the machine, and has the network (npm/pip installs work). No confirmation is needed. Use it "
+          + "for installs, builds, tests and dev servers instead of a shell of your own, so the user sees them in the chat. "
+        : "exec_command, write_stdin, read_output and kill_command run commands through the app's terminal. A command "
+          + "starts in the worktree but is NOT confined to it: it can read and write anything the user's account can. "
+          + (bypass ? "" : "The user confirms each command and each input sent to one, shown in full: a command with its "
+            + "input must fit about 20 short lines, so write anything longer to a script file with apply_patch and run that. ")
       : "")
     + "When the workspace policy needs approval for an operation, the user is asked in the app; never pass confirm "
     + "or approval_token yourself (they are ignored). "
@@ -707,6 +712,8 @@ function createChatAgentTools({
   previews = null, previewEnabled = () => true,
   // Why a command line is a routine project command "Approve for me" may run unasked, or null.
   routineCommand = () => null,
+  // Runs the terminal's commands in Codex's Windows sandbox (chat-sandbox.cjs) when it is installed.
+  sandbox = null,
   // Where the leases (credential hashes, never credentials) and the port are kept across restarts.
   statePath = null,
   worktreesRoot = null,
@@ -1094,6 +1101,12 @@ function createChatAgentTools({
       if (answer !== true) return answer;
       entry.controlAllowed = true;
     }
+    // Codex's sandbox is the boundary for the terminal's commands when it is installed: they run
+    // there, unasked. A command the sandbox did not start (the user's own terminal) goes on below.
+    if (group === "terminal" && sandboxed()) {
+      const handled = await runSandboxed(entry, name, args, root);
+      if (handled) return handled;
+    }
     let confirmed = false;
     if (group === "terminal") {
       const answer = await confirmTerminal(entry, name, args, root);
@@ -1131,6 +1144,58 @@ function createChatAgentTools({
       }
     } else if (entry.commands.has(id) && ["write_stdin", "kill_command", "kill_session"].includes(name)) {
       Object.assign(entry.commands.get(id), status);
+    }
+  }
+
+  /** Whether the terminal's commands run in Codex's Windows sandbox (it is installed). */
+  const sandboxed = () => { try { return Boolean(sandbox?.available()); } catch { return false; } };
+  const yieldOf = (value, fallback) => (Number.isFinite(value) ? Math.max(0, Math.min(30_000, value)) : fallback);
+
+  /**
+   * A terminal tool call run in the sandbox: exec_command always; write_stdin, read_output and
+   * kill_command for a command the sandbox started. Null for anything else (the user's own
+   * terminal, run by headless). Results are shaped like headless's, so the agent sees no difference.
+   */
+  async function runSandboxed(entry, name, args, root) {
+    try {
+      if (name === "check_exec_environment") {
+        const described = sandbox.describe();
+        return toolResult(name, args, { ok: true, sandbox: "codex-windows-unelevated", sandbox_enforced: true, shell: "cmd.exe",
+          writable_roots: [root.path, ...(described?.writableCaches ?? [])], network: true, confirmation: "none" });
+      }
+      if (name === "exec_command") {
+        const workdir = typeof args.workdir === "string" ? args.workdir : typeof args.cwd === "string" ? args.cwd : ".";
+        const id = sandbox.start({ cmd: String(args.cmd ?? ""), cwd: path.resolve(root.path, workdir), writable: root.path,
+          stdin: typeof args.stdin === "string" ? args.stdin : "" });
+        await sandbox.wait(id, yieldOf(args.yield_time_ms, 1000));
+        const result = toolResult(name, args, sandbox.snapshot(id, args.max_output_bytes ?? 65_536));
+        track(entry, name, args, result);
+        const command = entry.commands.get(id);
+        if (command) command.sandboxed = true;
+        return result;
+      }
+      const reference = name === "read_output" && typeof args.output_ref === "string" ? args.output_ref.split(":") : null;
+      const id = reference ? reference[1] : typeof args.command_id === "string" ? args.command_id : args.session_id;
+      if (typeof id !== "string" || !sandbox.owns(id)) return null;
+      if (name === "read_output") {
+        const stream = reference[2] === "stderr" ? "stderr" : "stdout";
+        return toolResult(name, args, sandbox.read(id, stream, args.offset ?? 0, args.limit ?? 4096));
+      }
+      if (name === "write_stdin") {
+        if (typeof args.chars === "string" && args.chars) sandbox.write(id, args.chars);
+        await sandbox.wait(id, yieldOf(args.yield_time_ms, 1000));
+        const result = toolResult(name, args, sandbox.snapshot(id, args.max_output_bytes ?? 65_536));
+        track(entry, name, args, result);
+        return result;
+      }
+      if (name === "kill_command" || name === "kill_session") {
+        const result = toolResult(name, args, { ...await sandbox.kill(id), killed: true });
+        track(entry, name, args, result);
+        return result;
+      }
+      return null;
+    } catch (error) {
+      return failedCall(errorMessage(error));
     }
   }
 
@@ -1186,7 +1251,7 @@ function createChatAgentTools({
             protocolVersion: PROTOCOL_VERSIONS.includes(requested) ? requested : PROTOCOL_VERSIONS[0],
             capabilities: { tools: { listChanged: false } },
             serverInfo: { name: SERVER_NAME, title: "Coding Tools", version: String(version) },
-            instructions: instructionsFor(entry.groups.filter((group) => allowed(entry, group)), { bypass: entry.bypass }),
+            instructions: instructionsFor(entry.groups.filter((group) => allowed(entry, group)), { bypass: entry.bypass, sandboxed: sandboxed() }),
           } };
         }
         case "ping": return { jsonrpc: "2.0", id, result: {} };
@@ -1344,6 +1409,17 @@ function createChatAgentTools({
 
   /** One read of a command's output from `offset`, with whether it still runs. */
   async function readCommand(entry, command, stream, offset) {
+    if (command.sandboxed && sandbox?.owns(command.id)) {
+      const value = sandbox.read(command.id, stream, Math.max(0, Number(offset) || 0), MAX_PANE_READ_BYTES);
+      command.status = value.termination_reason === "killed" ? "killed" : value.status;
+      command.exitCode = Number.isInteger(value.exit_code) ? value.exit_code : command.exitCode;
+      return { content: value.content, nextOffset: value.next_read_offset, gap: value.output_gap, status: command.status, exitCode: command.exitCode };
+    }
+    if (command.sandboxed) {
+      // The app restarted since: the sandboxed command ended with it.
+      if (command.status === "running") command.status = "gone";
+      return { content: "", nextOffset: Math.max(0, Number(offset) || 0), gap: false, status: command.status, exitCode: command.exitCode };
+    }
     const root = await rootOf(entry);
     const read = await invoke(entry, "read_output", {
       output_ref: `command:${command.id}:${stream}`, offset: Math.max(0, Number(offset) || 0), limit: MAX_PANE_READ_BYTES,
@@ -1477,6 +1553,11 @@ function createChatAgentTools({
       const entry = paneEntry(sessionId, workspaceId);
       if (!entry) throw new Error("That chat agent's session has ended");
       const command = commandOf(entry, commandId);
+      if (command.sandboxed) {
+        if (sandbox?.owns(command.id)) await sandbox.kill(command.id);
+        command.status = "killed";
+        return { ok: true, status: command.status };
+      }
       const value = await invokeAsUser(entry, "kill_command", { command_id: command.id, wait_ms: 3000 });
       command.status = value?.status === "terminating" ? "running" : "killed";
       return { ok: true, status: command.status };
@@ -1487,6 +1568,11 @@ function createChatAgentTools({
       if (!entry) throw new Error("That chat agent's session has ended");
       if (typeof text !== "string" || !text || text.length > 4000) throw new Error("Type 1 to 4000 characters");
       const command = commandOf(entry, commandId);
+      if (command.sandboxed) {
+        if (!sandbox?.owns(command.id)) throw new Error("That command is no longer running");
+        sandbox.write(command.id, text);
+        return { ok: true };
+      }
       await invokeAsUser(entry, "write_stdin", { command_id: command.id, chars: text, yield_time_ms: 200, max_output_bytes: 0 });
       return { ok: true };
     },
@@ -1561,6 +1647,8 @@ function createChatAgentTools({
     },
     /** The port this server listens on (0 before it does), so a preview never opens it. */
     servicePort() { return port; },
+    /** Whether agents' commands run in Codex's sandbox (the terminal tools then default on). */
+    sandboxed,
     listen,
     sweep,
     async close() {
