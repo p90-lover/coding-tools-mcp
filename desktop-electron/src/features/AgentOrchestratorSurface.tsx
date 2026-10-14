@@ -405,6 +405,9 @@ export function aoChatExecution(mode: "single" | "team", route: AoRoute, teams: 
 
 const NATIVE_ENTRY: AoHarness = { id: NATIVE_HARNESS, label: "Native Codex", runnable: true, installed: true };
 
+/** A project folder's git kind for the chat list's labels; one stable function, so each folder is read once. */
+const readProjectGit = (folder: string) => window.codexWebLauncher?.projectGit?.(folder) ?? Promise.resolve(null);
+
 export function AgentOrchestratorSurface({ language, setError }: {
   language: Language;
   setError: (error: string | null) => void;
@@ -1661,7 +1664,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
           newChatIn: (id) => { if (id === workspaceId) startNewChat(); else { setChatSeed({ key: crypto.randomUUID(), workspaceId: id, title: "", text: "" }); chooseWorkspace(id); } },
           editProject: (id) => setProjectEdit({ id, step: "edit" }),
           removeProject: (id) => setProjectEdit({ id, step: "remove" }) }}
-        projectRemote={(folder) => window.codexWebLauncher?.projectRemote?.(folder) ?? Promise.resolve(null)} />
+        projectRemote={(folder) => window.codexWebLauncher?.projectRemote?.(folder) ?? Promise.resolve(null)}
+        projectGit={readProjectGit} />
       <div className="ao-main">
       <div className="ao-dragstrip" aria-hidden="true" />
       {view !== "chat" ? <header className="ao-workspace-head">

@@ -728,6 +728,16 @@ export interface KeysmithSelectedFile {
   sha256: string;
 }
 
+/** A project folder in git (git-remote.cjs readGitInfo). */
+export type ProjectGit = {
+  kind: "repo" | "worktree" | "inside" | "none" | "missing";
+  /** The repository's root (for "inside", the repository the folder is in). */
+  root: string | null;
+  /** For a worktree, the repository it belongs to. */
+  mainRepo: string | null;
+  branch: string | null;
+};
+
 export interface LauncherApi {
   snapshot(): Promise<LauncherSnapshot>;
   gptBrowserStatus(): Promise<GptBrowserStatus>;
@@ -783,6 +793,8 @@ export interface LauncherApi {
   /** A project folder's git origin as "owner/repo", or null. */
   projectRemote?(folder: string): Promise<string | null>;
   projectBranch?(folder: string): Promise<string | null>;
+  /** What a project folder is in git: a repository, a worktree of one, a folder inside one, not git, or gone. */
+  projectGit?(folder: string): Promise<ProjectGit | null>;
   /** The system folder picker; the chosen absolute path, or null when cancelled. */
   chooseFolder?(): Promise<string | null>;
   setBrowserBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<boolean>;
