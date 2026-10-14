@@ -2238,11 +2238,13 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:set-preference", (_event, key, value) => {
     const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "autoConnectExistingMcp"
-      || key === "chatAgentTools" || key === "chatAgentDesktopTools" || key === "chatAgentTerminalTools" || key === "chatAgentPreviewTools";
+      || key === "chatAgentTools" || key === "chatAgentDesktopTools" || key === "chatAgentTerminalTools" || key === "chatAgentPreviewTools"
+      || key === "confirmAgentToolRequests";
     if (!ordinary) throw new Error("Unknown preference");
-    // Consent: auto-connecting MCP, and letting chat agents see and drive the screen or run
-    // commands, are the user's.
-    if (key === "autoConnectExistingMcp" || ((key === "chatAgentDesktopTools" || key === "chatAgentTerminalTools") && value === true)) {
+    // Consent: auto-connecting MCP, letting chat agents see and drive the screen or run commands,
+    // and dropping the dialog that confirms their tool requests, are the user's.
+    if (key === "autoConnectExistingMcp" || ((key === "chatAgentDesktopTools" || key === "chatAgentTerminalTools") && value === true)
+      || (key === "confirmAgentToolRequests" && value === false)) {
       assertFocusedMainWindow(_event, true);
     }
     const state = stateStore.update({ [key]: value === true });
@@ -2600,6 +2602,26 @@ async function start() {
     });
     return answer.response === 1;
   };
+  // An agent's tool request the person answered on its card in the chat: confirmed once more in a
+  // dialog, which offers "Don't ask again". Either way the answer must come from the visible,
+  // focused window, so it is still the person's click.
+  const confirmToolRequest = async ({ message, detail }) => {
+    if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() || !mainWindow.isFocused()) {
+      throw new Error("Use the focused Coding Tools window to answer the agent's request");
+    }
+    if (stateStore.read().confirmAgentToolRequests === false) return true;
+    const answer = await dialog.showMessageBox(mainWindow, {
+      type: "warning", title: "Coding Tools: Agent Orchestrator",
+      message: String(message).slice(0, 200), detail: String(detail).slice(0, 65_536),
+      buttons: ["Cancel", "Continue"], defaultId: 0, cancelId: 0, noLink: true, textWidth: 640,
+      checkboxLabel: "Don't ask again (turn it back on in Settings)", checkboxChecked: false,
+    });
+    if (answer.response === 1 && answer.checkboxChecked === true) {
+      stateStore.update({ confirmAgentToolRequests: false });
+      logger.info("launcher.agent_tool_confirmation_off", {});
+    }
+    return answer.response === 1;
+  };
   const listHeadlessWorkspaces = async () => {
     const catalog = await headlessHost.request("/api/v1/workspaces", null, { method: "GET" });
     if (!Array.isArray(catalog.workspaces)) throw new Error("Workspace catalog is unavailable");
@@ -2834,6 +2856,7 @@ async function start() {
       resolveHarness: (selection) => resolveAoNativeConnection({ ...selection, userData: app.getPath("userData") }),
       aoHarness: agentOrchestratorUpstream.harness,
       confirm: confirmAoAction,
+      confirmToolRequest,
       onRunState: (update) => {
         mcpEventMonitor.runState(update);
         aoPulse.run(update.workspaceId, update.runId);

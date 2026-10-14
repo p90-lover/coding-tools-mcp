@@ -2217,6 +2217,14 @@ function SettingsSurface({
               .catch((cause) => setError(messageOf(cause)))}
           />
         </SettingRow>
+        <SettingRow body={copy.confirmAgentToolRequestsBody} label={copy.confirmAgentToolRequests}>
+          <Switch
+            checked={snapshot.state.confirmAgentToolRequests !== false}
+            onChange={(checked) => void api!.setPreference("confirmAgentToolRequests", checked)
+              .then(updateState)
+              .catch((cause) => setError(messageOf(cause)))}
+          />
+        </SettingRow>
         <SettingRow body={copy.chatAgentDesktopToolsBody} label={copy.chatAgentDesktopTools}>
           <Switch
             checked={snapshot.state.chatAgentTools !== false && snapshot.state.chatAgentDesktopTools === true}
