@@ -105,6 +105,17 @@ test("effort and context window carry over only where the new route applies them
   assert.equal(editor.tokensLabel(1000000), "1M");
 });
 
+test("a context window is typed freely (272000, 272,000, 272k, 1.5m) and shown so it reads back exactly", () => {
+  for (const [typed, tokens] of [["272000", 272000], ["272,000", 272000], ["272k", 272000], ["272 K", 272000], ["1.5m", 1500000], ["1M", 1000000], ["128_000", 128000]]) {
+    assert.equal(editor.parseTokens(typed), tokens, typed);
+  }
+  for (const typed of ["", "abc", "-5", "1e6", "12kk", "0"]) assert.equal(editor.parseTokens(typed), null, `"${typed}" is not a window`);
+  for (const tokens of [32000, 128000, 200000, 272000, 872000, 1000000, 2000000, 272500, 4096]) {
+    assert.equal(editor.parseTokens(editor.contextText(tokens)), tokens, `${tokens} round-trips through what the field shows`);
+  }
+  assert.equal(editor.contextText(128000), "128k", "decimal, unlike tokensLabel's binary 125K");
+});
+
 test("every card describes how it runs, with a custom role in place of the built-in one", () => {
   const route = { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web", model: "chatgpt-web/high", permission_profile: ":read-only", effort: "xhigh", context_window: 1048576 };
   assert.equal(editor.cardMeta({ role: "planner", route, settings: {} }, []), "Native Codex · WebGPT High · effort xhigh · 1M context · Orchestrator");

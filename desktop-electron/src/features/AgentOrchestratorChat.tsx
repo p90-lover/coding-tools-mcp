@@ -406,7 +406,9 @@ export function AgentOrchestratorChat({
   const agentSessionIds = useMemo(() => agentSessions.map((session) => session.id), [agentSessions]);
   useWorkbenchAutoOpen(selectedTaskId ? agentSessionIds : [], workbench !== null, (tab) => setWorkbench(tab), projectId);
   useEffect(() => { setWorkbench(null); }, [selectedTaskId]);
-  useEffect(() => { if (atBottom) scroller.current?.scrollTo({ top: scroller.current.scrollHeight }); }, [turns.length, stepCount, atBottom]);
+  // Following new output jumps, even under a theme's smooth scrolling: an animated follow lags the
+  // stream and flashes the ↓ button. Only that button scrolls smoothly.
+  useEffect(() => { if (atBottom) scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "instant" }); }, [turns.length, stepCount, atBottom]);
   // The cards panel can be dragged wider for more board room; the width is kept per viewer.
   const [cardsWidth, setCardsWidth] = useState<number | null>(() => {
     try { const value = Number(localStorage.getItem(CARDS_WIDTH_KEY)); return Number.isFinite(value) && value >= 280 ? value : null; } catch { return null; }

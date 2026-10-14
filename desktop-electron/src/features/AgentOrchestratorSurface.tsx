@@ -225,6 +225,16 @@ function FloatingSheet({ stage, title, onClose, children, anchor, className = ""
   </div>;
 }
 
+/**
+ * A new chat's single-model route: the default worker in the project, set to "Approve for me", so
+ * routine commands run and anything else is judged by the command reviewer (codex-auto-review when
+ * CPA can reach it), with only unclear requests coming to the person.
+ */
+function newChatRoute(): AoRoute {
+  return { ...workerRoute(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL),
+    native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+}
+
 export async function moduleCall(operation: string, args: JsonObject = {}) {
   const outer = await getCodingToolsClient().apps.call({
     moduleId: "agent-orchestrator", operation, arguments: args,
@@ -453,8 +463,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [savedTeams, setSavedTeams] = useState<AoTeam[]>([]);
   const [composerTeamId, setComposerTeamId] = useState("");
   const [composerMode, setComposerMode] = useState<"single" | "team">("single");
-  const [singleRoute, setSingleRoute] = useState<AoRoute>(() => ({ ...workerRoute(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL),
-    native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" }));
+  const [singleRoute, setSingleRoute] = useState<AoRoute>(newChatRoute);
   const hydratedComposer = useRef("");
   // The New mission sheet's team choice (#254); the composer keeps its own (composerTeamId).
   const [missionTeamId, setMissionTeamId] = useState("");
@@ -941,7 +950,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     hydratedComposer.current = key;
     if (!chatMission) {
       setComposerMode("single");
-      setSingleRoute({ ...workerRoute(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL), native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" });
+      setSingleRoute(newChatRoute());
     } else if (chatMission.execution_mode === "single") {
       setComposerMode("single");
       const node = chatMission.nodes[0];

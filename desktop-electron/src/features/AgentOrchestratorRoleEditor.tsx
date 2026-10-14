@@ -87,6 +87,24 @@ export function tokensLabel(tokens: number): string {
   return tokens.toLocaleString("en-US");
 }
 
+/** A typed token count: "272000", "272,000", "200k", "1.5m" or "1M"; null when it is not one. */
+export function parseTokens(text: string): number | null {
+  const match = /^(\d+(?:\.\d+)?)\s*([km])?$/i.exec(text.replace(/[,_\s]/g, ""));
+  if (!match) return null;
+  const tokens = Math.round(Number(match[1]) * (match[2]?.toLowerCase() === "m" ? 1_000_000 : match[2] ? 1_000 : 1));
+  return Number.isSafeInteger(tokens) && tokens > 0 ? tokens : null;
+}
+
+/** A token count as the field shows it, read back exactly by parseTokens: "1M", "128k", "272,500". */
+export function contextText(tokens: number): string {
+  if (tokens % 1_000_000 === 0) return `${tokens / 1_000_000}M`;
+  if (tokens % 1_000 === 0) return `${tokens / 1_000}k`;
+  return tokens.toLocaleString("en-US");
+}
+
+/** Window sizes offered as you type, within what the model and harness allow. */
+const CONTEXT_PRESETS = [32_000, 64_000, 128_000, 200_000, 272_000, 400_000, 1_000_000, 2_000_000];
+
 const EFFORT_ORDER: string[] = [...EFFORTS];
 
 /** What a model supports, for model lists: "up to xhigh effort · 272K context". Native Codex accepts
@@ -243,19 +261,24 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
   const inRange = (tokens: number) => Boolean(context) && Number.isSafeInteger(tokens) && tokens >= context!.min && (context!.max === undefined || tokens <= context!.max);
   const typeContext = (text: string) => {
     setContextDraft(text);
-    const tokens = Math.round(Number(text));
+    const tokens = parseTokens(text);
     if (!text.trim()) { if (route.context_window !== undefined) { const next = { ...route }; delete next.context_window; onChange(next); } }
-    else if (inRange(tokens) && tokens !== route.context_window) onChange({ ...route, context_window: tokens });
+    else if (tokens !== null && inRange(tokens) && tokens !== route.context_window) onChange({ ...route, context_window: tokens });
   };
   const settleContext = () => {
     const text = contextDraft;
     setContextDraft(null);
     if (text === null || !text.trim() || !context) return;
-    const tokens = Math.round(Number(text));
-    if (!Number.isFinite(tokens)) return;
+    const tokens = parseTokens(text);
+    if (tokens === null) return;
     const settled = Math.max(context.min, context.max !== undefined ? Math.min(context.max, tokens) : tokens);
     if (settled !== route.context_window) onChange({ ...route, context_window: settled });
   };
+  // A blank window is the model's full known limit (the workflow's defaultContextWindow), or the
+  // agent's own default when the limit is unknown.
+  const fullLimit = !native && context && capability?.contextLimit ? Math.min(capability.contextLimit, context.max ?? capability.contextLimit) : null;
+  const presets = context ? CONTEXT_PRESETS.filter(tokens => inRange(tokens)) : [];
+  const presetsId = `context-presets-${harness}-${route.model}`.replace(/[^\w-]/g, "-");
   return <>
     <label>Harness<select value={harness} disabled={disabled || isWebModel(route.model)} title={isWebModel(route.model) ? "WebGPT requires Native Codex" : undefined} onChange={event => {
       // Start each harness on an explicit model; an agent without a known one shows "Choose a model".
@@ -291,13 +314,17 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
         {(efforts ?? []).map(effort => <option key={effort} value={effort}>{effort}</option>)}
       </select></label>
     <label title={native ? `Context window in tokens (4,096 to ${nativeMax.toLocaleString("en-US")})` : capability?.contextReason || (context ? context.kind === "compaction" ? "Client compaction threshold in tokens, not the model context limit" : "Client context budget in tokens, not a larger provider limit" : "No verified client context override")}>Context window
-      <input type="number" min={context?.min} max={context?.max} step={1} inputMode="numeric" disabled={disabled || !context}
-        placeholder={!context ? "No verified override" : `${native ? "Model default" : context.kind === "compaction" ? "Client compaction default" : "Client default"}${context.max ? ` · up to ${tokensLabel(context.max)}` : ""}`}
-        value={contextDraft ?? route.context_window ?? ""} aria-invalid={contextDraft !== null && contextDraft.trim() !== "" && !inRange(Math.round(Number(contextDraft)))
+      {/* Typed freely: 272000, 272,000, 272k or 1m; the list offers sizes the model takes. */}
+      <input type="text" inputMode="numeric" list={presets.length ? presetsId : undefined} disabled={disabled || !context}
+        placeholder={!context ? "No verified override" : native ? "Model default"
+          : fullLimit ? `Full model limit · ${contextText(fullLimit)}` : `Agent default${context.max ? ` · up to ${contextText(context.max)}` : ""}`}
+        value={contextDraft ?? (route.context_window !== undefined ? contextText(route.context_window) : "")}
+        aria-invalid={contextDraft !== null && contextDraft.trim() !== "" && !inRange(parseTokens(contextDraft) ?? Number.NaN)
           || !native && Boolean(context) && route.context_window !== undefined && !inRange(route.context_window)}
         onChange={event => typeContext(event.target.value)}
         // Leaving the field settles a value outside the model's range to the nearest limit.
-        onBlur={settleContext} /></label>
+        onBlur={settleContext} />
+      {presets.length ? <datalist id={presetsId}>{presets.map(tokens => <option key={tokens} value={contextText(tokens)} />)}</datalist> : null}</label>
     {!native && (route.effort !== undefined || route.context_window !== undefined) ? <button type="button" className="button-secondary ao-wide"
       disabled={disabled} title="Clear requested effort and client context budget" onClick={() => {
         const next = { ...route }; delete next.effort; delete next.context_window; onChange(next);
