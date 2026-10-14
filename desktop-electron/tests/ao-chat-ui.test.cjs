@@ -108,6 +108,20 @@ test("an open chat's composer carries the context meter; a new chat's does not",
   assert.equal(fresh.includes("cx-context-meter"), false);
 });
 
+test("an answer's Markdown is parsed once per text, not on every chat re-render", () => {
+  let parses = 0;
+  const real = load("chat-markdown.ts");
+  const counted = load("ChatMarkdown.tsx", { "./chat-markdown": { ...real, parseMarkdown: (text) => { parses += 1; return real.parseMarkdown(text); } } });
+  assert.equal(counted.ChatMarkdown.$$typeof, Symbol.for("react.memo"), "skips re-rendering while its text is unchanged");
+  const text = "## Done\n\n- one `a`\n- two\n\n```js\nconst x = 1;\n```";
+  const html = renderToStaticMarkup(React.createElement(counted.ChatMarkdown, { text }));
+  assert.equal(html, renderToStaticMarkup(React.createElement(markdown.ChatMarkdown, { text })));
+  assert.match(html, /<h4><span>Done<\/span><\/h4>/);
+  assert.match(html, /<code>a<\/code>/);
+  assert.match(html, /const x = 1;/);
+  assert.equal(parses, 1);
+});
+
 test("an AO agent's question shows as a card with its options, an Other box, and Send / Skip", () => {
   const approvalUi = load("AgentOrchestratorApproval.tsx", { "./ChatMarkdown": markdown });
   const question = { nodeId: "one", approval_id: "ask", source: "ao", kind: "question", message: "Please answer the following questions.",
