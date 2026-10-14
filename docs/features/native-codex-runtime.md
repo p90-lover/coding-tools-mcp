@@ -125,3 +125,16 @@ a real code review, or acceptance of the user's live provider/ChatGPT setup.
 `exitedReviewMode` 事件的結果；原生連線及模型使用仍須於可見的本機 UI 明確啟用。
 CI 只使用隔離的本機模擬 Responses 服務，不代表付費推論、真實程式碼審查，
 或使用者的實際供應商／ChatGPT 環境已完成驗收。
+
+
+## Native desktop Auto-review selector (October 2026)
+
+The Native Codex connection panel now has an **approval reviewer** selector. Choose **Workspace** and explicitly allow model use before selecting **Codex Auto-review (Approve for me)**. The initial setting remains **Ask me for approval**. The renderer sends the selected reviewer with the connection request; the focused desktop displays the selected policy in its local consent dialog. For workspace connections it forwards `approval_policy=on-request` and `approvals_reviewer=user|auto_review` to the existing native App Server bridge. Read-only connections retain native defaults.
+
+The bridge verifies the native runtime's effective permission profile, approval policy, and reviewer before sending a model turn. If the runtime does not support or acknowledge the exact selection, the operation fails closed. An **Active in native runtime** indicator is shown only when the status reports both `on-request` and `auto_review`; a saved UI choice alone is not proof of activation. This does **not** remove OS sandbox restrictions, local consent, or managed account policies, and some actions may still require approval. Actual availability requires validation with the installed native Codex runtime.
+
+### 繁體中文
+
+原生 Codex 連線面板現提供 **Codex 審批方式**，可選「由使用者審批」或「Codex 自動審批（Approve for me）」。必須選擇工作區模式並明確授權模型使用，才可選擇自動審批；預設仍為使用者審批。本機視窗會列明審批設定供確認；工作區連線會把 `on-request` 與 `auto_review` 傳送到原生 App Server。唯讀連線維持原生預設。
+
+原生執行環境必須確認完全相同的權限設定，否則系統會拒絕執行。只有狀態回報確實為 `on-request` 與 `auto_review`，畫面才顯示「原生運作中」。這功能不會繞過作業系統沙箱、本機同意流程或管理政策；某些操作仍可能需要使用者批准。正式可用性仍須在已安裝的原生 Codex 上驗證。
