@@ -120,7 +120,7 @@ test("CPA effort becomes exactly one session-local wire suffix and context is fo
     assert.equal(input.effort, undefined, "foreign model is not checked as native-agent effort");
     const untuned = await dispatched(agent, "cpa/gpt-5.5", {});
     assert.equal(untuned.gateway.model, "gpt-5.5");
-    assert.equal(Object.hasOwn(untuned, "contextWindow"), false);
+    assert.equal(untuned.contextWindow, 262144, "a card left blank starts with the model's full known window");
   }
   const own = await dispatched("codex", "own-model", { effort: "high", context_window: 131072 });
   assert.equal(own.model, "own-model");
