@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../icons";
 import { AgentOrchestratorComposerControls, type ComposerControlsProps } from "./AgentOrchestratorComposerControls";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
@@ -205,7 +205,30 @@ function AnswerWork({ step, runId, expanded, loadWork }: { step: ChatStep; runId
   </div>;
 }
 
-function WorkGroup({ turn, idle = false, expanded = false, loadWork }: { turn: ChatTurn; idle?: boolean; expanded?: boolean; loadWork?: LoadWork }) {
+type WorkGroupProps = { turn: ChatTurn; idle?: boolean; expanded?: boolean; loadWork?: LoadWork };
+
+/** A turn still being worked on: its steps change on every update, so it always re-renders. */
+const liveTurn = (turn: ChatTurn) => turn.status === "running" || turn.status === "queued"
+  || turn.steps.some((step) => step.working) || Boolean(turn.final?.working);
+const stepShape = (step: ChatStep) => [step.key, step.name, step.detail, step.state, step.verdict ?? "", step.error ?? "", step.text ?? "", step.hasWork ?? false];
+/** What a finished turn's work shows; equal shapes render the same rows. */
+const workShape = (turn: ChatTurn) => JSON.stringify([turn.runId, turn.status, turn.startedAtMs ?? 0, turn.steps.map(stepShape), turn.final ? stepShape(turn.final) : null]);
+
+/**
+ * A finished turn's work is skipped on re-render unless it changed. The chat rebuilds every turn
+ * object on each update, and re-diffing a long chat's finished work (thousands of rows) blocked
+ * the page for up to a second each time; only the live turn needs the work.
+ */
+export function sameWork(prev: WorkGroupProps, next: WorkGroupProps): boolean {
+  if (prev.idle !== next.idle || prev.expanded !== next.expanded || prev.loadWork !== next.loadWork) return false;
+  if (prev.turn === next.turn) return true;
+  if (liveTurn(prev.turn) || liveTurn(next.turn)) return false;
+  return workShape(prev.turn) === workShape(next.turn);
+}
+
+const WorkGroup = memo(WorkGroupView, sameWork);
+
+function WorkGroupView({ turn, idle = false, expanded = false, loadWork }: WorkGroupProps) {
   const working = turn.steps.find((step) => step.working);
   // Live and failed work opens by itself, and finished work too when the chat shows its details
   // (single-model chats by default); a toggle on the turn itself holds over both.

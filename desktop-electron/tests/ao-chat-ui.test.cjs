@@ -127,6 +127,23 @@ test("CPA's Codex accounts' limits apply only to a model CPA serves from Codex, 
   assert.equal(chats[0].model, "cpa/gpt-5.5", "the chat passes the session's model to the meter");
 });
 
+test("a finished turn's work is skipped on re-render unless it changed; a live turn always re-renders", () => {
+  const step = (over = {}) => ({ key: "r:a", nodeId: "a", role: "worker", name: "Builder", detail: "m", state: "finished", text: "done", hasWork: true, ...over });
+  const turn = (over = {}) => ({ key: "r", runId: "r", steps: [step()], status: "done", solo: false, startedAtMs: 1, ...over });
+  const props = (over = {}) => ({ turn: turn(), idle: false, expanded: false, loadWork: undefined, ...over });
+  // The chat rebuilds each turn object on every update: an equal finished turn is the same work.
+  assert.equal(ui.sameWork(props(), props()), true);
+  assert.equal(ui.sameWork(props(), props({ turn: turn({ steps: [step({ text: "done, edited" })] }) })), false, "its text changed");
+  assert.equal(ui.sameWork(props(), props({ turn: turn({ steps: [step(), step({ key: "r:b" })] }) })), false, "a step was added");
+  assert.equal(ui.sameWork(props(), props({ turn: turn({ steps: [step({ verdict: "APPROVED" })] }) })), false, "a verdict arrived");
+  assert.equal(ui.sameWork(props(), props({ expanded: true })), false, "details shown");
+  assert.equal(ui.sameWork(props(), props({ loadWork: async () => [] })), false);
+  const live = props({ turn: turn({ status: "running", steps: [step({ state: "running", working: { detail: "running 3s", stalled: false } })] }) });
+  assert.equal(ui.sameWork(live, { ...live, turn: { ...live.turn } }), false, "a live turn re-renders on every update");
+  const same = props();
+  assert.equal(ui.sameWork(same, same), true);
+});
+
 test("an answer's Markdown is parsed once per text, not on every chat re-render", () => {
   let parses = 0;
   const real = load("chat-markdown.ts");
