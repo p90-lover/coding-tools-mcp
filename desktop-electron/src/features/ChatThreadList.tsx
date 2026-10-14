@@ -10,6 +10,27 @@ const STATUS_LABEL: Record<ChatStatus, string> = {
 
 export type ThreadWorkspace = { id: string; name: string; path?: string };
 
+/** A project folder in git (main process readGitInfo): a repository, a worktree of one, a folder inside one, not git, or gone. */
+export type ThreadProjectGit = { kind: "repo" | "worktree" | "inside" | "none" | "missing"; root: string | null; mainRepo: string | null; branch: string | null };
+
+/**
+ * A project's git label, as Claude Code tells a repository from its worktrees: a short tag for its
+ * row (none for a repository's root, the usual case) and a line for its card. Agent chats work in
+ * a worktree of the project's repository, so a folder that is not a repository's root is flagged.
+ */
+export function projectGitLabel(git: ThreadProjectGit | null | undefined): { tag: string | null; line: string; warn: boolean } | null {
+  if (!git) return null;
+  const on = git.branch ? ` · ${git.branch}` : "";
+  switch (git.kind) {
+    case "repo": return { tag: null, line: `Git repository${on}`, warn: false };
+    case "worktree": return { tag: "worktree", line: `Worktree of ${git.mainRepo ?? "another repository"}${on}`, warn: false };
+    case "inside": return { tag: "subfolder", line: `A folder inside the repository ${git.root ?? ""}${on}. Agent chats need the repository's root folder.`, warn: true };
+    case "none": return { tag: "not git", line: "Not a git repository. Agent chats need a project whose folder is a repository's root.", warn: true };
+    case "missing": return { tag: "missing", line: "This folder no longer exists.", warn: true };
+    default: return null;
+  }
+}
+
 /** Everything a thread list action does; each one is a real operation of the surface. */
 export type ThreadActions = {
   select: (taskId: string) => void;
@@ -68,6 +89,8 @@ export type ThreadListProps = {
   actions: ThreadActions;
   /** A project folder's git remote as "owner/repo" (for the project card), when the app can tell. */
   projectRemote?: (folder: string) => Promise<string | null>;
+  /** What each project folder is in git, for its row's label (read when the list shows it). */
+  projectGit?: (folder: string) => Promise<ThreadProjectGit | null>;
 };
 
 const SHORTCUTS = { rename: "Alt+Ctrl+R", pin: "Alt+Ctrl+P", unread: "Ctrl+Shift+U", archive: "Ctrl+Shift+A" };
@@ -140,6 +163,18 @@ export function ChatThreadList(props: ThreadListProps) {
   // on the row or the card (it has a pin toggle and Edit project), closed shortly after leaving.
   const [projectCard, setProjectCard] = useState<{ item: ThreadWorkspace; top: number; left: number } | null>(null);
   const [remotes, setRemotes] = useState<Record<string, string | null>>({});
+  // Each project folder's git kind, read once per folder while the list shows it.
+  const [gits, setGits] = useState<Record<string, ThreadProjectGit | null>>({});
+  const { projectGit } = props;
+  const gitFolders = workspaces.map((item) => item.path).filter((folder): folder is string => Boolean(folder)).join("\n");
+  useEffect(() => {
+    if (!projectGit || !gitFolders) return undefined;
+    let live = true;
+    for (const folder of gitFolders.split("\n")) {
+      void projectGit(folder).then((git) => { if (live) setGits((current) => ({ ...current, [folder]: git })); }, () => undefined);
+    }
+    return () => { live = false; };
+  }, [projectGit, gitFolders]);
   const cardTimer = useRef<number | undefined>(undefined);
   const hoverProject = (item: ThreadWorkspace, row: HTMLElement) => {
     window.clearTimeout(cardTimer.current);
@@ -419,12 +454,14 @@ export function ChatThreadList(props: ThreadListProps) {
           <ul className="cx-projects">
             {projectOrder.map((item) => {
               const open = item.id === workspaceId && !collapsed.has(item.id);
+              const git = projectGitLabel(item.path ? gits[item.path] : null);
               return <li key={item.id}>
                 <div className="cx-project-row" onMouseEnter={(event) => hoverProject(item, event.currentTarget)} onMouseLeave={leaveProject}>
                   <button type="button" className="cx-project" aria-expanded={open}
                     onClick={() => clickProject(item.id)} onContextMenu={(event) => openMenu(event, projectMenu(item), item.name)}>
                     <ChatGlyph name="folder" size={15} />
                     <span className="cx-thread-title">{item.name}</span>
+                    {git?.tag ? <span className={`cx-project-tag${git.warn ? " is-warn" : ""}`} title={git.line}>{git.tag}</span> : null}
                     {props.pinnedProjects.includes(item.id) ? <span className="cx-project-pin" aria-label="Pinned project">📌</span> : null}
                   </button>
                   {/* Codex's project row actions: its menu and a new chat in this project. */}
@@ -486,6 +523,10 @@ export function ChatThreadList(props: ThreadListProps) {
           {isOpen ? <span className="cx-project-card-line"><span className={`cx-thread-dot status-${active ? "running" : "done"}`} aria-hidden="true" />
             {chats.length} {chats.length === 1 ? "task" : "tasks"} · {active} active</span> : null}
           {remote ? <span className="cx-project-card-line"><ChatGlyph name="repo" size={13} />{remote}</span> : null}
+          {(() => {
+            const git = projectGitLabel(item.path ? gits[item.path] : null);
+            return git ? <span className={`cx-project-card-line is-git${git.warn ? " is-warn" : ""}`}><ChatGlyph name="repo" size={13} />{git.line}</span> : null;
+          })()}
           {item.path ? <span className="cx-project-card-line is-path"><ChatGlyph name="folder" size={13} />{item.path}</span> : null}
           <hr />
           <button type="button" className="cx-project-card-action" onClick={() => { setProjectCard(null); actions.editProject(item.id); }}>

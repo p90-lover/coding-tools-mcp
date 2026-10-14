@@ -42,4 +42,34 @@ async function readBranch(folder, options) {
   return name && name !== "HEAD" && /^[\w./-]{1,200}$/.test(name) ? name : null;
 }
 
-module.exports = { readBranch, readRemote, repoSlug };
+const samePath = (left, right) => {
+  const norm = (value) => path.resolve(value).replace(/[\\/]+$/, "");
+  return process.platform === "win32" ? norm(left).toLowerCase() === norm(right).toLowerCase() : norm(left) === norm(right);
+};
+
+/**
+ * What a project folder is in git, as Claude Code tells a project's repo from its worktrees:
+ * "repo" (the folder is a repository's root), "worktree" (a linked worktree; `mainRepo` is the
+ * repository it belongs to), "inside" (a folder inside the repository at `root`), "none" (not in
+ * a git repository) or "missing" (the folder is gone). `branch` is the checked-out branch, null
+ * when detached. One read-only `git rev-parse`; nothing is changed.
+ */
+async function readGitInfo(folder, options) {
+  if (typeof folder !== "string" || folder.length > 4096 || !path.isAbsolute(folder)) return null;
+  const local = folder.replace(/^\\\\\?\\/, "");
+  if (!fs.statSync(local, { throwIfNoEntry: false })?.isDirectory()) return { kind: "missing", root: null, mainRepo: null, branch: null };
+  const output = await gitOutput(local, ["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-dir", "--git-common-dir", "--abbrev-ref", "HEAD"], options);
+  const [root, gitDir, commonDir, head] = (output ?? "").split(/\r?\n/).map((line) => line.trim());
+  if (!root || !gitDir || !commonDir) return { kind: "none", root: null, mainRepo: null, branch: null };
+  const branch = head && head !== "HEAD" && /^[\w./-]{1,200}$/.test(head) ? head : null;
+  const toNative = (value) => path.resolve(value);
+  if (!samePath(gitDir, commonDir)) {
+    // A linked worktree: its git dir is <main>/.git/worktrees/<name>; the main checkout holds <main>/.git.
+    const common = toNative(commonDir);
+    const mainRepo = path.basename(common).toLowerCase() === ".git" ? path.dirname(common) : common;
+    return { kind: "worktree", root: toNative(root), mainRepo, branch };
+  }
+  return { kind: samePath(root, local) ? "repo" : "inside", root: toNative(root), mainRepo: null, branch };
+}
+
+module.exports = { readBranch, readGitInfo, readRemote, repoSlug };

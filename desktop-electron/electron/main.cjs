@@ -28,7 +28,7 @@ const { createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatg
 const { createGptBrowserHost, cleanUserAgent } = require("./gpt-browser.cjs");
 const { createEmailHost } = require("./email-host.cjs");
 const { createChatWindows } = require("./chat-windows.cjs");
-const { readBranch, readRemote } = require("./git-remote.cjs");
+const { readBranch, readGitInfo, readRemote } = require("./git-remote.cjs");
 const { boundedQuitStep } = require("./quit-steps.cjs");
 const { installKeysmithIpc } = require("./keysmith-ipc.cjs");
 const { parseMessage, sanitizeHtml } = require("./email-mime.cjs");
@@ -1487,6 +1487,12 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:project-branch", async (event, folder) => {
     assertFocusedMainWindow(event, false);
     return readBranch(folder);
+  });
+  // What each project's folder is in git (a repository, a worktree of one, a folder inside one,
+  // not git at all, or gone), for the chat list's project labels. Read-only.
+  handle("launcher:project-git", async (event, folder) => {
+    assertFocusedMainWindow(event, false);
+    return readGitInfo(folder);
   });
 
   // "Open in new window" for a Mission chat. Only the main window sends content; the chat

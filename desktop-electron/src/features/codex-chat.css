@@ -28,6 +28,10 @@
 .cx-project svg { flex: 0 0 auto; color: var(--ao-muted); transition: transform var(--duration-micro, 140ms); }
 .cx-project svg.is-open { transform: rotate(90deg); }
 .cx-project-pin { margin-left: auto; font-size: 10px; opacity: .7; }
+/* A project folder's git label ("worktree", "not git"): quiet, amber when chats can't use the folder. */
+.cx-project-tag { flex: none; padding: 0 5px; border: 1px solid var(--ao-line); border-radius: 4px; color: var(--ao-muted); font-size: 10px; line-height: 15px; }
+.cx-project-tag.is-warn { border-color: color-mix(in srgb, var(--ao-amber, #c98a12) 55%, transparent); color: var(--ao-amber, #c98a12); }
+.cx-project-tag + .cx-project-pin { margin-left: 4px; }
 .cx-projects > li > ul { padding-left: 10px; }
 .cx-thread-row { position: relative; display: flex; align-items: center; border-radius: 8px; }
 .cx-thread-row:hover { background: var(--cx-hover); }
@@ -70,6 +74,8 @@
 .cx-project-card-line { display: flex; align-items: flex-start; gap: 6px; color: var(--ao-muted); }
 .cx-project-card-line svg, .cx-project-card-line .cx-thread-dot { flex: 0 0 auto; margin-top: 2px; }
 .cx-project-card-line.is-path { overflow-wrap: anywhere; font-family: var(--font-mono, ui-monospace, Consolas, monospace); font-size: 11px; }
+.cx-project-card-line.is-git { overflow-wrap: anywhere; }
+.cx-project-card-line.is-warn { color: var(--ao-amber, #c98a12); }
 .cx-project-card hr { width: 100%; margin: 2px 0; border: 0; border-top: 1px solid var(--ao-line); }
 .cx-project-card-action { display: flex; align-items: center; gap: 6px; padding: 4px 2px; border: 0; background: transparent; color: var(--color-text-primary);
   font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
