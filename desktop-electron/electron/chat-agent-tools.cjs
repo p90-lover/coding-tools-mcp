@@ -32,14 +32,19 @@
 //   script) and any word mixing scripts; a call too long to show in full is refused, never
 //   cut. One prompt is open at a time across every session, and an approval given too quickly to
 //   have been read is asked again.
-// - Not a sandbox: a terminal command can still `cd` anywhere and read or change anything the
-//   user's account can, exactly as the agent's own built-in shell can. That is why the terminal is
-//   its own group, off by default, and why the user confirms every command and every input sent
-//   to one (unless the session was launched to bypass permissions).
+// - Commands: with Codex installed they run in its Windows sandbox (chat-sandbox.cjs: the worktree
+//   and package caches writable, the rest read-only). Without it a terminal command can `cd`
+//   anywhere and read or change anything the user's account can, as the agent's own shell can.
+//   Either way each command is reviewed: on "Approve for me" in Claude Code by the chat's approval
+//   reviewer before the call reaches this server (a sandboxed one is then not asked again here;
+//   Codex and OpenCode may not route MCP tool calls through approval, so they are); otherwise
+//   the user confirms every command and every input sent to one here (unless the session was
+//   launched to bypass permissions). Being sandboxed never approves a command by itself.
 //
 // Tool groups, all under Settings: "agent" (files, search, patches, git, images, plan; on by
-// default), "terminal" (exec_command, write_stdin, read_output, kill_command; off unless the user
-// opts in) and "desktop" (screen capture and computer control; off unless the user opts in).
+// default), "terminal" (exec_command, write_stdin, read_output, kill_command; on by default when
+// Codex's sandbox is installed, otherwise only when the user opts in) and "desktop" (screen
+// capture and computer control; off unless the user opts in).
 // Anything else (the default cwd, the native Codex bridge, ChatGPT history, the operation store,
 // the task board, request_permissions, sandbox and harness tools) is never offered. A tool outside
 // the enabled groups is absent from tools/list and refused on tools/call; turning a group off also
@@ -639,14 +644,23 @@ function scopeArguments(name, args, root) {
   return scoped;
 }
 
-function instructionsFor(groups, { bypass = false } = {}) {
+function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview = false } = {}) {
   return "Coding Tools tools for this chat's own git worktree: read_file, list_dir, search_text and apply_patch "
     + "for files; git_* for this worktree's history. Paths are relative to the worktree root and paths outside it are refused. "
     + (groups.includes("terminal")
-      ? "exec_command, write_stdin, read_output and kill_command run commands through the app's terminal. A command "
-        + "starts in the worktree but is NOT confined to it: it can read and write anything the user's account can. "
-        + (bypass ? "" : "The user confirms each command and each input sent to one, shown in full: a command with its "
-          + "input must fit about 20 short lines, so write anything longer to a script file with apply_patch and run that. ")
+      ? sandboxed
+        ? "exec_command, write_stdin, read_output and kill_command run commands in a sandbox (Codex's Windows sandbox), "
+          + "through cmd.exe in the worktree: a command may write only inside this worktree and the package managers' caches, "
+          + "reads the rest of the machine, and has the network (npm/pip installs work). "
+          + (bypass ? ""
+            : autoReview ? "Each command is reviewed before it runs, like any other tool request; keep each one plain and to the point. "
+            : "The user confirms each command and each input sent to one, shown in full: a command with its input must fit "
+              + "about 20 short lines, so write anything longer to a script file with apply_patch and run that. ")
+          + "Use it for installs, builds, tests and dev servers instead of a shell of your own, so the user sees them in the chat. "
+        : "exec_command, write_stdin, read_output and kill_command run commands through the app's terminal. A command "
+          + "starts in the worktree but is NOT confined to it: it can read and write anything the user's account can. "
+          + (bypass ? "" : "The user confirms each command and each input sent to one, shown in full: a command with its "
+            + "input must fit about 20 short lines, so write anything longer to a script file with apply_patch and run that. ")
       : "")
     + "When the workspace policy needs approval for an operation, the user is asked in the app; never pass confirm "
     + "or approval_token yourself (they are ignored). "
@@ -707,6 +721,8 @@ function createChatAgentTools({
   previews = null, previewEnabled = () => true,
   // Why a command line is a routine project command "Approve for me" may run unasked, or null.
   routineCommand = () => null,
+  // Runs the terminal's commands in Codex's Windows sandbox (chat-sandbox.cjs) when it is installed.
+  sandbox = null,
   // Where the leases (credential hashes, never credentials) and the port are kept across restarts.
   statePath = null,
   worktreesRoot = null,
@@ -967,7 +983,7 @@ function createChatAgentTools({
   const who = (entry) => [`Agent: ${entry.agent}\nAO session: `, { value: String(entry.aoSession), own: true }, "\n"];
 
   /** The user's confirmation of one command or one input to a command, unless the session bypasses permissions. */
-  async function confirmTerminal(entry, name, args, root) {
+  async function confirmTerminal(entry, name, args, root, { sandboxed: inSandbox = false } = {}) {
     if (entry.bypass) return false;
     if (name === "exec_command") {
       // "Approve for me": a routine project command (an install from the lockfile, the project's
@@ -978,8 +994,11 @@ function createChatAgentTools({
       if (routine) return true;
       return ask("A chat agent wants to run a command",
         dialogText([...who(entry), ...describeCall(name, args, root),
-          "\n\nThe command starts in the chat's worktree but is not confined to it:\n"
-            + "it can read and change anything your user account can. Run it once?"]),
+          inSandbox
+            ? "\n\nThe command runs in Codex's Windows sandbox: it can change only the chat's\n"
+              + "worktree and the package caches, reads the rest, and has the network. Run it once?"
+            : "\n\nThe command starts in the chat's worktree but is not confined to it:\n"
+              + "it can read and change anything your user account can. Run it once?"]),
         "The user declined this command; it was not run.", tooLongToShow(name));
     }
     // An empty write only polls the command's output; it sends nothing.
@@ -1094,6 +1113,17 @@ function createChatAgentTools({
       if (answer !== true) return answer;
       entry.controlAllowed = true;
     }
+    // With Codex's sandbox installed the terminal's commands run there, and are still reviewed:
+    // when the chat's approval reviewer has already judged this call (reviewedUpstream), the app
+    // does not ask again; otherwise the user confirms it here. Being sandboxed never approves a
+    // command by itself. A command the sandbox did not start (the user's own terminal) goes on below.
+    if (group === "terminal" && sandboxed() && sandboxRuns(name, args)) {
+      if (!entry.bypass && !reviewedUpstream(entry)) {
+        const answer = await confirmTerminal(entry, name, args, root, { sandboxed: true });
+        if (answer !== true && answer !== false) return answer;
+      }
+      return runSandboxed(entry, name, args, root);
+    }
     let confirmed = false;
     if (group === "terminal") {
       const answer = await confirmTerminal(entry, name, args, root);
@@ -1131,6 +1161,75 @@ function createChatAgentTools({
       }
     } else if (entry.commands.has(id) && ["write_stdin", "kill_command", "kill_session"].includes(name)) {
       Object.assign(entry.commands.get(id), status);
+    }
+  }
+
+  /** Whether the terminal's commands run in Codex's Windows sandbox (it is installed). */
+  const sandboxed = () => { try { return Boolean(sandbox?.available()); } catch { return false; } };
+  /**
+   * Whether every call this session makes to these tools reaches the chat's approval reviewer
+   * before it gets here: "Approve for me" on Claude Code, which raises a permission request for
+   * each MCP tool call under accept-edits. Codex's approval policy and OpenCode's MCP defaults
+   * may let a tool call through unreviewed, so their sessions keep the app's own dialog.
+   */
+  const reviewedUpstream = (entry) => entry.autoReview === true && entry.agent === "claude-code";
+  const yieldOf = (value, fallback) => (Number.isFinite(value) ? Math.max(0, Math.min(30_000, value)) : fallback);
+
+  /** The id a terminal call names: its command_id, session_id, or the command in its output_ref. */
+  const commandIdOf = (name, args) => (name === "read_output" && typeof args.output_ref === "string"
+    ? args.output_ref.split(":")[1] : typeof args.command_id === "string" ? args.command_id : args.session_id);
+
+  /**
+   * Whether the sandbox runs this terminal call: exec_command and check_exec_environment always;
+   * write_stdin, read_output and kill_command for a command it started. Anything else (the user's
+   * own terminal) is headless's.
+   */
+  function sandboxRuns(name, args) {
+    if (name === "exec_command" || name === "check_exec_environment") return true;
+    const id = commandIdOf(name, args);
+    try { return typeof id === "string" && sandbox.owns(id); } catch { return false; }
+  }
+
+  /** A terminal call sandboxRuns, run in the sandbox. Results are shaped like headless's, so the agent sees no difference. */
+  async function runSandboxed(entry, name, args, root) {
+    try {
+      if (name === "check_exec_environment") {
+        const described = sandbox.describe();
+        return toolResult(name, args, { ok: true, sandbox: "codex-windows-unelevated", sandbox_enforced: true, shell: "cmd.exe",
+          writable_roots: [root.path, ...(described?.writableCaches ?? [])], network: true, confirmation: "none" });
+      }
+      if (name === "exec_command") {
+        const workdir = typeof args.workdir === "string" ? args.workdir : typeof args.cwd === "string" ? args.cwd : ".";
+        const id = sandbox.start({ cmd: String(args.cmd ?? ""), cwd: path.resolve(root.path, workdir), writable: root.path,
+          stdin: typeof args.stdin === "string" ? args.stdin : "" });
+        await sandbox.wait(id, yieldOf(args.yield_time_ms, 1000));
+        const result = toolResult(name, args, sandbox.snapshot(id, args.max_output_bytes ?? 65_536));
+        track(entry, name, args, result);
+        const command = entry.commands.get(id);
+        if (command) command.sandboxed = true;
+        return result;
+      }
+      const id = commandIdOf(name, args);
+      if (typeof id !== "string" || !sandbox.owns(id)) return failedCall("No such sandboxed command");
+      if (name === "read_output") {
+        const stream = args.output_ref.split(":")[2] === "stderr" ? "stderr" : "stdout";
+        return toolResult(name, args, sandbox.read(id, stream, args.offset ?? 0, args.limit ?? 4096));
+      }
+      if (name === "write_stdin") {
+        if (typeof args.chars === "string" && args.chars) sandbox.write(id, args.chars);
+        await sandbox.wait(id, yieldOf(args.yield_time_ms, 1000));
+        const result = toolResult(name, args, sandbox.snapshot(id, args.max_output_bytes ?? 65_536));
+        track(entry, name, args, result);
+        return result;
+      }
+      if (name === "kill_command" || name === "kill_session") {
+        const result = toolResult(name, args, { ...await sandbox.kill(id), killed: true });
+        track(entry, name, args, result);
+        return result;
+      }
+      return failedCall(`Unknown tool: ${name}`);
+    } catch (error) {
+      return failedCall(errorMessage(error));
     }
   }
 
@@ -1186,7 +1285,7 @@ function createChatAgentTools({
             protocolVersion: PROTOCOL_VERSIONS.includes(requested) ? requested : PROTOCOL_VERSIONS[0],
             capabilities: { tools: { listChanged: false } },
             serverInfo: { name: SERVER_NAME, title: "Coding Tools", version: String(version) },
-            instructions: instructionsFor(entry.groups.filter((group) => allowed(entry, group)), { bypass: entry.bypass }),
+            instructions: instructionsFor(entry.groups.filter((group) => allowed(entry, group)), { bypass: entry.bypass, sandboxed: sandboxed(), autoReview: reviewedUpstream(entry) }),
           } };
         }
         case "ping": return { jsonrpc: "2.0", id, result: {} };
@@ -1344,6 +1443,17 @@ function createChatAgentTools({
 
   /** One read of a command's output from `offset`, with whether it still runs. */
   async function readCommand(entry, command, stream, offset) {
+    if (command.sandboxed && sandbox?.owns(command.id)) {
+      const value = sandbox.read(command.id, stream, Math.max(0, Number(offset) || 0), MAX_PANE_READ_BYTES);
+      command.status = value.termination_reason === "killed" ? "killed" : value.status;
+      command.exitCode = Number.isInteger(value.exit_code) ? value.exit_code : command.exitCode;
+      return { content: value.content, nextOffset: value.next_read_offset, gap: value.output_gap, status: command.status, exitCode: command.exitCode };
+    }
+    if (command.sandboxed) {
+      // The app restarted since: the sandboxed command ended with it.
+      if (command.status === "running") command.status = "gone";
+      return { content: "", nextOffset: Math.max(0, Number(offset) || 0), gap: false, status: command.status, exitCode: command.exitCode };
+    }
     const root = await rootOf(entry);
     const read = await invoke(entry, "read_output", {
       output_ref: `command:${command.id}:${stream}`, offset: Math.max(0, Number(offset) || 0), limit: MAX_PANE_READ_BYTES,
@@ -1477,6 +1587,11 @@ function createChatAgentTools({
       const entry = paneEntry(sessionId, workspaceId);
       if (!entry) throw new Error("That chat agent's session has ended");
       const command = commandOf(entry, commandId);
+      if (command.sandboxed) {
+        if (sandbox?.owns(command.id)) await sandbox.kill(command.id);
+        command.status = "killed";
+        return { ok: true, status: command.status };
+      }
       const value = await invokeAsUser(entry, "kill_command", { command_id: command.id, wait_ms: 3000 });
       command.status = value?.status === "terminating" ? "running" : "killed";
       return { ok: true, status: command.status };
@@ -1487,6 +1602,11 @@ function createChatAgentTools({
       if (!entry) throw new Error("That chat agent's session has ended");
       if (typeof text !== "string" || !text || text.length > 4000) throw new Error("Type 1 to 4000 characters");
       const command = commandOf(entry, commandId);
+      if (command.sandboxed) {
+        if (!sandbox?.owns(command.id)) throw new Error("That command is no longer running");
+        sandbox.write(command.id, text);
+        return { ok: true };
+      }
       await invokeAsUser(entry, "write_stdin", { command_id: command.id, chars: text, yield_time_ms: 200, max_output_bytes: 0 });
       return { ok: true };
     },
@@ -1561,6 +1681,8 @@ function createChatAgentTools({
     },
     /** The port this server listens on (0 before it does), so a preview never opens it. */
     servicePort() { return port; },
+    /** Whether agents' commands run in Codex's sandbox (the terminal tools then default on). */
+    sandboxed,
     listen,
     sweep,
     async close() {

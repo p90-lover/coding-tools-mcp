@@ -597,6 +597,8 @@ export interface LauncherSnapshot {
   connectorName: string;
   connectorNames: Record<BrowserInteractionMode, string>;
   mcpCredentialsConfigured: boolean;
+  /** Agents' commands run in Codex's Windows sandbox (installed), so the terminal tools default on. */
+  chatAgentSandbox?: boolean;
   logs: LogRecord[];
   urls: {
     github: string;
