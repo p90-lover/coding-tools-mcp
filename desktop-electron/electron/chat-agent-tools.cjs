@@ -35,8 +35,9 @@
 // - Commands: with Codex installed they run in its Windows sandbox (chat-sandbox.cjs: the worktree
 //   and package caches writable, the rest read-only). Without it a terminal command can `cd`
 //   anywhere and read or change anything the user's account can, as the agent's own shell can.
-//   Either way each command is reviewed: on "Approve for me" by the chat's approval reviewer
-//   before the call reaches this server (a sandboxed one is then not asked again here); otherwise
+//   Either way each command is reviewed: on "Approve for me" in Claude Code by the chat's approval
+//   reviewer before the call reaches this server (a sandboxed one is then not asked again here;
+//   Codex and OpenCode may not route MCP tool calls through approval, so they are); otherwise
 //   the user confirms every command and every input sent to one here (unless the session was
 //   launched to bypass permissions). Being sandboxed never approves a command by itself.
 //
@@ -1112,12 +1113,12 @@ function createChatAgentTools({
       if (answer !== true) return answer;
       entry.controlAllowed = true;
     }
-    // With Codex's sandbox installed the terminal's commands run there, and are still reviewed: on
-    // "Approve for me" the chat's approval reviewer has already judged this call, so the app does
-    // not ask again; otherwise the user confirms it here. Being sandboxed never approves a command
-    // by itself. A command the sandbox did not start (the user's own terminal) goes on below.
+    // With Codex's sandbox installed the terminal's commands run there, and are still reviewed:
+    // when the chat's approval reviewer has already judged this call (reviewedUpstream), the app
+    // does not ask again; otherwise the user confirms it here. Being sandboxed never approves a
+    // command by itself. A command the sandbox did not start (the user's own terminal) goes on below.
     if (group === "terminal" && sandboxed() && sandboxRuns(name, args)) {
-      if (!entry.bypass && !entry.autoReview) {
+      if (!entry.bypass && !reviewedUpstream(entry)) {
         const answer = await confirmTerminal(entry, name, args, root, { sandboxed: true });
         if (answer !== true && answer !== false) return answer;
       }
@@ -1165,6 +1166,13 @@ function createChatAgentTools({
 
   /** Whether the terminal's commands run in Codex's Windows sandbox (it is installed). */
   const sandboxed = () => { try { return Boolean(sandbox?.available()); } catch { return false; } };
+  /**
+   * Whether every call this session makes to these tools reaches the chat's approval reviewer
+   * before it gets here: "Approve for me" on Claude Code, which raises a permission request for
+   * each MCP tool call under accept-edits. Codex's approval policy and OpenCode's MCP defaults
+   * may let a tool call through unreviewed, so their sessions keep the app's own dialog.
+   */
+  const reviewedUpstream = (entry) => entry.autoReview === true && entry.agent === "claude-code";
   const yieldOf = (value, fallback) => (Number.isFinite(value) ? Math.max(0, Math.min(30_000, value)) : fallback);
 
   /** The id a terminal call names: its command_id, session_id, or the command in its output_ref. */
@@ -1277,7 +1285,7 @@ function createChatAgentTools({
             protocolVersion: PROTOCOL_VERSIONS.includes(requested) ? requested : PROTOCOL_VERSIONS[0],
             capabilities: { tools: { listChanged: false } },
             serverInfo: { name: SERVER_NAME, title: "Coding Tools", version: String(version) },
-            instructions: instructionsFor(entry.groups.filter((group) => allowed(entry, group)), { bypass: entry.bypass, sandboxed: sandboxed(), autoReview: entry.autoReview }),
+            instructions: instructionsFor(entry.groups.filter((group) => allowed(entry, group)), { bypass: entry.bypass, sandboxed: sandboxed(), autoReview: reviewedUpstream(entry) }),
           } };
         }
         case "ping": return { jsonrpc: "2.0", id, result: {} };

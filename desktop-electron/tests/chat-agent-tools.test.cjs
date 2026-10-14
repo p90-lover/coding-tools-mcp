@@ -428,12 +428,12 @@ function fakeSandbox({ installed = true } = {}) {
   };
 }
 
-test("on Approve for me, the reviewed command runs in Codex's sandbox in the worktree with no second dialog here", async () => {
+test("Claude Code on Approve for me: the reviewed command runs in Codex's sandbox in the worktree with no second dialog here", async () => {
   const tree = tempTree();
   const sandbox = fakeSandbox();
   const { tools, calls, confirmations } = fixture({ root: tree.root, terminal: () => true, sandbox });
   try {
-    const { url, auth } = await session(tools, { autoReview: true });
+    const { url, auth } = await session(tools, { agent: "claude-code", autoReview: true });
     const init = await post(url, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, auth);
     assert.match(init.body.result.instructions, /Codex's Windows sandbox/);
     assert.match(init.body.result.instructions, /reviewed before it runs/);
@@ -501,6 +501,23 @@ test("in plain ask mode a sandboxed command is still confirmed here, and a decli
     assert.equal(declined.isError, true);
     assert.equal(sandbox.started.length, 1, "a declined command never starts");
     assert.ok(!calls.some((call) => call.body?.tool === "exec_command"), "nor goes to the unsandboxed terminal");
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("Codex and OpenCode on Approve for me still confirm sandboxed commands here: their MCP calls may skip the reviewer", async () => {
+  const tree = tempTree();
+  const sandbox = fakeSandbox();
+  const { tools, confirmations } = fixture({ root: tree.root, terminal: () => true, sandbox });
+  try {
+    for (const [index, agent] of ["codex", "opencode"].entries()) {
+      const { url, auth } = await session(tools, { agent, autoReview: true, id: `ao-${index + 1}` });
+      const init = await post(url, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, auth);
+      assert.match(init.body.result.instructions, /The user confirms each command/, agent);
+      assert.equal((await callTool(url, auth, "exec_command", { cmd: "npm test" })).isError, false, agent);
+      assert.equal(confirmations.length, index + 1, `${agent} is asked`);
+      assert.match(unwrapped(confirmations[index].detail), /runs in Codex's Windows sandbox/);
+    }
+    assert.equal(sandbox.started.length, 2);
   } finally { await tools.close(); tree.cleanup(); }
 });
 
