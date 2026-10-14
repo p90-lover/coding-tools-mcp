@@ -222,6 +222,10 @@ function realLocation(target) {
 const DEVICE_PATH = /^[\\/]{2}[?.](?:[\\/]|$)/;
 // C:foo is relative to that drive's current directory, not to the worktree.
 const DRIVE_RELATIVE = /^[A-Za-z]:(?![\\/])/;
+// C:/x names a Windows drive. On Windows it is resolved and checked like any absolute path; on
+// another host it can never be inside the worktree, but path.resolve would read it as a relative
+// name ("C:" a folder), so it is refused there outright.
+const DRIVE_ABSOLUTE = /^[A-Za-z]:[\\/]/;
 const RESERVED_DEVICE = /^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|(?:COM|LPT)[0-9\u00b9\u00b2\u00b3])$/i;
 
 /**
@@ -256,7 +260,7 @@ function scopePath(root, raw, label, { write = false } = {}) {
   if (typeof raw !== "string" || !raw || raw.includes("\0")) throw new ScopeError(`${label} must be a non-empty path`);
   const outside = (why = "it is outside this chat's worktree") => new ScopeError(`${label} "${raw.slice(0, 200)}" is refused: ${why}`);
   if (raw.startsWith("@")) throw outside("linked projects (@alias) are outside this chat's worktree");
-  if (DEVICE_PATH.test(raw) || DRIVE_RELATIVE.test(raw)) throw outside();
+  if (DEVICE_PATH.test(raw) || DRIVE_RELATIVE.test(raw) || (!WINDOWS && DRIVE_ABSOLUTE.test(raw))) throw outside();
   const candidate = path.resolve(root.path, raw);
   if (!inside(root.path, candidate)) throw outside();
   const relative = path.relative(root.path, candidate);

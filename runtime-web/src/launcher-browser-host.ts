@@ -193,9 +193,17 @@ export const LAUNCHER_ANNOUNCED_HOLD_MAX_MS = 30 * 60_000;
  * unreadable, expired, or claims more than LAUNCHER_ANNOUNCED_RESTART_MAX_MS is ignored.
  */
 export function launcherRestartAnnouncedUntil(configuredPath: string, now = Date.now()): number | null {
+  return launcherRestartAnnounced(configuredPath, now)?.until ?? null;
+}
+
+/**
+ * An announced restart: when it should be over, and the pid of the app that announced it (the one
+ * shutting down), or null when there is no valid marker. See launcherRestartAnnouncedUntil.
+ */
+export function launcherRestartAnnounced(configuredPath: string, now = Date.now()): { until: number; pid: number | null } | null {
   const markerPath = join(dirname(resolve(expandUserPath(configuredPath))), "launcher-browser.restarting.json");
   try {
-    const marker = JSON.parse(readFileSync(markerPath, "utf8")) as { version?: unknown; createdAt?: unknown; until?: unknown; holdUntil?: unknown };
+    const marker = JSON.parse(readFileSync(markerPath, "utf8")) as { version?: unknown; pid?: unknown; createdAt?: unknown; until?: unknown; holdUntil?: unknown };
     if (marker.version !== 1 || typeof marker.until !== "string" || typeof marker.createdAt !== "string") return null;
     const created = Date.parse(marker.createdAt);
     if (!Number.isFinite(created)) return null;
@@ -206,7 +214,9 @@ export function launcherRestartAnnouncedUntil(configuredPath: string, now = Date
     };
     const ends = [within(marker.until, LAUNCHER_ANNOUNCED_RESTART_MAX_MS), within(marker.holdUntil, LAUNCHER_ANNOUNCED_HOLD_MAX_MS)]
       .filter((value): value is number => value !== null);
-    return ends.length ? Math.max(...ends) : null;
+    if (!ends.length) return null;
+    const pid = typeof marker.pid === "number" && Number.isSafeInteger(marker.pid) && marker.pid > 0 ? marker.pid : null;
+    return { until: Math.max(...ends), pid };
   } catch {
     return null;
   }
@@ -238,8 +248,17 @@ export async function waitForLauncherBrowserHostDescriptor(
   const deadline = started + timeoutMs;
   for (;;) {
     try {
-      return readLauncherBrowserHostDescriptor(configuredPath);
+      const descriptor = readLauncherBrowserHostDescriptor(configuredPath);
+      // The quitting app announces the restart first and removes its descriptor only at the end of
+      // shutdown: a descriptor of the app that announced it names a browser about to close, so the
+      // turn waits for the new app's instead of attaching to it.
+      const announced = timeoutMs > 0 ? launcherRestartAnnounced(configuredPath, now()) : null;
+      if (!announced || announced.pid === null || announced.pid !== descriptor.pid) return descriptor;
+      if (signal?.aborted || now() >= Math.max(deadline, announced.until)) {
+        throw new Error(`Launcher browser host is restarting (pid ${descriptor.pid} is shutting down; waited ${Math.round((now() - started) / 1000)} s for Coding Tools to start again)`);
+      }
     } catch (error) {
+      if (error instanceof Error && error.message.startsWith("Launcher browser host is restarting")) throw error;
       const message = error instanceof Error ? error.message : String(error);
       const restarting = /descriptor is missing|host process is not running/.test(message);
       // An announced restart (an update installing) keeps the turn waiting until it should be over.

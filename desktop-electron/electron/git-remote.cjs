@@ -55,8 +55,11 @@ const samePath = (left, right) => {
  * when detached. One read-only `git rev-parse`; nothing is changed.
  */
 async function readGitInfo(folder, options) {
-  if (typeof folder !== "string" || folder.length > 4096 || !path.isAbsolute(folder)) return null;
+  if (typeof folder !== "string" || folder.length > 4096) return null;
+  // The service may store a Windows verbatim path (\\?\C:\...): drop the prefix before judging it,
+  // since only Windows reads the prefixed spelling as absolute.
   const local = folder.replace(/^\\\\\?\\/, "");
+  if (!path.isAbsolute(local)) return null;
   if (!fs.statSync(local, { throwIfNoEntry: false })?.isDirectory()) return { kind: "missing", root: null, mainRepo: null, branch: null };
   const output = await gitOutput(local, ["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-dir", "--git-common-dir", "--abbrev-ref", "HEAD"], options);
   const [root, gitDir, commonDir, head] = (output ?? "").split(/\r?\n/).map((line) => line.trim());

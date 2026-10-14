@@ -35,3 +35,13 @@ test("a non-proxy failure gives a plain hint, and nothing from the page is injec
   // Only an http(s) page gets a Retry link.
   assert.doesNotMatch(html(navigationFailurePage({ url: "javascript:alert(1)", errorCode: -105 })), /class="retry"/);
 });
+
+test("a proxy URL with credentials is named by scheme, host and port only", () => {
+  const body = html(navigationFailurePage({ url: "https://chatgpt.com/", errorCode: -130,
+    proxy: "http://coding-tools:GATEWAY_TOKEN_123@127.0.0.1:17894" }));
+  assert.match(body, /proxy <b>http:\/\/127\.0\.0\.1:17894<\/b>/);
+  assert.doesNotMatch(body, /GATEWAY_TOKEN_123|coding-tools:/, "neither the user name nor the token reaches the page");
+  const unparsable = html(navigationFailurePage({ url: "https://chatgpt.com/", errorCode: -130, proxy: "user:secret@host:8080" }));
+  assert.doesNotMatch(unparsable, /secret/, "a value that is not a URL is not shown at all");
+  assert.match(unparsable, /the proxy set for this route/);
+});

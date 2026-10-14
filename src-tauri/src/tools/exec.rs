@@ -1071,6 +1071,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_store_keeping_a_command_is_not_idle() {
+        // A cache of tool contexts may drop only an idle one: a kept command (running, or finished
+        // with its output retained for read_output) would otherwise vanish from later calls.
+        let workspace = tempdir().expect("workspace");
+        let harness = tempdir().expect("harness");
+        let ctx =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("context");
+        assert!(ctx.sessions.is_idle(), "a fresh store holds nothing");
+        // A spawned process (plain `echo` is answered natively, without one).
+        let cmd = if cfg!(windows) {
+            "cmd /c echo kept"
+        } else {
+            "sh -c \"echo kept\""
+        };
+        let output = call_tool(
+            &ctx,
+            "exec_command",
+            &json!({ "cmd": cmd, "timeout_ms": 30_000 }),
+        );
+        assert_eq!(output["ok"], true, "{output}");
+        assert!(
+            !ctx.sessions.is_idle(),
+            "the finished command's output is kept, so the store is in use"
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_batch_scripts_preserve_space_paths_and_arguments() {

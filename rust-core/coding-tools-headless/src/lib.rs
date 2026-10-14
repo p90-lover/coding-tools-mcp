@@ -430,10 +430,18 @@ impl ServiceState {
         }
         if root.is_some() {
             let rooted = |key: &String| key.contains('\n');
+            // Only an idle context is evicted: each owns its command sessions, and dropping one with
+            // a running command or kept output would leave later read_output, write_stdin and
+            // kill_command calls unable to find it while the process runs on. With none idle the
+            // cache stays over its size until commands finish and their output expires.
             while contexts.keys().filter(|other| rooted(other)).count() >= MAX_SESSION_CONTEXTS {
                 let Some(oldest) = contexts
                     .iter()
-                    .filter(|(other, _)| rooted(other))
+                    .filter(|(other, entry)| {
+                        rooted(other)
+                            && Arc::strong_count(&entry.context) == 1
+                            && entry.context.sessions.is_idle()
+                    })
                     .min_by_key(|(_, entry)| entry.used)
                     .map(|(other, _)| other.clone())
                 else {

@@ -71,6 +71,14 @@ impl SessionStore {
             })
     }
 
+    /// Whether nothing here is still needed: no command is running and no finished command's
+    /// output is still kept for `read_output` (expired output is dropped first). A store that is
+    /// not idle must outlive any cache that holds it.
+    pub fn is_idle(&self) -> bool {
+        self.maintain_completed(Instant::now());
+        self.sessions.lock().expect("sessions lock").is_empty()
+    }
+
     pub(crate) fn maintain_completed(&self, now: Instant) {
         let mut sessions = self.sessions.lock().expect("sessions lock");
         let mut terminal: Vec<_> = sessions

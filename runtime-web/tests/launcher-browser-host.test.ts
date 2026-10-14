@@ -136,6 +136,38 @@ test("a turn waits for the app's descriptor while it restarts, and only then", a
   expect(slept).toBe(0);
 });
 
+test("once the app announces a restart, its own still-present descriptor is not used: the turn waits for the new app's", async () => {
+  const path = descriptorFile();
+  const outgoing = readFileSync(path, "utf8");
+  const replacement = JSON.stringify({ ...JSON.parse(outgoing), pid: process.ppid });
+  const markerPath = join(dirname(path), "launcher-browser.restarting.json");
+  const base = Date.now();
+  let clock = base;
+  // The quitting app (this process's pid) wrote its marker but has not yet removed its descriptor.
+  writeFileSync(markerPath, JSON.stringify({ version: 1, pid: process.pid, reason: "update",
+    createdAt: new Date(base).toISOString(), until: new Date(base + 600_000).toISOString() }));
+  const waited = await waitForLauncherBrowserHostDescriptor(path, {
+    timeoutMs: 1_000, now: () => clock,
+    sleep: async () => { clock += 60_000; if (clock >= base + 180_000) writeFileSync(path, replacement, { mode: 0o600 }); },
+  });
+  expect(waited.pid).toBe(process.ppid);
+  expect(clock - base).toBe(180_000);
+  // The new app never comes: once the announced window is over the marker no longer counts, and a
+  // descriptor whose process still runs is used as it always was.
+  writeFileSync(path, outgoing, { mode: 0o600 });
+  clock = base;
+  let looks = 0;
+  const after = await waitForLauncherBrowserHostDescriptor(path, { timeoutMs: 1_000, now: () => clock, sleep: async () => { looks += 1; clock += 120_000; } });
+  expect(after.pid).toBe(process.pid);
+  expect(clock - base).toBe(600_000);
+  expect(looks).toBe(5);
+  // A marker from another app's pid leaves a live descriptor usable at once.
+  writeFileSync(markerPath, JSON.stringify({ version: 1, pid: 1, createdAt: new Date(base).toISOString(), until: new Date(base + 600_000).toISOString() }));
+  clock = base;
+  expect((await waitForLauncherBrowserHostDescriptor(path, { now: () => clock })).pid).toBe(process.pid);
+  rmSync(markerPath);
+});
+
 test("launcher turn control sends authenticated lifecycle events", async () => {
   let received: { authorization?: string; body?: unknown } = {};
   const server = createServer(async (request, response) => {

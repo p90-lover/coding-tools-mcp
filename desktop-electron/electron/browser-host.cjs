@@ -174,6 +174,17 @@ function navigationOriginForLog(value) {
 const PROXY_NET_ERRORS = new Set([-130, -111, -127, -336]);
 const FAILURE_PAGE_PREFIX = "data:text/html;charset=utf-8,";
 const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
+/**
+ * A proxy as the failure page may name it: scheme, host and port only. The route's proxy URL can
+ * carry credentials (the built-in gateway's token, an upstream password) that must not reach the
+ * page; anything that is not a parseable URL is not shown at all.
+ */
+function proxyLabel(proxy) {
+  try {
+    const parsed = new URL(String(proxy));
+    return parsed.host ? `${parsed.protocol}//${parsed.host}` : "";
+  } catch { return ""; }
+}
 
 /**
  * What the ChatGPT view shows when its page fails to load: Electron leaves the view blank otherwise,
@@ -185,8 +196,9 @@ function navigationFailurePage({ url = "", errorCode, errorDescription = "", pro
   try { const parsed = new URL(url); if (parsed.protocol === "https:" || parsed.protocol === "http:") retry = parsed.toString(); } catch { /* no retry link */ }
   const proxied = PROXY_NET_ERRORS.has(errorCode);
   const host = (() => { try { return new URL(retry).host; } catch { return "the page"; } })();
+  const named = proxyLabel(proxy);
   const hint = proxied
-    ? `The app reaches the internet through the proxy ${proxy ? `<b>${escapeHtml(proxy)}</b>` : "set for this route"}, and nothing is answering there. Start your proxy app (ProxyBridge), then retry.`
+    ? `The app reaches the internet through the proxy ${named ? `<b>${escapeHtml(named)}</b>` : "set for this route"}, and nothing is answering there. Start your proxy app (ProxyBridge), then retry.`
     : "Check your connection, then retry.";
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>Can't reach ${escapeHtml(host)}</title><style>
 body{margin:0;height:100vh;display:grid;place-items:center;font:14px/1.5 system-ui,sans-serif;background:#fff;color:#1f1f1f}

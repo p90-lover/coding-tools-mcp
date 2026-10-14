@@ -424,6 +424,9 @@ fn ensure_rev_in_history(ws: &Workspace, rev: &str) -> Result<(), WorkspaceError
             Some((left, right)) => vec![left, right],
             None => vec![commit_part],
         }
+        .into_iter()
+        .map(without_parent_set_suffix)
+        .collect()
     };
     let outside = || {
         WorkspaceError::Tool {
@@ -472,6 +475,21 @@ fn ensure_rev_in_history(ws: &Workspace, rev: &str) -> Result<(), WorkspaceError
         }
     }
     Ok(())
+}
+
+/// The commit a revision-set shorthand is built on: `X^!`, `X^@` and `X^-` / `X^-<n>` name X and
+/// some of its ancestors, never a commit X does not contain, so they stay in a worktree's history
+/// exactly when X does. Anything else is returned as it is.
+fn without_parent_set_suffix(end: &str) -> &str {
+    if let Some(base) = end.strip_suffix("^!").or_else(|| end.strip_suffix("^@")) {
+        return base;
+    }
+    if let Some(index) = end.rfind("^-") {
+        if end[index + 2..].chars().all(|c| c.is_ascii_digit()) {
+            return &end[..index];
+        }
+    }
+    end
 }
 
 fn validate_git_ref(ref_name: &str) -> Result<&str, WorkspaceError> {
@@ -814,6 +832,10 @@ mod revision_scope_tests {
             ":/secret",
             blob.as_str(),
             "no-such-branch",
+            // Revision-set shorthands are judged by the commit they are built on.
+            "other^!",
+            "other^@",
+            "other^-1",
         ] {
             let refused = git_show(&ws, &json!({ "rev": rev })).expect_err(rev);
             assert_eq!(refused.code(), "REVISION_OUTSIDE_WORKTREE", "{rev}");
@@ -838,6 +860,12 @@ mod revision_scope_tests {
         }
         let log = git_log(&ws, &json!({ "ref": "HEAD~1..HEAD" })).expect("log");
         assert_eq!(log["commits"].as_array().map(Vec::len), Some(1));
+        // HEAD^! (HEAD without its parents), HEAD^@ and HEAD^-1 name only HEAD and its ancestors.
+        for rev in ["HEAD^!", "HEAD^@", "HEAD^-1", "HEAD^-"] {
+            let log = git_log(&ws, &json!({ "ref": rev }))
+                .unwrap_or_else(|error| panic!("{rev}: {error}"));
+            assert_eq!(log["ok"], true, "{rev}");
+        }
         assert!(git_blame(&ws, &json!({ "path": "a.txt", "rev": "HEAD~1" })).is_ok());
     }
 

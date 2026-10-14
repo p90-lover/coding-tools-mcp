@@ -69,7 +69,7 @@ test("a project folder is told apart as Claude Code does: repository, worktree o
     same(inside.root, repo);
     assert.equal((await readGitInfo(plain)).kind, "none");
     assert.equal((await readGitInfo(path.join(base, "gone"))).kind, "missing");
-    assert.equal((await readGitInfo(`\\\\?\\${repo}`)).kind, process.platform === "win32" ? "repo" : "missing", "a \\\\?\\ path as the service stores it");
+    assert.equal((await readGitInfo(`\\\\?\\${repo}`))?.kind, "repo", "a \\\\?\\ path as the service stores it, on any host");
     assert.equal(await readGitInfo("relative/path"), null);
   } finally {
     fs.rmSync(base, { recursive: true, force: true });
