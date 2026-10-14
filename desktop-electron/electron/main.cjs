@@ -1235,6 +1235,13 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("coding-tools:native-codex:connect", async (event, input) => {
     assertFocusedMainWindow(event, true);
+    const reviewer = input.approvalsReviewer ?? "user";
+    if (reviewer !== "user" && reviewer !== "auto_review") {
+      throw new Error("Unsupported native Codex approval reviewer");
+    }
+    if (reviewer === "auto_review" && (input.permissionProfile !== ":workspace" || input.allowModelUsage !== true)) {
+      throw new Error("Codex Auto-review requires workspace permissions and explicit model-use consent");
+    }
     if (!path.isAbsolute(input.executable) || !path.isAbsolute(input.codexHome)) {
       throw new Error("Select absolute native Codex executable and home paths");
     }
@@ -1268,6 +1275,7 @@ function registerIpc({ logger, stateStore }) {
         name, location, "Executable: " + executable, "SHA-256: " + digest,
         "Dedicated home: " + home, "Model: " + model,
         "Permission profile: " + input.permissionProfile,
+        "Approval reviewer: " + (input.permissionProfile === ":workspace" ? reviewer : "native read-only default") + "; native runtime must acknowledge this selection",
         "Model use: " + (input.allowModelUsage ? "allowed" : "off")
           + "; standalone commands: " + (input.allowCommandExecution ? "allowed" : "off"),
         "Limit: " + (input.requestLimit || "unbounded") + " requests; duration: "
@@ -1290,6 +1298,10 @@ function registerIpc({ logger, stateStore }) {
         allow_model_usage: input.allowModelUsage,
         allow_command_execution: input.allowCommandExecution,
         permission_profile: input.permissionProfile,
+        // Explicit reviewer is submitted only for workspace mode; read-only retains its
+        // native defaults. Rust requires the exact App Server policy to be acknowledged.
+        ...(input.permissionProfile === ":workspace"
+          ? { approval_policy: "on-request", approvals_reviewer: reviewer } : {}),
         model: input.model,
         request_limit: input.requestLimit,
         lifetime_seconds: input.lifetimeSeconds,
