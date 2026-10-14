@@ -1081,16 +1081,12 @@ mod tests {
             ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
                 .expect("context");
         assert!(ctx.sessions.is_idle(), "a fresh store holds nothing");
-        // A spawned process (plain `echo` is answered natively, without one).
-        let cmd = if cfg!(windows) {
-            "cmd /c echo kept"
-        } else {
-            "sh -c \"echo kept\""
-        };
+        // A spawned, allowlisted process on every host (plain `echo` is answered natively, without
+        // one, and `sh` is not on the command allowlist).
         let output = call_tool(
             &ctx,
             "exec_command",
-            &json!({ "cmd": cmd, "timeout_ms": 30_000 }),
+            &json!({ "cmd": "git --version", "timeout_ms": 30_000 }),
         );
         assert_eq!(output["ok"], true, "{output}");
         assert!(
