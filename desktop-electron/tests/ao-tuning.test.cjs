@@ -11,6 +11,9 @@ const route = (harness = "ao:codex", model = "cpa/gpt") => ({
   harness_id: harness, provider_id: "agent-orchestrator", account_id: "ao-local", model, permission_profile: ":ao-default",
 });
 const walk = value => !value || typeof value !== "object" ? [] : Array.isArray(value) ? value.flatMap(walk) : [value, ...walk(value.props?.children)];
+/** The window sizes the Context window field suggests (its datalist), which is how it shows the allowed range. */
+const presets = tree => walk(walk(tree).find(item => item.type === "label" && item.props.children?.[0] === "Context window"))
+  .filter(item => item.type === "option").map(item => item.props.value);
 async function picker(current, catalog) {
   let states = [], cursor = 0, effects = [];
   const editor = {};
@@ -39,8 +42,8 @@ test("AO model capabilities enable only advertised effort and a real context con
   assert.equal(p.field("Reasoning effort").props.disabled, false);
   assert.deepEqual(walk(p.field("Reasoning effort")).filter(item => item.type === "option").map(item => item.props.value), ["", "low", "high", "auto", "none"]);
   assert.equal(p.field("Context window").props.disabled, false);
-  assert.equal(p.field("Context window").props.max, 131072);
-  assert.equal(p.field("Context window").props.value, 65536);
+  assert.deepEqual(presets(p.tree), ["32k", "64k", "128k"], "only sizes within the model's 131,072 are offered");
+  assert.equal(p.field("Context window").props.value, "65,536");
   p.field("Reasoning effort").props.onChange({ target: { value: "low" } });
   assert.equal(p.changes[0].model, "cpa/gpt"); assert.equal(p.changes[0].account_id, "ao-local");
   const switched = p.selectRoute(route("ao:claude-code"));
@@ -61,7 +64,7 @@ test("every AO harness uses capabilities, including compaction semantics and uns
   assert.equal(p.field("Reasoning effort").props.disabled, true);
   assert.equal(p.field("Reasoning effort").props.value, "high", "unsupported saved tuning is visible, not erased");
   assert.equal(p.field("Context window").props.disabled, true);
-  assert.equal(p.field("Context window").props.value, 32768);
+  assert.equal(p.field("Context window").props.value, "32,768", "a saved window stays visible, not erased");
   assert.match(JSON.stringify(p.tree), /Client has no context override/);
 });
 
@@ -81,7 +84,7 @@ test("AO card metadata reports requested tuning; Native controls and Native-to-A
   const p = await picker({ ...route("codex-native", "chatgpt-web/high"), effort: "high", context_window: 262144 }, []);
   assert.equal(p.field("Reasoning effort").props.disabled, false);
   assert.deepEqual(walk(p.field("Reasoning effort")).filter(item => item.type === "option").map(item => item.props.value), ["", "minimal", "low", "medium", "high", "xhigh"]);
-  assert.equal(p.field("Context window").props.min, 4096); assert.equal(p.field("Context window").props.max, 2000000);
+  assert.deepEqual(presets(p.tree), ["32k", "64k", "128k", "200k", "272k", "400k", "1M", "2M"], "Native takes 4,096 up to 2M");
   const previous = { ...route("codex-native", "chatgpt-web/high"), effort: "high", context_window: 262144 };
   assert.equal(p.editor.withTuning(route(), previous).effort, undefined);
   assert.match(p.editor.cardMeta({ role: "worker", settings: {}, route: { ...route(), effort: "high", context_window: 65536 } }), /effort high.*64K context/);
