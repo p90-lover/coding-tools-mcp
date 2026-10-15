@@ -113,10 +113,12 @@ export function capabilityText(capability: AoModelCapabilities | undefined, nati
   const efforts = (native && !capability?.efforts?.length ? [...NATIVE_DEFAULT_EFFORTS] : capability?.efforts ?? []).filter(effort => EFFORT_ORDER.includes(effort));
   const top = efforts.sort((a, b) => EFFORT_ORDER.indexOf(a) - EFFORT_ORDER.indexOf(b)).at(-1);
   const limit = capability?.contextLimit ?? (native ? 2_000_000 : capability?.contextWindow?.max);
+  // Without a reported limit, the window's max is only the client's ceiling, not the model's.
+  const unverified = !native && !capability?.contextLimit && Boolean(limit);
   // Catalog limits are decimal (272,000), so they read best as "272K" rather than tokensLabel's binary units.
   const size = !limit ? "" : limit >= 1_000_000 && limit % 100_000 === 0 ? `${limit / 1_000_000}M`
     : limit >= 1_000 && limit % 1_000 === 0 ? `${limit / 1_000}K` : tokensLabel(limit);
-  return [top ? `up to ${top} effort` : "", size ? `${size} context` : ""].filter(Boolean).join(" · ");
+  return [top ? `up to ${top} effort` : "", size ? `${size} context${unverified ? " (unverified)" : ""}` : ""].filter(Boolean).join(" · ");
 }
 
 const ROLE_LABELS = { planner: "Orchestrator", approver: "Command approver", worker: "Worker", review_split: "Main reviewer · split", sub_reviewer: "Sub-reviewer", reviewer: "Main reviewer", retry: "Retry" } as const;
@@ -324,7 +326,7 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
       {/* Typed freely: 272000, 272,000, 272k or 1m; the list offers sizes the model takes. */}
       <input type="text" inputMode="numeric" list={presets.length ? presetsId : undefined} disabled={disabled || !context}
         placeholder={!context ? "No verified override" : native ? "Model default"
-          : fullLimit ? `Full model limit · ${contextText(fullLimit)}` : `Agent default${context.max ? ` · up to ${contextText(context.max)}` : ""}`}
+          : fullLimit ? `Full model limit · ${contextText(fullLimit)}` : `Agent default${context.max ? ` · up to ${contextText(context.max)}${capability?.contextLimit ? "" : " (limit not reported)"}` : ""}`}
         value={contextDraft ?? (route.context_window !== undefined ? contextText(route.context_window) : "")}
         aria-invalid={contextDraft !== null && contextDraft.trim() !== "" && !inRange(parseTokens(contextDraft) ?? Number.NaN)
           || !native && Boolean(context) && route.context_window !== undefined && !inRange(route.context_window)}
