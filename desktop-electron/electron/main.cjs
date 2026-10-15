@@ -643,8 +643,21 @@ function applyReadyRuntimeAfterBridge({ logger, stateStore, bridgeRouteChanged =
 async function connectCodexBridgeAfterAuthentication({ logger, stateStore, reason = "auth" }) {
   if (quitting || shutdownInProgress) return { skipped: true, reason: "shutting-down" };
   if (IS_DEV_PROFILE || !runtimeHost || !runtimeSupervisor) return { skipped: true, reason: "unavailable" };
-  // The user took Codex off the bridge: nothing (startup, sign-in, a bridge restart) puts it back.
-  if (stateStore.read().codexRoute === false) return { skipped: true, reason: "codex-route-off" };
+  // The user took Codex off the bridge: nothing (startup, sign-in, a bridge restart) puts it back,
+  // and a route something else left behind (an older build reconnecting it at startup) is removed,
+  // as switching it off would. Seen live: the switch off, yet Codex's config still pointed at 17841.
+  if (stateStore.read().codexRoute === false) {
+    if (runtimeHost.runtimeConfigSnapshot().configured) {
+      try {
+        await waitForRuntimeHostIdle();
+        const route = await runtimeHost.setCodexRoute(false);
+        if (route.changed) logger.info("codex_route.reconciled_off", { reason });
+      } catch (error) {
+        logger.warn("codex_route.reconcile_failed", { reason, message: error instanceof Error ? error.message.slice(0, 200) : String(error) });
+      }
+    }
+    return { skipped: true, reason: "codex-route-off" };
+  }
   if (stateStore.read().browserInteractionMode === "automatic"
     && browserHost?.snapshot()?.authenticated !== true) {
     return { skipped: true, reason: "unauthenticated" };
