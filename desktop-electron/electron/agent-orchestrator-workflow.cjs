@@ -499,20 +499,24 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       const cpaOnly = CPA_ONLY_AGENTS.has(agent);
       const items = cpaOnly ? [] : (await harnessService().models(agent, workspaceId))
         .filter(item => item.id !== "default" && !item.id.startsWith("chatgpt-web/"));
-      const capabilities = Object.fromEntries(items.map(item => [item.id, modelCapabilities(agent, item.id, item)]));
-      let cpa = [];
+      let catalog = null;
       if (GATEWAY_AGENTS.has(agent)) {
-        let catalog = null;
         try { catalog = await models(); }
         catch (error) {
           if (cpaOnly) throw new Error(`CPA model list is unavailable: ${String(error?.message || error).slice(0, 200)}`);
         }
-        if (catalog) cpa = catalog.models.filter(id => !id.startsWith("chatgpt-web/")).map(id => {
-          const routed = `${CPA_MODEL_PREFIX}${id}`;
-          capabilities[routed] = modelCapabilities(agent, id, catalog.capabilities[id], true);
-          return routed;
-        });
       }
+      // An agent's own catalog names its models but not their windows (Codex's gpt-6-luna read as an
+      // unverified 2M); CPA serves many of the same models and reports their real limit.
+      const capabilities = Object.fromEntries(items.map(item => {
+        const cpaLimit = catalog?.capabilities[item.id]?.contextLimit;
+        return [item.id, modelCapabilities(agent, item.id, item.contextLimit || !cpaLimit ? item : { ...item, contextLimit: cpaLimit })];
+      }));
+      const cpa = !catalog ? [] : catalog.models.filter(id => !id.startsWith("chatgpt-web/")).map(id => {
+        const routed = `${CPA_MODEL_PREFIX}${id}`;
+        capabilities[routed] = modelCapabilities(agent, id, catalog.capabilities[id], true);
+        return routed;
+      });
       return { ok: true, harness, models: [...new Set([...items.map(item => item.id), ...cpa])], capabilities };
     }
     if (harness === "codex-native") {
@@ -593,6 +597,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         const catalog = await models({ harness: node.route.harness_id, workspaceId });
         const baseModel = node.route.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
         const capability = catalog.capabilities[node.route.model] ?? catalog.capabilities[baseModel];
+        // A model the harness no longer lists has no known efforts or window: say that, rather
+        // than blaming the effort the card saved for it.
+        if (!capability) {
+          throw new Error(`${node.route.model} is no longer in this harness's model list, so its effort and context window cannot be checked. Choose a listed model, or clear the card's effort and context window.`);
+        }
         if (node.route.effort && !capability?.efforts?.includes(node.route.effort)) {
           throw new Error("Reasoning effort is not supported by the current model/harness catalog");
         }

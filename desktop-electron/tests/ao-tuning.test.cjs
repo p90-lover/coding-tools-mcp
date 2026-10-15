@@ -147,3 +147,21 @@ test("AO-only efforts never cross into Native Codex; valid high, max and AO-to-A
     { ...route(), effort: "high", context_window: 32768 });
   assert.equal(valid.effort, "high", "valid Native effort carry-over remains unchanged");
 });
+
+test("model lists show a context size only when the catalog reported one, never the 2M client ceiling", async () => {
+  const { editor } = await picker(route(), { models: ["cpa/gpt"] });
+  assert.equal(editor.capabilityText({ efforts: ["low", "max"], contextWindow: { min: 4096, max: 2000000 } }), "up to max effort");
+  assert.equal(editor.capabilityText({ efforts: ["high"], contextLimit: 872000, contextWindow: { min: 4096, max: 872000 } }), "up to high effort · 872K context");
+});
+
+test("a saved model the harness no longer lists says so and offers the same model under another provider", async () => {
+  const catalog = { models: ["cpa/commandcode-go/deepseek-v4.1-flash", "cpa/cline-pass/deepseek-v4-flash"],
+    capabilities: { "cpa/commandcode-go/deepseek-v4.1-flash": { efforts: ["none", "high", "max"] } } };
+  const view = await picker({ ...route("ao:claude-code", "cpa/cline-pass/deepseek-v4.1-flash"), effort: "high" }, catalog);
+  assert.deepEqual(plain(view.editor.sameModelElsewhere("cpa/cline-pass/deepseek-v4.1-flash", catalog.models)), ["cpa/commandcode-go/deepseek-v4.1-flash"]);
+  const notice = walk(view.tree).find(item => item.type === "p" && item.props.role === "status");
+  assert.ok(notice, "the editor explains the model is gone");
+  const use = walk(notice).find(item => item.type === "button");
+  use.props.onClick();
+  assert.equal(view.changes.at(-1).model, "cpa/commandcode-go/deepseek-v4.1-flash");
+});
