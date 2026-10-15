@@ -2493,6 +2493,12 @@ async function start() {
   // Provider Network and the Proxy Gateway log here too (their launch events are kept until now).
   setProviderLogger(logger);
   if (autostartStartupError) logger.warn("launcher.autostart_unavailable", { message: autostartStartupError });
+  // CPA outlives the app and reads a plugin's models only when it loads the plugin's auth file:
+  // nudge it whenever the Cline Pass switcher's model list changes (cpa-plugin-models.cjs).
+  const cpaPluginModels = require("./cpa-plugin-models.cjs").watchCpaPluginModels({
+    stateRoot: path.join(app.getPath("userData"), "integrations", "state", "cpa"), logger,
+  });
+  app.on("will-quit", () => cpaPluginModels.stop());
   const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
   updateController = createGuiUpdateController({
     currentVersion: app.getVersion(),
