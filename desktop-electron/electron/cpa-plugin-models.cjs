@@ -14,13 +14,21 @@ const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 
 const INTERVAL_MS = 15_000;
 
-/** A stable revision of the models the switcher serves (what its /v1/models lists). */
-function clineModelsRevision(config) {
+const strings = (values) => (Array.isArray(values) ? values.filter((id) => typeof id === "string") : []);
+
+/**
+ * A stable revision of the models the switcher serves, as its /v1/models builds them: its known
+ * models plus the per-model settings' ids, or with exposeCatalog the known models plus the
+ * upstream catalog it caches in its metadata (`catalog`), which refreshes hourly.
+ */
+function clineModelsRevision(config, meta = null) {
   if (!config || typeof config !== "object") return null;
-  const known = Array.isArray(config.knownModels) ? config.knownModels.filter((id) => typeof id === "string") : [];
-  const tuned = config.perModel && typeof config.perModel === "object" ? Object.keys(config.perModel) : [];
-  const ids = [...new Set([...known, ...tuned])].sort();
-  return crypto.createHash("sha256").update(JSON.stringify({ ids, catalog: config.exposeCatalog === true })).digest("hex").slice(0, 16);
+  const known = strings(config.knownModels);
+  const exposed = config.exposeCatalog === true;
+  const extra = exposed ? strings(meta?.catalog)
+    : config.perModel && typeof config.perModel === "object" ? Object.keys(config.perModel) : [];
+  const ids = [...new Set([...known, ...extra])].sort();
+  return crypto.createHash("sha256").update(JSON.stringify({ ids, catalog: exposed })).digest("hex").slice(0, 16);
 }
 
 const readJson = (file) => {
@@ -32,8 +40,10 @@ const readJson = (file) => {
  * the marker. Leaves alone a marker that is missing or is not the switcher's bridge marker.
  */
 function syncClineMarker(stateRoot) {
-  const config = readJson(path.join(stateRoot, "cline-pass-switcher-data", "config.json"));
-  const revision = clineModelsRevision(config);
+  const data = path.join(stateRoot, "cline-pass-switcher-data");
+  const config = readJson(path.join(data, "config.json"));
+  // The metadata also holds request history; read it only when the catalog is served.
+  const revision = clineModelsRevision(config, config?.exposeCatalog === true ? readJson(path.join(data, "metadata.json")) : null);
   if (!revision) return false;
   const markerFile = path.join(stateRoot, "auth", "cline-pass-switcher.json");
   const marker = readJson(markerFile);

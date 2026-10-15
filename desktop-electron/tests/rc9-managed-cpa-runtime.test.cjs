@@ -130,6 +130,10 @@ test("packaging keeps the CPA adapter executable outside app.asar and preserves 
   assert.ok(manifest.build.asarUnpack.includes("vendor/bundled/cpa-plugins/**"));
   assert.ok(manifest.build.asarUnpack.includes("electron/cpa-codex-long-run.cjs"));
   assert.ok(manifest.build.asarUnpack.includes("electron/atomic-file.cjs"));
+  // The adapter runs from app.asar.unpacked, so every local module it requires must be unpacked too.
+  for (const [, name] of read("desktop-electron/electron/cpa-managed.cjs").matchAll(/require\("\.\/([^"]+)"\)/g)) {
+    assert.ok(manifest.build.asarUnpack.includes(`electron/${name}`), `electron/${name} is unpacked for the CPA adapter`);
+  }
 
   const workflow = read(".github/workflows/rc9-managed-cpa-runtime.yml");
   assert.match(workflow, /git diff --diff-filter=D/);

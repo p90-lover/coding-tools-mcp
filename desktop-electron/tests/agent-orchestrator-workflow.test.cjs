@@ -2178,6 +2178,39 @@ test("an agent's own models take CPA's real window for the same model, and a no-
   assert.match(message, /no longer in this harness's model list/, message);
 });
 
+test("CPA's model list leaves out a provider plugin's models when nobody is signed in to that provider", async () => {
+  const enhanced = { models: [
+    { slug: "gpt-5.5", context_window: 272000 },
+    { slug: "cline-pass/deepseek-v4-flash", context_window: 272000 },
+    { slug: "commandcode-go/deepseek-v4.1-flash", context_window: 272000 },
+  ] };
+  const plain = { data: [
+    { id: "gpt-5.5", owned_by: "openai" },
+    { id: "cline-pass/deepseek-v4-flash", owned_by: "cline" },
+    { id: "commandcode-go/deepseek-v4.1-flash", owned_by: "commandcode-go" },
+  ] };
+  const make = (accounts) => createAgentOrchestratorWorkflow({
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture", managementKey: "manage" }),
+    fetchImpl: async (url, init) => {
+      const target = String(url);
+      if (target.includes("/v0/management/auth-files")) {
+        assert.equal(init.headers.Authorization, "Bearer manage");
+        return accounts ? { ok: true, json: async () => ({ files: accounts }) } : { ok: false, status: 500, json: async () => ({}) };
+      }
+      if (target.endsWith("/v1/models")) return { ok: true, json: async () => plain };
+      return { ok: true, json: async () => enhanced };
+    },
+  });
+  const signedIn = [
+    { name: "codex-a.json", provider: "codex" },
+    { name: "cline-pass-switcher.json", provider: "cline" },
+    { name: "commandcode-old.json", provider: "commandcode-go", disabled: true },
+  ];
+  assert.deepEqual((await make(signedIn).call("models", {})).models, ["gpt-5.5", "cline-pass/deepseek-v4-flash"],
+    "commandcode-go has only a disabled account; the built-in gpt-5.5 is never judged by its owner name");
+  assert.equal((await make(null).call("models", {})).models.length, 3, "an unreadable account list hides nothing");
+});
+
 test("permission capabilities use installed AO adapter modes without fabricating native metadata", async () => {
   const reads = [], launches = [];
   const workflow = createAgentOrchestratorWorkflow({

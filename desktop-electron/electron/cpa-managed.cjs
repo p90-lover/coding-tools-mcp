@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { watchCpaPluginModels } = require("./cpa-plugin-models.cjs");
 const { cpaLongRunYamlLines } = require("./cpa-codex-long-run.cjs");
 
 const RUNTIME_MARKER = "CPA_RUNTIME.json";
@@ -285,7 +286,15 @@ function run(homeValue, stateValue) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   });
+  // CPA outlives the app (a keep-bridge quit detaches it), and reads a plugin's models only when
+  // it loads the plugin's auth file: keep the plugin model watcher running for as long as CPA.
+  // The app runs one too, so a CPA started by an older wrapper is still covered.
+  const pluginModels = watchCpaPluginModels({
+    stateRoot: state,
+    logger: { warn: (event, detail) => console.error(`${event} ${detail?.message ?? ""}`.trim()) },
+  });
   child.once("exit", (code, signal) => {
+    pluginModels.stop();
     process.exitCode = Number.isInteger(code) ? code : signal ? 1 : 0;
   });
 }
