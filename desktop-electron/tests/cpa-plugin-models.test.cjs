@@ -58,3 +58,19 @@ test("the watcher checks at start and logs a change without throwing on bad stat
   const broken = watchCpaPluginModels({ stateRoot: path.join(root, "missing"), intervalMs: 60_000, logger: { info: () => {}, warn: () => {} } });
   broken.stop();
 });
+
+test("with the catalog exposed, an upstream catalog refresh changes the revision; without it the catalog is ignored", () => {
+  const exposed = { knownModels: ["a"], perModel: { tuned: {} }, exposeCatalog: true };
+  const before = clineModelsRevision(exposed, { catalog: ["a", "b"] });
+  assert.notEqual(before, clineModelsRevision(exposed, { catalog: ["a", "b", "c"] }), "a new catalog model is noticed");
+  assert.equal(before, clineModelsRevision(exposed, { catalog: ["b", "a"], history: [1, 2] }), "order and history do not matter");
+  const hidden = { ...exposed, exposeCatalog: false };
+  assert.equal(clineModelsRevision(hidden, { catalog: ["x"] }), clineModelsRevision(hidden, { catalog: ["y"] }));
+  const root = stateRoot({ models: ["a"] });
+  fs.writeFileSync(configOf(root), JSON.stringify(exposed));
+  fs.writeFileSync(path.join(root, "cline-pass-switcher-data", "metadata.json"), JSON.stringify({ catalog: ["a", "b"] }));
+  assert.equal(syncClineMarker(root), true);
+  assert.equal(syncClineMarker(root), false);
+  fs.writeFileSync(path.join(root, "cline-pass-switcher-data", "metadata.json"), JSON.stringify({ catalog: ["a", "b", "c"] }));
+  assert.equal(syncClineMarker(root), true, "the marker follows the catalog");
+});
