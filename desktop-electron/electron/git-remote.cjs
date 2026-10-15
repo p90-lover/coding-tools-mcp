@@ -31,6 +31,16 @@ function gitOutput(folder, args, { run = execFile, timeoutMs = 3000 } = {}) {
   });
 }
 
+const GIT_INFO_TIMEOUT_MS = 15_000;
+
+/** A read-only git command's outcome: its output, or whether and why it failed (stderr; a timeout has none). */
+function gitResult(folder, args, { run = execFile, timeoutMs = 3000 } = {}) {
+  return new Promise((resolve) => {
+    run("git", ["-C", folder, ...args], { windowsHide: true, timeout: timeoutMs }, (error, stdout, stderr) =>
+      resolve({ ok: !error, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
+  });
+}
+
 /** The origin remote of an existing local folder as "owner/repo", or null (no git, no origin). */
 async function readRemote(folder, options) {
   return repoSlug(await gitOutput(folder, ["remote", "get-url", "origin"], options));
@@ -52,7 +62,8 @@ const samePath = (left, right) => {
  * "repo" (the folder is a repository's root), "worktree" (a linked worktree; `mainRepo` is the
  * repository it belongs to), "inside" (a folder inside the repository at `root`), "none" (not in
  * a git repository) or "missing" (the folder is gone). `branch` is the checked-out branch, null
- * when detached. One read-only `git rev-parse`; nothing is changed.
+ * when detached. Null when git could not tell (it timed out or failed otherwise), so the list shows
+ * no label rather than a wrong one. One read-only `git rev-parse`; nothing is changed.
  */
 async function readGitInfo(folder, options) {
   if (typeof folder !== "string" || folder.length > 4096) return null;
@@ -61,9 +72,13 @@ async function readGitInfo(folder, options) {
   const local = folder.replace(/^\\\\\?\\/, "");
   if (!path.isAbsolute(local)) return null;
   if (!fs.statSync(local, { throwIfNoEntry: false })?.isDirectory()) return { kind: "missing", root: null, mainRepo: null, branch: null };
-  const output = await gitOutput(local, ["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-dir", "--git-common-dir", "--abbrev-ref", "HEAD"], options);
-  const [root, gitDir, commonDir, head] = (output ?? "").split(/\r?\n/).map((line) => line.trim());
-  if (!root || !gitDir || !commonDir) return { kind: "none", root: null, mainRepo: null, branch: null };
+  // Git on a busy hard disk took 5-9 s here at app start; the short default timed out and a real
+  // repository read as "not git". Only git saying so means "none"; any other failure is unknown (null).
+  const result = await gitResult(local, ["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-dir", "--git-common-dir", "--abbrev-ref", "HEAD"],
+    { timeoutMs: GIT_INFO_TIMEOUT_MS, ...options });
+  if (!result.ok) return /not a git repository/i.test(result.stderr) ? { kind: "none", root: null, mainRepo: null, branch: null } : null;
+  const [root, gitDir, commonDir, head] = result.stdout.split(/\r?\n/).map((line) => line.trim());
+  if (!root || !gitDir || !commonDir) return null;
   const branch = head && head !== "HEAD" && /^[\w./-]{1,200}$/.test(head) ? head : null;
   const toNative = (value) => path.resolve(value);
   if (!samePath(gitDir, commonDir)) {
