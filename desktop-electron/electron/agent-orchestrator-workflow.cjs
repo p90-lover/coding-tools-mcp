@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { DEFAULT_GOAL_ROUNDS, goalPrompt, goalVerdict, closingAnswers, cleanObjective, createGoalStore } = require("./chat-goals.cjs");
 const { chatDescriptionWithout, createChatEditStore } = require("./chat-edits.cjs");
+const { normalizedAuthFile } = require("./cpa-oauth-adapter.cjs");
 
 function clean(value, limit, required = true) {
   if (typeof value !== "string") throw new Error("Expected text");
@@ -443,7 +444,36 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       || url.username || url.password || url.search || url.hash) {
       throw new Error("CPA must use its managed local endpoint");
     }
-    return { baseUrl: url.origin, key: value.proxyApiKey };
+    return { baseUrl: url.origin, key: value.proxyApiKey, managementKey: value.managementKey || null };
+  }
+
+  /**
+   * The CPA providers that have at least one enabled account, or null when CPA's account list
+   * cannot be read (then nothing is hidden). CPA lists a provider plugin's models whether or not
+   * anyone signed in to it: all of commandcode-go's showed, and each failed "auth_not_found".
+   */
+  async function providersWithAccounts({ baseUrl, managementKey }) {
+    if (!managementKey) return null;
+    try {
+      const response = await fetchImpl(`${baseUrl}/v0/management/auth-files`, {
+        headers: { Authorization: `Bearer ${managementKey}` }, signal: AbortSignal.timeout(5_000),
+      });
+      if (!response.ok) return null;
+      const listing = await response.json();
+      if (!Array.isArray(listing?.files)) return null;
+      return new Set(listing.files.map(normalizedAuthFile).filter(entry => entry && entry.status !== "disabled").map(entry => entry.provider));
+    } catch { return null; }
+  }
+
+  /** Which CPA provider serves each model (the plain list's owned_by), or null when unreadable. */
+  async function modelOwners({ baseUrl, key }) {
+    try {
+      const response = await fetchImpl(`${baseUrl}/v1/models`, { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(5_000) });
+      if (!response.ok) return null;
+      const rows = (await response.json())?.data;
+      return Array.isArray(rows) ? new Map(rows.filter(row => typeof row?.id === "string" && typeof row.owned_by === "string")
+        .map(row => [row.id, row.owned_by.trim().toLowerCase()])) : null;
+    } catch { return null; }
   }
 
   const tuningEfforts = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "auto"]);
@@ -528,7 +558,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       return { ok: true, harness, models: [...WEB_TIERS, ...LUNA_TIERS, ...cpa],
         capabilities: Object.fromEntries(cpa.map(id => [id, pool.capabilities[id]]).filter(([, value]) => value)) };
     }
-    const { baseUrl, key } = connection();
+    const cpa = connection();
+    const { baseUrl, key } = cpa;
     let rows;
     // The classic OpenAI list contains only IDs; the enhanced catalog carries capabilities.
     for (const suffix of ["?client_version=pi", ""]) {
@@ -543,11 +574,17 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         throw new Error("CPA model catalog has an unsupported shape");
       } catch (error) { if (!suffix) throw error; }
     }
+    // A provider plugin's model (cline-pass/…, commandcode-go/…) whose provider has no enabled
+    // account cannot be served; built-in providers' owners (openai) are not CPA's provider names
+    // (codex), so only namespaced models are checked. Without the account list nothing is hidden.
+    const accountProviders = await providersWithAccounts(cpa);
+    const owners = accountProviders ? await modelOwners(cpa) : null;
+    const unserved = id => Boolean(owners && id.includes("/") && owners.has(id) && !accountProviders.has(owners.get(id)));
     const capabilities = Object.create(null);
     const ids = [];
     for (const entry of rows || []) {
       const id = entry?.slug ?? entry?.id;
-      if (typeof id !== "string" || !id || id.length > 128 || entry.visibility === "hide" || ids.includes(id)) continue;
+      if (typeof id !== "string" || !id || id.length > 128 || entry.visibility === "hide" || ids.includes(id) || unserved(id)) continue;
       const efforts = reportedEfforts(entry.supported_reasoning_levels ?? entry.thinking?.levels);
       // context_window is the default the client starts with; max_context_window is how far the
       // model goes (Luna: 272K by default, up to 1M).
