@@ -449,6 +449,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   const tuningEfforts = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "auto"]);
   /** The window CPA reports for any provider-plugin model it knows no limit for (GPT-5's default). */
   const CPA_STOCK_WINDOW = 272_000;
+  /**
+   * Real context ceilings of provider-plugin models that CPA reports only with its stock window,
+   * by the model's own name (after any provider prefix). Without one, the card offers the client's
+   * 2M ceiling as unverified; DeepSeek v4.1 Flash showed "up to 2M" for its 1M.
+   */
+  const KNOWN_CONTEXT_LIMITS = [[/^deepseek-v4(?:\.\d+)?-flash\b/i, 1_000_000]];
+  const knownContextLimit = id => KNOWN_CONTEXT_LIMITS.find(([pattern]) => pattern.test(id.slice(id.lastIndexOf("/") + 1)))?.[1];
   const reportedEfforts = values => [...new Set((Array.isArray(values) ? values : [])
     .map(value => typeof value === "string" ? value : value?.effort)
     .filter(value => typeof value === "string" && tuningEfforts.has(value)))];
@@ -472,7 +479,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       && (slash < 0 || !model.slice(0, slash).trim() || !model.slice(slash + 1).trim());
     if (GATEWAY_AGENTS.has(agent) && !claudeFixedWindow && !unqualifiedOpenCode && (!limit || limit >= 4096)) {
       capabilities.contextWindow = { min: 4096, max: Math.min(2000000, limit || 2000000), kind: "context" };
-      capabilities.contextReason = "Client context declaration, not a larger provider limit. Client version/model applicability is checked again at launch.";
+      capabilities.contextReason = limit
+        ? "Client context declaration, not a larger provider limit. Client version/model applicability is checked again at launch."
+        : "The provider did not report this model's limit, so 2M (the client's ceiling) is unverified.";
     } else capabilities.contextReason = claudeFixedWindow
       ? "Claude Code cannot override this recognized model's window while preserving compaction."
       : unqualifiedOpenCode ? "OpenCode context requires an explicit provider/model."
@@ -543,7 +552,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       // instead of capping the card (and of becoming its default).
       const reported = entry.max_context_window ?? entry.context_window ?? entry.context_length;
       const stock = id.includes("/") && reported === CPA_STOCK_WINDOW && (entry.context_window ?? reported) === CPA_STOCK_WINDOW;
-      const limit = stock ? undefined : reported;
+      // A real number CPA reports wins; the stock one gives way to a known ceiling, else stays unknown.
+      const limit = stock ? knownContextLimit(id) : reported;
       // CPA names the upstream that serves the model (e.g. antigravity, codex, cline-pass).
       const provider = [entry.provider, entry.owned_by, entry.ownedBy].find(value => typeof value === "string" && value.trim());
       capabilities[id] = { efforts, ...(!efforts.length ? { effortReason: "CPA did not advertise reasoning levels for this model." } : {}),

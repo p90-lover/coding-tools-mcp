@@ -2117,6 +2117,7 @@ test("a card left blank starts with its model's full known window; CPA's stock 2
   const catalog = { data: [
     { id: "gpt-6-luna", context_window: 272000, max_context_window: 872000 },
     { id: "cline-pass/deepseek-v4.1-flash", context_window: 272000, max_context_window: 272000 },
+    { id: "cline-pass/brand-new-model", context_window: 272000, max_context_window: 272000 },
   ] };
   async function launch(model, contextWindow) {
     let launched;
@@ -2136,12 +2137,19 @@ test("a card left blank starts with its model's full known window; CPA's stock 2
   }
   const luna = await launch("gpt-6-luna");
   assert.equal(luna.launched.contextWindow, 872000, "the model's full limit, not the 272K it starts at");
-  const deepseek = await launch("cline-pass/deepseek-v4.1-flash");
-  assert.equal(deepseek.launched.contextWindow, undefined, "an unknown limit leaves the agent's own default");
-  const capability = deepseek.models.capabilities["cpa/cline-pass/deepseek-v4.1-flash"];
+  const unlisted = await launch("cline-pass/brand-new-model");
+  assert.equal(unlisted.launched.contextWindow, undefined, "an unknown limit leaves the agent's own default");
+  const capability = unlisted.models.capabilities["cpa/cline-pass/brand-new-model"];
   assert.equal(capability.contextLimit, undefined, "CPA's stock window is not reported as the model's limit");
   assert.equal(capability.contextWindow.max, 2000000, "so it no longer caps what the card may set");
-  assert.equal(deepseek.models.capabilities["cpa/gpt-6-luna"].contextLimit, 872000, "a real limit is kept");
+  assert.match(capability.contextReason, /did not report.*unverified/, "and the 2M ceiling is said to be unverified");
+  assert.equal(unlisted.models.capabilities["cpa/gpt-6-luna"].contextLimit, 872000, "a real limit is kept");
+  // DeepSeek v4.1 Flash showed "up to 2M" for its 1M: a known ceiling replaces CPA's stock window.
+  const deepseek = await launch("cline-pass/deepseek-v4.1-flash");
+  const known = deepseek.models.capabilities["cpa/cline-pass/deepseek-v4.1-flash"];
+  assert.equal(known.contextLimit, 1000000);
+  assert.equal(known.contextWindow.max, 1000000, "the card can't be set past it");
+  assert.equal(deepseek.launched.contextWindow, 1000000, "a blank card starts at its full known window");
   assert.equal((await launch("gpt-6-luna", 300000)).launched.contextWindow, 300000, "a window the card sets wins");
 });
 
