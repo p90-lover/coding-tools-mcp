@@ -156,25 +156,38 @@ class HeadlessHost {
     this.stopping = false;
   }
 
-  binaryPath() {
+  /**
+   * The headless executable to run, and where it came from. An installed app runs the one it
+   * shipped with (its installed backend bundle's, else its resources'). CODING_TOOLS_HEADLESS_BINARY
+   * and the source tree's builds are a developer's: honoured only by an unpackaged app or a dev
+   * profile (CODING_TOOLS_DEV_HOME). Otherwise a variable left in the shell that launched the
+   * installed app tied it to a build folder, whose executable it then held locked against rebuilds.
+   */
+  binarySelection() {
     const suffix = process.platform === "win32" ? ".exe" : "";
     const name = `coding-tools-headless${suffix}`;
+    const developer = !this.app.isPackaged || Boolean(process.env.CODING_TOOLS_DEV_HOME);
+    const override = process.env.CODING_TOOLS_HEADLESS_BINARY;
     const candidates = [
-      process.env.CODING_TOOLS_HEADLESS_BINARY,
-      this.binaryRoot ? path.join(this.binaryRoot, "coding-tools", name) : null,
-      this.app.isPackaged ? path.join(process.resourcesPath, "coding-tools", name) : null,
-      path.join(this.sourceRoot, "rust-core", "target", "debug", name),
-      path.join(this.sourceRoot, "rust-core", "target", "release", name),
+      developer && override ? { source: "override", file: override } : null,
+      this.binaryRoot ? { source: "bundle", file: path.join(this.binaryRoot, "coding-tools", name) } : null,
+      this.app.isPackaged ? { source: "packaged", file: path.join(process.resourcesPath, "coding-tools", name) } : null,
+      developer ? { source: "source", file: path.join(this.sourceRoot, "rust-core", "target", "debug", name) } : null,
+      developer ? { source: "source", file: path.join(this.sourceRoot, "rust-core", "target", "release", name) } : null,
     ].filter(Boolean);
     for (const candidate of candidates) {
       try {
-        regularFile(candidate, "Headless executable");
-        return path.resolve(candidate);
+        regularFile(candidate.file, "Headless executable");
+        return { source: candidate.source, file: path.resolve(candidate.file), ignoredOverride: Boolean(override) && !developer };
       } catch {
         // Continue through deterministic local candidates.
       }
     }
     throw new Error("Packaged Paseo/Anneal headless executable is unavailable");
+  }
+
+  binaryPath() {
+    return this.binarySelection().file;
   }
 
   async ensureStarted() {
@@ -190,7 +203,12 @@ class HeadlessHost {
 
   async start() {
     if (this.stopping) throw new Error("Local execution service is stopping");
-    const executable = this.binaryPath();
+    const selection = this.binarySelection();
+    const executable = selection.file;
+    this.logger?.info?.("headless.binary_selected", { source: selection.source, file: executable });
+    if (selection.ignoredOverride) {
+      this.logger?.warn?.("headless.binary_override_ignored", { reason: "packaged app without CODING_TOOLS_DEV_HOME" });
+    }
     const appDataDir = path.join(this.app.getPath("userData"), "headless");
     const id = `${process.pid}-${crypto.randomUUID()}`;
     const uiToken = crypto.randomBytes(32).toString("base64url");

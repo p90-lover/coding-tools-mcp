@@ -40,6 +40,19 @@ test("the branch is the checked-out name; detached HEAD, odd names and failures 
   assert.equal(await readBranch(os.tmpdir(), { run: (c, a, o, callback) => callback(new Error("not a repo")) }), null);
 });
 
+test("only git's own answer makes a folder \"not git\"; a slow or failing git leaves it unknown", async () => {
+  // As the installed app saw it: git took 5-9 s on a busy disk at start, past the old 3 s limit.
+  const seen = [];
+  const timedOut = (command, args, options, callback) => { seen.push(options.timeout); const error = new Error("spawn timeout"); error.killed = true; error.signal = "SIGTERM"; callback(error, "", ""); };
+  assert.equal(await readGitInfo(os.tmpdir(), { run: timedOut }), null, "a timeout is unknown, never \"none\"");
+  assert.ok(seen[0] >= 15_000, `git is given time on a slow disk (${seen[0]} ms)`);
+  const refused = (command, args, options, callback) => callback(Object.assign(new Error("exit 128"), { code: 128 }), "", "fatal: not a git repository (or any of the parent directories): .git\n");
+  assert.deepEqual(await readGitInfo(os.tmpdir(), { run: refused }), { kind: "none", root: null, mainRepo: null, branch: null });
+  const dubious = (command, args, options, callback) => callback(Object.assign(new Error("exit 128"), { code: 128 }), "", "fatal: detected dubious ownership in repository at 'G:/x'\n");
+  assert.equal(await readGitInfo(os.tmpdir(), { run: dubious }), null, "another git error is unknown too");
+  assert.equal(await readGitInfo(os.tmpdir(), { run: (c, a, o, callback) => callback(null, "only-one-line\n", "") }), null, "a short answer is unknown");
+});
+
 test("a project folder is told apart as Claude Code does: repository, worktree of one, folder inside one, not git, gone", { skip: !HAS_GIT }, async () => {
   const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "project-git-")));
   const git = (cwd, ...args) => execFileSync("git", ["-C", cwd, "-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { stdio: "ignore" });

@@ -73,6 +73,44 @@ test("the headless control token is kept in memory only: its file is deleted onc
   }
 });
 
+test("an installed app runs the headless it shipped with; an override or a source build only for a developer", (t) => {
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "headless-binary-")));
+  const name = `coding-tools-headless${process.platform === "win32" ? ".exe" : ""}`;
+  const put = (...parts) => { const file = path.join(base, ...parts); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, "x"); return file; };
+  const bundled = put("bundle", "coding-tools", name);
+  const shipped = put("resources", "coding-tools", name);
+  const override = put("ct-build", "rust-core", "coding-tools-headless", "target", "release", name);
+  const sourceBuild = put("source", "rust-core", "target", "release", name);
+  const saved = { binary: process.env.CODING_TOOLS_HEADLESS_BINARY, dev: process.env.CODING_TOOLS_DEV_HOME, resources: process.resourcesPath };
+  t.after(() => {
+    for (const [key, value] of [["CODING_TOOLS_HEADLESS_BINARY", saved.binary], ["CODING_TOOLS_DEV_HOME", saved.dev]]) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    process.resourcesPath = saved.resources;
+    fs.rmSync(base, { recursive: true, force: true });
+  });
+  process.resourcesPath = path.join(base, "resources");
+  const logger = { info() {}, warn() {}, error() {} };
+  const host = ({ packaged, bundle = true }) => new HeadlessHost({ app: { getPath: () => base, isPackaged: packaged }, logger,
+    sourceRoot: path.join(base, "source"), binaryRoot: bundle ? path.join(base, "bundle") : null });
+  const pick = (options) => { const { source, file, ignoredOverride } = host(options).binarySelection(); return { source, file, ignoredOverride }; };
+
+  // As found on 2026-10-15: the installed app launched with the variable pointing at a build folder.
+  process.env.CODING_TOOLS_HEADLESS_BINARY = override;
+  delete process.env.CODING_TOOLS_DEV_HOME;
+  assert.deepEqual(pick({ packaged: true }), { source: "bundle", file: bundled, ignoredOverride: true }, "its installed backend bundle's copy");
+  assert.deepEqual(pick({ packaged: true, bundle: false }), { source: "packaged", file: shipped, ignoredOverride: true }, "else its resources' copy");
+  fs.rmSync(shipped);
+  assert.throws(() => host({ packaged: true, bundle: false }).binarySelection(), /unavailable/, "never a source build when packaged");
+
+  process.env.CODING_TOOLS_DEV_HOME = path.join(base, "dev-home");
+  assert.deepEqual(pick({ packaged: true }), { source: "override", file: override, ignoredOverride: false }, "a dev profile may point it anywhere");
+  delete process.env.CODING_TOOLS_DEV_HOME;
+  assert.deepEqual(pick({ packaged: false }), { source: "override", file: override, ignoredOverride: false }, "so may an unpackaged app");
+  delete process.env.CODING_TOOLS_HEADLESS_BINARY;
+  assert.deepEqual(pick({ packaged: false, bundle: false }), { source: "source", file: sourceBuild, ignoredOverride: false }, "and it falls back to the source tree");
+});
+
 test("stale token files are removed before a start: only older token-*.txt files, never the current one or anything else", (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "headless-stale-tokens-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
