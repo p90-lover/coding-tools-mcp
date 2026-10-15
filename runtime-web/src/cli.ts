@@ -74,6 +74,7 @@ Setup options:
   --tunnel-id ID               Existing OpenAI tunnel id (full mode)
   --runtime-key-file PATH      File containing a Tunnels Read+Use runtime key
   --replace-codex-route        Reversibly replace existing Responses or Voice route settings
+  --no-codex-route             Leave Codex's model route untouched (Codex keeps talking to OpenAI)
   --subagent-protocol MODE     compatibility-v1 (default) or native (advanced)
   --restart-service            Explicitly restart this project's daemon after an update
   --login                      Refresh the stored ChatGPT login even if one exists
@@ -311,6 +312,10 @@ async function setupCommand(args: string[]): Promise<void> {
   }
   if (zeroRiskPro || zeroRiskDefault) options.zeroRiskProEnabled = zeroRiskPro;
   options.replaceCodexRoute = takeFlag(args, "--replace-codex-route");
+  options.skipCodexRoute = takeFlag(args, "--no-codex-route");
+  if (options.replaceCodexRoute && options.skipCodexRoute) {
+    throw new Error("Choose at most one: --replace-codex-route or --no-codex-route");
+  }
   options.restartService = takeFlag(args, "--restart-service");
   assertNoArgs(args);
 
@@ -355,7 +360,11 @@ async function setupCommand(args: string[]): Promise<void> {
     stdout.write("One account-level step remains: attach the tunnel to the ChatGPT connector named in config.\n");
     stdout.write("Open: https://chatgpt.com/#settings/Plugins\n");
   }
-  stdout.write("Restart the Codex app once so its native model catalog refreshes through the installed route.\n");
+  if (result.codexRestartRequired) {
+    stdout.write("Restart the Codex app once so its native model catalog refreshes through the installed route.\n");
+  } else {
+    stdout.write("Codex's model route was left unchanged (--no-codex-route).\n");
+  }
 }
 
 async function doctorCommand(args: string[]): Promise<void> {

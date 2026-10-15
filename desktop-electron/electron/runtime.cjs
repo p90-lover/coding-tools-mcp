@@ -177,7 +177,11 @@ class RuntimeHost {
     publishOperation,
     supervisor,
     getBrowserInteractionMode = () => "automatic",
+    // Whether Codex's model route may point at the bridge: the user's "Use Coding Tools in Codex".
+    // Off, no setup installs the route and nothing reconnects it.
+    codexRouteEnabled = () => true,
   }) {
+    this.codexRouteEnabled = codexRouteEnabled;
     this.app = app;
     this.logger = logger;
     this.sourceRoot = sourceRoot;
@@ -867,9 +871,37 @@ class RuntimeHost {
     }
   }
 
+  /** The setup flag for Codex's route: replace it when the user wants Codex on the bridge, else leave Codex alone. */
+  codexRouteArgs() {
+    return this.codexRouteEnabled() ? ["--replace-codex-route"] : ["--no-codex-route"];
+  }
+
+  /**
+   * The user's "Use Coding Tools in Codex". Off restores Codex's previous route (a config edit:
+   * Codex turns in flight don't block it) and, through codexRouteEnabled, keeps every later setup
+   * and reconnect from putting it back. On reconnects a route that setup installed before.
+   * Codex reads its config when it starts, so it needs a restart either way.
+   */
+  async setCodexRoute(enabled) {
+    this.assertProductionProfile("Codex bridge routing");
+    if (!enabled) {
+      const status = await this.bridgeStatus("codex-route-off");
+      if (!status.installed || !status.active) return { ...status, changed: false, codexRestartRequired: false };
+      const restored = await this.restoreBridgeRoute("codex-route-off");
+      return { ...restored, changed: true, codexRestartRequired: true };
+    }
+    const status = await this.bridgeStatus("codex-route-on");
+    if (!status.installed) {
+      return { ...status, changed: false, codexRestartRequired: false, setupRequired: true };
+    }
+    const connected = await this.connectBridgeRoute();
+    return { ...connected, codexRestartRequired: connected.changed === true };
+  }
+
   async connectBridgeRoute() {
     this.assertProductionProfile("Codex bridge routing");
     const name = "bridge-connect";
+    if (!this.codexRouteEnabled()) return { changed: false, skipped: "codex-route-off" };
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
     this.lifecycleOperation = name;
     try {
@@ -1008,7 +1040,7 @@ class RuntimeHost {
         mode: interactionMode,
         refreshCapabilities: interactionMode === "automatic",
       }),
-      "--replace-codex-route",
+      ...this.codexRouteArgs(),
       "--acknowledge-unofficial",
       "--restart-service",
     ];
@@ -1082,7 +1114,7 @@ class RuntimeHost {
       "--browser-host-descriptor",
       this.browserDescriptorPath,
       ...this.browserInteractionArgs(),
-      "--replace-codex-route",
+      ...this.codexRouteArgs(),
       "--acknowledge-unofficial",
       "--restart-service",
       contextFlag,
@@ -1114,7 +1146,7 @@ class RuntimeHost {
       "--acknowledge-unofficial",
       "--standard-context",
       profileFlag,
-      ...(this.launcherProfile === "production" ? ["--replace-codex-route", "--restart-service"] : []),
+      ...(this.launcherProfile === "production" ? [...this.codexRouteArgs(), "--restart-service"] : []),
     ];
     if (current.config?.autoApproveToolCalls === true) args.push("--auto-approve-tool-calls");
     const options = {
@@ -1180,6 +1212,9 @@ class RuntimeHost {
       // A release may repair capability detection. Reusing the previous result can
       // keep eligible models disabled even after the corrected probe is installed.
       ...this.browserInteractionArgs({ mode: interactionMode, refreshCapabilities: true }),
+      // An upgrade never replaces a route it doesn't own; when the user turned Codex's route off,
+      // it doesn't install one either.
+      ...(this.codexRouteEnabled() ? [] : ["--no-codex-route"]),
       "--acknowledge-unofficial",
       "--restart-service",
     ];
@@ -1219,7 +1254,7 @@ class RuntimeHost {
       "--browser-host-descriptor",
       this.browserDescriptorPath,
       ...this.browserInteractionArgs({ mode: targetMode }),
-      "--replace-codex-route",
+      ...this.codexRouteArgs(),
     ];
     if (reuseSavedCredentials) {
       args.push("--acknowledge-unofficial", "--restart-service");
@@ -1313,7 +1348,7 @@ class RuntimeHost {
       this.browserDescriptorPath,
       ...this.browserInteractionArgs({ mode, refreshCapabilities: true }),
       "--acknowledge-unofficial",
-      ...(this.launcherProfile === "production" ? ["--replace-codex-route", "--restart-service"] : []),
+      ...(this.launcherProfile === "production" ? [...this.codexRouteArgs(), "--restart-service"] : []),
       mode === "automatic" && current.config?.experimentalBiggerContext === true
         ? "--bigger-context"
         : "--standard-context",
