@@ -25,6 +25,24 @@ test("what the agent reports beyond the counted messages and tool calls is its s
   assert.deepEqual(breakdown.counts, { messages: 1, toolCalls: 1 });
 });
 
+test("ACP tool calls count their input and their output or content blocks", () => {
+  const acp = (sequence, detail) => ({ kind: "activity", sequence, activityKind: "mcp_tool", detail });
+  const breakdown = contextBreakdown({
+    activities: [
+      acp(1, { input: { file_path: "x".repeat(400) }, output: "y".repeat(400) }),
+      acp(2, { input: {}, content: [{ type: "content", content: { type: "text", text: "z".repeat(800) } }] }),
+    ],
+    usage: { contextUsed: 100_000, contextWindow: 200_000 },
+  });
+  assert.ok(byId(breakdown).tools >= 400, `tools ${byId(breakdown).tools}`);
+  assert.equal(breakdown.counts.toolCalls, 2);
+});
+
+test("the backend bundle carries the breakdown module the upstream service requires", () => {
+  const { BACKEND_MODULES } = require("../electron/backend-bundle.cjs");
+  assert.ok(BACKEND_MODULES.includes("ao-context-breakdown.cjs"));
+});
+
 test("only the history after the last compaction is counted", () => {
   const breakdown = contextBreakdown({
     messages: [message(1, "a".repeat(4_000)), message(5, "a".repeat(40))],

@@ -100,16 +100,20 @@ const share = (tokens: number, window: number | null) => (window ? ` (${((tokens
  * the total and each category's tokens. */
 function ContextUsage({ breakdown, model }: { breakdown: ContextBreakdown; model?: string }) {
   const { window, used, free } = breakdown;
+  // An agent can report more in use than its window; shares and the grid then measure against
+  // the larger figure so they never pass 100%, and the total reads full, as contextFraction does.
+  const scale = window ? Math.max(window, used) : null;
+  const fraction = contextFraction({ contextUsed: used, contextWindow: window });
   const rows = [...breakdown.categories.filter((category) => category.tokens > 0),
     ...(free !== null ? [{ id: "free", label: "Free space", tokens: free }] : [])];
   return <div className="cx-context-usage">
-    {window ? <div className="cx-context-grid" aria-hidden="true">
-      {contextGrid(breakdown.categories, window).map((id, index) => <span key={index} className={`is-${id}`} />)}
+    {scale ? <div className="cx-context-grid" aria-hidden="true">
+      {contextGrid(breakdown.categories, scale).map((id, index) => <span key={index} className={`is-${id}`} />)}
     </div> : null}
     <div className="cx-context-legend">
-      <p>{model ? <><b>{model}</b> · </> : null}{tokensShort(used)}{window ? `/${tokensShort(window)}` : ""} tokens{window ? ` (${Math.round((used / window) * 100)}%)` : ""}</p>
+      <p>{model ? <><b>{model}</b> · </> : null}{tokensShort(used)}{window ? `/${tokensShort(window)}` : ""} tokens{fraction !== null ? ` (${Math.round(fraction * 100)}%)` : ""}</p>
       <ul>{rows.map((row) => <li key={row.id}><i className={`is-${row.id}`} aria-hidden="true" />
-        <span>{row.label}:</span> <b>{tokensShort(row.tokens)}</b>{share(row.tokens, window)}</li>)}</ul>
+        <span>{row.label}:</span> <b>{tokensShort(row.tokens)}</b>{share(row.tokens, scale)}</li>)}</ul>
     </div>
   </div>;
 }
@@ -168,12 +172,19 @@ export function ChatContextMeter({ sessionId, agentLabel, model, canCompact, onC
     setBreakdown(null);
     if (!isOpen || !sessionId) return undefined;
     let live = true;
-    const read = () => void getCodingToolsClient().apps.call({ moduleId: "agent-orchestrator", operation: "chat_context", arguments: { sessionIds: [sessionId], detail: true } })
-      .then((outer) => {
-        const session = (outer.result as { sessions?: Record<string, ChatContextSnapshot> } | undefined)?.sessions?.[sessionId];
-        if (live) setBreakdown(session?.breakdown ?? null);
-      })
-      .catch(() => undefined);
+    // Each read can page through thousands of timeline entries: one at a time, and none while hidden.
+    let pending = false;
+    const read = () => {
+      if (pending || document.visibilityState !== "visible") return;
+      pending = true;
+      void getCodingToolsClient().apps.call({ moduleId: "agent-orchestrator", operation: "chat_context", arguments: { sessionIds: [sessionId], detail: true } })
+        .then((outer) => {
+          const session = (outer.result as { sessions?: Record<string, ChatContextSnapshot> } | undefined)?.sessions?.[sessionId];
+          if (live) setBreakdown(session?.breakdown ?? null);
+        })
+        .catch(() => undefined)
+        .finally(() => { pending = false; });
+    };
     read();
     const timer = window.setInterval(read, DETAIL_POLL_MS);
     return () => { live = false; window.clearInterval(timer); };

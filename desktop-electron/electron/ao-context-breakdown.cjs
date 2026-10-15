@@ -35,7 +35,14 @@ function activityText(activity) {
   const detail = activity?.detail && typeof activity.detail === "object" ? activity.detail : {};
   switch (activity?.activityKind) {
     case "command": return `${jsonText(detail.command ?? detail.rawCommand)}\n${jsonText(detail.output)}`;
-    case "mcp_tool": return `${jsonText(detail.toolName)} ${jsonText(detail.arguments)}\n${jsonText(detail.result)}${jsonText(detail.error)}`;
+    // ACP tool calls carry `input` and `output` or `content` blocks (what timelineActivity reads);
+    // Codex's MCP calls carry `arguments` and `result`.
+    case "mcp_tool": {
+      const content = (Array.isArray(detail.content) ? detail.content : []).map((entry) => entry?.content?.text ?? entry?.text)
+        .filter((text) => typeof text === "string").join("\n");
+      return [detail.toolName, detail.input ?? detail.arguments, detail.output, content, detail.result, detail.error]
+        .map(jsonText).filter(Boolean).join("\n");
+    }
     case "file_change": return (Array.isArray(detail.files) ? detail.files : []).map((file) => `${jsonText(file?.path)}\n${jsonText(file?.patch)}`).join("\n");
     case "user_input": return jsonText(detail.message);
     default: return "";
