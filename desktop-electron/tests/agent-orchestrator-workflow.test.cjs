@@ -2153,6 +2153,31 @@ test("a card left blank starts with its model's full known window; CPA's stock 2
   assert.equal((await launch("gpt-6-luna", 300000)).launched.contextWindow, 300000, "a window the card sets wins");
 });
 
+test("an agent's own models take CPA's real window for the same model, and a no-longer-listed model says so at launch", async () => {
+  const catalog = { data: [{ id: "gpt-6-luna", context_window: 272000, max_context_window: 872000, supported_reasoning_levels: ["low", "high"] }] };
+  const route = { harness_id: "ao:codex", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/cline-pass/gone-model",
+    permission_profile: ":ao-default", effort: "high" };
+  const mission = { id: "run", workspace_id: "ws", revision: 1, nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+  let failure = null;
+  const workflow = createAgentOrchestratorWorkflow({
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async url => String(url).includes("/v1/models") ? { ok: true, json: async () => catalog } : { ok: false, status: 404, json: async () => ({}) },
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+      if (body?.error) failure = body.error;
+      return { ok: true, run: mission };
+    },
+    aoHarness: { catalog: async () => [], models: async () => [{ id: "gpt-6-luna" }, { id: "gpt-6-sol" }], spawn: async () => "session" },
+    confirm: async () => true,
+  });
+  const listed = await workflow.call("models", { harness: "ao:codex" });
+  assert.equal(listed.capabilities["gpt-6-luna"].contextLimit, 872000, "Codex's own gpt-6-luna takes CPA's 872K");
+  assert.equal(listed.capabilities["gpt-6-sol"].contextLimit, undefined, "a model CPA does not serve stays unknown");
+  const result = await workflow.call("advance", { workspaceId: "ws", runId: "run", executable: "C:/codex.exe" }).catch(error => ({ error }));
+  const message = String(failure ?? result?.error?.message ?? JSON.stringify(result));
+  assert.match(message, /no longer in this harness's model list/, message);
+});
+
 test("permission capabilities use installed AO adapter modes without fabricating native metadata", async () => {
   const reads = [], launches = [];
   const workflow = createAgentOrchestratorWorkflow({

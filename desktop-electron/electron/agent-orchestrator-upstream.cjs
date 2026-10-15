@@ -10,6 +10,7 @@ const { createAoWorkspaceBoard } = require("./agent-orchestrator-workspace.cjs")
 const { readCpaCatalog, collectMissionAccounting } = require("./agent-orchestrator-accounting.cjs");
 const { createAoSessionEvents } = require("./ao-session-events.cjs");
 const { createAoDependencyLinks } = require("./ao-dependency-links.cjs");
+const { readContextBreakdown } = require("./ao-context-breakdown.cjs");
 
 const API_OPERATIONS = Object.freeze({
   upstream_projects: { method: "GET", endpoint: "/api/v1/projects" },
@@ -1084,6 +1085,14 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
             .filter((server) => typeof server?.name === "string")
             .map((server) => ({ name: server.name.slice(0, 80), status: String(server.status ?? "").slice(0, 40) })),
         };
+        // The open panel's category split reads the timeline back to the last compaction, so
+        // only on request and for one session; the 4-second ring poll stays one small read.
+        if (args.detail === true && ids.length === 1) {
+          sessions[id].breakdown = await readContextBreakdown(
+            (query) => internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?${query}`),
+            sessions[id].usage,
+          ).catch(() => null);
+        }
       }));
       return { ok: true, sessions };
     }

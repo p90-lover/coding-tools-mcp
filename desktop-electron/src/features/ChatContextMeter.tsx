@@ -8,7 +8,8 @@ import { contextFraction, tokensShort } from "./ao-chat";
 // session uses its context window, and on click what AO knows about it. That is the agent's own
 // report (ACP usage updates, Codex token usage): context used of the window, the conversation's
 // token spend, the account's rate limits, its tool servers and the last compaction. No agent
-// reports a per-category split (system prompt, tools, messages), so none is shown. A model CPA
+// reports a per-category split, so the open panel estimates one from the chat's history and
+// draws it as Claude Code's /context does (a grid of the window, one cell per 1%). A model CPA
 // serves from its Codex accounts shows each account's 5-hour and weekly limits instead (CPA
 // Helper's quota, through the cpa_quota operation), worded as Claude Code words plan limits.
 
@@ -21,9 +22,15 @@ type RateLimits = {
   primaryUsedPercent: number | null; secondaryUsedPercent: number | null;
   primaryResetsInSeconds: number | null; secondaryResetsInSeconds: number | null; planLabel: string | null;
 };
+/** The open panel's estimated split of the context (ao-context-breakdown.cjs). */
+export type ContextBreakdown = {
+  used: number; window: number | null; free: number | null;
+  categories: { id: string; label: string; tokens: number }[];
+  counts: { messages: number; toolCalls: number }; sinceCompaction: boolean; complete: boolean;
+};
 export type ChatContextSnapshot = {
   controller: string | null; usage: Usage | null; rateLimits: RateLimits | null; compactedAt: string | null;
-  planLabel: string | null; mcpServers: { name: string; status: string }[];
+  planLabel: string | null; mcpServers: { name: string; status: string }[]; breakdown?: ContextBreakdown | null;
 };
 
 /** One quota window of a CPA Codex account (cpa-quota.cjs): percent used and when it resets (ms). */
@@ -36,6 +43,9 @@ type CpaQuota = { available: boolean; reason?: string; accounts?: CpaQuotaAccoun
 
 const POLL_MS = 4_000;
 const QUOTA_POLL_MS = 60_000;
+const DETAIL_POLL_MS = 10_000;
+/** Matches .cx-context-panel's width in codex-chat.css. */
+const PANEL_WIDTH = 380;
 const RING = 18;
 
 /** "Resets 7:05 PM" today, else "Resets Oct 21, 10:00 AM", as Claude Code words plan limits. */
@@ -64,6 +74,47 @@ function LimitRow({ name, used, resetsAt }: { name: string; used: number; resets
     <div><span>{name}</span><b>{percent}% used</b></div>
     <div className={`cx-context-bar is-${tone(percent / 100)}`}><span style={{ width: `${percent}%` }} /></div>
     {resets ? <small>{resets}</small> : null}
+  </div>;
+}
+
+const GRID_CELLS = 100;
+
+/** Claude Code's /context grid: one cell per 1% of the window, in category order, each category
+ * that holds anything getting at least one cell; the rest is free space. */
+export function contextGrid(categories: { id: string; tokens: number }[], window: number): string[] {
+  const cells: string[] = [];
+  let total = 0;
+  for (const category of categories) {
+    if (category.tokens <= 0) continue;
+    total += category.tokens;
+    const end = Math.min(GRID_CELLS, Math.max(cells.length + 1, Math.round((total / window) * GRID_CELLS)));
+    while (cells.length < end) cells.push(category.id);
+  }
+  while (cells.length < GRID_CELLS) cells.push("free");
+  return cells;
+}
+
+const share = (tokens: number, window: number | null) => (window ? ` (${((tokens / window) * 100).toFixed(1)}%)` : "");
+
+/** The panel's top half, laid out as Claude Code's /context: the grid, and beside it the model,
+ * the total and each category's tokens. */
+function ContextUsage({ breakdown, model }: { breakdown: ContextBreakdown; model?: string }) {
+  const { window, used, free } = breakdown;
+  // An agent can report more in use than its window; shares and the grid then measure against
+  // the larger figure so they never pass 100%, and the total reads full, as contextFraction does.
+  const scale = window ? Math.max(window, used) : null;
+  const fraction = contextFraction({ contextUsed: used, contextWindow: window });
+  const rows = [...breakdown.categories.filter((category) => category.tokens > 0),
+    ...(free !== null ? [{ id: "free", label: "Free space", tokens: free }] : [])];
+  return <div className="cx-context-usage">
+    {scale ? <div className="cx-context-grid" aria-hidden="true">
+      {contextGrid(breakdown.categories, scale).map((id, index) => <span key={index} className={`is-${id}`} />)}
+    </div> : null}
+    <div className="cx-context-legend">
+      <p>{model ? <><b>{model}</b> · </> : null}{tokensShort(used)}{window ? `/${tokensShort(window)}` : ""} tokens{fraction !== null ? ` (${Math.round(fraction * 100)}%)` : ""}</p>
+      <ul>{rows.map((row) => <li key={row.id}><i className={`is-${row.id}`} aria-hidden="true" />
+        <span>{row.label}:</span> <b>{tokensShort(row.tokens)}</b>{share(row.tokens, scale)}</li>)}</ul>
+    </div>
   </div>;
 }
 
@@ -114,6 +165,31 @@ export function ChatContextMeter({ sessionId, agentLabel, model, canCompact, onC
     return () => { live = false; window.clearInterval(timer); target?.removeEventListener("click", onOpen); };
   }, [onCpaCodex]);
 
+  // The category split reads the chat's history, so only while the panel is open.
+  const [breakdown, setBreakdown] = useState<ContextBreakdown | null>(null);
+  const isOpen = Boolean(open);
+  useEffect(() => {
+    setBreakdown(null);
+    if (!isOpen || !sessionId) return undefined;
+    let live = true;
+    // Each read can page through thousands of timeline entries: one at a time, and none while hidden.
+    let pending = false;
+    const read = () => {
+      if (pending || document.visibilityState !== "visible") return;
+      pending = true;
+      void getCodingToolsClient().apps.call({ moduleId: "agent-orchestrator", operation: "chat_context", arguments: { sessionIds: [sessionId], detail: true } })
+        .then((outer) => {
+          const session = (outer.result as { sessions?: Record<string, ChatContextSnapshot> } | undefined)?.sessions?.[sessionId];
+          if (live) setBreakdown(session?.breakdown ?? null);
+        })
+        .catch(() => undefined)
+        .finally(() => { pending = false; });
+    };
+    read();
+    const timer = window.setInterval(read, DETAIL_POLL_MS);
+    return () => { live = false; window.clearInterval(timer); };
+  }, [isOpen, sessionId]);
+
   useEffect(() => {
     if (!open) return undefined;
     const close = (event: PointerEvent) => {
@@ -151,7 +227,7 @@ export function ChatContextMeter({ sessionId, agentLabel, model, canCompact, onC
       onClick={() => {
         const box = button.current?.getBoundingClientRect();
         if (!box) return;
-        setOpen((current) => (current ? null : { left: Math.max(8, Math.min(box.right - 320, window.innerWidth - 328)), bottom: window.innerHeight - box.top + 8 }));
+        setOpen((current) => (current ? null : { left: Math.max(8, Math.min(box.right - PANEL_WIDTH, window.innerWidth - PANEL_WIDTH - 8)), bottom: window.innerHeight - box.top + 8 }));
       }}>
       <svg width={RING} height={RING} viewBox={`0 0 ${RING} ${RING}`} aria-hidden="true">
         <circle className="cx-context-track" cx={RING / 2} cy={RING / 2} r={radius} fill="none" strokeWidth="2.2" />
@@ -162,14 +238,15 @@ export function ChatContextMeter({ sessionId, agentLabel, model, canCompact, onC
     {open ? <FloatingLayer className="cx-context-panel" role="dialog" style={{ left: open.left, bottom: open.bottom }}>
       <div ref={panel} aria-label="Context window">
         <div className="cx-context-head">
-          <strong>Context window</strong>
-          <span>{usage ? fraction === null ? `${tokensShort(usage.contextUsed)} tokens` : `${tokensShort(usage.contextUsed)} / ${tokensShort(usage.contextWindow)} (${Math.round(fraction * 100)}%)` : "—"}</span>
+          <strong>Context Usage</strong>
+          {!breakdown ? <span>{usage ? fraction === null ? `${tokensShort(usage.contextUsed)} tokens` : `${tokensShort(usage.contextUsed)} / ${tokensShort(usage.contextWindow)} (${Math.round(fraction * 100)}%)` : "—"}</span> : null}
         </div>
-        {fraction !== null ? <div className={`cx-context-bar is-${tone(fraction)}`}><span style={{ width: `${Math.round(fraction * 100)}%` }} /></div> : null}
+        {breakdown ? <ContextUsage breakdown={breakdown} model={model} />
+          : fraction !== null ? <div className={`cx-context-bar is-${tone(fraction)}`}><span style={{ width: `${Math.round(fraction * 100)}%` }} /></div> : null}
         {agentLabel ? <p className="cx-context-note">{agentLabel}{snapshot?.controller ? ` · ${snapshot.controller}` : ""}</p> : null}
         {!sessionId ? <p className="cx-context-note">No agent has started in this chat yet; the meter fills once one answers.</p>
           : !usage ? <p className="cx-context-note">The agent has not reported its context yet. It does after its first reply.</p> : <>
-            {fraction !== null ? <p className="cx-context-note">{tokensShort(Math.max(0, (usage.contextWindow ?? 0) - (usage.contextUsed ?? 0)))} free</p>
+            {breakdown ? null : fraction !== null ? <p className="cx-context-note">{tokensShort(Math.max(0, (usage.contextWindow ?? 0) - (usage.contextUsed ?? 0)))} free</p>
               : <p className="cx-context-note">This agent does not say how large its window is, so there is no percentage.</p>}
             <p className="cx-context-label">This conversation's tokens</p>
             <dl className="cx-context-rows">
@@ -211,7 +288,9 @@ export function ChatContextMeter({ sessionId, agentLabel, model, canCompact, onC
           <button type="button" disabled={!canCompact} title={canCompact ? "Summarize the history to free context (/compact)" : "Compact works once the chat is not running"}
             onClick={() => { setOpen(null); onCompact(); }}>Compact session</button>
         </div>
-        <p className="cx-context-note is-quiet">The agent reports totals only, not a split by system prompt, tools and messages.</p>
+        <p className="cx-context-note is-quiet">{breakdown
+          ? `The agent reports only its total; the split is estimated from ${breakdown.counts.messages} messages and ${breakdown.counts.toolCalls} tool calls${breakdown.sinceCompaction ? " since the last compaction" : ""}${breakdown.complete ? "" : " (the most recent ones)"}, and the rest is its system prompt, tool definitions and memory files.`
+          : "The agent reports totals only, not a split by system prompt, tools and messages."}</p>
       </div>
     </FloatingLayer> : null}
   </>;
