@@ -523,6 +523,9 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-terminal-list button[aria-pressed="true"], .cx-terminal-list button:hover { background: color-mix(in srgb, var(--ao-line) 55%, transparent); }
 .cx-terminal-list code { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cx-terminal-list small { flex: 0 0 auto; color: var(--ao-muted); }
+/* A command the agent ran with its own shell tool: listed read-only beside the app's. */
+.cx-terminal-source { flex: 0 0 auto; padding: 1px 6px; border: 1px solid var(--ao-line); border-radius: 8px; color: var(--ao-muted);
+  font-size: 10px; line-height: 14px; white-space: nowrap; }
 .cx-terminal-dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: var(--ao-muted); }
 .cx-terminal-dot.is-running { background: var(--ao-green, #2e9d5b); animation: cx-pulse 1.6s ease-in-out infinite; }
 .cx-terminal-dot.is-ok { background: var(--ao-green, #2e9d5b); }

@@ -100,6 +100,24 @@ const callTool = (url, auth, name, args = {}) =>
   post(url, { jsonrpc: "2.0", id: nextId++, method: "tools/call", params: { name, arguments: args } }, auth).then((reply) => reply.body.result);
 const listed = (url, auth) => post(url, { jsonrpc: "2.0", id: nextId++, method: "tools/list" }, auth).then((reply) => reply.body.result.tools.map((entry) => entry.name));
 
+test("a resumed session gets a fresh credential; the old one works until the new one is used", async () => {
+  const { tools } = fixture();
+  try {
+    const old = await session(tools, { agent: "claude-code", id: "ao-9" });
+    const renewed = await tools.renew("ao-9");
+    assert.ok(renewed, "renewed");
+    const [{ url, headers }] = renewed.servers;
+    assert.equal(url, renewed.servers[0].url);
+    assert.notEqual(headers.Authorization, old.auth.authorization, "a new credential");
+    assert.equal((await post(old.url, { jsonrpc: "2.0", id: 1, method: "tools/list" }, old.auth)).status, 200,
+      "an AO that resumed with the old servers keeps working");
+    assert.equal((await post(url, { jsonrpc: "2.0", id: 2, method: "tools/list" }, { authorization: headers.Authorization })).status, 200);
+    assert.equal((await post(old.url, { jsonrpc: "2.0", id: 3, method: "tools/list" }, old.auth)).status, 401,
+      "once the agent uses the new credential the old one is gone");
+    assert.equal(await tools.renew("never-leased"), null, "a session that never had tools gets none");
+  } finally { await tools.close(); }
+});
+
 test("each chat session gets its own server path and credential, for agents whose driver takes it", async () => {
   let on = true;
   const { tools } = fixture({ enabled: () => on });

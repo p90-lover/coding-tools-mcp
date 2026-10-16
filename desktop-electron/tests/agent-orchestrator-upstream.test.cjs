@@ -78,7 +78,7 @@ test("actual upstream observe exposes bounded current streaming output separatel
     internalApi: async (method, endpoint) => {
       assert.equal(method, "GET");
       if (endpoint === "/api/v1/sessions/owned-session") return { session: { id: "owned-session", mode: "chat", status: "working" } };
-      if (endpoint === "/api/v1/sessions/owned-session/conversation?limit=100") return { turns: [{ id: turn, state: "running" }], messages };
+      if (endpoint === "/api/v1/sessions/owned-session/conversation?limit=100&includePending=1") return { turns: [{ id: turn, state: "running" }], messages };
       throw new Error("Session is not owned");
     },
   });
@@ -95,7 +95,7 @@ test("actual upstream observe exposes bounded current streaming output separatel
 
 test("observe returns the current turn's reasoning, tool calls and messages in order", async () => {
   const upstream = observeHarness({
-    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100") ? {
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {
       turns: [{ id: "t", state: "running" }],
       messages: [
         { id: "m0", role: "user", turnId: "t", sequence: 1, text: "the prompt" },
@@ -129,7 +129,7 @@ test("a running turn whose chat host is gone is interrupted, even when its PID w
   const upstream = observeHarness({ dataRoot,
     internalApi: async (method, endpoint) => {
       calls.push(`${method} ${endpoint}`);
-      if (endpoint.endsWith("/conversation?limit=100")) return { turns: [{ id: "t", state: turnState }], messages: [] };
+      if (endpoint.endsWith("/conversation?limit=100&includePending=1")) return { turns: [{ id: "t", state: turnState }], messages: [] };
       if (endpoint.endsWith("/interrupt")) return {};
       return { session: { id: "s", mode: "chat", status: "working" } };
     },
@@ -269,7 +269,7 @@ test("observe lists the agent's parked tool requests with AO's offered decisions
   const upstream = observeHarness({
     internalApi: async (method, endpoint, body) => {
       calls.push([method, endpoint, body]);
-      if (endpoint.endsWith("/conversation?limit=100")) return {
+      if (endpoint.endsWith("/conversation?limit=100&includePending=1")) return {
         turns: [{ id: "t", state: "running" }], messages: [],
         activities: [
           { id: "a1", turnId: "t", sequence: 2, activityKind: "approval", status: "pending", requestId: "req-1", summary: "Bash",
@@ -301,7 +301,7 @@ test("a follow-up turn is observed only once AO shows it; send and steer use AO'
   const upstream = observeHarness({
     internalApi: async (method, endpoint, body) => {
       calls.push([method, endpoint, body]);
-      if (endpoint.endsWith("/conversation?limit=100")) return { turns,
+      if (endpoint.endsWith("/conversation?limit=100&includePending=1")) return { turns,
         messages: [{ id: "m", role: "assistant", turnId: "old", sequence: 1, text: "the previous answer" }], activities: [] };
       if (endpoint.endsWith("/conversation/messages")) return { turnId: "new", state: "running" };
       if (endpoint.endsWith("/conversation/steer")) { if (steerError) throw steerError; return { providerTurnId: "new" }; }
@@ -325,7 +325,7 @@ test("a follow-up turn is observed only once AO shows it; send and steer use AO'
 
 test("a steered message reads as the user's own words in the live timeline", async () => {
   const upstream = observeHarness({
-    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100") ? {
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {
       turns: [{ id: "t", state: "running" }], messages: [],
       activities: [{ id: "s1", turnId: "t", sequence: 3, activityKind: "system", status: "completed", summary: "use pnpm…",
         detail: { event: "steer", text: "use pnpm, not npm" } },
@@ -381,6 +381,42 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
   assert.ok(calls.some(([method, endpoint]) => method === "POST" && endpoint === "/api/v1/sessions/old/resume-agent"));
   status = "exited"; resumeOk = false;
   assert.equal(await upstream.continuable("old"), false, "a failed resume falls back to a fresh session");
+});
+
+test("a resumed chat gets the app's tools again, and an AO that refuses them still resumes it", async () => {
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("    async continuable(id)");
+  const end = source.indexOf("    /** Sends a follow-up as a new turn", start);
+  const methods = source.slice(start, end).trim().replace(/,$/, "");
+  const helpers = source.slice(source.indexOf("  async function chatHostGone"), source.indexOf("  // Mission-owned AO calls."));
+  const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
+  const states = source.match(/const TERMINAL_TURN_STATES = .*;/)[0];
+  const bodies = [];
+  let refuseServers = false;
+  let status = "exited";
+  const servers = [{ name: "coding-tools", type: "http", url: "http://127.0.0.1:1/mcp/ws/k", headers: { Authorization: "Bearer fixture" } }];
+  const upstream = vm.runInNewContext(states + helpers + identity + "({" + methods + "})", {
+    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), Date, Math, Number, Promise,
+    agentTools: { renew: async id => id === "chat-1" ? { servers } : null },
+    internalApi: async (method, endpoint, body) => {
+      if (endpoint.endsWith("/resume-agent")) {
+        bodies.push(JSON.parse(JSON.stringify(body)));
+        if (refuseServers && body?.mcpServers) throw new Error("unknown field mcpServers");
+        status = "idle";
+        return { ok: true };
+      }
+      return { session: { id: endpoint.split("/")[4], mode: "chat", status } };
+    },
+  });
+  assert.equal(await upstream.continuable("chat-1"), true);
+  assert.deepEqual(bodies, [{ mcpServers: servers }], "the resume carries the session's fresh tool servers");
+  status = "exited"; refuseServers = true; bodies.length = 0;
+  assert.equal(await upstream.continuable("chat-1"), true, "an older AO that refuses the field still resumes the chat");
+  assert.deepEqual(bodies, [{ mcpServers: servers }, {}]);
+  status = "exited"; bodies.length = 0;
+  assert.equal(await upstream.continuable("chat-2"), true);
+  assert.deepEqual(bodies, [{}], "a session that never had the app's tools resumes as before");
 });
 
 test("a terminal agent AO lost the signal of settles as failed once idle past the limit, never while it may still report", async () => {

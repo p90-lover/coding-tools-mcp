@@ -15,7 +15,14 @@ export type WorkbenchTab = "preview" | "terminal" | "changes" | "files" | "new";
 type PanelTab = { id: string; kind: WorkbenchTab };
 
 type PreviewState = { url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; errors: number };
-type Command = { id: string; cmd: string; workdir: string; startedAt: number; status: string; exitCode: number | null; user?: boolean };
+// "app": started through the app's exec_command (live output, stoppable, takes input). "agent": a
+// shell command the agent ran with its own tool (Bash, PowerShell), read from its AO conversation
+// with the tail of its output; read-only.
+type Command = {
+  id: string; cmd: string; workdir: string; startedAt: number; status: string; exitCode: number | null; user?: boolean;
+  source?: "app" | "agent"; output?: string;
+};
+const isAgentShell = (command: Command | undefined) => command?.source === "agent";
 
 const TAB_TITLES: Record<WorkbenchTab, string> = { preview: "Preview", terminal: "Terminal", changes: "Changes", files: "Files", new: "New tab" };
 const PANEL_WIDTH_KEY = "coding-tools:ao:workbench-width";
@@ -31,7 +38,8 @@ function rememberPage(sessionId: string, url: string, title: string) {
 
 /**
  * Opens the side panel the first time a chat agent opens a page in its preview or starts a command,
- * as Codex shows the browser or terminal when its agent uses one. Each page and command opens it
+ * as Codex shows the browser or terminal when its agent uses one. A command counts whether it went
+ * through the app's exec_command or the agent's own shell tool (source "agent"). Each page and command opens it
  * once; closing the panel is respected until the agent does something new.
  */
 export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen: (tab: WorkbenchTab) => void, workspaceId?: string) {
@@ -316,11 +324,14 @@ function TerminalPane({ sessionId, workspaceId }: { sessionId: string; workspace
 
   const command = commands.find((item) => item.id === selected);
   const running = command?.status === "running";
+  const agentShell = isAgentShell(command);
+  // An agent shell command's output tail comes with the listing; only app commands are read here.
+  const selectedAgentShell = selected.startsWith("agent:");
   useEffect(() => {
     offsets.current = { stdout: 0, stderr: 0 };
     setOutput("");
     pinned.current = true;
-    if (!selected) return undefined;
+    if (!selected || selectedAgentShell) return undefined;
     let live = true;
     let busy = false;
     const read = async () => {
@@ -341,9 +352,10 @@ function TerminalPane({ sessionId, workspaceId }: { sessionId: string; workspace
     const timer = window.setInterval(() => void read(), OUTPUT_POLL_MS);
     return () => { live = false; window.clearInterval(timer); };
   }, [sessionId, selected]);
+  const shown = agentShell ? plain(command?.output ?? "") : output;
   useLayoutEffect(() => {
     if (pinned.current && screen.current) screen.current.scrollTop = screen.current.scrollHeight;
-  }, [output]);
+  }, [shown]);
 
   const stop = () => {
     setError("");
@@ -373,30 +385,33 @@ function TerminalPane({ sessionId, workspaceId }: { sessionId: string; workspace
     return <div className="cx-terminal">
       <div className="cx-terminal-head">{shellButton}</div>
       {error ? <p className="cx-workbench-error" role="alert">{error}</p> : null}
-      <p className="cx-workbench-empty">No commands yet. Dev servers and other commands the agent starts through the app's terminal show here with their output (Settings → "Let chat agents run commands through the app's terminal"). New terminal opens your own shell in the agent's worktree.</p>
+      <p className="cx-workbench-empty">No commands yet. Dev servers and other commands the agent starts through the app's terminal show here with their output (Settings → "Let chat agents run commands through the app's terminal"), and so do the commands it runs with its own shell tool. New terminal opens your own shell in the agent's worktree.</p>
     </div>;
   }
+  const agentShellLabel = <span className="cx-terminal-source" title="Run by the agent with its own shell tool; shown read-only">agent shell</span>;
   return <div className="cx-terminal">
     <div className="cx-terminal-head">{shellButton}</div>
     <ul className="cx-terminal-list" aria-label="Commands">
       {commands.map((item) => <li key={item.id}>
         <button type="button" aria-pressed={item.id === selected} title={item.cmd} onClick={() => setSelected(item.id)}>
-          <span className={`cx-terminal-dot is-${item.status === "running" ? "running" : item.exitCode === 0 ? "ok" : "failed"}`} aria-hidden="true" />
+          <span className={`cx-terminal-dot is-${item.status === "running" ? "running" : item.exitCode === 0 || (isAgentShell(item) && item.exitCode === null && item.status === "completed") ? "ok" : "failed"}`} aria-hidden="true" />
           <code>{item.user ? "Your terminal" : item.cmd}</code>
+          {isAgentShell(item) ? agentShellLabel : null}
           <small>{item.status === "running" ? since(item.startedAt, now) : item.exitCode !== null ? `exit ${item.exitCode}` : item.status}</small>
         </button>
       </li>)}
     </ul>
     {command ? <div className="cx-terminal-head">
-      <code title={`${command.workdir}`}>{command.cmd}</code>
-      {running ? <button type="button" className="cx-terminal-stop" onClick={stop}>Stop</button> : null}
+      <code title={command.workdir || command.cmd}>{command.cmd}</code>
+      {agentShell ? agentShellLabel : null}
+      {running && !agentShell ? <button type="button" className="cx-terminal-stop" onClick={stop}>Stop</button> : null}
     </div> : null}
     {error ? <p className="cx-workbench-error" role="alert">{error}</p> : null}
     <pre ref={screen} className="cx-terminal-output" aria-live="off"
       onScroll={(event) => { const box = event.currentTarget; pinned.current = box.scrollHeight - box.scrollTop - box.clientHeight < 24; }}>
-      {output || (running ? "Waiting for output…" : "No output.")}
+      {shown || (running ? "Waiting for output…" : "No output.")}
     </pre>
-    {running ? <form className="cx-terminal-input" onSubmit={(event) => { event.preventDefault(); send(); }}>
+    {running && !agentShell ? <form className="cx-terminal-input" onSubmit={(event) => { event.preventDefault(); send(); }}>
       <input aria-label={command?.user ? "Type a command" : "Type into the command"} placeholder={command?.user ? "PS> type a command, Enter runs it" : "Type into the command, Enter sends"}
         value={input} spellCheck={false} onChange={(event) => setInput(event.target.value)} />
     </form> : null}
