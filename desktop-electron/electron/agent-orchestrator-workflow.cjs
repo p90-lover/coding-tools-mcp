@@ -282,18 +282,47 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   // tools, or none, is not handed to this chat.
   const toolsKey = (workspaceId) => { try { return agentToolsIdentity(workspaceId) ?? null; } catch { return null; } };
   const warmKey = (workspaceId, route, plain) => JSON.stringify([workspaceId, Boolean(plain), toolsKey(workspaceId), ...ROUTE_IDENTITY.map(field => route?.[field] ?? null)]);
+  // Not one of 21 warm sessions was ever handed to a chat, and nothing said why. Each warm session's
+  // fate is logged, and a miss names what differed from the closest waiting one (field names only).
+  const warmLog = (event, fields = {}) => logger?.info?.("ao.warm", { event, ...fields });
+  const warmDiff = (entry, workspaceId, route, plain) => [
+    ...(entry.plain !== Boolean(plain) ? ["plain"] : []),
+    ...(entry.tools !== toolsKey(workspaceId) ? ["tools"] : []),
+    ...ROUTE_IDENTITY.filter(field => (entry.route?.[field] ?? null) !== (route?.[field] ?? null)),
+  ];
   // Listed once, before this run starts any warm session of its own, so none of ours is in the list.
   let sweep = null;
   const sweepStaleWarm = () => sweep ??= (async () => {
     const stale = await harnessService().warmSessions?.(WARM_NAME).catch(() => []) ?? [];
     for (const id of stale) void harnessService().kill?.(id).catch(() => undefined);
   })();
+  // A chat opened while the app's tools were still starting asked once and was told no; nothing
+  // asked again, so the first chat after every app start launched cold. Ask again once they listen.
+  const TOOLS_WAIT_MS = 2_000;
+  const TOOLS_WAIT_TRIES = 45;
+  const toolsWaits = new Map(); // workspaceId -> timer; the latest route asked for wins
+  function warmWhenToolsReady(workspaceId, route, plain, tries = TOOLS_WAIT_TRIES) {
+    if (toolsWaits.has(workspaceId)) clearTimer(toolsWaits.get(workspaceId));
+    if (idleStopped || tries <= 0) { toolsWaits.delete(workspaceId); return; }
+    const timer = setTimer(() => {
+      toolsWaits.delete(workspaceId);
+      if (toolsKey(workspaceId) === "pending") return warmWhenToolsReady(workspaceId, route, plain, tries - 1);
+      void chatPrewarmRoute(workspaceId, route, plain).catch(() => undefined);
+    }, TOOLS_WAIT_MS);
+    timer?.unref?.();
+    toolsWaits.set(workspaceId, timer);
+  }
   async function chatPrewarmRoute(workspaceId, route, plain) {
     const node = { route, settings: { name: WARM_NAME } };
     if (!externalAgent(node)) return { ok: true, warmed: false, reason: "Only AO agents are pre-warmed" };
     // Until the tool server (started with the app) listens, its identity is "pending": a session
     // warmed under that key would never match the launch that comes for it.
-    if (toolsKey(workspaceId) === "pending") return { ok: true, warmed: false, reason: "The app's tools are still starting" };
+    if (toolsKey(workspaceId) === "pending") {
+      warmWhenToolsReady(workspaceId, route, plain);
+      return { ok: true, warmed: false, reason: "The app's tools are still starting", retrying: true };
+    }
+    // A request made once the tools listen supersedes one still waiting for them.
+    if (toolsWaits.has(workspaceId)) { clearTimer(toolsWaits.get(workspaceId)); toolsWaits.delete(workspaceId); }
     const key = warmKey(workspaceId, route, plain);
     if (warm.has(key)) return { ok: true, warmed: true };
     const args = aoLaunchArgs(workspaceId, node, plain, await defaultContextWindow(workspaceId, node));
@@ -301,33 +330,49 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       const [oldKey, oldest] = warm.entries().next().value;
       warm.delete(oldKey);
       clearTimeout(oldest.timer);
+      warmLog("evicted", { model: oldest.route?.model ?? null, ready: Boolean(oldest.session) });
       void oldest.promise.then(session => harnessService().kill?.(session)).catch(() => undefined);
     }
-    const entry = {};
+    const entry = { workspaceId, plain: Boolean(plain), tools: toolsKey(workspaceId),
+      route: Object.fromEntries(ROUTE_IDENTITY.map(field => [field, route?.[field] ?? null])), started: now() };
     entry.promise = sweepStaleWarm().then(() => harnessService().spawn({ ...args, prompt: "", warm: true })).then(session => {
       entry.session = session;
+      warmLog("ready", { model: entry.route.model, readyMs: now() - entry.started });
       // Unused for a while: end it rather than keep an idle agent around.
       entry.timer = setTimeout(() => {
         if (warm.get(key) !== entry) return;
         warm.delete(key);
+        warmLog("expired", { model: entry.route.model });
         void harnessService().kill?.(session).catch(() => undefined);
       }, WARM_TTL_MS);
       entry.timer.unref?.();
       return session;
-    }, error => { if (warm.get(key) === entry) warm.delete(key); throw error; });
+    }, error => {
+      if (warm.get(key) === entry) warm.delete(key);
+      warmLog("failed", { model: entry.route.model, error: String(error?.message || error).slice(0, 200) });
+      throw error;
+    });
     warm.set(key, entry);
     entry.promise.catch(() => undefined);
+    warmLog("started", { model: entry.route.model, waiting: warm.size });
     return { ok: true, warmed: true, starting: true };
   }
   /** Hands the warm session for this route to a launch (waiting for one still starting), or null. */
   async function takeWarm(workspaceId, route, plain) {
     const key = warmKey(workspaceId, route, plain);
     const entry = warm.get(key);
-    if (!entry) return null;
+    if (!entry) {
+      const near = [...warm.values()].filter(item => item.workspaceId === workspaceId)
+        .map(item => warmDiff(item, workspaceId, route, plain)).sort((a, b) => a.length - b.length)[0];
+      warmLog("miss", { model: route?.model ?? null, waiting: warm.size, differs: near ?? null });
+      return null;
+    }
     warm.delete(key);
     clearTimeout(entry.timer);
     const session = await entry.promise.catch(() => null);
-    return session && await harnessService().continuable?.(session).catch(() => false) ? session : null;
+    const usable = Boolean(session) && await harnessService().continuable?.(session).catch(() => false);
+    warmLog(usable ? "taken" : "unusable", { model: entry.route.model, ready: Boolean(entry.session), ageMs: now() - entry.started });
+    return usable ? session : null;
   }
   // Idle agents: AO keeps every chat's agent running, and starts one again for every chat when it
   // starts, so dozens of finished chats held a model process each (gigabytes of memory). An agent
@@ -696,7 +741,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         // turn: it already has its worktree and a running agent, so nothing is launched now.
         const warmed = sent?.turnId ? null : await takeWarm(workspaceId, node.route, plain);
         const first = warmed ? await harnessService().send(warmed, reserved.prompt, reserved.request_key).catch(() => null) : null;
-        if (warmed && !first?.turnId) void harnessService().kill?.(warmed).catch(() => undefined);
+        if (warmed && !first?.turnId) {
+          warmLog("send_failed", { model: node.route.model });
+          void harnessService().kill?.(warmed).catch(() => undefined);
+        }
         if (sent?.turnId || first?.turnId) {
           const live = sent?.turnId ? continued.session : warmed;
           expectedTurns.set(live, (sent ?? first).turnId);
@@ -2744,6 +2792,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     schedulerDisposed = true;
     idleStopped = true;
     if (idleTimer) clearTimer(idleTimer);
+    for (const timer of toolsWaits.values()) clearTimer(timer);
+    toolsWaits.clear();
     for (const timer of scheduleTimers.values()) clearTimer(timer);
     scheduleTimers.clear();
   }
