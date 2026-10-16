@@ -243,6 +243,16 @@ function newChatRoute(): AoRoute {
 const LAST_CHAT_ROUTE = "coding-tools:ao:last-chat-route";
 const CHAT_ROUTE_FIELDS = ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile",
   "approval_policy", "approvals_reviewer", "effort", "context_window"];
+/**
+ * What a chat says about a start that did not get going: a failed start, or one held before it
+ * began (a WebGPT card whose browser check failed was held with its reason, and the chat said
+ * "Starting…" for good). Empty when the start went ahead.
+ */
+function startNotice(result: Record<string, unknown>): string {
+  if (result.status === "failed") return String(result.detail || "The run could not start");
+  if (result.status === "held" && typeof result.detail === "string" && result.detail) return result.detail;
+  return "";
+}
 /** The fields that decide how a route launches, in a fixed order (absent ones as null). */
 const routeIdentity = (route: AoRoute) => CHAT_ROUTE_FIELDS.map(name => (route as unknown as Record<string, unknown>)[name] ?? null);
 function lastChatRoute(): AoRoute | null {
@@ -1352,8 +1362,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
         }
         setChatTaskId(taskId);
         setSelectedRunId(String(result.runId));
-        setChatNotices((current) => ({ ...current, [taskId]: result.status === "failed" ? String(result.detail || "The run could not start") : "" }));
-        setAutoStatus(result.status === "failed" ? "idle" : typeof result.status === "string" ? result.status : "running");
+        setChatNotices((current) => ({ ...current, [taskId]: startNotice(result) }));
+        setAutoStatus(startNotice(result) ? "idle" : typeof result.status === "string" ? result.status : "running");
         resolve();
         void Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]).catch(cause => setError(cause instanceof Error ? cause.message : String(cause)));
       } catch (cause) { if (!input.taskId) setPendingChat(null); reject(cause); throw cause; }
@@ -1399,8 +1409,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
         const result = await moduleCall("restart_run", { workspaceId, runId, ...executableArg(), singleRoute: { ...picked } as unknown as JsonObject });
         if (result.cancelled) return;
         if (typeof result.runId === "string") setSelectedRunId(result.runId);
-        setChatNotices((current) => ({ ...current, [taskId]: result.status === "failed" ? String(result.detail || "The run could not start") : "" }));
-        setAutoStatus(result.status === "failed" ? "idle" : typeof result.status === "string" ? result.status : "running");
+        setChatNotices((current) => ({ ...current, [taskId]: startNotice(result) }));
+        setAutoStatus(startNotice(result) ? "idle" : typeof result.status === "string" ? result.status : "running");
         await loadMissions(workspaceId);
         return;
       }
@@ -1408,8 +1418,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
         await moduleCall("control_run", { workspaceId, runId, action: "retry", ...executableArg() });
       }
       const result = await moduleCall("start_run", { workspaceId, runId, ...executableArg() });
-      setChatNotices((current) => ({ ...current, [taskId]: result.status === "failed" ? String(result.detail || "The run could not start") : "" }));
-      setAutoStatus(result.status === "failed" ? "idle" : typeof result.status === "string" ? result.status : "running");
+      setChatNotices((current) => ({ ...current, [taskId]: startNotice(result) }));
+      setAutoStatus(startNotice(result) ? "idle" : typeof result.status === "string" ? result.status : "running");
     } catch (cause) {
       setChatNotices((current) => ({ ...current, [taskId]: cause instanceof Error ? cause.message : String(cause) }));
     }
