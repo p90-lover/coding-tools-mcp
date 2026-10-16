@@ -3238,12 +3238,22 @@ test("idle agents are released on a timer, never a pre-warmed one, and the timer
     } });
   await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route });
   await new Promise(resolve => setTimeout(resolve, 10));
-  const first = timers.find(timer => timer.delay === 2 * 60_000);
-  assert.ok(first, "the first sweep runs two minutes after start");
+  const first = timers.find(timer => timer.delay === 20_000);
+  assert.ok(first, "the first sweep runs soon after start, once AO has brought its chats back");
   first.run();
-  for (let tries = 0; tries < 50 && timers.length < 3; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  const next = async delay => {
+    for (let tries = 0; tries < 50 && !timers.some(timer => timer.delay === delay && !timer.ran); tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    return timers.find(timer => timer.delay === delay && !timer.ran);
+  };
+  first.ran = true;
+  const minute = await next(60_000);
+  assert.ok(minute, "AO brings its chats back over a few minutes: another sweep a minute later");
   assert.deepEqual(released, ["old-1", "old-2"], "the pre-warmed session is kept; a refused release does not stop the sweep");
-  assert.ok(timers.some(timer => timer.delay === 10 * 60_000), "then every ten minutes");
+  minute.ran = true; minute.run();
+  const three = await next(3 * 60_000);
+  assert.ok(three, "and three minutes later");
+  three.ran = true; three.run();
+  assert.ok(await next(10 * 60_000), "then every ten minutes");
   workflow.dispose();
   assert.ok(timers.at(-1).cleared, "dispose stops it");
 });

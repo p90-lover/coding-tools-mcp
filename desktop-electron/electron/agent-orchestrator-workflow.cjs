@@ -381,7 +381,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   // resumes it (continuable) in a few seconds instead of launching a new one.
   const IDLE_RELEASE_MS = 30 * 60_000;
   const IDLE_SWEEP_MS = 10 * 60_000;
-  const IDLE_FIRST_SWEEP_MS = 2 * 60_000;
+  // Soon after start: AO brings back the agent of every chat that was open when it last stopped
+  // (twenty at once, seen live), and a new chat's agent then timed out starting beside them.
+  // They come back over a few minutes, and one still starting is not idle yet, so the first
+  // sweeps follow it closely before settling to every IDLE_SWEEP_MS.
+  const IDLE_FIRST_SWEEP_MS = 20_000;
+  const IDLE_EARLY_SWEEPS_MS = [60_000, 3 * 60_000];
   let idleTimer = null;
   let idleStopped = false;
   async function releaseIdle() {
@@ -394,10 +399,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     }
     return released;
   }
-  function scheduleIdleRelease(delay) {
+  function scheduleIdleRelease(delay, early = [...IDLE_EARLY_SWEEPS_MS]) {
     if (idleStopped) return;
     idleTimer = setTimer(() => {
-      void releaseIdle().catch(() => []).finally(() => scheduleIdleRelease(IDLE_SWEEP_MS));
+      void releaseIdle().catch(() => []).finally(() => scheduleIdleRelease(early.length ? early.shift() : IDLE_SWEEP_MS, early));
     }, delay);
     idleTimer?.unref?.();
   }
