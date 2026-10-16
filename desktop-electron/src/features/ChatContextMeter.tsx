@@ -31,6 +31,8 @@ export type ContextBreakdown = {
 export type ChatContextSnapshot = {
   controller: string | null; usage: Usage | null; rateLimits: RateLimits | null; compactedAt: string | null;
   planLabel: string | null; mcpServers: { name: string; status: string }[]; breakdown?: ContextBreakdown | null;
+  /** The window the session was launched with, as this app run recorded it (a blank card's full limit included). */
+  launchedWindow?: number | null;
 };
 
 /** One quota window of a CPA Codex account (cpa-quota.cjs): percent used and when it resets (ms). */
@@ -210,12 +212,14 @@ export function ChatContextMeter({ sessionId, agentLabel, model, launchedWindow,
   // The agent reports the window it assumes for the model (Claude Code over ACP says 200K for an
   // unknown model), but a session launched with a window runs with that one: show it.
   const reported = snapshot?.usage ?? null;
-  const overridden = Boolean(reported && launchedWindow && reported.contextWindow !== launchedWindow);
-  const usage = reported && overridden ? { ...reported, contextWindow: launchedWindow! } : reported;
-  const breakdown = detail && overridden && detail.window !== launchedWindow
-    ? { ...detail, window: launchedWindow!, free: Math.max(0, launchedWindow! - detail.used) } : detail;
+  // What the app recorded at launch (a blank card's full limit too) wins over the card's setting.
+  const launched = snapshot?.launchedWindow || launchedWindow || null;
+  const overridden = Boolean(reported && launched && reported.contextWindow !== launched);
+  const usage = reported && overridden ? { ...reported, contextWindow: launched! } : reported;
+  const breakdown = detail && overridden && detail.window !== launched
+    ? { ...detail, window: launched!, free: Math.max(0, launched! - detail.used) } : detail;
   // A window changed in the model menu applies from the next run; say so at once.
-  const pendingWindow = nextWindow && nextWindow !== (usage?.contextWindow ?? launchedWindow) ? nextWindow : null;
+  const pendingWindow = nextWindow && nextWindow !== (usage?.contextWindow ?? launched) ? nextWindow : null;
   const fraction = contextFraction(usage);
   const radius = (RING - 4) / 2;
   const circumference = 2 * Math.PI * radius;
@@ -256,7 +260,7 @@ export function ChatContextMeter({ sessionId, agentLabel, model, launchedWindow,
         {breakdown ? <ContextUsage breakdown={breakdown} model={model} />
           : fraction !== null ? <div className={`cx-context-bar is-${tone(fraction)}`}><span style={{ width: `${Math.round(fraction * 100)}%` }} /></div> : null}
         {agentLabel ? <p className="cx-context-note">{agentLabel}{snapshot?.controller ? ` · ${snapshot.controller}` : ""}</p> : null}
-        {overridden ? <p className="cx-context-note">Launched with a {tokensShort(launchedWindow!)} window; the agent's own report says {tokensShort(reported?.contextWindow ?? null)}.</p> : null}
+        {overridden ? <p className="cx-context-note">Launched with a {tokensShort(launched!)} window; the agent's own report says {tokensShort(reported?.contextWindow ?? null)}.</p> : null}
         {pendingWindow ? <p className="cx-context-note is-pending">Next run: {tokensShort(pendingWindow)} window (set in the model menu).</p> : null}
         {!sessionId ? <p className="cx-context-note">No agent has started in this chat yet; the meter fills once one answers.</p>
           : !usage ? <p className="cx-context-note">The agent has not reported its context yet. It does after its first reply.</p> : <>

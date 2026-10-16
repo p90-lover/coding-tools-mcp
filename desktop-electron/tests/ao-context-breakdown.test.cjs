@@ -106,3 +106,23 @@ test("a later page that cannot be read keeps what was read; nothing read gives n
   assert.equal(byId(partial).messages, 10);
   await assert.rejects(readContextBreakdown(async () => { throw new Error("down"); }, { contextUsed: 1_000, contextWindow: 10_000 }));
 });
+
+test("the page size grows back after a page that fits, and the read stops at its request cap", async () => {
+  const queries = [];
+  let calls = 0;
+  await readContextBreakdown(async (query) => {
+    queries.push(query);
+    calls += 1;
+    if (calls === 1) throw new Error("AO response exceeds the handler limit (GET /conversation)");
+    return { messages: [message(1000 - calls, "a")], activities: [], hasMoreBefore: true, oldestSequence: 1000 - calls };
+  }, { contextUsed: 1_000, contextWindow: 10_000 });
+  assert.deepEqual(queries.slice(0, 4).map((query) => query.split("&")[0]), ["limit=200", "limit=100", "limit=200", "limit=200"]);
+  assert.ok(queries.length <= 24, `bounded at ${queries.length} requests`);
+});
+
+test("only an oversized response is retried smaller; an outage fails at once", async () => {
+  let calls = 0;
+  await assert.rejects(readContextBreakdown(async () => { calls += 1; throw new Error("The operation was aborted due to timeout"); },
+    { contextUsed: 1_000, contextWindow: 10_000 }), /timeout/);
+  assert.equal(calls, 1);
+});
