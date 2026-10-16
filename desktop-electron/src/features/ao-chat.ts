@@ -73,7 +73,11 @@ export type ChatActivity = {
 export type ChatLiveItem = {
   id: string; kind: string; status: string; text: string; label?: string;
   description?: string; input?: string; output?: string;
+  /** For kind "edit": the files it changed (Claude Code's "Edited <file> +12 −3"). */
+  files?: ChatEditedFile[];
 };
+/** A file a tool call edited: lines added and removed, and the changed lines ("-old", "+new"). */
+export type ChatEditedFile = { path: string; additions: number; deletions: number; diff?: string };
 
 /** How a card's state reads in the chat's details panel, in the order the counts are listed. */
 const AGENT_STATES = ["working", "waiting", "failed", "done", "queued", "stopped"] as const;

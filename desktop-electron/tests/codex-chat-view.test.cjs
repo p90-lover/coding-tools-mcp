@@ -560,7 +560,7 @@ test("a single model's thinking and tool calls stay folded under its answer once
     runs: [run("r1", "t", [node("w", "planner", "finished", { route, receipt: { thread_id: "s1", answer: "All set." } })], { execution_mode: "single" })] });
   const head = walk(finished).find((element) => element.props?.className === "cx-work-head");
   assert.ok(head, "the work is still there after the answer");
-  assert.match(text(head), /Worked · 1 tool call/);
+  assert.match(text(head), /Ran a command/, "headed like Claude Code's work summary");
   assert.ok(walk(finished).some((element) => element.type === "Markdown" && element.props.text === "All set."), "and the answer below it");
 
   const older = mount(base({ selectedTaskId: "t",
