@@ -3050,9 +3050,13 @@ test("a new chat's first message runs in the session pre-warmed for its model, a
     if (endpoint === "/api/v1/ao/external/terminal") { latest.nodes[0].state = "finished"; return { ok: true, run: latest }; }
     return world.requestHeadless(endpoint, body, options);
   };
+  // The replacement warm session waits until the claimed one's turn is under way (90 s).
+  const rewarms = [];
   const workflow = createAgentOrchestratorWorkflow({
     requestHeadless: request, findCodexExecutable: () => process.execPath,
     resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    setTimer: (callback, delay) => { if (delay === 90_000) { rewarms.push(callback); return { unref() {} }; } return setTimeout(callback, delay); },
+    clearTimer: timer => clearTimeout(timer),
     aoHarness: {
       spawn: async input => { spawned.push(input); return `warm-${spawned.length}`; },
       continuable: async id => id.startsWith("warm-"),
@@ -3077,6 +3081,9 @@ test("a new chat's first message runs in the session pre-warmed for its model, a
   for (let tries = 0; tries < 200 && !observedWith.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
   assert.deepEqual(JSON.parse(JSON.stringify(sent)), [["warm-1", "fix the login", "key-1"]], "the first message is the warm session's first turn");
   assert.deepEqual(JSON.parse(JSON.stringify(observedWith[0])), ["warm-1", "turn-1"], "observed on that turn");
+  assert.equal(spawned.length, 1, "no second agent starts beside the turn that just began");
+  assert.equal(rewarms.length, 1);
+  rewarms[0]();
   for (let tries = 0; tries < 50 && spawned.length < 2; tries++) await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(spawned.length, 2, "the next chat on this route finds one waiting too");
   assert.equal(spawned[1].prompt, "");

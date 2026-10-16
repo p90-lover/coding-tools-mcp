@@ -3310,6 +3310,10 @@ async function start() {
     if (stateStore.read().codexRoute === false) {
       await connectCodexBridgeAfterAuthentication({ logger, stateStore, reason: "startup" });
     }
+    // That route check (or a sign-in's) may still be finishing; starting meanwhile was refused as
+    // "Another launcher operation is active" and the runtime stayed down until the next restart.
+    await waitForRuntimeHostIdle(120_000).catch((error) => logger.warn("runtime.startup_wait_idle", {
+      message: error instanceof Error ? error.message.slice(0, 200) : String(error) }));
     const runtime = await runtimeSupervisor.startIfConfigured();
     // "degraded" means the bridge is up and only the MCP tunnel is still being retried.
     if (runtime.status !== "ready" && runtime.status !== "degraded") return runtime;

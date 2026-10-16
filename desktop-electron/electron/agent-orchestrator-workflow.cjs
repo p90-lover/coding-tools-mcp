@@ -298,6 +298,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   })();
   // A chat opened while the app's tools were still starting asked once and was told no; nothing
   // asked again, so the first chat after every app start launched cold. Ask again once they listen.
+  const REWARM_DELAY_MS = 90_000;
   const TOOLS_WAIT_MS = 2_000;
   const TOOLS_WAIT_TRIES = 45;
   const toolsWaits = new Map(); // workspaceId -> timer; the latest route asked for wins
@@ -412,6 +413,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       // An open chat whose next message continues its agent needs no new one; this also brings back
       // an agent released while idle, so it is ready before the message is sent.
       const previous = task ? saved.runs.filter(run => run.project_id === task).at(-1) : null;
+      // The chat's own run is still starting or working: its launch is the agent. Warming another
+      // now (the chat opened its new task the moment it was sent) started a second agent beside
+      // the launch on a busy machine, and the launch timed out while the spare one came up.
+      if (previous && !previous.cancelled && !runSettled(previous)) return { ok: true, warmed: false, reason: "The chat's run is starting" };
       const live = freshSessionRequired(id, task) ? null : continuationCard(previous, executionMode, singleRoute);
       if (live && await harnessService().continuable?.(live.receipt.thread_id).catch(() => false)) {
         return { ok: true, warmed: false, continues: true };
@@ -765,8 +770,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
           session = live;
           launchedVia = sent?.turnId ? "continued" : "warm";
         } else session = await harnessService().spawn({ ...launch, prompt: reserved.prompt });
-        // The next chat on this route finds a session waiting too.
-        if (warmed) void chatPrewarmRoute(workspaceId, node.route, plain).catch(() => undefined);
+        // The next chat on this route finds a session waiting too, started once this turn is under
+        // way rather than beside its first model call.
+        if (warmed) {
+          const timer = setTimer(() => { void chatPrewarmRoute(workspaceId, node.route, plain).catch(() => undefined); }, REWARM_DELAY_MS);
+          timer?.unref?.();
+        }
       } catch (error) { failure = error; }
       const done = now();
       logger?.info?.("ao.launch_timing", { agent: externalAgent(node), via: launchedVia, ok: !failure,
