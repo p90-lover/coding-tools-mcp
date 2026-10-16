@@ -163,7 +163,7 @@ function delayToMilliseconds(value, unit) {
   }
   return ms;
 }
-function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, chatEditsFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, chatEditsFile = null, seenModelsFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, logger = null }) {
   const goals = createGoalStore({ file: goalsFile, now });
   // Deleted chat messages: their runs are hidden from the chat, and the next follow-up starts afresh.
   const chatEdits = createChatEditStore({ file: chatEditsFile });
@@ -551,6 +551,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const efforts = viaCpa || nativeEffort ? reportedEfforts(info?.efforts) : [];
     const capabilities = { efforts };
     if (viaCpa && typeof info?.provider === "string") capabilities.provider = info.provider;
+    // CPA has paused it for now (see SEEN_MODEL_MS): still offered, and the picker says so.
+    if (viaCpa && info?.paused === true) Object.assign(capabilities, { paused: true, pausedReason: String(info.pausedReason || "").slice(0, 200) });
     if (!efforts.length) capabilities.effortReason = viaCpa
       ? "CPA did not advertise reasoning levels for this model."
       : "This harness/model has no verified reasoning-effort transport.";
@@ -621,6 +623,39 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   // owners), seconds on a busy machine before the agent even starts. It changes rarely; a minute's
   // cache serves them all, and a failed read is never cached.
   const CPA_CATALOG_TTL_MS = 60_000;
+  // CPA leaves a model out of its list while it has paused it: every account serving it cooling
+  // down after a 429, a spent quota, an upstream "model not found". The model the user had just
+  // chatted with vanished from the picker, and a chat on it was refused. A model CPA listed in
+  // the last SEEN_MODEL_MS stays listed, marked paused (CPA serves it again once the pause ends);
+  // only one unseen for longer is gone. Kept across restarts (ids and capabilities only).
+  const SEEN_MODEL_MS = 3 * 24 * 60 * 60_000;
+  let seenModels = null; // id -> { at, capability }
+  function loadSeenModels() {
+    if (seenModels) return seenModels;
+    seenModels = Object.create(null);
+    if (!seenModelsFile) return seenModels;
+    try {
+      const saved = JSON.parse(fs.readFileSync(seenModelsFile, "utf8"));
+      for (const [id, entry] of Object.entries(saved?.models ?? {})) {
+        if (typeof id === "string" && id.length <= 128 && Number.isFinite(entry?.at)) {
+          seenModels[id] = { at: entry.at, capability: entry.capability && typeof entry.capability === "object" ? entry.capability : {} };
+        }
+      }
+    } catch { /* none yet, or unreadable: start empty */ }
+    return seenModels;
+  }
+  function rememberSeenModels(ids, capabilities) {
+    const seen = loadSeenModels(), at = now();
+    for (const id of ids) seen[id] = { at, capability: capabilities[id] ?? {} };
+    for (const [id, entry] of Object.entries(seen)) if (!(at - entry.at < SEEN_MODEL_MS)) delete seen[id];
+    if (!seenModelsFile) return;
+    try {
+      fs.mkdirSync(path.dirname(seenModelsFile), { recursive: true });
+      const temporary = `${seenModelsFile}.tmp-${process.pid}`;
+      fs.writeFileSync(temporary, JSON.stringify({ models: seen }));
+      fs.renameSync(temporary, seenModelsFile);
+    } catch (error) { logger?.warn?.("ao.seen_models_save_failed", { message: String(error?.message || error).slice(0, 200) }); }
+  }
   let cpaCatalogCache = null; // { at, promise }
   function cachedCpaCatalog() {
     const at = now();
@@ -678,6 +713,14 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       if (ids.length === 100) break;
     }
     if (!ids.length) throw new Error("CPA has no available models");
+    rememberSeenModels(ids, capabilities);
+    const listed = new Set(ids);
+    for (const [id, entry] of Object.entries(loadSeenModels())) {
+      if (ids.length >= 100 || listed.has(id) || unserved(id)) continue;
+      ids.push(id);
+      capabilities[id] = { ...entry.capability, paused: true,
+        pausedReason: "CPA has paused this model for now (rate-limited or cooling down); it is served again once that ends." };
+    }
     return { ok: true, models: ids, capabilities };
   }
 
