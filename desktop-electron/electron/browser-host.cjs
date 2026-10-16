@@ -29,6 +29,8 @@ const TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
 const CHATGPT_ORIGIN = "https://chatgpt.com";
 const IDLE_BROWSER_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
 const PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS = 10_000;
+/** The primary view's idle-document windows at startup: a timed-out load is retried with the next. */
+const PRIMARY_VIEW_BOOTSTRAP_ATTEMPTS_MS = Object.freeze([PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS, 30_000, 60_000]);
 const MAX_BROWSER_VIEW_DIMENSION = 16_384;
 const MAX_BROWSER_TABS = 5;
 const MAX_CANCELLED_TURN_TRACES = 256;
@@ -173,6 +175,12 @@ function navigationOriginForLog(value) {
 // Chromium net errors that mean the proxy, not the site, could not be reached.
 const PROXY_NET_ERRORS = new Set([-130, -111, -127, -336]);
 const FAILURE_PAGE_PREFIX = "data:text/html;charset=utf-8,";
+/**
+ * Whether a URL is the "page failed to load" document. The launcher's own idle document shares the
+ * data: prefix: read as a failure page, its later load skipped the recovery that writes the
+ * ownership descriptor, so a slow start left the launcher unowned for its whole run.
+ */
+const isFailurePageUrl = (url) => String(url).startsWith(FAILURE_PAGE_PREFIX) && String(url) !== IDLE_BROWSER_URL;
 const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
 /**
  * A proxy as the failure page may name it: scheme, host and port only. The route's proxy URL can
@@ -496,7 +504,20 @@ class BrowserHost {
     this.view.setBounds(this.hiddenTurnBounds());
     this.view.setVisible(true);
     try {
-      await loadCommittedBrowserSurface(this.view.webContents, IDLE_BROWSER_URL);
+      // A busy machine can miss the first window (seen: every start for a day missed 10 s). The
+      // timeout stops the load, so nothing else would retry it and the launcher stayed without its
+      // ownership descriptor: retry only a timeout, with longer windows.
+      const attempts = this.bootstrapAttemptsMs ?? PRIMARY_VIEW_BOOTSTRAP_ATTEMPTS_MS;
+      for (const [attempt, timeoutMs] of attempts.entries()) {
+        try {
+          await loadCommittedBrowserSurface(this.view.webContents, IDLE_BROWSER_URL, timeoutMs);
+          break;
+        } catch (error) {
+          const timedOut = /did not commit within/.test(error instanceof Error ? error.message : String(error));
+          if (!timedOut || attempt === attempts.length - 1) throw error;
+          this.logger.warn("browser.initialization_retry", { attempt: attempt + 1, timeoutMs });
+        }
+      }
       if (browserInteractionModeFor(this) === "automatic") await this.markOwnedSurface();
     } finally {
       this.syncViewVisibility();
@@ -1172,7 +1193,7 @@ class BrowserHost {
       return { action: "deny" };
     });
     contents.on("did-start-navigation", (_event, url, inPlace, mainFrame) => {
-      if (!mainFrame || String(url).startsWith(FAILURE_PAGE_PREFIX)) return;
+      if (!mainFrame || isFailurePageUrl(url)) return;
       if (inPlace) {
         this.setState({ url });
         return;
@@ -1191,7 +1212,7 @@ class BrowserHost {
     contents.on("did-finish-load", () => {
       this.clearHomeNavigationTimeout();
       // The failure page is not ChatGPT: keep the error state and its URL.
-      if (contents.getURL().startsWith(FAILURE_PAGE_PREFIX)) return;
+      if (isFailurePageUrl(contents.getURL())) return;
       if (this.manualOperation === "ChatGPT login") {
         this.logger.info("browser.auth_navigation_completed", {
           surface: "primary",
@@ -1247,7 +1268,7 @@ class BrowserHost {
       if (mainFrame) this.setState({ url });
     });
     contents.on("did-fail-load", (_event, errorCode, errorDescription, url, mainFrame) => {
-      if (!mainFrame || errorCode === -3 || String(url).startsWith(FAILURE_PAGE_PREFIX)) return;
+      if (!mainFrame || errorCode === -3 || isFailurePageUrl(url)) return;
       this.clearHomeNavigationTimeout();
       this.logger.error(
         this.manualOperation === "ChatGPT login"
