@@ -400,3 +400,17 @@ test("permissions start empty, send only selected requested entries and retain e
   elements(tree, item => item.type === "button" && text(item) === "Send selected subset")[0].props.onClick();
   assert.deepEqual(plain(replies[0]), { permissions: { filesystem: { read: ["/one"] } }, scope: "turn" });
 });
+
+test("a picked model the harness no longer offers is marked not available", () => {
+  const view = renderer("AgentOrchestratorComposerControls.tsx");
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/cline-pass/deepseek-v4.1-flash", permission_profile: ":ao-default" };
+  const props = { mode: "single", onModeChange() {}, route, onRouteChange() {}, harnesses: [], loadModels: async () => [], teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false };
+  let model = menuNamed(view.render("AgentOrchestratorComposerControls", props, composerState(["cpa/cline-pass/deepseek-v4-flash"])), "Model");
+  assert.equal(model.props.className, "is-warning");
+  assert.match(text(model.props.label), /not available/);
+  assert.match(model.props.title, /not offered right now/);
+  model = menuNamed(view.render("AgentOrchestratorComposerControls", { ...props, route: { ...route, model: "cpa/cline-pass/deepseek-v4-flash(high)" } }, composerState(["cpa/cline-pass/deepseek-v4-flash"])), "Model");
+  assert.equal(model.props.className, "", "an effort suffix still matches its listed model");
+  model = menuNamed(view.render("AgentOrchestratorComposerControls", props, composerState(null)), "Model");
+  assert.equal(model.props.className, "", "nothing is flagged before the list loads");
+});

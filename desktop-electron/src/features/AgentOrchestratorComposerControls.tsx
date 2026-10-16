@@ -116,6 +116,11 @@ export function AgentOrchestratorComposerControls({
   const setWindow = (tokens: number | null) => { const next = { ...route }; if (tokens) next.context_window = tokens; else delete next.context_window; onRouteChange(next); };
   const inRange = (tokens: number) => Boolean(context) && Number.isSafeInteger(tokens) && tokens >= context!.min && (context!.max === undefined || tokens <= context!.max);
   const windowLabel = route.context_window ? contextText(route.context_window) : fullLimit ? contextText(fullLimit) : "Default";
+  // A picked model the harness no longer offers (CPA dropped cline-pass/deepseek-v4.1-flash when
+  // Cline stopped serving it) must not look as if it would run; the send is refused up front too.
+  const baseModel = route.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
+  const unlisted = Boolean(route.model) && models !== null && models.length > 0 && !models.includes(route.model) && !models.includes(baseModel);
+  const modelName = modelLabel(route.model, route.provider_id === "cliproxyapi-antigravity") || "Choose model";
   return <div className="ao-composer-controls">
     {permissions}
     <div className="ao-mode-switch" role="group" aria-label="Who answers">
@@ -141,8 +146,9 @@ export function AgentOrchestratorComposerControls({
           {!harnesses.length ? <p role="status">No agents found yet.</p> : null}
         </div>}
       </ChipMenu>
-      <ChipMenu heading="Model" popupClass="ao-model-popup" ariaLabel="Choose model" disabled={busy}
-        label={<span>{modelLabel(route.model, route.provider_id === "cliproxyapi-antigravity") || "Choose model"}</span>}>
+      <ChipMenu heading="Model" popupClass="ao-model-popup" ariaLabel="Choose model" disabled={busy} className={unlisted ? "is-warning" : ""}
+        title={unlisted ? `${modelName} is not offered right now; choose another model` : undefined}
+        label={<span>{modelName}{unlisted ? <span className="ao-chip-unavailable"> · not available</span> : null}</span>}>
         {(close) => <>
           <input className="ao-model-search" type="search" aria-label="Search models" placeholder="Search models…" value={search} onChange={event => setSearch(event.target.value)} />
           <div className="ao-model-options" role="radiogroup" aria-label="Available models">
