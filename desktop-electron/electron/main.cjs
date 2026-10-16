@@ -2839,6 +2839,8 @@ async function start() {
     const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
       // Stop agents that sat idle for a while; their chats resume them on the next message.
       releaseIdleAgents: true,
+      // Each launch logs where its time went (ao.launch_timing).
+      logger,
       // A pre-warmed session is reused only by a launch that attaches the same app tools.
       agentToolsIdentity: (workspaceId) => chatAgentTools?.identity(workspaceId) ?? null,
       // Chat goals (/goal) survive an app restart.

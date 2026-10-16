@@ -3406,3 +3406,38 @@ test("Approve for me: the chat's preview tools and routine commands through the 
   assert.equal(exec({ cmd: "npm ci" }, "mcp__coding-tools__write_stdin"), null);
   assert.equal(workflow.routineAppCommand({ tool: "mcp__coding-tools__exec_command", toolInput: '{"cmd":"npm ci"' }), null, "a cut-off argument list is never read");
 });
+test("CPA's catalog is read once a minute, and a failed read is not kept", async () => {
+  let clock = 1_000_000, reads = 0, fail = false;
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async () => { reads += 1; if (fail) throw new Error("CPA busy"); return { ok: true, json: async () => ({ models: [{ slug: "gpt-5.5" }] }) }; },
+  });
+  await workflow.call("models", {});
+  await workflow.call("models", {});
+  assert.equal(reads, 1, "a second menu or launch within the minute reuses the read");
+  clock += 61_000;
+  fail = true;
+  await assert.rejects(workflow.call("models", {}));
+  fail = false;
+  assert.deepEqual((await workflow.call("models", {})).models, ["gpt-5.5"], "the failure was not cached");
+});
+
+test("each launch logs where its time went", async () => {
+  const events = [];
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "sonnet", permission_profile: ":ao-default" };
+  const mission = { id: "run", workspace_id: "ws", revision: 1, nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+  const workflow = createAgentOrchestratorWorkflow({
+    logger: { info: (event, detail) => events.push({ event, ...detail }) },
+    requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } }
+      : endpoint.endsWith("/reserve") ? { ok: true, request_key: "key", prompt: "task" } : { ok: true, run: mission },
+    aoHarness: { spawn: async () => "session" },
+    confirm: async () => true,
+  });
+  await workflow.call("advance", { workspaceId: "ws", runId: "run", executable: "C:/codex.exe" });
+  const timing = events.find(entry => entry.event === "ao.launch_timing");
+  assert.ok(timing, "a timing line is logged");
+  assert.equal(timing.via, "spawn");
+  assert.equal(timing.ok, true);
+  for (const field of ["prepareMs", "launchMs", "totalMs"]) assert.ok(Number.isFinite(timing[field]) && timing[field] >= 0, field);
+});

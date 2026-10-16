@@ -18,7 +18,7 @@ export type ChatNode = {
 };
 
 /** One AO agent session of a chat, for its Preview and Terminal panes. */
-export type ChatAgentSession = { id: string; label: string; model?: string };
+export type ChatAgentSession = { id: string; label: string; model?: string; contextWindow?: number };
 
 /**
  * The chat's AO agent sessions, newest first, each once (a follow-up reuses its session): the cards
@@ -31,7 +31,11 @@ export function chatAgentSessions(runs: { nodes: ChatNode[] }[]): ChatAgentSessi
       const id = node.receipt?.thread_id;
       if (!id || seen.has(id) || !node.route?.harness_id?.startsWith("ao:")) continue;
       const name = node.settings?.name || node.settings?.role_name || node.role;
-      seen.set(id, { id, label: node.route.model ? `${name} · ${node.route.model}` : name, ...(node.route.model ? { model: node.route.model } : {}) });
+      // The window the card asked for is the one the agent runs with (Claude Code's
+      // CLAUDE_CODE_MAX_CONTEXT_TOKENS), even when its usage report still names the model's default.
+      const contextWindow = node.route.context_window;
+      seen.set(id, { id, label: node.route.model ? `${name} · ${node.route.model}` : name, ...(node.route.model ? { model: node.route.model } : {}),
+        ...(typeof contextWindow === "number" && contextWindow > 0 ? { contextWindow } : {}) });
     }
   }
   // The same agent in several sessions (a follow-up that started a fresh one): the newest is the

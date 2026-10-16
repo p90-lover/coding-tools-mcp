@@ -432,6 +432,17 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (typeof value !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(value)) throw new Error("A valid AO session ID is required");
     return value;
   };
+  // The window each session was launched with, including a blank card's resolved full limit
+  // (defaultContextWindow), which no route records and AO does not read back. The context meter
+  // shows it over the agent's own report (Claude Code over ACP says 200K for any unknown model).
+  // In memory and bounded: after a restart the meter falls back to the card's explicit window.
+  const launchWindows = new Map();
+  function rememberLaunchWindow(id, tokens) {
+    if (!Number.isSafeInteger(tokens) || tokens <= 0) return;
+    launchWindows.delete(id);
+    launchWindows.set(id, tokens);
+    if (launchWindows.size > 500) launchWindows.delete(launchWindows.keys().next().value);
+  }
   async function projectFor(workspaceId) {
     if (!workspaceBoard) throw new Error("Coding Tools mission service is unavailable");
     const binding = await workspaceBoard.bind(workspaceId);
@@ -537,7 +548,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           data = await launch("chat");
         } else data = await launch("tui");
       }
-      return sessionId(data?.session?.id);
+      const created = sessionId(data?.session?.id);
+      rememberLaunchWindow(created, contextWindow);
+      return created;
     },
     async observe(id, expectedTurn) {
       const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`);
@@ -1080,6 +1093,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
             planLabel: typeof limits.planLabel === "string" ? limits.planLabel.slice(0, 80) : null,
           } : null,
           compactedAt: typeof conversation.compactedAt === "string" ? conversation.compactedAt : null,
+          launchedWindow: launchWindows.get(id) ?? null,
           planLabel: typeof conversation.account?.planLabel === "string" ? conversation.account.planLabel.slice(0, 80) : null,
           mcpServers: (Array.isArray(conversation.mcpServers) ? conversation.mcpServers : []).slice(0, 40)
             .filter((server) => typeof server?.name === "string")
