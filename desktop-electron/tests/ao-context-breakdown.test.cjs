@@ -79,7 +79,30 @@ test("the timeline is read back page by page and stops at the compaction", async
   ];
   const breakdown = await readContextBreakdown(async (query) => { queries.push(query); return pages[queries.length - 1]; },
     { contextUsed: 1_000, contextWindow: 10_000 });
-  assert.deepEqual(queries, ["limit=500", "limit=500&beforeSequence=600"]);
+  assert.deepEqual(queries, ["limit=200", "limit=200&beforeSequence=600"]);
   assert.equal(byId(breakdown).messages, 20);
   assert.equal(breakdown.complete, true);
+});
+
+test("a page too large for the app's AO client is read again at half the size", async () => {
+  const queries = [];
+  const breakdown = await readContextBreakdown(async (query) => {
+    queries.push(query);
+    if (/limit=(200|100)\b/.test(query)) throw new Error("AO response exceeds the handler limit");
+    return { messages: [message(9, "a".repeat(40))], activities: [], hasMoreBefore: false };
+  }, { contextUsed: 1_000, contextWindow: 10_000 });
+  assert.deepEqual(queries, ["limit=200", "limit=100", "limit=50"]);
+  assert.equal(byId(breakdown).messages, 10);
+});
+
+test("a later page that cannot be read keeps what was read; nothing read gives no breakdown", async () => {
+  let calls = 0;
+  const partial = await readContextBreakdown(async () => {
+    calls += 1;
+    if (calls === 1) return { messages: [message(900, "a".repeat(40))], activities: [], hasMoreBefore: true, oldestSequence: 700 };
+    throw new Error("AO response exceeds the handler limit");
+  }, { contextUsed: 1_000, contextWindow: 10_000 });
+  assert.equal(partial.complete, false);
+  assert.equal(byId(partial).messages, 10);
+  await assert.rejects(readContextBreakdown(async () => { throw new Error("down"); }, { contextUsed: 1_000, contextWindow: 10_000 }));
 });

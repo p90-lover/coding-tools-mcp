@@ -7,8 +7,9 @@
 // that is its system prompt, tool definitions and memory files. AO keeps tool output trimmed, so
 // the counted parts are a floor and the remainder a ceiling; the panel says it is an estimate.
 
-const PAGE = 500;
-const MAX_PAGES = 8;
+const PAGE = 200;
+const MIN_PAGE = 20;
+const MAX_ENTRIES = 4000;
 
 /** About how many tokens a text costs: ~4 characters each for Latin script, ~1 each for CJK
  * and other wide scripts (what BPE tokenizers average). */
@@ -102,18 +103,32 @@ function contextBreakdown({ messages = [], activities = [], usage, complete = tr
 }
 
 /**
- * Reads a session's timeline back to its last compaction (at most MAX_PAGES pages) and splits
- * its reported context. `get(query)` fetches one page of `/conversation`.
+ * Reads a session's timeline back to its last compaction (at most MAX_ENTRIES entries) and splits
+ * its reported context. `get(query)` fetches one page of `/conversation`. The app's AO client
+ * refuses a response over 900 KB, which a page of a long chat's tool output passes: a page that
+ * fails is asked for again at half the size, and one that fails at MIN_PAGE ends the read with
+ * what was read so far. Nothing read means no breakdown, never one that calls it all system.
  */
 async function readContextBreakdown(get, usage) {
   const messages = [];
   const activities = [];
   let before = null;
   let complete = true;
-  for (let page = 0; ; page += 1) {
-    if (page >= MAX_PAGES) { complete = false; break; }
-    const snapshot = await get(`limit=${PAGE}${before ? `&beforeSequence=${before}` : ""}`);
-    if (!snapshot || typeof snapshot !== "object") { complete = page > 0 && complete; break; }
+  let size = PAGE;
+  let read = 0;
+  for (;;) {
+    if (read >= MAX_ENTRIES) { complete = false; break; }
+    let snapshot;
+    try {
+      snapshot = await get(`limit=${size}${before ? `&beforeSequence=${before}` : ""}`);
+    } catch (error) {
+      if (size > MIN_PAGE) { size = Math.max(MIN_PAGE, Math.floor(size / 2)); continue; }
+      if (!read) throw error;
+      complete = false;
+      break;
+    }
+    if (!snapshot || typeof snapshot !== "object") { if (!read) return null; complete = false; break; }
+    read += size;
     const pageMessages = Array.isArray(snapshot.messages) ? snapshot.messages : [];
     const pageActivities = Array.isArray(snapshot.activities) ? snapshot.activities : [];
     messages.push(...pageMessages);

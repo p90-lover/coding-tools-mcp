@@ -193,6 +193,7 @@
 .cx-context-bar.is-high > span { background: var(--ao-red, #c0392b); }
 .cx-context-note { margin: 4px 0; color: var(--ao-muted); font-size: 12px; }
 .cx-context-note.is-quiet { margin-top: 10px; font-size: 11px; }
+.cx-context-note.is-pending { color: var(--ao-amber, #c98a12); }
 .cx-context-label { margin: 12px 0 4px; padding-top: 10px; border-top: 1px solid var(--ao-line); color: var(--ao-muted); font-size: 12px; }
 .cx-context-rows { display: grid; grid-template-columns: 1fr auto; gap: 3px 12px; margin: 0; }
 .cx-context-rows dt { margin: 0; }
