@@ -95,6 +95,41 @@ test("core setup starts in browser-only mode when no installation exists", async
   assert.equal(fixture.invocation().args.includes("--chrome"), false);
 });
 
+test("a launcher-control command re-publishes this launcher's descriptor when the file still names the previous launcher", () => {
+  // Seen live: the browser's idle document missed its 10 s window at start, so the descriptor
+  // still named the previous app and "Remove Codex integration" failed on ownership.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "launcher-descriptor-"));
+  const descriptorPath = path.join(dir, "launcher-browser.json");
+  const token = "t".repeat(43);
+  const write = (pid) => fs.writeFileSync(descriptorPath, JSON.stringify({ pid, control: { token } }));
+  try {
+    write(process.pid + 1);
+    let refreshed = 0;
+    const host = new RuntimeHost({
+      app: { getPath: () => dir, getVersion: () => "1.1.3" }, logger: { info() {}, warn() {}, error() {} },
+      sourceRoot: "/source", browserDescriptorPath: descriptorPath,
+      supervisor: { readConfig: () => null, readSetupConfig: () => null },
+      refreshBrowserDescriptor: () => { refreshed += 1; write(process.pid); },
+    });
+    assert.deepEqual(host.launcherControlEnvironment(), { CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN: token });
+    assert.equal(refreshed, 1);
+    assert.deepEqual(host.launcherControlEnvironment(), { CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN: token });
+    assert.equal(refreshed, 1, "already this launcher's: nothing to re-publish");
+
+    write(process.pid + 1);
+    const stale = new RuntimeHost({
+      app: { getPath: () => dir, getVersion: () => "1.1.3" }, logger: { info() {}, warn() {}, error() {} },
+      sourceRoot: "/source", browserDescriptorPath: descriptorPath,
+      supervisor: { readConfig: () => null, readSetupConfig: () => null },
+    });
+    assert.throws(() => stale.launcherControlEnvironment(), /does not belong to this launcher process/, "without a refresh, another launcher's token is never used");
+    fs.rmSync(descriptorPath);
+    assert.throws(() => stale.launcherControlEnvironment(), /unavailable/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("with \"Use Coding Tools in Codex\" off, no setup installs Codex's route and nothing reconnects it", async () => {
   let enabled = false;
   const fixture = hostFor({ mode: "full", browserHost: "launcher", appName: CURRENT_CONNECTOR_NAME, releaseVersion: "1.1.1" },

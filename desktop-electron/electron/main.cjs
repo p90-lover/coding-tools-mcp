@@ -2085,7 +2085,10 @@ function registerIpc({ logger, stateStore }) {
     try {
       await runtimeHost.uninstallIntegration();
     } finally {
-      browserHost.writeDescriptor();
+      // Never let re-publishing the descriptor replace the removal's own result or error.
+      try { browserHost.writeDescriptor(); } catch (error) {
+        logger.warn("browser.descriptor_write_failed", { message: error instanceof Error ? error.message.slice(0, 200) : String(error) });
+      }
     }
     const state = stateStore.update({
       coreSetupComplete: false,
@@ -2110,6 +2113,9 @@ function registerIpc({ logger, stateStore }) {
     if (typeof enabled !== "boolean") throw new Error("Choose on or off");
     const state = stateStore.update({ codexRoute: enabled });
     send("launcher:state-changed", state);
+    // A switch flipped while another launcher operation runs (seen: during Remove Codex
+    // integration) waits for it instead of failing with "Another launcher operation is active".
+    await waitForRuntimeHostIdle(120_000);
     const route = runtimeHost?.runtimeConfigSnapshot().configured
       ? await runtimeHost.setCodexRoute(enabled)
       : { changed: false, setupRequired: enabled, codexRestartRequired: false };
@@ -3106,6 +3112,7 @@ async function start() {
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
     // Settings → "Use Coding Tools in Codex": absent is on (as every install before it was).
     codexRouteEnabled: () => stateStore.read().codexRoute !== false,
+    refreshBrowserDescriptor: () => browserHost?.writeDescriptor(),
   });
   const configuredInteractionMode = runtimeHost.runtimeConfigSnapshot().config?.browserInteractionMode;
   if ((configuredInteractionMode === "automatic" || configuredInteractionMode === "manual")

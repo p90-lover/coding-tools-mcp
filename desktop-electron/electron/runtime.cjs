@@ -180,8 +180,12 @@ class RuntimeHost {
     // Whether Codex's model route may point at the bridge: the user's "Use Coding Tools in Codex".
     // Off, no setup installs the route and nothing reconnects it.
     codexRouteEnabled = () => true,
+    // Re-publishes this launcher's browser ownership descriptor (its own control token), for a
+    // launcher-control command started before the browser finished initializing.
+    refreshBrowserDescriptor = null,
   }) {
     this.codexRouteEnabled = codexRouteEnabled;
+    this.refreshBrowserDescriptor = refreshBrowserDescriptor;
     this.app = app;
     this.logger = logger;
     this.sourceRoot = sourceRoot;
@@ -396,14 +400,25 @@ class RuntimeHost {
   }
 
   launcherControlEnvironment() {
-    let descriptor;
-    try {
-      descriptor = JSON.parse(fs.readFileSync(this.browserDescriptorPath, "utf8"));
-    } catch (error) {
-      throw new Error(
-        `Launcher browser ownership descriptor is unavailable: ${error instanceof Error ? error.message : String(error)}`,
-      );
+    const read = () => {
+      try {
+        return JSON.parse(fs.readFileSync(this.browserDescriptorPath, "utf8"));
+      } catch (error) {
+        if (error?.code === "ENOENT") return null;
+        throw new Error(
+          `Launcher browser ownership descriptor is unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    };
+    let descriptor = read();
+    // The launcher writes its descriptor once its browser is ready. After a slow start (seen: the
+    // idle document missed its 10 s window) the file can still name the previous launcher, and the
+    // control token it carries is this process's own: publish it now and read it back.
+    if (descriptor?.pid !== process.pid && this.refreshBrowserDescriptor) {
+      this.refreshBrowserDescriptor();
+      descriptor = read();
     }
+    if (!descriptor) throw new Error("Launcher browser ownership descriptor is unavailable: not written yet");
     const token = descriptor?.control?.token;
     if (descriptor?.pid !== process.pid || typeof token !== "string" || !/^[A-Za-z0-9_-]{40,}$/.test(token)) {
       throw new Error("Launcher browser ownership descriptor does not belong to this launcher process");
