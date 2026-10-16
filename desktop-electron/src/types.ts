@@ -498,6 +498,8 @@ export interface LauncherState {
   showBrowserDuringTurns: boolean;
   /** AO chat agents get the app's own tools over MCP; absent means on. */
   chatAgentTools?: boolean;
+  /** Codex's model route goes through the app's bridge ("Use Coding Tools in Codex") unless false. */
+  codexRoute?: boolean;
   /** Those agents may also capture the screen and control the computer; absent means off. */
   chatAgentDesktopTools?: boolean;
   /** Those agents may also run commands through the app's terminal; absent means off. */
@@ -819,6 +821,8 @@ export interface LauncherApi {
   doctor(): Promise<DoctorReport>;
   cancelTurns(): Promise<{ stdout: string }>;
   uninstallIntegration(): Promise<{ cancelled: true } | { cancelled: false; state: LauncherState }>;
+  /** Settings → "Use Coding Tools in Codex": on routes Codex's models through the bridge, off restores its own route. */
+  setCodexRoute?(enabled: boolean): Promise<{ state: LauncherState; route: { changed: boolean; setupRequired: boolean; codexRestartRequired: boolean } }>;
   setupCore(): Promise<{ ok: boolean; stdout: string; restartRequired: boolean }>;
   refreshPart(part: RefreshPart): Promise<{ ok: boolean; results: { part: string; ok: boolean; status?: string; message?: string }[] }>;
   setupMcp(input: {

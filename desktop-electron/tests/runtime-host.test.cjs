@@ -6,8 +6,9 @@ const path = require("node:path");
 const { CURRENT_CONNECTOR_NAME, DEV_CONNECTOR_NAME } = require("../electron/connector-identity.cjs");
 const { RuntimeHost } = require("../electron/runtime.cjs");
 
-function hostFor(existingConfig, interactionMode = "automatic") {
+function hostFor(existingConfig, interactionMode = "automatic", { codexRouteEnabled } = {}) {
   const host = new RuntimeHost({
+    ...(codexRouteEnabled ? { codexRouteEnabled } : {}),
     app: {
       getPath: () => path.join(os.tmpdir(), "codex-web-gpt-runtime-host-test"),
       getVersion: () => "1.1.3",
@@ -92,6 +93,84 @@ test("core setup starts in browser-only mode when no installation exists", async
   assert.equal(fixture.invocation().args.includes("--refresh-account-capabilities"), true);
   assert.equal(fixture.invocation().args.includes("--replace-codex-route"), true);
   assert.equal(fixture.invocation().args.includes("--chrome"), false);
+});
+
+test("a launcher-control command re-publishes this launcher's descriptor when the file still names the previous launcher", () => {
+  // Seen live: the browser's idle document missed its 10 s window at start, so the descriptor
+  // still named the previous app and "Remove Codex integration" failed on ownership.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "launcher-descriptor-"));
+  const descriptorPath = path.join(dir, "launcher-browser.json");
+  const token = "t".repeat(43);
+  const write = (pid) => fs.writeFileSync(descriptorPath, JSON.stringify({ pid, control: { token } }));
+  try {
+    write(process.pid + 1);
+    let refreshed = 0;
+    const host = new RuntimeHost({
+      app: { getPath: () => dir, getVersion: () => "1.1.3" }, logger: { info() {}, warn() {}, error() {} },
+      sourceRoot: "/source", browserDescriptorPath: descriptorPath,
+      supervisor: { readConfig: () => null, readSetupConfig: () => null },
+      refreshBrowserDescriptor: () => { refreshed += 1; write(process.pid); },
+    });
+    assert.deepEqual(host.launcherControlEnvironment(), { CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN: token });
+    assert.equal(refreshed, 1);
+    assert.deepEqual(host.launcherControlEnvironment(), { CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN: token });
+    assert.equal(refreshed, 1, "already this launcher's: nothing to re-publish");
+
+    write(process.pid + 1);
+    const stale = new RuntimeHost({
+      app: { getPath: () => dir, getVersion: () => "1.1.3" }, logger: { info() {}, warn() {}, error() {} },
+      sourceRoot: "/source", browserDescriptorPath: descriptorPath,
+      supervisor: { readConfig: () => null, readSetupConfig: () => null },
+    });
+    assert.throws(() => stale.launcherControlEnvironment(), /does not belong to this launcher process/, "without a refresh, another launcher's token is never used");
+    fs.rmSync(descriptorPath);
+    assert.throws(() => stale.launcherControlEnvironment(), /unavailable/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("with \"Use Coding Tools in Codex\" off, no setup installs Codex's route and nothing reconnects it", async () => {
+  let enabled = false;
+  const fixture = hostFor({ mode: "full", browserHost: "launcher", appName: CURRENT_CONNECTOR_NAME, releaseVersion: "1.1.1" },
+    "automatic", { codexRouteEnabled: () => enabled });
+  const routeCalls = [];
+  let status = { installed: true, active: true, errors: [] };
+  fixture.host.run = async (name, args) => {
+    routeCalls.push(args.join(" "));
+    const active = args[1] === "connect";
+    status = { installed: true, active, errors: [] };
+    return { code: 0, stdout: JSON.stringify({ installed: true, active, changed: true, errors: [] }), stderr: "" };
+  };
+  fixture.host.bridgeStatus = async () => status;
+
+  await fixture.host.setupCore();
+  assert.equal(fixture.invocation().args.includes("--no-codex-route"), true, "Install models skips the route while it is off");
+  assert.equal(fixture.invocation().args.includes("--replace-codex-route"), false);
+  await fixture.host.upgradeManagedRuntime();
+  assert.equal(fixture.invocation().args.includes("--no-codex-route"), true, "so does the automatic upgrade");
+  await fixture.host.setBiggerContext(true);
+  assert.equal(fixture.invocation().args.includes("--no-codex-route"), true, "and every other setup");
+
+  assert.deepEqual(await fixture.host.connectBridgeRoute(), { changed: false, skipped: "codex-route-off" });
+  assert.deepEqual(routeCalls, [], "startup, sign-in and bridge restarts don't reconnect it");
+
+  // Turning it off restores Codex's previous route: one `route disconnect`, needing no idle runtime.
+  fixture.host.restoreBridgeRoute = async () => { routeCalls.push("route disconnect"); status = { installed: true, active: false, errors: [] }; return { installed: true, active: false }; };
+  const off = await fixture.host.setCodexRoute(false);
+  assert.deepEqual(routeCalls, ["route disconnect"]);
+  assert.equal(off.codexRestartRequired, true, "Codex re-reads its config only when it restarts");
+  assert.equal((await fixture.host.setCodexRoute(false)).changed, false, "already off: nothing to do");
+
+  enabled = true;
+  const on = await fixture.host.setCodexRoute(true);
+  assert.equal(routeCalls.at(-1), "route connect");
+  assert.equal(on.codexRestartRequired, true);
+  await fixture.host.setupCore();
+  assert.equal(fixture.invocation().args.includes("--replace-codex-route"), true, "on again, setup installs it as before");
+
+  status = { installed: false, active: false, errors: [] };
+  assert.equal((await fixture.host.setCodexRoute(true)).setupRequired, true, "never set up: Setup must install it first");
 });
 
 test("core setup refuses an implicit Automatic fallback for a new Zero Risk installation", async () => {

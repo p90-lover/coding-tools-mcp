@@ -31,6 +31,7 @@ test("Codex route waits for authenticated browser evidence and retries after log
     runtimeHost: {
       runtimeConfigSnapshot: () => ({ configured: true }),
       connectBridgeRoute: async () => { calls.push("route"); return { changed: true }; },
+      setCodexRoute: async (enabled) => { calls.push(`set-route:${enabled}`); return { changed: true }; },
     },
     runtimeSupervisor: { startIfConfigured: async () => { calls.push("runtime"); return { status: "ready" }; } },
     browserHost: { snapshot: () => browser },
@@ -47,6 +48,15 @@ test("Codex route waits for authenticated browser evidence and retries after log
   browser.authenticated = true;
   assert.equal((await connect({ logger: context.logger, stateStore: context.stateStore })).connected, true);
   assert.deepEqual(calls, ["runtime", "route"]);
+
+  // "Use Coding Tools in Codex" off: never reconnect, and remove a route left behind (live: an older
+  // build reconnected it at startup while the switch said off).
+  calls.length = 0;
+  state.codexRoute = false;
+  assert.equal((await connect({ logger: context.logger, stateStore: context.stateStore, reason: "startup" })).reason, "codex-route-off");
+  assert.deepEqual(calls, ["set-route:false"], "the route is taken off, never connected");
+  delete state.codexRoute;
+  calls.length = 0;
 
   for (const [channel, action] of [
     ["launcher:browser-login", "openLogin"],

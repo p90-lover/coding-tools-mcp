@@ -643,6 +643,21 @@ function applyReadyRuntimeAfterBridge({ logger, stateStore, bridgeRouteChanged =
 async function connectCodexBridgeAfterAuthentication({ logger, stateStore, reason = "auth" }) {
   if (quitting || shutdownInProgress) return { skipped: true, reason: "shutting-down" };
   if (IS_DEV_PROFILE || !runtimeHost || !runtimeSupervisor) return { skipped: true, reason: "unavailable" };
+  // The user took Codex off the bridge: nothing (startup, sign-in, a bridge restart) puts it back,
+  // and a route something else left behind (an older build reconnecting it at startup) is removed,
+  // as switching it off would. Seen live: the switch off, yet Codex's config still pointed at 17841.
+  if (stateStore.read().codexRoute === false) {
+    if (runtimeHost.runtimeConfigSnapshot().configured) {
+      try {
+        await waitForRuntimeHostIdle();
+        const route = await runtimeHost.setCodexRoute(false);
+        if (route.changed) logger.info("codex_route.reconciled_off", { reason });
+      } catch (error) {
+        logger.warn("codex_route.reconcile_failed", { reason, message: error instanceof Error ? error.message.slice(0, 200) : String(error) });
+      }
+    }
+    return { skipped: true, reason: "codex-route-off" };
+  }
   if (stateStore.read().browserInteractionMode === "automatic"
     && browserHost?.snapshot()?.authenticated !== true) {
     return { skipped: true, reason: "unauthenticated" };
@@ -2064,10 +2079,16 @@ function registerIpc({ logger, stateStore }) {
       noLink: true,
     });
     if (confirmation.response !== 1) return { cancelled: true };
+    // Removal sticks even if the runtime can't stop cleanly (Codex turns in flight): the route was
+    // put back already, and with the switch off nothing reconnects it.
+    send("launcher:state-changed", stateStore.update({ codexRoute: false }));
     try {
       await runtimeHost.uninstallIntegration();
     } finally {
-      browserHost.writeDescriptor();
+      // Never let re-publishing the descriptor replace the removal's own result or error.
+      try { browserHost.writeDescriptor(); } catch (error) {
+        logger.warn("browser.descriptor_write_failed", { message: error instanceof Error ? error.message.slice(0, 200) : String(error) });
+      }
     }
     const state = stateStore.update({
       coreSetupComplete: false,
@@ -2083,6 +2104,23 @@ function registerIpc({ logger, stateStore }) {
     send("launcher:state-changed", state);
     stopCatalogVerificationMonitor();
     return { cancelled: false, state };
+  });
+  // Settings → "Use Coding Tools in Codex". The choice is saved first, so even if restoring or
+  // reconnecting the route fails now, no later setup or reconnect goes against it.
+  handle("launcher:set-codex-route", async (event, enabled) => {
+    assertFocusedMainWindow(event, true);
+    if (IS_DEV_PROFILE) throw new Error("DEV profile has no Codex route");
+    if (typeof enabled !== "boolean") throw new Error("Choose on or off");
+    const state = stateStore.update({ codexRoute: enabled });
+    send("launcher:state-changed", state);
+    // A switch flipped while another launcher operation runs (seen: during Remove Codex
+    // integration) waits for it instead of failing with "Another launcher operation is active".
+    await waitForRuntimeHostIdle(120_000);
+    const route = runtimeHost?.runtimeConfigSnapshot().configured
+      ? await runtimeHost.setCodexRoute(enabled)
+      : { changed: false, setupRequired: enabled, codexRestartRequired: false };
+    logger.info("codex_route.set", { enabled, changed: route.changed === true, setupRequired: route.setupRequired === true });
+    return { state, route: { changed: route.changed === true, setupRequired: route.setupRequired === true, codexRestartRequired: route.codexRestartRequired === true } };
   });
   handle("launcher:refresh-part", async (_event, part) => refreshPart(String(part || ""), logger));
   handle("launcher:setup-core", async () => {
@@ -2106,6 +2144,8 @@ function registerIpc({ logger, stateStore }) {
           : "Run the browser smoke test before installing the Codex integration",
       );
     }
+    // "Install models" is the explicit install into Codex: it opts back in to Codex's route.
+    if (!IS_DEV_PROFILE && setupState.codexRoute === false) stateStore.update({ codexRoute: true });
     const result = IS_DEV_PROFILE ? await runtimeHost.setupDevCore() : await runtimeHost.setupCore();
     stateStore.update({
       coreSetupComplete: true,
@@ -3078,6 +3118,9 @@ async function start() {
     publishOperation,
     supervisor: runtimeSupervisor,
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
+    // Settings → "Use Coding Tools in Codex": absent is on (as every install before it was).
+    codexRouteEnabled: () => stateStore.read().codexRoute !== false,
+    refreshBrowserDescriptor: () => browserHost?.writeDescriptor(),
   });
   const configuredInteractionMode = runtimeHost.runtimeConfigSnapshot().config?.browserInteractionMode;
   if ((configuredInteractionMode === "automatic" || configuredInteractionMode === "manual")
@@ -3256,6 +3299,12 @@ async function start() {
         const state = stateStore.update({ experimentalBiggerContext: enabled, zeroRiskProEnabled });
         send("launcher:state-changed", state);
       }
+    }
+    // "Use Coding Tools in Codex" off: take a leftover route off at every start. This needs neither
+    // the bridge nor ChatGPT, and the connect below waits for both (seen live: deferred until
+    // ChatGPT was ready, so a route an older build had left stayed in Codex's config).
+    if (stateStore.read().codexRoute === false) {
+      await connectCodexBridgeAfterAuthentication({ logger, stateStore, reason: "startup" });
     }
     const runtime = await runtimeSupervisor.startIfConfigured();
     // "degraded" means the bridge is up and only the MCP tunnel is still being retried.
