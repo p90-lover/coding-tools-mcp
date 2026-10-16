@@ -12,6 +12,19 @@ export type EditableProject = {
 
 export type ProjectEditSave = { name: string; path: string; linkedPaths: string[] };
 
+/** Where a project's chats work (AO's workspace mode). */
+export type WorkspaceMode = "worktree" | "shared" | "folder";
+export type WorkspaceModeState = { available: boolean; mode?: WorkspaceMode; reason?: string };
+
+export const WORKSPACE_MODE_OPTIONS: readonly { value: WorkspaceMode; label: string; hint: string }[] = [
+  { value: "worktree", label: "A new worktree for each chat",
+    hint: "Each chat works on its own branch in its own copy, so chats never touch each other's files or yours." },
+  { value: "shared", label: "One shared worktree",
+    hint: "Every chat in this project works in the same copy, set up once and kept. Chats running at the same time can change the same files." },
+  { value: "folder", label: "The project folder itself",
+    hint: "Chats edit this folder directly, on whatever branch it has checked out, with your uncommitted work. Nothing is copied or cleaned up; chats running at the same time can change the same files." },
+];
+
 /** A folder's last path segment: "coding-tools-mcp" for G:\Projects\coding-tools-mcp. */
 export function folderName(path: string): string {
   const trimmed = path.replace(/[\\/]+$/, "");
@@ -44,7 +57,7 @@ export function projectFolders(project: EditableProject): string[] {
  * Codex's "Edit project" dialog: the project's name, its source folders (the first is the
  * project's own folder) and "Remove local project", which only drops it from this app's list.
  */
-export function ProjectEditDialog({ project, initialStep = "edit", chooseFolder, onSave, onRemove, onClose }: {
+export function ProjectEditDialog({ project, initialStep = "edit", chooseFolder, onSave, onRemove, onClose, readWorkspaceMode, saveWorkspaceMode }: {
   project: EditableProject;
   /** "remove" opens straight at the remove confirmation (the sidebar's "Remove project"). */
   initialStep?: "edit" | "remove";
@@ -53,12 +66,29 @@ export function ProjectEditDialog({ project, initialStep = "edit", chooseFolder,
   onSave: (change: ProjectEditSave) => Promise<void>;
   onRemove?: () => Promise<void>;
   onClose: () => void;
+  /** Reads where this project's chats work; absent hides the choice. */
+  readWorkspaceMode?: () => Promise<WorkspaceModeState>;
+  /** Saves where this project's chats work. */
+  saveWorkspaceMode?: (mode: WorkspaceMode) => Promise<void>;
 }) {
   const [name, setName] = useState(project.name);
   const [folders, setFolders] = useState<string[]>(() => projectFolders(project));
   const [step, setStep] = useState<"edit" | "remove">(initialStep);
   const [busy, setBusy] = useState<"" | "pick" | "save" | "remove">("");
   const [error, setError] = useState("");
+  // Where chats work: read once when the dialog opens; null while loading or unavailable.
+  const [modeState, setModeState] = useState<WorkspaceModeState | null>(null);
+  const [mode, setMode] = useState<WorkspaceMode | null>(null);
+  useEffect(() => {
+    if (!readWorkspaceMode) return undefined;
+    let live = true;
+    readWorkspaceMode()
+      .then((state) => { if (live) { setModeState(state); setMode(state.mode ?? null); } })
+      .catch((cause) => { if (live) setModeState({ available: false, reason: cause instanceof Error ? cause.message : String(cause) }); });
+    return () => { live = false; };
+    // Once per project: the reader is usually an inline arrow, new on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project.id]);
 
   const cancel = () => { if (busy !== "save" && busy !== "remove") onClose(); };
   const back = () => { setError(""); if (initialStep === "remove") cancel(); else setStep("edit"); };
@@ -90,17 +120,21 @@ export function ProjectEditDialog({ project, initialStep = "edit", chooseFolder,
   };
   const trimmed = name.trim();
   const original = projectFolders(project);
-  const changed = trimmed !== project.name || folders.length !== original.length || folders.some((folder, index) => folder !== original[index]);
+  const projectChanged = trimmed !== project.name || folders.length !== original.length || folders.some((folder, index) => folder !== original[index]);
+  const modeChanged = Boolean(mode && modeState?.mode && mode !== modeState.mode);
+  const changed = projectChanged || modeChanged;
   const canSave = Boolean(trimmed) && trimmed.length <= 128 && folders.length > 0 && !busy;
   const save = async () => {
     if (!canSave) return;
     if (!changed) { onClose(); return; }
     setBusy("save"); setError("");
     try {
-      await onSave({ name: trimmed, path: folders[0], linkedPaths: folders.slice(1) });
+      if (projectChanged) await onSave({ name: trimmed, path: folders[0], linkedPaths: folders.slice(1) });
+      if (modeChanged && mode && saveWorkspaceMode) await saveWorkspaceMode(mode);
       onClose();
     } catch (cause) { fail(cause); setBusy(""); }
   };
+  const modeHint = WORKSPACE_MODE_OPTIONS.find((option) => option.value === mode)?.hint;
   const remove = async () => {
     if (!onRemove || busy) return;
     setBusy("remove"); setError("");
@@ -161,6 +195,16 @@ export function ProjectEditDialog({ project, initialStep = "edit", chooseFolder,
                 </li>
               </ul>
             </div>
+            {readWorkspaceMode ? <label className="cx-field">
+              <span className="cx-field-label">Chats work in</span>
+              {modeState?.available && mode ? <>
+                <select className="cx-field-select" value={mode} disabled={Boolean(busy)} aria-label="Where this project's chats work"
+                  onChange={(event) => setMode(event.target.value as WorkspaceMode)}>
+                  {WORKSPACE_MODE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select>
+                {modeHint ? <span className={`cx-modal-hint${mode === "folder" ? " is-warning" : ""}`}>{modeHint} Applies to chats started after saving.</span> : null}
+              </> : <span className="cx-modal-hint">{modeState ? modeState.reason || "Not available for this project." : "Loading…"}</span>}
+            </label> : null}
             {error ? <p className="cx-modal-error" role="alert">{error}</p> : null}
           </div>
           <footer className="cx-modal-foot">

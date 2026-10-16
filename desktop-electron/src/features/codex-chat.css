@@ -569,6 +569,11 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-field-input { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 10px; border: 1px solid color-mix(in srgb, var(--color-text-primary) 14%, transparent);
   border-radius: 8px; color: var(--ao-muted); }
 .cx-field-input:focus-within { border-color: color-mix(in srgb, var(--color-text-primary) 40%, transparent); }
+/* "Chats work in": the same box as a text field, as a native select. */
+.cx-field-select { height: 34px; padding: 0 8px; border: 1px solid color-mix(in srgb, var(--color-text-primary) 14%, transparent); border-radius: 8px;
+  background: transparent; color: var(--color-text-primary); font: inherit; font-size: 13px; }
+.cx-field-select:focus { outline: none; border-color: color-mix(in srgb, var(--color-text-primary) 40%, transparent); }
+.cx-modal-hint.is-warning { color: var(--ao-amber, #b7791f); }
 .ao-workflow .cx-field-input input { flex: 1 1 auto; height: 100%; padding: 0; border: 0; background: transparent; color: var(--color-text-primary); font: inherit; font-size: 13px; }
 .ao-workflow .cx-field-input input:focus-visible { outline: none; }
 .cx-folder-list { display: grid; gap: 2px; margin: 0; padding: 4px; list-style: none; border: 1px solid color-mix(in srgb, var(--color-text-primary) 10%, transparent); border-radius: 8px; }
