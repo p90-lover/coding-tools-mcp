@@ -175,9 +175,22 @@ function createAoDependencyLinks({ file, request, logger = console }) {
     return run;
   }
 
+  /**
+   * Runs `work` on the project's sync queue. AO replaces a project's whole config on every PUT,
+   * so any other read-modify-write of it (the workspace mode) must not interleave with a sync,
+   * or the later PUT drops what the earlier one wrote. Unlike sync, it passes errors back.
+   */
+  function exclusive(projectId, work) {
+    const previous = chains.get(projectId) || Promise.resolve();
+    const run = previous.catch(() => undefined).then(work);
+    chains.set(projectId, run.catch(() => undefined));
+    return run;
+  }
+
   const settings = (state = load()) => ({ enabled: state.enabled, python: state.python });
   return {
     sync,
+    exclusive,
     /** `enabled`: reuse installed Node packages (hard-link farms); `python`: share the Python environment. */
     settings: () => settings(),
     /**

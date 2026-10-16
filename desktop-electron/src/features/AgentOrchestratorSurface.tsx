@@ -1922,7 +1922,12 @@ export function AgentOrchestratorSurface({ language, setError }: {
           onSave={(change) => saveProjectEdit(project.id, change)} onRemove={() => removeProject(project.id)}
           onClose={() => setProjectEdit(null)}
           readWorkspaceMode={() => workspaceMode(project.id)}
-          saveWorkspaceMode={async (mode) => { await workspaceMode(project.id, mode); }} />;
+          saveWorkspaceMode={async (mode) => {
+            // An unavailable answer (AO stopped, no AO project) must keep the dialog open, not
+            // close it as if the choice were saved.
+            const saved = await workspaceMode(project.id, mode);
+            if (!saved.available || saved.mode !== mode) throw new Error(saved.reason || "Where chats work could not be saved");
+          }} />;
       })()}
     </section>
   );

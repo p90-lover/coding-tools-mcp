@@ -156,3 +156,25 @@ test("binding a workspace for a session syncs its project's links; reading the b
   assert.deepEqual(await bridge.bind("ws"), { workspaceId: "ws", projectId: "reg" });
   assert.deepEqual(synced, [["reg", "C:\\work\\reg"]]);
 });
+
+test("another whole-config write waits for a running sync and runs before the next one", async () => {
+  const { createAoDependencyLinks } = require("../electron/ao-dependency-links.cjs");
+  const fsMod = require("node:fs"), osMod = require("node:os"), pathMod = require("node:path");
+  const dir = fsMod.mkdtempSync(pathMod.join(osMod.tmpdir(), "ao-links-exclusive-"));
+  const order = [];
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const links = createAoDependencyLinks({ file: pathMod.join(dir, "links.json"), request: async () => { order.push("sync-read"); await gate; return { status: "ok", project: { kind: "scratch" } }; }, logger: { warn() {} } });
+  fsMod.mkdirSync(pathMod.join(dir, "proj", "node_modules"), { recursive: true });
+  fsMod.writeFileSync(pathMod.join(dir, "proj", "package.json"), "{}");
+  const syncing = links.sync("p1", pathMod.join(dir, "proj"));
+  const exclusive = links.exclusive("p1", async () => { order.push("mode-write"); return "done"; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(order, ["sync-read"], "the mode write waits for the running sync");
+  release();
+  assert.equal(await exclusive, "done");
+  await syncing;
+  assert.deepEqual(order, ["sync-read", "mode-write"]);
+  await assert.rejects(links.exclusive("p1", async () => { throw new Error("nope"); }), /nope/, "its errors reach the caller");
+  assert.equal(await links.exclusive("p1", async () => "after"), "after", "a failure does not wedge the queue");
+});

@@ -1079,27 +1079,31 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       if (state !== "ready") return { ok: true, available: false, reason: "Agent Orchestrator is not running" };
       const { projectId } = await workspaceBoard.project(args.workspaceId);
       if (!projectId) return { ok: true, available: false, reason: "This project's first chat sets it up; choose after that" };
+      if (args.mode !== undefined && !WORKSPACE_MODES.has(args.mode)) throw new Error("Choose worktree, shared or folder");
       const endpoint = `/api/v1/projects/${encodeURIComponent(projectId)}`;
       const read = async () => {
         const record = await internalApi("GET", endpoint);
         const project = record?.project;
         return { project, config: project?.config && typeof project.config === "object" ? project.config : {} };
       };
-      const { project, config } = await read();
-      if (!project || (project.kind && project.kind !== "single_repo")) {
-        return { ok: true, available: false, reason: "Only a single-folder project can choose where its chats work" };
-      }
-      const current = WORKSPACE_MODES.has(config.workspaceMode) ? config.workspaceMode : "worktree";
-      if (args.mode === undefined) return { ok: true, available: true, mode: current };
-      if (!WORKSPACE_MODES.has(args.mode)) throw new Error("Choose worktree, shared or folder");
-      if (args.mode !== current) {
-        // AO replaces the whole config, so every other setting is sent back as it was.
-        const { workspaceMode: _previous, ...rest } = config;
-        await internalApi("PUT", `${endpoint}/config`, { config: { ...rest, ...(args.mode === "worktree" ? {} : { workspaceMode: args.mode }) } });
-        const saved = (await read()).config.workspaceMode || "worktree";
-        if (saved !== args.mode) throw new Error("This Agent Orchestrator does not support choosing where chats work yet; update the app");
-      }
-      return { ok: true, available: true, mode: args.mode };
+      // On the dependency-link sync's queue: both rewrite the whole config, and interleaved they
+      // would drop each other's fields (this mode, or the links a spawn just added).
+      return dependencyLinks.exclusive(projectId, async () => {
+        const { project, config } = await read();
+        if (!project || (project.kind && project.kind !== "single_repo")) {
+          return { ok: true, available: false, reason: "Only a single-folder project can choose where its chats work" };
+        }
+        const current = WORKSPACE_MODES.has(config.workspaceMode) ? config.workspaceMode : "worktree";
+        if (args.mode === undefined) return { ok: true, available: true, mode: current };
+        if (args.mode !== current) {
+          // AO replaces the whole config, so every other setting is sent back as it was.
+          const { workspaceMode: _previous, ...rest } = config;
+          await internalApi("PUT", `${endpoint}/config`, { config: { ...rest, ...(args.mode === "worktree" ? {} : { workspaceMode: args.mode }) } });
+          const saved = (await read()).config.workspaceMode || "worktree";
+          if (saved !== args.mode) throw new Error("This Agent Orchestrator does not support choosing where chats work yet; update the app");
+        }
+        return { ok: true, available: true, mode: args.mode };
+      });
     }
     // The chat composer's context meter: how full each agent session's context is, what it has
     // spent, its account's rate limits and tool servers, as AO keeps them on the conversation

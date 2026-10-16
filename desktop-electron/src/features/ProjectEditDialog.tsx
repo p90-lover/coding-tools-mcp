@@ -129,8 +129,10 @@ export function ProjectEditDialog({ project, initialStep = "edit", chooseFolder,
     if (!changed) { onClose(); return; }
     setBusy("save"); setError("");
     try {
-      if (projectChanged) await onSave({ name: trimmed, path: folders[0], linkedPaths: folders.slice(1) });
+      // The mode first: it belongs to the AO project behind the current folder, which a changed
+      // primary folder would no longer reach.
       if (modeChanged && mode && saveWorkspaceMode) await saveWorkspaceMode(mode);
+      if (projectChanged) await onSave({ name: trimmed, path: folders[0], linkedPaths: folders.slice(1) });
       onClose();
     } catch (cause) { fail(cause); setBusy(""); }
   };
