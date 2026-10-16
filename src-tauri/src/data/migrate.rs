@@ -195,7 +195,34 @@ fn read_valid_data(path: &Path) -> AppResult<AppData> {
     serde_json::from_str(&raw).map_err(AppError::from)
 }
 
+/// Writes this process made to each data file. File times can be as coarse as a clock tick, so
+/// two saves of the same length inside one tick look alike on disk; the count tells them apart.
+static DATA_WRITES: std::sync::Mutex<Option<std::collections::HashMap<PathBuf, u64>>> =
+    std::sync::Mutex::new(None);
+
+pub(super) fn data_writes(path: &Path) -> u64 {
+    let counts = DATA_WRITES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    counts
+        .as_ref()
+        .and_then(|counts| counts.get(path).copied())
+        .unwrap_or(0)
+}
+
+fn count_data_write(path: &Path) {
+    let mut counts = DATA_WRITES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *counts
+        .get_or_insert_with(Default::default)
+        .entry(path.to_path_buf())
+        .or_insert(0) += 1;
+}
+
 fn write_data_at(path: &Path, app_root: &Path, data: &AppData) -> AppResult<()> {
+    // Counted before anything moves, so a reader that saw the old count reads the file again.
+    count_data_write(path);
     let Some(parent) = path.parent() else {
         return Err(AppError::Message("profile data path has no parent".into()));
     };
@@ -241,7 +268,37 @@ fn write_data_at(path: &Path, app_root: &Path, data: &AppData) -> AppResult<()> 
     }
     restrict_file_permissions(path)?;
     copy_valid_backup(path, app_root)?;
+    prune_backups(&app_root.join("Trash").join("data-backups"), KEPT_BACKUPS);
     Ok(())
+}
+
+/// Backups kept of the data file. Every save added two full copies and none was ever removed:
+/// one install held 2,429 (456 MB). Recovery reads only the newest valid one.
+const KEPT_BACKUPS: usize = 40;
+
+/// Removes all but the newest `keep` backups; best effort, a backup that cannot go stays.
+fn prune_backups(dir: &Path, keep: usize) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut backups = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().and_then(|value| value.to_str()) == Some("json"))
+        .map(|entry| {
+            let modified = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(UNIX_EPOCH);
+            (modified, entry.path())
+        })
+        .collect::<Vec<_>>();
+    if backups.len() <= keep {
+        return;
+    }
+    backups.sort_by_key(|backup| std::cmp::Reverse(backup.0));
+    for (_, path) in backups.into_iter().skip(keep) {
+        let _ = fs::remove_file(path);
+    }
 }
 
 fn copy_valid_backup(path: &Path, app_root: &Path) -> AppResult<PathBuf> {
@@ -378,6 +435,29 @@ mod tests {
         assert!(
             backup_count >= 3,
             "expected first valid copy, moved previous file, and second valid copy"
+        );
+    }
+
+    #[test]
+    fn backups_are_pruned_to_the_newest_and_recovery_still_finds_the_latest() {
+        let root = tempfile::tempdir().expect("app root");
+        let path = root.path().join("data/profiles.json");
+        for index in 0..(KEPT_BACKUPS + 15) {
+            let data = AppData {
+                last_workspace_id: format!("write-{index}"),
+                ..AppData::default()
+            };
+            write_data_at(&path, root.path(), &data).expect("write");
+        }
+        let kept = fs::read_dir(root.path().join("Trash/data-backups"))
+            .expect("backups")
+            .filter_map(Result::ok)
+            .count();
+        assert_eq!(kept, KEPT_BACKUPS);
+        let latest = latest_valid_backup(root.path()).unwrap().expect("a backup");
+        assert_eq!(
+            latest.last_workspace_id,
+            format!("write-{}", KEPT_BACKUPS + 14)
         );
     }
 

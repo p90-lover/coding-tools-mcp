@@ -6,7 +6,9 @@ use crate::workspace::legacy_import::import_legacy_profiles_if_empty;
 use crate::workspace::resources::assign_free_workspace_ports;
 use crate::workspace::WorkspaceProfile;
 
-use super::migrate::{data_file_path, load_or_migrate, maybe_backup_legacy_files, save};
+use super::migrate::{
+    data_file_path, data_writes, load_or_migrate, maybe_backup_legacy_files, save,
+};
 use super::model::AppData;
 
 static DATA_FILE_LOCK: Mutex<()> = Mutex::new(());
@@ -73,11 +75,50 @@ fn create_workspace_in_data(
     Ok(profile)
 }
 
+/// What identifies one version of the data file: this process's write count (see data_writes)
+/// and the file's times and size, which change with a write from another process too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    writes: u64,
+    modified: std::time::SystemTime,
+    created: Option<std::time::SystemTime>,
+    len: u64,
+    #[cfg(unix)]
+    inode: (u64, u64),
+}
+
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let writes = data_writes(path);
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(FileStamp {
+        writes,
+        modified: metadata.modified().ok()?,
+        created: metadata.created().ok(),
+        len: metadata.len(),
+        #[cfg(unix)]
+        inode: {
+            use std::os::unix::fs::MetadataExt;
+            (metadata.dev(), metadata.ino())
+        },
+    })
+}
+
+/// The last version of the data file this store parsed, with its stamp. A request refreshed the
+/// store several times and each refresh parsed the whole file again (hundreds of KB) under the
+/// global lock; while the stamp is unchanged its parsed copy is reused instead.
+#[derive(Debug)]
+struct Parsed {
+    stamp: FileStamp,
+    data: AppData,
+    value: serde_json::Value,
+}
+
 #[derive(Debug)]
 pub struct DataStore {
     data: AppData,
     baseline: serde_json::Value,
     persistent: bool,
+    parsed: Option<Parsed>,
 }
 
 impl DataStore {
@@ -85,20 +126,25 @@ impl DataStore {
         let _guard = lock_data_file()?;
         let path = data_file_path()?;
         let existed_before = path.exists();
+        let read_stamp = file_stamp(&path);
         let mut data = load_or_migrate()?;
         let imported = import_legacy_profiles_if_empty(&mut data)?;
         let baseline = serde_json::to_value(&data)?;
-        let store = Self {
+        let mut store = Self {
             data,
             baseline,
             persistent: true,
+            parsed: None,
         };
-        if !existed_before || imported > 0 {
+        let wrote = !existed_before || imported > 0;
+        if wrote {
             save(&store.data)?;
         }
         if !existed_before {
             maybe_backup_legacy_files(&path)?;
         }
+        // Read: the stamp from before reading (see latest_on_disk). Written: the file just saved.
+        store.remember_parsed(if wrote { file_stamp(&path) } else { read_stamp })?;
         crate::auth::sync_trusted_origins(&store.data);
         Ok(store)
     }
@@ -113,7 +159,43 @@ impl DataStore {
             data,
             baseline,
             persistent: false,
+            parsed: None,
         })
+    }
+
+    /// Keeps the store's current data, just loaded or written, as the parsed copy of the file
+    /// version `stamp` names. Its JSON form is built from the data, as reading the file would.
+    fn remember_parsed(&mut self, stamp: Option<FileStamp>) -> AppResult<()> {
+        self.parsed = match stamp {
+            Some(stamp) => Some(Parsed {
+                stamp,
+                data: self.data.clone(),
+                value: serde_json::to_value(&self.data)?,
+            }),
+            None => None,
+        };
+        Ok(())
+    }
+
+    /// The data file's current contents and their JSON form: the parsed copy while the file is
+    /// the version it was parsed from, otherwise read again. Callers hold the data file lock.
+    fn latest_on_disk(&mut self) -> AppResult<(AppData, serde_json::Value)> {
+        // Stamped before reading: a write landing in between leaves an older stamp on the newer
+        // data, so the next call reads again, never the other way round.
+        let stamp = file_stamp(&data_file_path()?);
+        if let (Some(stamp), Some(parsed)) = (stamp, self.parsed.as_ref()) {
+            if parsed.stamp == stamp {
+                return Ok((parsed.data.clone(), parsed.value.clone()));
+            }
+        }
+        let data = load_or_migrate()?;
+        let value = serde_json::to_value(&data)?;
+        self.parsed = stamp.map(|stamp| Parsed {
+            stamp,
+            data: data.clone(),
+            value: value.clone(),
+        });
+        Ok((data, value))
     }
 
     pub fn read_file<R>(f: impl FnOnce(&AppData) -> AppResult<R>) -> AppResult<R> {
@@ -149,8 +231,8 @@ impl DataStore {
             return Ok(());
         }
         let _guard = lock_data_file()?;
-        let data = load_or_migrate()?;
-        self.baseline = serde_json::to_value(&data)?;
+        let (data, value) = self.latest_on_disk()?;
+        self.baseline = value;
         self.data = data;
         crate::auth::sync_trusted_origins(&self.data);
         Ok(())
@@ -162,8 +244,7 @@ impl DataStore {
             return Ok(());
         }
         let _guard = lock_data_file()?;
-        let latest = load_or_migrate()?;
-        let latest_value = serde_json::to_value(&latest)?;
+        let (latest, latest_value) = self.latest_on_disk()?;
         let local = serde_json::to_value(&self.data)?;
         let merged = match merge_local_changes(&self.baseline, &local, &latest_value) {
             Ok(value) => value,
@@ -174,11 +255,16 @@ impl DataStore {
             }
         };
         let data: AppData = serde_json::from_value(merged.clone())?;
-        if merged != latest_value {
+        let wrote = merged != latest_value;
+        if wrote {
             save(&data)?;
         }
         self.data = data;
         self.baseline = merged;
+        if wrote {
+            // What was just written is the file now; nothing needs to read it back.
+            self.remember_parsed(file_stamp(&data_file_path()?))?;
+        }
         crate::auth::sync_trusted_origins(&self.data);
         Ok(())
     }
@@ -437,6 +523,76 @@ mod tests {
                 .expect("get");
             assert_eq!(loaded.as_deref(), Some("roundtrip-secret"));
             store.remove_workspace_secrets(&id).expect("remove");
+        });
+    }
+
+    fn isolated_fixture() -> std::path::PathBuf {
+        std::env::current_dir()
+            .unwrap()
+            .join("aiTemp/isolated-store-tests")
+            .join(uuid::Uuid::new_v4().to_string())
+            .join("profiles.json")
+    }
+
+    #[test]
+    fn refresh_sees_other_writers_and_still_drops_unsaved_edits() {
+        crate::data::with_test_file(isolated_fixture(), || {
+            let mut store = DataStore::load().expect("load");
+            DataStore::update_file(|data| {
+                data.last_workspace_id = "written-elsewhere".into();
+                Ok(())
+            })
+            .expect("another writer");
+            store.data.last_workspace_id = "unsaved".into();
+            store.refresh().expect("refresh after a write");
+            assert_eq!(store.data().last_workspace_id, "written-elsewhere");
+            // The file is unchanged now, so this refresh is served from the parsed copy: an
+            // unsaved edit is still dropped, exactly as a full read would.
+            store.data.last_workspace_id = "unsaved-again".into();
+            store.refresh().expect("refresh from the parsed copy");
+            assert_eq!(store.data().last_workspace_id, "written-elsewhere");
+            store.data.last_workspace_id = "saved-here".into();
+            store.save().expect("save");
+            store.refresh().expect("refresh after own save");
+            assert_eq!(store.data().last_workspace_id, "saved-here");
+            let on_disk = DataStore::read_file(|data| Ok(data.last_workspace_id.clone())).unwrap();
+            assert_eq!(on_disk, "saved-here");
+        });
+    }
+
+    #[test]
+    fn refresh_reads_the_file_again_only_when_its_stamp_changes() {
+        crate::data::with_test_file(isolated_fixture(), || {
+            let mut store = DataStore::load().expect("load");
+            store.data.last_workspace_id = "aaaa".into();
+            store.save().expect("save");
+            let path = data_file_path().unwrap();
+            let before = std::fs::metadata(&path).unwrap();
+            // Same length, other contents, original modification time: nothing a stamp sees.
+            let mut changed = store.data().clone();
+            changed.last_workspace_id = "bbbb".into();
+            let text = serde_json::to_string_pretty(&changed).unwrap() + "\n";
+            assert_eq!(text.len() as u64, before.len());
+            std::fs::write(&path, &text).unwrap();
+            let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            file.set_modified(before.modified().unwrap()).unwrap();
+            drop(file);
+            store.refresh().expect("refresh");
+            assert_eq!(
+                store.data().last_workspace_id,
+                "aaaa",
+                "an unchanged stamp reuses the parsed copy"
+            );
+            let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            file.set_modified(before.modified().unwrap() + std::time::Duration::from_secs(5))
+                .unwrap();
+            drop(file);
+            store.refresh().expect("refresh");
+            assert_eq!(
+                store.data().last_workspace_id,
+                "bbbb",
+                "a new stamp reads the file"
+            );
         });
     }
 
