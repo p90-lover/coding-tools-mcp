@@ -2029,7 +2029,20 @@ function SettingsSurface({
   const [busy, setBusy] = useState(false);
   const [turnsCancelled, setTurnsCancelled] = useState(false);
   const [integrationRemoved, setIntegrationRemoved] = useState(false);
+  // What switching Codex's route just did: restart Codex to apply it, or run Setup first.
+  const [codexRouteNote, setCodexRouteNote] = useState("");
   const [updateNotice, setUpdateNotice] = useState("");
+  const setCodexRoute = async (enabled: boolean) => {
+    setCodexRouteNote("");
+    try {
+      const result = await api!.setCodexRoute!(enabled);
+      updateState(result.state);
+      setCodexRouteNote(result.route.setupRequired ? copy.codexRouteSetupRequired
+        : result.route.codexRestartRequired ? copy.codexRouteRestart : "");
+    } catch (cause) {
+      setError(messageOf(cause));
+    }
+  };
   const guiUpdating = ["checking", "downloading", "installing"].includes(snapshot.update.status);
 
   const updateLanguage = async (next: Language) => {
@@ -2191,6 +2204,12 @@ function SettingsSurface({
               .catch((cause) => setError(messageOf(cause)))}
           />
         </SettingRow>
+        {!devProfile && api?.setCodexRoute ? <SettingRow body={codexRouteNote || copy.codexRouteBody} label={copy.codexRoute}>
+          <Switch
+            checked={snapshot.state.codexRoute !== false}
+            onChange={(checked) => void setCodexRoute(checked)}
+          />
+        </SettingRow> : null}
         <SettingRow body={copy.chatAgentToolsBody} label={copy.chatAgentTools}>
           <Switch
             checked={snapshot.state.chatAgentTools !== false}

@@ -56,6 +56,9 @@ function readState(filePath) {
     ]) {
       if (typeof state[key] !== "boolean") state[key] = DEFAULT_STATE[key];
     }
+    // Codex's model route goes through the bridge unless this is false ("Use Coding Tools in
+    // Codex"); absent means on, as every install was before the switch existed.
+    if (Object.hasOwn(state, "codexRoute") && typeof state.codexRoute !== "boolean") delete state.codexRoute;
     // AO chat agents get the app's own tools unless this is false; absent means on.
     if (Object.hasOwn(state, "chatAgentTools") && typeof state.chatAgentTools !== "boolean") delete state.chatAgentTools;
     // Their screen capture and computer control only when this is true; absent means off.
