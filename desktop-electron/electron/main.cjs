@@ -1020,7 +1020,11 @@ function assertFocusedMainWindow(event, write = false) {
     && !window.isMinimized()
     && (!write || (window.isFocused() && event.sender.isFocused()));
   if (!valid) {
-    throw new Error("Use the visible, focused main-window controller for provider consent");
+    // Said in the user's terms: this refused chat sends and starts too, and the old wording
+    // ("provider consent") left them guessing why their message did not go.
+    throw new Error(write
+      ? "Click into the Coding Tools window and try again: this action runs only from the focused app window"
+      : "Open the Coding Tools window (not minimized) to do this");
   }
 }
 
@@ -2887,6 +2891,8 @@ async function start() {
       goalsFile: path.join(app.getPath("userData"), "integrations", "chat-goals.json"),
       // So do deleted chat messages (their hidden runs and fresh-session flags).
       chatEditsFile: path.join(app.getPath("userData"), "integrations", "chat-edits.json"),
+      // And the CPA models seen lately, so one CPA pauses (rate-limited) stays in the picker.
+      seenModelsFile: path.join(app.getPath("userData"), "integrations", "cpa-seen-models.json"),
       requestHeadless: (endpoint, body, options) => {
         if (!headlessHost) throw new Error("Local Coding Tools runtime is unavailable");
         return headlessHost.request(endpoint, body, options);
@@ -3306,6 +3312,10 @@ async function start() {
     if (stateStore.read().codexRoute === false) {
       await connectCodexBridgeAfterAuthentication({ logger, stateStore, reason: "startup" });
     }
+    // That route check (or a sign-in's) may still be finishing; starting meanwhile was refused as
+    // "Another launcher operation is active" and the runtime stayed down until the next restart.
+    await waitForRuntimeHostIdle(120_000).catch((error) => logger.warn("runtime.startup_wait_idle", {
+      message: error instanceof Error ? error.message.slice(0, 200) : String(error) }));
     const runtime = await runtimeSupervisor.startIfConfigured();
     // "degraded" means the bridge is up and only the MCP tunnel is still being retried.
     if (runtime.status !== "ready" && runtime.status !== "degraded") return runtime;

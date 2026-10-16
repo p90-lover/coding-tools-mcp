@@ -243,6 +243,8 @@ function newChatRoute(): AoRoute {
 const LAST_CHAT_ROUTE = "coding-tools:ao:last-chat-route";
 const CHAT_ROUTE_FIELDS = ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile",
   "approval_policy", "approvals_reviewer", "effort", "context_window"];
+/** The fields that decide how a route launches, in a fixed order (absent ones as null). */
+const routeIdentity = (route: AoRoute) => CHAT_ROUTE_FIELDS.map(name => (route as unknown as Record<string, unknown>)[name] ?? null);
 function lastChatRoute(): AoRoute | null {
   try {
     const saved: unknown = JSON.parse(localStorage.getItem(LAST_CHAT_ROUTE) || "null");
@@ -1354,7 +1356,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
     try {
       const result = await moduleCall("chat_steer", { workspaceId, taskId: input.taskId, message: input.message });
       if (result.steered) void loadBoard(workspaceId).catch(() => undefined);
-      return result.steered === true;
+      // The agent waits on a request of its own: the message waits for the turn instead.
+      return result.steered === true ? true : result.waiting === true ? "wait" as const : false;
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); throw cause; }
   };
   // Have the agent the next message needs running before it is sent, so sending does not wait half
@@ -1377,12 +1380,26 @@ export function AgentOrchestratorSurface({ language, setError }: {
     const taskId = missions.find((mission) => mission.id === runId)?.project_id ?? "";
     try {
       const mission = missions.find(item => item.id === runId);
+      // Retry ran the run's saved route again: a model that had gone failed the same way however
+      // often it was retried, whatever the composer showed. A single chat whose composer now has
+      // another model restarts on that one, as the next message would.
+      const card = mission?.execution_mode === "single" ? mission.nodes[0] : undefined;
+      const picked = composerMode === "single" && singleRoute.model && singleRoute.model !== "default" ? singleRoute : null;
+      if (card && picked && JSON.stringify(routeIdentity(card.route)) !== JSON.stringify(routeIdentity(picked))) {
+        const result = await moduleCall("restart_run", { workspaceId, runId, ...executableArg(), singleRoute: { ...picked } as unknown as JsonObject });
+        if (result.cancelled) return;
+        if (typeof result.runId === "string") setSelectedRunId(result.runId);
+        setChatNotices((current) => ({ ...current, [taskId]: result.status === "failed" ? String(result.detail || "The run could not start") : "" }));
+        setAutoStatus(result.status === "failed" ? "idle" : typeof result.status === "string" ? result.status : "running");
+        await loadMissions(workspaceId);
+        return;
+      }
       if (mission?.nodes.some(node => ["held", "failed"].includes(node.state))) {
         await moduleCall("control_run", { workspaceId, runId, action: "retry", ...executableArg() });
       }
       const result = await moduleCall("start_run", { workspaceId, runId, ...executableArg() });
-      setChatNotices((current) => ({ ...current, [taskId]: "" }));
-      setAutoStatus(typeof result.status === "string" ? result.status : "running");
+      setChatNotices((current) => ({ ...current, [taskId]: result.status === "failed" ? String(result.detail || "The run could not start") : "" }));
+      setAutoStatus(result.status === "failed" ? "idle" : typeof result.status === "string" ? result.status : "running");
     } catch (cause) {
       setChatNotices((current) => ({ ...current, [taskId]: cause instanceof Error ? cause.message : String(cause) }));
     }

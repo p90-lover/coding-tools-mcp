@@ -2164,6 +2164,8 @@ test("an agent's own models take CPA's real window for the same model, and a no-
     fetchImpl: async url => String(url).includes("/v1/models") ? { ok: true, json: async () => catalog } : { ok: false, status: 404, json: async () => ({}) },
     requestHeadless: async (endpoint, body) => {
       if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+      // The route is checked once the card is reserved, so the refusal holds the card with its reason.
+      if (endpoint.endsWith("/external/reserve")) return { ok: true, request_key: "key-1", prompt: "go" };
       if (body?.error) failure = body.error;
       return { ok: true, run: mission };
     },
@@ -2176,6 +2178,64 @@ test("an agent's own models take CPA's real window for the same model, and a no-
   const result = await workflow.call("advance", { workspaceId: "ws", runId: "run", executable: "C:/codex.exe" }).catch(error => ({ error }));
   const message = String(failure ?? result?.error?.message ?? JSON.stringify(result));
   assert.match(message, /no longer in this harness's model list/, message);
+});
+
+test("a model CPA pauses after use stays in the list, marked paused, and still takes a chat", async () => {
+  const root = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "seen-models-"));
+  const seenModelsFile = path.join(root, "cpa-seen-models.json");
+  let catalog = { data: [{ id: "gemini-3.8-flash-high", context_window: 1000000 }, { id: "cline-pass/deepseek-v4-flash", context_window: 1000000 }] };
+  let clock = 1_000_000;
+  const make = () => createAgentOrchestratorWorkflow({
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async url => String(url).includes("/v1/models") ? { ok: true, json: async () => catalog } : { ok: false, status: 404, json: async () => ({}) },
+    requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [], teams: [], worker_capacity: {} } : { ok: true },
+    aoHarness: { catalog: async () => [], models: async () => [], spawn: async () => "session" },
+    now: () => clock, seenModelsFile, confirm: async () => true,
+  });
+  try {
+    let workflow = make();
+    assert.ok((await workflow.call("models", { harness: "ao:claude-code" })).models.includes("cpa/cline-pass/deepseek-v4-flash"));
+    // After a chat on it rate-limited every account, CPA leaves it out of its list.
+    catalog = { data: [{ id: "gemini-3.8-flash-high", context_window: 1000000 }] };
+    clock += 2 * 60_000;
+    workflow = make(); // a restart too: what was seen is kept on disk
+    const listed = await workflow.call("models", { harness: "ao:claude-code" });
+    assert.ok(listed.models.includes("cpa/cline-pass/deepseek-v4-flash"), "still offered");
+    assert.equal(listed.capabilities["cpa/cline-pass/deepseek-v4-flash"].paused, true, "and marked paused");
+    const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/cline-pass/deepseek-v4-flash", permission_profile: ":ao-default" };
+    const sent = await workflow.call("chat_send", { workspaceId: "ws", message: "hi", executionMode: "single", singleRoute: route }).catch(error => ({ error }));
+    assert.notEqual(sent?.ok, false, "a paused model is not refused as gone: " + JSON.stringify(sent?.reason ?? ""));
+    // Unseen for longer than three days, it is gone.
+    clock += 4 * 24 * 60 * 60_000;
+    workflow = make();
+    assert.ok(!(await workflow.call("models", { harness: "ao:claude-code" })).models.includes("cpa/cline-pass/deepseek-v4-flash"));
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a chat on a model CPA no longer offers is refused before a task or run is created", async () => {
+  const catalog = { data: [{ id: "gemini-3.8-flash-high", context_window: 1000000 }] };
+  const writes = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async url => String(url).includes("/v1/models") ? { ok: true, json: async () => catalog } : { ok: false, status: 404, json: async () => ({}) },
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [], teams: [], worker_capacity: {} };
+      writes.push(endpoint);
+      return { ok: true };
+    },
+    aoHarness: { catalog: async () => [], models: async () => [], spawn: async () => "session" },
+    confirm: async () => true,
+  });
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/cline-pass/deepseek-v4.1-flash(high)",
+    permission_profile: ":ao-default" };
+  const refused = await workflow.call("chat_send", { workspaceId: "ws", message: "hi", executionMode: "single", singleRoute: route });
+  assert.equal(refused.ok, false);
+  assert.match(refused.reason, /cline-pass\/deepseek-v4\.1-flash\(high\) is not offered right now/);
+  assert.deepEqual(writes, [], "nothing was created for it");
+  // A listed model goes on to create its chat.
+  await workflow.call("chat_send", { workspaceId: "ws", message: "hi", executionMode: "single",
+    singleRoute: { ...route, model: "cpa/gemini-3.8-flash-high" } }).catch(() => undefined);
+  assert.ok(writes.length > 0, "a listed model is not refused");
 });
 
 test("CPA's model list leaves out a provider plugin's models when nobody is signed in to that provider", async () => {
@@ -3022,9 +3082,13 @@ test("a new chat's first message runs in the session pre-warmed for its model, a
     if (endpoint === "/api/v1/ao/external/terminal") { latest.nodes[0].state = "finished"; return { ok: true, run: latest }; }
     return world.requestHeadless(endpoint, body, options);
   };
+  // The replacement warm session waits until the claimed one's turn is under way (90 s).
+  const rewarms = [];
   const workflow = createAgentOrchestratorWorkflow({
     requestHeadless: request, findCodexExecutable: () => process.execPath,
     resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    setTimer: (callback, delay) => { if (delay === 90_000) { rewarms.push(callback); return { unref() {} }; } return setTimeout(callback, delay); },
+    clearTimer: timer => clearTimeout(timer),
     aoHarness: {
       spawn: async input => { spawned.push(input); return `warm-${spawned.length}`; },
       continuable: async id => id.startsWith("warm-"),
@@ -3049,6 +3113,9 @@ test("a new chat's first message runs in the session pre-warmed for its model, a
   for (let tries = 0; tries < 200 && !observedWith.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
   assert.deepEqual(JSON.parse(JSON.stringify(sent)), [["warm-1", "fix the login", "key-1"]], "the first message is the warm session's first turn");
   assert.deepEqual(JSON.parse(JSON.stringify(observedWith[0])), ["warm-1", "turn-1"], "observed on that turn");
+  assert.equal(spawned.length, 1, "no second agent starts beside the turn that just began");
+  assert.equal(rewarms.length, 1);
+  rewarms[0]();
   for (let tries = 0; tries < 50 && spawned.length < 2; tries++) await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(spawned.length, 2, "the next chat on this route finds one waiting too");
   assert.equal(spawned[1].prompt, "");
@@ -3203,12 +3270,22 @@ test("idle agents are released on a timer, never a pre-warmed one, and the timer
     } });
   await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route });
   await new Promise(resolve => setTimeout(resolve, 10));
-  const first = timers.find(timer => timer.delay === 2 * 60_000);
-  assert.ok(first, "the first sweep runs two minutes after start");
+  const first = timers.find(timer => timer.delay === 20_000);
+  assert.ok(first, "the first sweep runs soon after start, once AO has brought its chats back");
   first.run();
-  for (let tries = 0; tries < 50 && timers.length < 3; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  const next = async delay => {
+    for (let tries = 0; tries < 50 && !timers.some(timer => timer.delay === delay && !timer.ran); tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    return timers.find(timer => timer.delay === delay && !timer.ran);
+  };
+  first.ran = true;
+  const minute = await next(60_000);
+  assert.ok(minute, "AO brings its chats back over a few minutes: another sweep a minute later");
   assert.deepEqual(released, ["old-1", "old-2"], "the pre-warmed session is kept; a refused release does not stop the sweep");
-  assert.ok(timers.some(timer => timer.delay === 10 * 60_000), "then every ten minutes");
+  minute.ran = true; minute.run();
+  const three = await next(3 * 60_000);
+  assert.ok(three, "and three minutes later");
+  three.ran = true; three.run();
+  assert.ok(await next(10 * 60_000), "then every ten minutes");
   workflow.dispose();
   assert.ok(timers.at(-1).cleared, "dispose stops it");
 });

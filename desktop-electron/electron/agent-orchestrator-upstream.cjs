@@ -11,6 +11,7 @@ const { readCpaCatalog, collectMissionAccounting } = require("./agent-orchestrat
 const { createAoSessionEvents } = require("./ao-session-events.cjs");
 const { createAoDependencyLinks } = require("./ao-dependency-links.cjs");
 const { readContextBreakdown } = require("./ao-context-breakdown.cjs");
+const { withAgentShellCommands, CONVERSATION_LIMITS: AGENT_SHELL_CONVERSATION_LIMITS } = require("./chat-agent-shell.cjs");
 
 const API_OPERATIONS = Object.freeze({
   upstream_projects: { method: "GET", endpoint: "/api/v1/projects" },
@@ -213,7 +214,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   async function conversationTail(id, limits = [100, 40, 10]) {
     for (let at = 0; ; at += 1) {
       try {
-        return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${limits[at]}`);
+        // includePending: a request still waiting on an answer is always in the page, however much
+        // came after it; one that fell out of the newest items never showed and sat until it timed out.
+        return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${limits[at]}&includePending=1`);
       } catch (error) {
         if (at === limits.length - 1 || !/exceeds the handler limit/.test(String(error?.message))) throw error;
       }
@@ -607,7 +610,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       if (status === "exited") {
         // An agent released while idle (exitAgent) keeps its session, worktree and conversation:
         // bring it back (a few seconds) rather than start over and replay the whole chat.
-        const resumed = await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/resume-agent`, {}).catch(() => null);
+        // AO holds a chat's tool servers only while its daemon runs: one resumed after a restart
+        // came back without the app's tools. Fresh ones for the session go with the resume.
+        const renewed = await Promise.resolve().then(() => agentTools?.renew?.(sessionId(id))).catch(() => null);
+        const resume = body => internalApi("POST", `/api/v1/sessions/${sessionId(id)}/resume-agent`, body).catch(() => null);
+        let resumed = await resume(renewed?.servers?.length ? { mcpServers: renewed.servers } : {});
+        // An AO from before resume took servers refuses the field; resume as before then.
+        if (resumed?.ok !== true && renewed?.servers?.length) resumed = await resume({});
         if (resumed?.ok !== true) return false;
       }
       return !(await chatHostGone(id));
@@ -910,7 +919,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           // relaunches itself with (pty-host, chat-host, agent-process); a daemon-only build cannot.
           child = spawn(executable, ["daemon"], {
           cwd: resourceRoot, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
-          env: { ...environment, AO_PORT: String(daemonPort), AO_DATA_DIR: dataRoot, AO_RUN_FILE: path.join(dataRoot, "running.json"), AO_ALLOWED_ORIGINS: gatewayOrigin, AO_TELEMETRY_EVENTS: "off", AO_TELEMETRY_METRICS: "off", AO_TELEMETRY_REMOTE: "off", AO_SENTRY_DSN: "" },
+          env: { ...environment, AO_PORT: String(daemonPort), AO_DATA_DIR: dataRoot, AO_RUN_FILE: path.join(dataRoot, "running.json"), AO_ALLOWED_ORIGINS: gatewayOrigin, AO_TELEMETRY_EVENTS: "off", AO_TELEMETRY_METRICS: "off", AO_TELEMETRY_REMOTE: "off", AO_SENTRY_DSN: "",
+            // AO bounds every request at 60 s, and starting a chat agent (worktree, agent process,
+            // its handshake) took longer on a busy machine: the chat failed with SPAWN_TIMEOUT
+            // while the agent came up seconds later. Just under this app's own 180 s for a POST,
+            // so AO answers with its error before the app stops waiting.
+            AO_REQUEST_TIMEOUT: "170s" },
         });
         const currentChild = child;
         logTail = "";
@@ -1118,6 +1132,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     }
     // A chat's Terminal and Preview panes: the user's view of each card's agent session, through
     // the agent tools server that started its commands and owns its preview (chat-agent-tools.cjs).
+    if (operation === "chat_processes") {
+      // The commands the app started (exec_command) and the ones the agent ran with its own shell
+      // tool, which AO records in the conversation. That read only happens while AO is up (a poll
+      // must not start it) and never fails the app's listing.
+      const ids = Array.isArray(args.sessionIds) ? args.sessionIds.filter((id) => typeof id === "string").slice(0, 32) : [];
+      const app = agentTools?.processes ? await agentTools.processes(ids, typeof args.workspaceId === "string" ? args.workspaceId : null) : [];
+      const readConversation = state === "ready" ? (id) => conversationTail(id, AGENT_SHELL_CONVERSATION_LIMITS) : null;
+      return { ok: true, sessions: await withAgentShellCommands(app, ids, readConversation, logger) };
+    }
     if (operation.startsWith("chat_process") || operation.startsWith("chat_preview_")
       || ["chat_terminal_start", "chat_changes", "chat_files", "chat_file"].includes(operation)) {
       if (!agentTools?.processes) throw new Error("The chat agent tools are unavailable");
@@ -1131,7 +1154,6 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           if (typeof args.path !== "string" || !args.path || args.path.length > 1024) throw new Error("Choose a file");
           return agentTools.file({ sessionId: args.sessionId, workspaceId: args.workspaceId, path: args.path });
         }
-        case "chat_processes": return { ok: true, sessions: await agentTools.processes(ids, typeof args.workspaceId === "string" ? args.workspaceId : null) };
         case "chat_process_output": return { ok: true, ...await agentTools.processOutput(args) };
         case "chat_process_stop": return agentTools.processStop(args);
         case "chat_process_input": return agentTools.processInput(args);

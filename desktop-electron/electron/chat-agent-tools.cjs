@@ -108,6 +108,18 @@ const CONFIRMED_TOOLS = new Map([
 const CONTROL_TOOLS = new Set([
   "computer_route", "computer_select_window", "computer_find_control", "computer_wait", "computer_action", "computer_sequence",
 ]);
+// A chat agent's view of the tools the user sees beside the chat. Headless's own descriptions are
+// for its generic clients (they point at request_permissions, which a chat never has); a model
+// picks tools by these, so they say what each one is in the chat and when to use it.
+const CHAT_DESCRIPTIONS = Object.freeze({
+  exec_command: "Run a shell command in this chat's Terminal pane (the user's terminal/backend terminal for this chat), "
+    + "starting in the worktree. Use it for dev servers, backends, installs, builds and tests, and whenever the user asks to "
+    + "run something in the terminal or sandbox. A long-running process (a dev server) keeps running: pass a short "
+    + "yield_time_ms, then use read_output to see more of its output and write_stdin to type into it.",
+  read_output: "Read more output from a command started with exec_command (it keeps running in the chat's Terminal pane).",
+  write_stdin: "Type input into a command started with exec_command that is waiting for it.",
+  kill_command: "Stop a command started with exec_command (for example a dev server you no longer need).",
+});
 // Consent the agent may never give itself: stripped from every call it makes.
 const CONSENT_ARGUMENTS = Object.freeze(["confirm", "confirmed", "approval_token"]);
 const GROUPS = Object.freeze(["agent", "terminal", "desktop", "preview"]);
@@ -648,8 +660,33 @@ function scopeArguments(name, args, root) {
   return scoped;
 }
 
+// What the user sees beside the chat, in the words they use for it. Agents ran every command in
+// their own shell (which no pane shows) and answered "can you see the sandbox browser and its
+// backend terminal?" with no: one clause late in these instructions lost to the agent's built-in
+// preference for its own shell. The rules come first, and name the panes as the user does.
+function paneRulesFor(groups) {
+  const rules = [];
+  if (groups.includes("terminal")) {
+    rules.push("The chat's Terminal pane (what the user calls the terminal, the backend terminal or the sandbox terminal) "
+      + "runs commands started with this server's exec_command. Start dev servers, backends and anything else that keeps "
+      + "running, and anything the user asks to run in the terminal or sandbox, with exec_command: they run there, the user "
+      + "watches their output, and you read more with read_output and type into them with write_stdin. Your own shell tool "
+      + "still works for quick one-off commands. When the user asks what is running in the terminal, read_output the commands you started.");
+  }
+  if (groups.includes("preview")) {
+    rules.push("The chat's Preview pane (what the user calls the browser, the sandbox browser or the frontend) is driven "
+      + "with preview_open and the other preview_* tools; use them to open and check pages your dev server serves, rather "
+      + "than a browser of your own.");
+  }
+  if (groups.includes("desktop")) {
+    rules.push("Seeing the screen (vision) is capture_screenshot, capture_window and list_windows; operating apps on it is computer_*.");
+  }
+  return rules.length ? "How to work in this chat: " + rules.join(" ") + " " : "";
+}
+
 function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview = false } = {}) {
-  return "Coding Tools tools for this chat's own git worktree: read_file, list_dir, search_text and apply_patch "
+  return paneRulesFor(groups)
+    + "Coding Tools tools for this chat's own git worktree: read_file, list_dir, search_text and apply_patch "
     + "for files; git_* for this worktree's history. Paths are relative to the worktree root and paths outside it are refused. "
     + (groups.includes("terminal")
       ? sandboxed
@@ -660,7 +697,6 @@ function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview
             : autoReview ? "Each command is reviewed before it runs, like any other tool request; keep each one plain and to the point. "
             : "The user confirms each command and each input sent to one, shown in full: a command with its input must fit "
               + "about 20 short lines, so write anything longer to a script file with apply_patch and run that. ")
-          + "Use it for installs, builds, tests and dev servers instead of a shell of your own, so the user sees them in the chat. "
         : "exec_command, write_stdin, read_output and kill_command run commands through the app's terminal. A command "
           + "starts in the worktree but is NOT confined to it: it can read and write anything the user's account can. "
           + (bypass ? "" : "The user confirms each command and each input sent to one, shown in full: a command with its "
@@ -794,6 +830,9 @@ function createChatAgentTools({
     };
     sessions.set(key, entry);
     save();
+    // Which tool groups a chat got, so "the agent can't see the terminal" can be told from a group
+    // that was off when it launched (never the credential or anything per session).
+    logger?.info?.("chat_agent_tools.leased", { agent, groups: entry.groups, autoReview: entry.autoReview, bypass: entry.bypass });
     return { entry, token };
   }
 
@@ -923,7 +962,8 @@ function createChatAgentTools({
       // outputSchema is left out: clients would validate structuredContent against it, and the
       // agent gains nothing from it.
       .map(({ name, title, description, inputSchema, annotations }) => ({
-        name, ...(title ? { title } : {}), ...(description ? { description } : {}),
+        name, ...(title ? { title } : {}),
+        ...(CHAT_DESCRIPTIONS[name] || description ? { description: CHAT_DESCRIPTIONS[name] ?? description } : {}),
         inputSchema: inputSchema && typeof inputSchema === "object" ? inputSchema : { type: "object" },
         ...(annotations ? { annotations } : {}),
       }));
@@ -1333,6 +1373,11 @@ function createChatAgentTools({
       return;
     }
     entry.usedAt = now();
+    // A renewed credential's first use proves the agent took it: the ones it replaces go now.
+    if (entry.supersedes) {
+      for (const old of entry.supersedes) if (sessions.get(old)?.aoSession === entry.aoSession) forget(old);
+      delete entry.supersedes;
+    }
     if (request.method !== "POST") {
       // No server-initiated stream and no session to delete.
       send(response, 405, undefined, { allow: "POST" });
@@ -1551,6 +1596,33 @@ function createChatAgentTools({
         },
         release() { forget(entry.key); },
       });
+    },
+    /**
+     * Fresh tools for an AO session that had them, as it is resumed: AO keeps a session's tool
+     * servers only while its daemon runs, so a chat resumed after a restart came back without the
+     * app's tools. The new credential carries the session's agent, workspace and permission mode,
+     * is bound to the session at once (retiring the old one, whose commands and preview origins it
+     * keeps), and `servers` go into the resume. Null when the session never had tools here.
+     */
+    async renew(sessionId) {
+      const previous = entryFor(sessionId);
+      if (!previous || !isEnabled() || !MCP_HTTP_AGENTS.has(previous.agent)) return null;
+      await listen();
+      const { entry, token } = mint({ agent: previous.agent, workspaceId: previous.workspaceId,
+        approvalMode: previous.bypass ? "bypass-permissions" : null, autoReview: previous.autoReview });
+      // The old credential stays valid until the new one is first used: an AO that ignores the
+      // resume's servers (or still holds them from before) resumes the agent with the old one.
+      entry.supersedes = [];
+      for (const other of [...sessions.values()]) {
+        if (other === entry || other.aoSession !== sessionId) continue;
+        for (const [id, command] of other.commands) if (!entry.commands.has(id)) entry.commands.set(id, command);
+        for (const origin of other.origins) entry.origins.add(origin);
+        entry.supersedes.push(other.key);
+      }
+      entry.aoSession = sessionId;
+      save();
+      const url = `http://127.0.0.1:${port}/mcp/${encodeURIComponent(entry.workspaceId)}/${entry.key}`;
+      return Object.freeze({ servers: [{ name: SERVER_NAME, type: "http", url, headers: { Authorization: `Bearer ${token}` } }] });
     },
     /** Forgets the credential of an AO session that has ended (it was killed or deleted). */
     forgetSession(sessionId) {

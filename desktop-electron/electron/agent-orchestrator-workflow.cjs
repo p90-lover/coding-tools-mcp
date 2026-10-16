@@ -163,7 +163,7 @@ function delayToMilliseconds(value, unit) {
   }
   return ms;
 }
-function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, chatEditsFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, chatEditsFile = null, seenModelsFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, logger = null }) {
   const goals = createGoalStore({ file: goalsFile, now });
   // Deleted chat messages: their runs are hidden from the chat, and the next follow-up starts afresh.
   const chatEdits = createChatEditStore({ file: chatEditsFile });
@@ -298,6 +298,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   })();
   // A chat opened while the app's tools were still starting asked once and was told no; nothing
   // asked again, so the first chat after every app start launched cold. Ask again once they listen.
+  const REWARM_DELAY_MS = 90_000;
   const TOOLS_WAIT_MS = 2_000;
   const TOOLS_WAIT_TRIES = 45;
   const toolsWaits = new Map(); // workspaceId -> timer; the latest route asked for wins
@@ -380,7 +381,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   // resumes it (continuable) in a few seconds instead of launching a new one.
   const IDLE_RELEASE_MS = 30 * 60_000;
   const IDLE_SWEEP_MS = 10 * 60_000;
-  const IDLE_FIRST_SWEEP_MS = 2 * 60_000;
+  // Soon after start: AO brings back the agent of every chat that was open when it last stopped
+  // (twenty at once, seen live), and a new chat's agent then timed out starting beside them.
+  // They come back over a few minutes, and one still starting is not idle yet, so the first
+  // sweeps follow it closely before settling to every IDLE_SWEEP_MS.
+  const IDLE_FIRST_SWEEP_MS = 20_000;
+  const IDLE_EARLY_SWEEPS_MS = [60_000, 3 * 60_000];
   let idleTimer = null;
   let idleStopped = false;
   async function releaseIdle() {
@@ -393,10 +399,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     }
     return released;
   }
-  function scheduleIdleRelease(delay) {
+  function scheduleIdleRelease(delay, early = [...IDLE_EARLY_SWEEPS_MS]) {
     if (idleStopped) return;
     idleTimer = setTimer(() => {
-      void releaseIdle().catch(() => []).finally(() => scheduleIdleRelease(IDLE_SWEEP_MS));
+      void releaseIdle().catch(() => []).finally(() => scheduleIdleRelease(early.length ? early.shift() : IDLE_SWEEP_MS, early));
     }, delay);
     idleTimer?.unref?.();
   }
@@ -412,6 +418,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       // An open chat whose next message continues its agent needs no new one; this also brings back
       // an agent released while idle, so it is ready before the message is sent.
       const previous = task ? saved.runs.filter(run => run.project_id === task).at(-1) : null;
+      // The chat's own run is still starting or working: its launch is the agent. Warming another
+      // now (the chat opened its new task the moment it was sent) started a second agent beside
+      // the launch on a busy machine, and the launch timed out while the spare one came up.
+      if (previous && !previous.cancelled && !runSettled(previous)) return { ok: true, warmed: false, reason: "The chat's run is starting" };
       const live = freshSessionRequired(id, task) ? null : continuationCard(previous, executionMode, singleRoute);
       if (live && await harnessService().continuable?.(live.receipt.thread_id).catch(() => false)) {
         return { ok: true, warmed: false, continues: true };
@@ -541,6 +551,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const efforts = viaCpa || nativeEffort ? reportedEfforts(info?.efforts) : [];
     const capabilities = { efforts };
     if (viaCpa && typeof info?.provider === "string") capabilities.provider = info.provider;
+    // CPA has paused it for now (see SEEN_MODEL_MS): still offered, and the picker says so.
+    if (viaCpa && info?.paused === true) Object.assign(capabilities, { paused: true, pausedReason: String(info.pausedReason || "").slice(0, 200) });
     if (!efforts.length) capabilities.effortReason = viaCpa
       ? "CPA did not advertise reasoning levels for this model."
       : "This harness/model has no verified reasoning-effort transport.";
@@ -611,6 +623,39 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   // owners), seconds on a busy machine before the agent even starts. It changes rarely; a minute's
   // cache serves them all, and a failed read is never cached.
   const CPA_CATALOG_TTL_MS = 60_000;
+  // CPA leaves a model out of its list while it has paused it: every account serving it cooling
+  // down after a 429, a spent quota, an upstream "model not found". The model the user had just
+  // chatted with vanished from the picker, and a chat on it was refused. A model CPA listed in
+  // the last SEEN_MODEL_MS stays listed, marked paused (CPA serves it again once the pause ends);
+  // only one unseen for longer is gone. Kept across restarts (ids and capabilities only).
+  const SEEN_MODEL_MS = 3 * 24 * 60 * 60_000;
+  let seenModels = null; // id -> { at, capability }
+  function loadSeenModels() {
+    if (seenModels) return seenModels;
+    seenModels = Object.create(null);
+    if (!seenModelsFile) return seenModels;
+    try {
+      const saved = JSON.parse(fs.readFileSync(seenModelsFile, "utf8"));
+      for (const [id, entry] of Object.entries(saved?.models ?? {})) {
+        if (typeof id === "string" && id.length <= 128 && Number.isFinite(entry?.at)) {
+          seenModels[id] = { at: entry.at, capability: entry.capability && typeof entry.capability === "object" ? entry.capability : {} };
+        }
+      }
+    } catch { /* none yet, or unreadable: start empty */ }
+    return seenModels;
+  }
+  function rememberSeenModels(ids, capabilities) {
+    const seen = loadSeenModels(), at = now();
+    for (const id of ids) seen[id] = { at, capability: capabilities[id] ?? {} };
+    for (const [id, entry] of Object.entries(seen)) if (!(at - entry.at < SEEN_MODEL_MS)) delete seen[id];
+    if (!seenModelsFile) return;
+    try {
+      fs.mkdirSync(path.dirname(seenModelsFile), { recursive: true });
+      const temporary = `${seenModelsFile}.tmp-${process.pid}`;
+      fs.writeFileSync(temporary, JSON.stringify({ models: seen }));
+      fs.renameSync(temporary, seenModelsFile);
+    } catch (error) { logger?.warn?.("ao.seen_models_save_failed", { message: String(error?.message || error).slice(0, 200) }); }
+  }
   let cpaCatalogCache = null; // { at, promise }
   function cachedCpaCatalog() {
     const at = now();
@@ -668,6 +713,14 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       if (ids.length === 100) break;
     }
     if (!ids.length) throw new Error("CPA has no available models");
+    rememberSeenModels(ids, capabilities);
+    const listed = new Set(ids);
+    for (const [id, entry] of Object.entries(loadSeenModels())) {
+      if (ids.length >= 100 || listed.has(id) || unserved(id)) continue;
+      ids.push(id);
+      capabilities[id] = { ...entry.capability, paused: true,
+        pausedReason: "CPA has paused this model for now (rate-limited or cooling down); it is served again once that ends." };
+    }
     return { ok: true, models: ids, capabilities };
   }
 
@@ -695,13 +748,25 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     dispatching.add(key);
     const dispatchStarted = now();
     try {
-      if (node.route.effort || node.route.context_window != null) {
+      // A follow-up that continues the chat's live session keeps the settings it was started with:
+      // nothing new is launched, so there is nothing to check against the catalog.
+      const continuing = continuations.has(runId);
+      // Checked after the card is reserved: a refusal found before it left the card pending, so the
+      // chat said "Starting" for good and the reason lived only in memory. Now it holds the card
+      // with the reason, which the chat shows and Retry clears.
+      const checkRoute = async () => {
+        if (continuing || !(node.route.effort || node.route.context_window != null)) return;
         const catalog = await models({ harness: node.route.harness_id, workspaceId });
         const baseModel = node.route.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
         const capability = catalog.capabilities[node.route.model] ?? catalog.capabilities[baseModel];
         // A model the harness no longer lists has no known efforts or window: say that, rather
-        // than blaming the effort the card saved for it.
+        // than blaming the effort the card saved for it. An agent's catalog leaves CPA's models out
+        // when CPA cannot be read; that is not the model being gone.
         if (!capability) {
+          if (node.route.model.startsWith(CPA_MODEL_PREFIX)) {
+            const cpaUp = await models().then(() => true, () => false);
+            if (!cpaUp) throw new Error("CPA's model list cannot be read right now, so this card's effort and context window cannot be checked. Check that CPA is running, then retry.");
+          }
           throw new Error(`${node.route.model} is no longer in this harness's model list, so its effort and context window cannot be checked. Choose a listed model, or clear the card's effort and context window.`);
         }
         if (node.route.effort && !capability?.efforts?.includes(node.route.effort)) {
@@ -714,7 +779,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
             throw new Error("Context limit for this model/harness is " + maximum + " tokens or no override is supported");
           }
         }
-      }
+      };
       const reserved = await requestHeadless("/api/v1/ao/external/reserve", {
         workspace_id: workspaceId, run_id: runId, node_id: node.id,
         expected_revision: expectedRevision, confirm: !background,
@@ -728,6 +793,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       let launchedVia = "spawn";
       let launchStarted = null;
       try {
+        await checkRoute();
         const launch = aoLaunchArgs(workspaceId, node, plain, await defaultContextWindow(workspaceId, node));
         launchStarted = now();
         // A single-model follow-up continues the chat's live session as its next turn: no new
@@ -752,8 +818,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
           session = live;
           launchedVia = sent?.turnId ? "continued" : "warm";
         } else session = await harnessService().spawn({ ...launch, prompt: reserved.prompt });
-        // The next chat on this route finds a session waiting too.
-        if (warmed) void chatPrewarmRoute(workspaceId, node.route, plain).catch(() => undefined);
+        // The next chat on this route finds a session waiting too, started once this turn is under
+        // way rather than beside its first model call.
+        if (warmed) {
+          const timer = setTimer(() => { void chatPrewarmRoute(workspaceId, node.route, plain).catch(() => undefined); }, REWARM_DELAY_MS);
+          timer?.unref?.();
+        }
       } catch (error) { failure = error; }
       const done = now();
       logger?.info?.("ao.launch_timing", { agent: externalAgent(node), via: launchedVia, ok: !failure,
@@ -882,6 +952,24 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     return response;
   }
 
+  /**
+   * Why a route's model cannot run now, or null. A model CPA stopped offering (renamed, or nobody
+   * signed in to its provider) was only found at launch: the chat got a run that failed, and Retry
+   * failed the same way. A send is refused before anything is created, naming the model and the
+   * fix. An unreadable catalog never blocks a send; the launch check stays the backstop.
+   */
+  async function unlistedModel(workspaceId, route, who = "") {
+    if (!route?.model || !String(route.harness_id || "").startsWith("ao:")) return null;
+    const base = route.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
+    // A CPA model is judged by CPA's own list: an agent's catalog falls back to the agent's models
+    // when CPA cannot be read, which would make every CPA model look gone.
+    const viaCpa = route.model.startsWith(CPA_MODEL_PREFIX);
+    const catalog = await (viaCpa ? models() : models({ harness: route.harness_id, workspaceId })).catch(() => null);
+    const listed = Array.isArray(catalog?.models) ? catalog.models.map(id => viaCpa ? `${CPA_MODEL_PREFIX}${id}` : id) : [];
+    if (!listed.length) return null;
+    if (listed.includes(route.model) || listed.includes(base)) return null;
+    return `${who ? who + ": " : ""}${route.model.replace(/^cpa\//, "")} is not offered right now (renamed, or no account is signed in for it). Choose another model${who ? " in Team settings" : ""}, then send again.`;
+  }
   function missingModelNotice(team) {
     const invalid = Array.isArray(team?.nodes) ? team.nodes.find(node => !node.route?.model || node.route.model === "default") : null;
     return invalid ? `Choose an explicit model for ${String(invalid.settings?.name || invalid.role || "this role").slice(0,96)} in Team settings before sending.` : null;
@@ -1551,10 +1639,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return [...new Set(order.filter(model => model && catalog.includes(model)))];
   }
 
+  // A reviewer model that just failed (Codex's auto-review with every Codex sign-in expired took
+  // half a minute per request to fail) is passed over for a while, and one request's review never
+  // takes longer than REVIEW_BUDGET_MS across all the models it tries: past that the person decides.
+  const REVIEW_BUDGET_MS = 25_000;
+  const REVIEWER_DOWN_MS = 10 * 60_000;
+  const reviewerDown = new Map(); // model -> until
   async function askApprover({ approver, mission, approval }) {
     const { baseUrl, key } = connection();
-    const candidates = reviewerModels(approver, (await models()).models);
+    const all = reviewerModels(approver, (await models()).models);
+    const up = all.filter(model => !(reviewerDown.get(model) > now()));
+    const candidates = up.length ? up : all;
     if (!candidates.length) throw new Error("CPA has no model for the command approver");
+    const deadline = now() + REVIEW_BUDGET_MS;
     const prompt = [
       "You are the command approver for an orchestrated coding mission. A worker asks to run a tool request.",
       `Workspace: ${mission.workspace_id}. Approver rules: ${String(approver.settings?.instructions || "none").slice(0, 1500)}`,
@@ -1565,19 +1662,25 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     ].filter(Boolean).join("\n");
     let failure = null;
     for (const model of candidates) {
+      const left = deadline - now();
+      if (left < 1_000) { failure ??= new Error("the review took too long"); break; }
       try {
         const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
           method: "POST",
           headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
           body: JSON.stringify({ model, temperature: 0, max_tokens: 200, messages: [{ role: "user", content: prompt }] }),
-          signal: AbortSignal.timeout(45_000),
+          signal: AbortSignal.timeout(left),
         });
         if (!response.ok) throw new Error(`Command approver ${model} returned HTTP ${response.status}`);
         const text = String((await response.json())?.choices?.[0]?.message?.content ?? "");
         const decision = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
         if (!["allow", "deny", "ask"].includes(decision?.action)) throw new Error(`Command approver ${model} gave no decision`);
+        reviewerDown.delete(model);
         return { action: decision.action, reason: String(decision.reason || "").slice(0, 300) };
-      } catch (error) { failure = error; }
+      } catch (error) {
+        failure = error;
+        reviewerDown.set(model, now() + REVIEWER_DOWN_MS);
+      }
     }
     throw failure;
   }
@@ -1587,21 +1690,35 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * With auto-decide on it answers allow/deny itself; otherwise it only recommends, and "ask" always
    * goes to the person. The hard deny list wins over the model.
    */
-  async function screenApprovals(workspaceId, runId, mission, active, observed) {
+  /** The reviewer that answers a card's requests for the person, or null (see screenApprovals). */
+  function cardApprover(mission, own) {
     const teamApprover = mission.nodes.find((node) => node.role === "approver" && node.state === "finished" && node.receipt?.verdict === "APPROVED");
-    // A team with a Command approver leaves screening to it; until it approves, requests wait for the person.
     const teamHasApprover = mission.nodes.some((node) => node.role === "approver");
+    return teamApprover ?? (!teamHasApprover && own?.route?.approvals_reviewer === "auto_review" && externalAgent(own)
+      ? { route: own.route, settings: { instructions: "", auto_decide: true } } : null);
+  }
+  /** Whether a pending request waits on the person, not on a reviewer that answers it for them. */
+  function approvalNeedsPerson(mission, node, approval) {
+    if (["question", "plan"].includes(approval?.kind) || !(approval?.kind === "command" || approval?.source === "ao")) return true;
+    const approver = cardApprover(mission, node);
+    if (!approver || approver.settings?.auto_decide !== true) return true;
+    const advice = approverAdvice.get(approval.approval_id);
+    // Not reviewed yet: the reviewer answers it within its budget, or passes it to the person then.
+    return Boolean(advice) && advice.action === "ask";
+  }
+  async function screenApprovals(workspaceId, runId, mission, active, observed) {
     let note = null;
     for (const [index, result] of observed.entries()) {
-      // A team's Command approver screens its workers; otherwise a card set to "Approve for me"
-      // has its AO tool requests reviewed and answered for it, like Codex's auto-review.
-      const own = active[index];
-      const approver = teamApprover ?? (!teamHasApprover && own?.route?.approvals_reviewer === "auto_review" && externalAgent(own)
-        ? { route: own.route, settings: { instructions: "", auto_decide: true } } : null);
+      // A team's Command approver screens its workers (until it approves, requests wait for the
+      // person); otherwise a card set to "Approve for me" has its AO tool requests reviewed and
+      // answered for it, like Codex's auto-review.
+      const approver = cardApprover(mission, active[index]);
       if (!approver) continue;
       for (const approval of result?.pending_approvals ?? []) {
         // A question the agent asked is the person's to answer: never screened or answered for them.
-        const screened = approval?.kind !== "question" && (approval?.kind === "command" || approval?.source === "ao");
+        // So is a plan (ExitPlanMode): its "allow once" choice switches Claude to asking before every
+        // edit, which flooded the reviewer and the person, and the reviewer never saw the plan.
+        const screened = !["question", "plan"].includes(approval?.kind) && (approval?.kind === "command" || approval?.source === "ao");
         if (!screened || !approval.approval_id || approverAdvice.has(approval.approval_id)) continue;
         const request = describeRequest(approval);
         // The command advisor must not decide from a truncated command or permission scope.
@@ -1630,18 +1747,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         }
         approverAdvice.set(approval.approval_id, advice);
         if (approverAdvice.size > 500) approverAdvice.delete(approverAdvice.keys().next().value);
+        // Each answer stands alone: one the person gave first (or any failure to send it) never
+        // skips the requests after it in this pass; the request just goes to the person.
         if (approval.source === "ao" && approver.settings?.auto_decide === true && advice.action !== "ask") {
           const decision = aoDecision(approval, advice.action === "allow");
-          if (decision) {
-            await harnessService().resolveApproval(approval.thread_id, approval.approval_id, decision);
+          if (!decision) note = `Reviewer suggests ${advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
+          else if (await harnessService().resolveApproval(approval.thread_id, approval.approval_id, decision).then(() => true, () => false)) {
             note = `Reviewer ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
-          } else note = `Reviewer suggests ${advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
+          } else approverAdvice.set(approval.approval_id, { action: "ask", reason: `The reviewer's answer could not be sent (${advice.action}: ${advice.reason}); check it yourself` });
         } else if (approver.settings?.auto_decide === true && advice.action !== "ask") {
-          await requestHeadless("/api/v1/ao/harness/approval", {
+          const sent = await requestHeadless("/api/v1/ao/harness/approval", {
             workspace_id: workspaceId, run_id: runId, node_id: active[index].id, approval_id: approval.approval_id,
             allow: advice.action === "allow", confirm: false, approver_reason: advice.reason || advice.action, approver_request: request,
-          });
-          note = `Command approver ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
+          }).then(() => true, () => false);
+          if (sent) note = `Command approver ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
+          else approverAdvice.set(approval.approval_id, { action: "ask", reason: `The command approver's answer could not be sent (${advice.action}: ${advice.reason}); check it yourself` });
         } else {
           note = `Command approver suggests ${advice.action === "ask" ? "checking it yourself" : advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
         }
@@ -1860,16 +1980,28 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // run as needing attention, then not, every other tick (thousands of reopened incidents).
         for (const [index, node] of completed.entries()) {
           const result = observed[index];
-          nodeAttention.set(node.id, result.pending_approvals?.length ? "pending_approval" : result.needs_input ? "needs_input" : null);
+          nodeAttention.set(node.id, result.pending_approvals?.length ? { kind: "pending_approval", node, pending: result.pending_approvals }
+            : result.needs_input ? { kind: "needs_input" } : null);
         }
         for (const id of [...nodeAttention.keys()]) if (!active.some(node => node.id === id)) nodeAttention.delete(id);
-        const kinds = [...nodeAttention.values()];
-        const attention = kinds.includes("pending_approval") ? "pending_approval" : kinds.includes("needs_input") ? "needs_input" : null;
+        const marks = [...nodeAttention.values()].filter(Boolean);
+        // The person is needed only for a request nobody answers for them: one the reviewer passed
+        // to them, a question or plan, or any request on a card nobody reviews. A request the
+        // reviewer is still on, or will answer, is not "waiting for you": notifying for every one
+        // taught the person to ignore the notifications that did need them.
+        const waiting = marks.filter(mark => mark.kind === "pending_approval");
+        const forPerson = waiting.some(mark => mark.pending.some(approval => approvalNeedsPerson(mission, mark.node, approval)));
+        const attention = forPerson ? "pending_approval" : marks.some(mark => mark.kind === "needs_input") ? "needs_input" : null;
         if (attention) state.detail = attention === "pending_approval" ? "Waiting for your tool approval" : "An AO worker needs input on the Board";
-        if (attention === "pending_approval") {
-          const note = await screenApprovals(workspaceId, runId, mission, completed, observed)
-            .catch(error => "Command approver unavailable: " + publicText(error?.message || error, 200));
-          if (note) state.detail = note;
+        else if (waiting.length) state.detail = "The reviewer is checking the agent's request";
+        // Reviewing runs beside the loop, one pass at a time: the loop kept reporting and launching
+        // while a slow reviewer took up to minutes, and the chat showed nothing meanwhile.
+        if (waiting.length && !state.screening) {
+          state.screening = true;
+          void screenApprovals(workspaceId, runId, mission, waiting.map(mark => mark.node), waiting.map(mark => ({ pending_approvals: mark.pending })))
+            .then(note => { if (note) state.detail = note; },
+              error => { state.detail = "Command approver unavailable: " + publicText(error?.message || error, 200); })
+            .finally(() => { state.screening = false; });
         }
         const helped = mission.paused || mission.cancelled ? null : await recoverHeld(workspaceId, mission, state);
         if (helped?.detail) state.detail = helped.detail;
@@ -1879,7 +2011,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           if (!mission) throw new Error("Saved mission is unavailable");
           if (helped?.retried && !mission.grant) {
             state.status = "held";
-            setTimeout(() => { void startRun({ workspaceId, runId, executable }).catch(() => {}); }, 0);
+            setTimeout(() => {
+              void startRun({ workspaceId, runId, executable }).catch(error => logger?.warn?.("ao.retry_start_failed",
+                { message: publicText(error?.message || error, 200) }));
+            }, 0);
             return;
           }
           if (helped?.changed) continue;
@@ -1908,8 +2043,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           }
         }
         const pending = [...observing.values()].filter(entry => !entry.done).map(entry => entry.promise);
+        // Always a pause between passes: a reservation that came back "waiting" (a card whose
+        // parents the saved graph does not consider finished, a harness slot) had nothing running
+        // and capacity free, and the loop spun without a break.
         if (pending.length) await Promise.race([...pending, pause()]);
-        else if (running || mission.paused || saved.worker_capacity[runId] === 0) await pause();
+        else await pause();
       }
     } catch (error) {
       state.status = "held"; state.detail = publicText(error?.message || error, 500);
@@ -2103,11 +2241,33 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (response.ok) name = String((await response.json())?.choices?.[0]?.message?.content ?? "");
     } catch { /* CPA unavailable: fall back to the message itself. */ }
     name = name.replace(/["'`*#]/g, "").replace(/\s+/g, " ").trim().slice(0, 80) || fallbackChatTitle(message);
-    const detail = await board({ workspaceId, taskId });
-    // Only a chat still using the default name is renamed; a name the user chose wins.
-    if (!detail.task || detail.task.title !== CHAT_TASK_TITLE || name === CHAT_TASK_TITLE) return;
-    await write(workspaceId, { expected_revision: detail.revision,
-      change: { operation: "edit", id: taskId, title: clean(name, 240), description: detail.task.description } });
+    whenTaskIdle(workspaceId, taskId, async () => {
+      const detail = await board({ workspaceId, taskId });
+      // Only a chat still using the default name is renamed; a name the user chose wins.
+      if (!detail.task || detail.task.title !== CHAT_TASK_TITLE || name === CHAT_TASK_TITLE) return;
+      await write(workspaceId, { expected_revision: detail.revision,
+        change: { operation: "edit", id: taskId, title: clean(name, 240), description: detail.task.description } });
+    });
+  }
+
+  // A team run's grant covers its cards' task title and description. Renaming a new team chat
+  // or noting a steer under its message while the run was open voided the grant, and every worker
+  // after the orchestrator was refused ("AO graph or revision changed"): the team never got past
+  // its plan. Such edits wait until no team run of the task is open, then apply.
+  const TASK_IDLE_POLL_MS = 20_000;
+  const TASK_IDLE_LIMIT_MS = 6 * 60 * 60_000;
+  /** A team run with cards still to reserve: an edit of its task now would refuse them. */
+  const grantAtRisk = (run) => run.execution_mode !== "single" && !run.cancelled && !runSettled(run)
+    && (run.nodes ?? []).some(node => node.state === "pending");
+  function whenTaskIdle(workspaceId, taskId, apply, started = now()) {
+    void (async () => {
+      const saved = await runs({ workspaceId }).catch(() => null);
+      const open = saved?.runs.some(run => run.project_id === taskId && grantAtRisk(run));
+      if (!open) return apply();
+      if (idleStopped || now() - started > TASK_IDLE_LIMIT_MS) return;
+      const timer = setTimer(() => whenTaskIdle(workspaceId, taskId, apply, started), TASK_IDLE_POLL_MS);
+      timer?.unref?.();
+    })().catch(error => logger?.warn?.("ao.task_edit_deferred_failed", { message: String(error?.message || error).slice(0, 200) }));
   }
 
   // A previous run that is really working must finish or be stopped first. One that is stuck
@@ -2212,15 +2372,28 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const card = run?.nodes.find(node => node.state === "running" && externalAgent(node) && node.receipt?.thread_id
       && (run.execution_mode === "single" || node.role === "planner"));
     if (!card) return { ok: true, steered: false, reason: "No AO agent you can steer is working in this chat" };
+    // Steering a turn that waits on an approval or a question cancelled that request ("Tool use
+    // aborted"), and the agent lost the step it asked about. While one waits, the message is not
+    // steered; the chat sends it once the turn ends, like any queued message.
+    const waiting = await Promise.resolve().then(() => harnessService().observe?.(card.receipt.thread_id, expectedTurns.get(card.receipt.thread_id)))
+      .catch(() => null);
+    if (waiting?.approvals?.length || waiting?.needsInput) {
+      return { ok: true, steered: false, waiting: true, reason: "The agent is waiting for your answer to its request; your message is sent after it" };
+    }
     const result = await harnessService().steer(card.receipt.thread_id, text, `steer-${randomUUID()}`);
     if (!result.steered) return { ok: true, steered: false, reason: "The agent's turn already ended" };
-    const detail = await board({ workspaceId: id, taskId: task });
     const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
-    const description = `${detail.task?.description || ""}\n\n↳ Steer (${stamp} UTC): ${text}`.trim();
-    if (detail.task && description.length <= 8192) {
-      await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } })
-        .catch(() => undefined); // the steer itself was delivered; the transcript note is best-effort
-    }
+    const note = async () => {
+      const detail = await board({ workspaceId: id, taskId: task });
+      const description = `${detail.task?.description || ""}\n\n↳ Steer (${stamp} UTC): ${text}`.trim();
+      if (detail.task && description.length <= 8192) {
+        await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
+      }
+    };
+    // The steer itself was delivered; the transcript note is best-effort, and a team's waits for
+    // its run to settle (see whenTaskIdle).
+    if (!grantAtRisk(run)) await note().catch(() => undefined);
+    else whenTaskIdle(id, task, note);
     return { ok: true, steered: true, runId: run.id, nodeId: card.id };
   }
 
@@ -2245,6 +2418,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         throw new Error("Choose one explicit model route without saved-team fields");
       }
       clean(singleRoute.model, 128); clean(singleRoute.harness_id, 128); clean(singleRoute.permission_profile, 128);
+      const unlisted = await unlistedModel(id, singleRoute);
+      if (unlisted) return { ok: false, reason: unlisted };
     } else {
       if (singleRoute !== undefined) throw new Error("A team request cannot include a single model route");
       if (executionMode === "team" && (teamId === undefined || teamRevision === undefined)) {
@@ -2261,6 +2436,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       const missingModel = missingModelNotice(team);
       if (missingModel) return { ok: false, reason: missingModel };
+      for (const node of team.nodes ?? []) {
+        const unlisted = await unlistedModel(id, node.route, String(node.settings?.name || node.role || "A role").slice(0, 96));
+        if (unlisted) return { ok: false, reason: unlisted };
+      }
     }
 
     let task;

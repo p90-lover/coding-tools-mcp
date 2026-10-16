@@ -22,6 +22,8 @@ const MAX_RUNTIME_LOG_LINE_CHARS = 64 * 1024;
 const CORE_SETUP_TIMEOUT_MS = 5 * 60_000;
 const MCP_SETUP_TIMEOUT_MS = 10 * 60_000;
 const UNINSTALL_TIMEOUT_MS = 2 * 60_000;
+// Reading or restoring Codex's route only edits its config, but on a busy machine took ~19 s.
+const ROUTE_COMMAND_TIMEOUT_MS = 60_000;
 const MAX_CHECKPOINT_FILE_BYTES = 16 * 1024 * 1024;
 const PASSKEY_LOGIN_TIMEOUT_MS = 10 * 60_000;
 const MAX_PASSKEY_STATE_FILE_BYTES = 16 * 1024 * 1024;
@@ -851,7 +853,9 @@ class RuntimeHost {
       embedded: true,
       message: "Checking Codex bridge route",
       successMessage: "Codex bridge route checked",
-      timeoutMs: 15_000,
+      // A busy machine took ~19 s for this read; at 15 s it timed out and the runtime's start right
+      // after it was refused ("Another launcher operation is active").
+      timeoutMs: ROUTE_COMMAND_TIMEOUT_MS,
     });
     return parseBridgeRouteResult(result.stdout, { requireInstalled: true });
   }
@@ -863,7 +867,7 @@ class RuntimeHost {
       embedded: true,
       message: "Restoring the previous Codex route",
       successMessage: "Previous Codex route restored",
-      timeoutMs: 15_000,
+      timeoutMs: ROUTE_COMMAND_TIMEOUT_MS,
     });
     const result = parseBridgeRouteResult(disconnected.stdout, { expectedActive: false });
     const verified = await this.bridgeStatus(operationName);
