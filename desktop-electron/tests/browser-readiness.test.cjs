@@ -59,7 +59,26 @@ test("a challenged main-process check falls back to the open ChatGPT page, which
   assert.match(script, /fetch\("\/api\/auth\/session"/);
   assert.doesNotMatch(script, /accessToken|return body\b/, "tokens never leave the page");
   contents.executeJavaScript = async () => ({ status: 403 });
-  assert.deepEqual({ ...(await world.host.authenticationReadiness()) }, { authenticated: null, ready: false });
+  // The session was confirmed a moment ago: a check that cannot tell does not block a turn.
+  assert.deepEqual({ ...(await world.host.authenticationReadiness()) }, { authenticated: true, ready: true, recent: true });
   contents.executeJavaScript = async () => ({ status: 401 });
   assert.equal((await world.host.authenticationReadiness()).authenticated, false);
+  // Signed out clears it: an unknown answer after that stays unknown.
+  contents.executeJavaScript = async () => ({ status: 403 });
+  assert.deepEqual({ ...(await world.host.authenticationReadiness()) }, { authenticated: null, ready: false });
+});
+
+test("a recent confirmation vouches for an unknown check only for ten minutes", async () => {
+  const world = fixture({ user: { id: "x" } });
+  const realNow = Date.now;
+  let clock = realNow();
+  Date.now = () => clock;
+  try {
+    assert.equal((await world.host.authenticationReadiness()).ready, true);
+    world.host.view.webContents.session.fetch = async () => { throw new Error("slow page"); };
+    clock += 9 * 60_000;
+    assert.deepEqual({ ...(await world.host.authenticationReadiness()) }, { authenticated: true, ready: true, recent: true });
+    clock += 2 * 60_000;
+    assert.deepEqual({ ...(await world.host.authenticationReadiness()) }, { authenticated: null, ready: false });
+  } finally { Date.now = realNow; }
 });
