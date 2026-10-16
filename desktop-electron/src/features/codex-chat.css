@@ -349,6 +349,17 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-tool-io { max-height: 280px; margin: 0; padding: 8px 10px; overflow: auto; border: 1px solid var(--ao-line); border-radius: 8px;
   background: var(--cx-tray, rgb(127 127 127 / 6%)); color: var(--color-text-primary); font-size: 12px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
 .cx-tool-io.is-output { color: var(--color-text-secondary); }
+/* File edits, as Claude Code shows them: "Edited <file> +12 −3", opening on the changed lines. */
+.cx-diff-count { margin-left: 6px; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cx-diff-count .is-add { color: var(--ao-green, #2e9d5b); }
+.cx-diff-count .is-del { color: var(--ao-red, #c0392b); }
+.cx-edit-file + .cx-edit-file { margin-top: 8px; }
+.cx-edit-file > header { display: flex; align-items: baseline; gap: 6px; margin-bottom: 4px; color: var(--color-text-secondary); font-size: 12px; }
+.cx-diff { max-height: 320px; margin: 0; padding: 6px 0; overflow: auto; border: 1px solid var(--ao-line); border-radius: 8px;
+  background: var(--cx-tray, rgb(127 127 127 / 6%)); font-size: 12px; line-height: 1.5; }
+.cx-diff code > span { display: block; padding: 0 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cx-diff code > span.is-add { background: color-mix(in srgb, var(--ao-green, #2e9d5b) 14%, transparent); }
+.cx-diff code > span.is-del { background: color-mix(in srgb, var(--ao-red, #c0392b) 12%, transparent); }
 .cx-tool.tone-failed .cx-tool-io.is-output { color: var(--ao-red); }
 .cx-tool-empty { margin: 2px 0; color: var(--ao-muted); font-size: 12px; font-style: italic; }
 @media (prefers-reduced-motion: reduce) { .cx-tool.tone-running .cx-tool-dot { animation: none; } }
@@ -572,6 +583,11 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-field-input { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 10px; border: 1px solid color-mix(in srgb, var(--color-text-primary) 14%, transparent);
   border-radius: 8px; color: var(--ao-muted); }
 .cx-field-input:focus-within { border-color: color-mix(in srgb, var(--color-text-primary) 40%, transparent); }
+/* "Chats work in": the same box as a text field, as a native select. */
+.cx-field-select { height: 34px; padding: 0 8px; border: 1px solid color-mix(in srgb, var(--color-text-primary) 14%, transparent); border-radius: 8px;
+  background: transparent; color: var(--color-text-primary); font: inherit; font-size: 13px; }
+.cx-field-select:focus { outline: none; border-color: color-mix(in srgb, var(--color-text-primary) 40%, transparent); }
+.cx-modal-hint.is-warning { color: var(--ao-amber, #b7791f); }
 .ao-workflow .cx-field-input input { flex: 1 1 auto; height: 100%; padding: 0; border: 0; background: transparent; color: var(--color-text-primary); font: inherit; font-size: 13px; }
 .ao-workflow .cx-field-input input:focus-visible { outline: none; }
 .cx-folder-list { display: grid; gap: 2px; margin: 0; padding: 4px; list-style: none; border: 1px solid color-mix(in srgb, var(--color-text-primary) 10%, transparent); border-radius: 8px; }

@@ -172,7 +172,9 @@ function createHarness(hooks = {}) {
     "./ao-session-events.cjs": { createAoSessionEvents: () => ({ subscribe: () => () => {} }) },
     // Dependency links have their own tests; here a project never has any to sync.
     "./ao-dependency-links.cjs": { createAoDependencyLinks: () => ({ sync: async () => ({ changed: false }), settings: () => ({ enabled: true, python: false }),
-      set: value => value, inEffect: async () => ({ shared: [], farmed: [] }) }) },
+      set: value => value, inEffect: async () => ({ shared: [], farmed: [] }), exclusive: (_projectId, work) => work() }) },
+    // The context panel's history reader has its own tests (ao-context-breakdown.test.cjs).
+    "./ao-context-breakdown.cjs": { readContextBreakdown: async () => null },
   };
   const loadedModule = { exports: {} };
   vm.runInNewContext(fs.readFileSync(sourcePath, "utf8"), {

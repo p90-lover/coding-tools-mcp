@@ -123,6 +123,23 @@ export function capabilityText(capability: AoModelCapabilities | undefined, nati
   return [top ? `up to ${top} effort` : "", size ? `${size} context` : "", capability?.paused ? "paused by CPA for now" : ""].filter(Boolean).join(" · ");
 }
 
+/**
+ * What a route can be tuned to, from its model's catalog entry: the efforts it takes, the
+ * window range a card may set, the window a blank card launches with (the model's full known
+ * limit, as the workflow's defaultContextWindow), and the preset sizes within range. Native
+ * Codex takes the model's own efforts and limit when reported, else its full effort set and a
+ * 4,096–2M budget. Shared by the role editor and the composer's effort and window menus.
+ */
+export function routeTuning(route: AoRoute, capability: AoModelCapabilities | undefined) {
+  const native = route.harness_id === NATIVE_HARNESS;
+  const efforts: readonly string[] | undefined = native ? (capability?.efforts?.length ? capability.efforts : [...NATIVE_DEFAULT_EFFORTS]) : capability?.efforts;
+  const nativeMax = Math.min(2000000, capability?.contextLimit ?? 2000000);
+  const context = native ? { min: 4096, max: nativeMax } : capability?.contextWindow;
+  const fullLimit = !native && context && capability?.contextLimit ? Math.min(capability.contextLimit, context.max ?? capability.contextLimit) : null;
+  const presets = context ? CONTEXT_PRESETS.filter(tokens => tokens >= context.min && (context.max === undefined || tokens <= context.max)) : [];
+  return { native, efforts, nativeMax, context, fullLimit, presets };
+}
+
 /** Listed models serving the same model as `model` under another provider: a card saved on
  *  cpa/cline-pass/deepseek-v4.1-flash finds cpa/commandcode-go/deepseek-v4.1-flash. */
 export function sameModelElsewhere(model: string, models: readonly string[]): string[] {
@@ -273,10 +290,7 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
   // A saved model the harness no longer lists: nothing about it can be verified, so say why
   // instead of offering only a disabled "unverified" effort.
   const missing = !native && models !== null && models.length > 0 && Boolean(route.model) && route.model !== AGENT_DEFAULT_MODEL && !models.includes(route.model);
-  // Native Codex takes the model's own efforts and context limit when its catalog reports them.
-  const efforts = native ? (capability?.efforts?.length ? capability.efforts : [...NATIVE_DEFAULT_EFFORTS]) : capability?.efforts;
-  const nativeMax = Math.min(2000000, capability?.contextLimit ?? 2000000);
-  const context = native ? { min: 4096, max: nativeMax } : capability?.contextWindow;
+  const { efforts, nativeMax, context, fullLimit, presets } = routeTuning(route, capability);
   // What is being typed stays local until it is a whole number in range: a half-typed "1" of
   // "1000000" would otherwise reach the route (and a saved team's autosave) and be refused.
   const [contextDraft, setContextDraft] = useState<string | null>(null);
@@ -296,10 +310,6 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
     const settled = Math.max(context.min, context.max !== undefined ? Math.min(context.max, tokens) : tokens);
     if (settled !== route.context_window) onChange({ ...route, context_window: settled });
   };
-  // A blank window is the model's full known limit (the workflow's defaultContextWindow), or the
-  // agent's own default when the limit is unknown.
-  const fullLimit = !native && context && capability?.contextLimit ? Math.min(capability.contextLimit, context.max ?? capability.contextLimit) : null;
-  const presets = context ? CONTEXT_PRESETS.filter(tokens => inRange(tokens)) : [];
   const presetsId = `context-presets-${harness}-${route.model}`.replace(/[^\w-]/g, "-");
   return <>
     <label>Harness<select value={harness} disabled={disabled || isWebModel(route.model)} title={isWebModel(route.model) ? "WebGPT requires Native Codex" : undefined} onChange={event => {

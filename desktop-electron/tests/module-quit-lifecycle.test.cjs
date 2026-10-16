@@ -44,6 +44,11 @@ function fixture({ active = null, failCleanup = false, restoreFails = false, qui
     chatgptDesktop: { shutdown: async () => { order.push("stop-chatgpt-desktop"); } },
     managedBootstrapController: controller("bootstrap"), originalUiController: controller("visuals"),
     externalServicesController: controller("external"), upstreamToolController: controller("upstream"),
+    // requestQuit runs each shutdown step under quit-steps.cjs's deadline (main.cjs requires it).
+    boundedQuitStep: require("../electron/quit-steps.cjs").boundedQuitStep,
+    quitLogger: null, antigravityAuthBrowser: { closeAll() {} },
+    // The forced-exit timer after app.quit() must never fire in a test.
+    QUIT_EXIT_GRACE_MS: 0, setTimeout: () => ({ unref() {} }),
     showMainWindow() {}, publishOperation() {}, app: { quit: () => quits.push(true) },
     dialog: { showMessageBox: async () => ({ response: quitAnyway ? 1 : 0 }) },
     mainWindow: {},

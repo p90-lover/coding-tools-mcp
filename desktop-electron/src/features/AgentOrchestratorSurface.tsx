@@ -7,7 +7,7 @@ import { AgentOrchestratorOriginalSurface } from "./AgentOrchestratorOriginalSur
 import { AgentOrchestratorCanvas, type CanvasNode } from "./AgentOrchestratorCanvas";
 import { AgentOrchestratorChat } from "./AgentOrchestratorChat";
 import { ChatThreadList, type ThreadWorkspace } from "./ChatThreadList";
-import { ProjectEditDialog } from "./ProjectEditDialog";
+import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "./ProjectEditDialog";
 import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
@@ -275,6 +275,16 @@ export async function moduleCall(operation: string, args: JsonObject = {}) {
     throw new Error(String(result.reason || result.detail || "Agent Orchestrator operation failed"));
   }
   return result;
+}
+
+/** Reads, or with `mode` sets, where a project's chats work (the Edit project dialog). */
+async function workspaceMode(workspaceId: string, mode?: WorkspaceMode): Promise<WorkspaceModeState> {
+  const result = await moduleCall("workspace_mode", { workspaceId, ...(mode ? { mode } : {}) });
+  return {
+    available: result.available === true,
+    ...(typeof result.mode === "string" ? { mode: result.mode as WorkspaceMode } : {}),
+    ...(typeof result.reason === "string" ? { reason: result.reason } : {}),
+  };
 }
 
 /**
@@ -1951,7 +1961,14 @@ export function AgentOrchestratorSurface({ language, setError }: {
         return <ProjectEditDialog key={`${project.id}:${projectEdit.step}`} project={project} initialStep={projectEdit.step}
           chooseFolder={window.codexWebLauncher?.chooseFolder ? () => window.codexWebLauncher!.chooseFolder!() : undefined}
           onSave={(change) => saveProjectEdit(project.id, change)} onRemove={() => removeProject(project.id)}
-          onClose={() => setProjectEdit(null)} />;
+          onClose={() => setProjectEdit(null)}
+          readWorkspaceMode={() => workspaceMode(project.id)}
+          saveWorkspaceMode={async (mode) => {
+            // An unavailable answer (AO stopped, no AO project) must keep the dialog open, not
+            // close it as if the choice were saved.
+            const saved = await workspaceMode(project.id, mode);
+            if (!saved.available || saved.mode !== mode) throw new Error(saved.reason || "Where chats work could not be saved");
+          }} />;
       })()}
     </section>
   );

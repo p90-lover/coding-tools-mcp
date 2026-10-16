@@ -1089,6 +1089,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       ...(item.description ? { description: publicText(item.description, 200) } : {}),
       ...(item.input ? { input: publicText(item.input, 1000) } : {}),
       ...(item.output ? { output: publicText(item.output, 2000) } : {}),
+      // An edit's files: paths, counts, and the changed lines (redacted like any output).
+      ...(item.kind === "edit" && Array.isArray(item.files) ? { files: item.files.slice(0, 50).map(file => ({
+        path: publicText(file.path, 500), additions: Number(file.additions) || 0, deletions: Number(file.deletions) || 0,
+        ...(file.diff ? { diff: publicText(file.diff, 6000) } : {}),
+      })) } : {}),
     }));
   }
 
