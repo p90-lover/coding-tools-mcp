@@ -3953,13 +3953,8 @@ async fn ao_harness_execute(
         Ok(Err(error)) if error == "AO node is not ready or run revision changed" => {
             return Json(json!({"ok":true,"waiting":true,"reason":"revision_changed"})).into_response();
         },
-        _ => {
-            return json_error(
-                StatusCode::CONFLICT,
-                "AO_RESERVATION_FAILED",
-                "AO graph or revision changed; refresh before retrying",
-            )
-        }
+        Ok(Err(error)) => return ao_reservation_failed(&error),
+        Err(_) => return ao_reservation_failed(""),
     };
     let submitted = tokio::task::spawn_blocking({
         let hub = hub.clone();
@@ -4210,6 +4205,18 @@ async fn ao_harness_observe(
     }
 }
 
+/// A refused reservation: known causes (a stopped or expired run grant, task text changed since the
+/// run was approved, an archived task) keep their person-facing wording; anything else stays
+/// generic. Users saw only "graph or revision changed" for all of them and could not tell why.
+fn ao_reservation_failed(error: &str) -> Response {
+    json_error(
+        StatusCode::CONFLICT,
+        "AO_RESERVATION_FAILED",
+        integrations::ao::reservation_refusal(error)
+            .unwrap_or("AO graph or revision changed; refresh before retrying"),
+    )
+}
+
 fn ao_external_node(
     state: &ServiceState,
     workspace_id: &str,
@@ -4301,11 +4308,8 @@ async fn ao_external_reserve(
         Ok(Err(error)) if error == "AO node is not ready or run revision changed" => {
             Json(json!({"ok":true,"waiting":true,"reason":"revision_changed"})).into_response()
         }
-        _ => json_error(
-            StatusCode::CONFLICT,
-            "AO_RESERVATION_FAILED",
-            "AO graph or revision changed; refresh before retrying",
-        ),
+        Ok(Err(error)) => ao_reservation_failed(&error),
+        Err(_) => ao_reservation_failed(""),
     }
 }
 

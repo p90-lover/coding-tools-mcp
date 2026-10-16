@@ -823,6 +823,43 @@ fn worker_failure_summary(run: &Run) -> AppResult<String> {
     Ok(summary)
 }
 
+/// Background-grant refusals worded for the person; [`reservation_refusal`] lets callers show them.
+pub const GRANT_STOPPED: &str = "The run was stopped; start it again";
+pub const GRANT_EXPIRED: &str = "The run's approval expired; start it again";
+pub const GRANT_TURNS_USED: &str = "The run's approval has no turns left; start it again";
+pub const GRANT_TASK_CHANGED: &str =
+    "The run's approval no longer matches its task (the chat was renamed or steered); start it again";
+pub const GRANT_BUILD_CHANGED: &str =
+    "The run's approval belongs to a different app build; start it again";
+pub const GRANT_MISSING: &str =
+    "The run has no approval (it was stopped or its team changed); start it again";
+const GRANT_INVALID: &str = "AO background run grant expired or changed";
+
+/// The person-facing wording of a refused reservation, or None when the refusal is a genuine
+/// revision change or an internal detail that callers keep generic. Only fixed, known messages
+/// pass, so no path or internal state leaks through an HTTP error.
+pub fn reservation_refusal(error: &str) -> Option<&'static str> {
+    const PASS: [&str; 9] = [
+        GRANT_STOPPED,
+        GRANT_EXPIRED,
+        GRANT_TURNS_USED,
+        GRANT_TASK_CHANGED,
+        GRANT_BUILD_CHANGED,
+        super::ao_lifecycle::ARCHIVED_REFUSAL,
+        super::ao_lifecycle::HIDDEN_REFUSAL,
+        super::ao_lifecycle::RECONFIGURE_REFUSAL,
+        super::ao_lifecycle::SCHEDULE_REFUSAL,
+    ];
+    match error {
+        // The approved task or clause no longer exists in the shape that was approved.
+        "AO task changed after run grant" | "AO clause changed after run grant" => {
+            Some(GRANT_TASK_CHANGED)
+        }
+        "AO background grant is missing" | "AO run has no background grant" => Some(GRANT_MISSING),
+        _ => PASS.into_iter().find(|message| *message == error),
+    }
+}
+
 pub fn grant_valid(
     data: &AppData,
     run: &Run,
@@ -833,10 +870,24 @@ pub fn grant_valid(
         .grant
         .as_ref()
         .ok_or_else(|| fail("AO run has no background grant"))?;
-    if run.cancelled
-        || !sha256_text(executable_sha256)
+    if run.cancelled {
+        return Err(fail(GRANT_STOPPED));
+    }
+    if sha256_text(executable_sha256) && grant.executable_sha256 != executable_sha256 {
+        return Err(fail(GRANT_BUILD_CHANGED));
+    }
+    if grant.turns_started >= grant.max_turns && grant.max_turns > 0 {
+        return Err(fail(GRANT_TURNS_USED));
+    }
+    if now_ms >= grant.expires_at_ms && now_ms >= grant.granted_at_ms {
+        return Err(fail(GRANT_EXPIRED));
+    }
+    // The hash covers the exact approved task text, so a renamed or steered task voids it.
+    if grant.graph_sha256 != graph_sha256(data, run)? {
+        return Err(fail(GRANT_TASK_CHANGED));
+    }
+    if !sha256_text(executable_sha256)
         || grant.executable_sha256 != executable_sha256
-        || grant.graph_sha256 != graph_sha256(data, run)?
         || grant.max_turns == 0
         || grant.max_turns as usize
             > run.nodes.len()
@@ -856,7 +907,7 @@ pub fn grant_valid(
         || now_ms >= grant.expires_at_ms
         || grant.turns_started >= grant.max_turns
     {
-        return Err(fail("AO background run grant expired or changed"));
+        return Err(fail(GRANT_INVALID));
     }
     Ok(())
 }
@@ -2939,6 +2990,87 @@ mod tests {
         assert!(grant_valid(&extended, &extended.ao_runs[0], 1_001, &sha).is_err());
         assert!(grant_valid(&granted, &grant, 3_601_000, &sha).is_err());
         assert!(grant_valid(&granted, &grant, 1_001, &"b".repeat(64)).is_err());
+        // Each refusal names its cause, and only fixed wording passes to HTTP callers.
+        let refusal = |data: &AppData, run: &Run, now_ms: u64, sha: &str| {
+            grant_valid(data, run, now_ms, sha).unwrap_err().to_string()
+        };
+        assert_eq!(
+            refusal(&edited_task, &grant, 1_001, &sha),
+            GRANT_TASK_CHANGED
+        );
+        let mut renamed = granted.clone();
+        renamed.control_board.tasks[0].title = "Renamed chat".into();
+        assert_eq!(refusal(&renamed, &grant, 1_001, &sha), GRANT_TASK_CHANGED);
+        assert_eq!(refusal(&granted, &grant, 3_601_000, &sha), GRANT_EXPIRED);
+        assert_eq!(
+            refusal(&granted, &grant, 1_001, &"b".repeat(64)),
+            GRANT_BUILD_CHANGED
+        );
+        assert_eq!(
+            refusal(&extended, &extended.ao_runs[0], 1_001, &sha),
+            GRANT_INVALID
+        );
+        let mut used = grant.clone();
+        let turns = used.grant.as_ref().unwrap().max_turns;
+        used.grant.as_mut().unwrap().turns_started = turns;
+        assert_eq!(refusal(&granted, &used, 1_001, &sha), GRANT_TURNS_USED);
+        let mut stopped = grant.clone();
+        stopped.cancelled = true;
+        assert_eq!(refusal(&granted, &stopped, 1_001, &sha), GRANT_STOPPED);
+        for message in [
+            GRANT_STOPPED,
+            GRANT_EXPIRED,
+            GRANT_TURNS_USED,
+            GRANT_TASK_CHANGED,
+            GRANT_BUILD_CHANGED,
+            super::super::ao_lifecycle::ARCHIVED_REFUSAL,
+        ] {
+            assert_eq!(reservation_refusal(message), Some(message));
+        }
+        assert_eq!(
+            reservation_refusal("AO task changed after run grant"),
+            Some(GRANT_TASK_CHANGED)
+        );
+        assert_eq!(
+            reservation_refusal("AO background grant is missing"),
+            Some(GRANT_MISSING)
+        );
+        assert_eq!(
+            reservation_refusal("AO node is not ready or run revision changed"),
+            None
+        );
+        assert_eq!(reservation_refusal(GRANT_INVALID), None);
+        assert_eq!(reservation_refusal("io error at C:\\private\\path"), None);
+        let mut late = granted.clone();
+        let error = reserve(
+            &mut late,
+            "qa",
+            "run",
+            "planner",
+            grant.revision,
+            "late".into(),
+            Some(3_601_000),
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(reservation_refusal(&error), Some(GRANT_EXPIRED));
+        let mut archived = granted.clone();
+        archived.control_board.tasks[0].state = "archived".into();
+        let error = reserve(
+            &mut archived,
+            "qa",
+            "run",
+            "planner",
+            grant.revision,
+            "archived".into(),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            reservation_refusal(&error),
+            Some(super::super::ao_lifecycle::ARCHIVED_REFUSAL)
+        );
         let started = reserve(
             &mut granted,
             "qa",

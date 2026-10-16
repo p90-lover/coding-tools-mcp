@@ -304,15 +304,20 @@ pub fn handoff_for<'a>(data: &'a AppData, run: &Run) -> Option<&'a str> {
         .map(|intent| intent.handoff.as_str())
         .filter(|text| !text.is_empty())
 }
+/// Execution refusals worded for the person; `ao::reservation_refusal` passes them to callers.
+pub const ARCHIVED_REFUSAL: &str = "Archived tasks cannot execute; restore the mission first";
+pub const HIDDEN_REFUSAL: &str = "Hidden tasks cannot execute; restore the mission first";
+pub const RECONFIGURE_REFUSAL: &str =
+    "Configuration replacement is pending; no new attempt may start on the old mission";
+pub const SCHEDULE_REFUSAL: &str = "This delayed mission has not been claimed for execution";
+
 pub fn ensure_execution_allowed(data: &AppData, run: &Run) -> AppResult<()> {
     if data.control_board.tasks.iter().any(|task| {
         task.workspace_id == run.workspace_id
             && (task.id == run.project_id || run.nodes.iter().any(|node| node.task_id == task.id))
             && task.state == "archived"
     }) {
-        return Err(err(
-            "Archived tasks cannot execute; restore the mission first",
-        ));
+        return Err(err(ARCHIVED_REFUSAL));
     }
     if let Some(item) = data
         .ao_task_lifecycle
@@ -320,9 +325,7 @@ pub fn ensure_execution_allowed(data: &AppData, run: &Run) -> AppResult<()> {
         .find(|item| item.workspace_id == run.workspace_id && item.task_id == run.project_id)
     {
         if item.visibility != Visibility::Active {
-            return Err(err(
-                "Hidden tasks cannot execute; restore the mission first",
-            ));
+            return Err(err(HIDDEN_REFUSAL));
         }
         if item.reconfigure.iter().any(|intent| {
             intent.previous_run_id == run.id
@@ -331,17 +334,13 @@ pub fn ensure_execution_allowed(data: &AppData, run: &Run) -> AppResult<()> {
                     ReconfigurePhase::Prepared | ReconfigurePhase::NeedsAttention
                 )
         }) {
-            return Err(err(
-                "Configuration replacement is pending; no new attempt may start on the old mission",
-            ));
+            return Err(err(RECONFIGURE_REFUSAL));
         }
         if item.schedule.as_ref().is_some_and(|job| {
             job.run_id == run.id
                 && !matches!(job.state, ScheduleState::Claimed | ScheduleState::Started)
         }) {
-            return Err(err(
-                "This delayed mission has not been claimed for execution",
-            ));
+            return Err(err(SCHEDULE_REFUSAL));
         }
     }
     Ok(())
