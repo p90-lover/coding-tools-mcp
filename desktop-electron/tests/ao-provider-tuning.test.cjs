@@ -194,6 +194,8 @@ test("upstream spawn preserves context on Chat/TUI fallback without adding nativ
     utf8Prefix: text => text,
     TUI_RESULT_INSTRUCTION: "Write fixture result",
     TRANSIENT_CHAT_START: /persistent (ACP )?host|timed out|timeout|deadline exceeded|context canceled/i, CHAT_RETRY_PAUSE_MS: 0, setTimeout,
+    // spawn records each session's launch window for the context meter (chat_context launchedWindow).
+    rememberLaunchWindow: () => {},
     chatTools: async () => null,
     internalApi: async (verb, endpoint, body) => {
       if (verb === "GET") return { chatHarnesses: ["codex"] };
@@ -282,6 +284,7 @@ test("a chat host that was only slow to start is retried as chat, not turned int
     const spawn = vm.runInNewContext("({" + method.getText(ast) + "}).spawn", {
       Buffer, projectFor: async () => "project", agentId: id => id, sessionId: id => id, utf8Prefix: text => text,
       TUI_RESULT_INSTRUCTION: "Write fixture result", TRANSIENT_CHAT_START: vm.runInNewContext(transient), CHAT_RETRY_PAUSE_MS: 0, setTimeout,
+      rememberLaunchWindow: () => {},
       chatTools: async () => null,
       internalApi: async (verb, _endpoint, body) => {
         if (verb === "GET") return { chatHarnesses: ["claude-code"] };

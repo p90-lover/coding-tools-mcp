@@ -23,6 +23,27 @@ const API_OPERATIONS = Object.freeze({
   upstream_send: { method: "POST", endpoint: "/api/v1/sessions/:id/send" },
 });
 
+// How much of an edit's diff a chat timeline item carries (it is polled with every working card).
+const EDIT_DIFF_BYTES = 6000;
+
+/**
+ * Lines one text change added and removed, as a "+56 −26" count and a short diff: the lines the
+ * two versions share at the start and end are trimmed, and what is left on each side is the
+ * change. Linear in the text, which a poll can afford; a full diff could not be.
+ */
+function lineChange(before, after) {
+  const old = before === "" ? [] : String(before).split(/\r?\n/);
+  const next = after === "" ? [] : String(after).split(/\r?\n/);
+  let start = 0;
+  while (start < old.length && start < next.length && old[start] === next[start]) start += 1;
+  let end = 0;
+  while (end < old.length - start && end < next.length - start && old[old.length - 1 - end] === next[next.length - 1 - end]) end += 1;
+  const removed = old.slice(start, old.length - end);
+  const added = next.slice(start, next.length - end);
+  return { additions: added.length, deletions: removed.length,
+    diff: [...removed.map(line => `-${line}`), ...added.map(line => `+${line}`)].join("\n") };
+}
+
 // Where a single-repo project's chats work (AO's ProjectConfig.workspaceMode).
 const WORKSPACE_MODES = new Set(["worktree", "shared", "folder"]);
 
@@ -296,11 +317,53 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       ...(output.trim() ? { output: utf8Prefix(output.trim(), 2000) } : {}),
     };
   }
+  /**
+   * The files a timeline activity edited, with lines added and removed and a short diff, or null
+   * when it edited none. Codex reports a file_change with per-file counts and a patch; Claude Code
+   * over ACP reports an Edit/MultiEdit/Write tool call whose content carries {path, oldText,
+   * newText} diffs, or only its input (file_path with old_string/new_string, edits[] or content).
+   */
+  function editedFiles(activity, detail, input) {
+    if (activity.activityKind === "file_change") {
+      const files = (Array.isArray(detail.files) ? detail.files : []).filter(file => typeof file?.path === "string").slice(0, 50)
+        .map(file => ({ path: utf8Prefix(file.path, 500), additions: Number(file.additions) || 0, deletions: Number(file.deletions) || 0,
+          ...(typeof file.patch === "string" && file.patch ? { diff: utf8Prefix(file.patch, EDIT_DIFF_BYTES) } : {}) }));
+      return files.length ? { label: "Edited", files } : null;
+    }
+    if (activity.activityKind !== "mcp_tool") return null;
+    const toolName = String(detail.toolName || "").replace(/^mcp__[\w-]+__/, "");
+    const diffs = (Array.isArray(detail.content) ? detail.content : [])
+      .map(entry => entry?.type === "diff" ? entry : entry?.diff && typeof entry.diff === "object" ? entry.diff : null)
+      .filter(entry => entry && typeof entry.path === "string" && typeof entry.newText === "string");
+    let changes = diffs.map(entry => ({ path: entry.path, before: typeof entry.oldText === "string" ? entry.oldText : null, after: entry.newText }));
+    const path = typeof input.file_path === "string" ? input.file_path : typeof input.path === "string" ? input.path : "";
+    if (!changes.length && path && (/^(Edit|MultiEdit|Write|NotebookEdit|str_replace_based_edit_tool)$/i.test(toolName) || detail.toolKind === "edit")) {
+      if (typeof input.old_string === "string" && typeof input.new_string === "string") changes = [{ path, before: input.old_string, after: input.new_string }];
+      else if (Array.isArray(input.edits)) changes = input.edits.filter(item => typeof item?.old_string === "string" && typeof item?.new_string === "string")
+        .map(item => ({ path, before: item.old_string, after: item.new_string }));
+      else if (typeof input.content === "string") changes = [{ path, before: null, after: input.content }];
+    }
+    if (!changes.length) return null;
+    const byPath = new Map();
+    for (const change of changes.slice(0, 50)) {
+      const counted = lineChange(change.before ?? "", change.after);
+      const file = byPath.get(change.path) ?? { path: utf8Prefix(change.path, 500), additions: 0, deletions: 0, diff: "" };
+      file.additions += counted.additions;
+      file.deletions += counted.deletions;
+      if (Buffer.byteLength(file.diff) < EDIT_DIFF_BYTES) file.diff = utf8Prefix(file.diff ? `${file.diff}\n${counted.diff}` : counted.diff, EDIT_DIFF_BYTES);
+      byPath.set(change.path, file);
+    }
+    const created = changes.every(change => change.before === null);
+    return { label: created ? "Created" : "Edited", files: [...byPath.values()].map(file => file.diff ? file : { path: file.path, additions: file.additions, deletions: file.deletions }) };
+  }
   function timelineActivity(activity) {
     const detail = activity.detail && typeof activity.detail === "object" ? activity.detail : {};
     const input = detail.input && typeof detail.input === "object" ? detail.input : {};
     const base = { id: String(activity.id), sequence: Number(activity.sequence) || 0, status: String(activity.status || "").slice(0, 32) };
     const summary = String(activity.summary || "");
+    // A file edit shows as Claude Code shows one: "Edited <file> +12 −3", opening on the diff.
+    const edit = editedFiles(activity, detail, input);
+    if (edit) return { ...base, kind: "edit", label: edit.label, text: utf8Prefix(edit.files.map(file => file.path).join(", "), 400), files: edit.files };
     // A shell call (Bash, PowerShell) shows as the command it ran, like Codex.
     if (activity.activityKind === "mcp_tool" && typeof input.command === "string" && input.command.trim()) {
       return { ...base, kind: "command", text: utf8Prefix(input.command.trim(), 400), ...toolDetails(detail, input) };

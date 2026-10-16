@@ -121,6 +121,52 @@ function ToolItem({ item }: { item: ChatLiveItem }) {
     : <div className={`cx-tool tone-${tone}`}><div className="cx-tool-row">{head}</div></div>;
 }
 
+const fileName = (path: string) => path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
+
+/** "+12 −3", green and red, as Claude Code counts an edit. */
+function DiffCount({ additions, deletions }: { additions: number; deletions: number }) {
+  return <span className="cx-diff-count"><span className="is-add">+{additions}</span> <span className="is-del">−{deletions}</span></span>;
+}
+
+/** A file edit as Claude Code shows one: "Edited <file> +12 −3", opening on the changed lines. */
+function EditItem({ item }: { item: ChatLiveItem }) {
+  const files = item.files ?? [];
+  const tone = toolTone(item.status);
+  const additions = files.reduce((sum, file) => sum + file.additions, 0);
+  const deletions = files.reduce((sum, file) => sum + file.deletions, 0);
+  const head = <><span className="cx-tool-dot" aria-hidden="true" /><span className="cx-live-label">{item.label ?? "Edited"}</span>
+    <span className="cx-live-text" title={files.map((file) => file.path).join("\n")}>{files.length === 1 ? fileName(files[0].path) : `${files.length} files`}</span>
+    <DiffCount additions={additions} deletions={deletions} /></>;
+  if (!files.some((file) => file.diff)) return <div className={`cx-tool tone-${tone}`}><div className="cx-tool-row">{head}</div></div>;
+  return <details className={`cx-tool cx-edit tone-${tone}`}><summary>{head}</summary>
+    <div className="cx-tool-body">
+      {files.map((file) => <section key={file.path} className="cx-edit-file">
+        {files.length > 1 ? <header><span title={file.path}>{fileName(file.path)}</span><DiffCount additions={file.additions} deletions={file.deletions} /></header> : null}
+        {file.diff ? <pre className="cx-diff"><code>{file.diff.split("\n").map((line, index) =>
+          <span key={index} className={line.startsWith("+") ? "is-add" : line.startsWith("-") ? "is-del" : undefined}>{line}{"\n"}</span>)}</code></pre> : null}
+      </section>)}
+    </div></details>;
+}
+
+/** What a turn's work did, as Claude Code heads it: "Edited 2 files, ran a command" and the line counts. */
+export function workSummary(items: ChatLiveItem[]): { text: string; additions: number; deletions: number } {
+  const edits = items.filter((item) => item.kind === "edit");
+  const files = new Set(edits.flatMap((item) => (item.files ?? []).map((file) => file.path)));
+  const commands = items.filter((item) => item.kind === "command").length;
+  const tools = items.filter((item) => item.kind === "tool").length;
+  const parts = [
+    files.size ? `edited ${files.size === 1 ? "a file" : `${files.size} files`}` : "",
+    commands ? `ran ${commands === 1 ? "a command" : `${commands} commands`}` : "",
+    tools ? `used ${tools === 1 ? "a tool" : `${tools} tools`}` : "",
+  ].filter(Boolean);
+  const text = parts.length ? parts.join(", ") : "Worked";
+  return {
+    text: text[0].toUpperCase() + text.slice(1),
+    additions: edits.reduce((sum, item) => sum + (item.files ?? []).reduce((total, file) => total + file.additions, 0), 0),
+    deletions: edits.reduce((sum, item) => sum + (item.files ?? []).reduce((total, file) => total + file.deletions, 0), 0),
+  };
+}
+
 /** A role's turn, as Codex and Claude Code show it: thinking, tool calls and streamed messages. */
 function LiveTimeline({ items }: { items: ChatLiveItem[] }) {
   return <ol className="cx-live">
@@ -128,6 +174,7 @@ function LiveTimeline({ items }: { items: ChatLiveItem[] }) {
       {item.kind === "steer" ? <div className="cx-user cx-steer"><div className="cx-bubble"><p>{item.text}</p></div></div>
         : item.kind === "message" ? <ChatMarkdown text={item.text} />
         : item.kind === "reasoning" ? <ReasoningItem item={item} />
+        : item.kind === "edit" ? <EditItem item={item} />
         : item.kind === "command" || item.kind === "tool" ? <ToolItem item={item} />
         : <><span className="cx-live-label">{item.label ?? item.kind.replace(/_/g, " ")}</span><span className="cx-live-text">{item.text}</span></>}
     </li>)}
@@ -195,10 +242,11 @@ function AnswerWork({ step, runId, expanded, loadWork }: { step: ChatStep; runId
   const open = chosen ?? expanded;
   const work = useStepWork(step, runId, open, loadWork);
   if (!work?.length && !step.hasWork) return null;
-  const tools = work?.filter((item) => item.kind === "command" || item.kind === "tool").length ?? 0;
+  const summary = workSummary(work ?? []);
   return <div className="cx-work">
     <button type="button" className="cx-work-head" aria-expanded={open} onClick={() => setChosen(!open)}>
-      <span>{tools ? `Worked · ${tools} ${tools === 1 ? "tool call" : "tool calls"}` : "Worked"}</span>
+      <span>{summary.text}</span>
+      {summary.additions || summary.deletions ? <DiffCount additions={summary.additions} deletions={summary.deletions} /> : null}
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
     </button>
     {open ? work?.length ? <LiveTimeline items={work} /> : <p className="cx-tool-empty">Loading…</p> : null}
