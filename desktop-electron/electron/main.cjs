@@ -3285,6 +3285,12 @@ async function start() {
         send("launcher:state-changed", state);
       }
     }
+    // "Use Coding Tools in Codex" off: take a leftover route off at every start. This needs neither
+    // the bridge nor ChatGPT, and the connect below waits for both (seen live: deferred until
+    // ChatGPT was ready, so a route an older build had left stayed in Codex's config).
+    if (stateStore.read().codexRoute === false) {
+      await connectCodexBridgeAfterAuthentication({ logger, stateStore, reason: "startup" });
+    }
     const runtime = await runtimeSupervisor.startIfConfigured();
     // "degraded" means the bridge is up and only the MCP tunnel is still being retried.
     if (runtime.status !== "ready" && runtime.status !== "degraded") return runtime;
