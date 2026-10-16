@@ -919,7 +919,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           // relaunches itself with (pty-host, chat-host, agent-process); a daemon-only build cannot.
           child = spawn(executable, ["daemon"], {
           cwd: resourceRoot, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
-          env: { ...environment, AO_PORT: String(daemonPort), AO_DATA_DIR: dataRoot, AO_RUN_FILE: path.join(dataRoot, "running.json"), AO_ALLOWED_ORIGINS: gatewayOrigin, AO_TELEMETRY_EVENTS: "off", AO_TELEMETRY_METRICS: "off", AO_TELEMETRY_REMOTE: "off", AO_SENTRY_DSN: "" },
+          env: { ...environment, AO_PORT: String(daemonPort), AO_DATA_DIR: dataRoot, AO_RUN_FILE: path.join(dataRoot, "running.json"), AO_ALLOWED_ORIGINS: gatewayOrigin, AO_TELEMETRY_EVENTS: "off", AO_TELEMETRY_METRICS: "off", AO_TELEMETRY_REMOTE: "off", AO_SENTRY_DSN: "",
+            // AO bounds every request at 60 s, and starting a chat agent (worktree, agent process,
+            // its handshake) took longer on a busy machine: the chat failed with SPAWN_TIMEOUT
+            // while the agent came up seconds later. Just under this app's own 180 s for a POST,
+            // so AO answers with its error before the app stops waiting.
+            AO_REQUEST_TIMEOUT: "170s" },
         });
         const currentChild = child;
         logTail = "";
