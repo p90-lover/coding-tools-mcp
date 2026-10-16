@@ -163,7 +163,7 @@ function delayToMilliseconds(value, unit) {
   }
   return ms;
 }
-function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, chatEditsFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, chatEditsFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, logger = null }) {
   const goals = createGoalStore({ file: goalsFile, now });
   // Deleted chat messages: their runs are hidden from the chat, and the next follow-up starts afresh.
   const chatEdits = createChatEditStore({ file: chatEditsFile });
@@ -558,6 +558,25 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       return { ok: true, harness, models: [...WEB_TIERS, ...LUNA_TIERS, ...cpa],
         capabilities: Object.fromEntries(cpa.map(id => [id, pool.capabilities[id]]).filter(([, value]) => value)) };
     }
+    return cachedCpaCatalog();
+  }
+
+  // CPA's catalog is read for every launch that sets an effort or window, again for a blank card's
+  // default window, and by every model menu: three CPA requests each time (catalog, accounts,
+  // owners), seconds on a busy machine before the agent even starts. It changes rarely; a minute's
+  // cache serves them all, and a failed read is never cached.
+  const CPA_CATALOG_TTL_MS = 60_000;
+  let cpaCatalogCache = null; // { at, promise }
+  function cachedCpaCatalog() {
+    const at = now();
+    if (cpaCatalogCache && at - cpaCatalogCache.at < CPA_CATALOG_TTL_MS) return cpaCatalogCache.promise;
+    const entry = { at, promise: fetchCpaCatalog() };
+    entry.promise.catch(() => { if (cpaCatalogCache === entry) cpaCatalogCache = null; });
+    cpaCatalogCache = entry;
+    return entry.promise;
+  }
+
+  async function fetchCpaCatalog() {
     const cpa = connection();
     const { baseUrl, key } = cpa;
     let rows;
@@ -629,6 +648,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const key = nodeKey(workspaceId, runId, node.id);
     if (dispatching.has(key)) return { ok: true, waiting: true, reason: "dispatching" };
     dispatching.add(key);
+    const dispatchStarted = now();
     try {
       if (node.route.effort || node.route.context_window != null) {
         const catalog = await models({ harness: node.route.harness_id, workspaceId });
@@ -658,8 +678,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       if (reserved?.ok !== true || typeof reserved.request_key !== "string") throw new Error("AO harness reservation outcome is unknown");
       let session = null;
       let failure = null;
+      // Where a launch's time goes, so a slow one can be told apart: the catalog checks and default
+      // window before it, and whether it continued the chat's session, took a warm one or spawned.
+      let launchedVia = "spawn";
+      let launchStarted = null;
       try {
         const launch = aoLaunchArgs(workspaceId, node, plain, await defaultContextWindow(workspaceId, node));
+        launchStarted = now();
         // A single-model follow-up continues the chat's live session as its next turn: no new
         // session, worktree or replayed prompt, and the agent keeps what it already read and ran.
         const continued = continuations.get(runId);
@@ -677,10 +702,14 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
           expectedTurns.set(live, (sent ?? first).turnId);
           if (expectedTurns.size > 500) expectedTurns.delete(expectedTurns.keys().next().value);
           session = live;
+          launchedVia = sent?.turnId ? "continued" : "warm";
         } else session = await harnessService().spawn({ ...launch, prompt: reserved.prompt });
         // The next chat on this route finds a session waiting too.
         if (warmed) void chatPrewarmRoute(workspaceId, node.route, plain).catch(() => undefined);
       } catch (error) { failure = error; }
+      const done = now();
+      logger?.info?.("ao.launch_timing", { agent: externalAgent(node), via: launchedVia, ok: !failure,
+        prepareMs: (launchStarted ?? done) - dispatchStarted, launchMs: launchStarted === null ? 0 : done - launchStarted, totalMs: done - dispatchStarted });
       // A card stopped while its launch was in flight has no session to stop yet; once the launch
       // returns one, end it, or it keeps working (and waiting for input) where no chat shows it.
       const stopIfAbandoned = async () => {
