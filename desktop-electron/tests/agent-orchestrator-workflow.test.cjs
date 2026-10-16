@@ -2164,6 +2164,8 @@ test("an agent's own models take CPA's real window for the same model, and a no-
     fetchImpl: async url => String(url).includes("/v1/models") ? { ok: true, json: async () => catalog } : { ok: false, status: 404, json: async () => ({}) },
     requestHeadless: async (endpoint, body) => {
       if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+      // The route is checked once the card is reserved, so the refusal holds the card with its reason.
+      if (endpoint.endsWith("/external/reserve")) return { ok: true, request_key: "key-1", prompt: "go" };
       if (body?.error) failure = body.error;
       return { ok: true, run: mission };
     },
@@ -2176,6 +2178,32 @@ test("an agent's own models take CPA's real window for the same model, and a no-
   const result = await workflow.call("advance", { workspaceId: "ws", runId: "run", executable: "C:/codex.exe" }).catch(error => ({ error }));
   const message = String(failure ?? result?.error?.message ?? JSON.stringify(result));
   assert.match(message, /no longer in this harness's model list/, message);
+});
+
+test("a chat on a model CPA no longer offers is refused before a task or run is created", async () => {
+  const catalog = { data: [{ id: "gemini-3.8-flash-high", context_window: 1000000 }] };
+  const writes = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async url => String(url).includes("/v1/models") ? { ok: true, json: async () => catalog } : { ok: false, status: 404, json: async () => ({}) },
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [], teams: [], worker_capacity: {} };
+      writes.push(endpoint);
+      return { ok: true };
+    },
+    aoHarness: { catalog: async () => [], models: async () => [], spawn: async () => "session" },
+    confirm: async () => true,
+  });
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/cline-pass/deepseek-v4.1-flash(high)",
+    permission_profile: ":ao-default" };
+  const refused = await workflow.call("chat_send", { workspaceId: "ws", message: "hi", executionMode: "single", singleRoute: route });
+  assert.equal(refused.ok, false);
+  assert.match(refused.reason, /cline-pass\/deepseek-v4\.1-flash\(high\) is not offered right now/);
+  assert.deepEqual(writes, [], "nothing was created for it");
+  // A listed model goes on to create its chat.
+  await workflow.call("chat_send", { workspaceId: "ws", message: "hi", executionMode: "single",
+    singleRoute: { ...route, model: "cpa/gemini-3.8-flash-high" } }).catch(() => undefined);
+  assert.ok(writes.length > 0, "a listed model is not refused");
 });
 
 test("CPA's model list leaves out a provider plugin's models when nobody is signed in to that provider", async () => {

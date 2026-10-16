@@ -1020,7 +1020,11 @@ function assertFocusedMainWindow(event, write = false) {
     && !window.isMinimized()
     && (!write || (window.isFocused() && event.sender.isFocused()));
   if (!valid) {
-    throw new Error("Use the visible, focused main-window controller for provider consent");
+    // Said in the user's terms: this refused chat sends and starts too, and the old wording
+    // ("provider consent") left them guessing why their message did not go.
+    throw new Error(write
+      ? "Click into the Coding Tools window and try again: this action runs only from the focused app window"
+      : "Open the Coding Tools window (not minimized) to do this");
   }
 }
 

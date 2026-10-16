@@ -299,7 +299,8 @@ export function AgentOrchestratorChat({
   /** `goal` starts (or replaces) the chat’s goal with this objective; the message is its first round. */
   send: (input: { taskId?: string; title?: string; message: string; goal?: string }) => Promise<void>;
   /** Hands a message to the running agent at once (Codex's steer); false when its turn already ended. */
-  steer?: (input: { taskId: string; message: string }) => Promise<boolean>;
+  /** true: steered; "wait": the agent waits on a request, so the message is queued; false: send it normally. */
+  steer?: (input: { taskId: string; message: string }) => Promise<boolean | "wait">;
   openStructure: (runId: string) => void;
   approvals: ChatApproval[];
   approve: (approval: ChatApproval, reply: ApprovalReply) => void;
@@ -539,6 +540,14 @@ export function AgentOrchestratorChat({
     try {
       // A steer the turn outran (it ended first) is sent as an ordinary follow-up instead; a goal is never steered.
       const steered = !goal && steering && steer && selectedTaskId ? await steer({ taskId: selectedTaskId, message }) : false;
+      if (steered === "wait" && selectedTaskId) {
+        // The agent was found waiting on its own request just now (the page had not seen it yet):
+        // steering would cancel that request, so the message waits for the turn like a queued one.
+        setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what: "Message", message }));
+        setDraft(""); setAttachments([]); setAttachNote("");
+        say("Queued", "The agent is waiting for your answer to its request; your message is sent when the turn finishes.");
+        return true;
+      }
       // A rewound chat's first message takes the earlier messages along ahead of it, as context.
       const first = !selectedTaskId && carried?.length ? [...carried, message].join("\n\n").slice(-8192) : message;
       if (!steered) await send(selectedTaskId ? { taskId: selectedTaskId, message, ...(goal ? { goal } : {}) }
@@ -586,9 +595,18 @@ export function AgentOrchestratorChat({
   // and the next item must wait for the turn that send started.
   const sentWhileFree = useRef(false);
   useEffect(() => { sentWhileFree.current = false; }, [accepts, selectedTaskId]);
+  // A send runs only from the focused app window. A turn that ended while the user was in another
+  // app had its queued message refused and dropped back into the composer; it now waits for focus.
+  const [windowFocused, setWindowFocused] = useState(() => typeof document === "undefined" || typeof document.hasFocus !== "function" || document.hasFocus());
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.addEventListener !== "function") return undefined;
+    const on = () => setWindowFocused(true), off = () => setWindowFocused(false);
+    window.addEventListener("focus", on); window.addEventListener("blur", off);
+    return () => { window.removeEventListener("focus", on); window.removeEventListener("blur", off); };
+  }, []);
   useEffect(() => {
     const task = selectedTaskId, [next, ...rest] = queueOf(task);
-    if (!task || !next || !accepts || busy || sending || sentWhileFree.current) return;
+    if (!task || !next || !accepts || busy || sending || sentWhileFree.current || !windowFocused) return;
     sentWhileFree.current = true;
     setQueue(task, rest);
     void deliver(next.message, next.goal).then((sent) => {
@@ -597,7 +615,7 @@ export function AgentOrchestratorChat({
       if (next.what === "Message") setDraft(next.message);
       say(next.what, next.what === "Message" ? "The queued message couldn't be sent; it's back in the composer." : "The queued message couldn't be sent; run the command again.");
     });
-  }, [queueVersion, selectedTaskId, accepts, busy, sending]);
+  }, [queueVersion, selectedTaskId, accepts, busy, sending, windowFocused]);
   /**
    * Sends a command's message now when the chat is free, steers it into the working agent when it
    * can be steered (never a goal), and otherwise queues it for when the current turn finishes.
