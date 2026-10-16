@@ -15,7 +15,7 @@ import { GOAL_SUMMARY, chatArchived, chatList, chatMarkdown, chatMessagesFromDes
 import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { createLatestConfigQueue } from "./ao-config";
 import {
-  AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, defaultTeam, emptyRoleSettings,
+  AGENT_DEFAULT_MODEL, AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, defaultTeam, emptyRoleSettings,
   cardMeta, harnessLabel, modelLabel, teamForMission, workerRoute, type AoHarness, type AoModelCatalog, type AoModelLoader, type AoRoute, type AoTeam, type RoleSettings,
 } from "./AgentOrchestratorRoleEditor";
 import "./agent-orchestrator.css";
@@ -232,8 +232,31 @@ function FloatingSheet({ stage, title, onClose, children, anchor, className = ""
  * CPA can reach it), with only unclear requests coming to the person.
  */
 function newChatRoute(): AoRoute {
-  return { ...workerRoute(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL),
+  return lastChatRoute() ?? { ...workerRoute(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL),
     native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+}
+/**
+ * A new chat starts on the route the last chat was sent with, as Codex and Claude Code keep the
+ * last model. A new chat pre-warms its route as soon as it opens, so with the default model there
+ * the agent being readied was one nobody used, and the chosen model's started only once picked.
+ */
+const LAST_CHAT_ROUTE = "coding-tools:ao:last-chat-route";
+const CHAT_ROUTE_FIELDS = ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile",
+  "approval_policy", "approvals_reviewer", "effort", "context_window"];
+function lastChatRoute(): AoRoute | null {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(LAST_CHAT_ROUTE) || "null");
+    if (!saved || typeof saved !== "object" || Array.isArray(saved)) return null;
+    const route = Object.fromEntries(Object.entries(saved).filter(([name, value]) => CHAT_ROUTE_FIELDS.includes(name)
+      && (typeof value === "string" || (name === "context_window" && Number.isSafeInteger(value)))));
+    const required = ["harness_id", "provider_id", "account_id", "model", "permission_profile"];
+    return required.every(name => typeof route[name] === "string") && route.model && route.model !== AGENT_DEFAULT_MODEL
+      ? route as unknown as AoRoute : null;
+  } catch { return null; }
+}
+function rememberChatRoute(route: AoRoute) {
+  const kept = Object.fromEntries(Object.entries(route).filter(([name, value]) => CHAT_ROUTE_FIELDS.includes(name) && value !== undefined && value !== null));
+  try { localStorage.setItem(LAST_CHAT_ROUTE, JSON.stringify(kept)); } catch { /* New chats keep the default model. */ }
 }
 
 export async function moduleCall(operation: string, args: JsonObject = {}) {
@@ -1301,6 +1324,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
           ...(input.taskId ? { taskId: input.taskId } : input.title ? { title: input.title } : {}),
           ...execution, ...executableArg(), ...(input.goal ? { goal: input.goal } : {}) });
         if (result.cancelled) throw new Error("Message start cancelled; no new attempt confirmed.");
+        if (composerMode === "single") rememberChatRoute(singleRoute);
         await Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]);
         const taskId = String(result.taskId);
         if (result.run) {

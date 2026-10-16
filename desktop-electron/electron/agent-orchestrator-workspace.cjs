@@ -25,6 +25,19 @@ async function recordLocalDefaultBranch(directory) {
   await git(directory, ["config", "--local", "ao.defaultBranch", branch]);
 }
 
+// The dependency-link sync asks AO for the project, and on a busy machine that request ran into
+// its 30 s timeout: every launch waited for it before AO was even asked for a session. A launch
+// now waits a few seconds at most; the sync then finishes on its own (one per project at a time),
+// and as the links rarely change between launches, the next launch has its result.
+const SYNC_BUDGET_MS = 3_000;
+function within(promise, ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+    Promise.resolve(promise).catch(() => undefined).finally(() => { clearTimeout(timer); resolve(); });
+  });
+}
+
 // AO project identity and the existing durable mission IDs are shared by both views.
 // No task store, checkout or model process is created by this binding.
 function createAoWorkspaceBoard({ listWorkspaces, listProjects, createProject, missionCall, readAccounting,
@@ -33,6 +46,7 @@ function createAoWorkspaceBoard({ listWorkspaces, listProjects, createProject, m
   recordDefaultBranch = recordLocalDefaultBranch,
   // Before AO starts a session, brings the project's links to installed dependencies up to date.
   syncProject = null,
+  syncBudgetMs = SYNC_BUDGET_MS,
 }) {
   const pending = new Map();
   async function canonical(directory) {
@@ -68,7 +82,7 @@ function createAoWorkspaceBoard({ listWorkspaces, listProjects, createProject, m
       project = await createProject({ path: folder });
       if (!project || await canonical(project.path) !== root) throw new Error("AO project registration changed the workspace scope");
     }
-    if (register && project?.id && typeof syncProject === "function") await syncProject(project, folder);
+    if (register && project?.id && typeof syncProject === "function") await within(syncProject(project, folder), syncBudgetMs);
     return { workspaceId: item.id, projectId: project?.id ?? null };
   }
   async function readWorkspace(workspaceId, runId) {

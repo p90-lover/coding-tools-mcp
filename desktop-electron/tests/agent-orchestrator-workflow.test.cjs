@@ -3115,6 +3115,70 @@ test("a pre-warmed session is used only by a launch that attaches the same app t
   assert.ok(spawned.some(input => !input.warm && input.prompt === "fix the login"), "the message starts a session of its own");
 });
 
+test("a chat opened while the tools start is warmed once they listen, and a miss says what differed", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  const world = chatWorld();
+  const created = new Map();
+  const spawned = [], logs = [], timers = [];
+  let tools = "pending";
+  const request = async (endpoint, body, options) => {
+    if (endpoint === "/api/v1/ao/read" && body.run_id) {
+      const run = created.get(body.run_id) ?? { id: body.run_id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1,
+        grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route: { ...route, approvals_reviewer: "auto_review" } }] };
+      created.set(body.run_id, run);
+      return { ok: true, runs: [run], worker_capacity: { [body.run_id]: 1 } };
+    }
+    const latest = [...created.values()].at(-1);
+    if (endpoint === "/api/v1/ao/grant") return { ok: true, run: latest, grant: { executable_sha256: "a".repeat(64) } };
+    if (endpoint === "/api/v1/ao/external/reserve") { latest.nodes[0].state = "reserved"; return { ok: true, request_key: "key-1", prompt: "fix the login" }; }
+    if (endpoint === "/api/v1/ao/external/submitted") { latest.nodes[0].state = "running"; latest.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run: latest }; }
+    if (endpoint === "/api/v1/ao/external/terminal") { latest.nodes[0].state = "finished"; return { ok: true, run: latest }; }
+    return world.requestHeadless(endpoint, body, options);
+  };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: request, findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    agentToolsIdentity: () => tools,
+    // Timers run only when the test says so; the idle sweep is not under test here.
+    setTimer: (callback, delay) => { const timer = { callback, delay, cleared: false }; timers.push(timer); return timer; },
+    clearTimer: timer => { if (timer) timer.cleared = true; },
+    releaseIdleAgents: false,
+    logger: { info: (event, fields) => logs.push([event, fields]) },
+    aoHarness: {
+      spawn: async input => { spawned.push(input); return input.warm ? `warm-${spawned.length}` : `fresh-${spawned.length}`; },
+      continuable: async () => true,
+      send: async () => ({ turnId: "turn-1", state: "running" }),
+      observe: async (id, expected) => ({ status: "idle", turnId: expected, turnState: "completed", answer: "fixed" }),
+      warmSessions: async () => [],
+      kill: async () => ({ ok: true }),
+    },
+  });
+  const pending = await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route });
+  assert.equal(pending.warmed, false);
+  assert.equal(pending.retrying, true);
+  const due = () => timers.filter(timer => !timer.cleared && timer.delay === 2_000 && !timer.ran);
+  const fire = async () => { const [timer] = due(); timer.ran = true; timer.callback(); await new Promise(resolve => setImmediate(resolve)); };
+  assert.equal(due().length, 1, "one retry waits for the tools");
+  await fire();
+  assert.equal(spawned.length, 0, "still pending: nothing is warmed");
+  assert.equal(due().length, 1, "and it asks again");
+  tools = "on|agent|first";
+  await fire();
+  for (let tries = 0; tries < 50 && !spawned.length; tries++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(spawned.length, 1, "warmed as soon as the tools listen, without the chat asking again");
+  assert.equal(spawned[0].warm, true);
+
+  // The card was saved with a reviewer the warm route did not have: the miss names that field.
+  await workflow.call("chat_send", { workspaceId: "ws-1", message: "fix the login", executionMode: "single", singleRoute: route });
+  for (let tries = 0; tries < 200 && spawned.length < 2; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  const miss = logs.find(([event, fields]) => event === "ao.warm" && fields.event === "miss");
+  assert.ok(miss, "the miss is logged");
+  assert.deepEqual(miss[1].differs, ["approvals_reviewer"]);
+  assert.ok(logs.some(([event, fields]) => event === "ao.warm" && fields.event === "started"), "the warm start is logged too");
+  workflow.dispose();
+});
+
 test("pre-warming skips a team without an orchestrator and native Codex routes", async () => {
   const world = chatWorld();
   const spawned = [];

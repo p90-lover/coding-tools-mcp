@@ -156,3 +156,35 @@ test("binding a workspace for a session syncs its project's links; reading the b
   assert.deepEqual(await bridge.bind("ws"), { workspaceId: "ws", projectId: "reg" });
   assert.deepEqual(synced, [["reg", "C:\\work\\reg"]]);
 });
+
+test("a slow link sync delays a session's launch only by its budget, then finishes on its own", async () => {
+  let finish;
+  let finished = false;
+  const bridge = createAoWorkspaceBoard({
+    platform: "win32", realpath: async value => value, isRepositoryRoot: async () => true, recordDefaultBranch: async () => {},
+    listWorkspaces: async () => [{ id: "ws", path: "C:\\work\\reg" }],
+    listProjects: async () => [{ id: "reg", path: "C:\\work\\reg" }],
+    createProject: async () => { throw new Error("already registered"); },
+    missionCall: async () => ({ ok: true, revision: 1, tasks: [], runs: [] }),
+    // AO answering the project read only after its 30 s timeout, as it did on a busy machine.
+    syncProject: () => new Promise(resolve => { finish = () => { finished = true; resolve(); }; }),
+    syncBudgetMs: 20,
+  });
+  const started = Date.now();
+  assert.deepEqual(await bridge.bind("ws"), { workspaceId: "ws", projectId: "reg" });
+  assert.ok(Date.now() - started < 1_000, "the launch went on after the budget");
+  assert.equal(finished, false, "the sync is still running");
+  finish();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(finished, true);
+  // A sync that fails is the sync's own business; the launch is not failed by it.
+  const failing = createAoWorkspaceBoard({
+    platform: "win32", realpath: async value => value, isRepositoryRoot: async () => true, recordDefaultBranch: async () => {},
+    listWorkspaces: async () => [{ id: "ws", path: "C:\\work\\reg" }],
+    listProjects: async () => [{ id: "reg", path: "C:\\work\\reg" }],
+    createProject: async () => { throw new Error("already registered"); },
+    missionCall: async () => ({ ok: true, revision: 1, tasks: [], runs: [] }),
+    syncProject: async () => { throw new Error("AO is busy"); },
+  });
+  assert.deepEqual(await failing.bind("ws"), { workspaceId: "ws", projectId: "reg" });
+});
