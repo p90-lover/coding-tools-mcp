@@ -574,6 +574,14 @@ fn native_child_command(
         } else {
             "windows.sandbox=elevated"
         });
+        // The unelevated sandbox's own setup grants a fresh CODEX_HOME write access to the
+        // workspace before its first command: 26 s on a one-file folder and over six minutes on
+        // a full repository, so a card's first tool call outlived the WebGPT bridge's stall limit
+        // and the chat hung. Codex's MXC sandbox (what the Codex desktop app uses) starts the same
+        // command at once and keeps the same boundary: writes inside the workspace, none outside.
+        if ao_child {
+            command.arg("-c").arg("features.prefer_mxc=true");
+        }
     }
     command
         .arg("app-server")
@@ -2066,6 +2074,30 @@ mod tests {
         };
         #[cfg(windows)]
         {
+            let mxc = |command: &Command| {
+                command
+                    .get_args()
+                    .any(|arg| arg.to_string_lossy() == "features.prefer_mxc=true")
+            };
+            // AO children run commands in the MXC sandbox, whose setup does not stall a card.
+            assert!(mxc(&native_child_command(
+                &options,
+                Path::new("aiTemp"),
+                None,
+                true
+            )));
+            assert!(mxc(&native_child_command(
+                &options,
+                Path::new("aiTemp"),
+                Some("K"),
+                false
+            )));
+            assert!(!mxc(&native_child_command(
+                &options,
+                Path::new("aiTemp"),
+                None,
+                false
+            )));
             // Each AO card has its own CODEX_HOME, so AO children never need the admin setup.
             assert_eq!(
                 sandbox(&native_child_command(
