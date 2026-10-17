@@ -457,13 +457,62 @@ function combineUpdateControllers(appUpdates, guiUpdates) {
   };
 }
 
+// With automatic updates on, a found update installs by itself once nobody is using the app: no
+// keyboard or mouse input for AUTO_INSTALL_IDLE_SECONDS and no work running (isBusy). A failed
+// install waits AUTO_INSTALL_RETRY_MS before the next try instead of downloading again each minute.
+const AUTO_INSTALL_IDLE_SECONDS = 10 * 60;
+const AUTO_INSTALL_POLL_MS = 60 * 1000;
+const AUTO_INSTALL_RETRY_MS = 60 * 60 * 1000;
+
+function createAutoInstaller({
+  controller, enabled, idleSeconds, isBusy, logger, now = Date.now,
+  pollMs = AUTO_INSTALL_POLL_MS, idleThreshold = AUTO_INSTALL_IDLE_SECONDS, retryMs = AUTO_INSTALL_RETRY_MS,
+}) {
+  let timer = null;
+  let attempting = false;
+  let failedAt = null;
+
+  async function tick() {
+    if (attempting || !enabled()) return false;
+    const state = controller.getState();
+    if (state.status !== "available") return false;
+    if (failedAt !== null && now() - failedAt < retryMs) return false;
+    if (idleSeconds() < idleThreshold) return false;
+    attempting = true;
+    try {
+      // A busy check that cannot answer counts as busy: never restart over work it could not see.
+      if (await Promise.resolve().then(isBusy).catch(() => true)) return false;
+      logger?.info("launcher.update_auto_install", { version: state.version ?? null, kind: state.kind ?? null });
+      await controller.beginInstall();
+      failedAt = null;
+      return true;
+    } catch (error) {
+      failedAt = now();
+      logger?.warn("launcher.update_auto_install_failed", { message: error instanceof Error ? error.message : String(error) });
+      return false;
+    } finally {
+      attempting = false;
+    }
+  }
+
+  function stop() { if (timer) clearInterval(timer); timer = null; }
+  function start() {
+    stop();
+    timer = setInterval(() => { void tick(); }, pollMs);
+    timer.unref?.();
+  }
+  return { tick, start, stop };
+}
+
 module.exports = {
+  AUTO_INSTALL_IDLE_SECONDS,
   INSTALLED_MANIFEST,
   SET_ASIDE_LIST,
   STAGE_DIRECTORY,
   combineUpdateControllers,
   combinedUpdateState,
   createAppUpdateController,
+  createAutoInstaller,
   extractPack,
   hashFile,
   isFrameworkFile,

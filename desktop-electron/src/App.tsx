@@ -2172,8 +2172,8 @@ function SettingsSurface({
         </SettingRow> : null}
         {!devProfile ? <SettingRow
           body={updateNotice || (language === "zh-TW"
-            ? "自動檢查更新，在應用程式內安裝，不需安裝程式：只下載有變更的檔案，然後重新啟動。MCP、Codex Bridge 及 CPA 持續執行。"
-            : "Automatically check for updates and install them inside the app, with no installer: only the changed files download, then the app restarts. MCP, Codex Bridge and CPA keep running.")}
+            ? "自動檢查更新，在應用程式內安裝，不需安裝程式：只下載有變更的檔案。你離開 10 分鐘且沒有工作在執行時，更新會自動安裝並重新啟動；也可隨時按側邊欄的「更新至」。MCP、Codex Bridge 及 CPA 持續執行。"
+            : "Automatically check for updates and install them inside the app, with no installer: only the changed files download. An update installs by itself and restarts the app once you have been away for 10 minutes and nothing is running, or any time from Update to in the sidebar. MCP, Codex Bridge and CPA keep running.")}
           label={language === "zh-TW" ? "應用程式更新" : "App updates"}
         >
           <div className="inline-actions">
