@@ -229,7 +229,9 @@ function StepRow({ step, runId, loadWork }: { step: ChatStep; runId: string; loa
       {step.detail ? <p className="cx-step-detail">{step.detail}</p> : null}
       {step.working ? <p className="cx-step-detail">{step.working.detail}</p> : null}
       {work?.length ? <LiveTimeline items={work} /> : null}
-      {step.error ? <p className="cx-step-error">{step.error}</p> : step.text ? <ChatMarkdown text={step.text} /> : null}
+      {/* A held or failed card keeps the reply it gave: the error says why, the reply stays readable. */}
+      {step.error ? <p className="cx-step-error">{step.error}</p> : null}
+      {step.text ? <ChatMarkdown text={step.text} /> : null}
     </div> : null}
   </li>;
 }

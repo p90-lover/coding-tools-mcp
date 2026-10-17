@@ -651,3 +651,16 @@ test("a working card's streamed reply shows as its running message", () => {
   assert.deepEqual(plain(chat.liveTimeline("r1:w", { output: "   " })), []);
   assert.deepEqual(plain(chat.liveTimeline("r1:w", undefined)), []);
 });
+
+test("a retried card shows its earlier reply until the new attempt writes, and a held card's reply is copied with its error", () => {
+  const retried = node("p", "planner", "running", { receipt: { started_at_ms: 1 }, history: [{ answer: "First try's reply" }] });
+  const [turn] = plain(chat.chatTurns([run("r1", "t", [retried], { execution_mode: "single" })], "go", { now: 2 }));
+  assert.equal(turn.steps[0].text, "Earlier attempt:\n\nFirst try's reply");
+  const [writing] = plain(chat.chatTurns([run("r1", "t", [retried], { execution_mode: "single" })], "go",
+    { now: 2, activity: { "r1:p": { output: "New reply so far" } } }));
+  assert.equal(writing.steps[0].text, undefined, "the new attempt's own output replaces it");
+  const held = node("p", "planner", "held", { receipt: { error: "Native turn returned no verifiable final answer", answer: "The reply" } });
+  const turns = plain(chat.chatTurns([run("r1", "t", [held], { execution_mode: "single" })], "go"));
+  assert.equal(turns[0].steps[0].text, "The reply");
+  assert.ok(chat.chatMarkdown("Chat", turns).includes("Error: Native turn returned no verifiable final answer\n\nThe reply"));
+});

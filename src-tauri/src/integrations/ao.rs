@@ -41,6 +41,25 @@ pub const MAX_PLAN_ROUNDS: u8 = 2;
 pub const MAX_SUB_REVIEWERS: usize = 8;
 /// Earlier attempts kept per card.
 pub(crate) const HISTORY_LIMIT: usize = 12;
+/// Most of a card's final answer a receipt keeps, in bytes. A longer answer is cut on a character
+/// boundary with a marker, never dropped: 4,000 CJK characters are already 12 KB.
+pub const MAX_ANSWER_BYTES: usize = 200_000;
+
+/// The answer a receipt keeps: all of it, or its start and a note of how long it was.
+fn kept_answer(answer: &str) -> String {
+    if answer.len() <= MAX_ANSWER_BYTES {
+        return answer.to_owned();
+    }
+    let marker = format!(
+        "\n\n[Answer truncated: the full answer was {} bytes]",
+        answer.len()
+    );
+    let mut end = MAX_ANSWER_BYTES - marker.len();
+    while !answer.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{marker}", &answer[..end])
+}
 
 pub fn default_review_rounds() -> u8 {
     DEFAULT_REVIEW_ROUNDS
@@ -492,7 +511,7 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
                 || receipt
                     .answer
                     .as_ref()
-                    .is_some_and(|answer| answer.len() > 12_000)
+                    .is_some_and(|answer| answer.len() > MAX_ANSWER_BYTES)
                 || receipt.verdict.as_deref().is_some_and(|verdict| {
                     !matches!(
                         verdict,
@@ -2186,12 +2205,12 @@ pub fn record_terminal(
     if completed
         && !failure.is_some_and(|message| message.starts_with("Native approval declined"))
         && turn_id.is_some_and(|id| text(id, 128) && !id.contains('/'))
-        && answer.is_some_and(|value| !value.trim().is_empty() && value.len() <= 12_000)
+        && answer.is_some_and(|value| !value.trim().is_empty())
         && verdict_ok
         && !matches!(plan, Some(Err(_)))
     {
         receipt.turn_id = turn_id.map(str::to_owned);
-        receipt.answer = answer.map(str::to_owned);
+        receipt.answer = answer.map(kept_answer);
         receipt.verdict = verdict.map(str::to_owned);
         receipt.status = "completed".into();
         node.state = State::Finished;
@@ -2219,8 +2238,8 @@ pub fn record_terminal(
             }
         }
     } else {
-        if answer.is_some_and(|value| !value.trim().is_empty() && value.len() <= 12_000) {
-            receipt.answer = answer.map(str::to_owned);
+        if answer.is_some_and(|value| !value.trim().is_empty()) {
+            receipt.answer = answer.map(kept_answer);
             receipt.verdict = if failure_review && node.role == Role::Reviewer {
                 Some("CHANGES_REQUIRED".into())
             } else {
@@ -4091,5 +4110,86 @@ mod tests {
             late.revision, rewired.revision,
             "a stopped turn's result changes nothing"
         );
+    }
+
+    #[test]
+    fn ao_long_native_answers_are_kept_instead_of_holding_the_card() {
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../aiTemp")
+            .canonicalize()
+            .unwrap();
+        let mut data: AppData = serde_json::from_value(json!({
+            "profiles":[{"id":"qa","name":"QA","path":workspace.to_string_lossy(),"tunnel":{},"auth":{"type":"bearer"},"runtime":{},"actions":{}}],
+            "control_board":{"revision":1,"tasks":[{"id":"task","workspace_id":"qa","title":"Direct answer","description":"Explain the result","state":"pending","step":0,"created_at":0,"updated_at":0,"clauses":[],"evidence":[]}]}
+        })).unwrap();
+        let run: Run = serde_json::from_value(json!({
+            "id":"single","workspace_id":"qa","project_id":"task","revision":0,"execution_mode":"single",
+            "nodes":[{"id":"only","task_id":"task","role":"planner","parents":[],"x":0,"y":0,"state":"pending",
+                "route":{"harness_id":"codex-native","provider_id":"chatgpt-web","account_id":"chatgpt-web","model":"chatgpt-web/high","permission_profile":":read-only"}}]
+        })).unwrap();
+        let revision = create(&mut data, 1, run).unwrap().revision;
+        reserve(
+            &mut data,
+            "qa",
+            "single",
+            "only",
+            revision,
+            "one".into(),
+            None,
+        )
+        .unwrap();
+        record_submission(&mut data, "qa", "single", "only", "one", Some("thread-one")).unwrap();
+        let finish = |data: &mut AppData, answer: &str, completed: bool| {
+            record_terminal(
+                data,
+                "qa",
+                "single",
+                "only",
+                "thread-one",
+                Some("turn-one"),
+                Some(answer),
+                completed,
+                (!completed).then_some("Turn failed"),
+            )
+            .unwrap()
+        };
+        // A WebGPT reply of 4,500 CJK characters is 13.5 KB: it finishes the card in full.
+        let long = "繁體中文答案".repeat(750);
+        assert!(long.len() > 13_000);
+        let mut kept = data.clone();
+        let done = finish(&mut kept, &long, true);
+        assert_eq!(done.nodes[0].state, State::Finished);
+        let receipt = done.nodes[0].receipt.as_ref().unwrap();
+        assert_eq!(receipt.status, "completed");
+        assert_eq!(receipt.answer.as_deref(), Some(long.as_str()));
+        assert!(validate(Some(&kept), &done).is_ok());
+        // A failed turn keeps its long partial answer as evidence.
+        let mut failed = data.clone();
+        let held = finish(&mut failed, &long, false);
+        assert_eq!(held.nodes[0].state, State::Held);
+        assert_eq!(
+            held.nodes[0].receipt.as_ref().unwrap().answer.as_deref(),
+            Some(long.as_str())
+        );
+        assert!(validate(Some(&failed), &held).is_ok());
+        // An answer over the cap is cut on a character boundary and marked, never dropped.
+        let huge = "答".repeat(MAX_ANSWER_BYTES);
+        let mut cut = data.clone();
+        let done = finish(&mut cut, &huge, true);
+        assert_eq!(done.nodes[0].state, State::Finished);
+        let answer = done.nodes[0]
+            .receipt
+            .as_ref()
+            .unwrap()
+            .answer
+            .clone()
+            .unwrap();
+        assert!(answer.len() <= MAX_ANSWER_BYTES);
+        assert!(answer.starts_with("答答答"));
+        assert!(answer.ends_with(&format!(
+            "[Answer truncated: the full answer was {} bytes]",
+            huge.len()
+        )));
+        assert!(validate(Some(&cut), &done).is_ok());
     }
 }

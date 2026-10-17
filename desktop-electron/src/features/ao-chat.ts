@@ -15,6 +15,8 @@ export type ChatNode = {
   route?: { harness_id: string; model: string; effort?: string; context_window?: number };
   /** `thread_id` is the card's AO session id when its harness is an AO agent ("ao:…"). */
   receipt?: { answer?: string; error?: string; verdict?: string; started_at_ms?: number; thread_id?: string };
+  /** Earlier attempts' receipts, oldest first (a retry moves the last receipt here). */
+  history?: { answer?: string }[];
 };
 
 /** One AO agent session of a chat, for its Preview and Terminal panes. */
@@ -475,6 +477,11 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
     const timeline = liveTimeline(key, live);
     step.working = { ...working, ...(live?.activity ? { activity: live.activity } : {}),
       ...(timeline.length ? { timeline } : {}) };
+    // A retried card's new attempt starts empty; until it writes, its earlier reply stays readable.
+    const earlier = node.history?.[node.history.length - 1]?.answer;
+    if (!step.text && earlier?.trim() && !timeline.some((item) => item.kind === "message")) {
+      step.text = `Earlier attempt:\n\n${earlier}`;
+    }
   }
   return step;
 }
@@ -536,7 +543,7 @@ export function chatMarkdown(title: string, turns: ChatTurn[]): string {
   for (const turn of turns) {
     if (turn.user) parts.push(`**You:**\n\n${turn.user.text}`);
     for (const step of [...turn.steps, ...(turn.final ? [turn.final] : [])]) {
-      const body = step.error ? `Error: ${step.error}` : step.text;
+      const body = [step.error ? `Error: ${step.error}` : "", step.text ?? ""].filter(Boolean).join("\n\n");
       if (body) parts.push(`**${step.name}${step.verdict ? ` · ${step.verdict}` : ""}:**\n\n${body}`);
     }
   }

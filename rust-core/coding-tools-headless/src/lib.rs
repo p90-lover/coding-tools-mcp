@@ -4110,10 +4110,25 @@ async fn ao_harness_observe(
         .as_ref()
         .and_then(|native| native["turn_id"].as_str())
         .map(str::to_owned);
-    let answer = native
-        .as_ref()
-        .and_then(|native| native["answer"].as_str())
-        .map(str::to_owned);
+    // A read returns the answer's first page; the receipt keeps up to MAX_ANSWER_BYTES of it.
+    let answer = native.as_ref().and_then(|native| {
+        let mut answer = native["answer"].as_str()?.to_owned();
+        let mut next = native["answer_next_offset"].as_u64();
+        while let (Some(offset), Some(hub)) = (next, hub.as_ref()) {
+            if answer.len() > integrations::ao::MAX_ANSWER_BYTES {
+                break;
+            }
+            let Ok(page) = hub.read_page(thread_id, offset as usize) else {
+                break;
+            };
+            match page["answer"].as_str() {
+                Some(text) if !text.is_empty() => answer.push_str(text),
+                _ => break,
+            }
+            next = page["answer_next_offset"].as_u64();
+        }
+        Some(answer)
+    });
     let workspace_id = body.workspace_id;
     let run_id = body.run_id;
     let node_id = body.node_id;
