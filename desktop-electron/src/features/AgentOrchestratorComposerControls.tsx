@@ -17,8 +17,16 @@ const effortWord = (effort?: string) => !effort ? "" : effort === "xhigh" ? "Ext
 const ownEffort = (model: string) => /[-(](minimal|low|medium|high|xhigh|max)\)?$/i.exec(model)?.[1]?.toLowerCase();
 /** A chat's window when none is picked: 400K, kept inside what the model accepts. */
 export const DEFAULT_CONTEXT_WINDOW = 400_000;
-const defaultWindow = (context: { min: number; max?: number } | undefined) => !context ? null
-  : Math.max(context.min, Math.min(DEFAULT_CONTEXT_WINDOW, context.max ?? DEFAULT_CONTEXT_WINDOW));
+/**
+ * Only a model whose limit is known starts with one (WebGPT's is ChatGPT's own, so it does too).
+ * Without a limit the range ends at the client's 2M ceiling, so 400K reached 128K–262K models and
+ * their upstreams refused it; those keep the agent's own default.
+ */
+const defaultWindow = (route: AoRoute, capability: AoModelCapabilities | undefined) => {
+  const { context } = routeTuning(route, capability);
+  if (!context || !capability?.contextLimit && !isWebModel(route.model)) return null;
+  return Math.max(context.min, Math.min(DEFAULT_CONTEXT_WINDOW, context.max ?? DEFAULT_CONTEXT_WINDOW));
+};
 
 export type ComposerControlsProps = {
   mode: "single" | "team"; onModeChange: (mode: "single" | "team") => void;
@@ -99,6 +107,10 @@ export function AgentOrchestratorComposerControls({
   // added in CPA shows up without switching harness or restarting.
   const [reload, setReload] = useState(0);
   const shown = useRef("");
+  // The route as it is now: a catalog that arrives after the user picked another model must not
+  // write the route it started with back over that pick.
+  const latest = useRef(route);
+  latest.current = route;
   useEffect(() => {
     if (mode !== "single") return;
     let live = true;
@@ -115,8 +127,20 @@ export function AgentOrchestratorComposerControls({
       setModels([...new Set([...modelIds(catalog), ...modelIds(webCatalog)])]);
       setCaps(loaded);
       rememberCpaProviders(loaded);
-      const start = route.context_window ? null : defaultWindow(routeTuning(route, loaded[route.model]).context);
-      if (start) onRouteChange({ ...route, context_window: start });
+      const current = latest.current;
+      if (current.harness_id !== route.harness_id || current.model !== route.model) return;
+      // A window carried from another harness or model (the harness chip keeps it) that this model
+      // does not take is dropped, then the model's own start applies. A model the catalog does not
+      // describe is left alone: it is flagged as unavailable and its send is refused anyway.
+      const capability = loaded[current.model];
+      const { context } = routeTuning(current, capability);
+      const fits = current.context_window && context && current.context_window >= context.min
+        && (context.max === undefined || current.context_window <= context.max);
+      if (current.context_window && (fits || !capability && current.harness_id !== NATIVE_HARNESS)) return;
+      const next = { ...current };
+      const start = defaultWindow(current, capability);
+      if (start) next.context_window = start; else delete next.context_window;
+      if (next.context_window !== current.context_window) onRouteChange(next);
     }).catch(cause => { if (live) { setModels([]); setError(cause instanceof Error ? cause.message : String(cause)); } });
     return () => { live = false; };
   }, [mode, route.harness_id, loadModels, reload]);
@@ -142,9 +166,11 @@ export function AgentOrchestratorComposerControls({
   const setWindow = (tokens: number | null) => { const next = { ...route }; if (tokens) next.context_window = tokens; else delete next.context_window; onRouteChange(next); };
   const inRange = (tokens: number) => Boolean(context) && Number.isSafeInteger(tokens) && tokens >= context!.min && (context!.max === undefined || tokens <= context!.max);
   // No "Default" window: a chat starts at 400K (or the model's limit, if lower). The model list sets
-  // it once it knows the model's range, and so does picking a model.
-  const startWindow = defaultWindow(context);
-  const windowLabel = contextText(route.context_window || startWindow || fullLimit || DEFAULT_CONTEXT_WINDOW);
+  // it once it knows the model's range, and so does picking a model. A model whose limit is not
+  // known runs at the agent's own window, which the chip calls "Auto" like an unpicked effort.
+  const startWindow = models === null ? null : defaultWindow(route, capability);
+  const shownWindow = route.context_window || startWindow || fullLimit;
+  const windowLabel = shownWindow ? contextText(shownWindow) : "Auto";
   // No "Default" effort either: unpicked, a model runs at its own effort, which the chip names
   // when the model's id carries it ("Gemini 3.8 Flash High" -> High) and otherwise calls "Auto".
   const modelEffort = ownEffort(route.model);
@@ -160,14 +186,15 @@ export function AgentOrchestratorComposerControls({
   // list sets the effort: the two can never disagree (High model, Low effort).
   const tier = webTier(route.model);
   const pickModel = (model: string) => {
-    const next = withTuning(workerRoute(route.harness_id, model, nativePermission(route)), route);
+    // The carried window is fitted to the new model, or dropped where it takes none.
+    const next = withTuning(workerRoute(route.harness_id, model, nativePermission(route)), route, caps);
     const picked = webTier(model);
     if (picked) next.effort = picked.effort;
     const tuning = routeTuning(next, caps[model]);
     const kept = next.context_window && tuning.context && next.context_window >= tuning.context.min
       && (tuning.context.max === undefined || next.context_window <= tuning.context.max);
     if (!kept) {
-      const start = defaultWindow(tuning.context);
+      const start = defaultWindow(next, caps[model]);
       if (start) next.context_window = start; else delete next.context_window;
     }
     onRouteChange(next);

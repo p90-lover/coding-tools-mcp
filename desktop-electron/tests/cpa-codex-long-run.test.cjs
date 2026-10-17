@@ -89,7 +89,10 @@ test("CPA managed config keeps the original panel and turns on long-run keep-ali
   assert.match(yaml, /host: "127\.0\.0\.1"/);
   assert.match(yaml, /streaming:\n {2}keepalive-seconds: 15/);
   assert.match(yaml, /nonstream-keepalive-interval: 30/);
-  assert.match(yaml, /request-retry: 5/);
+  // A chat's first request must not sit behind minutes of retries while every account cools down.
+  assert.match(yaml, /^request-retry: 3$/m);
+  assert.match(yaml, /^max-retry-interval: 30$/m);
+  assert.doesNotMatch(yaml, /max-retry-interval: 300/);
   assert.match(yaml, new RegExp(`logs-max-total-size-mb: ${CPA_LOGS_MAX_TOTAL_SIZE_MB}`));
   assert.match(yaml, /request-log: false/);
   assert.equal(cpaLongRunYamlLines().includes("debug: false"), false);

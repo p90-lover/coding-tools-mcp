@@ -555,9 +555,26 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   }
   async function projectFor(workspaceId) {
     if (!workspaceBoard) throw new Error("Coding Tools mission service is unavailable");
-    const binding = await workspaceBoard.bind(workspaceId);
-    if (!binding.projectId) throw new Error("AO harness workers need this workspace to be a git repository registered in AO");
-    return binding.projectId;
+    const at = Date.now();
+    const kept = projectBindings.get(workspaceId);
+    if (kept && at - kept.at < PROJECT_BINDING_TTL_MS) return kept.promise;
+    const entry = { at, promise: workspaceBoard.bind(workspaceId).then(binding => {
+      if (!binding.projectId) throw new Error("AO harness workers need this workspace to be a git repository registered in AO");
+      return binding.projectId;
+    }) };
+    entry.promise.catch(() => forgetProject(workspaceId, entry));
+    projectBindings.set(workspaceId, entry);
+    return entry.promise;
+  }
+  // One send bound its workspace up to four times (model checks, the default window, the launch):
+  // each listed AO's projects, ran git and synced dependency links for up to 3 s. A binding is kept
+  // for a minute, so the launch reuses the sync its own model check just did. A failed binding is
+  // not kept, and a failed start, a new daemon or a dependency-link setting change binds afresh.
+  const PROJECT_BINDING_TTL_MS = 60_000;
+  const projectBindings = new Map(); // workspaceId -> { at, promise }
+  function forgetProject(workspaceId, entry = null) {
+    if (workspaceId === undefined) { projectBindings.clear(); return; }
+    if (!entry || projectBindings.get(workspaceId) === entry) projectBindings.delete(workspaceId);
   }
   /**
    * The app's own tools for one chat session about to be spawned (its own credential, rooted at
@@ -647,6 +664,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       try {
         data = await launch(chat ? "chat" : "tui");
       } catch (error) {
+        // The project may be gone or changed in AO; the next start binds the workspace again.
+        forgetProject(workspaceId);
         // Chat mode needs AO's packaged ACP runtime (Claude's chat driver). Without it the agent
         // still runs in its own terminal and hands back a result file.
         if (!chat || codexWorkspace || !/CHAT_DRIVER_UNAVAILABLE/.test(String(error?.message))) throw error;
@@ -1051,7 +1070,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         });
         const currentChild = child;
         logTail = "";
-        for (const output of [child.stdout, child.stderr]) output.on("data", (chunk) => { logTail = (logTail + chunk.toString()).slice(-16384); });
+        // A new daemon may know its projects differently; workspaces bind again.
+        forgetProject();
+        for (const output of [child.stdout, child.stderr]) output.on("data", (chunk) => {
+          logTail = (logTail + chunk.toString()).slice(-16384);
+        });
         child.once("error", (cause) => { if (child === currentChild && startupGeneration === lifecycleGeneration) { error = cause.message; state = "error"; } });
         child.once("exit", (code) => { if (child === currentChild && startupGeneration === lifecycleGeneration) { state = "error"; error = `AO exited (${code})`; } });
         const deadline = Date.now() + 30000;
@@ -1183,6 +1206,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     }
     if (operation === "upstream_bind_workspace") {
       if (!workspaceBoard) throw new Error("Coding Tools mission service is unavailable");
+      forgetProject(args.workspaceId);
       return { ok: true, ...await workspaceBoard.bind(args.workspaceId) };
     }
     // "Reuse installed Node packages" (`enabled`, default on) and "Share the Python environment"
@@ -1191,6 +1215,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (operation === "upstream_set_dependency_links") {
       const given = ["enabled", "python"].filter(name => args[name] !== undefined);
       if (!given.length || given.some(name => typeof args[name] !== "boolean")) throw new Error("enabled or python must be true or false");
+      forgetProject();
       return { ok: true, ...dependencyLinks.set({ enabled: args.enabled, python: args.python }) };
     }
     // The folders new worktrees of this workspace's AO project share with it or get as hard-link

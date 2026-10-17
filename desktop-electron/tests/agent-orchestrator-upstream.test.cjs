@@ -714,3 +714,33 @@ test("a finished turn's work is read back from AO, paging back until it reaches 
   assert.equal(requests.filter(endpoint => endpoint.includes("beforeSequence")).length, 2, "it stops once a page reaches the turn before");
   assert.equal((await upstream.timeline("s", "")).length, 0, "no turn, nothing to read");
 });
+
+test("a send binds its workspace in AO once, not for every catalog read and the launch", async () => {
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("  async function projectFor");
+  const block = source.slice(start, source.indexOf("  /**\n   * The app's own tools for one chat session", start));
+  const binds = [];
+  let failing = false;
+  const upstream = vm.runInNewContext(block + "({ projectFor, forgetProject })", {
+    Date, Map, Promise,
+    workspaceBoard: { bind: async id => {
+      binds.push(id);
+      if (failing) throw new Error("git is busy");
+      return { workspaceId: id, projectId: id === "plain-folder" ? null : `project-${id}` };
+    } },
+  });
+  assert.equal(await upstream.projectFor("ws-1"), "project-ws-1");
+  assert.equal(await upstream.projectFor("ws-1"), "project-ws-1");
+  assert.deepEqual(binds, ["ws-1"], "the launch reuses the binding its model check just made");
+  upstream.forgetProject("ws-1");
+  await upstream.projectFor("ws-1");
+  assert.equal(binds.length, 2, "a failed start (or a new daemon) binds again");
+  await assert.rejects(upstream.projectFor("plain-folder"), /git repository registered in AO/);
+  await assert.rejects(upstream.projectFor("plain-folder"));
+  assert.equal(binds.filter(id => id === "plain-folder").length, 2, "a workspace without a project is not kept");
+  failing = true;
+  await assert.rejects(upstream.projectFor("ws-2"), /git is busy/);
+  failing = false;
+  assert.equal(await upstream.projectFor("ws-2"), "project-ws-2", "a failed binding is not kept");
+});

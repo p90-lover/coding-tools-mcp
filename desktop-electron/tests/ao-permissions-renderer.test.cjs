@@ -6,14 +6,19 @@ const path = require("node:path");
 const vm = require("node:vm");
 const ts = require(require.resolve("typescript", { paths: [path.resolve(__dirname, "..")] }));
 const plain = value => JSON.parse(JSON.stringify(value));
-function renderer(file) {
-  let states = [], cursor = 0;
-  const effects = [];
+// persistentRefs: refs live across renders as React's do, for an effect that reads a later render's value.
+function renderer(file, { persistentRefs = false } = {}) {
+  let states = [], cursor = 0, refCursor = 0;
+  const effects = [], refs = [];
   const react = { useState: initial => {
     const index = cursor++;
     if (!(index in states)) states[index] = typeof initial === "function" ? initial() : initial;
     return [states[index], value => { states[index] = typeof value === "function" ? value(states[index]) : value; }];
-  }, useEffect: effect => effects.push(effect), useRef: initial => ({ current: initial }) };
+  }, useEffect: effect => effects.push(effect), useRef: initial => {
+    if (!persistentRefs) return { current: initial };
+    const index = refCursor++;
+    return refs[index] ??= { current: initial };
+  } };
   const jsx = (type, props) => ({ type, props: props || {} });
   const cache = {};
   const load = name => {
@@ -27,7 +32,7 @@ function renderer(file) {
     return exports;
   };
   const exports = load(file);
-  return { exports, effects, render(name, props, values) { if (values) states = values; cursor = 0; effects.length = 0; return exports[name](props); } };
+  return { exports, effects, render(name, props, values) { if (values) states = values; cursor = 0; refCursor = 0; effects.length = 0; return exports[name](props); } };
 }
 
 function elements(tree, predicate) {
@@ -119,7 +124,7 @@ test("WebGPT locks the harness; its model menu offers Native Codex's CPA models,
   assert.equal(picked.provider_id, "cliproxyapi-antigravity");
   assert.equal(picked.model, "actual-local-model");
   assert.equal(picked.permission_profile, "managed/raw");
-  assert.equal(picked.context_window, 400_000);
+  assert.equal(picked.context_window, undefined, "a pool model whose limit CPA did not report keeps the agent's own window");
 });
 
 test("the effort and window chips show the pick and offer exactly what the model takes", () => {
@@ -455,4 +460,66 @@ test("a picked model the harness no longer offers is marked not available", () =
   assert.equal(model.props.className, "", "an effort suffix still matches its listed model");
   model = menuNamed(view.render("AgentOrchestratorComposerControls", props, composerState(null)), "Model");
   assert.equal(model.props.className, "", "nothing is flagged before the list loads");
+});
+
+/** Renders the composer on `route`, lets its catalog load, and returns the route changes it made. */
+async function composerLoad(route, capabilities, options) {
+  const view = renderer("AgentOrchestratorComposerControls.tsx", options);
+  const routes = [];
+  let release = () => {};
+  const gate = options?.gated ? new Promise(resolve => { release = resolve; }) : null;
+  const props = { mode: "single", onModeChange() {}, route, onRouteChange: next => routes.push(plain(next)), harnesses: [], teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false,
+    loadModels: async harness => { if (harness === "codex-native") return []; await gate; return { models: Object.keys(capabilities), capabilities }; } };
+  view.render("AgentOrchestratorComposerControls", props, composerState(null));
+  view.effects[view.effects.length - 1]();
+  const settle = async () => { release(); await new Promise(resolve => setImmediate(resolve)); };
+  if (!gate) await settle();
+  return { routes, settle, render: next => view.render("AgentOrchestratorComposerControls", { ...props, ...next }) };
+}
+
+test("the composer starts a window only for a model whose limit is known, and drops one the model does not take", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/glm-5", permission_profile: ":ao-default" };
+  const unknown = { "cpa/glm-5": { efforts: [], contextWindow: { min: 4096, max: 2_000_000 } } };
+  const known = { "cpa/glm-5": { efforts: [], contextLimit: 262144, contextWindow: { min: 4096, max: 262144 } } };
+  // Without a reported limit the range ends at the client's 2M, so 400K reached 128K-262K models.
+  let view = await composerLoad(route, unknown);
+  assert.deepEqual(view.routes, [], "the agent's own window is left");
+  assert.equal(text(menuNamed(view.render(), "Context window").props.label), "Auto");
+  view = await composerLoad(route, known);
+  assert.equal(view.routes.at(-1).context_window, 262144, "a known limit starts the chat at it (under 400K)");
+  // A window carried by the harness chip or an older pick is checked once the catalog is known.
+  view = await composerLoad({ ...route, context_window: 1_000_000 }, known);
+  assert.equal(view.routes.at(-1).context_window, 262144, "out of range: replaced by the model's start");
+  view = await composerLoad({ ...route, context_window: 1_000_000 }, { "cpa/glm-5": { efforts: [], contextReason: "no setter" } });
+  assert.equal(Object.hasOwn(view.routes.at(-1), "context_window"), false, "unsupported: dropped");
+  view = await composerLoad({ ...route, context_window: 131072 }, known);
+  assert.deepEqual(view.routes, [], "a window the model takes is kept");
+});
+
+test("a catalog that loads after the user picked another model does not put the old one back", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/first", permission_profile: ":ao-default" };
+  const caps = { "cpa/first": { efforts: [], contextLimit: 262144, contextWindow: { min: 4096, max: 262144 } },
+    "cpa/second": { efforts: [], contextLimit: 1_000_000, contextWindow: { min: 4096, max: 1_000_000 } } };
+  const view = await composerLoad(route, caps, { persistentRefs: true, gated: true });
+  const picked = { route: { ...route, model: "cpa/second", context_window: 400_000 } };
+  view.render(picked);
+  await view.settle();
+  assert.equal(optionsIn(menuNamed(view.render(picked), "Model")).length, 2, "the catalog did load");
+  assert.deepEqual(view.routes, [], "the late catalog leaves the newer pick alone");
+});
+
+test("picking a model fits the carried window to it", () => {
+  const view = renderer("AgentOrchestratorComposerControls.tsx");
+  const routes = [];
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/big", permission_profile: ":ao-default", context_window: 1_000_000 };
+  const caps = { "cpa/big": { efforts: [], contextLimit: 1_000_000, contextWindow: { min: 4096, max: 1_000_000 } },
+    "cpa/small": { efforts: [], contextLimit: 262144, contextWindow: { min: 4096, max: 262144 } },
+    "cpa/unknown": { efforts: [], contextWindow: { min: 4096, max: 2_000_000 } } };
+  const props = { mode: "single", onModeChange() {}, route, onRouteChange: next => routes.push(plain(next)), harnesses: [], loadModels: async () => [], teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false };
+  const tree = view.render("AgentOrchestratorComposerControls", props, composerState(Object.keys(caps), caps));
+  const pick = name => optionsIn(menuNamed(tree, "Model")).find(row => row.props.title.includes(name)).props.onPick();
+  pick("cpa/small");
+  assert.equal(routes.at(-1).context_window, 262144, "clamped to the new model's limit");
+  pick("cpa/unknown");
+  assert.equal(routes.at(-1).context_window, 1_000_000, "within an unreported range a picked window stays");
 });
