@@ -23,6 +23,7 @@
     "package:linux": "bun run build && bun run build:agent-orchestrator && bun run build:runtime && bun run build:five-stack-runtime && bun run build:package-resources && bun run scripts/package.cjs --linux",
     "smoke:package": "bun run scripts/smoke-package.cjs",
     "package:backend": "node scripts/package-backend.cjs",
+    "patch:portable": "node scripts/patch-portable.cjs",
     "test": "node --test tests/*.test.cjs",
     "start": "bun run build:preload && electron ."
   },
