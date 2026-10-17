@@ -918,9 +918,10 @@ test("AO harness workers run as AO sessions and return their answer as the card 
   assert.equal(calls.filter((item) => item.endpoint.startsWith("/api/v1/ao/harness/")).length, 0);
 });
 
-test("Native Codex offers every WebGPT tier, Luna included, and every CPA pool model", async () => {
-  const WEB = ["chatgpt-web/light", "chatgpt-web/medium", "chatgpt-web/high", "chatgpt-web/extra-high", "chatgpt-web/pro",
-    "chatgpt-web/luna", "chatgpt-web/think"];
+// Luna and Think are not offered: they exist only without ChatGPT's effort picker, and there the
+// bridge runs these five tiers as Luna or Think itself. Saved Luna routes still run (see aoWebCatalogForModel).
+test("Native Codex offers ChatGPT's five effort tiers and every CPA pool model", async () => {
+  const WEB = ["chatgpt-web/light", "chatgpt-web/medium", "chatgpt-web/high", "chatgpt-web/extra-high", "chatgpt-web/pro"];
   const workflow = createAgentOrchestratorWorkflow({
     requestHeadless: async () => { throw new Error("no headless call expected"); },
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k".repeat(40) }),

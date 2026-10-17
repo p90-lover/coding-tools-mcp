@@ -265,7 +265,7 @@
 .ao-workflow .cx-chat .ao-permission-option > svg:last-child, .ao-workflow .cx-chat .ao-picker-option { color: var(--claude-text); }
 .ao-workflow .cx-chat .ao-composer-popover .ao-hint, .ao-workflow .cx-chat .ao-popup-muted, .ao-workflow .cx-chat .ao-picker-option small,
 .ao-workflow .cx-chat .ao-permission-option small, .ao-workflow .cx-chat .ao-permissions-panel > header h3,
-.ao-workflow .cx-chat .ao-popover-close { color: var(--claude-text-2); }
+.ao-workflow .cx-chat .ao-popover-close, .ao-workflow .cx-chat .ao-model-group > h4, .ao-workflow .cx-chat .ao-chip-provider { color: var(--claude-text-2); }
 .ao-workflow .cx-chat .ao-picker-option { background: transparent; }
 .ao-workflow .cx-chat .ao-picker-option:hover { background: var(--cx-hover); }
 .ao-workflow .cx-chat .ao-picker-option[aria-checked="true"] { background: var(--claude-accent-soft); color: var(--claude-text); }

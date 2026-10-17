@@ -151,7 +151,9 @@ function aoWebCatalogForModel(catalog, model) {
     throw new Error("AO WebGPT catalog is unavailable");
   }
   if (template.slug === model) return catalog;
-  const tier = model.slice("chatgpt-web/".length).split("-").map((part) => part[0].toUpperCase() + part.slice(1)).join(" ");
+  // "light" is what ChatGPT's effort picker calls Instant (the runtime's own name for it too).
+  const slug = model.slice("chatgpt-web/".length);
+  const tier = slug === "light" ? "Instant" : slug.split("-").map((part) => part[0].toUpperCase() + part.slice(1)).join(" ");
   return { models: [{ ...template, slug: model, display_name: `ChatGPT Web — ${tier}` }] };
 }
 
@@ -612,7 +614,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       let pool = { models: [], capabilities: {} };
       try { pool = await models(); } catch {}
       const cpa = pool.models.filter(id => !id.startsWith("chatgpt-web/"));
-      return { ok: true, harness, models: [...WEB_TIERS, ...LUNA_TIERS, ...cpa],
+      // Only ChatGPT's own effort tiers are offered. Luna and Think exist only on Free/Go accounts
+      // without the effort picker, and there the bridge already runs these tiers as Luna (Instant,
+      // Medium) or Think (High and up). A saved Luna or Think route still runs (webModel).
+      return { ok: true, harness, models: [...WEB_TIERS, ...cpa],
         capabilities: Object.fromEntries(cpa.map(id => [id, pool.capabilities[id]]).filter(([, value]) => value)) };
     }
     return cachedCpaCatalog();

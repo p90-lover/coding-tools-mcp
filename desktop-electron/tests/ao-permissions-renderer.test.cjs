@@ -109,7 +109,10 @@ test("WebGPT locks the harness; its model menu offers Native Codex's CPA models,
   assert.equal(menuNamed(tree, "Harness").props.disabled, true, "a WebGPT model keeps the harness on Native Codex");
   const rows = optionsIn(menuNamed(tree, "Model"));
   assert.equal(rows.length, 2);
-  rows.find(row => text(row.props.children).includes("actual-local-model")).props.onPick();
+  // A pool row shows the tidied name; its tooltip keeps the exact id.
+  const pool = rows.find(row => text(row.props.children).includes("Actual Local Model"));
+  assert.match(pool.props.title, /actual-local-model/);
+  pool.props.onPick();
   assert.equal(routes[0].harness_id, "codex-native");
   assert.equal(routes[0].provider_id, "cliproxyapi-antigravity");
   assert.equal(routes[0].model, "actual-local-model");
@@ -139,6 +142,23 @@ test("the effort and window chips show the pick and offer exactly what the model
   assert.equal(routes.at(-1).context_window, 400_000);
   const harness = menuNamed(tree, "Harness");
   assert.match(text(harness.props.label), /Claude Code/);
+});
+
+test("a WebGPT model is one ChatGPT effort: the effort chip picks the model and the model list sets the effort", () => {
+  const view = renderer("AgentOrchestratorComposerControls.tsx");
+  const routes = [];
+  const route = { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web", model: "chatgpt-web/high", permission_profile: ":read-only", effort: "low" };
+  const props = { mode: "single", onModeChange() {}, route, onRouteChange: next => routes.push(plain(next)), harnesses: [], loadModels: async () => [], teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false };
+  const tree = view.render("AgentOrchestratorComposerControls", props, composerState(["chatgpt-web/light", "chatgpt-web/high", "chatgpt-web/pro"]));
+  const effort = menuNamed(tree, "Reasoning effort");
+  assert.match(text(effort.props.label), /^High$/, "the chip shows the model's tier, not a stray saved effort");
+  const tiers = optionsIn(effort);
+  assert.deepEqual(tiers.map(row => text(row.props.children)), ["Instant", "Medium", "High", "Extra High", "Pro"], "no Model default, no Luna");
+  tiers.find(row => text(row.props.children) === "Pro").props.onPick();
+  assert.deepEqual([routes.at(-1).model, routes.at(-1).effort], ["chatgpt-web/pro", "ultra"]);
+  assert.match(text(menuNamed(tree, "Model").props.label), /^WebGPT High/, "the model chip names the whole WebGPT model");
+  optionsIn(menuNamed(tree, "Model")).find(row => text(row.props.children) === "WebGPT Instant").props.onPick();
+  assert.deepEqual([routes.at(-1).model, routes.at(-1).effort], ["chatgpt-web/light", "low"]);
 });
 
 test("mixed unsupported capabilities disable all presets rather than silently skipping roles", () => {

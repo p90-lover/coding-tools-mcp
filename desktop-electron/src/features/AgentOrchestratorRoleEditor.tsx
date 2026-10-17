@@ -51,6 +51,20 @@ export function workerRoute(harness: string, model: string, permission: NativePe
 
 /** Reasoning efforts a card may ask for (Codex's names; the engine checks the same list). */
 export const EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
+/**
+ * The WebGPT tiers as ChatGPT's own effort picker names them, each with the one effort the
+ * bridge runs it at (Pro is Codex's "ultra"). A tier is its effort: picking either picks both.
+ * Luna and Think are not listed: they exist only on Free/Go accounts without that picker, and
+ * there the bridge already runs these tiers as Luna (Instant, Medium) or Think (High and up).
+ */
+export const WEB_TIERS = [
+  { model: "chatgpt-web/light", effort: "low", label: "Instant" },
+  { model: "chatgpt-web/medium", effort: "medium", label: "Medium" },
+  { model: "chatgpt-web/high", effort: "high", label: "High" },
+  { model: "chatgpt-web/extra-high", effort: "xhigh", label: "Extra High" },
+  { model: "chatgpt-web/pro", effort: "ultra", label: "Pro" },
+] as const;
+export const webTier = (model: string | undefined) => WEB_TIERS.find(tier => tier.model === model);
 /** What Native Codex offers when the model reports no efforts of its own (WebGPT tiers). */
 const NATIVE_DEFAULT_EFFORTS = EFFORTS.slice(0, 5);
 /** Legacy Native-to-agent carry-over policy; AO controls use the selected model capabilities. */
@@ -196,8 +210,8 @@ export function cpaProviderOf(model: string | undefined): string | null {
   const slash = id.indexOf("/");
   return cpaProviders.get(id) ?? (slash > 0 ? id.slice(0, slash) : null);
 }
-/** "CPA · <provider> · <model>": the provider CPA reported, else the model id's own prefix or family. */
-function cpaLabel(id: string): string {
+/** A CPA id's provider (as CPA reported it, else the id's own prefix or family) and the model's own part. */
+function cpaParts(id: string): { provider: string; name: string } {
   const slash = id.indexOf("/");
   const prefix = slash > 0 ? id.slice(0, slash) : "";
   const name = prefix ? id.slice(slash + 1) : id;
@@ -206,7 +220,53 @@ function cpaLabel(id: string): string {
     : /^(gpt|o\d|codex)/.test(lower) ? "openai" : lower.startsWith("grok") ? "grok" : lower.startsWith("deepseek") ? "deepseek"
     : lower.startsWith("glm") ? "zhipu" : lower.startsWith("qwen") ? "qwen" : lower.startsWith("kimi") ? "kimi" : "";
   const provider = cpaProviders.get(id) ?? (prefix || family);
-  return provider ? `CPA · ${providerName(provider)} · ${name}` : `CPA · ${name}`;
+  return { provider: provider ? providerName(provider) : "", name };
+}
+
+/** "CPA · <provider> · <model>": the provider CPA reported, else the model id's own prefix or family. */
+function cpaLabel(id: string): string {
+  const { provider, name } = cpaParts(id);
+  return provider ? `CPA · ${provider} · ${name}` : `CPA · ${name}`;
+}
+
+// Words whose usual casing a plain capital letter gets wrong.
+const MODEL_WORDS: Record<string, string> = {
+  gpt: "GPT", oss: "OSS", glm: "GLM", deepseek: "DeepSeek", minimax: "MiniMax", mimo: "MiMo", xai: "xAI",
+};
+
+/**
+ * A model id as a person reads it: "claude-opus-4-6-thinking" -> "Opus 4.6 Thinking",
+ * "gpt-5.6-terra" -> "GPT-5.6 Terra", "kimi-k2.7-code" -> "Kimi K2.7 Code". Claude's family word
+ * goes (the group already says Claude; "Opus" is the name); split version digits ("4-6") join.
+ */
+export function prettyModelName(id: string): string {
+  const parts = id.replace(/^claude-(?=opus|sonnet|haiku)/i, "").split("-").filter(Boolean);
+  const words: string[] = [];
+  for (const part of parts) {
+    const previous = words.at(-1);
+    // "4-6" is one version, "4.6"; "gpt-5.6" keeps its hyphen, as OpenAI writes it.
+    if (/^\d+$/.test(part) && previous && /^\d+(\.\d+)?$/.test(previous)) { words[words.length - 1] = `${previous}.${part}`; continue; }
+    if (/^\d/.test(part) && previous === "GPT") { words[words.length - 1] = `GPT-${part}`; continue; }
+    const lower = part.toLowerCase();
+    words.push(MODEL_WORDS[lower] ?? (/^[a-z]\d/.test(lower) ? lower.toUpperCase() : lower[0].toUpperCase() + lower.slice(1)));
+  }
+  return words.join(" ");
+}
+
+/**
+ * How a model list row names a model once a group header says who serves it: the group
+ * ("WebGPT", "Claude · CPA") and the model's own name ("High", "Opus 4.6 Thinking"). An
+ * agent's own model (not WebGPT, not CPA) has no group and keeps its id, which is what that
+ * agent's own docs call it. modelLabel stays the full, unambiguous form for cards and hints.
+ */
+export function modelShortLabel(model: string, cpaPool = false): { group: string; name: string } {
+  // WebGPT keeps its whole name ("WebGPT High") in the list and on the chip, ungrouped: the
+  // tier at its end is the effort, which the effort chip then shows and picks.
+  if (model.startsWith("chatgpt-web/")) return { group: "", name: modelLabel(model) };
+  const cpa = model.startsWith("cpa/") ? model.slice(4) : cpaPool && model ? model : null;
+  if (cpa === null) return { group: "", name: model };
+  const { provider, name } = cpaParts(cpa);
+  return { group: provider ? `${provider} · CPA` : "CPA", name: prettyModelName(name) };
 }
 
 /** cpaPool: a bare id that Native Codex runs through the shared CPA pool. */
@@ -215,7 +275,8 @@ export function modelLabel(model: string, cpaPool = false): string {
   if (model.startsWith("cpa/")) return cpaLabel(model.slice(4));
   if (cpaPool && model && !model.startsWith("chatgpt-web/")) return cpaLabel(model);
   if (!model.startsWith("chatgpt-web/")) return model;
-  return `WebGPT ${model.slice("chatgpt-web/".length).split("-").map(part => part[0]?.toUpperCase() + part.slice(1)).join(" ")}`;
+  // A tier reads as ChatGPT names it ("light" is ChatGPT's Instant); a saved Luna/Think route keeps its own name.
+  return `WebGPT ${webTier(model)?.label ?? model.slice("chatgpt-web/".length).split("-").map(part => part[0]?.toUpperCase() + part.slice(1)).join(" ")}`;
 }
 
 export function harnessLabel(harnessId: string, harnesses: AoHarness[]): string {
