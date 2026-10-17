@@ -1,6 +1,7 @@
 "use strict";
 
 const { spawnSync } = require("node:child_process");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { validateRuntimeBundle } = require("../electron/runtime-install.cjs");
@@ -152,17 +153,24 @@ function preparePublication() {
     throw new Error(`electron-builder produced no distributable artifact in ${staging}`);
   }
   for (const artifact of artifacts) {
-    const publicName = artifact.name.replace(/-linux-x86_64(?=\.)/, "-linux-x64");
+    const publicName = artifact.name
+      .replace(/-linux-x86_64(?=\.)/, "-linux-x64")
+      // The Windows zip is the portable app: unzip anywhere and run Coding Tools.exe.
+      .replace(/_win_x64\.zip$/, "_win_x64_portable.zip");
     fs.copyFileSync(
       path.join(staging, artifact.name),
       path.join(publication, publicName),
       fs.constants.COPYFILE_EXCL,
     );
   }
-  // Installed Windows apps update in place from these packs; no installer runs.
+  // Windows apps, portable or installed, update in place from these packs; no installer runs.
   const unpacked = path.join(staging, "win-unpacked");
   if (target === "--win" && fs.existsSync(unpacked)) {
     runChecked(executable, [path.join(__dirname, "package-app-update.cjs"), "--app", unpacked, "--output", publication]);
+    for (const name of fs.readdirSync(publication).filter((entry) => entry.endsWith("_portable.zip"))) {
+      const digest = crypto.createHash("sha256").update(fs.readFileSync(path.join(publication, name))).digest("hex");
+      fs.appendFileSync(path.join(publication, "SHA256SUMS.txt"), `${digest}  ${name}\n`);
+    }
   }
 }
 
