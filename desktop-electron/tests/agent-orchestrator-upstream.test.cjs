@@ -310,6 +310,24 @@ test("observe lists the agent's parked tool requests with AO's offered decisions
   await assert.rejects(upstream.resolveApproval("s", "req-1", ""), /offered decision/);
 });
 
+// Seen live: AO's ACP approval for the app's exec_command had no toolName (subjectKind "mcp_tool",
+// toolKind "other"); the name was only the summary. The input was dropped, so "Approve for me"'s
+// reviewer saw no command, answered "ask", and the chat waited on the person for a bare `cd`.
+test("an MCP tool approval named only by its summary keeps its input for the reviewer", async () => {
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {
+      turns: [{ id: "t", state: "running" }], messages: [],
+      activities: [{ id: "a1", turnId: "t", sequence: 2, activityKind: "approval", status: "pending", requestId: "req-cd",
+        summary: "mcp__coding-tools__exec_command",
+        detail: { subjectKind: "mcp_tool", toolKind: "other", protocol: "acp", input: { cmd: "cd" },
+          decisions: [{ id: "allow", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }] } }],
+    } : { session: { id: "s", mode: "chat", status: "working" } },
+  });
+  const [approval] = JSON.parse(JSON.stringify((await upstream.observe("s")).approvals));
+  assert.equal(approval.tool, "mcp__coding-tools__exec_command");
+  assert.equal(approval.toolInput, '{"cmd":"cd"}');
+});
+
 test("a follow-up turn is observed only once AO shows it; send and steer use AO's conversation routes", async () => {
   const calls = [];
   let turns = [{ id: "old", state: "completed" }];

@@ -95,7 +95,8 @@ async function dispatched(agent, model, tuning) {
   const workflow = createAgentOrchestratorWorkflow({
     aoHarness: { models: async () => [{ id: "own-model", efforts: ["high"] }], spawn: async input => { spawned.push(input); return "session-1"; } },
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-key" }),
-    fetchImpl: async () => ({ ok: true, json: async () => ({ models: [{ slug: "gpt-5.5", context_window: 262144, supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }] }] }) }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ models: [{ slug: "gpt-5.5", context_window: 262144, supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }] },
+      { slug: "cline-pass/deepseek-v4.1-flash", supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }] }] }) }),
     confirm: async () => true,
     requestHeadless: async endpoint => {
       if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run", workspace_id: "ws", revision: 1, cancelled: false,
@@ -127,6 +128,26 @@ test("CPA effort becomes exactly one session-local wire suffix and context is fo
   assert.equal(own.effort, "high");
   assert.equal(own.contextWindow, 131072);
   assert.equal(Object.hasOwn(own, "gateway"), false);
+});
+
+test("a Cline Pass model reaches CPA by its bare name: the plugin passes the name to Cline unchanged", async () => {
+  // Seen live: "cline-pass/deepseek-v4.1-flash(high)" came back "model not found".
+  for (const model of ["cpa/cline-pass/deepseek-v4.1-flash", "cpa/cline-pass/deepseek-v4.1-flash(high)"]) {
+    const input = await dispatched("claude-code", model, { effort: "high" });
+    assert.equal(input.model, "cline-pass/deepseek-v4.1-flash");
+    assert.deepEqual(input.gateway, { provider: "cpa", model: "cline-pass/deepseek-v4.1-flash" });
+  }
+  // CPA advertises its stock levels for the plugin's models; the card offers none.
+  const workflow = createAgentOrchestratorWorkflow({
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-key" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ models: [
+      { slug: "cline-pass/deepseek-v4.1-flash", supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }] },
+      { slug: "gpt-5.5", supported_reasoning_levels: [{ effort: "high" }] }] }) }),
+    aoHarness: { models: async () => [] },
+  });
+  const { capabilities } = await workflow.call("models", { harness: "ao:claude-code", workspaceId: "ws" });
+  assert.deepEqual(capabilities["cpa/cline-pass/deepseek-v4.1-flash"]?.efforts ?? capabilities["cline-pass/deepseek-v4.1-flash"]?.efforts, []);
+  assert.deepEqual(capabilities["cpa/gpt-5.5"]?.efforts ?? capabilities["gpt-5.5"]?.efforts, ["high"]);
 });
 
 test("the permission menu reuses the agent catalog instead of probing every CLI on each open", async () => {
