@@ -72,7 +72,13 @@ test("a release update installs only the files that changed", async () => {
     const manifest = parseManifest(manifestText, { version: "0.8.0", tag: "win_x64" });
 
     const previous = { files: [{ path: "resources/runtime/app/gone.js" }, { path: "resources/app.asar" }] };
-    const plan = await planUpdate({ manifest, installRoot: installed, electronVersion: "41.10.7", previous });
+    const checks = [];
+    const plan = await planUpdate({
+      manifest, installRoot: installed, electronVersion: "41.10.7", previous,
+      onProgress: (done, total) => checks.push([done, total]),
+    });
+    // Every non-framework file is checked once, and the count climbs to the total.
+    assert.deepEqual(checks, [[1, 5], [2, 5], [3, 5], [4, 5], [5, 5]]);
     assert.deepEqual(plan.changed.map((file) => file.path).sort(), [
       "resources/agent-orchestrator/renderer/index.html", "resources/app.asar", "resources/empty.txt", "resources/runtime/app/new.js",
     ]);
@@ -231,6 +237,10 @@ test("the controller stages the update, starts the worker and closes the app kee
     assert.equal(fs.readFileSync(path.join(workerJob.filesRoot, "resources", "app.asar"), "utf8"), "v2");
     assert.equal(controller.getState().status, "installing");
     assert.ok(states.some((state) => state.status === "downloading" && state.progress === 1));
+    // The bar moves while installed files are checked, before any pack downloads, and never goes back.
+    const progress = states.filter((state) => state.status === "downloading").map((state) => state.progress);
+    assert.ok(progress.some((value) => value > 0 && value <= 0.2), JSON.stringify(progress));
+    assert.deepEqual(progress, [...progress].sort((a, b) => a - b));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

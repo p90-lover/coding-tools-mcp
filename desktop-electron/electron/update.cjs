@@ -4,6 +4,7 @@ const https = require("node:https");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
+const { Transform } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
 
 const REPOSITORY = "p90-lover/coding-tools-mcp";
@@ -143,9 +144,11 @@ async function downloadText(url, maxBytes = 2 * 1024 * 1024) {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-async function downloadFile(url, destination) {
+/** Downloads to destination; onBytes (optional) hears each received chunk's length. */
+async function downloadFile(url, destination, onBytes) {
   const response = await request(url);
-  await pipeline(response, fs.createWriteStream(destination, { flags: "wx", mode: 0o600 }));
+  const counted = new Transform({ transform(chunk, _encoding, done) { onBytes?.(chunk.length); done(null, chunk); } });
+  await pipeline(response, counted, fs.createWriteStream(destination, { flags: "wx", mode: 0o600 }));
 }
 
 function sha256(filePath) {
