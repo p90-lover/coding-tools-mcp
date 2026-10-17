@@ -159,3 +159,285 @@
   line-height: 1.45;
   white-space: pre-wrap;
 }
+
+/* CPA account usage strip (CpaUsagePanel.tsx): sits between the host bar and CPA's own panel, so
+   it never grows past a share of the window and scrolls inside itself instead. */
+.cpa-usage {
+  flex: 0 0 auto;
+  border-bottom: 1px solid rgb(15 23 42 / 10%);
+  background: #fbfcfd;
+  color: #1f2937;
+  font-size: 12px;
+}
+
+.cpa-usage-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-height: 36px;
+  padding: 4px 12px;
+}
+
+.cpa-usage-head button {
+  min-height: 24px;
+  padding: 2px 8px;
+  border: 1px solid rgb(15 23 42 / 12%);
+  border-radius: 6px;
+  background: #fff;
+  color: #111827;
+  font-size: 12px;
+}
+
+.cpa-usage-head button:disabled {
+  opacity: 0.55;
+}
+
+.cpa-usage-head .cpa-usage-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-color: transparent;
+  background: transparent;
+  padding-left: 0;
+}
+
+.cpa-usage-toggle strong {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.cpa-usage-toggle small,
+.cpa-usage-muted {
+  color: #6b7280;
+  font-size: 11px;
+}
+
+.cpa-usage-ranges {
+  display: inline-flex;
+}
+
+.cpa-usage-head .cpa-usage-ranges button {
+  margin-left: -1px;
+  border-radius: 0;
+}
+
+.cpa-usage-head .cpa-usage-ranges button:first-child {
+  margin-left: 0;
+  border-radius: 6px 0 0 6px;
+}
+
+.cpa-usage-head .cpa-usage-ranges button:last-child {
+  border-radius: 0 6px 6px 0;
+}
+
+.cpa-usage-head .cpa-usage-ranges button.is-active {
+  border-color: #1d4ed8;
+  background: #1d4ed8;
+  color: #fff;
+}
+
+.cpa-usage-head .cpa-usage-refresh {
+  margin-left: auto;
+}
+
+.cpa-usage-body {
+  padding: 0 12px 8px;
+}
+
+.cpa-usage-scroll {
+  max-height: 38vh;
+  overflow: auto;
+  border: 1px solid rgb(15 23 42 / 10%);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.cpa-usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.cpa-usage-table th,
+.cpa-usage-table td {
+  padding: 5px 8px;
+  border-bottom: 1px solid rgb(15 23 42 / 6%);
+  font-weight: 400;
+  text-align: left;
+  vertical-align: top;
+}
+
+.cpa-usage-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f6f7f9;
+  color: #4b5563;
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.cpa-usage-table .is-num {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.cpa-usage-table tbody th {
+  max-width: 280px;
+}
+
+.cpa-usage-table tfoot th,
+.cpa-usage-table tfoot td {
+  border-top: 1px solid rgb(15 23 42 / 14%);
+  border-bottom: 0;
+  background: #f6f7f9;
+  font-weight: 700;
+}
+
+.cpa-usage-table tr.is-resting {
+  opacity: 0.6;
+}
+
+.cpa-usage-model th,
+.cpa-usage-model td {
+  color: #4b5563;
+  font-size: 11px;
+}
+
+.cpa-usage-expand {
+  display: inline-block;
+  width: 18px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #6b7280;
+  font-size: 11px;
+  vertical-align: middle;
+  cursor: pointer;
+}
+
+.cpa-usage-label {
+  display: inline-block;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.cpa-usage-tag {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border: 1px solid rgb(15 23 42 / 12%);
+  border-radius: 999px;
+  color: #4b5563;
+  font-size: 10px;
+  vertical-align: middle;
+}
+
+.cpa-usage-tag.is-off {
+  border-color: rgb(220 38 38 / 30%);
+  color: #b91c1c;
+}
+
+.cpa-usage-quota {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 180px;
+}
+
+.cpa-usage-meter {
+  display: grid;
+  grid-template-columns: 40px 1fr 34px;
+  align-items: center;
+  gap: 6px;
+}
+
+.cpa-usage-meter small:last-child {
+  text-align: right;
+}
+
+.cpa-usage-meter i {
+  display: block;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgb(15 23 42 / 8%);
+}
+
+.cpa-usage-meter b {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #16a34a;
+}
+
+.cpa-usage-meter.is-mid b {
+  background: #d97706;
+}
+
+.cpa-usage-meter.is-high b {
+  background: #dc2626;
+}
+
+.cpa-usage-warn {
+  color: #b45309;
+}
+
+.cpa-usage-keys {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cpa-usage-keys li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+}
+
+.cpa-usage-keys em {
+  margin-left: 6px;
+  color: #1d4ed8;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 650;
+}
+
+.cpa-usage-keys small {
+  color: #6b7280;
+}
+
+.cpa-usage-keys li.is-limited small,
+.cpa-usage-keys li.is-error small {
+  color: #b45309;
+}
+
+.cpa-usage-keys li.is-signed-out small {
+  color: #b91c1c;
+}
+
+.cpa-usage-keys li.is-disabled {
+  opacity: 0.6;
+}
+
+.cpa-usage-note {
+  margin: 6px 0 0;
+  color: #1e3a8a;
+  line-height: 1.4;
+}
+
+.cpa-usage-note.is-error {
+  color: #991b1b;
+}
+
+.cpa-usage-note.is-quiet {
+  color: #6b7280;
+  font-size: 11px;
+}

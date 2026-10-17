@@ -3,6 +3,7 @@ import { getCodingToolsClient } from "../api/client";
 import { cpaProviderOf } from "./AgentOrchestratorRoleEditor";
 import { FloatingLayer } from "./ChatMenu";
 import { contextFraction, tokensShort } from "./ao-chat";
+import { agoLabel, clineStateLabel, costLabel, costSourceLabel, isClineModel, readCpaUsage, type CpaUsage, type CpaUsageAccount } from "./cpa-usage";
 
 // The composer's context meter, as Claude Code shows one: a ring filling as the chat's agent
 // session uses its context window, and on click what AO knows about it. That is the agent's own
@@ -11,7 +12,10 @@ import { contextFraction, tokensShort } from "./ao-chat";
 // reports a per-category split, so the open panel estimates one from the chat's history and
 // draws it as Claude Code's /context does (a grid of the window, one cell per 1%). A model CPA
 // serves from its Codex accounts shows each account's 5-hour and weekly limits instead (CPA
-// Helper's quota, through the cpa_quota operation), worded as Claude Code words plan limits.
+// Helper's quota, through the cpa_quota operation), worded as Claude Code words plan limits, and
+// each account's tokens and estimated cost over the last 7 days (cpa_usage). A Cline Pass model
+// shows the switcher's keys instead: Cline reports no quota for them, only whether a key is at
+// its limit, so that is what the meter can say.
 
 type Usage = {
   contextUsed: number | null; contextWindow: number | null;
@@ -45,6 +49,8 @@ type CpaQuota = { available: boolean; reason?: string; accounts?: CpaQuotaAccoun
 
 const POLL_MS = 4_000;
 const QUOTA_POLL_MS = 60_000;
+/** The meter's usage period: a week, as the weekly limit beside it. */
+const USAGE_RANGE = "7d";
 const DETAIL_POLL_MS = 10_000;
 /** Matches .cx-context-panel's width in codex-chat.css. */
 const PANEL_WIDTH = 380;
@@ -67,6 +73,16 @@ function checkedLabel(at: number | null, now = Date.now()): string {
 }
 
 const tone = (fraction: number | null) => (fraction === null ? "unknown" : fraction >= 0.85 ? "high" : fraction >= 0.6 ? "mid" : "low");
+
+/** "Last 7 days: 1.2M tokens (in 900k · out 300k) · 42 requests · ~$3.10" for one CPA account. */
+function UsageLine({ account }: { account: CpaUsageAccount | undefined }) {
+  if (!account) return null;
+  if (!account.requests) return <p className="cx-context-note">Last 7 days: no requests</p>;
+  return <p className="cx-context-note" title={costSourceLabel(account.costSource, account.costPartial, false)}>
+    Last 7 days: {tokensShort(account.totalTokens)} tokens (in {tokensShort(account.inputTokens)} · out {tokensShort(account.outputTokens)})
+    {" "}· {account.requests.toLocaleString()} requests · {costLabel(account.cost, account.costPartial)}
+  </p>;
+}
 
 /** A plan usage limit as Claude Code shows one: its name, a bar, "N% used" and when it resets. */
 function LimitRow({ name, used, resetsAt }: { name: string; used: number; resetsAt: number | null }) {
@@ -134,7 +150,10 @@ export function ChatContextMeter({ sessionId, agentLabel, model, launchedWindow,
 }) {
   const [snapshot, setSnapshot] = useState<ChatContextSnapshot | null>(null);
   const [quota, setQuota] = useState<CpaQuota | null>(null);
-  const onCpaCodex = cpaProviderOf(model)?.toLowerCase() === "codex";
+  const [cpaUsage, setUsageReport] = useState<CpaUsage | null>(null);
+  const cpaProvider = cpaProviderOf(model)?.toLowerCase() ?? null;
+  const onCpaCodex = cpaProvider === "codex";
+  const onCpaCline = isClineModel(cpaProvider);
   const [open, setOpen] = useState<{ left: number; bottom: number } | null>(null);
   const button = useRef<HTMLButtonElement>(null);
   const panel = useRef<HTMLDivElement>(null);
@@ -155,21 +174,27 @@ export function ChatContextMeter({ sessionId, agentLabel, model, launchedWindow,
   }, [sessionId]);
 
   // CPA's Codex accounts' limits change slowly and CPA Helper caches them: read once a minute while
-  // the window is visible, and again when the panel opens.
+  // the window is visible, and again when the panel opens. Their token use and cost come along.
   useEffect(() => {
     setQuota(null);
-    if (!onCpaCodex) return undefined;
+    setUsageReport(null);
+    if (!onCpaCodex && !onCpaCline) return undefined;
     let live = true;
-    const read = () => void getCodingToolsClient().apps.call({ moduleId: "agent-orchestrator", operation: "cpa_quota", arguments: {} })
-      .then((outer) => { if (live) setQuota((outer.result as CpaQuota | undefined) ?? null); })
-      .catch(() => undefined);
+    const read = () => {
+      if (onCpaCodex) {
+        void getCodingToolsClient().apps.call({ moduleId: "agent-orchestrator", operation: "cpa_quota", arguments: {} })
+          .then((outer) => { if (live) setQuota((outer.result as CpaQuota | undefined) ?? null); })
+          .catch(() => undefined);
+      }
+      void readCpaUsage(USAGE_RANGE).then((next) => { if (live) setUsageReport(next); }).catch(() => undefined);
+    };
     read();
     const timer = window.setInterval(() => { if (document.visibilityState === "visible") read(); }, QUOTA_POLL_MS);
     const onOpen = () => read();
     button.current?.addEventListener("click", onOpen);
     const target = button.current;
     return () => { live = false; window.clearInterval(timer); target?.removeEventListener("click", onOpen); };
-  }, [onCpaCodex]);
+  }, [onCpaCodex, onCpaCline]);
 
   // The category split reads the chat's history, so only while the panel is open.
   const [detail, setBreakdown] = useState<ContextBreakdown | null>(null);
@@ -236,6 +261,11 @@ export function ChatContextMeter({ sessionId, agentLabel, model, launchedWindow,
     .map((row) => ({ name: row.name, used: row.used ?? 0, resetsAt: row.resets && row.resets > 0 ? readAt + row.resets * 1000 : null })) : [];
   // The agent's own report wins; a CPA Codex model without one shows CPA's accounts instead.
   const cpaAccounts = !limitRows.length && onCpaCodex && quota?.available ? quota.accounts ?? [] : [];
+  const usageById = new Map((cpaUsage?.available ? cpaUsage.accounts ?? [] : []).map((account) => [account.id, account]));
+  // Cline Pass: CPA's one bridge account, whose quota lists the switcher's keys.
+  const clineBridge = !limitRows.length && onCpaCline
+    ? (cpaUsage?.accounts ?? []).find((account) => account.quota?.kind === "cline") : undefined;
+  const clineKeys = clineBridge?.quota?.kind === "cline" ? clineBridge.quota : null;
 
   return <>
     <button ref={button} type="button" className={`cx-icon-button cx-context-meter is-${tone(fraction)}`} aria-label={label} title={label}
@@ -290,10 +320,26 @@ export function ChatContextMeter({ sessionId, agentLabel, model, launchedWindow,
             {account.session ? <LimitRow name="Current session (5 h)" used={account.session.usedPercent} resetsAt={account.session.resetsAt} /> : null}
             {account.week ? <LimitRow name="Current week" used={account.week.usedPercent} resetsAt={account.week.resetsAt} /> : null}
             {!account.session && !account.week ? <p className="cx-context-note">{account.error || "CPA Helper has not checked this account's limits yet."}</p> : null}
+            <UsageLine account={usageById.get(account.id)} />
           </section>)}
         </> : onCpaCodex && !limitRows.length && quota && !quota.available ? <>
           <p className="cx-context-label">Plan usage limits</p>
           <p className="cx-context-note">{quota.reason || "CPA's account limits are unavailable."}</p>
+        </> : null}
+        {onCpaCline && !limitRows.length ? <>
+          <p className="cx-context-label">Plan usage limits · Cline Pass{clineKeys?.accounts.length ? ` (${clineKeys.accounts.length} keys, ${clineKeys.mode === "roundrobin" ? "round-robin" : "single key"})` : ""}</p>
+          {!cpaUsage ? null : !cpaUsage.available ? <p className="cx-context-note">{cpaUsage.reason || "CPA's account usage is unavailable."}</p> : <>
+            <p className="cx-context-note">Cline reports no remaining quota for a Cline Pass key. Each key's last request says whether it hit its limit.</p>
+            {(clineKeys?.accounts ?? []).map((key) => <section key={key.name} className={`cx-context-account${key.state === "disabled" || key.state === "limited" ? " is-resting" : ""}`}>
+              <div className="cx-context-account-head">
+                <span title={key.lastError ?? key.name}>{key.name}{key.active ? " · in use" : ""}</span>
+                <small>{[clineStateLabel(key.state, false), `${key.requests.toLocaleString()} requests`, `last used ${agoLabel(key.lastUsedAt, false)}`].join(" · ")}</small>
+              </div>
+            </section>)}
+            {!clineKeys ? <p className="cx-context-note">The Cline Pass switcher did not answer through CPA.</p> : null}
+            {clineKeys && !clineKeys.accounts.length ? <p className="cx-context-note">The Cline Pass switcher has no keys yet. Add one in CPA, under Plugins, Cline Pass.</p> : null}
+            <UsageLine account={clineBridge} />
+          </>}
         </> : null}
         {snapshot?.mcpServers.length ? <>
           <p className="cx-context-label">Tool servers ({snapshot.mcpServers.length})</p>

@@ -117,7 +117,7 @@ async function allocatePort() {
   return port;
 }
 
-function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, cpaQuota = null, logger = console }) {
+function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, cpaQuota = null, cpaUsage = null, logger = console }) {
   let child = null;
   let gateway = null;
   let view = null;
@@ -1333,6 +1333,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (operation === "cpa_quota") {
       if (!cpaQuota) return { ok: true, available: false, reason: "CPA is not set up in this app" };
       return cpaQuota.read();
+    }
+    // Each CPA account's tokens, requests and estimated cost over a range, with its quota where
+    // one is known (cpa-usage.cjs): the CPA accounts view and the context meter. Read-only.
+    if (operation === "cpa_usage") {
+      if (!cpaUsage) return { ok: true, available: false, reason: "CPA is not set up in this app" };
+      return cpaUsage.read({ range: typeof args.range === "string" ? args.range : undefined });
     }
     // A chat's Terminal and Preview panes: the user's view of each card's agent session, through
     // the agent tools server that started its commands and owns its preview (chat-agent-tools.cjs).

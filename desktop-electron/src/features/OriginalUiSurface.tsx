@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { JsonObject } from "../api/contracts";
 import type { Language, OriginalUiId, OriginalUiSnapshot, OriginalUiCatalog } from "../types";
+import { CpaUsagePanel } from "./CpaUsagePanel";
 import "./original-ui.css";
 
 interface OriginalUiSurfaceProps {
@@ -271,6 +272,8 @@ export function OriginalUiSurface({ toolId, initialSection, language, setError }
       ) : null}
       {localError || tool.error ? <p className="original-ui-error">{localError || tool.error}</p> : null}
       {notice ? <p className="original-ui-note">{notice}</p> : null}
+      {/* CPA's own panel shows no per-account tokens or cost; the app adds them above it. */}
+      {toolId === "cpa" ? <CpaUsagePanel language={language} /> : null}
 
       <div className="original-ui-frame-shell">
         {frameUrl ? (
