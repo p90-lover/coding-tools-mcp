@@ -2181,36 +2181,23 @@ test("an agent's own models take CPA's real window for the same model, and a no-
   assert.match(message, /no longer in this harness's model list/, message);
 });
 
-test("a model CPA pauses after use stays in the list, marked paused, and still takes a chat", async () => {
-  const root = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "seen-models-"));
-  const seenModelsFile = path.join(root, "cpa-seen-models.json");
+test("a model CPA stops listing leaves the picker (a launch on it is refused, see above)", async () => {
   let catalog = { data: [{ id: "gemini-3.8-flash-high", context_window: 1000000 }, { id: "cline-pass/deepseek-v4-flash", context_window: 1000000 }] };
   let clock = 1_000_000;
-  const make = () => createAgentOrchestratorWorkflow({
+  const workflow = createAgentOrchestratorWorkflow({
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
     fetchImpl: async url => String(url).includes("/v1/models") ? { ok: true, json: async () => catalog } : { ok: false, status: 404, json: async () => ({}) },
     requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [], teams: [], worker_capacity: {} } : { ok: true },
     aoHarness: { catalog: async () => [], models: async () => [], spawn: async () => "session" },
-    now: () => clock, seenModelsFile, confirm: async () => true,
+    now: () => clock, confirm: async () => true,
   });
-  try {
-    let workflow = make();
-    assert.ok((await workflow.call("models", { harness: "ao:claude-code" })).models.includes("cpa/cline-pass/deepseek-v4-flash"));
-    // After a chat on it rate-limited every account, CPA leaves it out of its list.
-    catalog = { data: [{ id: "gemini-3.8-flash-high", context_window: 1000000 }] };
-    clock += 2 * 60_000;
-    workflow = make(); // a restart too: what was seen is kept on disk
-    const listed = await workflow.call("models", { harness: "ao:claude-code" });
-    assert.ok(listed.models.includes("cpa/cline-pass/deepseek-v4-flash"), "still offered");
-    assert.equal(listed.capabilities["cpa/cline-pass/deepseek-v4-flash"].paused, true, "and marked paused");
-    const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/cline-pass/deepseek-v4-flash", permission_profile: ":ao-default" };
-    const sent = await workflow.call("chat_send", { workspaceId: "ws", message: "hi", executionMode: "single", singleRoute: route }).catch(error => ({ error }));
-    assert.notEqual(sent?.ok, false, "a paused model is not refused as gone: " + JSON.stringify(sent?.reason ?? ""));
-    // Unseen for longer than three days, it is gone.
-    clock += 4 * 24 * 60 * 60_000;
-    workflow = make();
-    assert.ok(!(await workflow.call("models", { harness: "ao:claude-code" })).models.includes("cpa/cline-pass/deepseek-v4-flash"));
-  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  assert.ok((await workflow.call("models", { harness: "ao:claude-code" })).models.includes("cpa/cline-pass/deepseek-v4-flash"));
+  // CPA no longer serves it (rate-limited, or the upstream answers "model not found").
+  catalog = { data: [{ id: "gemini-3.8-flash-high", context_window: 1000000 }] };
+  clock += 2 * 60_000;
+  const listed = await workflow.call("models", { harness: "ao:claude-code" });
+  assert.ok(!listed.models.includes("cpa/cline-pass/deepseek-v4-flash"), "only what CPA lists is offered");
+  assert.equal(listed.capabilities["cpa/cline-pass/deepseek-v4-flash"], undefined);
 });
 
 test("a chat on a model CPA no longer offers is refused before a task or run is created", async () => {
@@ -2244,11 +2231,14 @@ test("CPA's model list leaves out a provider plugin's models when nobody is sign
     { slug: "gpt-5.5", context_window: 272000 },
     { slug: "cline-pass/deepseek-v4-flash", context_window: 272000 },
     { slug: "commandcode-go/deepseek-v4.1-flash", context_window: 272000 },
+    { slug: "myclaude/claude-sonnet-5", context_window: 200000 },
   ] };
   const plain = { data: [
     { id: "gpt-5.5", owned_by: "openai" },
     { id: "cline-pass/deepseek-v4-flash", owned_by: "cline" },
     { id: "commandcode-go/deepseek-v4.1-flash", owned_by: "commandcode-go" },
+    // A Claude API key in CPA's config, with a prefix: no auth file names its provider.
+    { id: "myclaude/claude-sonnet-5", owned_by: "anthropic" },
   ] };
   const make = (accounts) => createAgentOrchestratorWorkflow({
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture", managementKey: "manage" }),
@@ -2267,9 +2257,9 @@ test("CPA's model list leaves out a provider plugin's models when nobody is sign
     { name: "cline-pass-switcher.json", provider: "cline" },
     { name: "commandcode-old.json", provider: "commandcode-go", disabled: true },
   ];
-  assert.deepEqual((await make(signedIn).call("models", {})).models, ["gpt-5.5", "cline-pass/deepseek-v4-flash"],
-    "commandcode-go has only a disabled account; the built-in gpt-5.5 is never judged by its owner name");
-  assert.equal((await make(null).call("models", {})).models.length, 3, "an unreadable account list hides nothing");
+  assert.deepEqual((await make(signedIn).call("models", {})).models, ["gpt-5.5", "cline-pass/deepseek-v4-flash", "myclaude/claude-sonnet-5"],
+    "commandcode-go has only a disabled account; built-in and API-key providers are never judged by their owner name");
+  assert.equal((await make(null).call("models", {})).models.length, 4, "an unreadable account list hides nothing");
 });
 
 test("permission capabilities use installed AO adapter modes without fabricating native metadata", async () => {

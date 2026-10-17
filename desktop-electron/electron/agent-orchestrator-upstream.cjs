@@ -599,7 +599,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       const projectId = workspaceId ? await projectFor(workspaceId).catch(() => "") : "";
       const catalog = await internalApi("GET", `/api/v1/agents/${agentId(agent)}/models${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`);
       return (Array.isArray(catalog?.models) ? catalog.models : []).filter(model => typeof model?.id === "string" && model.id.length <= 128)
-        .slice(0, 100).map(model => ({ id: model.id, label: String(model.label || model.id).slice(0, 128), isDefault: model.isDefault === true,
+        .slice(0, 500).map(model => ({ id: model.id, label: String(model.label || model.id).slice(0, 128), isDefault: model.isDefault === true,
           efforts: Array.isArray(model.efforts) ? model.efforts.filter(value => typeof value === "string" && value.length <= 32).slice(0, 16) : [] }));
     },
     async spawn({ workspaceId, agent, model, prompt, name, gateway = null, effort = null, contextWindow = null, approvalMode = null, autoReview = false, plain = false, warm = false }) {

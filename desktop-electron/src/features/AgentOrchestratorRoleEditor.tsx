@@ -12,8 +12,6 @@ export type AoModelCapabilities = {
   provider?: string;
   contextWindow?: { min: number; max?: number; kind?: "context" | "compaction" };
   contextLimit?: number; effortReason?: string; contextReason?: string;
-  /** CPA has paused it for now (rate-limited or cooling down): still offered, served again later. */
-  paused?: boolean; pausedReason?: string;
 };
 export type AoModelCatalog = { models: string[]; capabilities?: Record<string, AoModelCapabilities> };
 export type AoModelLoader = (harness: string) => Promise<string[] | AoModelCatalog>;
@@ -133,7 +131,7 @@ export function capabilityText(capability: AoModelCapabilities | undefined, nati
   // Catalog limits are decimal (272,000), so they read best as "272K" rather than tokensLabel's binary units.
   const size = !limit ? "" : limit >= 1_000_000 && limit % 100_000 === 0 ? `${limit / 1_000_000}M`
     : limit >= 1_000 && limit % 1_000 === 0 ? `${limit / 1_000}K` : tokensLabel(limit);
-  return [top ? `up to ${top} effort` : "", size ? `${size} context` : "", capability?.paused ? "paused by CPA for now" : ""].filter(Boolean).join(" · ");
+  return [top ? `up to ${top} effort` : "", size ? `${size} context` : ""].filter(Boolean).join(" · ");
 }
 
 /**
