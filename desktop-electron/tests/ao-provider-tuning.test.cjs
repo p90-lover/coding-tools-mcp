@@ -245,6 +245,7 @@ test("upstream spawn preserves context on Chat/TUI fallback without adding nativ
   const spawn = vm.runInNewContext("({" + method.getText(ast) + "}).spawn", {
     Buffer,
     projectFor: async () => "project",
+    forgetProject: () => {},
     agentId: id => id,
     sessionId: id => id,
     utf8Prefix: text => text,
@@ -338,7 +339,7 @@ test("a chat host that was only slow to start is retried as chat, not turned int
   const run = async (failures) => {
     const modes = [];
     const spawn = vm.runInNewContext("({" + method.getText(ast) + "}).spawn", {
-      Buffer, projectFor: async () => "project", agentId: id => id, sessionId: id => id, utf8Prefix: text => text,
+      Buffer, projectFor: async () => "project", forgetProject: () => {}, agentId: id => id, sessionId: id => id, utf8Prefix: text => text,
       TUI_RESULT_INSTRUCTION: "Write fixture result", TRANSIENT_CHAT_START: vm.runInNewContext(transient), CHAT_RETRY_PAUSE_MS: 0, setTimeout,
       rememberLaunchWindow: () => {},
       chatTools: async () => null,

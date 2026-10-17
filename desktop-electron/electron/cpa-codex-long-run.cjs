@@ -77,8 +77,13 @@ function trimJournal(events, { maxEvents = MAX_JOURNAL_EVENTS, maxBytes = MAX_JO
 
 function cpaLongRunYamlLines() {
   return [
-    "request-retry: 5",
-    "max-retry-interval: 300",
+    // A chat's agent sends its first request through CPA and waits for it. With every account for
+    // the model cooling down (a 429, a spent quota), 5 retries up to 300 s apart held that request
+    // for minutes, so a chat looked stuck starting before any token came. Interactive values: a
+    // few quick retries move to another account, and a cooldown longer than 30 s comes back as the
+    // provider's error (which the chat shows) instead of being waited out.
+    "request-retry: 3",
+    "max-retry-interval: 30",
     "save-cooldown-status: true",
     "error-logs-max-files: 20",
     `logs-max-total-size-mb: ${CPA_LOGS_MAX_TOTAL_SIZE_MB}`,

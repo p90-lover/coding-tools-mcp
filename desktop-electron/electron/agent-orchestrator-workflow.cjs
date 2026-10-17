@@ -281,6 +281,20 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   // Opening chats warms agents too; keep only the newest few so browsing does not pile them up.
   const WARM_MAX = 2;
   const warm = new Map(); // key -> { promise, session?, timer }
+  // AO starts one session at a time per project (it holds the project's lock for the whole start),
+  // and a warm start is a full one: trying three models queued three 30-60 s starts in front of the
+  // chat's real launch, which took three minutes. So a project has at most one warm start in flight
+  // and none beside a real launch; the latest route asked for meanwhile is warmed once it is free.
+  const warmSpawning = new Set(); // entries whose AO start has not returned, evicted ones included
+  const warmDeferred = new Map(); // workspaceId -> { route, plain }: the latest route asked for meanwhile
+  const launching = new Map(); // workspaceId -> real launches in flight
+  const warmBusy = workspaceId => (launching.get(workspaceId) ?? 0) > 0 || [...warmSpawning].some(entry => entry.workspaceId === workspaceId);
+  function startDeferredWarm(workspaceId) {
+    const next = warmDeferred.get(workspaceId);
+    if (!next || idleStopped || warmBusy(workspaceId)) return;
+    warmDeferred.delete(workspaceId);
+    void chatPrewarmRoute(workspaceId, next.route, next.plain).catch(() => undefined);
+  }
   // The app's tools a launch attaches (the tool groups enabled and the server's lifetime; never a
   // credential or anything per session) are launch identity too: a session warmed with other
   // tools, or none, is not handed to this chat.
@@ -330,19 +344,39 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     if (toolsWaits.has(workspaceId)) { clearTimer(toolsWaits.get(workspaceId)); toolsWaits.delete(workspaceId); }
     const key = warmKey(workspaceId, route, plain);
     if (warm.has(key)) return { ok: true, warmed: true };
+    // Checked again after the catalog read below: another start may have begun while it ran.
+    const deferred = () => {
+      if (!warmBusy(workspaceId)) return null;
+      // A real launch is the chat's agent; a picker change made during it is not worth a start
+      // queued behind it. Beside a warm start, the latest route waits its turn.
+      if ((launching.get(workspaceId) ?? 0) > 0) return { ok: true, warmed: false, reason: "An agent is starting in this project" };
+      warmDeferred.set(workspaceId, { route, plain });
+      warmLog("deferred", { model: route?.model ?? null });
+      return { ok: true, warmed: false, deferred: true, reason: "Another agent is starting in this project" };
+    };
+    const busy = deferred();
+    if (busy) return busy;
     const args = aoLaunchArgs(workspaceId, node, plain, await defaultContextWindow(workspaceId, node));
+    if (warm.has(key)) return { ok: true, warmed: true };
+    const busyNow = deferred();
+    if (busyNow) return busyNow;
     while (warm.size >= WARM_MAX) {
       const [oldKey, oldest] = warm.entries().next().value;
       warm.delete(oldKey);
       clearTimeout(oldest.timer);
       warmLog("evicted", { model: oldest.route?.model ?? null, ready: Boolean(oldest.session) });
+      // One still starting is ended the moment its start returns (AO cannot cancel a start).
       void oldest.promise.then(session => harnessService().kill?.(session)).catch(() => undefined);
     }
     const entry = { workspaceId, plain: Boolean(plain), tools: toolsKey(workspaceId),
       route: Object.fromEntries(ROUTE_IDENTITY.map(field => [field, route?.[field] ?? null])), started: now() };
+    const settled = () => { warmSpawning.delete(entry); startDeferredWarm(workspaceId); };
     entry.promise = sweepStaleWarm().then(() => harnessService().spawn({ ...args, prompt: "", warm: true })).then(session => {
       entry.session = session;
       warmLog("ready", { model: entry.route.model, readyMs: now() - entry.started });
+      settled();
+      // Evicted while it started: it is being ended, so nothing waits to expire.
+      if (warm.get(key) !== entry) return session;
       // Unused for a while: end it rather than keep an idle agent around.
       entry.timer = setTimeout(() => {
         if (warm.get(key) !== entry) return;
@@ -355,14 +389,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     }, error => {
       if (warm.get(key) === entry) warm.delete(key);
       warmLog("failed", { model: entry.route.model, error: String(error?.message || error).slice(0, 200) });
+      settled();
       throw error;
     });
+    warmSpawning.add(entry);
     warm.set(key, entry);
     entry.promise.catch(() => undefined);
     warmLog("started", { model: entry.route.model, waiting: warm.size });
     return { ok: true, warmed: true, starting: true };
   }
-  /** Hands the warm session for this route to a launch (waiting for one still starting), or null. */
+  /** Hands the ready warm session for this route to a launch, or null. */
   async function takeWarm(workspaceId, route, plain) {
     const key = warmKey(workspaceId, route, plain);
     const entry = warm.get(key);
@@ -370,6 +406,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       const near = [...warm.values()].filter(item => item.workspaceId === workspaceId)
         .map(item => warmDiff(item, workspaceId, route, plain)).sort((a, b) => a.length - b.length)[0];
       warmLog("miss", { model: route?.model ?? null, waiting: warm.size, differs: near ?? null });
+      return null;
+    }
+    // Still starting: waiting for it held the launch for up to AO's whole start timeout, and the
+    // launch's own start would queue behind it in AO anyway. The launch starts its own session;
+    // this one stays for the next new chat on the route, ended by WARM_TTL_MS or eviction.
+    if (!entry.session) {
+      warmLog("not_ready", { model: entry.route.model, ageMs: now() - entry.started });
       return null;
     }
     warm.delete(key);
@@ -604,7 +647,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       // keeps its own ChatGPT-account models. For a CPA-only agent a CPA failure is reported,
       // never silently replaced by its aliases; the renderer drops a rejected catalog and retries.
       const cpaOnly = CPA_ONLY_AGENTS.has(agent);
-      const items = cpaOnly ? [] : (await harnessService().models(agent, workspaceId))
+      const items = cpaOnly ? [] : (await cachedAgentModels(agent, workspaceId))
         .filter(item => item.id !== "default" && !item.id.startsWith("chatgpt-web/"));
       let catalog = null;
       if (GATEWAY_AGENTS.has(agent)) {
@@ -646,6 +689,24 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   // owners), seconds on a busy machine before the agent even starts. It changes rarely; a minute's
   // cache serves them all, and a failed read is never cached.
   const CPA_CATALOG_TTL_MS = 60_000;
+  // An agent's own catalog was read up to three times per send (the send's model check, the
+  // launch's effort/window check and a blank card's default window), each binding the workspace in
+  // AO first (git calls, a dependency sync) and then asking AO, which can take its 30 s. It is
+  // shared for a minute per agent and workspace like CPA's; a failed or empty read is not kept.
+  const agentModelsCache = new Map(); // JSON [agent, workspaceId] -> { at, promise }
+  function cachedAgentModels(agent, workspaceId) {
+    const key = JSON.stringify([agent, workspaceId ?? null]);
+    const at = now();
+    const hit = agentModelsCache.get(key);
+    if (hit && at - hit.at < CPA_CATALOG_TTL_MS) return hit.promise;
+    const entry = { at, promise: Promise.resolve().then(() => harnessService().models(agent, workspaceId)) };
+    const forget = () => { if (agentModelsCache.get(key) === entry) agentModelsCache.delete(key); };
+    entry.promise.then(items => { if (!Array.isArray(items) || !items.length) forget(); }, forget);
+    agentModelsCache.delete(key);
+    agentModelsCache.set(key, entry);
+    if (agentModelsCache.size > 50) agentModelsCache.delete(agentModelsCache.keys().next().value);
+    return entry.promise;
+  }
   let cpaCatalogCache = null; // { at, promise }
   function cachedCpaCatalog() {
     const at = now();
@@ -783,6 +844,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       // window before it, and whether it continued the chat's session, took a warm one or spawned.
       let launchedVia = "spawn";
       let launchStarted = null;
+      // No warm start begins in this project while the launch runs (it would queue in front of
+      // it in AO), and a route the picker asked to warm before the send is no longer wanted.
+      launching.set(workspaceId, (launching.get(workspaceId) ?? 0) + 1);
+      warmDeferred.delete(workspaceId);
       try {
         await checkRoute();
         const launch = aoLaunchArgs(workspaceId, node, plain, await defaultContextWindow(workspaceId, node));
@@ -815,7 +880,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
           const timer = setTimer(() => { void chatPrewarmRoute(workspaceId, node.route, plain).catch(() => undefined); }, REWARM_DELAY_MS);
           timer?.unref?.();
         }
-      } catch (error) { failure = error; }
+      } catch (error) { failure = error; } finally {
+        const left = (launching.get(workspaceId) ?? 1) - 1;
+        if (left > 0) launching.set(workspaceId, left); else launching.delete(workspaceId);
+      }
       const done = now();
       logger?.info?.("ao.launch_timing", { agent: externalAgent(node), via: launchedVia, ok: !failure,
         prepareMs: (launchStarted ?? done) - dispatchStarted, launchMs: launchStarted === null ? 0 : done - launchStarted, totalMs: done - dispatchStarted });

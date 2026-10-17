@@ -2941,6 +2941,8 @@ async function start() {
           ? path.join(process.resourcesPath, "agent-orchestrator")
           : path.join(__dirname, "..", "build", "agent-orchestrator"),
       dataRoot: aoDataRoot,
+      // Beside the app's other logs, so a slow chat launch's AO stage timings are kept.
+      daemonLogFile: path.join(app.getPath("logs"), "ao-daemon.log"),
       confirm: confirmAoAction, getWindow: () => mainWindow,
       getWorkspaces: listHeadlessWorkspaces,
       getCpaPricesPath: () => require("./cpa-managed.cjs").helperPricesPath(

@@ -714,3 +714,52 @@ test("a finished turn's work is read back from AO, paging back until it reaches 
   assert.equal(requests.filter(endpoint => endpoint.includes("beforeSequence")).length, 2, "it stops once a page reaches the turn before");
   assert.equal((await upstream.timeline("s", "")).length, 0, "no turn, nothing to read");
 });
+
+test("a send binds its workspace in AO once, not for every catalog read and the launch", async () => {
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("  async function projectFor");
+  const block = source.slice(start, source.indexOf("  /**\n   * The app's own tools for one chat session", start));
+  const binds = [];
+  let failing = false;
+  const upstream = vm.runInNewContext(block + "({ projectFor, forgetProject })", {
+    Date, Map, Promise,
+    workspaceBoard: { bind: async id => {
+      binds.push(id);
+      if (failing) throw new Error("git is busy");
+      return { workspaceId: id, projectId: id === "plain-folder" ? null : `project-${id}` };
+    } },
+  });
+  assert.equal(await upstream.projectFor("ws-1"), "project-ws-1");
+  assert.equal(await upstream.projectFor("ws-1"), "project-ws-1");
+  assert.deepEqual(binds, ["ws-1"], "the launch reuses the binding its model check just made");
+  upstream.forgetProject("ws-1");
+  await upstream.projectFor("ws-1");
+  assert.equal(binds.length, 2, "a failed start (or a new daemon) binds again");
+  await assert.rejects(upstream.projectFor("plain-folder"), /git repository registered in AO/);
+  await assert.rejects(upstream.projectFor("plain-folder"));
+  assert.equal(binds.filter(id => id === "plain-folder").length, 2, "a workspace without a project is not kept");
+  failing = true;
+  await assert.rejects(upstream.projectFor("ws-2"), /git is busy/);
+  failing = false;
+  assert.equal(await upstream.projectFor("ws-2"), "project-ws-2", "a failed binding is not kept");
+});
+
+test("the AO daemon's output is kept in a log file that rotates once, so a slow launch can be read afterwards", () => {
+  const { createDaemonLog } = require("../electron/agent-orchestrator-upstream.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ao-daemon-log-"));
+  try {
+    const file = path.join(root, "logs", "ao-daemon.log");
+    const log = createDaemonLog(file, { maxBytes: 64 });
+    log.write(Buffer.from("chat: ACP start stage 1200ms\n"));
+    log.write("agent readiness check 900ms\n");
+    const first = "chat: ACP start stage 1200ms\nagent readiness check 900ms\n";
+    assert.equal(fs.readFileSync(file, "utf8"), first);
+    log.write("x".repeat(40) + "\n");
+    assert.equal(fs.readFileSync(`${file}.1`, "utf8"), first, "the full file moves aside");
+    assert.equal(fs.readFileSync(file, "utf8"), "x".repeat(40) + "\n");
+    log.write("y".repeat(40) + "\n");
+    assert.equal(fs.readFileSync(`${file}.1`, "utf8"), "x".repeat(40) + "\n", "only one previous file is kept");
+    assert.doesNotThrow(() => createDaemonLog(null).write("nothing"), "no file configured: nothing is written");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
