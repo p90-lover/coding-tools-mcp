@@ -50,12 +50,25 @@ async function cachedHash(cache, full, rel) {
   return sha256;
 }
 
+/**
+ * Whether a Coding Tools.exe command line is the app's main process. Chromium's children carry
+ * --type=; the bridge also runs the exe as Node for its browser helper ("Coding Tools.exe
+ * ...\browser-helper.cjs"), which outlives the app, so waiting on it never applied the patch.
+ */
+function isAppMainProcess(commandLine) {
+  const line = String(commandLine || "");
+  return !/--type=/.test(line) && !/\.[cm]?js\b/i.test(line);
+}
+
 /** The PID of Coding Tools' main process when it runs from the target folder. */
 function runningAppPid(executable) {
   if (process.platform !== "win32") return null;
-  const query = `Get-CimInstance Win32_Process -Filter "Name='Coding Tools.exe'" | Where-Object { $_.ExecutablePath -eq '${executable.replace(/'/g, "''")}' -and $_.CommandLine -notmatch '--type=' } | Select-Object -First 1 -ExpandProperty ProcessId`;
+  const query = `Get-CimInstance Win32_Process -Filter "Name='Coding Tools.exe'" | Where-Object { $_.ExecutablePath -eq '${executable.replace(/'/g, "''")}' } | Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress`;
   const result = spawnSync("powershell.exe", ["-NoProfile", "-Command", query], { encoding: "utf8", windowsHide: true });
-  const pid = Number.parseInt(String(result.stdout).trim(), 10);
+  let processes = [];
+  try { processes = [JSON.parse(String(result.stdout).trim() || "[]")].flat(); } catch { return null; }
+  const main = processes.find((entry) => isAppMainProcess(entry?.CommandLine));
+  const pid = Number(main?.ProcessId);
   return Number.isInteger(pid) && pid > 0 ? pid : null;
 }
 
@@ -129,4 +142,8 @@ async function main() {
   console.log(`Log: ${job.logPath}`);
 }
 
-main().catch((error) => { console.error(error instanceof Error ? error.message : error); process.exit(1); });
+if (require.main === module) {
+  main().catch((error) => { console.error(error instanceof Error ? error.message : error); process.exit(1); });
+}
+
+module.exports = { isAppMainProcess };

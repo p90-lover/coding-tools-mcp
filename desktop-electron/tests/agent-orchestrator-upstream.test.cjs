@@ -370,6 +370,20 @@ test("a steered message reads as the user's own words in the live timeline", asy
   assert.deepEqual(timeline.map(item => [item.kind, item.text]), [["system", "Context compacted"], ["steer", "use pnpm, not npm"]]);
 });
 
+test("a provider retry says why it retries, such as a rate limit", async () => {
+  // As AO stored it live (coding-tools-mcp-27): the summary alone never said it was a 429.
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {
+      turns: [{ id: "t", state: "running" }], messages: [],
+      activities: [{ id: "r1", turnId: "t", sequence: 2, activityKind: "system", status: "running", summary: "Retrying Claude, attempt 2 of 10.",
+        detail: { category: "limit", event: "provider.failure", severity: "warning", text: "API error 429. Trying again in 1s." } }],
+    } : { session: { id: "s", mode: "chat", status: "working" } },
+  });
+  const timeline = JSON.parse(JSON.stringify((await upstream.observe("s")).timeline));
+  assert.deepEqual(timeline.map(item => [item.kind, item.text]),
+    [["system", "Retrying Claude, attempt 2 of 10. API error 429. Trying again in 1s."]]);
+});
+
 test("an idle agent is found by its last turn, released with exit-agent, and resumed when its chat continues", async () => {
   const vm = require("node:vm");
   const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
