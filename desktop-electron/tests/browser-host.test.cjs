@@ -239,6 +239,56 @@ test("primary browser initialization keeps its view offscreen but visible until 
   ]);
 });
 
+test("a primary view that misses its first idle-document window is retried, then owns its descriptor", async () => {
+  // Seen live: on a busy machine every start missed the 10 s window; the timeout stopped the load,
+  // nothing retried it, and the launcher never wrote its ownership descriptor.
+  const calls = [];
+  let currentUrl = "about:blank";
+  let loads = 0;
+  const contents = new EventEmitter();
+  contents.isDestroyed = () => false;
+  contents.getURL = () => currentUrl;
+  contents.stop = () => calls.push("stop");
+  contents.loadURL = (url) => {
+    loads += 1;
+    calls.push(["load", loads]);
+    if (loads === 1) return new Promise(() => {}); // never commits: the first window times out
+    currentUrl = url;
+    return Promise.resolve();
+  };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    bootstrapAttemptsMs: [5, 50],
+    view: { setBounds() {}, setVisible() {}, webContents: contents },
+    hiddenTurnBounds: () => ({ x: 0, y: 0, width: 1, height: 1 }),
+    markOwnedSurface: async () => calls.push("owned"),
+    syncViewVisibility: () => {},
+    writeDescriptor: () => calls.push("descriptor"),
+    logger: { info: (event) => calls.push(event), warn: (event, detail) => calls.push([event, detail]) },
+  });
+
+  await BrowserHost.prototype.initializePrimaryView.call(fixture);
+
+  assert.deepEqual(calls, [
+    ["load", 1], "stop", ["browser.initialization_retry", { attempt: 1, timeoutMs: 5 }],
+    ["load", 2], "owned", "descriptor", "browser.initialized",
+  ]);
+
+  // A real load failure is not retried.
+  const failing = new EventEmitter();
+  failing.isDestroyed = () => false;
+  failing.getURL = () => "about:blank";
+  failing.stop = () => {};
+  failing.loadURL = () => Promise.reject(new Error("net::ERR_FAILED"));
+  const broken = Object.assign(Object.create(BrowserHost.prototype), {
+    bootstrapAttemptsMs: [5, 50],
+    view: { setBounds() {}, setVisible() {}, webContents: failing },
+    hiddenTurnBounds: () => ({ x: 0, y: 0, width: 1, height: 1 }),
+    syncViewVisibility: () => {},
+    logger: { info() {}, warn: () => { throw new Error("must not retry"); } },
+  });
+  await assert.rejects(BrowserHost.prototype.initializePrimaryView.call(broken), /ERR_FAILED/);
+});
+
 test("authentication diagnostics retain only origin and non-sensitive error metadata", () => {
   assert.equal(
     navigationOriginForLog("https://accounts.google.com/o/oauth2/v2/auth?state=secret&login_hint=user@example.com"),

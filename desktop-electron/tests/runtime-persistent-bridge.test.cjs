@@ -82,6 +82,42 @@ test("adoption refuses a live foreign owner, a version mismatch, or a non-persis
   assert.equal((await plain.detach()).status, "not-persistent");
 });
 
+test("a same-version patch replaces an idle bridge that runs an older runtime bundle", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "persistent-bridge-"));
+  const daemon = survivingDaemon();
+  t.after(() => daemon.kill());
+  const health = { service: "codex-chatgpt-web", mode: "full", version: "0.2.0", pid: daemon.pid };
+  const oldRoot = path.join(root, "versions", "0.2.0-win32-x64");
+  const patchedRoot = `${oldRoot}-b9bd1747bbd7`;
+  const ownership = { ownerPid: 2 ** 22 - 3, daemonPid: daemon.pid, daemonRuntimeRoot: oldRoot };
+
+  writeOwnership(root, ownership);
+  const idle = supervisorFor(root);
+  idle.supervisor.runtimeRootProvider = () => patchedRoot;
+  idle.supervisor.proxyHealthPayload = async () => ({ ...health, active_browser_turns: 0 });
+  assert.equal(await idle.supervisor.adoptRunningDaemon(config), false, "the patched runtime must take over");
+  assert.ok(idle.events.some(([event]) => event === "runtime.daemon_outdated"));
+
+  // A bridge in the middle of a turn keeps it; the next launch replaces it.
+  const busy = supervisorFor(root).supervisor;
+  busy.runtimeRootProvider = () => patchedRoot;
+  busy.proxyHealthPayload = async () => ({ ...health, active_browser_turns: 1 });
+  assert.equal(await busy.adoptRunningDaemon(config), true);
+  assert.equal(busy.snapshot("ready").daemonRuntimeRoot, oldRoot, "the adopted bridge keeps its recorded folder");
+
+  // Same folder, or a state written before folders were recorded: adopt as before.
+  writeOwnership(root, ownership);
+  const same = supervisorFor(root).supervisor;
+  same.runtimeRootProvider = () => oldRoot.toUpperCase();
+  same.proxyHealthPayload = async () => health;
+  assert.equal(await same.adoptRunningDaemon(config), process.platform === "win32");
+  writeOwnership(root, { ownerPid: 2 ** 22 - 3, daemonPid: daemon.pid });
+  const legacy = supervisorFor(root).supervisor;
+  legacy.runtimeRootProvider = () => patchedRoot;
+  legacy.proxyHealthPayload = async () => health;
+  assert.equal(await legacy.adoptRunningDaemon(config), true);
+});
+
 test("an adopted daemon that dies unexpectedly is reported and recovered", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "persistent-bridge-"));
   const daemon = survivingDaemon();

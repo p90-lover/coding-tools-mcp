@@ -140,7 +140,14 @@ pub fn available_workers(data: &AppData, run: &Run) -> usize {
             })
             .count()
     };
-    let global = data.ao_runs.iter().map(active).sum::<usize>();
+    // A stopped run never dispatches again, so its reserved or running worker cards (orphaned
+    // when the app restarted mid-turn) must not hold global slots that live runs wait on.
+    let global = data
+        .ao_runs
+        .iter()
+        .filter(|mission| !mission.cancelled)
+        .map(active)
+        .sum::<usize>();
     usize::from(data.ao_limits.max_workers)
         .saturating_sub(global)
         .min(usize::from(run.worker_limit).saturating_sub(active(run)))
@@ -2133,6 +2140,55 @@ mod tests {
             Some("Partial worker output")
         );
         ao::grant_valid(&data, &retried, 1003, &"a".repeat(64)).unwrap();
+    }
+
+    #[test]
+    fn stopped_run_worker_cards_release_global_worker_capacity() {
+        let mut data = recovery_fixture();
+        // The recovery run keeps one reserved worker; make it a running one as after a restart.
+        data.ao_runs[0].nodes[3].state = State::Running;
+        let busy = |data: &AppData| {
+            data.ao_runs[0]
+                .nodes
+                .iter()
+                .filter(|node| {
+                    node.role == Role::Worker
+                        && matches!(node.state, State::Reserved | State::Running)
+                })
+                .count()
+        };
+        assert!(busy(&data) >= 1);
+        let mut other = data.ao_runs[0].clone();
+        other.id = "other".into();
+        other.grant = None;
+        for node in &mut other.nodes {
+            node.state = State::Pending;
+            node.request_key = None;
+            node.receipt = None;
+        }
+        data.ao_runs.push(other.clone());
+        data.ao_limits.max_workers = u8::try_from(busy(&data)).unwrap();
+        assert_eq!(
+            available_workers(&data, &other),
+            0,
+            "an active run's running worker holds its global slot"
+        );
+
+        let stopped = control(&mut data, "qa", "recovery", "stop").unwrap();
+        assert!(stopped.cancelled);
+        assert_eq!(
+            stopped.nodes[3].state,
+            State::Running,
+            "stop leaves it orphaned"
+        );
+        assert_eq!(busy(&data), usize::from(data.ao_limits.max_workers));
+        let free = usize::from(data.ao_limits.max_workers).min(usize::from(other.worker_limit));
+        assert!(free >= 1);
+        assert_eq!(
+            available_workers(&data, &other),
+            free,
+            "a stopped run's orphaned worker cards do not hold global slots"
+        );
     }
 
     #[test]

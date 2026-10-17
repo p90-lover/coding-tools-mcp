@@ -10,7 +10,7 @@ test("runtime upgrade waits for the saved-session refresh to release the browser
   const file = ts.createSourceFile("main.cjs", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
   let startup;
   function visit(node) {
-    if (ts.isArrowFunction(node) && node.body.getText(file).includes("const upgrade = await runtimeHost.upgradeManagedRuntime()")) startup = node;
+    if (ts.isArrowFunction(node) && /const upgrade = await whenRuntimeHostIdle\([^)]*\(\) => runtimeHost\.upgradeManagedRuntime\(\)\)/.test(node.body.getText(file))) startup = node;
     ts.forEachChild(node, visit);
   }
   visit(file);
@@ -21,6 +21,9 @@ test("runtime upgrade waits for the saved-session refresh to release the browser
   const stop = new Error("Stop after testing upgrade entry");
   const start = vm.runInNewContext(`(${startup.getText(file)})`, {
     startupAuthenticationRefresh,
+    logger: {},
+    // The busy-host retry (tests/startup-runtime-busy.test.cjs) runs the step once here.
+    whenRuntimeHostIdle: (_logger, _step, run) => run(),
     // A pending upgrade probes the browser, so startup waits for the refresh in full.
     runtimeHost: {
       managedRuntimeUpgradeRequired: () => true,

@@ -7,19 +7,20 @@ import { AgentOrchestratorOriginalSurface } from "./AgentOrchestratorOriginalSur
 import { AgentOrchestratorCanvas, type CanvasNode } from "./AgentOrchestratorCanvas";
 import { AgentOrchestratorChat } from "./AgentOrchestratorChat";
 import { ChatThreadList, type ThreadWorkspace } from "./ChatThreadList";
-import { ProjectEditDialog } from "./ProjectEditDialog";
+import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "./ProjectEditDialog";
 import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
-import { GOAL_SUMMARY, chatArchived, chatList, chatMarkdown, chatMessagesFromDescription, chatTurns, goalElapsed, type ChatActivity, type ChatCommands, type ChatGoal, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
+import { GOAL_SUMMARY, chatArchived, chatList, chatMarkdown, chatMessagesFromDescription, chatTurns, dependencyInstallNote, goalElapsed, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
 import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { createLatestConfigQueue } from "./ao-config";
 import {
-  AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, defaultTeam, emptyRoleSettings,
+  AGENT_DEFAULT_MODEL, AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, defaultTeam, emptyRoleSettings,
   cardMeta, harnessLabel, modelLabel, teamForMission, workerRoute, type AoHarness, type AoModelCatalog, type AoModelLoader, type AoRoute, type AoTeam, type RoleSettings,
 } from "./AgentOrchestratorRoleEditor";
 import "./agent-orchestrator.css";
 import "./codex-chat.css";
+import "./claude-theme.css";
 import { onAoPush, pageHidden } from "./page-visibility";
 
 type Clause = { id: string; title: string; detail?: string; state: string };
@@ -225,6 +226,51 @@ function FloatingSheet({ stage, title, onClose, children, anchor, className = ""
   </div>;
 }
 
+/**
+ * A new chat's single-model route: the default worker in the project, set to "Approve for me", so
+ * routine commands run and anything else is judged by the command reviewer (codex-auto-review when
+ * CPA can reach it), with only unclear requests coming to the person.
+ */
+function newChatRoute(): AoRoute {
+  return lastChatRoute() ?? { ...workerRoute(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL),
+    native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+}
+/**
+ * A new chat starts on the route the last chat was sent with, as Codex and Claude Code keep the
+ * last model. A new chat pre-warms its route as soon as it opens, so with the default model there
+ * the agent being readied was one nobody used, and the chosen model's started only once picked.
+ */
+const LAST_CHAT_ROUTE = "coding-tools:ao:last-chat-route";
+const CHAT_ROUTE_FIELDS = ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile",
+  "approval_policy", "approvals_reviewer", "effort", "context_window"];
+/**
+ * What a chat says about a start that did not get going: a failed start, or one held before it
+ * began (a WebGPT card whose browser check failed was held with its reason, and the chat said
+ * "Starting…" for good). Empty when the start went ahead.
+ */
+function startNotice(result: Record<string, unknown>): string {
+  if (result.status === "failed") return String(result.detail || "The run could not start");
+  if (result.status === "held" && typeof result.detail === "string" && result.detail) return result.detail;
+  return "";
+}
+/** The fields that decide how a route launches, in a fixed order (absent ones as null). */
+const routeIdentity = (route: AoRoute) => CHAT_ROUTE_FIELDS.map(name => (route as unknown as Record<string, unknown>)[name] ?? null);
+function lastChatRoute(): AoRoute | null {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(LAST_CHAT_ROUTE) || "null");
+    if (!saved || typeof saved !== "object" || Array.isArray(saved)) return null;
+    const route = Object.fromEntries(Object.entries(saved).filter(([name, value]) => CHAT_ROUTE_FIELDS.includes(name)
+      && (typeof value === "string" || (name === "context_window" && Number.isSafeInteger(value)))));
+    const required = ["harness_id", "provider_id", "account_id", "model", "permission_profile"];
+    return required.every(name => typeof route[name] === "string") && route.model && route.model !== AGENT_DEFAULT_MODEL
+      ? route as unknown as AoRoute : null;
+  } catch { return null; }
+}
+function rememberChatRoute(route: AoRoute) {
+  const kept = Object.fromEntries(Object.entries(route).filter(([name, value]) => CHAT_ROUTE_FIELDS.includes(name) && value !== undefined && value !== null));
+  try { localStorage.setItem(LAST_CHAT_ROUTE, JSON.stringify(kept)); } catch { /* New chats keep the default model. */ }
+}
+
 export async function moduleCall(operation: string, args: JsonObject = {}) {
   const outer = await getCodingToolsClient().apps.call({
     moduleId: "agent-orchestrator", operation, arguments: args,
@@ -239,6 +285,39 @@ export async function moduleCall(operation: string, args: JsonObject = {}) {
     throw new Error(String(result.reason || result.detail || "Agent Orchestrator operation failed"));
   }
   return result;
+}
+
+/** Reads, or with `mode` sets, where a project's chats work (the Edit project dialog). */
+async function workspaceMode(workspaceId: string, mode?: WorkspaceMode): Promise<WorkspaceModeState> {
+  const result = await moduleCall("workspace_mode", { workspaceId, ...(mode ? { mode } : {}) });
+  return {
+    available: result.available === true,
+    ...(typeof result.mode === "string" ? { mode: result.mode as WorkspaceMode } : {}),
+    ...(typeof result.reason === "string" ? { reason: result.reason } : {}),
+  };
+}
+
+/**
+ * Reads the harness list, and while AO is still starting (the list then holds only Native Codex,
+ * with a notice) asks again with a growing pause for about three minutes, so Claude Code, Codex and
+ * the other AO harnesses appear once AO is up instead of staying missing until a reload.
+ * Returns a function that stops asking.
+ */
+export function watchHarnesses(update: (harnesses: AoHarness[], notice: string) => void): () => void {
+  let live = true;
+  void (async () => {
+    for (let attempt = 0; live && attempt < 20; attempt++) {
+      if (attempt) await new Promise(resolve => setTimeout(resolve, Math.min(2000 * attempt, 10_000)));
+      if (!live) return;
+      const result = await moduleCall("harnesses")
+        .catch(cause => ({ harnesses: [], notice: cause instanceof Error ? cause.message : String(cause) } as Record<string, unknown>));
+      if (!live) return;
+      const notice = typeof result.notice === "string" ? result.notice : "";
+      update(Array.isArray(result.harnesses) ? result.harnesses as AoHarness[] : [], notice);
+      if (!notice) return;
+    }
+  })();
+  return () => { live = false; };
 }
 
 /** Per-viewer chat list state (pins, unread, pinned projects), kept on this computer like Codex. */
@@ -371,6 +450,9 @@ export function aoChatExecution(mode: "single" | "team", route: AoRoute, teams: 
 
 const NATIVE_ENTRY: AoHarness = { id: NATIVE_HARNESS, label: "Native Codex", runnable: true, installed: true };
 
+/** A project folder's git kind for the chat list's labels; one stable function, so each folder is read once. */
+const readProjectGit = (folder: string) => window.codexWebLauncher?.projectGit?.(folder) ?? Promise.resolve(null);
+
 export function AgentOrchestratorSurface({ language, setError }: {
   language: Language;
   setError: (error: string | null) => void;
@@ -404,13 +486,33 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [missions, setMissions] = useState<AoMission[]>([]);
   const [selectedRunId, setSelectedRunId] = useState("");
   const [showInactive, setShowInactive] = useState(false);
+  // What agent worktrees get of the project's installed dependencies (null: not read yet):
+  // `enabled` reuses node_modules as a hard-link farm, `python` shares the .venv/venv itself.
+  type DependencySettings = { enabled: boolean; python: boolean };
+  const [depSettings, setDepSettings] = useState<DependencySettings | null>(null);
+  const readDepSettings = (result: { enabled?: unknown; python?: unknown }): DependencySettings =>
+    ({ enabled: result.enabled !== false, python: result.python === true });
+  useEffect(() => {
+    if (sheet !== "settings") return;
+    let live = true;
+    void moduleCall("upstream_dependency_links")
+      .then((result) => { if (live) setDepSettings(readDepSettings(result)); })
+      .catch(() => { if (live) setDepSettings(null); });
+    return () => { live = false; };
+  }, [sheet]);
+  const changeDepSetting = (name: keyof DependencySettings, value: boolean) => {
+    const previous = depSettings;
+    if (previous) setDepSettings({ ...previous, [name]: value });
+    void moduleCall("upstream_set_dependency_links", { [name]: value })
+      .then((result) => setDepSettings(readDepSettings(result)))
+      .catch(() => setDepSettings(previous));
+  };
   const [inspectedId, setInspectedId] = useState("");
   const [team, setTeam] = useState<AoTeam | null>(null);
   const [savedTeams, setSavedTeams] = useState<AoTeam[]>([]);
   const [composerTeamId, setComposerTeamId] = useState("");
   const [composerMode, setComposerMode] = useState<"single" | "team">("single");
-  const [singleRoute, setSingleRoute] = useState<AoRoute>(() => ({ ...workerRoute(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL),
-    native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" }));
+  const [singleRoute, setSingleRoute] = useState<AoRoute>(newChatRoute);
   const hydratedComposer = useRef("");
   // The New mission sheet's team choice (#254); the composer keeps its own (composerTeamId).
   const [missionTeamId, setMissionTeamId] = useState("");
@@ -433,6 +535,23 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [advanceNotice, setAdvanceNotice] = useState("");
   const [autoStatus, setAutoStatus] = useState("idle");
   const [pendingApprovals, setPendingApprovals] = useState<AoApproval[]>([]);
+  // Which folders this project's worktrees share or farm, for the install note on approval cards.
+  const [dependencyLinks, setDependencyLinks] = useState<{ workspaceId: string; at: number; links: DependencyLinks } | null>(null);
+  const wantsDependencyLinks = Boolean(workspaceId) && pendingApprovals.some((approval) => Boolean(approval.command));
+  useEffect(() => {
+    if (!wantsDependencyLinks) return;
+    if (dependencyLinks?.workspaceId === workspaceId && Date.now() - dependencyLinks.at < 60_000) return;
+    let live = true;
+    void moduleCall("dependency_link_info", { workspaceId }).then((result) => {
+      const list = (value: unknown) => Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+      if (live) setDependencyLinks({ workspaceId, at: Date.now(), links: { shared: list(result.shared), farmed: list(result.farmed) } });
+    }).catch(() => undefined);
+    return () => { live = false; };
+  }, [wantsDependencyLinks, workspaceId, pendingApprovals.length]);
+  const shownApprovals = pendingApprovals.map((approval) => {
+    const note = dependencyInstallNote(approval.command, dependencyLinks?.workspaceId === workspaceId ? dependencyLinks.links : null);
+    return note ? { ...approval, dependencyNote: note } : approval;
+  });
   const [runtimePolicies, setRuntimePolicies] = useState<Record<string, RuntimePermissionPolicy>>({});
   const [runTaskId, setRunTaskId] = useState("");
   const [workerParentId, setWorkerParentId] = useState("");
@@ -441,7 +560,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [missionPrompt, setMissionPrompt] = useState("");
   const [pendingChat, setPendingChat] = useState<{ title: string; message: string; taskId?: string } | null>(null);
   /** "Continue in project": a new chat in another project, its composer filled with this chat's messages. */
-  const [chatSeed, setChatSeed] = useState<{ key: string; workspaceId: string; title: string; text: string } | null>(null);
+  const [chatSeed, setChatSeed] = useState<{ key: string; workspaceId: string; title: string; text: string; context?: string[] } | null>(null);
 
   const selection = useRef({ workspaceId, taskId: chatTaskId ?? "", runId: selectedRunId });
   selection.current = { workspaceId, taskId: chatTaskId ?? "", runId: selectedRunId };
@@ -522,17 +641,16 @@ export function AgentOrchestratorSurface({ language, setError }: {
 
   useEffect(() => {
     let live = true;
-    void moduleCall("harnesses").then(result => {
-      if (!live) return;
-      const items = Array.isArray(result.harnesses) ? result.harnesses as AoHarness[] : [];
-      setHarnesses(items.length ? items : [NATIVE_ENTRY]);
-      setHarnessNotice(typeof result.notice === "string" ? result.notice : "");
-    }).catch(cause => { if (live) setHarnessNotice(cause instanceof Error ? cause.message : String(cause)); });
+    // A list that only has Native Codex never replaces a fuller one already shown.
+    const stopHarnesses = watchHarnesses((items, notice) => {
+      setHarnesses(current => items.length > 1 || current.length <= 1 ? items.length ? items : [NATIVE_ENTRY] : current);
+      setHarnessNotice(notice);
+    });
     // Show which codex.exe an empty setting resolves to (the Codex CLI first).
     void moduleCall("codex_executable").then(result => {
       if (live && typeof result.executable === "string") setDetectedExecutable(result.executable);
     }).catch(() => { /* No Codex found: the start reports it with install guidance. */ });
-    return () => { live = false; };
+    return () => { live = false; stopHarnesses(); };
   }, []);
 
   const loadMissions = async (id: string) => {
@@ -554,7 +672,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
   // longer driven until you open that very chat. Such chats stayed "running" (and on top of the
   // list). Each run nothing is driving is observed once per session: a dead native harness is
   // recorded as failed (so it can be retried) and a dead AO chat host settles as interrupted,
-  // while a live AO host just reports that it is still working.
+  // while a live AO host just reports that it is still working. That one keeps working with nothing
+  // watching it, so its card would stay "running" after the turn ends and the chat could never take
+  // another message: it is observed again every few seconds until its turn ends and the card settles.
+  // (Observing needs no consent; resuming the run would need the focused window's approval.)
   const settledRuns = useRef(new Set<string>());
   useEffect(() => {
     if (!workspaceId) return;
@@ -566,7 +687,19 @@ export function AgentOrchestratorSurface({ language, setError }: {
       void (async () => {
         const status = await moduleCall("run_status", { workspaceId, runId: mission.id });
         if (status.driven !== false) return;
-        for (const node of running) await moduleCall("observe", { workspaceId, runId: mission.id, nodeId: node.id }).catch(() => undefined);
+        let nodes = running;
+        for (;;) {
+          for (const node of nodes) await moduleCall("observe", { workspaceId, runId: mission.id, nodeId: node.id }).catch(() => undefined);
+          const after = await moduleCall("runs", { workspaceId, runId: mission.id }).catch(() => null);
+          const still = (after?.runs as AoMission[] | undefined)?.find((run) => run.id === mission.id);
+          nodes = still && !still.cancelled ? still.nodes.filter((node) => node.state === "running" && node.route?.harness_id?.startsWith("ao:")) : [];
+          // Done once nothing is left running here, another project is open, or a loop took the run over.
+          if (!nodes.length || selection.current.workspaceId !== workspaceId
+            || (await moduleCall("run_status", { workspaceId, runId: mission.id }).catch(() => null))?.driven !== false) break;
+          await new Promise((resolve) => setTimeout(resolve, 5000));
+        }
+        // Left for another project with the card still running: watch it again when it is back.
+        if (nodes.length && selection.current.workspaceId !== workspaceId) settledRuns.current.delete(key);
         if (selection.current.workspaceId === workspaceId) await loadMissions(workspaceId);
       })().catch(() => undefined);
     }
@@ -695,6 +828,17 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [projectBranch, setProjectBranch] = useState("");
   // /goal state per chat, from the bridge, and /plan (a composer mode, kept for this session).
   const [goals, setGoals] = useState<Record<string, ChatGoal>>({});
+  // A model picked while the open chat's goal runs is used from its next round on (the running
+  // round keeps the model it started with; the composer says so).
+  const goalRouteKey = chatTaskId && composerMode === "single" && goals[chatTaskId]?.status === "active"
+    ? JSON.stringify([workspaceId, chatTaskId, singleRoute]) : "";
+  useEffect(() => {
+    if (!goalRouteKey || !chatTaskId || !singleRoute.model || singleRoute.model === "default") return;
+    const timer = setTimeout(() => {
+      void moduleCall("chat_goal", { workspaceId, taskId: chatTaskId, action: "route", singleRoute: { ...singleRoute } as unknown as JsonObject }).catch(() => undefined);
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [goalRouteKey]);
   const [planMode, setPlanMode] = useState(false);
   useEffect(() => {
     setProjectBranch("");
@@ -855,7 +999,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     hydratedComposer.current = key;
     if (!chatMission) {
       setComposerMode("single");
-      setSingleRoute({ ...workerRoute(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL), native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" });
+      setSingleRoute(newChatRoute());
     } else if (chatMission.execution_mode === "single") {
       setComposerMode("single");
       const node = chatMission.nodes[0];
@@ -1202,6 +1346,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
           ...(input.taskId ? { taskId: input.taskId } : input.title ? { title: input.title } : {}),
           ...execution, ...executableArg(), ...(input.goal ? { goal: input.goal } : {}) });
         if (result.cancelled) throw new Error("Message start cancelled; no new attempt confirmed.");
+        if (composerMode === "single") rememberChatRoute(singleRoute);
         await Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]);
         const taskId = String(result.taskId);
         if (result.run) {
@@ -1217,23 +1362,64 @@ export function AgentOrchestratorSurface({ language, setError }: {
         }
         setChatTaskId(taskId);
         setSelectedRunId(String(result.runId));
-        setChatNotices((current) => ({ ...current, [taskId]: result.status === "failed" ? String(result.detail || "The run could not start") : "" }));
-        setAutoStatus(result.status === "failed" ? "idle" : typeof result.status === "string" ? result.status : "running");
+        setChatNotices((current) => ({ ...current, [taskId]: startNotice(result) }));
+        setAutoStatus(startNotice(result) ? "idle" : typeof result.status === "string" ? result.status : "running");
         resolve();
         void Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]).catch(cause => setError(cause instanceof Error ? cause.message : String(cause)));
       } catch (cause) { if (!input.taskId) setPendingChat(null); reject(cause); throw cause; }
     });
   });
+  // Steering goes straight to the running agent, outside run()'s one-action-at-a-time lock: it must
+  // not wait behind another action, and it changes no run state the surface tracks.
+  const steerChat = async (input: { taskId: string; message: string }) => {
+    if (!workspaceId) throw new Error("Add a workspace first");
+    try {
+      const result = await moduleCall("chat_steer", { workspaceId, taskId: input.taskId, message: input.message });
+      if (result.steered) void loadBoard(workspaceId).catch(() => undefined);
+      // The agent waits on a request of its own: the message waits for the turn instead.
+      return result.steered === true ? true : result.waiting === true ? "wait" as const : false;
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); throw cause; }
+  };
+  // Have the agent the next message needs running before it is sent, so sending does not wait half
+  // a minute for a launch: the selected model's (or the team's orchestrator) on a new chat, and on an
+  // open chat whenever its agent cannot simply continue (the backend decides, and wakes one that was
+  // released while idle). Best effort and silent.
+  const prewarmKey = view === "chat" && chatTaskId !== null && workspaceId
+    ? JSON.stringify([workspaceId, chatTaskId, composerMode, composerMode === "single" ? singleRoute : composerTeamId]) : "";
+  useEffect(() => {
+    if (!prewarmKey) return;
+    let execution: JsonObject;
+    try { execution = aoChatExecution(composerMode, singleRoute, savedTeams, composerTeamId); } catch { return; }
+    // Wait for the picker to settle so trying models does not start an agent for each.
+    const timer = setTimeout(() => {
+      void moduleCall("chat_prewarm", { workspaceId, ...execution, ...(chatTaskId ? { taskId: chatTaskId } : {}) }).catch(() => undefined);
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [prewarmKey, savedTeams.length]);
   const retryChatStart = (runId: string) => void run("start-run", async () => {
     const taskId = missions.find((mission) => mission.id === runId)?.project_id ?? "";
     try {
       const mission = missions.find(item => item.id === runId);
+      // Retry ran the run's saved route again: a model that had gone failed the same way however
+      // often it was retried, whatever the composer showed. A single chat whose composer now has
+      // another model restarts on that one, as the next message would.
+      const card = mission?.execution_mode === "single" ? mission.nodes[0] : undefined;
+      const picked = composerMode === "single" && singleRoute.model && singleRoute.model !== "default" ? singleRoute : null;
+      if (card && picked && JSON.stringify(routeIdentity(card.route)) !== JSON.stringify(routeIdentity(picked))) {
+        const result = await moduleCall("restart_run", { workspaceId, runId, ...executableArg(), singleRoute: { ...picked } as unknown as JsonObject });
+        if (result.cancelled) return;
+        if (typeof result.runId === "string") setSelectedRunId(result.runId);
+        setChatNotices((current) => ({ ...current, [taskId]: startNotice(result) }));
+        setAutoStatus(startNotice(result) ? "idle" : typeof result.status === "string" ? result.status : "running");
+        await loadMissions(workspaceId);
+        return;
+      }
       if (mission?.nodes.some(node => ["held", "failed"].includes(node.state))) {
         await moduleCall("control_run", { workspaceId, runId, action: "retry", ...executableArg() });
       }
       const result = await moduleCall("start_run", { workspaceId, runId, ...executableArg() });
-      setChatNotices((current) => ({ ...current, [taskId]: "" }));
-      setAutoStatus(typeof result.status === "string" ? result.status : "running");
+      setChatNotices((current) => ({ ...current, [taskId]: startNotice(result) }));
+      setAutoStatus(startNotice(result) ? "idle" : typeof result.status === "string" ? result.status : "running");
     } catch (cause) {
       setChatNotices((current) => ({ ...current, [taskId]: cause instanceof Error ? cause.message : String(cause) }));
     }
@@ -1285,6 +1471,19 @@ export function AgentOrchestratorSurface({ language, setError }: {
     setChatTaskId("");
     await Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]);
   });
+  // Rewind (Codex's backtrack): a new chat whose composer holds just the chosen message, to edit and
+  // send; the messages before it go along as context (shown as a chip that can be dropped). Nothing
+  // is sent and this chat stays as it is (files are not reverted).
+  const rewindChat = (taskId: string, upTo: number) => void (async () => {
+    const messages = chatMessagesFromDescription(await loadDescription(taskId));
+    if (!Number.isInteger(upTo) || upTo < 0 || upTo >= messages.length) return;
+    // Earlier messages keep the steers sent during their turns; the chosen one is just what was typed.
+    const earlier = messages.slice(0, upTo).flatMap((message) => [message.text, ...(message.steers ?? []).map((steer) => steer.text)]);
+    setChatSeed({ key: crypto.randomUUID(), workspaceId, title: `${taskName(taskId)} (rewound)`.slice(0, 240), text: messages[upTo].text,
+      ...(earlier.length ? { context: earlier } : {}) });
+    setPendingChat(null); setInspectedId(""); setDraftTeam(null); setSheet("");
+    setChatTaskId(""); setView("chat");
+  })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
   // Fork: a new chat starting from this chat's messages (all, the first, or up to one of them).
   const forkChat = (taskId: string, upTo?: number | "first") => void (async () => {
     const messages = chatMessagesFromDescription(await loadDescription(taskId));
@@ -1292,6 +1491,15 @@ export function AgentOrchestratorSurface({ language, setError }: {
     if (!kept.length) return;
     await sendChat({ title: `Fork of ${taskName(taskId)}`.slice(0, 240), message: kept.map((message) => message.text).join("\n\n").slice(0, 8192) });
   })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+  // Delete message (confirmed in the chat): the message and its reply leave this chat. The chat
+  // names the runs its turn showed (the first is the one the message started); the bridge hides
+  // exactly those, so every other answer stays with its message, and the next turn starts a fresh
+  // agent session. Files on disk are not changed.
+  const deleteChatMessage = (taskId: string, index: number, runIds: string[]) => chatRun(taskId, async () => {
+    const [runId, ...more] = runIds;
+    await moduleCall("chat_delete_message", { workspaceId, taskId, index, runId, runIds: more });
+    await loadMissions(workspaceId);
+  });
   /** A chat as Codex turns, read fresh (the board list omits task descriptions). */
   const chatTranscript = async (taskId: string) => chatTurns(missions.filter((mission) => mission.project_id === taskId) as unknown as ChatRun[],
     await loadDescription(taskId), { describe: describeChatNode, activity: chatActivity, now: Date.now() });
@@ -1337,8 +1545,16 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const openFolder = (item: ThreadWorkspace) => {
     if (item.path) void window.codexWebLauncher?.openFolder?.(item.path).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
   };
+  // A finished card's thinking and tool calls, read back from AO when its folded work is opened.
+  const loadChatWork = useCallback(async (runId: string, nodeId: string) => {
+    if (!workspaceId) return [];
+    const result = await moduleCall("turn_timeline", { workspaceId, runId, nodeId }) as { timeline?: ChatLiveItem[] };
+    return Array.isArray(result?.timeline) ? result.timeline : [];
+  }, [workspaceId]);
   const restartChatRun = (runId: string) => void run("restart-run", async () => {
-    const result = await moduleCall("restart_run", { workspaceId, runId, ...executableArg() });
+    // Retry and Restart run on the model picked now, as the next message would.
+    const result = await moduleCall("restart_run", { workspaceId, runId, ...executableArg(),
+      ...(composerMode === "single" && singleRoute.model && singleRoute.model !== "default" ? { singleRoute: { ...singleRoute } as unknown as JsonObject } : {}) });
     if (result.cancelled) return;
     if (typeof result.runId === "string") setSelectedRunId(result.runId);
     if (result.status === "failed" && typeof result.detail === "string") setError(result.detail);
@@ -1355,7 +1571,11 @@ export function AgentOrchestratorSurface({ language, setError }: {
     if (!selectedRun) return;
     const result = await moduleCall("approve_harness", { workspaceId, runId: selectedRun.id,
       nodeId: approval.nodeId, approvalId: approval.approval_id,
-      ...(typeof reply === "boolean" ? { allow: reply } : { response: reply as JsonObject, threadId: approval.thread_id!, turnId: approval.turn_id! }) });
+      ...(typeof reply === "boolean" ? { allow: reply }
+        // The person's answer to a question the AO agent asked.
+        : approval.kind === "question" && approval.source === "ao" ? { answer: reply as JsonObject }
+        : typeof (reply as { decisionId?: unknown }).decisionId === "string" ? { decisionId: (reply as { decisionId: string }).decisionId }
+          : { response: reply as JsonObject, threadId: approval.thread_id!, turnId: approval.turn_id! }) });
     if (!result.cancelled) setPendingApprovals((current) => current.filter((item) => item.approval_id !== approval.approval_id));
   });
 
@@ -1505,7 +1725,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
           newChatIn: (id) => { if (id === workspaceId) startNewChat(); else { setChatSeed({ key: crypto.randomUUID(), workspaceId: id, title: "", text: "" }); chooseWorkspace(id); } },
           editProject: (id) => setProjectEdit({ id, step: "edit" }),
           removeProject: (id) => setProjectEdit({ id, step: "remove" }) }}
-        projectRemote={(folder) => window.codexWebLauncher?.projectRemote?.(folder) ?? Promise.resolve(null)} />
+        projectRemote={(folder) => window.codexWebLauncher?.projectRemote?.(folder) ?? Promise.resolve(null)}
+        projectGit={readProjectGit} />
       <div className="ao-main">
       <div className="ao-dragstrip" aria-hidden="true" />
       {view !== "chat" ? <header className="ao-workspace-head">
@@ -1620,6 +1841,16 @@ export function AgentOrchestratorSurface({ language, setError }: {
               <span>Cancelled cards</span>
               <input type="checkbox" role="switch" checked={showInactive} onChange={(event) => setShowInactive(event.target.checked)} />
             </label>
+            <label className="ao-set-row ao-set-toggle" title="Give each agent's worktree the project's installed node_modules instead of reinstalling them: its folders are new and its files are hard links to the project's, so an npm ci or npm install the agent runs replaces only the worktree's copy. Same drive only. A tool that edits a package file in place (rather than replacing it) still changes the project's file. A branch whose package.json or lockfile differs starts with none.">
+              <span className="ao-set-icon" aria-hidden="true">📦</span>
+              <span>Reuse installed Node packages</span>
+              <input type="checkbox" role="switch" checked={depSettings?.enabled !== false} disabled={depSettings === null} onChange={(event) => changeDepSetting("enabled", event.target.checked)} />
+            </label>
+            <label className="ao-set-row ao-set-toggle" title="Link the project's .venv/venv itself into each agent's worktree. It is shared: a pip install an agent runs there changes the project's own environment (pip's launchers point at the project's python). A branch whose requirements differ gets no link. Off: agents create their own environment.">
+              <span className="ao-set-icon" aria-hidden="true">🐍</span>
+              <span>Share the Python environment</span>
+              <input type="checkbox" role="switch" checked={depSettings?.python === true} disabled={depSettings === null} onChange={(event) => changeDepSetting("python", event.target.checked)} />
+            </label>
             <p className="ao-set-row ao-set-note" title={harnessNotice || undefined}>
               <span className="ao-set-icon" aria-hidden="true">🧩</span>
               <span>{harnesses.filter(item => item.runnable).length} harnesses ready{harnessNotice ? " ⚠️" : ""}</span>
@@ -1642,10 +1873,11 @@ export function AgentOrchestratorSurface({ language, setError }: {
                 runs={missions.map(mission => ({...mission, replaces_run_id: taskLifecycle.flatMap(item=>item.reconfigure || []).find(intent=>intent.replacement_run_id===mission.id)?.previous_run_id}))}
                 tasks={allTasks} selectedTaskId={chatTaskId ?? ""}
                 projectName={workspaces.find((item) => item.id === workspaceId)?.name} projectBranch={projectBranch}
-                stop={stopChatRun} restart={restartChatRun}
+                stop={stopChatRun} restart={restartChatRun} loadWork={loadChatWork}
                 thread={chatTaskId ? { newChat: startNewChat, rename: (title) => renameChat(chatTaskId, title), archive: () => missionAction(chatTaskId, "archive"),
-                  fork: (turnIndex) => forkChat(chatTaskId, turnIndex), copyConversation: () => copyChat(chatTaskId, "conversation"),
-                  togglePin: () => togglePin(chatTaskId), pinned: chatPins.includes(chatTaskId) } : undefined}
+                  fork: (turnIndex) => forkChat(chatTaskId, turnIndex), rewind: (turnIndex) => rewindChat(chatTaskId, turnIndex),
+                  deleteMessage: (messageIndex, runIds) => deleteChatMessage(chatTaskId, messageIndex, runIds),
+                  copyConversation: () => copyChat(chatTaskId, "conversation"), togglePin: () => togglePin(chatTaskId), pinned: chatPins.includes(chatTaskId) } : undefined}
                 onPause={() => controlRun("pause")} onResume={() => controlRun("resume")} onSettings={() => openSheet("settings")}
                 onOpenProject={(() => { const open = workspaces.find((item) => item.id === workspaceId); return open?.path ? () => openFolder(open) : undefined; })()}
                 projects={workspaces.map((item) => ({ id: item.id, name: item.name, path: item.path }))} projectId={workspaceId}
@@ -1662,7 +1894,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
                   onConnect={addDependency} canConnect={(nodeId, parentId) => Boolean(aoDependencyChange(selectedRun, nodeId, parentId))}
                   onUnlink={unlink} canUnlink={(nodeId, parentId) => Boolean(aoUnlinkChange(selectedRun, nodeId, parentId))}
                   onRemove={removeCard} canRemove={(nodeId) => Boolean(aoRemoveChange(selectedRun, nodeId))} /> : undefined}
-                busy={Boolean(busy)} loadDescription={loadDescription} send={sendChat} commands={chatCommands}
+                busy={Boolean(busy)} loadDescription={loadDescription} send={sendChat} steer={steerChat} commands={chatCommands}
                 // A new chat's team sits in the header, as Codex keeps the page free of setting bars.
                 headerExtra={chatTaskId === "" && savedTeams.length ? <label className="cx-head-team" title="Uses these role blocks for this chat">
                   <span>Team</span>
@@ -1676,7 +1908,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
                 pendingTitle={pendingChat?.title} pendingCreation={Boolean(pendingChat && !pendingChat.taskId)}
                 working={Boolean(selectedRun && chatTaskId && selectedRun.project_id === chatTaskId && ["starting", "running"].includes(autoStatus))}
                 openStructure={(runId) => { setSelectedRunId(runId); setView("overview"); }}
-                approvals={selectedRun && chatTaskId && selectedRun.project_id === chatTaskId ? pendingApprovals : []}
+                approvals={selectedRun && chatTaskId && selectedRun.project_id === chatTaskId ? shownApprovals : []}
                 composer={{ mode: composerMode, onModeChange: setComposerMode, route: singleRoute, onRouteChange: setSingleRoute,
                   harnesses, loadModels, teams: savedTeams, teamId: composerTeamId, onTeamChange: setComposerTeamId }}
                 onOpenTeam={openTeam}
@@ -1710,7 +1942,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
               onUnlink={unlink} canUnlink={(nodeId, parentId) => Boolean(aoUnlinkChange(selectedRun, nodeId, parentId))}
               onRemove={removeCard} canRemove={(nodeId) => Boolean(aoRemoveChange(selectedRun, nodeId))}>
               {pendingApprovals.length ? <aside className="ao-approvals ao-canvas-overlay" aria-label="AO tool approvals">
-                {pendingApprovals.map(approval => <AgentOrchestratorApproval key={approval.approval_id} approval={approval} busy={Boolean(busy)} approve={approve} />)}
+                {shownApprovals.map(approval => <AgentOrchestratorApproval key={approval.approval_id} approval={approval} busy={Boolean(busy)} approve={approve} />)}
               </aside> : null}
               <button type="button" className="ao-fab ao-canvas-overlay" title="Add worker"
                 disabled={selectedRun.cancelled || selectedRun.nodes.length >= 24 || selectedRun.nodes.some((node) => node.role === "reviewer" && node.state !== "pending") || Boolean(busy)}
@@ -1739,7 +1971,14 @@ export function AgentOrchestratorSurface({ language, setError }: {
         return <ProjectEditDialog key={`${project.id}:${projectEdit.step}`} project={project} initialStep={projectEdit.step}
           chooseFolder={window.codexWebLauncher?.chooseFolder ? () => window.codexWebLauncher!.chooseFolder!() : undefined}
           onSave={(change) => saveProjectEdit(project.id, change)} onRemove={() => removeProject(project.id)}
-          onClose={() => setProjectEdit(null)} />;
+          onClose={() => setProjectEdit(null)}
+          readWorkspaceMode={() => workspaceMode(project.id)}
+          saveWorkspaceMode={async (mode) => {
+            // An unavailable answer (AO stopped, no AO project) must keep the dialog open, not
+            // close it as if the choice were saved.
+            const saved = await workspaceMode(project.id, mode);
+            if (!saved.available || saved.mode !== mode) throw new Error(saved.reason || "Where chats work could not be saved");
+          }} />;
       })()}
     </section>
   );

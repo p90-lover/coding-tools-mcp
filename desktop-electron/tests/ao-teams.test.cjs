@@ -119,86 +119,30 @@ test("a saved team can be deleted from the team page; the last team stays and ch
   assert.ok(workflow.includes('["save_team", "delete_team", "apply_team", "set_limits"]'));
 });
 
-test("links go around cards: a direct orchestrator-to-reviewer link no longer runs through a worker", () => {
-  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorCanvas.tsx"), "utf8");
-  const start = source.indexOf("export type WireBox"), end = source.indexOf("export function AgentOrchestratorCanvas");
-  const code = ts.transpileModule(source.slice(start, end), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
-  const canvas = {}; new Function("exports", code)(canvas);
-  const card = (x, y) => ({ x, y, w: 212, h: 76 });
-  const lead = card(400, 0), workers = [card(0, 200), card(400, 200), card(800, 200)], reviewer = card(400, 420);
-  const numbers = d => d.match(/-?\d+(\.\d+)?/g).map(Number);
-  // Straight down past the middle worker: detour to a side lane clear of it.
-  const around = canvas.wirePath(lead, reviewer, workers);
-  assert.match(around, /Q/, "a detour with rounded corners");
-  const points = []; const all = numbers(around); for (let i = 0; i + 1 < all.length; i += 2) points.push([all[i], all[i + 1]]);
-  const inside = (box, [x, y]) => x > box.x && x < box.x + box.w && y > box.y && y < box.y + box.h;
-  assert.ok(points.every(point => workers.every(worker => !inside(worker, point))), "no point of the link is inside a worker");
-  const lane = points.find(([x, y], i) => y < 200 && points[i + 1]?.[0] === x && points[i + 1][1] > 276);
-  assert.ok(lane && workers.every(worker => lane[0] < worker.x || lane[0] > worker.x + worker.w), "a side lane passes the worker row between cards");
-  // Nothing in the way: the usual curve.
-  assert.match(canvas.wirePath(lead, workers[1], []), /^M506,76 C/);
-  // A child above its parent (a link back up): routed around, never a straight crossing.
-  assert.match(canvas.wirePath(reviewer, lead, workers), /Q/);
-});
-
-test("routed links keep clear of every card, take their own lanes and fan into a card side by side", () => {
+test("links are the original smooth curves, and the canvas explains how to keep them clear", () => {
   const canvas = canvasHelpers();
   const card = (x, y) => ({ x, y, w: 212, h: 76 });
-  // The team from the user's screenshot: three workers, a review split with a sub-reviewer, a reviewer.
-  const boxes = new Map(Object.entries({ orch: card(470, 40), w1: card(240, 270), w2: card(510, 290), w3: card(730, 300),
-    split: card(495, 430), sub: card(460, 690), rev: card(810, 660) }));
-  const links = [["orch", "w1"], ["orch", "w2"], ["orch", "w3"], ["w1", "split"], ["w2", "split"], ["w3", "split"], ["split", "sub"],
-    ["w1", "rev"], ["w2", "rev"], ["w3", "rev"], ["sub", "rev"], ["orch", "rev"]].map(([from, to]) => ({ key: `${from}>${to}`, from, to }));
-  links.push({ key: "loop", from: "rev", to: "orch" });
-  const ports = canvas.linkPorts(boxes, links);
-  const intoReviewer = links.filter(link => link.to === "rev").map(link => [link.from, ports.get(link.key).into]);
-  assert.equal(new Set(intoReviewer.map(([, x]) => x)).size, intoReviewer.length, "each link into the reviewer has its own point");
-  const byX = [...intoReviewer].sort((a, b) => a[1] - b[1]).map(([from]) => from);
-  const centre = id => boxes.get(id).x + 106;
-  assert.deepEqual(byX, [...byX].sort((a, b) => centre(a) - centre(b)), "points are ordered by where each link comes from");
+  const lead = card(400, 0), worker = card(400, 200), reviewer = card(400, 420);
+  // Bottom centre of the parent to top centre of the child, one cubic curve.
+  assert.equal(canvas.wirePath(lead, worker), "M506,76 C506,136 506,140 506,200");
+  // A card being dragged sways its links sideways.
+  assert.match(canvas.wirePath(lead, worker, 20), /^M506,76 C526,136 526,140 506,200$/);
+  // A link back up swings out past the right of both cards, then drops into the child from above.
+  const back = canvas.wirePath(reviewer, lead);
+  assert.match(back, /^M506,496 C506,566 702,566 702,/);
+  assert.match(back, / S506,-70 506,0$/);
+  assert.equal(typeof canvas.routeLinks, "undefined", "the lane router is gone");
+  assert.ok(canvas.CANVAS_TIPS.length >= 5);
+  assert.ok(canvas.CANVAS_TIPS.some(tip => /Shift-drag/.test(tip)) && canvas.CANVAS_TIPS.some(tip => /Tidy/.test(tip)));
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorCanvas.tsx"), "utf8");
+  assert.ok(source.includes('aria-label="Tidy layout"') && source.includes('aria-label="How to keep links clear"'));
+});
 
-  const started = Date.now();
-  const shapes = canvas.routeLinks(boxes, links);
-  assert.ok(Date.now() - started < 1000, "routing a team this size is quick");
-  assert.equal(shapes.size, links.length);
-  const numbers = d => d.match(/-?\d+(\.\d+)?/g).map(Number);
-  const pairs = d => { const all = numbers(d), out = []; for (let i = 0; i + 1 < all.length; i += 2) out.push([all[i], all[i + 1]]); return out; };
-  for (const link of links) {
-    for (const [x, y] of pairs(shapes.get(link.key))) for (const [id, box] of boxes) {
-      if (id === link.from || id === link.to) continue;
-      assert.ok(!(x > box.x && x < box.x + box.w && y > box.y && y < box.y + box.h), `${link.key} passes through ${id}`);
-    }
-  }
-  // A routed link's corners are its Q control points: rebuild each polyline and check lanes.
-  const routed = links.filter(link => shapes.get(link.key).includes("Q")).map(link => {
-    const d = shapes.get(link.key), corners = [...d.matchAll(/Q(-?[\d.]+),(-?[\d.]+)/g)].map(m => [Number(m[1]), Number(m[2])]);
-    const start = pairs(d)[0], end = pairs(d).at(-1);
-    return { key: link.key, points: [start, ...corners, end] };
-  });
-  assert.ok(routed.length >= 3, "links that would cross cards are routed around them");
-  const runs = routed.flatMap(({ key, points }) => points.slice(1, -2).map((a, i) => ({ key, a, b: points[i + 2] })));
-  for (const one of runs) for (const other of runs) {
-    if (one.key === other.key) continue;
-    const vertical = one.a[0] === one.b[0] && other.a[0] === other.b[0] && one.a[0] === other.a[0];
-    const horizontal = one.a[1] === one.b[1] && other.a[1] === other.b[1] && one.a[1] === other.a[1];
-    const span = (s, axis) => [Math.min(s.a[axis], s.b[axis]), Math.max(s.a[axis], s.b[axis])];
-    if (vertical) { const [a1, a2] = span(one, 1), [b1, b2] = span(other, 1); assert.ok(Math.min(a2, b2) - Math.max(a1, b1) <= 0, `${one.key} and ${other.key} share a lane`); }
-    if (horizontal) { const [a1, a2] = span(one, 0), [b1, b2] = span(other, 0); assert.ok(Math.min(a2, b2) - Math.max(a1, b1) <= 0, `${one.key} and ${other.key} share a lane`); }
-  }
-  // Every link is drawn the same way: right angles with rounded corners, never a free curve.
-  for (const link of links) assert.doesNotMatch(shapes.get(link.key), / C/, `${link.key} is orthogonal`);
-  // A link whose ends nearly line up runs straight down, both ends on one x.
-  const straight = canvas.routeLinks(new Map([["a", card(400, 0)], ["b", card(420, 200)]]), [{ key: "a>b", from: "a", to: "b" }]);
-  assert.match(straight.get("a>b"), /^M(\d+),76 L\1,200$/);
-  // A link going down (its child starts below its parent) never climbs back up on the way (no loops).
-  const below = link => boxes.get(link.to).y > boxes.get(link.from).y + boxes.get(link.from).h + 40;
-  for (const link of links.filter(below)) {
-    const ys = pairs(shapes.get(link.key)).map(([, y]) => y);
-    for (let i = 1; i < ys.length; i++) assert.ok(ys[i] >= ys[i - 1] - 1, `${link.key} climbs from ${ys[i - 1]} to ${ys[i]}`);
-  }
-  // A pulled link keeps its point.
-  const pulled = canvas.routeLinks(boxes, [{ key: "orch>rev", from: "orch", to: "rev", via: { x: 1100, y: 400 } }]);
-  assert.match(pulled.get("orch>rev"), / 1100,400 S/);
+test("the card menu's clicks reach its items: portal events never start a canvas drag", () => {
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorCanvas.tsx"), "utf8");
+  const begin = source.slice(source.indexOf("const begin = "), source.indexOf("setPointerCapture", source.indexOf("const begin = ")));
+  assert.match(begin, /viewport\.current\?\.contains\(event\.target\)\) return;/,
+    "a pointerdown bubbling up from the menu portal returns before the canvas captures the pointer");
 });
 
 test("every card can be removed: optional ones go, required ones are replaced, the split takes its sub-reviewers", () => {
@@ -254,15 +198,12 @@ test("a Shift-dragged link passes through its point, and a loop back to the orch
   const canvas = canvasHelpers();
   const card = (x, y) => ({ x, y, w: 212, h: 76 });
   const lead = card(400, 0), workers = [card(0, 200), card(400, 200), card(800, 200)], reviewer = card(400, 420);
-  const pulled = canvas.wirePath(lead, workers[1], [], 0, { x: 300, y: 150 });
+  const pulled = canvas.wirePath(lead, workers[1], 0, { x: 300, y: 150 });
   assert.match(pulled, /^M506,76 C506,/);
   assert.match(pulled, / 300,150 S/, "the link reaches the pulled point, then continues to its child");
   assert.match(pulled, / 506,200$/);
-  // The loop from the reviewer up to the orchestrator: no point of it inside a worker.
-  const loop = canvas.wirePath(reviewer, lead, workers);
-  const all = loop.match(/-?\d+(\.\d+)?/g).map(Number); const points = [];
-  for (let i = 0; i + 1 < all.length; i += 2) points.push([all[i], all[i + 1]]);
-  assert.ok(points.every(([x, y]) => workers.every(w => !(x > w.x && x < w.x + w.w && y > w.y && y < w.y + w.h))));
+  // The loop from the reviewer up to the orchestrator swings out to the right of both.
+  assert.match(canvas.wirePath(reviewer, lead), /^M506,496 C506,566 702,566 /);
   assert.deepEqual(canvas.scenePoint(250, 180, { left: 50, top: 30 }, { x: 100, y: 50, scale: 2 }), { x: 50, y: 50 });
   assert.equal(canvas.linkPointKey("lead", "worker"), "lead>worker");
 });
@@ -295,4 +236,15 @@ test("a block's role editor opens as a popover beside it, survives autosaves and
   assert.match(source, /if \(event\.key === "Escape"\) setSelectedId\(""\)/);
   const canvas = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorCanvas.tsx"), "utf8");
   assert.match(canvas, /if \(!selectedId\) setSelected\(current => current\.size \? new Set\(\) : current\)/);
+});
+test("the chat and Team pages keep asking for the harness list while AO is still starting", () => {
+  const read = name => fs.readFileSync(path.resolve(__dirname, "../src/features", name), "utf8");
+  const surface = read("AgentOrchestratorSurface.tsx");
+  const watch = surface.slice(surface.indexOf("export function watchHarnesses"), surface.indexOf("/** Per-viewer chat list state"));
+  assert.ok(watch.includes("if (!notice) return;"), "it stops once AO answers without a notice");
+  assert.ok(watch.includes("attempt < 20"), "and gives up after a few minutes");
+  for (const page of ["AgentOrchestratorSurface.tsx", "AgentOrchestratorTeamsSurface.tsx"]) {
+    assert.ok(read(page).includes("const stopHarnesses = watchHarnesses("), page);
+    assert.ok(read(page).includes("stopHarnesses(); };"), page + " stops asking when it closes");
+  }
 });

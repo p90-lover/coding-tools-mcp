@@ -22,6 +22,8 @@ const MAX_RUNTIME_LOG_LINE_CHARS = 64 * 1024;
 const CORE_SETUP_TIMEOUT_MS = 5 * 60_000;
 const MCP_SETUP_TIMEOUT_MS = 10 * 60_000;
 const UNINSTALL_TIMEOUT_MS = 2 * 60_000;
+// Reading or restoring Codex's route only edits its config, but on a busy machine took ~19 s.
+const ROUTE_COMMAND_TIMEOUT_MS = 60_000;
 const MAX_CHECKPOINT_FILE_BYTES = 16 * 1024 * 1024;
 const PASSKEY_LOGIN_TIMEOUT_MS = 10 * 60_000;
 const MAX_PASSKEY_STATE_FILE_BYTES = 16 * 1024 * 1024;
@@ -177,7 +179,15 @@ class RuntimeHost {
     publishOperation,
     supervisor,
     getBrowserInteractionMode = () => "automatic",
+    // Whether Codex's model route may point at the bridge: the user's "Use Coding Tools in Codex".
+    // Off, no setup installs the route and nothing reconnects it.
+    codexRouteEnabled = () => true,
+    // Re-publishes this launcher's browser ownership descriptor (its own control token), for a
+    // launcher-control command started before the browser finished initializing.
+    refreshBrowserDescriptor = null,
   }) {
+    this.codexRouteEnabled = codexRouteEnabled;
+    this.refreshBrowserDescriptor = refreshBrowserDescriptor;
     this.app = app;
     this.logger = logger;
     this.sourceRoot = sourceRoot;
@@ -392,14 +402,25 @@ class RuntimeHost {
   }
 
   launcherControlEnvironment() {
-    let descriptor;
-    try {
-      descriptor = JSON.parse(fs.readFileSync(this.browserDescriptorPath, "utf8"));
-    } catch (error) {
-      throw new Error(
-        `Launcher browser ownership descriptor is unavailable: ${error instanceof Error ? error.message : String(error)}`,
-      );
+    const read = () => {
+      try {
+        return JSON.parse(fs.readFileSync(this.browserDescriptorPath, "utf8"));
+      } catch (error) {
+        if (error?.code === "ENOENT") return null;
+        throw new Error(
+          `Launcher browser ownership descriptor is unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    };
+    let descriptor = read();
+    // The launcher writes its descriptor once its browser is ready. After a slow start (seen: the
+    // idle document missed its 10 s window) the file can still name the previous launcher, and the
+    // control token it carries is this process's own: publish it now and read it back.
+    if (descriptor?.pid !== process.pid && this.refreshBrowserDescriptor) {
+      this.refreshBrowserDescriptor();
+      descriptor = read();
     }
+    if (!descriptor) throw new Error("Launcher browser ownership descriptor is unavailable: not written yet");
     const token = descriptor?.control?.token;
     if (descriptor?.pid !== process.pid || typeof token !== "string" || !/^[A-Za-z0-9_-]{40,}$/.test(token)) {
       throw new Error("Launcher browser ownership descriptor does not belong to this launcher process");
@@ -832,7 +853,9 @@ class RuntimeHost {
       embedded: true,
       message: "Checking Codex bridge route",
       successMessage: "Codex bridge route checked",
-      timeoutMs: 15_000,
+      // A busy machine took ~19 s for this read; at 15 s it timed out and the runtime's start right
+      // after it was refused ("Another launcher operation is active").
+      timeoutMs: ROUTE_COMMAND_TIMEOUT_MS,
     });
     return parseBridgeRouteResult(result.stdout, { requireInstalled: true });
   }
@@ -844,7 +867,7 @@ class RuntimeHost {
       embedded: true,
       message: "Restoring the previous Codex route",
       successMessage: "Previous Codex route restored",
-      timeoutMs: 15_000,
+      timeoutMs: ROUTE_COMMAND_TIMEOUT_MS,
     });
     const result = parseBridgeRouteResult(disconnected.stdout, { expectedActive: false });
     const verified = await this.bridgeStatus(operationName);
@@ -867,9 +890,37 @@ class RuntimeHost {
     }
   }
 
+  /** The setup flag for Codex's route: replace it when the user wants Codex on the bridge, else leave Codex alone. */
+  codexRouteArgs() {
+    return this.codexRouteEnabled() ? ["--replace-codex-route"] : ["--no-codex-route"];
+  }
+
+  /**
+   * The user's "Use Coding Tools in Codex". Off restores Codex's previous route (a config edit:
+   * Codex turns in flight don't block it) and, through codexRouteEnabled, keeps every later setup
+   * and reconnect from putting it back. On reconnects a route that setup installed before.
+   * Codex reads its config when it starts, so it needs a restart either way.
+   */
+  async setCodexRoute(enabled) {
+    this.assertProductionProfile("Codex bridge routing");
+    if (!enabled) {
+      const status = await this.bridgeStatus("codex-route-off");
+      if (!status.installed || !status.active) return { ...status, changed: false, codexRestartRequired: false };
+      const restored = await this.restoreBridgeRoute("codex-route-off");
+      return { ...restored, changed: true, codexRestartRequired: true };
+    }
+    const status = await this.bridgeStatus("codex-route-on");
+    if (!status.installed) {
+      return { ...status, changed: false, codexRestartRequired: false, setupRequired: true };
+    }
+    const connected = await this.connectBridgeRoute();
+    return { ...connected, codexRestartRequired: connected.changed === true };
+  }
+
   async connectBridgeRoute() {
     this.assertProductionProfile("Codex bridge routing");
     const name = "bridge-connect";
+    if (!this.codexRouteEnabled()) return { changed: false, skipped: "codex-route-off" };
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
     this.lifecycleOperation = name;
     try {
@@ -1008,7 +1059,7 @@ class RuntimeHost {
         mode: interactionMode,
         refreshCapabilities: interactionMode === "automatic",
       }),
-      "--replace-codex-route",
+      ...this.codexRouteArgs(),
       "--acknowledge-unofficial",
       "--restart-service",
     ];
@@ -1082,7 +1133,7 @@ class RuntimeHost {
       "--browser-host-descriptor",
       this.browserDescriptorPath,
       ...this.browserInteractionArgs(),
-      "--replace-codex-route",
+      ...this.codexRouteArgs(),
       "--acknowledge-unofficial",
       "--restart-service",
       contextFlag,
@@ -1114,7 +1165,7 @@ class RuntimeHost {
       "--acknowledge-unofficial",
       "--standard-context",
       profileFlag,
-      ...(this.launcherProfile === "production" ? ["--replace-codex-route", "--restart-service"] : []),
+      ...(this.launcherProfile === "production" ? [...this.codexRouteArgs(), "--restart-service"] : []),
     ];
     if (current.config?.autoApproveToolCalls === true) args.push("--auto-approve-tool-calls");
     const options = {
@@ -1180,6 +1231,9 @@ class RuntimeHost {
       // A release may repair capability detection. Reusing the previous result can
       // keep eligible models disabled even after the corrected probe is installed.
       ...this.browserInteractionArgs({ mode: interactionMode, refreshCapabilities: true }),
+      // An upgrade never replaces a route it doesn't own; when the user turned Codex's route off,
+      // it doesn't install one either.
+      ...(this.codexRouteEnabled() ? [] : ["--no-codex-route"]),
       "--acknowledge-unofficial",
       "--restart-service",
     ];
@@ -1219,7 +1273,7 @@ class RuntimeHost {
       "--browser-host-descriptor",
       this.browserDescriptorPath,
       ...this.browserInteractionArgs({ mode: targetMode }),
-      "--replace-codex-route",
+      ...this.codexRouteArgs(),
     ];
     if (reuseSavedCredentials) {
       args.push("--acknowledge-unofficial", "--restart-service");
@@ -1313,7 +1367,7 @@ class RuntimeHost {
       this.browserDescriptorPath,
       ...this.browserInteractionArgs({ mode, refreshCapabilities: true }),
       "--acknowledge-unofficial",
-      ...(this.launcherProfile === "production" ? ["--replace-codex-route", "--restart-service"] : []),
+      ...(this.launcherProfile === "production" ? [...this.codexRouteArgs(), "--restart-service"] : []),
       mode === "automatic" && current.config?.experimentalBiggerContext === true
         ? "--bigger-context"
         : "--standard-context",

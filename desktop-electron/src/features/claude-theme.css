@@ -1,0 +1,308 @@
+/* Claude-style chat: the warm palette, reading column, quiet tool lines and soft motion of the
+   Claude desktop app's Code tab, for Single and Team chats. Loaded after codex-chat.css and scoped to
+   the chat surface, so the thread list and the rest of the orchestrator keep their own look.
+   Popovers drawn outside the chat (ChatMenu's FloatingLayer) copy the palette variables set here. */
+
+/* ---------- Palette ---------- */
+.ao-workflow .cx-chat {
+  --claude-bg: #faf9f5;
+  --claude-surface: #f5f4ed;
+  --claude-raised: #ffffff;
+  --claude-text: #141413;
+  --claude-text-2: #73726c;
+  --claude-line: rgb(31 30 29 / 15%);
+  --claude-line-soft: rgb(31 30 29 / 9%);
+  --claude-accent: #d97757;
+  --claude-accent-hover: #c6613f;
+  --claude-accent-soft: rgb(217 119 87 / 12%);
+  --claude-bubble: #f0eee6;
+  --claude-code-bg: #f5f4ed;
+  --claude-inline-bg: rgb(31 30 29 / 6%);
+  --claude-inline-text: #3d3929;
+  --claude-shadow: 0 1px 2px rgb(31 30 29 / 4%), 0 4px 16px rgb(31 30 29 / 5%);
+  --claude-font: var(--font-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+  --claude-mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", Menlo, Consolas, monospace;
+  --claude-ease: cubic-bezier(0.2, 0, 0, 1);
+
+  /* The orchestrator's palette variables, so everything already built on them follows. */
+  --color-bg-primary: var(--claude-bg);
+  --color-bg-secondary: var(--claude-surface);
+  --color-background-surface: var(--claude-bg);
+  --color-background-elevated: var(--claude-raised);
+  --color-text-primary: var(--claude-text);
+  --color-text-secondary: var(--claude-text-2);
+  --color-text-warning: #a86b12;
+  --ao-line: var(--claude-line);
+  --ao-muted: var(--claude-text-2);
+  --ao-blue: var(--claude-accent);
+  --ao-red: #c2463a;
+  --ao-green: #5c8b3b;
+  --ao-amber: #b8801a;
+  --cx-hover: rgb(31 30 29 / 5%);
+  --cx-active: rgb(31 30 29 / 8%);
+  --cx-bubble: var(--claude-bubble);
+  --cx-tray: var(--claude-surface);
+  --cx-radius: 12px;
+
+  color-scheme: light;
+  accent-color: var(--claude-accent);
+  color: var(--claude-text);
+  background: var(--claude-bg);
+  font-family: var(--claude-font);
+}
+
+/* Dark: the same hook the orchestrator would set for a dark surface. */
+.ao-workflow[data-theme="dark"] .cx-chat {
+  --claude-bg: #262624;
+  --claude-surface: #30302e;
+  --claude-raised: #30302e;
+  --claude-text: #faf9f5;
+  --claude-text-2: #a6a39a;
+  --claude-line: rgb(222 220 209 / 15%);
+  --claude-line-soft: rgb(222 220 209 / 9%);
+  --claude-accent-soft: rgb(217 119 87 / 18%);
+  --claude-bubble: #1f1e1d;
+  --claude-code-bg: #1a1918;
+  --claude-inline-bg: rgb(250 249 245 / 8%);
+  --claude-inline-text: #e8e6dc;
+  --claude-shadow: 0 1px 2px rgb(0 0 0 / 20%), 0 6px 20px rgb(0 0 0 / 22%);
+  --color-text-warning: #e0a84a;
+  --ao-red: #e5695c;
+  --ao-green: #8bbf6a;
+  --ao-amber: #d9a441;
+  --cx-hover: rgb(250 249 245 / 6%);
+  --cx-active: rgb(250 249 245 / 10%);
+  color-scheme: dark;
+}
+
+/* The window's drag strip sits above the chat in the same column: paint it the chat's background. */
+.ao-workflow .ao-main:has(> .ao-stage > .cx-chat) { background: #faf9f5; }
+.ao-workflow[data-theme="dark"] .ao-main:has(> .ao-stage > .cx-chat) { background: #262624; }
+
+/* ---------- Header ---------- */
+.ao-workflow .cx-chat .cx-thread-head h2 { font-weight: 500; letter-spacing: -0.005em; }
+.ao-workflow .cx-chat .cx-status { background: var(--claude-surface); }
+.ao-workflow .cx-chat .cx-icon-button { color: var(--claude-text-2); }
+.ao-workflow .cx-chat .cx-icon-button:hover:not(:disabled), .ao-workflow .cx-chat .cx-icon-button[aria-pressed="true"] { color: var(--claude-text); }
+
+/* ---------- Reading column ---------- */
+.ao-workflow .cx-chat .cx-column { gap: 22px; max-width: 788px; padding: 20px 24px 40px; }
+.ao-workflow .cx-chat .cx-turn { gap: 12px; }
+
+/* The user's message: a rounded beige bubble. */
+.ao-workflow .cx-chat .cx-bubble { max-width: 85%; padding: 10px 16px; border-radius: 16px; background: var(--claude-bubble); color: var(--claude-text); }
+.ao-workflow .cx-chat .cx-bubble p { font-size: 15px; line-height: 1.6; }
+.ao-workflow .cx-chat .cx-stamp { font-size: 11px; color: var(--claude-text-2); }
+.ao-workflow .cx-chat .cx-msg-actions button { color: var(--claude-text-2); }
+
+/* The answer: plain text on the page, no card. */
+.ao-workflow .cx-chat .cx-answer { gap: 6px; }
+.ao-workflow .cx-chat .cx-answer-meta { font-size: 12px; color: var(--claude-text-2); }
+.ao-workflow .cx-chat .cx-answer-meta > span:first-child { color: var(--claude-text-2); font-weight: 500; }
+.ao-workflow .cx-chat .cx-note { color: var(--claude-text-2); font-size: 13px; }
+.ao-workflow .cx-chat .cx-empty h1 { font-weight: 400; letter-spacing: -0.015em; }
+
+/* ---------- Markdown ---------- */
+.ao-workflow .cx-chat .cx-md { color: var(--claude-text); font-size: 15px; line-height: 1.65; }
+.ao-workflow .cx-chat .cx-md p, .ao-workflow .cx-chat .cx-md ul, .ao-workflow .cx-chat .cx-md ol,
+.ao-workflow .cx-chat .cx-md blockquote, .ao-workflow .cx-chat .cx-md table { margin: 0 0 12px; }
+.ao-workflow .cx-chat .cx-md h1, .ao-workflow .cx-chat .cx-md h2, .ao-workflow .cx-chat .cx-md h3,
+.ao-workflow .cx-chat .cx-md h4, .ao-workflow .cx-chat .cx-md h5, .ao-workflow .cx-chat .cx-md h6 {
+  margin: 20px 0 8px; color: var(--claude-text); font-weight: 600; line-height: 1.35; letter-spacing: -0.005em; }
+.ao-workflow .cx-chat .cx-md h1 { font-size: 1.25rem; }
+.ao-workflow .cx-chat .cx-md h2 { font-size: 1.1rem; }
+.ao-workflow .cx-chat .cx-md h3 { font-size: 1rem; }
+.ao-workflow .cx-chat .cx-md h4, .ao-workflow .cx-chat .cx-md h5, .ao-workflow .cx-chat .cx-md h6 { font-size: 0.95rem; }
+.ao-workflow .cx-chat .cx-md > :first-child { margin-top: 0; }
+.ao-workflow .cx-chat .cx-md > :last-child { margin-bottom: 0; }
+.ao-workflow .cx-chat .cx-md ul, .ao-workflow .cx-chat .cx-md ol { padding-left: 1.5em; }
+.ao-workflow .cx-chat .cx-md li { padding-left: 2px; }
+.ao-workflow .cx-chat .cx-md li + li { margin-top: 5px; }
+.ao-workflow .cx-chat .cx-md li > ul, .ao-workflow .cx-chat .cx-md li > ol { margin: 5px 0 0; }
+.ao-workflow .cx-chat .cx-md li::marker { color: var(--claude-text-2); }
+.ao-workflow .cx-chat .cx-md strong { font-weight: 600; }
+.ao-workflow .cx-chat .cx-md a { color: var(--claude-accent); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--claude-accent) 40%, transparent);
+  text-underline-offset: 2px; transition: text-decoration-color 120ms ease-out, color 120ms ease-out; }
+.ao-workflow .cx-chat .cx-md a:hover { color: var(--claude-accent-hover); text-decoration-color: currentColor; }
+.ao-workflow .cx-chat .cx-md blockquote { padding-left: 14px; border-left: 3px solid var(--claude-line); color: var(--claude-text-2); }
+.ao-workflow .cx-chat .cx-md hr { margin: 18px 0; border-top-color: var(--claude-line); }
+.ao-workflow .cx-chat .cx-md code { padding: 1px 5px; border-radius: 5px; background: var(--claude-inline-bg); color: var(--claude-inline-text);
+  font-family: var(--claude-mono); font-size: 0.86em; }
+/* Tables: hairline grid, scrolled sideways inside the column when wide. */
+.ao-workflow .cx-chat .cx-md table { display: block; width: max-content; max-width: 100%; overflow-x: auto; border-collapse: collapse; font-size: 14px; line-height: 1.5; }
+.ao-workflow .cx-chat .cx-md th, .ao-workflow .cx-chat .cx-md td { padding: 6px 12px; border: 1px solid var(--claude-line); text-align: left; vertical-align: top; }
+.ao-workflow .cx-chat .cx-md th { background: var(--claude-surface); font-weight: 600; }
+
+/* Code blocks: warm panel, hairline border, a quiet language + Copy row. */
+.ao-workflow .cx-chat .cx-code { margin: 0 0 12px; border: 1px solid var(--claude-line-soft); border-radius: 10px; background: var(--claude-code-bg); }
+.ao-workflow .cx-chat .cx-code-head { padding: 6px 6px 0 14px; background: transparent; color: var(--claude-text-2); font-family: var(--claude-font); font-size: 12px; }
+.ao-workflow .cx-chat .cx-code-head button { height: 24px; padding: 0 8px; border-radius: 6px; color: var(--claude-text-2); font-size: 12px; }
+.ao-workflow .cx-chat .cx-code-head button:hover { background: var(--cx-hover); color: var(--claude-text); }
+.ao-workflow .cx-chat .cx-code pre { padding: 8px 14px 12px; color: var(--claude-text); font-family: var(--claude-mono); font-size: 13px; line-height: 1.55; }
+.ao-workflow .cx-chat .cx-code pre code { padding: 0; background: transparent; color: inherit; font-size: inherit; }
+
+/* ---------- Work: quiet tool lines ---------- */
+.ao-workflow .cx-chat .cx-work { color: var(--claude-text-2); font-size: 13px; }
+.ao-workflow .cx-chat .cx-work-head { gap: 6px; margin: 0 -6px; padding: 3px 6px; border-radius: 6px; color: var(--claude-text-2); }
+.ao-workflow .cx-chat .cx-work-head:hover { background: var(--cx-hover); color: var(--claude-text); }
+.ao-workflow .cx-chat .cx-work-head svg, .ao-workflow .cx-chat .cx-step-head svg { color: var(--claude-text-2); opacity: .75; }
+.ao-workflow .cx-chat .cx-work.is-stalled .cx-work-head { color: var(--ao-amber); }
+
+.ao-workflow .cx-chat .cx-steps { gap: 0; margin: 4px 0 0; padding: 0; border-left: 0; }
+.ao-workflow .cx-chat .cx-step-head { gap: 8px; margin: 0 -6px; padding: 3px 6px; width: calc(100% + 12px); color: var(--claude-text-2); font-size: 13px; }
+.ao-workflow .cx-chat .cx-step-head:hover:not(:disabled) { background: var(--cx-hover); color: var(--claude-text); }
+.ao-workflow .cx-chat .cx-step-name { color: var(--claude-text); font-weight: 500; }
+.ao-workflow .cx-chat .cx-step-meta { color: var(--claude-text-2); }
+.ao-workflow .cx-chat .cx-step-body { margin: 2px 0 8px 14px; padding-left: 12px; border-left: 1px solid var(--claude-line-soft); }
+.ao-workflow .cx-chat .cx-step-detail { color: var(--claude-text-2); font-size: 12px; }
+.ao-workflow .cx-chat .cx-step-error { font-size: 13px; }
+.ao-workflow .cx-chat .cx-step-dot, .ao-workflow .cx-chat .cx-tool-dot { width: 6px; height: 6px; }
+
+.ao-workflow .cx-chat .cx-live { gap: 1px; margin: 4px 0 6px; padding: 0; border-left: 0; }
+.ao-workflow .cx-chat .cx-step-body .cx-live { margin-top: 2px; }
+.ao-workflow .cx-chat .cx-live-item { gap: 8px; color: var(--claude-text-2); font-size: 13px; line-height: 1.5; }
+.ao-workflow .cx-chat .cx-live-item > .cx-live-label { color: var(--claude-text-2); font-weight: 500; }
+/* Rows without a status dot (file changes, approvals, inputs) line up with the tool names. */
+.ao-workflow .cx-chat .cx-live-item:not(.kind-message):not(.kind-tool):not(.kind-command):not(.kind-reasoning):not(.kind-steer) { padding: 2px 0 2px 14px; }
+.ao-workflow .cx-chat .cx-live-item.kind-reasoning { padding-left: 14px; }
+.ao-workflow .cx-chat .cx-live-item.kind-message { margin: 6px 0; color: var(--claude-text); }
+.ao-workflow .cx-chat .cx-live-item.kind-message .cx-md { font-size: 14px; line-height: 1.6; }
+.ao-workflow .cx-chat .cx-tool summary, .ao-workflow .cx-chat .cx-tool-row,
+.ao-workflow .cx-chat .cx-reasoning summary { align-items: baseline; margin: 0 -6px; padding: 2px 6px; border-radius: 6px; }
+.ao-workflow .cx-chat .cx-tool summary:hover, .ao-workflow .cx-chat .cx-reasoning summary:hover { background: var(--cx-hover); color: var(--claude-text); }
+.ao-workflow .cx-chat .cx-tool .cx-live-label { color: color-mix(in srgb, var(--claude-text) 72%, var(--claude-text-2)); font-weight: 500; }
+.ao-workflow .cx-chat .cx-tool summary:hover .cx-live-label, .ao-workflow .cx-chat .cx-tool[open] .cx-live-label { color: var(--claude-text); }
+.ao-workflow .cx-chat .cx-tool .cx-live-text { color: var(--claude-text-2); font-family: var(--claude-mono); font-size: 12px; }
+.ao-workflow .cx-chat .cx-tool.tone-ok .cx-tool-dot { background: var(--ao-green); }
+.ao-workflow .cx-chat .cx-tool.tone-failed .cx-live-label { color: var(--ao-red); }
+.ao-workflow .cx-chat .cx-tool-body { margin: 4px 0 8px 14px; }
+.ao-workflow .cx-chat .cx-tool-io { border-color: var(--claude-line-soft); border-radius: 8px; background: var(--claude-code-bg); color: var(--claude-text);
+  font-family: var(--claude-mono); font-size: 12px; line-height: 1.5; }
+.ao-workflow .cx-chat .cx-tool-io.is-output { color: var(--claude-text-2); }
+.ao-workflow .cx-chat .cx-tool-io code { padding: 0; background: transparent; color: inherit; font-size: inherit; }
+.ao-workflow .cx-chat .cx-live-item code { font-family: var(--claude-mono); }
+/* Reasoning: secondary, upright, quieter than the tool calls. */
+.ao-workflow .cx-chat .cx-live-item.kind-reasoning .cx-live-text { font-style: normal; color: var(--claude-text-2); }
+.ao-workflow .cx-chat .cx-live-item.kind-reasoning .cx-live-label { color: var(--claude-text-2); font-weight: 500; text-transform: none; }
+.ao-workflow .cx-chat .cx-reasoning-body { margin: 2px 0 6px 6px; padding-left: 12px; border-left: 1px solid var(--claude-line-soft); color: var(--claude-text-2); }
+.ao-workflow .cx-chat .cx-reasoning-body .cx-md { color: var(--claude-text-2); font-size: 13px; line-height: 1.6; }
+.ao-workflow .cx-chat .cx-shimmer { background-image: linear-gradient(90deg, var(--claude-text-2) 0%, var(--claude-text) 50%, var(--claude-text-2) 100%);
+  animation-duration: 2.8s; }
+
+/* ---------- Cards: approvals, questions, plans, errors ---------- */
+.ao-workflow .cx-chat .ao-msg-approval, .ao-workflow .cx-chat .cx-card { padding: 14px 16px; border: 1px solid var(--claude-line); border-radius: 12px;
+  background: var(--claude-surface); color: var(--claude-text); font-size: 14px; line-height: 1.55; }
+.ao-workflow .cx-chat .ao-msg-question { border-color: var(--claude-line); }
+.ao-workflow .cx-chat .cx-card.tone-error { border-color: color-mix(in srgb, var(--ao-red) 35%, var(--claude-line)); }
+.ao-workflow .cx-chat .cx-card p { font-size: 14px; }
+.ao-workflow .cx-chat .ao-msg-meta { margin-bottom: 6px; color: var(--claude-text-2); font-size: 12px; font-weight: 500; }
+.ao-workflow .cx-chat .ao-hint { color: var(--claude-text-2); font-size: 12px; }
+.ao-workflow .cx-chat .ao-msg-approval pre, .ao-workflow .cx-chat .ao-msg-plan .ao-plan { border: 1px solid var(--claude-line-soft); border-radius: 8px;
+  background: var(--claude-bg); }
+.ao-workflow .cx-chat .ao-msg-approval pre { padding: 8px 10px; font-family: var(--claude-mono); font-size: 12px; }
+.ao-workflow .cx-chat .ao-msg-actions { gap: 8px; margin-top: 12px; }
+.ao-workflow .cx-chat .ao-question-option { border-color: var(--claude-line); border-radius: 10px; background: var(--claude-bg); }
+/* `.ao-msg-approval fieldset label { display: grid }` and `input { width: 100% }` put each option's
+   radio on its own full-width row; keep it beside its label. */
+.ao-workflow .cx-chat .ao-msg-approval .ao-question-option { display: flex; margin: 0; }
+.ao-workflow .cx-chat .ao-question-option input[type="radio"], .ao-workflow .cx-chat .ao-question-option input[type="checkbox"] {
+  flex: 0 0 auto; width: auto; margin: 3px 0 0; padding: 0; }
+.ao-workflow .cx-chat .ao-question-option.is-checked { border-color: var(--claude-accent); background: var(--claude-accent-soft); }
+.ao-workflow .cx-chat .ao-question-input { border-color: var(--claude-line); background: var(--claude-bg); }
+.ao-workflow .cx-chat .ao-msg-approval a { color: var(--claude-accent); }
+/* Buttons in cards: clay primary, hairline secondary. */
+.ao-workflow .cx-chat .ao-msg-actions .button-primary, .ao-workflow .cx-chat .cx-card-actions button,
+.ao-workflow .cx-chat .cx-primary-button, .ao-workflow .cx-chat .ao-permissions-panel .button-primary {
+  min-height: 0; height: 32px; padding: 0 14px; border: 0; border-radius: 8px; background: var(--claude-accent); color: #fff; font-size: 13px; font-weight: 500; box-shadow: none; }
+.ao-workflow .cx-chat .ao-msg-actions .button-primary:hover:not(:disabled), .ao-workflow .cx-chat .cx-card-actions button:hover:not(:disabled),
+.ao-workflow .cx-chat .cx-primary-button:hover:not(:disabled), .ao-workflow .cx-chat .ao-permissions-panel .button-primary:hover:not(:disabled) {
+  background: var(--claude-accent-hover); }
+.ao-workflow .cx-chat .ao-msg-actions .button-secondary, .ao-workflow .cx-chat .ao-permissions-panel .button-secondary {
+  min-height: 0; height: 32px; padding: 0 14px; border: 1px solid var(--claude-line); border-radius: 8px; background: var(--claude-bg);
+  color: var(--claude-text); font-size: 13px; font-weight: 500; box-shadow: none; }
+.ao-workflow .cx-chat .ao-msg-actions .button-secondary:hover:not(:disabled), .ao-workflow .cx-chat .ao-permissions-panel .button-secondary:hover:not(:disabled) {
+  background: var(--cx-hover); }
+.ao-workflow .cx-chat .cx-delete-confirm .cx-primary-button { background: var(--ao-red); }
+
+/* ---------- Composer ---------- */
+.ao-workflow .cx-chat .cx-composer, .ao-workflow .cx-chat .cx-context-strip, .ao-workflow .cx-chat .cx-command-card,
+.ao-workflow .cx-chat .cx-composer-modes, .ao-workflow .cx-chat .cx-route-note { max-width: 740px; }
+.ao-workflow .cx-chat .cx-composer { padding: 12px 12px 8px 14px; border: 1px solid var(--claude-line); border-radius: 16px; background: var(--claude-raised);
+  box-shadow: var(--claude-shadow); }
+.ao-workflow .cx-chat .cx-composer:focus-within { border-color: color-mix(in srgb, var(--claude-accent) 45%, var(--claude-line));
+  box-shadow: var(--claude-shadow), 0 0 0 3px var(--claude-accent-soft); }
+.ao-workflow .cx-chat .cx-composer textarea { color: var(--claude-text); font-size: 15px; line-height: 1.55; }
+.ao-workflow .cx-chat .cx-composer textarea::placeholder { color: var(--claude-text-2); opacity: 1; }
+.ao-workflow .cx-chat .cx-context-strip { border-radius: 16px 16px 0 0; background: var(--claude-surface); }
+.ao-workflow .cx-chat .cx-chip, .ao-workflow .cx-chat .cx-chip-icon { color: var(--claude-text-2); }
+.ao-workflow .cx-chat .cx-composer .ao-composer-chip { height: 30px; color: var(--claude-text-2); font-size: 13px; }
+.ao-workflow .cx-chat .cx-composer .ao-composer-controls > .ao-composer-picker:last-child .ao-composer-chip { color: var(--claude-text-2); }
+.ao-workflow .cx-chat .cx-composer .ao-composer-chip:hover:not(:disabled), .ao-workflow .cx-chat .cx-composer .ao-composer-chip[aria-expanded="true"] {
+  background: var(--cx-hover); color: var(--claude-text); }
+.ao-workflow .cx-chat .cx-composer .ao-mode-switch button { color: var(--claude-text-2); }
+.ao-workflow .cx-chat .cx-composer .ao-mode-switch button.is-active { color: var(--claude-text); }
+.ao-workflow .cx-chat .cx-composer .ao-mode-switch button + button::before { color: var(--claude-line); }
+.ao-workflow .cx-chat .cx-composer .cx-icon-button { color: var(--claude-text-2); }
+.ao-workflow .cx-chat .cx-composer .cx-icon-button:hover:not(:disabled) { color: var(--claude-text); }
+.ao-workflow .cx-chat .cx-context-meter .cx-context-fill { stroke: var(--claude-accent); }
+/* Send: a clay circle with a white arrow; Stop stays a dark square button. */
+.ao-workflow .cx-chat .cx-send { width: 32px; height: 32px; border-radius: 50%; background: var(--claude-accent); color: #fff; }
+.ao-workflow .cx-chat .cx-send:hover:not(:disabled) { background: var(--claude-accent-hover); }
+.ao-workflow .cx-chat .cx-send:disabled { background: color-mix(in srgb, var(--claude-accent) 40%, var(--claude-raised)); color: #fff; }
+.ao-workflow .cx-chat .cx-send.is-stop { border-radius: 10px; background: var(--claude-text); }
+.ao-workflow .cx-chat .cx-send.is-stop:hover { background: color-mix(in srgb, var(--claude-text) 85%, var(--claude-bg)); }
+.ao-workflow .cx-chat .cx-send.is-stop span { background: var(--claude-bg); }
+.ao-workflow .cx-chat .cx-attachment { border-color: var(--claude-line); border-radius: 8px; background: var(--claude-surface); }
+.ao-workflow .cx-chat .cx-slash, .ao-workflow .cx-chat .cx-command-card { border-color: var(--claude-line); background: var(--claude-raised); box-shadow: var(--claude-shadow); }
+.ao-workflow .cx-chat .cx-goal { border-color: var(--claude-line); background: var(--claude-raised); }
+.ao-workflow .cx-chat .cx-plan-chip { background: var(--claude-accent-soft); color: var(--claude-accent-hover); }
+.ao-workflow .cx-chat .cx-to-bottom { border-color: var(--claude-line); background: var(--claude-raised); color: var(--claude-text); box-shadow: var(--claude-shadow); }
+
+/* Composer popovers (model, permissions) render inside the chat; give them the warm surface. */
+.ao-workflow .cx-chat .ao-composer-popover, .ao-workflow .cx-chat .ao-permissions-panel, .ao-workflow .cx-chat .ao-permission-notice {
+  border-color: var(--claude-line); background: var(--claude-raised); color: var(--claude-text); box-shadow: var(--claude-shadow); }
+.ao-workflow .cx-chat .ao-composer-popover label, .ao-workflow .cx-chat .ao-permission-option, .ao-workflow .cx-chat .ao-permission-symbol,
+.ao-workflow .cx-chat .ao-permission-option > svg:last-child, .ao-workflow .cx-chat .ao-picker-option { color: var(--claude-text); }
+.ao-workflow .cx-chat .ao-composer-popover .ao-hint, .ao-workflow .cx-chat .ao-popup-muted, .ao-workflow .cx-chat .ao-picker-option small,
+.ao-workflow .cx-chat .ao-permission-option small, .ao-workflow .cx-chat .ao-permissions-panel > header h3,
+.ao-workflow .cx-chat .ao-popover-close, .ao-workflow .cx-chat .ao-model-group > h4, .ao-workflow .cx-chat .ao-chip-provider { color: var(--claude-text-2); }
+.ao-workflow .cx-chat .ao-picker-option { background: transparent; }
+.ao-workflow .cx-chat .ao-picker-option:hover { background: var(--cx-hover); }
+.ao-workflow .cx-chat .ao-picker-option[aria-checked="true"] { background: var(--claude-accent-soft); color: var(--claude-text); }
+.ao-workflow .cx-chat .ao-option-radio { border-color: var(--claude-text-2); }
+.ao-workflow .cx-chat .ao-picker-option[aria-checked="true"] .ao-option-radio { border-color: var(--claude-accent); background: var(--claude-accent);
+  box-shadow: inset 0 0 0 3px var(--claude-raised); }
+.ao-workflow .cx-chat .ao-permission-option:hover:not(:disabled), .ao-workflow .cx-chat .ao-permission-option:focus-visible { background: var(--cx-hover); }
+.ao-workflow .cx-chat .ao-composer-popover input, .ao-workflow .cx-chat .ao-composer-popover select { border-color: var(--claude-line); background: var(--claude-bg); color: var(--claude-text); }
+
+/* ---------- Side panels inside the chat (cards, workbench, details) ---------- */
+.ao-workflow .cx-chat .cx-structure { border-left-color: var(--claude-line-soft); background: var(--claude-surface); }
+.ao-workflow .cx-chat .cx-structure-resize:hover, .ao-workflow .cx-chat .cx-structure-resize:focus-visible { background: var(--claude-accent-soft); }
+.ao-workflow .cx-chat .cx-workbench-tab.is-active { background: var(--cx-active); }
+
+/* ---------- Focus: a clay ring ---------- */
+.ao-workflow .cx-chat :is(button, a, summary, select, input, textarea):focus-visible { outline: 2px solid color-mix(in srgb, var(--claude-accent) 70%, transparent); outline-offset: 2px; }
+.ao-workflow .cx-chat .cx-composer textarea:focus-visible, .ao-workflow .cx-chat .cx-field-input input:focus-visible { outline: none; }
+
+/* ---------- Motion: subtle, and none at all for reduced motion ---------- */
+.ao-workflow .cx-chat .cx-scroll { scroll-behavior: smooth; }
+.ao-workflow .cx-chat :is(button, summary, .ao-question-option, .cx-composer, .cx-md a) {
+  transition: background-color 120ms ease-out, color 120ms ease-out, border-color 120ms ease-out, box-shadow 120ms ease-out, opacity 120ms ease-out, transform 120ms ease-out; }
+.ao-workflow .cx-chat :is(.cx-send, .cx-card-actions button, .ao-msg-actions button, .cx-primary-button):active:not(:disabled) { transform: scale(0.96); }
+/* New turns and live items fade and rise in; `backwards` leaves no transform behind once done. */
+.ao-workflow .cx-chat .cx-turn, .ao-workflow .cx-chat .cx-live-item, .ao-workflow .cx-chat .cx-step,
+.ao-workflow .cx-chat .ao-msg-approval, .ao-workflow .cx-chat .cx-card { animation: claude-rise 160ms var(--claude-ease) backwards; }
+/* Folds open by fading their content in (no height animation, so nothing jumps). */
+.ao-workflow .cx-chat .cx-work > .cx-live, .ao-workflow .cx-chat .cx-work > .cx-steps, .ao-workflow .cx-chat .cx-step-body,
+.ao-workflow .cx-chat details[open] > .cx-tool-body, .ao-workflow .cx-chat details[open] > .cx-reasoning-body { animation: claude-fade 140ms ease-out backwards; }
+.ao-workflow .cx-chat .cx-msg-actions { transition: opacity 120ms ease-out; }
+
+@keyframes claude-rise { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@keyframes claude-fade { from { opacity: 0; } to { opacity: 1; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .ao-workflow .cx-chat .cx-scroll { scroll-behavior: auto; }
+  .ao-workflow .cx-chat *, .ao-workflow .cx-chat *::before, .ao-workflow .cx-chat *::after { animation: none !important; transition: none !important; }
+  .ao-workflow .cx-chat :is(.cx-send, .cx-card-actions button, .ao-msg-actions button, .cx-primary-button):active:not(:disabled) { transform: none; }
+  .ao-workflow .cx-chat .cx-shimmer { background: none; color: var(--claude-text-2); }
+}

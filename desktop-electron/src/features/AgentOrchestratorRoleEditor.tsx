@@ -12,6 +12,8 @@ export type AoModelCapabilities = {
   provider?: string;
   contextWindow?: { min: number; max?: number; kind?: "context" | "compaction" };
   contextLimit?: number; effortReason?: string; contextReason?: string;
+  /** CPA has paused it for now (rate-limited or cooling down): still offered, served again later. */
+  paused?: boolean; pausedReason?: string;
 };
 export type AoModelCatalog = { models: string[]; capabilities?: Record<string, AoModelCapabilities> };
 export type AoModelLoader = (harness: string) => Promise<string[] | AoModelCatalog>;
@@ -49,6 +51,20 @@ export function workerRoute(harness: string, model: string, permission: NativePe
 
 /** Reasoning efforts a card may ask for (Codex's names; the engine checks the same list). */
 export const EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
+/**
+ * The WebGPT tiers as ChatGPT's own effort picker names them, each with the one effort the
+ * bridge runs it at (Pro is Codex's "ultra"). A tier is its effort: picking either picks both.
+ * Luna and Think are not listed: they exist only on Free/Go accounts without that picker, and
+ * there the bridge already runs these tiers as Luna (Instant, Medium) or Think (High and up).
+ */
+export const WEB_TIERS = [
+  { model: "chatgpt-web/light", effort: "low", label: "Instant" },
+  { model: "chatgpt-web/medium", effort: "medium", label: "Medium" },
+  { model: "chatgpt-web/high", effort: "high", label: "High" },
+  { model: "chatgpt-web/extra-high", effort: "xhigh", label: "Extra High" },
+  { model: "chatgpt-web/pro", effort: "ultra", label: "Pro" },
+] as const;
+export const webTier = (model: string | undefined) => WEB_TIERS.find(tier => tier.model === model);
 /** What Native Codex offers when the model reports no efforts of its own (WebGPT tiers). */
 const NATIVE_DEFAULT_EFFORTS = EFFORTS.slice(0, 5);
 /** Legacy Native-to-agent carry-over policy; AO controls use the selected model capabilities. */
@@ -68,13 +84,12 @@ export function withTuning(next: AoRoute, previous: AoRoute): AoRoute {
   if (route.harness_id === NATIVE_HARNESS && previous.native_permission_profile !== undefined) route.native_permission_profile = previous.native_permission_profile;
   if (previous.approval_policy !== undefined) route.approval_policy = previous.approval_policy;
   if (previous.approvals_reviewer !== undefined) route.approvals_reviewer = previous.approvals_reviewer;
+  // A new model starts on its own effort: carrying the last one over gave DeepSeek and Gemini
+  // "effort high" because WebGPT High had been picked before. The window carries where it applies.
+  // (A WebGPT model sets its own effort: it is one ChatGPT effort.)
   delete route.effort;
   delete route.context_window;
   const betweenAgents = next.harness_id.startsWith("ao:") && previous.harness_id.startsWith("ao:");
-  const keepEffort = route.harness_id === NATIVE_HARNESS
-    ? EFFORTS.some(effort => effort === previous.effort)
-    : betweenAgents || effortApplies(route);
-  if (previous.effort && keepEffort) route.effort = previous.effort;
   if (previous.context_window && (betweenAgents || contextApplies(route))) route.context_window = previous.context_window;
   return route;
 }
@@ -87,6 +102,24 @@ export function tokensLabel(tokens: number): string {
   return tokens.toLocaleString("en-US");
 }
 
+/** A typed token count: "272000", "272,000", "200k", "1.5m" or "1M"; null when it is not one. */
+export function parseTokens(text: string): number | null {
+  const match = /^(\d+(?:\.\d+)?)\s*([km])?$/i.exec(text.replace(/[,_\s]/g, ""));
+  if (!match) return null;
+  const tokens = Math.round(Number(match[1]) * (match[2]?.toLowerCase() === "m" ? 1_000_000 : match[2] ? 1_000 : 1));
+  return Number.isSafeInteger(tokens) && tokens > 0 ? tokens : null;
+}
+
+/** A token count as the field shows it, read back exactly by parseTokens: "1M", "128k", "272,500". */
+export function contextText(tokens: number): string {
+  if (tokens % 1_000_000 === 0) return `${tokens / 1_000_000}M`;
+  if (tokens % 1_000 === 0) return `${tokens / 1_000}k`;
+  return tokens.toLocaleString("en-US");
+}
+
+/** Window sizes offered as you type, within what the model and harness allow. */
+const CONTEXT_PRESETS = [32_000, 64_000, 128_000, 200_000, 272_000, 400_000, 1_000_000, 2_000_000];
+
 const EFFORT_ORDER: string[] = [...EFFORTS];
 
 /** What a model supports, for model lists: "up to xhigh effort · 272K context". Native Codex accepts
@@ -94,11 +127,38 @@ const EFFORT_ORDER: string[] = [...EFFORTS];
 export function capabilityText(capability: AoModelCapabilities | undefined, native = false): string {
   const efforts = (native && !capability?.efforts?.length ? [...NATIVE_DEFAULT_EFFORTS] : capability?.efforts ?? []).filter(effort => EFFORT_ORDER.includes(effort));
   const top = efforts.sort((a, b) => EFFORT_ORDER.indexOf(a) - EFFORT_ORDER.indexOf(b)).at(-1);
-  const limit = capability?.contextLimit ?? (native ? 2_000_000 : capability?.contextWindow?.max);
+  // Only a limit the catalog reported is the model's; without one the window's max is just the
+  // client's 2M ceiling, which every such model read as "2M context (unverified)". Say nothing then.
+  const limit = capability?.contextLimit ?? (native ? 2_000_000 : undefined);
   // Catalog limits are decimal (272,000), so they read best as "272K" rather than tokensLabel's binary units.
   const size = !limit ? "" : limit >= 1_000_000 && limit % 100_000 === 0 ? `${limit / 1_000_000}M`
     : limit >= 1_000 && limit % 1_000 === 0 ? `${limit / 1_000}K` : tokensLabel(limit);
-  return [top ? `up to ${top} effort` : "", size ? `${size} context` : ""].filter(Boolean).join(" · ");
+  return [top ? `up to ${top} effort` : "", size ? `${size} context` : "", capability?.paused ? "paused by CPA for now" : ""].filter(Boolean).join(" · ");
+}
+
+/**
+ * What a route can be tuned to, from its model's catalog entry: the efforts it takes, the
+ * window range a card may set, the window a blank card launches with (the model's full known
+ * limit, as the workflow's defaultContextWindow), and the preset sizes within range. Native
+ * Codex takes the model's own efforts and limit when reported, else its full effort set and a
+ * 4,096–2M budget. Shared by the role editor and the composer's effort and window menus.
+ */
+export function routeTuning(route: AoRoute, capability: AoModelCapabilities | undefined) {
+  const native = route.harness_id === NATIVE_HARNESS;
+  const efforts: readonly string[] | undefined = native ? (capability?.efforts?.length ? capability.efforts : [...NATIVE_DEFAULT_EFFORTS]) : capability?.efforts;
+  const nativeMax = Math.min(2000000, capability?.contextLimit ?? 2000000);
+  const context = native ? { min: 4096, max: nativeMax } : capability?.contextWindow;
+  const fullLimit = !native && context && capability?.contextLimit ? Math.min(capability.contextLimit, context.max ?? capability.contextLimit) : null;
+  const presets = context ? CONTEXT_PRESETS.filter(tokens => tokens >= context.min && (context.max === undefined || tokens <= context.max)) : [];
+  return { native, efforts, nativeMax, context, fullLimit, presets };
+}
+
+/** Listed models serving the same model as `model` under another provider: a card saved on
+ *  cpa/cline-pass/deepseek-v4.1-flash finds cpa/commandcode-go/deepseek-v4.1-flash. */
+export function sameModelElsewhere(model: string, models: readonly string[]): string[] {
+  const name = (id: string) => id.slice(id.lastIndexOf("/") + 1).toLowerCase();
+  const wanted = name(model);
+  return wanted ? models.filter(id => id !== model && name(id) === wanted).slice(0, 3) : [];
 }
 
 const ROLE_LABELS = { planner: "Orchestrator", approver: "Command approver", worker: "Worker", review_split: "Main reviewer · split", sub_reviewer: "Sub-reviewer", reviewer: "Main reviewer", retry: "Retry" } as const;
@@ -142,8 +202,15 @@ const PROVIDER_NAMES: Record<string, string> = {
   zhipu: "Zhipu", glm: "Zhipu", openrouter: "OpenRouter", commandcode: "CommandCode",
 };
 const providerName = (provider: string) => PROVIDER_NAMES[provider.toLowerCase()] ?? provider;
-/** "CPA · <provider> · <model>": the provider CPA reported, else the model id's own prefix or family. */
-function cpaLabel(id: string): string {
+/** The CPA provider serving a "cpa/<id>" route model (as CPA reported it, else the id's own prefix); null for other models. */
+export function cpaProviderOf(model: string | undefined): string | null {
+  if (!model?.startsWith("cpa/")) return null;
+  const id = model.slice(4);
+  const slash = id.indexOf("/");
+  return cpaProviders.get(id) ?? (slash > 0 ? id.slice(0, slash) : null);
+}
+/** A CPA id's provider (as CPA reported it, else the id's own prefix or family) and the model's own part. */
+function cpaParts(id: string): { provider: string; name: string } {
   const slash = id.indexOf("/");
   const prefix = slash > 0 ? id.slice(0, slash) : "";
   const name = prefix ? id.slice(slash + 1) : id;
@@ -152,7 +219,53 @@ function cpaLabel(id: string): string {
     : /^(gpt|o\d|codex)/.test(lower) ? "openai" : lower.startsWith("grok") ? "grok" : lower.startsWith("deepseek") ? "deepseek"
     : lower.startsWith("glm") ? "zhipu" : lower.startsWith("qwen") ? "qwen" : lower.startsWith("kimi") ? "kimi" : "";
   const provider = cpaProviders.get(id) ?? (prefix || family);
-  return provider ? `CPA · ${providerName(provider)} · ${name}` : `CPA · ${name}`;
+  return { provider: provider ? providerName(provider) : "", name };
+}
+
+/** "CPA · <provider> · <model>": the provider CPA reported, else the model id's own prefix or family. */
+function cpaLabel(id: string): string {
+  const { provider, name } = cpaParts(id);
+  return provider ? `CPA · ${provider} · ${name}` : `CPA · ${name}`;
+}
+
+// Words whose usual casing a plain capital letter gets wrong.
+const MODEL_WORDS: Record<string, string> = {
+  gpt: "GPT", oss: "OSS", glm: "GLM", deepseek: "DeepSeek", minimax: "MiniMax", mimo: "MiMo", xai: "xAI",
+};
+
+/**
+ * A model id as a person reads it: "claude-opus-4-6-thinking" -> "Opus 4.6 Thinking",
+ * "gpt-5.6-terra" -> "GPT-5.6 Terra", "kimi-k2.7-code" -> "Kimi K2.7 Code". Claude's family word
+ * goes (the group already says Claude; "Opus" is the name); split version digits ("4-6") join.
+ */
+export function prettyModelName(id: string): string {
+  const parts = id.replace(/^claude-(?=opus|sonnet|haiku)/i, "").split("-").filter(Boolean);
+  const words: string[] = [];
+  for (const part of parts) {
+    const previous = words.at(-1);
+    // "4-6" is one version, "4.6"; "gpt-5.6" keeps its hyphen, as OpenAI writes it.
+    if (/^\d+$/.test(part) && previous && /^\d+(\.\d+)?$/.test(previous)) { words[words.length - 1] = `${previous}.${part}`; continue; }
+    if (/^\d/.test(part) && previous === "GPT") { words[words.length - 1] = `GPT-${part}`; continue; }
+    const lower = part.toLowerCase();
+    words.push(MODEL_WORDS[lower] ?? (/^[a-z]\d/.test(lower) ? lower.toUpperCase() : lower[0].toUpperCase() + lower.slice(1)));
+  }
+  return words.join(" ");
+}
+
+/**
+ * How a model list row names a model once a group header says who serves it: the group
+ * ("WebGPT", "Claude · CPA") and the model's own name ("High", "Opus 4.6 Thinking"). An
+ * agent's own model (not WebGPT, not CPA) has no group and keeps its id, which is what that
+ * agent's own docs call it. modelLabel stays the full, unambiguous form for cards and hints.
+ */
+export function modelShortLabel(model: string, cpaPool = false): { group: string; name: string } {
+  // WebGPT keeps its whole name ("WebGPT High") in the list and on the chip, ungrouped: the
+  // tier at its end is the effort, which the effort chip then shows and picks.
+  if (model.startsWith("chatgpt-web/")) return { group: "", name: modelLabel(model) };
+  const cpa = model.startsWith("cpa/") ? model.slice(4) : cpaPool && model ? model : null;
+  if (cpa === null) return { group: "", name: model };
+  const { provider, name } = cpaParts(cpa);
+  return { group: provider ? `${provider} · CPA` : "CPA", name: prettyModelName(name) };
 }
 
 /** cpaPool: a bare id that Native Codex runs through the shared CPA pool. */
@@ -161,7 +274,8 @@ export function modelLabel(model: string, cpaPool = false): string {
   if (model.startsWith("cpa/")) return cpaLabel(model.slice(4));
   if (cpaPool && model && !model.startsWith("chatgpt-web/")) return cpaLabel(model);
   if (!model.startsWith("chatgpt-web/")) return model;
-  return `WebGPT ${model.slice("chatgpt-web/".length).split("-").map(part => part[0]?.toUpperCase() + part.slice(1)).join(" ")}`;
+  // A tier reads as ChatGPT names it ("light" is ChatGPT's Instant); a saved Luna/Think route keeps its own name.
+  return `WebGPT ${webTier(model)?.label ?? model.slice("chatgpt-web/".length).split("-").map(part => part[0]?.toUpperCase() + part.slice(1)).join(" ")}`;
 }
 
 export function harnessLabel(harnessId: string, harnesses: AoHarness[]): string {
@@ -233,29 +347,30 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
   const known = harnesses.some(item => item.id === harness);
   const native = harness === NATIVE_HARNESS;
   const capability = capabilities?.harness === harness ? capabilities.models[route.model] : undefined;
-  // Native Codex takes the model's own efforts and context limit when its catalog reports them.
-  const efforts = native ? (capability?.efforts?.length ? capability.efforts : [...NATIVE_DEFAULT_EFFORTS]) : capability?.efforts;
-  const nativeMax = Math.min(2000000, capability?.contextLimit ?? 2000000);
-  const context = native ? { min: 4096, max: nativeMax } : capability?.contextWindow;
+  // A saved model the harness no longer lists: nothing about it can be verified, so say why
+  // instead of offering only a disabled "unverified" effort.
+  const missing = !native && models !== null && models.length > 0 && Boolean(route.model) && route.model !== AGENT_DEFAULT_MODEL && !models.includes(route.model);
+  const { efforts, nativeMax, context, fullLimit, presets } = routeTuning(route, capability);
   // What is being typed stays local until it is a whole number in range: a half-typed "1" of
   // "1000000" would otherwise reach the route (and a saved team's autosave) and be refused.
   const [contextDraft, setContextDraft] = useState<string | null>(null);
   const inRange = (tokens: number) => Boolean(context) && Number.isSafeInteger(tokens) && tokens >= context!.min && (context!.max === undefined || tokens <= context!.max);
   const typeContext = (text: string) => {
     setContextDraft(text);
-    const tokens = Math.round(Number(text));
+    const tokens = parseTokens(text);
     if (!text.trim()) { if (route.context_window !== undefined) { const next = { ...route }; delete next.context_window; onChange(next); } }
-    else if (inRange(tokens) && tokens !== route.context_window) onChange({ ...route, context_window: tokens });
+    else if (tokens !== null && inRange(tokens) && tokens !== route.context_window) onChange({ ...route, context_window: tokens });
   };
   const settleContext = () => {
     const text = contextDraft;
     setContextDraft(null);
     if (text === null || !text.trim() || !context) return;
-    const tokens = Math.round(Number(text));
-    if (!Number.isFinite(tokens)) return;
+    const tokens = parseTokens(text);
+    if (tokens === null) return;
     const settled = Math.max(context.min, context.max !== undefined ? Math.min(context.max, tokens) : tokens);
     if (settled !== route.context_window) onChange({ ...route, context_window: settled });
   };
+  const presetsId = `context-presets-${harness}-${route.model}`.replace(/[^\w-]/g, "-");
   return <>
     <label>Harness<select value={harness} disabled={disabled || isWebModel(route.model)} title={isWebModel(route.model) ? "WebGPT requires Native Codex" : undefined} onChange={event => {
       // Start each harness on an explicit model; an agent without a known one shows "Choose a model".
@@ -273,7 +388,7 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
     {!hideModel ? <label>Model<select value={route.model} disabled={disabled || models === null} onChange={event => onChange(withTuning(workerRoute(route.harness_id, event.target.value, nativePermission(route)), route))}>
       {!route.model || route.model === AGENT_DEFAULT_MODEL
         ? <option value={route.model} disabled>Choose a model{route.model ? " (\"default\" is not allowed)" : ""}</option>
-        : models && !models.includes(route.model) ? <option value={route.model}>{route.model} (unverified)</option> : null}
+        : models && !models.includes(route.model) ? <option value={route.model}>{route.model} (no longer listed)</option> : null}
       {models === null ? <option value={route.model}>{route.model || "Loading"}</option> : null}
       {shown.map(model => <option key={model} value={model}>
         {modelLabel(model, native && !isWebModel(model))}{harness !== NATIVE_HARNESS && isWebModel(model) ? " · switches to Native Codex"
@@ -286,22 +401,29 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
     <label title={native ? "Reasoning effort for this card" : capability?.effortReason || (efforts ? efforts.length ? "Reasoning efforts advertised for this model" : "This model does not support an effort override" : "Model capabilities have not been verified")}>Reasoning effort
       <select value={route.effort ?? ""} disabled={disabled || !efforts?.length} aria-invalid={!native && Boolean(route.effort) && Boolean(efforts) && !efforts?.includes(route.effort!)}
         onChange={event => { const next = { ...route }; if (event.target.value) next.effort = event.target.value; else delete next.effort; onChange(next); }}>
-        <option value="">{native ? "Model default" : efforts ? efforts.length ? "Model default" : "Not supported" : "Capabilities unverified"}</option>
+        <option value="">{native ? "Model default" : efforts ? efforts.length ? "Model default" : "Not supported" : missing ? "Choose a listed model" : "Capabilities unverified"}</option>
         {!native && route.effort && !efforts?.includes(route.effort) ? <option value={route.effort} disabled>{route.effort} (saved, unverified or unsupported)</option> : null}
         {(efforts ?? []).map(effort => <option key={effort} value={effort}>{effort}</option>)}
       </select></label>
     <label title={native ? `Context window in tokens (4,096 to ${nativeMax.toLocaleString("en-US")})` : capability?.contextReason || (context ? context.kind === "compaction" ? "Client compaction threshold in tokens, not the model context limit" : "Client context budget in tokens, not a larger provider limit" : "No verified client context override")}>Context window
-      <input type="number" min={context?.min} max={context?.max} step={1} inputMode="numeric" disabled={disabled || !context}
-        placeholder={!context ? "No verified override" : `${native ? "Model default" : context.kind === "compaction" ? "Client compaction default" : "Client default"}${context.max ? ` · up to ${tokensLabel(context.max)}` : ""}`}
-        value={contextDraft ?? route.context_window ?? ""} aria-invalid={contextDraft !== null && contextDraft.trim() !== "" && !inRange(Math.round(Number(contextDraft)))
+      {/* Typed freely: 272000, 272,000, 272k or 1m; the list offers sizes the model takes. */}
+      <input type="text" inputMode="numeric" list={presets.length ? presetsId : undefined} disabled={disabled || !context}
+        placeholder={!context ? "No verified override" : native ? "Model default"
+          : fullLimit ? `Full model limit · ${contextText(fullLimit)}` : `Agent default${context.max ? ` · up to ${contextText(context.max)}${capability?.contextLimit ? "" : " (limit not reported)"}` : ""}`}
+        value={contextDraft ?? (route.context_window !== undefined ? contextText(route.context_window) : "")}
+        aria-invalid={contextDraft !== null && contextDraft.trim() !== "" && !inRange(parseTokens(contextDraft) ?? Number.NaN)
           || !native && Boolean(context) && route.context_window !== undefined && !inRange(route.context_window)}
         onChange={event => typeContext(event.target.value)}
         // Leaving the field settles a value outside the model's range to the nearest limit.
-        onBlur={settleContext} /></label>
+        onBlur={settleContext} />
+      {presets.length ? <datalist id={presetsId}>{presets.map(tokens => <option key={tokens} value={contextText(tokens)} />)}</datalist> : null}</label>
     {!native && (route.effort !== undefined || route.context_window !== undefined) ? <button type="button" className="button-secondary ao-wide"
       disabled={disabled} title="Clear requested effort and client context budget" onClick={() => {
         const next = { ...route }; delete next.effort; delete next.context_window; onChange(next);
       }}>Model defaults</button> : null}
+    {missing ? <p className="ao-hint ao-wide" role="status">{modelLabel(route.model)} is no longer in this harness's model list, so its efforts and context window are unknown and a run with them saved will not start.
+      {sameModelElsewhere(route.model, models ?? []).map(other => <button key={other} type="button" className="button-secondary" disabled={disabled}
+        onClick={() => onChange(withTuning(workerRoute(route.harness_id, other, nativePermission(route)), route))}>Use {modelLabel(other)}</button>)}</p> : null}
     <p className="ao-hint ao-wide">{native
       ? `Native harness context budget: 4,096–${nativeMax.toLocaleString("en-US")} tokens${capability?.contextLimit ? " (this model's limit)" : ""}. Blank uses the model default.`
       : [capability?.effortReason || (!efforts ? "Effort capabilities are unverified." : !efforts.length ? "This model has no effort override." : ""),

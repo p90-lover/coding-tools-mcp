@@ -55,6 +55,8 @@ export interface SetupOptions {
   experimentalBiggerContext?: boolean;
   zeroRiskProEnabled?: boolean;
   replaceCodexRoute?: boolean;
+  /** Leave Codex's model route alone: the user turned "Use Coding Tools in Codex" off. */
+  skipCodexRoute?: boolean;
   restartService?: boolean;
   acknowledgedUnofficial?: boolean;
   tunnelId?: string;
@@ -68,7 +70,8 @@ export interface SetupResult {
   loginCreated: boolean;
   serviceLoaded: boolean;
   tunnelReady: boolean | null;
-  codexRestartRequired: true;
+  /** False when setup left Codex's route alone (--no-codex-route): Codex has nothing new to read. */
+  codexRestartRequired: boolean;
   connectorSetupRequired: boolean;
 }
 
@@ -459,16 +462,20 @@ export function preflightSetup(options: SetupOptions): void {
       throw new Error("Automatic and Zero Risk require different Tunnel IDs and separate ChatGPT connectors");
     }
   }
-  preflightCodexIntegration(config, {
-    replaceExistingRoute: options.replaceCodexRoute,
-  });
+  if (!options.skipCodexRoute) {
+    preflightCodexIntegration(config, {
+      replaceExistingRoute: options.replaceCodexRoute,
+    });
+  }
 }
 
 export async function setup(options: SetupOptions): Promise<SetupResult> {
   const { existing, config, launcherOwned } = prepareSetup(options);
-  preflightCodexIntegration(config, {
-    replaceExistingRoute: options.replaceCodexRoute,
-  });
+  if (!options.skipCodexRoute) {
+    preflightCodexIntegration(config, {
+      replaceExistingRoute: options.replaceCodexRoute,
+    });
+  }
   const refreshTunnelWorker = tunnelWorkerRuntimeChanged(existing, config);
   if (existing && options.restartService) config.controlToken = randomBytes(32).toString("base64url");
   const beforeService = getServiceStatus();
@@ -602,9 +609,12 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
     launcherOwned && existing && existing.browserHost !== "launcher",
   );
   if (!migratingTerminalRuntime) removeLegacyRuntimeArtifacts(config);
-  installCodexIntegration(config, {
-    replaceExistingRoute: options.replaceCodexRoute,
-  });
+  // The user may keep Codex off the bridge: the runtime still serves the app, Codex is untouched.
+  if (!options.skipCodexRoute) {
+    installCodexIntegration(config, {
+      replaceExistingRoute: options.replaceCodexRoute,
+    });
+  }
 
   return {
     mode: config.mode,
@@ -612,7 +622,7 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
     loginCreated,
     serviceLoaded: launcherOwned ? false : getServiceStatus().loaded,
     tunnelReady,
-    codexRestartRequired: true,
+    codexRestartRequired: !options.skipCodexRoute,
     connectorSetupRequired: config.mode === "full",
   };
 }

@@ -14,6 +14,7 @@ import { copyFor, localizeRuntimeMessage, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import { ProviderCenterSurface } from "./features/ProviderHubSaasSurface";
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
+import { ProxyGatewaySurface } from "./features/ProxyGatewaySurface";
 import { ExternalServicesSurface } from "./features/ExternalServicesSurface";
 import { OriginalUiSurface } from "./features/OriginalUiSurface";
 import { WorkspacePanel } from "./features/WorkspacePanel";
@@ -448,7 +449,8 @@ function LauncherShell({
     || surface === "integrations"
     || surface === "cpa"
 
-    || surface === "network";
+    || surface === "network"
+    || surface === "proxy-gateway";
   const [compactSidebar, setCompactSidebar] = useState(compactAtMount);
   const [browserSlot, setBrowserSlot] = useState<HTMLDivElement | null>(null);
   const [sessionReminderBusy, setSessionReminderBusy] = useState(false);
@@ -469,6 +471,14 @@ function LauncherShell({
   const updateVisible = ["available", "downloading", "installing"].includes(snapshot.update.status);
   const updateBusy = snapshot.update.status === "downloading" || snapshot.update.status === "installing";
   const updateVersion = "version" in snapshot.update ? snapshot.update.version : null;
+  const appUpdate = "kind" in snapshot.update && snapshot.update.kind === "app";
+  const updateProgress = "progress" in snapshot.update && typeof snapshot.update.progress === "number"
+    ? ` ${Math.round(snapshot.update.progress * 100)}%` : "";
+  const updateLabel = updateBusy
+    ? `${copy.updating}${snapshot.update.status === "downloading" ? updateProgress : ""}`
+    : appUpdate
+      ? (language === "zh-TW" ? `更新至 v${updateVersion}` : `Update to v${updateVersion}`)
+      : (language === "zh-TW" ? `更新 GUI ${updateVersion}` : `Update GUI ${updateVersion}`);
   const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
 
   useEffect(() => {
@@ -810,6 +820,12 @@ function LauncherShell({
                   label={language === "zh-TW" ? "網路代理" : copy.networkProxy}
                   onClick={() => navigateSurface("network")}
                 />
+                <SidebarItem
+                  active={surface === "proxy-gateway"}
+                  icon="globe"
+                  label={copy.proxyGateway}
+                  onClick={() => navigateSurface("proxy-gateway")}
+                />
               </details>
             </nav>
             {sidebarOpen && !compactSidebar ? (
@@ -827,7 +843,7 @@ function LauncherShell({
                   active={false}
                   disabled={updateBusy || operation?.status === "running" || browser?.status === "running"}
                   icon="update"
-                  label={updateBusy ? copy.updating : (language === "zh-TW" ? `更新 GUI ${updateVersion}` : `Update GUI ${updateVersion}`)}
+                  label={updateLabel}
                   onClick={() => void installUpdate()}
                   tone="update"
                 />
@@ -953,6 +969,14 @@ function LauncherShell({
             ) : null}
             {keepAlive("network", () => (
               <NetworkProxySurface language={language} setError={setError} />
+            ))}
+            {keepAlive("proxy-gateway", () => (
+              <ProxyGatewaySurface
+                active={surface === "proxy-gateway"}
+                language={language}
+                openNetwork={() => navigateSurface("network")}
+                setError={setError}
+              />
             ))}
             {keepAlive("settings", () => (
               <SettingsSurface
@@ -1467,6 +1491,18 @@ function SetupSurface({
     return () => { active = false; };
   }, [keysmithAvailable]);
   const manualInteraction = snapshot.state.browserInteractionMode === "manual";
+  // Setup finds an existing ChatGPT sign-in by itself: on open and every 10 s while it still shows
+  // "Sign in". The check never navigates a login in progress (launcher:browser-check-auth).
+  const signedIn = browser?.authenticated === true;
+  const canCheckSignIn = !manualInteraction && typeof api?.checkSignIn === "function";
+  useEffect(() => {
+    if (!canCheckSignIn || signedIn) return;
+    let active = true;
+    const check = () => { if (active) void api!.checkSignIn().catch(() => undefined); };
+    check();
+    const timer = window.setInterval(check, 10_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [canCheckSignIn, signedIn]);
   const busy = localBusy
     || operation?.status === "running"
     || (!manualInteraction && (
@@ -2013,7 +2049,20 @@ function SettingsSurface({
   const [busy, setBusy] = useState(false);
   const [turnsCancelled, setTurnsCancelled] = useState(false);
   const [integrationRemoved, setIntegrationRemoved] = useState(false);
+  // What switching Codex's route just did: restart Codex to apply it, or run Setup first.
+  const [codexRouteNote, setCodexRouteNote] = useState("");
   const [updateNotice, setUpdateNotice] = useState("");
+  const setCodexRoute = async (enabled: boolean) => {
+    setCodexRouteNote("");
+    try {
+      const result = await api!.setCodexRoute!(enabled);
+      updateState(result.state);
+      setCodexRouteNote(result.route.setupRequired ? copy.codexRouteSetupRequired
+        : result.route.codexRestartRequired ? copy.codexRouteRestart : "");
+    } catch (cause) {
+      setError(messageOf(cause));
+    }
+  };
   const guiUpdating = ["checking", "downloading", "installing"].includes(snapshot.update.status);
 
   const updateLanguage = async (next: Language) => {
@@ -2075,7 +2124,7 @@ function SettingsSurface({
     setUpdateNotice("");
     try {
       const updated = await api!.installUpdate();
-      if (!updated) setUpdateNotice(language === "zh-TW" ? "GUI 已是最新版本。" : "The GUI is up to date.");
+      if (!updated) setUpdateNotice(language === "zh-TW" ? "已是最新版本。" : "Coding Tools is up to date.");
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -2123,13 +2172,13 @@ function SettingsSurface({
         </SettingRow> : null}
         {!devProfile ? <SettingRow
           body={updateNotice || (language === "zh-TW"
-            ? "自動檢查 GUI 更新；一鍵刷新介面。MCP、Codex Bridge 及 Proxy Bridge 持續執行。"
-            : "Automatically check for GUI updates. One click downloads and refreshes the interface while MCP, Codex Bridge and Proxy Bridge keep running.")}
-          label={language === "zh-TW" ? "GUI 更新" : "GUI updates"}
+            ? "自動檢查更新，在應用程式內安裝，不需安裝程式：只下載有變更的檔案，然後重新啟動。MCP、Codex Bridge 及 CPA 持續執行。"
+            : "Automatically check for updates and install them inside the app, with no installer: only the changed files download, then the app restarts. MCP, Codex Bridge and CPA keep running.")}
+          label={language === "zh-TW" ? "應用程式更新" : "App updates"}
         >
           <div className="inline-actions">
             <SecondaryButton disabled={busy || guiUpdating} onClick={() => void updateGui()}>
-              {guiUpdating ? (language === "zh-TW" ? "更新中…" : "Updating GUI…") : (language === "zh-TW" ? "更新 GUI" : "Update GUI")}
+              {guiUpdating ? (language === "zh-TW" ? "更新中…" : "Updating…") : (language === "zh-TW" ? "更新" : "Update")}
             </SecondaryButton>
             <Switch
               checked={snapshot.state.automaticUpdates}
@@ -2171,6 +2220,56 @@ function SettingsSurface({
             checked={snapshot.state.showBrowserDuringTurns}
             disabled={snapshot.state.browserInteractionMode === "manual"}
             onChange={(checked) => void api!.setPreference("showBrowserDuringTurns", checked)
+              .then(updateState)
+              .catch((cause) => setError(messageOf(cause)))}
+          />
+        </SettingRow>
+        {!devProfile && api?.setCodexRoute ? <SettingRow body={codexRouteNote || copy.codexRouteBody} label={copy.codexRoute}>
+          <Switch
+            checked={snapshot.state.codexRoute !== false}
+            onChange={(checked) => void setCodexRoute(checked)}
+          />
+        </SettingRow> : null}
+        <SettingRow body={copy.chatAgentToolsBody} label={copy.chatAgentTools}>
+          <Switch
+            checked={snapshot.state.chatAgentTools !== false}
+            onChange={(checked) => void api!.setPreference("chatAgentTools", checked)
+              .then(updateState)
+              .catch((cause) => setError(messageOf(cause)))}
+          />
+        </SettingRow>
+        <SettingRow body={copy.chatAgentTerminalToolsBody} label={copy.chatAgentTerminalTools}>
+          <Switch
+            checked={snapshot.state.chatAgentTools !== false && (snapshot.state.chatAgentTerminalTools === true
+              || (snapshot.state.chatAgentTerminalTools !== false && snapshot.chatAgentSandbox === true))}
+            disabled={snapshot.state.chatAgentTools === false}
+            onChange={(checked) => void api!.setPreference("chatAgentTerminalTools", checked)
+              .then(updateState)
+              .catch((cause) => setError(messageOf(cause)))}
+          />
+        </SettingRow>
+        <SettingRow body={copy.chatAgentPreviewToolsBody} label={copy.chatAgentPreviewTools}>
+          <Switch
+            checked={snapshot.state.chatAgentTools !== false && snapshot.state.chatAgentPreviewTools !== false}
+            disabled={snapshot.state.chatAgentTools === false}
+            onChange={(checked) => void api!.setPreference("chatAgentPreviewTools", checked)
+              .then(updateState)
+              .catch((cause) => setError(messageOf(cause)))}
+          />
+        </SettingRow>
+        <SettingRow body={copy.confirmAgentToolRequestsBody} label={copy.confirmAgentToolRequests}>
+          <Switch
+            checked={snapshot.state.confirmAgentToolRequests !== false}
+            onChange={(checked) => void api!.setPreference("confirmAgentToolRequests", checked)
+              .then(updateState)
+              .catch((cause) => setError(messageOf(cause)))}
+          />
+        </SettingRow>
+        <SettingRow body={copy.chatAgentDesktopToolsBody} label={copy.chatAgentDesktopTools}>
+          <Switch
+            checked={snapshot.state.chatAgentTools !== false && snapshot.state.chatAgentDesktopTools === true}
+            disabled={snapshot.state.chatAgentTools === false}
+            onChange={(checked) => void api!.setPreference("chatAgentDesktopTools", checked)
               .then(updateState)
               .catch((cause) => setError(messageOf(cause)))}
           />

@@ -96,13 +96,24 @@ test("every harness lists the WebGPT models and marks that they switch to Native
 test("effort and context window carry over only where the new route applies them", () => {
   const native = { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web", model: "chatgpt-web/high", permission_profile: ":read-only", effort: "high", context_window: 262144 };
   const own = editor.withTuning(editor.workerRoute("ao:codex", "gpt-5.5"), native);
-  assert.equal(own.effort, "high", "an AO agent's own model takes effort");
+  assert.equal(own.effort, undefined, "a new model starts on its own effort, not WebGPT High's");
   assert.equal(own.context_window, undefined, "AO harnesses have no context window");
   const gateway = editor.withTuning(editor.workerRoute("ao:codex", "cpa/gpt-6-luna"), native);
   assert.equal(gateway.effort, undefined, "AO skips effort for gateway models");
   assert.deepEqual(plain(editor.withTuning(editor.workerRoute("codex-native", "chatgpt-web/pro"), native)).context_window, 262144);
   assert.equal(editor.tokensLabel(262144), "256K");
   assert.equal(editor.tokensLabel(1000000), "1M");
+});
+
+test("a context window is typed freely (272000, 272,000, 272k, 1.5m) and shown so it reads back exactly", () => {
+  for (const [typed, tokens] of [["272000", 272000], ["272,000", 272000], ["272k", 272000], ["272 K", 272000], ["1.5m", 1500000], ["1M", 1000000], ["128_000", 128000]]) {
+    assert.equal(editor.parseTokens(typed), tokens, typed);
+  }
+  for (const typed of ["", "abc", "-5", "1e6", "12kk", "0"]) assert.equal(editor.parseTokens(typed), null, `"${typed}" is not a window`);
+  for (const tokens of [32000, 128000, 200000, 272000, 872000, 1000000, 2000000, 272500, 4096]) {
+    assert.equal(editor.parseTokens(editor.contextText(tokens)), tokens, `${tokens} round-trips through what the field shows`);
+  }
+  assert.equal(editor.contextText(128000), "128k", "decimal, unlike tokensLabel's binary 125K");
 });
 
 test("every card describes how it runs, with a custom role in place of the built-in one", () => {
@@ -132,4 +143,23 @@ test("CPA models are labelled CPA, then their provider, then the model name", ()
   assert.equal(editor.modelLabel("chatgpt-web/high", true), "WebGPT High");
   editor.rememberCpaProviders({ "cpa/gemini-3.8-flash-high": { provider: "antigravity" } });
   assert.equal(editor.modelLabel("cpa/gemini-3.8-flash-high"), "CPA · Antigravity · gemini-3.8-flash-high", "the provider CPA reported wins");
+});
+
+test("model list rows name the provider once in a group and tidy the model's own name", () => {
+  for (const [id, name] of [
+    ["claude-opus-4-6-thinking", "Opus 4.6 Thinking"], ["claude-sonnet-5-5-high", "Sonnet 5.5 High"],
+    ["gpt-5.6-terra", "GPT-5.6 Terra"], ["gpt-oss-120b-medium", "GPT OSS 120b Medium"], ["deepseek-v4-pro", "DeepSeek V4 Pro"],
+    ["kimi-k2.7-code", "Kimi K2.7 Code"], ["glm-5.3-flash", "GLM 5.3 Flash"], ["mimo-v2.5-pro", "MiMo V2.5 Pro"],
+    ["minimax-m3", "MiniMax M3"], ["qwen3.7-max", "Qwen3.7 Max"], ["gemini-3.1-flash-lite", "Gemini 3.1 Flash Lite"],
+  ]) assert.equal(editor.prettyModelName(id), name, id);
+  assert.deepEqual(plain(editor.modelShortLabel("chatgpt-web/extra-high")), { group: "", name: "WebGPT Extra High" }, "WebGPT keeps its whole name");
+  assert.equal(editor.modelLabel("chatgpt-web/light"), "WebGPT Instant", "named as ChatGPT's effort picker names it");
+  assert.equal(editor.modelLabel("chatgpt-web/luna"), "WebGPT Luna", "a saved Luna route keeps its name");
+  assert.deepEqual(plain(editor.WEB_TIERS.map(tier => [tier.label, tier.effort])),
+    [["Instant", "low"], ["Medium", "medium"], ["High", "high"], ["Extra High", "xhigh"], ["Pro", "ultra"]]);
+  assert.deepEqual(plain(editor.modelShortLabel("cpa/cline-pass/kimi-k3")), { group: "Cline Pass · CPA", name: "Kimi K3" });
+  assert.deepEqual(plain(editor.modelShortLabel("gpt-6-luna", true)), { group: "OpenAI · CPA", name: "GPT-6 Luna" }, "a Native Codex pool id");
+  assert.deepEqual(plain(editor.modelShortLabel("gpt-6-luna")), { group: "", name: "gpt-6-luna" }, "an agent's own model keeps its id");
+  // The full label is unchanged: cards and hints still say exactly which route runs.
+  assert.equal(editor.modelLabel("cpa/cline-pass/kimi-k3"), "CPA · Cline Pass · kimi-k3");
 });

@@ -18,6 +18,9 @@ const SPECS = Object.freeze({
   upstream_bounds: { readOnly: false, description: "Resize the embedded AO renderer within the host window." },
   upstream_projects: { readOnly: true, description: "List actual upstream AO projects." },
   upstream_bind_workspace: { readOnly: false, description: "Bind a registered local workspace to AO by its canonical directory without creating repositories or worktrees." },
+  upstream_dependency_links: { readOnly: true, description: "Read whether new AO worktrees reuse the project's installed node_modules (a hard-link farm, `enabled`) and share its .venv/venv (`python`)." },
+  upstream_set_dependency_links: { readOnly: false, description: "Turn reusing the project's installed node_modules (`enabled`) or sharing its .venv/venv (`python`) in new AO worktrees on or off." },
+  dependency_link_info: { readOnly: true, description: "Read the repo-relative folders new worktrees of a workspace's AO project share with the project (`shared`) or get as hard-link farms (`farmed`)." },
   upstream_sessions: { readOnly: true, description: "List actual upstream AO sessions." },
   upstream_agents: { readOnly: true, description: "List upstream harness availability." },
   upstream_orchestrators: { readOnly: true, description: "List upstream project orchestrators." },
@@ -42,14 +45,35 @@ const SPECS = Object.freeze({
   restart_run: { readOnly: false, description: "Stop a stuck or settled mission (kept in history) and start a fresh run of the same task with the current team." },
   control_run: { readOnly: false, description: "Pause queued work, resume a paused mission, or stop only that mission's owned harnesses from the local GUI." },
   activity: { readOnly: true, description: "Read what each working card of a run is doing now: start time, current step and last activity." },
+  turn_timeline: { readOnly: true, description: "Read a finished card's thinking, tool calls (with their arguments and output) and messages back from its AO session." },
   run_status: { readOnly: true, description: "Read background AO run progress and held state." },
   approve_harness: { readOnly: false, description: "Respond to one visible native consent request with its typed decision and exact thread/turn scope after local confirmation; legacy Allow/Deny remains supported." },
   next: { readOnly: true, description: "Return the next actionable plan clause for the active Codex harness." },
   chat_send: { readOnly: false, description: "Send a chat message: create the chat's task (or append a follow-up) and start a team run on it." },
+  chat_prewarm: { readOnly: false, description: "Start an AO agent for the new chat's selected model (or its team's orchestrator) ahead of the first message, so it does not launch on send." },
+  chat_steer: { readOnly: false, description: "Hand a message to the chat's running AO agent at once (steer), without waiting for its turn to end." },
   chat_goal: { readOnly: false, description: "Pause, resume, edit or clear a chat's goal (/goal); a resumed goal starts its next round." },
   compact_chat: { readOnly: false, description: "Replace a settled chat's context with a handoff summary (/compact)." },
+  chat_delete_message: { readOnly: false, description: "Delete one message of a settled chat with its reply: the message leaves the task, its run is hidden from the chat, and the next turn starts a fresh agent session." },
   chat_diff: { readOnly: true, description: "Read the project's uncommitted git changes (/diff)." },
   codex_executable: { readOnly: true, description: "Locate the installed Codex desktop app's codex.exe used to run missions." },
+  chat_processes: { readOnly: true, description: "List the commands a chat's agents started through the app's terminal (the chat's Terminal pane), with whether each still runs." },
+  chat_process_output: { readOnly: true, description: "Read one of a chat's commands' output (stdout or stderr) from an offset." },
+  chat_process_stop: { readOnly: false, description: "Stop one of a chat's running commands for the user." },
+  chat_process_input: { readOnly: false, description: "Type the user's input into one of a chat's running commands." },
+  chat_preview_state: { readOnly: true, description: "Read what each of a chat's agents shows in its preview browser (URL, title, errors)." },
+  chat_preview_show: { readOnly: false, description: "Draw one chat agent's preview browser in the chat's Preview pane at the given bounds." },
+  chat_preview_hide: { readOnly: false, description: "Take the chat's preview browser out of the Preview pane; it keeps running for the agent." },
+  chat_preview_navigate: { readOnly: false, description: "The user's own navigation in a chat agent's preview: back, forward, reload or a localhost URL." },
+  workspace_mode: { readOnly: false, description: "Read or set where a project's chats work: each in its own git worktree, one shared worktree, or the project folder itself (the Edit project dialog)." },
+  chat_context: { readOnly: true, description: "Read how full each of a chat's agent sessions' context is, its token spend, rate limits and tool servers (the composer's context meter)." },
+  cpa_quota: { readOnly: true, description: "Read each CPA Codex account's 5-hour and weekly usage limits, as CPA Helper last checked them (the context meter's plan usage limits)." },
+  chat_terminal_start: { readOnly: false, description: "Start the user's own shell in a chat agent's worktree (the side panel's Terminal tab)." },
+  chat_changes: { readOnly: true, description: "Read a chat agent's worktree changes: git status with new files and the diff (the side panel's Changes tab)." },
+  chat_files: { readOnly: true, description: "List one folder of a chat agent's worktree (the side panel's Files tab)." },
+  chat_file: { readOnly: true, description: "Read one file of a chat agent's worktree as text (the side panel's Files tab)." },
+  chat_branches: { readOnly: true, description: "List a project's git branches, the worktree each is checked out in, and which one the project folder and the chat are on (the composer's branch bar)." },
+  chat_switch_branch: { readOnly: false, description: "Check out an existing branch in a project's folder, where its chats work (the branch bar's choice). Creates nothing; refuses uncommitted changes and a branch another worktree holds." },
 
   create: { readOnly: false, description: "Create a task for the Coding Tools mission board at its expected revision." },
   append: { readOnly: false, description: "Append reviewed clauses to the old plan board with its expected revision." },
@@ -57,6 +81,11 @@ const SPECS = Object.freeze({
   move_task: { readOnly: false, description: "Move one plan task after local confirmation." },
   move_clause: { readOnly: false, description: "Move one plan clause after local confirmation." },
 });
+
+// Operations served by the AO runtime service although their names do not start with "upstream_".
+const UPSTREAM_OPERATIONS = new Set(["dependency_link_info", "workspace_mode", "chat_processes", "chat_process_output", "chat_process_stop",
+  "chat_process_input", "chat_preview_state", "chat_preview_show", "chat_preview_hide", "chat_preview_navigate", "chat_context",
+  "cpa_quota", "chat_terminal_start", "chat_changes", "chat_files", "chat_file", "chat_branches", "chat_switch_branch"]);
 
 module.exports = Object.freeze({
   operations: Object.freeze(Object.keys(SPECS)),
@@ -70,7 +99,7 @@ module.exports = Object.freeze({
   },
   async invoke(operation, args = {}, context = {}) {
     if (!Object.hasOwn(SPECS, operation)) throw new Error("Unknown Agent Orchestrator operation");
-    const call = operation.startsWith("upstream_")
+    const call = operation.startsWith("upstream_") || UPSTREAM_OPERATIONS.has(operation)
       ? context.services?.agentOrchestratorUpstream
       : context.services?.agentOrchestrator;
     if (typeof call !== "function") {

@@ -12,6 +12,16 @@ function git(directory, args) {
   });
 }
 
+/** Like git(), but keeps git's own message when it refuses, for the user to read. */
+function gitOutcome(directory, args) {
+  return new Promise((resolve) => {
+    execFile("git", ["-C", directory, ...args], { windowsHide: true, timeout: 60_000 }, (error, stdout, stderr) => {
+      const message = String(stderr || error?.message || "").split(/\r?\n/).map(line => line.trim()).find(Boolean) || "";
+      resolve({ ok: !error, stdout: String(stdout).trim(), message: message.replace(/^(fatal|error):\s*/i, "") });
+    });
+  });
+}
+
 /**
  * AO starts each session from the repository's default branch. A repository with no remote has
  * none, so AO refuses it unless `ao.defaultBranch` is recorded (as AO does for repositories it
@@ -25,12 +35,108 @@ async function recordLocalDefaultBranch(directory) {
   await git(directory, ["config", "--local", "ao.defaultBranch", branch]);
 }
 
+const MAX_BRANCHES = 300;
+
+/** The repository's default branch: the one recorded for AO, else the remote's HEAD. */
+async function defaultBranchOf(folder) {
+  const recorded = await git(folder, ["config", "--local", "--get", "ao.defaultBranch"]);
+  if (recorded) return recorded;
+  const remote = await git(folder, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
+  return remote ? remote.replace(/^origin\//, "") : null;
+}
+
+/**
+ * The project's branches for the chat's branch bar: each local branch, the worktree that has it
+ * checked out, and which one the project folder and this chat are on. The default branch comes
+ * first, then the user's own branches, then AO's ao/* session branches, each newest first.
+ * Read-only: nothing is checked out or created.
+ */
+async function listBranches(folder, chatRoot = null) {
+  const root = await git(folder, ["rev-parse", "--show-toplevel"]);
+  if (!root) return { git: false, branches: [] };
+  const headOf = async (directory) => {
+    const branch = await git(directory, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+    if (branch) return branch;
+    const commit = await git(directory, ["rev-parse", "--short", "HEAD"]);
+    return commit ? `detached at ${commit}` : null;
+  };
+  const [refs, worktrees, current, chatBranch, recordedDefault] = await Promise.all([
+    git(folder, ["for-each-ref", "--sort=-committerdate", `--count=${MAX_BRANCHES}`,
+      "--format=%(refname:short)%09%(committerdate:unix)%09%(upstream:short)", "refs/heads"]),
+    git(folder, ["worktree", "list", "--porcelain"]),
+    headOf(folder),
+    chatRoot ? headOf(chatRoot) : Promise.resolve(null),
+    defaultBranchOf(folder),
+  ]);
+  const checkedOut = new Map();
+  let worktree = null;
+  for (const line of String(worktrees || "").split(/\r?\n/)) {
+    if (line.startsWith("worktree ")) worktree = line.slice(9);
+    else if (line.startsWith("branch refs/heads/") && worktree) checkedOut.set(line.slice(18), worktree);
+  }
+  const branches = String(refs || "").split(/\r?\n/).filter(Boolean).map((line) => {
+    const [name, time, upstream] = line.split("\t");
+    return {
+      name, updatedAt: Number(time) > 0 ? new Date(Number(time) * 1000).toISOString() : null,
+      upstream: upstream || null, worktree: checkedOut.get(name) ?? null,
+      current: name === current, chat: Boolean(chatBranch) && name === chatBranch,
+    };
+  });
+  const names = new Set(branches.map(branch => branch.name));
+  const defaultBranch = [recordedDefault, "main", "master"].find(name => name && names.has(name)) ?? null;
+  const rank = (branch) => (branch.name === defaultBranch ? 0 : branch.name.startsWith("ao/") ? 2 : 1);
+  branches.sort((a, b) => rank(a) - rank(b));
+  for (const branch of branches) branch.default = branch.name === defaultBranch;
+  return { git: true, root, current, chatBranch, defaultBranch, branches, truncated: branches.length >= MAX_BRANCHES };
+}
+
+/**
+ * Checks out an existing local branch in the project folder, where chats work. Refuses uncommitted
+ * changes (they would follow the switch or block it halfway) and passes on git's own reason for
+ * anything else, such as a branch another worktree has checked out. Nothing is created.
+ */
+async function switchFolderBranch(folder, branch) {
+  if (typeof branch !== "string" || !/^[\w./-]{1,200}$/.test(branch) || branch.startsWith("-")) {
+    throw new Error("Choose a branch from the list");
+  }
+  if (!(await git(folder, ["rev-parse", "--show-toplevel"]))) throw new Error("This project is not a git repository");
+  if ((await git(folder, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`])) === null) {
+    throw new Error(`There is no local branch named ${branch}`);
+  }
+  if ((await git(folder, ["symbolic-ref", "--quiet", "--short", "HEAD"])) === branch) return { switched: false };
+  const changes = await git(folder, ["status", "--porcelain", "--untracked-files=no"]);
+  if (changes === null) throw new Error("Could not read the project folder's git status");
+  if (changes) throw new Error("The project folder has uncommitted changes; commit or stash them before switching branch");
+  const outcome = await gitOutcome(folder, ["switch", "--no-guess", branch]);
+  if (!outcome.ok) throw new Error(outcome.message || `git could not switch to ${branch}`);
+  return { switched: true };
+}
+
+// The dependency-link sync asks AO for the project, and on a busy machine that request ran into
+// its 30 s timeout: every launch waited for it before AO was even asked for a session. A launch
+// now waits a few seconds at most; the sync then finishes on its own (one per project at a time),
+// and as the links rarely change between launches, the next launch has its result.
+const SYNC_BUDGET_MS = 3_000;
+function within(promise, ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+    Promise.resolve(promise).catch(() => undefined).finally(() => { clearTimeout(timer); resolve(); });
+  });
+}
+
 // AO project identity and the existing durable mission IDs are shared by both views.
 // No task store, checkout or model process is created by this binding.
 function createAoWorkspaceBoard({ listWorkspaces, listProjects, createProject, missionCall, readAccounting,
   realpath = fs.promises.realpath, platform = process.platform,
   isRepositoryRoot = async directory => fs.existsSync(path.join(directory, ".git")),
   recordDefaultBranch = recordLocalDefaultBranch,
+  // Before AO starts a session, brings the project's links to installed dependencies up to date.
+  syncProject = null,
+  // Before AO starts a session, gives a project that never chose where its chats work the app's
+  // default. Awaited in full: AO must not make a worktree for the first chat first.
+  defaultWorkspaceMode = null,
+  syncBudgetMs = SYNC_BUDGET_MS,
 }) {
   const pending = new Map();
   async function canonical(directory) {
@@ -66,6 +172,10 @@ function createAoWorkspaceBoard({ listWorkspaces, listProjects, createProject, m
       project = await createProject({ path: folder });
       if (!project || await canonical(project.path) !== root) throw new Error("AO project registration changed the workspace scope");
     }
+    if (register && project?.id && typeof defaultWorkspaceMode === "function") {
+      try { await defaultWorkspaceMode(project); } catch { /* AO's own default, a worktree per chat, still works */ }
+    }
+    if (register && project?.id && typeof syncProject === "function") await within(syncProject(project, folder), syncBudgetMs);
     return { workspaceId: item.id, projectId: project?.id ?? null };
   }
   async function readWorkspace(workspaceId, runId) {
@@ -90,6 +200,21 @@ function createAoWorkspaceBoard({ listWorkspaces, listProjects, createProject, m
       pending.set(id, operation);
       return operation;
     },
+    /** The workspace's AO project ({ workspaceId, projectId|null }) without registering one or syncing it. */
+    project: id => binding(id, false),
+    /** The workspace folder's branches, and the one a chat's own folder (`chatRoot`) is on. */
+    async branches(id, chatRoot = null) {
+      const { item } = await workspace(id);
+      const folder = platform === "win32" ? item.path.replace(/^\\\\\?\\/, "") : item.path;
+      return listBranches(folder, chatRoot);
+    },
+    /** Checks out `branch` in the workspace folder, then lists the branches again. */
+    async switchBranch(id, branch) {
+      const { item } = await workspace(id);
+      const folder = platform === "win32" ? item.path.replace(/^\\\\\?\\/, "") : item.path;
+      const { switched } = await switchFolderBranch(folder, branch);
+      return { switched, ...await listBranches(folder) };
+    },
     readWorkspace,
     async read(projectId, runId) {
       const project = (await listProjects()).find(item => item.id === projectId);
@@ -101,4 +226,4 @@ function createAoWorkspaceBoard({ listWorkspaces, listProjects, createProject, m
   };
 }
 
-module.exports = { createAoWorkspaceBoard, recordLocalDefaultBranch };
+module.exports = { createAoWorkspaceBoard, listBranches, switchFolderBranch, recordLocalDefaultBranch };

@@ -1,6 +1,6 @@
 {
   "name": "coding-tools-full-harness-desktop",
-  "version": "0.7.0-rc.14",
+  "version": "0.7.0-rc.16",
   "private": true,
   "description": "Coding Tools desktop with the pinned full Codex ChatGPT Web harness",
   "author": "Coding Tools MCP Contributors",
@@ -23,6 +23,7 @@
     "package:linux": "bun run build && bun run build:agent-orchestrator && bun run build:runtime && bun run build:five-stack-runtime && bun run build:package-resources && bun run scripts/package.cjs --linux",
     "smoke:package": "bun run scripts/smoke-package.cjs",
     "package:backend": "node scripts/package-backend.cjs",
+    "patch:portable": "node scripts/patch-portable.cjs",
     "test": "node --test tests/*.test.cjs",
     "start": "bun run build:preload && electron ."
   },
@@ -56,7 +57,9 @@
       "electron/cpa-managed.cjs",
       "vendor/bundled/cpa-plugins/**",
       "electron/cpa-codex-long-run.cjs",
-      "electron/atomic-file.cjs"
+      "electron/atomic-file.cjs",
+      "electron/cpa-plugin-models.cjs",
+      "electron/proxy-gateway-relay.cjs"
     ],
     "directories": {
       "output": "release"
@@ -169,7 +172,8 @@
     "win": {
       "icon": "assets/icon.ico",
       "target": [
-        "nsis"
+        "nsis",
+        "zip"
       ]
     },
     "linux": {

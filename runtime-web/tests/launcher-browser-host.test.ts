@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { createServer } from "node:http";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   LAUNCHER_BROWSER_HOST_KIND,
   LAUNCHER_BROWSER_IDLE_URL,
@@ -22,6 +22,8 @@ import {
   startLauncherManualTurn,
   waitForLauncherManualSent,
   waitForLauncherManualTerminal,
+  waitForLauncherBrowserHostDescriptor,
+  launcherRestartAnnouncedUntil,
 } from "../src/launcher-browser-host";
 import type { Browser, BrowserContext, Page } from "playwright-core";
 
@@ -75,6 +77,95 @@ test("launcher descriptor is owner-only, loopback-only, and process-bound", () =
     chmodSync(path, 0o644);
     expect(() => readLauncherBrowserHostDescriptor(path)).toThrow("unsafe permissions");
   }
+});
+
+test("a turn waits for the app's descriptor while it restarts, and only then", async () => {
+  const path = descriptorFile();
+  const contents = readFileSync(path, "utf8");
+  rmSync(path);
+  // The app is restarting: the descriptor appears on the third look.
+  let looks = 0;
+  const waited = await waitForLauncherBrowserHostDescriptor(path, {
+    intervalMs: 1,
+    sleep: async () => { looks += 1; if (looks === 2) writeFileSync(path, contents, { mode: 0o600 }); },
+  });
+  expect(waited.pid).toBe(process.pid);
+  expect(looks).toBe(2);
+
+  // It never comes back: the turn fails after the wait, saying so.
+  rmSync(path);
+  let clock = 0;
+  await expect(waitForLauncherBrowserHostDescriptor(path, {
+    timeoutMs: 1_000, now: () => clock, sleep: async () => { clock += 500; },
+  })).rejects.toThrow(/descriptor is missing.*waited 1 s for Coding Tools to start again/);
+
+  // An announced restart (an update installing) keeps the turn waiting past the plain wait.
+  const base = Date.now();
+  clock = base;
+  const markerPath = join(dirname(path), "launcher-browser.restarting.json");
+  writeFileSync(markerPath, JSON.stringify({ version: 1, pid: 1, reason: "update",
+    createdAt: new Date(base).toISOString(), until: new Date(base + 600_000).toISOString() }));
+  const announced = await waitForLauncherBrowserHostDescriptor(path, {
+    timeoutMs: 1_000, now: () => clock,
+    sleep: async () => { clock += 60_000; if (clock >= base + 480_000) writeFileSync(path, contents, { mode: 0o600 }); },
+  });
+  expect(announced.pid).toBe(process.pid);
+  expect(clock - base).toBe(480_000);
+  rmSync(path);
+  // Past the announced end, or a marker claiming more than 15 minutes, it fails like any other wait.
+  clock = base + 600_000;
+  await expect(waitForLauncherBrowserHostDescriptor(path, { timeoutMs: 1_000, now: () => clock, sleep: async () => { clock += 500; } }))
+    .rejects.toThrow(/descriptor is missing.*waited 1 s/);
+  writeFileSync(markerPath, JSON.stringify({ version: 1, createdAt: new Date(base).toISOString(), until: new Date(base + 3_600_000).toISOString() }));
+  expect(launcherRestartAnnouncedUntil(path, base)).toBeNull();
+  // A newer app's marker: `until` within 15 minutes for older bridges, `holdUntil` 30 for this one.
+  writeFileSync(markerPath, JSON.stringify({ version: 1, createdAt: new Date(base).toISOString(),
+    until: new Date(base + 900_000).toISOString(), holdUntil: new Date(base + 1_800_000).toISOString() }));
+  expect(launcherRestartAnnouncedUntil(path, base + 1_000_000)).toBe(base + 1_800_000);
+  expect(launcherRestartAnnouncedUntil(path, base + 1_800_001)).toBeNull();
+  writeFileSync(markerPath, JSON.stringify({ version: 1, createdAt: new Date(base).toISOString(),
+    until: new Date(base + 900_000).toISOString(), holdUntil: new Date(base + 7_200_000).toISOString() }));
+  // A holdUntil past 30 minutes is ignored; its until still counts.
+  expect(launcherRestartAnnouncedUntil(path, base)).toBe(base + 900_000);
+  rmSync(markerPath);
+
+  // A broken descriptor is not a restart: it fails at once.
+  writeFileSync(path, "{not json", { mode: 0o600 });
+  let slept = 0;
+  await expect(waitForLauncherBrowserHostDescriptor(path, { sleep: async () => { slept += 1; } })).rejects.toThrow("invalid JSON");
+  expect(slept).toBe(0);
+});
+
+test("once the app announces a restart, its own still-present descriptor is not used: the turn waits for the new app's", async () => {
+  const path = descriptorFile();
+  const outgoing = readFileSync(path, "utf8");
+  const replacement = JSON.stringify({ ...JSON.parse(outgoing), pid: process.ppid });
+  const markerPath = join(dirname(path), "launcher-browser.restarting.json");
+  const base = Date.now();
+  let clock = base;
+  // The quitting app (this process's pid) wrote its marker but has not yet removed its descriptor.
+  writeFileSync(markerPath, JSON.stringify({ version: 1, pid: process.pid, reason: "update",
+    createdAt: new Date(base).toISOString(), until: new Date(base + 600_000).toISOString() }));
+  const waited = await waitForLauncherBrowserHostDescriptor(path, {
+    timeoutMs: 1_000, now: () => clock,
+    sleep: async () => { clock += 60_000; if (clock >= base + 180_000) writeFileSync(path, replacement, { mode: 0o600 }); },
+  });
+  expect(waited.pid).toBe(process.ppid);
+  expect(clock - base).toBe(180_000);
+  // The new app never comes: once the announced window is over the marker no longer counts, and a
+  // descriptor whose process still runs is used as it always was.
+  writeFileSync(path, outgoing, { mode: 0o600 });
+  clock = base;
+  let looks = 0;
+  const after = await waitForLauncherBrowserHostDescriptor(path, { timeoutMs: 1_000, now: () => clock, sleep: async () => { looks += 1; clock += 120_000; } });
+  expect(after.pid).toBe(process.pid);
+  expect(clock - base).toBe(600_000);
+  expect(looks).toBe(5);
+  // A marker from another app's pid leaves a live descriptor usable at once.
+  writeFileSync(markerPath, JSON.stringify({ version: 1, pid: 1, createdAt: new Date(base).toISOString(), until: new Date(base + 600_000).toISOString() }));
+  clock = base;
+  expect((await waitForLauncherBrowserHostDescriptor(path, { now: () => clock })).pid).toBe(process.pid);
+  rmSync(markerPath);
 });
 
 test("launcher turn control sends authenticated lifecycle events", async () => {

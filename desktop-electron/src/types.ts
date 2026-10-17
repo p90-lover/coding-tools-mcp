@@ -2,7 +2,7 @@ export type Language = "en" | "zh-CN" | "zh-TW" | "ja";
 export type RefreshPart = "ui" | "bridge" | "mcp" | "agent-orchestrator" | "cpa" | "headless" | "backend" | "all" | "app";
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "gpt-browser" | "chatgpt-desktop" | "email" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "agent-orchestrator-teams" | "antigravity-cli" | "providers" | "integrations" | "cpa" | "paseo" | "anneal" | "network" | "activity" | "settings";
+export type Surface = "browser" | "gpt-browser" | "chatgpt-desktop" | "email" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "agent-orchestrator-teams" | "antigravity-cli" | "providers" | "integrations" | "cpa" | "paseo" | "anneal" | "network" | "proxy-gateway" | "activity" | "settings";
 
 export type ProviderAuth = "oauth" | "api_key" | "browser_session" | "local_proxy";
 export type ProviderAccountStatus = "pending" | "connected" | "expired" | "error" | "disabled";
@@ -121,7 +121,72 @@ export interface ProviderNetworkSnapshot {
   };
 }
 
-export type ProviderExecutionWorkload = "subagent" | "paseo" | "anneal";
+export interface ProxyGatewayProfileSummary {
+  profileId: string;
+  name: string;
+  protocol: ProxyProtocol;
+  host: string;
+  port: number;
+  hasAuthentication: boolean;
+}
+
+export interface ProxyGatewayStats {
+  activeConnections: number;
+  totalConnections: number;
+  rejectedConnections: number;
+  pendingConnections: number;
+  authFailures: number;
+  /** First tries without a key (the normal 407 challenge); helpers from before this was counted omit it. */
+  authChallenges?: number;
+  /** The newest wrong-key try: when, and from which client port. */
+  lastAuthFailure?: { at: string; remotePort: number | null } | null;
+  tunnels: number;
+  httpRequests: number;
+  failures: number;
+  bytesSent: number;
+  bytesReceived: number;
+  startedAt: string | null;
+}
+
+export interface ProxyGatewayTestResult {
+  ok: boolean;
+  ip?: string;
+  loc?: string;
+  colo?: string;
+  latencyMs?: number;
+  error?: string;
+  at: string;
+}
+
+export interface ProxyGatewayStatus {
+  enabled: boolean;
+  running: boolean;
+  listen: { host: string; port: number };
+  port: number;
+  tokenlessPort: number;
+  tokenlessOpen: boolean;
+  reservedPorts: number[];
+  helperState: "running" | "unverified" | "restarting" | "stopped";
+  helper: { pid: number; runtime: string; adopted: boolean; startedAt: string } | null;
+  unverifiedHelper: { pid: number; port: number; since: string } | null;
+  needsRestart: Array<"bridge" | "mcp">;
+  watchdog: { restarts: number; nextRestartAt: string | null };
+  gatewayProfileId: string;
+  upstreamProfileId: string | null;
+  upstream: ProxyGatewayProfileSummary | null;
+  useForApp: boolean;
+  globalRoute: {
+    enabled: boolean;
+    profileId: string | null;
+    profile: ProxyGatewayProfileSummary | null;
+  };
+  previousGlobal: { enabled: boolean; profileId: string | null } | null;
+  stats: ProxyGatewayStats | null;
+  lastError: { message: string; at: string } | null;
+  lastTest: ProxyGatewayTestResult | null;
+}
+
+export type ProviderExecutionWorkload ="subagent" | "paseo" | "anneal";
 export type ProviderExecutionProtocol =
   | "openai_chat"
   | "openai_responses"
@@ -431,6 +496,18 @@ export interface LauncherState {
   automaticUpdates: boolean;
   keepRunningOnClose: boolean;
   showBrowserDuringTurns: boolean;
+  /** AO chat agents get the app's own tools over MCP; absent means on. */
+  chatAgentTools?: boolean;
+  /** Codex's model route goes through the app's bridge ("Use Coding Tools in Codex") unless false. */
+  codexRoute?: boolean;
+  /** Those agents may also capture the screen and control the computer; absent means off. */
+  chatAgentDesktopTools?: boolean;
+  /** Those agents may also run commands through the app's terminal; absent means off. */
+  chatAgentTerminalTools?: boolean;
+  /** Those agents get their own preview browser for pages served on this machine; absent means on. */
+  chatAgentPreviewTools?: boolean;
+  /** An agent's tool request answered in the chat is confirmed again in a dialog unless false. */
+  confirmAgentToolRequests?: boolean;
   browserInteractionMode: BrowserInteractionMode;
   experimentalBiggerContext: boolean;
   zeroRiskProEnabled: boolean;
@@ -507,7 +584,8 @@ export interface OperationState {
 
 export type UpdateState =
   | { status: "disabled" | "idle" | "checking" | "up-to-date" }
-  | { status: "available" | "downloading" | "installing"; version: string }
+  // kind "app": a whole-app update that restarts the app; otherwise a GUI-only reload.
+  | { status: "available" | "downloading" | "installing"; version: string; kind?: "app"; progress?: number }
   | { status: "error"; message: string };
 
 export interface LauncherSnapshot {
@@ -522,6 +600,8 @@ export interface LauncherSnapshot {
   connectorName: string;
   connectorNames: Record<BrowserInteractionMode, string>;
   mcpCredentialsConfigured: boolean;
+  /** Agents' commands run in Codex's Windows sandbox (installed), so the terminal tools default on. */
+  chatAgentSandbox?: boolean;
   logs: LogRecord[];
   urls: {
     github: string;
@@ -574,6 +654,17 @@ export interface ChatGptDesktopStatus {
   busy: "launching" | "switching" | "clearing" | "stopping" | null;
   error: string | null;
   accounts: ChatGptDesktopAccount[];
+}
+
+/** A still capture of the user's own ChatGPT desktop window (not a copy Coding Tools runs). */
+export interface ChatGptLocalPreview {
+  state: "ok" | "not-running" | "minimized" | "hidden" | "blank" | "unsupported";
+  title: string | null;
+  /** JPEG data URL when `state` is "ok". */
+  image: string | null;
+  width: number;
+  height: number;
+  capturedAt: number;
 }
 
 export interface EmailStatus {
@@ -640,6 +731,16 @@ export interface KeysmithSelectedFile {
   sha256: string;
 }
 
+/** A project folder in git (git-remote.cjs readGitInfo). */
+export type ProjectGit = {
+  kind: "repo" | "worktree" | "inside" | "none" | "missing";
+  /** The repository's root (for "inside", the repository the folder is in). */
+  root: string | null;
+  /** For a worktree, the repository it belongs to. */
+  mainRepo: string | null;
+  branch: string | null;
+};
+
 export interface LauncherApi {
   snapshot(): Promise<LauncherSnapshot>;
   gptBrowserStatus(): Promise<GptBrowserStatus>;
@@ -660,6 +761,8 @@ export interface LauncherApi {
   clearChatGptDesktopAccount(): Promise<ChatGptDesktopStatus>;
   stopChatGptDesktop(): Promise<ChatGptDesktopStatus>;
   setChatGptDesktopSurfaceActive(active: boolean): Promise<boolean>;
+  chatGptLocalPreview(): Promise<ChatGptLocalPreview>;
+  sendChatGptLocalMessage(text: string): Promise<{ ok: true; sentAt: number }>;
   setChatGptDesktopBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<boolean>;
   onChatGptDesktopChanged(listener: (status: ChatGptDesktopStatus) => void): () => void;
   onChatGptDesktopRemeasure(listener: () => void): () => void;
@@ -693,6 +796,8 @@ export interface LauncherApi {
   /** A project folder's git origin as "owner/repo", or null. */
   projectRemote?(folder: string): Promise<string | null>;
   projectBranch?(folder: string): Promise<string | null>;
+  /** What a project folder is in git: a repository, a worktree of one, a folder inside one, not git, or gone. */
+  projectGit?(folder: string): Promise<ProjectGit | null>;
   /** The system folder picker; the chosen absolute path, or null when cancelled. */
   chooseFolder?(): Promise<string | null>;
   setBrowserBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<boolean>;
@@ -707,6 +812,8 @@ export interface LauncherApi {
   copyManualPrompt(tabId: string): Promise<BrowserState>;
   confirmManualSent(tabId: string): Promise<BrowserState>;
   openLogin(): Promise<BrowserState>;
+  /** Checks the saved ChatGPT sign-in without leaving a login in progress; refreshes it when signed in. */
+  checkSignIn(): Promise<BrowserState>;
   openPasskeyLogin(): Promise<BrowserState>;
   continuePasskeyLogin(): Promise<boolean>;
   logoutChatGpt(): Promise<{ browser: BrowserState; state: LauncherState }>;
@@ -717,6 +824,8 @@ export interface LauncherApi {
   doctor(): Promise<DoctorReport>;
   cancelTurns(): Promise<{ stdout: string }>;
   uninstallIntegration(): Promise<{ cancelled: true } | { cancelled: false; state: LauncherState }>;
+  /** Settings → "Use Coding Tools in Codex": on routes Codex's models through the bridge, off restores its own route. */
+  setCodexRoute?(enabled: boolean): Promise<{ state: LauncherState; route: { changed: boolean; setupRequired: boolean; codexRestartRequired: boolean } }>;
   setupCore(): Promise<{ ok: boolean; stdout: string; restartRequired: boolean }>;
   refreshPart(part: RefreshPart): Promise<{ ok: boolean; results: { part: string; ok: boolean; status?: string; message?: string }[] }>;
   setupMcp(input: {
@@ -735,7 +844,7 @@ export interface LauncherApi {
     targetMode: BrowserInteractionMode;
   }>;
   setPreference(
-    key: "keepRunningOnClose" | "showBrowserDuringTurns" | "autoConnectExistingMcp",
+    key: "keepRunningOnClose" | "showBrowserDuringTurns" | "autoConnectExistingMcp" | "chatAgentTools" | "chatAgentDesktopTools" | "chatAgentTerminalTools" | "chatAgentPreviewTools" | "confirmAgentToolRequests",
     value: boolean,
   ): Promise<LauncherState>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;
@@ -811,6 +920,16 @@ export interface LauncherApi {
     mode: ProxyPolicyMode;
     profileId?: string;
   }): Promise<ProviderNetworkSnapshot>;
+  proxyGatewayStatus(): Promise<ProxyGatewayStatus>;
+  configureProxyGateway(input: {
+    upstreamProfileId?: string | null;
+    port?: number;
+    tokenlessPort?: number;
+  }): Promise<ProxyGatewayStatus>;
+  setProxyGatewayRunning(running: boolean): Promise<ProxyGatewayStatus>;
+  setProxyGatewayForApp(enabled: boolean): Promise<ProxyGatewayStatus>;
+  rotateProxyGatewayKey(): Promise<ProxyGatewayStatus>;
+  testProxyGateway(): Promise<ProxyGatewayStatus>;
   logs(limit?: number): Promise<LogRecord[]>;
   exportLogs(): Promise<string | null>;
   checkForUpdates(): Promise<UpdateState>;
@@ -827,6 +946,7 @@ export interface LauncherApi {
   onExternalServicesChanged(listener: (state: ExternalServicesSnapshot) => void): () => void;
   onManagedBootstrapChanged(listener: (state: ManagedBootstrapSnapshot) => void): () => void;
   onProviderNetworkChanged(listener: (state: ProviderNetworkSnapshot) => void): () => void;
+  onProxyGatewayChanged(listener: (state: ProxyGatewayStatus) => void): () => void;
 }
 
 declare global {

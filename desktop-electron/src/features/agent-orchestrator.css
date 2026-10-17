@@ -69,6 +69,28 @@
 .ao-permissions-panel > button { margin-right: 8px; }
 .ao-permissions-panel > details { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--ao-line); }
 .ao-msg-approval fieldset { border: 0; margin: 0; padding: 0; }
+/* ExitPlanMode: the plan scrolls inside the card, so its answer buttons stay in view. */
+.ao-msg-plan .ao-plan { max-height: min(48vh, 420px); overflow: auto; margin: 8px 0; padding: 4px 12px; border: 1px solid var(--ao-line); border-radius: 8px; }
+.ao-msg-plan .ao-msg-actions { flex-wrap: wrap; }
+/* A question the agent asked (AskUserQuestion): each question with its options, then Send or Skip. */
+.ao-msg-question { border-color: color-mix(in srgb, var(--ao-blue, #2f6fdd) 45%, transparent); }
+.ao-msg-question fieldset { display: grid; gap: 12px; margin: 8px 0 0; padding: 0; border: 0; min-width: 0; }
+.ao-question-message { max-height: min(30vh, 260px); overflow: auto; }
+.ao-question-field { display: grid; gap: 6px; }
+.ao-question-header { font-size: 12px; text-transform: none; color: var(--ao-muted); }
+.ao-question-text { margin: 0; }
+.ao-question-options { display: grid; gap: 6px; }
+.ao-question-option { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px; border: 1px solid var(--ao-line); border-radius: 8px; cursor: pointer; }
+.ao-question-option:hover { background: var(--cx-hover, rgb(0 0 0 / 4%)); }
+.ao-question-option.is-checked { border-color: var(--ao-blue, #2f6fdd); background: color-mix(in srgb, var(--ao-blue, #2f6fdd) 8%, transparent); }
+.ao-question-option input { margin-top: 2px; }
+.ao-question-option > span { display: grid; gap: 2px; min-width: 0; }
+.ao-question-option small { color: var(--ao-muted); }
+.ao-question-label { font-weight: 500; }
+.ao-question-input { width: 100%; box-sizing: border-box; height: 32px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 8px; background: transparent; color: inherit; font: inherit; }
+.ao-msg-question .ao-msg-actions { flex-wrap: wrap; }
+/* An install that changes the project's own packages (a shared Python environment). */
+.ao-dependency-note.is-warn { color: var(--color-text-warning, #b45309); font-weight: 600; }
 .ao-msg-approval fieldset input[type="checkbox"] { width: auto; justify-self: start; }
 .ao-msg-approval pre { max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .ao-msg-approval a { color: var(--ao-blue); }
@@ -211,6 +233,9 @@
 .ao-canvas-controls button { min-width: 28px; height: 28px; border: 0; border-radius: 5px; padding: 0 6px; background: transparent; color: var(--color-text-primary); }
 .ao-canvas-controls button:hover { background: rgb(255 255 255 / 8%); }
 .ao-canvas-controls span { min-width: 38px; color: var(--ao-muted); font-size: 11px; font-variant-numeric: tabular-nums; text-align: center; }
+.ao-canvas-help { position: absolute; z-index: 4; left: 12px; bottom: 54px; width: min(360px, calc(100% - 24px)); max-height: calc(100% - 80px); overflow: auto; padding: 12px 14px; border: 1px solid var(--ao-line); border-radius: 10px; background: var(--color-bg-secondary); box-shadow: 0 8px 24px rgb(0 0 0 / 28%); font-size: 12px; line-height: 1.45; }
+.ao-canvas-help ul { margin: 8px 0 10px; padding-left: 18px; color: var(--color-text-secondary, var(--ao-muted)); }
+.ao-canvas-help li + li { margin-top: 5px; }
 .ao-connect-hint { position: absolute; z-index: 3; left: 50%; bottom: 14px; transform: translateX(-50%); padding: 6px 12px; border-radius: 14px; background: var(--color-bg-secondary); font-size: 12px; }
 .ao-fab { position: absolute; z-index: 3; left: 12px; top: 12px; display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 14px 0 11px; border: 1px solid var(--ao-line); border-radius: 17px; background: var(--color-bg-secondary); color: var(--color-text-primary); font-size: 12px; box-shadow: 0 6px 18px rgb(0 0 0 / 30%); }
 .ao-fab:hover:not(:disabled) { background: color-mix(in srgb, var(--color-bg-secondary) 80%, white); }
@@ -393,7 +418,28 @@
 .ao-workflow .ao-permissions { padding: 0; }
 .ao-workflow .ao-composer-chip { display: flex; align-items: center; gap: 8px; height: 32px; max-width: 300px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 8px; background: #fbfcfe; color: #22324b; font-size: 12px; cursor: pointer; }
 .ao-workflow .ao-composer-chip > span:nth-last-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A chip shrinks with its picker and cuts its own text short ("Gemini 3.8 Fl…"): the button kept
+   its full width inside a shrunken picker and its text ran over the next chip. */
+.ao-workflow .ao-composer-picker { flex: 0 1 auto; }
+.ao-workflow .ao-composer-chip { min-width: 0; max-width: min(300px, 100%); overflow: hidden; }
+.ao-workflow .ao-composer-chip > span:nth-last-child(2) { min-width: 0; }
+.ao-workflow .ao-composer-chip.is-logo { padding: 0 6px; gap: 3px; }
+.ao-workflow .ao-composer-chip.is-logo > :first-child { flex: none; }
 .ao-workflow .ao-composer-chip:hover:not(:disabled) { border-color: #bed6ff; background: #f4f8ff; }
+/* Harness, model, effort and window each get their own chip, as Claude Code lays them out. */
+.ao-workflow .ao-composer-controls .ao-composer-picker + .ao-composer-picker { margin-left: -2px; }
+.ao-workflow .ao-composer-chip:disabled { cursor: default; opacity: .55; }
+.ao-workflow .ao-composer-chip.is-warning { border-color: color-mix(in srgb, var(--ao-amber, #c98a12) 55%, var(--ao-line)); }
+.ao-workflow .ao-chip-unavailable { color: var(--ao-amber, #b7791f); }
+.ao-workflow .ao-harness-logo { display: inline-grid; flex: none; place-items: center; line-height: 0; }
+.ao-workflow .ao-harness-option { display: inline-flex; align-items: center; gap: 8px; }
+.ao-workflow .ao-tuning-popup { width: min(260px, calc(100vw - 40px)); }
+.ao-workflow .ao-tuning-popup [role="radiogroup"] { display: grid; gap: 2px; }
+.ao-workflow .ao-context-custom { display: flex; gap: 6px; margin-top: 8px; }
+.ao-workflow .ao-context-custom input { flex: 1; min-width: 0; height: 28px; padding: 0 8px; border: 1px solid var(--ao-line); border-radius: 6px; }
+.ao-workflow .ao-context-custom input[aria-invalid="true"] { border-color: var(--ao-red, #c0392b); }
+.ao-workflow .ao-popover-apply { height: 28px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 6px; background: transparent; color: inherit; font: inherit; font-size: 12px; cursor: pointer; }
+.ao-workflow .ao-popover-apply:disabled { opacity: .5; cursor: default; }
 .ao-workflow .ao-composer-popover { position: absolute; z-index: 40; bottom: calc(100% + 12px); left: 0; right: auto; width: min(360px, calc(100vw - 40px)); max-height: min(72vh, 650px); overflow: auto; padding: 16px; border: 1px solid #dfe7f0; border-radius: 12px; background: #fff; color: #17243a; box-shadow: 0 10px 36px rgb(31 54 86 / 13%); }
 .ao-workflow .ao-composer-popover header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; gap: 12px; }
 .ao-workflow .ao-composer-popover h3 { margin: 0; font-size: 15px; font-weight: 600; }
@@ -418,6 +464,10 @@
 .ao-workflow .ao-option-radio { flex: 0 0 14px; width: 14px; height: 14px; border: 1px solid #8496ac; border-radius: 50%; }
 .ao-workflow .ao-picker-option[aria-checked="true"] .ao-option-radio { border-color: #1677ff; box-shadow: inset 0 0 0 3px #fff; background: #1677ff; }
 .ao-workflow .ao-picker-option small { display: block; margin-top: 5px; color: #7b899e; font-size: 11px; }
+/* The model list names each provider once, above its models, instead of in every row. */
+.ao-workflow .ao-model-group + .ao-model-group { margin-top: 6px; }
+.ao-workflow .ao-model-group > h4 { margin: 6px 8px 2px; color: #7b899e; font-size: 11px; font-weight: 600; letter-spacing: .02em; }
+.ao-workflow .ao-chip-provider { color: #7b899e; }
 .ao-workflow .ao-permissions-panel { width: min(390px, calc(100vw - 40px)); padding: 8px 6px 6px; border-radius: 14px; }
 .ao-workflow .ao-permissions-panel > header { display: flex; align-items: center; justify-content: space-between; margin: 0 8px 4px; }
 .ao-workflow .ao-permissions-panel > header h3 { margin: 0; color: #8a8f98; font-size: 12.5px; font-weight: 400; }

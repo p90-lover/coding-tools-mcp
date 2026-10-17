@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { JsonObject, WorkspaceSummary } from "../api/contracts";
 import { AgentOrchestratorCanvas, LOOP_LINK, linkPointKey } from "./AgentOrchestratorCanvas";
-import { aoDependencyChange, aoLevels, aoUnlinkChange, listAllWorkspaces, moduleCall, type AoMission, type AoNode } from "./AgentOrchestratorSurface";
+import { aoDependencyChange, aoLevels, aoUnlinkChange, listAllWorkspaces, moduleCall, watchHarnesses, type AoMission, type AoNode } from "./AgentOrchestratorSurface";
 import { AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, NATIVE_HARNESS, cardMeta,
   defaultTeam, emptyRoleSettings, workerRoute, type AoHarness, type AoModelCatalog, type AoModelLoader, type AoTeam } from "./AgentOrchestratorRoleEditor";
 import { ROLE_TITLE, prepareTeamGraph } from "./AgentOrchestratorTeam";
@@ -114,27 +114,16 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
   useEffect(() => {
     if (!active) return;
     let live = true;
-    void Promise.all([listAllWorkspaces(), moduleCall("harnesses")]).then(([items, result]) => {
+    void listAllWorkspaces().then(items => {
       if (!live) return;
       setWorkspaces(items);
       setWorkspaceId(current => items.some(item => item.id === current) ? current : items[0]?.id ?? "");
-      const available = result.harnesses as AoHarness[] | undefined;
-      setHarnesses(available?.length ? available : [native]);
       if (!items.length) { setLoading(false); setDraft(null); }
-      // Right after the app starts, AO may still be starting and only Native Codex is listed (with a
-      // notice); ask again a few times so the cards name their harnesses instead of their ids.
-      if (result.notice) void (async () => {
-        for (let attempt = 0; attempt < 6 && live; attempt++) {
-          await new Promise(resolve => setTimeout(resolve, 3000));
-          if (!live) return;
-          const again = await moduleCall("harnesses").catch(() => null);
-          const list = again?.harnesses as AoHarness[] | undefined;
-          if (live && list?.length) setHarnesses(list);
-          if (again && !again.notice) return;
-        }
-      })();
     }).catch(cause => { if (live) { setError(String(cause instanceof Error ? cause.message : cause)); setLoading(false); } });
-    return () => { live = false; };
+    // Right after the app starts AO may still be starting and only Native Codex is listed; the watch
+    // asks again until AO answers, so the cards name their harnesses instead of their ids.
+    const stopHarnesses = watchHarnesses(list => setHarnesses(current => list.length > 1 || current.length <= 1 ? list.length ? list : [native] : current));
+    return () => { live = false; stopHarnesses(); };
   }, [active, setError]);
 
   const accept = (result: Record<string, unknown>, chosenId?: string, preserveDraft = false) => {

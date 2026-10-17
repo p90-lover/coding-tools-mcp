@@ -38,13 +38,20 @@ function elements(tree, predicate) {
 const text = tree => typeof tree === "string" ? tree : Array.isArray(tree) ? tree.map(text).join("") : tree?.props ? text(tree.props.children) : "";
 const node = (id, harness = "codex-native", profile = "managed/custom") => ({ id, role: "worker", route: { harness_id: harness, permission_profile: profile }, settings: {} });
 
+// The composer's chips are ChipMenu elements; a menu's content is its children(close), and its
+// options are Option elements (role="radio" once rendered).
+const menuNamed = (tree, heading) => elements(tree, item => typeof item.type === "function" && item.type.name === "ChipMenu" && item.props.heading === heading)[0];
+const optionsIn = (menu, close = () => {}) => elements(menu.props.children(close), item => typeof item.type === "function" && item.type.name === "Option");
+// Composer state order: search, models, caps, error, contextDraft.
+const composerState = (models, caps = {}, search = "") => [search, models, caps, "", ""];
+
 test("composer mode clicks show only the corresponding real selector without sending", () => {
   const view = renderer("AgentOrchestratorComposerControls.tsx");
   const changes = [];
   const props = { mode: "single", onModeChange: mode => changes.push(mode), route: { harness_id: "ao:claude-code", model: "cpa/gemini-flash", permission_profile: ":ao-default" }, onRouteChange() {}, harnesses: [], loadModels: async () => [], teams: [{ id: "actual-team", name: "Saved setup", nodes: [] }], teamId: "actual-team", onTeamChange() {}, permissions: null, busy: false };
   let tree = view.render("AgentOrchestratorComposerControls", props);
-  assert.equal(elements(tree, item => item.type === "button" && item.props["aria-label"] === "Choose model").length, 1);
-  assert.equal(elements(tree, item => item.type === "button" && item.props["aria-label"] === "Choose saved team").length, 0);
+  for (const heading of ["Harness", "Model", "Reasoning effort", "Context window"]) assert.ok(menuNamed(tree, heading), `${heading} has its own chip`);
+  assert.equal(menuNamed(tree, "Orchestrator / Team"), undefined);
   const option = label => elements(tree, item => item.type === "button" && item.props["aria-pressed"] !== undefined && item.props.children === label)[0];
   assert.equal(option("Single").props["aria-pressed"], true, "the switch names both modes and marks the active one");
   option("Single").props.onClick();
@@ -52,26 +59,24 @@ test("composer mode clicks show only the corresponding real selector without sen
   option("Team").props.onClick();
   assert.deepEqual(changes, ["team"]);
   tree = view.render("AgentOrchestratorComposerControls", { ...props, mode: "team" });
-  assert.equal(elements(tree, item => item.type === "button" && item.props["aria-label"] === "Choose model").length, 0);
-  assert.equal(elements(tree, item => item.type === "button" && item.props["aria-label"] === "Choose saved team").length, 1);
+  assert.equal(menuNamed(tree, "Model"), undefined);
+  assert.equal(menuNamed(tree, "Orchestrator / Team").props.ariaLabel, "Choose saved team");
 });
 
-test("saved-team popup uses only supplied setups and Escape restores its trigger focus", () => {
+test("saved-team menu uses only supplied setups, and Escape in a chip menu restores its trigger focus", () => {
   const view = renderer("AgentOrchestratorComposerControls.tsx");
   const selected = [];
+  let closed = 0;
   const props = { mode: "team", onModeChange() {}, route: { model: "not rendered", harness_id: "ao:claude-code" }, onRouteChange() {}, harnesses: [], loadModels: async () => [], teams: [{ id: "real", name: "Runtime saved setup", nodes: [node("lead")] }], teamId: "real", onTeamChange: id => selected.push(id), permissions: null, busy: false };
-  let tree = view.render("AgentOrchestratorComposerControls", props, [true, "", null, ""]);
-  const rows = elements(tree, item => item.type === "button" && item.props.role === "radio");
-  assert.equal(rows.length, 1); assert.match(text(rows[0]), /Runtime saved setup/);
-  rows[0].props.onClick(); assert.deepEqual(selected, ["real"]);
-  tree = view.render("AgentOrchestratorComposerControls", props, [true, "", null, ""]);
+  const tree = view.render("AgentOrchestratorComposerControls", props, composerState(null));
+  const rows = optionsIn(menuNamed(tree, "Orchestrator / Team"), () => closed++);
+  assert.equal(rows.length, 1); assert.match(text(rows[0].props.children), /Runtime saved setup/);
+  rows[0].props.onPick(); assert.deepEqual(selected, ["real"]); assert.equal(closed, 1, "picking closes the menu");
+  const popup = view.render("useComposerPopover", undefined, [true]);
   let focused = 0;
-  const trigger = elements(tree, item => item.type === "button" && item.props["aria-label"] === "Choose saved team")[0];
-  trigger.props.ref.current = { focus: () => focused++ };
-  elements(tree, item => item.props.className === "ao-composer-picker")[0].props.onKeyDown({ key: "Escape", preventDefault() {}, stopPropagation() {} });
+  popup.trigger.current = { focus: () => focused++ };
+  popup.onKeyDown({ key: "Escape", preventDefault() {}, stopPropagation() {} });
   assert.equal(focused, 1);
-  tree = view.render("AgentOrchestratorComposerControls", props);
-  assert.equal(elements(tree, item => item.props.role === "dialog").length, 0);
 });
 
 test("model search filters real catalog choices and WebGPT selection preserves saved policy", () => {
@@ -79,36 +84,103 @@ test("model search filters real catalog choices and WebGPT selection preserves s
   const routes = [];
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gemini-flash", permission_profile: ":ao-default", native_permission_profile: "managed/custom", approval_policy: "on-request", approvals_reviewer: "auto_review" };
   const props = { mode: "single", onModeChange() {}, route, onRouteChange: next => routes.push(plain(next)), harnesses: [], loadModels: async () => [], teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false };
-  let tree = view.render("AgentOrchestratorComposerControls", props, [true, "", ["cpa/gemini-flash", "chatgpt-web/high", "default"], ""]);
-  assert.equal(elements(tree, item => item.type === "button" && item.props.role === "radio").length, 2, "only actual catalog entries, no default/fake models");
-  elements(tree, item => item.type === "input" && item.props.type === "search")[0].props.onChange({ target: { value: "chatgpt-web" } });
+  let tree = view.render("AgentOrchestratorComposerControls", props, composerState(["cpa/gemini-flash", "chatgpt-web/high", "default"]));
+  const model = menuNamed(tree, "Model");
+  assert.equal(optionsIn(model).length, 2, "only actual catalog entries, no default/fake models");
+  elements(model.props.children(() => {}), item => item.type === "input" && item.props.type === "search")[0].props.onChange({ target: { value: "chatgpt-web" } });
   tree = view.render("AgentOrchestratorComposerControls", props);
-  const rows = elements(tree, item => item.type === "button" && item.props.role === "radio");
-  assert.equal(rows.length, 1); rows[0].props.onClick();
+  const rows = optionsIn(menuNamed(tree, "Model"));
+  assert.equal(rows.length, 1); rows[0].props.onPick();
   assert.equal(routes[0].harness_id, "codex-native");
   assert.equal(routes[0].permission_profile, "managed/custom");
   assert.equal(routes[0].approvals_reviewer, "auto_review");
-  const tuning = elements(tree, item => typeof item.type === "function" && item.type.name === "HarnessPicker")[0];
-  assert.equal(tuning.props.hideModel, true); assert.equal(tuning.props.hidePermissionNote, true);
 });
 
-test("WebGPT locks the harness; its model popup offers Native Codex's CPA models, which keep the native permission", async () => {
+test("WebGPT locks the harness; its model menu offers Native Codex's CPA models, which keep the native permission", async () => {
   const view = renderer("AgentOrchestratorComposerControls.tsx");
   const calls = [], routes = [];
   const route = { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web", model: "chatgpt-web/high", permission_profile: "managed/raw", approval_policy: "on-request", approvals_reviewer: "auto_review" };
   const props = { mode: "single", onModeChange() {}, route, onRouteChange: next => routes.push(plain(next)), harnesses: [], loadModels: async harness => { calls.push(harness); return harness === "codex-native" ? ["chatgpt-web/high", "actual-local-model"] : ["cpa/other-agent-model"]; }, teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false };
-  view.render("AgentOrchestratorComposerControls", props, [true, "", null, ""]);
+  view.render("AgentOrchestratorComposerControls", props, composerState(null));
   view.effects[view.effects.length - 1]();
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(calls, ["codex-native"], "Native Codex lists WebGPT and the CPA pool itself");
   const tree = view.render("AgentOrchestratorComposerControls", props);
-  const rows = elements(tree, item => item.type === "button" && item.props.role === "radio");
+  assert.equal(menuNamed(tree, "Harness").props.disabled, true, "a WebGPT model keeps the harness on Native Codex");
+  const rows = optionsIn(menuNamed(tree, "Model"));
   assert.equal(rows.length, 2);
-  rows.find(row => text(row).includes("actual-local-model")).props.onClick();
-  assert.equal(routes[0].harness_id, "codex-native");
-  assert.equal(routes[0].provider_id, "cliproxyapi-antigravity");
-  assert.equal(routes[0].model, "actual-local-model");
-  assert.equal(routes[0].permission_profile, "managed/raw");
+  // A pool row shows the tidied name; its tooltip keeps the exact id.
+  const pool = rows.find(row => text(row.props.children).includes("Actual Local Model"));
+  assert.match(pool.props.title, /actual-local-model/);
+  assert.equal(routes[0].context_window, 400_000, "the loaded list starts the chat at a 400K window");
+  pool.props.onPick();
+  const picked = routes.at(-1);
+  assert.equal(picked.harness_id, "codex-native");
+  assert.equal(picked.provider_id, "cliproxyapi-antigravity");
+  assert.equal(picked.model, "actual-local-model");
+  assert.equal(picked.permission_profile, "managed/raw");
+  assert.equal(picked.context_window, 400_000);
+});
+
+test("the effort and window chips show the pick and offer exactly what the model takes", () => {
+  const view = renderer("AgentOrchestratorComposerControls.tsx");
+  const routes = [];
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/deepseek", permission_profile: ":ao-default", effort: "high" };
+  const caps = { "cpa/deepseek": { efforts: ["low", "high", "xhigh"], contextLimit: 1_000_000, contextWindow: { min: 4096, max: 1_000_000, kind: "context" } } };
+  const props = { mode: "single", onModeChange() {}, route, onRouteChange: next => routes.push(plain(next)), harnesses: [{ id: "ao:claude-code", label: "Claude Code", runnable: true, installed: true }], loadModels: async () => [], teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false };
+  const tree = view.render("AgentOrchestratorComposerControls", props, composerState(["cpa/deepseek"], caps));
+  const effort = menuNamed(tree, "Reasoning effort");
+  assert.match(text(effort.props.label), /High/);
+  const efforts = optionsIn(effort);
+  assert.deepEqual(efforts.map(row => text(row.props.children)), ["Low", "High", "Extra high"], "no Model default row");
+  assert.equal(efforts.find(row => row.props.picked).props.children, "High");
+  efforts[2].props.onPick();
+  assert.equal(routes.at(-1).effort, "xhigh");
+  const window = menuNamed(tree, "Context window");
+  assert.match(text(window.props.label), /400k/i, "an unpicked window reads as the 400K default");
+  const sizes = optionsIn(window).map(row => text(row.props.children));
+  assert.ok(!sizes.some(size => /default/i.test(size)), `no default row: ${sizes}`);
+  assert.ok(sizes.includes("400k") && sizes.includes("1Mfull model limit") && !sizes.includes("2M"), `presets stay within the model's range: ${sizes}`);
+  assert.equal(optionsIn(window).find(row => row.props.picked).props.children[0], "400k");
+  optionsIn(window).find(row => text(row.props.children) === "1Mfull model limit").props.onPick();
+  assert.equal(routes.at(-1).context_window, 1_000_000);
+  const harness = menuNamed(tree, "Harness");
+  assert.doesNotMatch(text(harness.props.label), /Claude Code/, "the harness chip shows only its logo");
+  assert.match(harness.props.title, /Claude Code/);
+  assert.match(harness.props.ariaLabel, /Claude Code/);
+});
+
+test("unpicked, the effort chip names the model's own effort and the model chip shows no provider", () => {
+  const view = renderer("AgentOrchestratorComposerControls.tsx");
+  const routes = [];
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gemini-3.8-flash-high", permission_profile: ":ao-default", context_window: 400_000 };
+  const caps = { "cpa/gemini-3.8-flash-high": { provider: "gemini", efforts: ["low", "medium", "high"], contextWindow: { min: 4096, max: 1_048_576 } } };
+  const props = { mode: "single", onModeChange() {}, route, onRouteChange: next => routes.push(plain(next)), harnesses: [{ id: "ao:claude-code", label: "Claude Code", runnable: true, installed: true }], loadModels: async () => [], teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false };
+  const tree = view.render("AgentOrchestratorComposerControls", props, composerState(["cpa/gemini-3.8-flash-high"], caps));
+  const effort = menuNamed(tree, "Reasoning effort");
+  assert.equal(text(effort.props.label), "High", "the model's own effort, read from its id");
+  const rows = optionsIn(effort);
+  assert.equal(rows.find(row => row.props.picked).props.children, "High");
+  rows.find(row => row.props.children === "High").props.onPick();
+  assert.equal(routes.at(-1).effort, undefined, "picking the model's own effort keeps it the model's own");
+  assert.doesNotMatch(text(menuNamed(tree, "Model").props.label), /·/, "no provider after the model name");
+});
+
+test("a WebGPT model is one ChatGPT effort: the effort chip picks the model and the model list sets the effort", () => {
+  const view = renderer("AgentOrchestratorComposerControls.tsx");
+  const routes = [];
+  const route = { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web", model: "chatgpt-web/high", permission_profile: ":read-only", effort: "low" };
+  const props = { mode: "single", onModeChange() {}, route, onRouteChange: next => routes.push(plain(next)), harnesses: [], loadModels: async () => [], teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false };
+  const tree = view.render("AgentOrchestratorComposerControls", props, composerState(["chatgpt-web/light", "chatgpt-web/high", "chatgpt-web/pro"]));
+  const effort = menuNamed(tree, "Reasoning effort");
+  assert.match(text(effort.props.label), /^High$/, "the chip shows the model's tier, not a stray saved effort");
+  const tiers = optionsIn(effort);
+  assert.deepEqual(tiers.map(row => text(row.props.children)), ["Instant", "Medium", "High", "Extra High", "Pro"], "no Model default, no Luna");
+  tiers.find(row => text(row.props.children) === "Pro").props.onPick();
+  assert.deepEqual([routes.at(-1).model, routes.at(-1).effort], ["chatgpt-web/pro", "ultra"]);
+  assert.match(text(menuNamed(tree, "Model").props.label), /^WebGPT High/, "the model chip names the whole WebGPT model");
+  optionsIn(menuNamed(tree, "Model")).find(row => text(row.props.children) === "WebGPT Instant").props.onPick();
+  assert.deepEqual([routes.at(-1).model, routes.at(-1).effort], ["chatgpt-web/light", "low"]);
 });
 
 test("mixed unsupported capabilities disable all presets rather than silently skipping roles", () => {
@@ -369,4 +441,18 @@ test("permissions start empty, send only selected requested entries and retain e
   tree = view.render("AgentOrchestratorApproval", props);
   elements(tree, item => item.type === "button" && text(item) === "Send selected subset")[0].props.onClick();
   assert.deepEqual(plain(replies[0]), { permissions: { filesystem: { read: ["/one"] } }, scope: "turn" });
+});
+
+test("a picked model the harness no longer offers is marked not available", () => {
+  const view = renderer("AgentOrchestratorComposerControls.tsx");
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/cline-pass/deepseek-v4.1-flash", permission_profile: ":ao-default" };
+  const props = { mode: "single", onModeChange() {}, route, onRouteChange() {}, harnesses: [], loadModels: async () => [], teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false };
+  let model = menuNamed(view.render("AgentOrchestratorComposerControls", props, composerState(["cpa/cline-pass/deepseek-v4-flash"])), "Model");
+  assert.equal(model.props.className, "is-warning");
+  assert.match(text(model.props.label), /not available/);
+  assert.match(model.props.title, /not offered right now/);
+  model = menuNamed(view.render("AgentOrchestratorComposerControls", { ...props, route: { ...route, model: "cpa/cline-pass/deepseek-v4-flash(high)" } }, composerState(["cpa/cline-pass/deepseek-v4-flash"])), "Model");
+  assert.equal(model.props.className, "", "an effort suffix still matches its listed model");
+  model = menuNamed(view.render("AgentOrchestratorComposerControls", props, composerState(null)), "Model");
+  assert.equal(model.props.className, "", "nothing is flagged before the list loads");
 });

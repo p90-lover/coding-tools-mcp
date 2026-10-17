@@ -14,6 +14,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { createWin32Helper } = require("./chatgpt-desktop-win32.cjs");
+const { createLocalChatGpt } = require("./chatgpt-desktop-local.cjs");
 const {
   desktopAuthFromCpa,
   jwtEmail,
@@ -111,6 +112,7 @@ function createChatGptDesktopHost({
   idleCloseMs = IDLE_CLOSE_MS,
   windowWaitMs = WINDOW_WAIT_MS,
   autoStartRetryMs = AUTO_START_RETRY_MS,
+  createLocal = createLocalChatGpt,
 }) {
   const statePath = path.join(dataRoot, "state.json");
   let state = { active: null, local: [] };
@@ -144,6 +146,14 @@ function createChatGptDesktopHost({
   const syncs = new Map(); // slotId -> { watchers, timer, debounce }
   let autoStartQueued = false;
   const autoStartBackoff = new Map(); // slotId -> { until, delay }
+  // The user's own ChatGPT app, previewed beside the docked copy; every copy this host runs is
+  // excluded by its pid and its slots folder.
+  const local = createLocal({
+    logger,
+    platform,
+    ownedMarker: `${path.join(dataRoot, "slots")}${path.sep}`,
+    ownedPids: () => [...instances.values()].map((entry) => entry.pid),
+  });
 
   function persist() {
     writeJson(statePath, state);
@@ -507,7 +517,7 @@ function createChatGptDesktopHost({
     ];
     // The app's Rust backend reads the *_PROXY variables; its Electron window ignores them on
     // Windows and needs Chromium's own switches.
-    let proxy = getProxyRoute();
+    let proxy = await getProxyRoute();
     if (proxy && [proxy.url, ...proxy.bypass].some((value) => CMD_UNSAFE.test(value) || /\s/.test(value))) {
       logger?.warn?.("chatgpt_desktop.proxy_not_passed", { reason: "unsafe_characters" });
       proxy = null;
@@ -828,10 +838,18 @@ function createChatGptDesktopHost({
       bounds = next;
       void placeNow().catch(() => {});
     },
+    localPreview() {
+      return local.preview();
+    },
+    // Only ever called for the user's click on Send in the panel (see main.cjs).
+    localSend(text, options) {
+      return local.send(text, options);
+    },
     async shutdown() {
       shuttingDown = true;
       stopPlacementLoop();
       stopWatchingAccounts();
+      local.dispose();
       try { await stopAllInstances(); } finally { stopAllSync(); helper.dispose(); }
     },
   };

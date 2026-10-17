@@ -11,6 +11,9 @@ const route = (harness = "ao:codex", model = "cpa/gpt") => ({
   harness_id: harness, provider_id: "agent-orchestrator", account_id: "ao-local", model, permission_profile: ":ao-default",
 });
 const walk = value => !value || typeof value !== "object" ? [] : Array.isArray(value) ? value.flatMap(walk) : [value, ...walk(value.props?.children)];
+/** The window sizes the Context window field suggests (its datalist), which is how it shows the allowed range. */
+const presets = tree => walk(walk(tree).find(item => item.type === "label" && item.props.children?.[0] === "Context window"))
+  .filter(item => item.type === "option").map(item => item.props.value);
 async function picker(current, catalog) {
   let states = [], cursor = 0, effects = [];
   const editor = {};
@@ -39,8 +42,8 @@ test("AO model capabilities enable only advertised effort and a real context con
   assert.equal(p.field("Reasoning effort").props.disabled, false);
   assert.deepEqual(walk(p.field("Reasoning effort")).filter(item => item.type === "option").map(item => item.props.value), ["", "low", "high", "auto", "none"]);
   assert.equal(p.field("Context window").props.disabled, false);
-  assert.equal(p.field("Context window").props.max, 131072);
-  assert.equal(p.field("Context window").props.value, 65536);
+  assert.deepEqual(presets(p.tree), ["32k", "64k", "128k"], "only sizes within the model's 131,072 are offered");
+  assert.equal(p.field("Context window").props.value, "65,536");
   p.field("Reasoning effort").props.onChange({ target: { value: "low" } });
   assert.equal(p.changes[0].model, "cpa/gpt"); assert.equal(p.changes[0].account_id, "ao-local");
   const switched = p.selectRoute(route("ao:claude-code"));
@@ -61,7 +64,7 @@ test("every AO harness uses capabilities, including compaction semantics and uns
   assert.equal(p.field("Reasoning effort").props.disabled, true);
   assert.equal(p.field("Reasoning effort").props.value, "high", "unsupported saved tuning is visible, not erased");
   assert.equal(p.field("Context window").props.disabled, true);
-  assert.equal(p.field("Context window").props.value, 32768);
+  assert.equal(p.field("Context window").props.value, "32,768", "a saved window stays visible, not erased");
   assert.match(JSON.stringify(p.tree), /Client has no context override/);
 });
 
@@ -73,7 +76,7 @@ test("legacy catalogs stay usable without inventing AO tuning support or erasing
   assert.equal(p.field("Context window").props.disabled, true);
   const model = walk(p.tree).find(item => item.type === "select" && item.props.value === "cpa/gpt");
   model.props.onChange({ target: { value: "cpa/next" } });
-  assert.equal(p.changes[0].effort, "high");
+  assert.equal(p.changes[0].effort, undefined, "a new model starts on its own effort");
   assert.equal(p.changes[0].context_window, 32768);
 });
 
@@ -81,7 +84,7 @@ test("AO card metadata reports requested tuning; Native controls and Native-to-A
   const p = await picker({ ...route("codex-native", "chatgpt-web/high"), effort: "high", context_window: 262144 }, []);
   assert.equal(p.field("Reasoning effort").props.disabled, false);
   assert.deepEqual(walk(p.field("Reasoning effort")).filter(item => item.type === "option").map(item => item.props.value), ["", "minimal", "low", "medium", "high", "xhigh"]);
-  assert.equal(p.field("Context window").props.min, 4096); assert.equal(p.field("Context window").props.max, 2000000);
+  assert.deepEqual(presets(p.tree), ["32k", "64k", "128k", "200k", "272k", "400k", "1M", "2M"], "Native takes 4,096 up to 2M");
   const previous = { ...route("codex-native", "chatgpt-web/high"), effort: "high", context_window: 262144 };
   assert.equal(p.editor.withTuning(route(), previous).effort, undefined);
   assert.match(p.editor.cardMeta({ role: "worker", settings: {}, route: { ...route(), effort: "high", context_window: 65536 } }), /effort high.*64K context/);
@@ -127,20 +130,35 @@ test("Surface caches model capability catalogs for AO harnesses and Native Codex
 });
 
 
-test("AO-only efforts never cross into Native Codex; valid high, max and AO-to-AO tuning still carry over", async () => {
+test("a new model starts on its own effort; AO-to-AO context still carries over", async () => {
   const p = await picker(route(), ["cpa/gpt"]);
   const maxed = p.editor.withTuning(p.editor.workerRoute("ao:claude-code", "chatgpt-web/high"), { ...route("ao:claude-code", "cpa/fixture"), effort: "max" });
-  assert.equal(maxed.effort, "max", "Native Codex takes max, as Luna and Sol offer it");
-  for (const effort of ["none", "auto"]) {
+  assert.equal(maxed.effort, undefined, "no effort crosses to another model");
+  for (const effort of ["none", "auto", "high"]) {
     const previous = { ...route("ao:claude-code", "cpa/fixture"), effort, context_window: 32768 };
     const native = p.editor.withTuning(p.editor.workerRoute("ao:claude-code", "chatgpt-web/high"), previous);
     assert.equal(native.harness_id, "codex-native");
-    assert.equal(native.effort, undefined, `Native Codex does not accept ${effort}`);
+    assert.equal(native.effort, undefined, `${effort} does not cross into Native Codex`);
     const ao = p.editor.withTuning(route("ao:opencode", "cpa/next"), previous);
-    assert.equal(ao.effort, effort, "AO-to-AO requested effort is retained");
+    assert.equal(ao.effort, undefined, `${effort} does not cross to another AO model`);
     assert.equal(ao.context_window, 32768, "AO-to-AO client context is retained");
   }
-  const valid = p.editor.withTuning(p.editor.workerRoute("ao:codex", "chatgpt-web/high"),
-    { ...route(), effort: "high", context_window: 32768 });
-  assert.equal(valid.effort, "high", "valid Native effort carry-over remains unchanged");
+});
+
+test("model lists show a context size only when the catalog reported one, never the 2M client ceiling", async () => {
+  const { editor } = await picker(route(), { models: ["cpa/gpt"] });
+  assert.equal(editor.capabilityText({ efforts: ["low", "max"], contextWindow: { min: 4096, max: 2000000 } }), "up to max effort");
+  assert.equal(editor.capabilityText({ efforts: ["high"], contextLimit: 872000, contextWindow: { min: 4096, max: 872000 } }), "up to high effort · 872K context");
+});
+
+test("a saved model the harness no longer lists says so and offers the same model under another provider", async () => {
+  const catalog = { models: ["cpa/commandcode-go/deepseek-v4.1-flash", "cpa/cline-pass/deepseek-v4-flash"],
+    capabilities: { "cpa/commandcode-go/deepseek-v4.1-flash": { efforts: ["none", "high", "max"] } } };
+  const view = await picker({ ...route("ao:claude-code", "cpa/cline-pass/deepseek-v4.1-flash"), effort: "high" }, catalog);
+  assert.deepEqual(plain(view.editor.sameModelElsewhere("cpa/cline-pass/deepseek-v4.1-flash", catalog.models)), ["cpa/commandcode-go/deepseek-v4.1-flash"]);
+  const notice = walk(view.tree).find(item => item.type === "p" && item.props.role === "status");
+  assert.ok(notice, "the editor explains the model is gone");
+  const use = walk(notice).find(item => item.type === "button");
+  use.props.onClick();
+  assert.equal(view.changes.at(-1).model, "cpa/commandcode-go/deepseek-v4.1-flash");
 });

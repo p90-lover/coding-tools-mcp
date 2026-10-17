@@ -120,12 +120,36 @@ function emitHttpStreamFailure(
   }
 }
 
+// A streamed response's own end: once one of these has gone by, the request is no longer
+// generating, even while the client keeps the connection (Codex holds it between turns).
+const TERMINAL_RESPONSE_EVENT = /"type"\s*:\s*"response\.(?:completed|failed|incomplete|cancelled)"|^event:\s*response\.(?:completed|failed|incomplete|cancelled)\s*$/m;
+
+/** Watches a response body's chunks and calls `ended` once a terminal response event has passed. */
+export function terminalEventWatcher(ended: () => void): (chunk: Uint8Array) => void {
+  const decoder = new TextDecoder();
+  let tail = "";
+  let seen = false;
+  return chunk => {
+    if (seen) return;
+    const text = tail + decoder.decode(chunk, { stream: true });
+    if (TERMINAL_RESPONSE_EVENT.test(text)) {
+      seen = true;
+      ended();
+      return;
+    }
+    // An event split across chunks is still found.
+    tail = text.slice(-160);
+  };
+}
+
 export class HttpTurnCounter {
   private readonly active = new Map<number, {
     abort: AbortController;
     done: Promise<void>;
     finish: () => void;
     identity?: NativeCodexTurnIdentity;
+    /** Still producing its answer: false once its stream carried a terminal response event. */
+    generating: boolean;
   }>();
   private readonly interrupted = new Map<string, unknown>();
   private nextId = 1;
@@ -147,8 +171,20 @@ export class HttpTurnCounter {
 
   constructor(private readonly reportStreamFailure: HttpStreamFailureReporter = reportHttpStreamFailure) {}
 
+  /** Open requests, including streams whose answer is done but whose client still holds them. */
   count(): number {
     return this.active.size;
+  }
+
+  /**
+   * Requests still producing an answer: what a service operation (an update install) waits for.
+   * Codex keeps its response connections open between turns, so `count()` never reaches zero while
+   * it runs; a request stops generating once its stream carries a terminal response event.
+   */
+  generatingCount(): number {
+    let generating = 0;
+    for (const entry of this.active.values()) if (entry.generating) generating += 1;
+    return generating;
   }
 
   async cancelAll(reason: unknown = new Error("Active HTTP turns cancelled")): Promise<number> {
@@ -204,7 +240,9 @@ export class HttpTurnCounter {
       done: Promise<void>;
       finish: () => void;
       identity?: NativeCodexTurnIdentity;
-    } = { abort, done, finish };
+      generating: boolean;
+    } = { abort, done, finish, generating: true };
+    const watch = terminalEventWatcher(() => { tracked.generating = false; });
     this.active.set(id, tracked);
     let released = false;
     let clientAbortListener: (() => void) | undefined;
@@ -270,6 +308,7 @@ export class HttpTurnCounter {
               }
               chunks += 1;
               bytes += chunk.value.byteLength;
+              watch(chunk.value);
               controller.enqueue(chunk.value);
             } catch (error) {
               if (!abort.signal.aborted) {
@@ -324,6 +363,7 @@ export class HttpTurnCounter {
             if (chunk.done) break;
             chunks += 1;
             bytes += chunk.value.byteLength;
+            watch(chunk.value);
             // Consume eagerly so the lifecycle branch never backpressures the client branch.
           }
         } catch (error) {
@@ -826,7 +866,10 @@ export function startServer(
   } | null = null;
   const httpTurns = new HttpTurnCounter();
   const activity = () => ({
+    // Open requests: Codex holds its response connections between turns, so this rarely reaches 0.
     active_http_turns: httpTurns.count(),
+    // Requests still producing an answer (no terminal response event yet): what an install waits for.
+    active_generations: httpTurns.generatingCount(),
     active_browser_turns: chatGptTurnSessions.activeCount() + (turnBroker?.externalOwnerActiveCount() ?? 0),
   });
   const controlAuthorized = (req: Request): boolean => {

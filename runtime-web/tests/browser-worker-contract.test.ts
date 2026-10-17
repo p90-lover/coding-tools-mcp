@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright-core";
-import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptDetachedTurnIdentity, chatGptAcceptedUserTurnCount, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { ensureChatGptPersonalizedConnectorAccess } from "../src/adapters/chatgpt-web/browser-worker";
 import { observeChatGptMarkdown } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
@@ -137,6 +137,55 @@ test("assistant tracking rebinds only one proven replacement after React detache
     "conversation-turn-2",
     ["conversation-turn-1", "conversation-turn-3", "conversation-turn-4"],
   )).toThrow("2 new conversation turns");
+});
+
+test("a finished answer whose turns ChatGPT re-keyed stays bound; only an added user turn fails", () => {
+  const binding = {
+    identity: "assistant-tmp",
+    acceptedTurnIdentities: ["user-tmp", "assistant-tmp"],
+    acceptedUserTurnCount: 1,
+  };
+  // Seen live (trace c1dd420be516): on completion both ids changed, one user turn remained.
+  expect(chatGptDetachedTurnIdentity([], binding, {
+    userIdentities: ["user-final"],
+    responseIdentities: ["assistant-final"],
+  })).toBe("assistant-final");
+  expect(chatGptDetachedTurnIdentity(["old-user", "old-assistant"], { ...binding, acceptedUserTurnCount: 2 }, {
+    userIdentities: ["old-user-final", "user-final"],
+    responseIdentities: ["old-assistant-final", "assistant-final"],
+  })).toBe("assistant-final");
+  expect(() => chatGptDetachedTurnIdentity([], binding, {
+    userIdentities: ["user-tmp", "user-next"],
+    responseIdentities: ["assistant-next"],
+  })).toThrow("opened another user turn");
+  expect(chatGptDetachedTurnIdentity([], binding, {
+    userIdentities: ["user-tmp"],
+    responseIdentities: ["assistant-tmp-2"],
+  })).toBe("assistant-tmp-2");
+});
+
+test("an answer bound before ChatGPT rendered its prompt survives the prompt appearing", () => {
+  // Seen live (trace dfd2ba0dcc28): the answer was bound while no user turn was rendered yet; on
+  // completion the prompt appeared with a fresh id, and the finished answer was thrown away.
+  const binding = {
+    identity: "assistant-tmp",
+    acceptedTurnIdentities: ["assistant-tmp"],
+    acceptedUserTurnCount: chatGptAcceptedUserTurnCount(0, 0),
+  };
+  expect(binding.acceptedUserTurnCount).toBe(1);
+  expect(chatGptDetachedTurnIdentity([], binding, {
+    userIdentities: ["user-final"],
+    responseIdentities: ["assistant-final"],
+  })).toBe("assistant-final");
+  // A prompt beyond the one sent is still another turn.
+  expect(() => chatGptDetachedTurnIdentity([], binding, {
+    userIdentities: ["user-final", "user-next"],
+    responseIdentities: ["assistant-next"],
+  })).toThrow("opened another user turn");
+  // History before the send counts; a hand-built baseline without a count still allows the prompt.
+  expect(chatGptAcceptedUserTurnCount(2, 1)).toBe(3);
+  expect(chatGptAcceptedUserTurnCount(undefined, 0)).toBe(1);
+  expect(chatGptAcceptedUserTurnCount(0, 2)).toBe(2);
 });
 
 test("current ChatGPT exchange containers prove submission and bind only their assistant", async () => {
