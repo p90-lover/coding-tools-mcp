@@ -51,6 +51,20 @@ export function workerRoute(harness: string, model: string, permission: NativePe
 
 /** Reasoning efforts a card may ask for (Codex's names; the engine checks the same list). */
 export const EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
+/**
+ * The WebGPT tiers as ChatGPT's own effort picker names them, each with the one effort the
+ * bridge runs it at (Pro is Codex's "ultra"). A tier is its effort: picking either picks both.
+ * Luna and Think are not listed: they exist only on Free/Go accounts without that picker, and
+ * there the bridge already runs these tiers as Luna (Instant, Medium) or Think (High and up).
+ */
+export const WEB_TIERS = [
+  { model: "chatgpt-web/light", effort: "low", label: "Instant" },
+  { model: "chatgpt-web/medium", effort: "medium", label: "Medium" },
+  { model: "chatgpt-web/high", effort: "high", label: "High" },
+  { model: "chatgpt-web/extra-high", effort: "xhigh", label: "Extra High" },
+  { model: "chatgpt-web/pro", effort: "ultra", label: "Pro" },
+] as const;
+export const webTier = (model: string | undefined) => WEB_TIERS.find(tier => tier.model === model);
 /** What Native Codex offers when the model reports no efforts of its own (WebGPT tiers). */
 const NATIVE_DEFAULT_EFFORTS = EFFORTS.slice(0, 5);
 /** Legacy Native-to-agent carry-over policy; AO controls use the selected model capabilities. */
@@ -259,7 +273,8 @@ export function modelLabel(model: string, cpaPool = false): string {
   if (model.startsWith("cpa/")) return cpaLabel(model.slice(4));
   if (cpaPool && model && !model.startsWith("chatgpt-web/")) return cpaLabel(model);
   if (!model.startsWith("chatgpt-web/")) return model;
-  return `WebGPT ${model.slice("chatgpt-web/".length).split("-").map(part => part[0]?.toUpperCase() + part.slice(1)).join(" ")}`;
+  // A tier reads as ChatGPT names it ("light" is ChatGPT's Instant); a saved Luna/Think route keeps its own name.
+  return `WebGPT ${webTier(model)?.label ?? model.slice("chatgpt-web/".length).split("-").map(part => part[0]?.toUpperCase() + part.slice(1)).join(" ")}`;
 }
 
 export function harnessLabel(harnessId: string, harnesses: AoHarness[]): string {

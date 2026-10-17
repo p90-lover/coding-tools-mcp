@@ -3,7 +3,7 @@ import type { KeyboardEvent, ReactNode } from "react";
 import { Icon } from "../icons";
 import {
   capabilityText, contextText, harnessLabel, parseTokens, rememberCpaProviders, routeTuning,
-  NATIVE_HARNESS, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, WEB_ROUTE, isWebModel, modelLabel, modelShortLabel, nativePermission, workerRoute, withTuning,
+  NATIVE_HARNESS, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, WEB_ROUTE, WEB_TIERS, isWebModel, modelLabel, modelShortLabel, nativePermission, webTier, workerRoute, withTuning,
   type AoHarness, type AoModelCapabilities, type AoModelCatalog, type AoModelLoader, type AoRoute, type AoTeam,
 } from "./AgentOrchestratorRoleEditor";
 import { HarnessLogo } from "./HarnessLogo";
@@ -136,6 +136,15 @@ export function AgentOrchestratorComposerControls({
   // the same model can come from two providers. The full label stays in its tooltip.
   const chipModel = modelShortLabel(route.model, route.provider_id === "cliproxyapi-antigravity");
   const chipProvider = chipModel.group.endsWith(" · CPA") ? chipModel.group.slice(0, -" · CPA".length) : "";
+  // A WebGPT model is one ChatGPT effort, so the effort chip picks the WebGPT model and the model
+  // list sets the effort: the two can never disagree (High model, Low effort).
+  const tier = webTier(route.model);
+  const pickModel = (model: string) => {
+    const next = withTuning(workerRoute(route.harness_id, model, nativePermission(route)), route);
+    const picked = webTier(model);
+    if (picked) next.effort = picked.effort;
+    onRouteChange(next);
+  };
   return <div className="ao-composer-controls">
     {permissions}
     <div className="ao-mode-switch" role="group" aria-label="Who answers">
@@ -176,7 +185,7 @@ export function AgentOrchestratorComposerControls({
                 // effort and window chips once picked. "Paused" stays visible: it decides whether it runs.
                 return <Option key={model} picked={route.model === model} disabled={busy}
                   title={[modelLabel(model, viaPool(model)), model, full].filter(Boolean).join("\n")}
-                  onPick={() => { onRouteChange(withTuning(workerRoute(route.harness_id, model, nativePermission(route)), route)); close(); }}>
+                  onPick={() => { pickModel(model); close(); }}>
                   {modelShortLabel(model, viaPool(model)).name}
                   {caps[model]?.paused ? <small>paused by CPA for now</small> : null}
                 </Option>;
@@ -186,7 +195,14 @@ export function AgentOrchestratorComposerControls({
           </div>
         </>}
       </ChipMenu>
-      <ChipMenu heading="Reasoning effort" popupClass="ao-tuning-popup" className={effortUnsupported ? "is-warning" : ""}
+      {tier ? <ChipMenu heading="Reasoning effort" popupClass="ao-tuning-popup" ariaLabel={`Reasoning effort: ${tier.label}`} disabled={busy}
+        title="A WebGPT model is one ChatGPT effort: picking an effort here picks that WebGPT model"
+        label={<span>{tier.label}</span>}>
+        {(close) => <div role="radiogroup" aria-label="Efforts">
+          {WEB_TIERS.map(item => <Option key={item.model} picked={item.model === route.model} disabled={busy}
+            onPick={() => { pickModel(item.model); close(); }}>{item.label}</Option>)}
+        </div>}
+      </ChipMenu> : <ChipMenu heading="Reasoning effort" popupClass="ao-tuning-popup" className={effortUnsupported ? "is-warning" : ""}
         ariaLabel={`Reasoning effort: ${route.effort ? effortWord(route.effort) : "model default"}`}
         disabled={busy || (!efforts?.length && !route.effort)}
         title={!efforts ? capability?.effortReason || "This model's efforts are not known yet" : !efforts.length ? capability?.effortReason || "This model takes no effort setting" : "How hard the model thinks"}
@@ -196,7 +212,7 @@ export function AgentOrchestratorComposerControls({
           {(efforts ?? []).map(effort => <Option key={effort} picked={route.effort === effort} disabled={busy} onPick={() => { setEffort(effort); close(); }}>{effortWord(effort)}</Option>)}
           {effortUnsupported ? <p className="ao-popup-muted" role="status">{effortWord(route.effort)} is saved but this model does not take it; pick one above.</p> : null}
         </div>}
-      </ChipMenu>
+      </ChipMenu>}
       <ChipMenu heading="Context window" popupClass="ao-tuning-popup" ariaLabel={`Context window: ${windowLabel}`} disabled={busy || !context}
         title={!context ? capability?.contextReason || "This agent's window cannot be set" : "How much of the conversation the agent keeps in view"}
         label={<span>{windowLabel}</span>}>

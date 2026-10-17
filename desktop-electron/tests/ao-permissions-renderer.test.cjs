@@ -144,6 +144,22 @@ test("the effort and window chips show the pick and offer exactly what the model
   assert.match(text(harness.props.label), /Claude Code/);
 });
 
+test("a WebGPT model is one ChatGPT effort: the effort chip picks the model and the model list sets the effort", () => {
+  const view = renderer("AgentOrchestratorComposerControls.tsx");
+  const routes = [];
+  const route = { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web", model: "chatgpt-web/high", permission_profile: ":read-only", effort: "low" };
+  const props = { mode: "single", onModeChange() {}, route, onRouteChange: next => routes.push(plain(next)), harnesses: [], loadModels: async () => [], teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false };
+  const tree = view.render("AgentOrchestratorComposerControls", props, composerState(["chatgpt-web/light", "chatgpt-web/high", "chatgpt-web/pro"]));
+  const effort = menuNamed(tree, "Reasoning effort");
+  assert.match(text(effort.props.label), /^High$/, "the chip shows the model's tier, not a stray saved effort");
+  const tiers = optionsIn(effort);
+  assert.deepEqual(tiers.map(row => text(row.props.children)), ["Instant", "Medium", "High", "Extra High", "Pro"], "no Model default, no Luna");
+  tiers.find(row => text(row.props.children) === "Pro").props.onPick();
+  assert.deepEqual([routes.at(-1).model, routes.at(-1).effort], ["chatgpt-web/pro", "ultra"]);
+  optionsIn(menuNamed(tree, "Model")).find(row => text(row.props.children) === "Instant").props.onPick();
+  assert.deepEqual([routes.at(-1).model, routes.at(-1).effort], ["chatgpt-web/light", "low"]);
+});
+
 test("mixed unsupported capabilities disable all presets rather than silently skipping roles", () => {
   const view = renderer("AgentOrchestratorPermissions.tsx");
   let saves = 0;

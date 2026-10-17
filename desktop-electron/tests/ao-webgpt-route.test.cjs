@@ -153,6 +153,10 @@ test("model list rows name the provider once in a group and tidy the model's own
     ["minimax-m3", "MiniMax M3"], ["qwen3.7-max", "Qwen3.7 Max"], ["gemini-3.1-flash-lite", "Gemini 3.1 Flash Lite"],
   ]) assert.equal(editor.prettyModelName(id), name, id);
   assert.deepEqual(plain(editor.modelShortLabel("chatgpt-web/extra-high")), { group: "WebGPT", name: "Extra High" });
+  assert.equal(editor.modelLabel("chatgpt-web/light"), "WebGPT Instant", "named as ChatGPT's effort picker names it");
+  assert.equal(editor.modelLabel("chatgpt-web/luna"), "WebGPT Luna", "a saved Luna route keeps its name");
+  assert.deepEqual(plain(editor.WEB_TIERS.map(tier => [tier.label, tier.effort])),
+    [["Instant", "low"], ["Medium", "medium"], ["High", "high"], ["Extra High", "xhigh"], ["Pro", "ultra"]]);
   assert.deepEqual(plain(editor.modelShortLabel("cpa/cline-pass/kimi-k3")), { group: "Cline Pass · CPA", name: "Kimi K3" });
   assert.deepEqual(plain(editor.modelShortLabel("gpt-6-luna", true)), { group: "OpenAI · CPA", name: "GPT-6 Luna" }, "a Native Codex pool id");
   assert.deepEqual(plain(editor.modelShortLabel("gpt-6-luna")), { group: "", name: "gpt-6-luna" }, "an agent's own model keeps its id");
