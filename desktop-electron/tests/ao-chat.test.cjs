@@ -638,3 +638,16 @@ test("the context meter's numbers: short token counts, and fullness only when th
   assert.equal(chat.contextFraction({ contextUsed: 1_200_000, contextWindow: 1_000_000 }), 1, "never more than full");
   assert.equal(chat.contextFraction(null), null);
 });
+// Native Codex cards (WebGPT and the CPA pool) report only the reply streamed so far. The chat used
+// to drop it, so a working reply showed nothing but "working · Xm" until the turn ended.
+test("a working card's streamed reply shows as its running message", () => {
+  assert.deepEqual(plain(chat.liveTimeline("r1:w", { activity: "working", output: "  I'll run the three checks…  " })),
+    [{ id: "r1:w:live", kind: "message", status: "running", text: "I'll run the three checks…" }]);
+  const timeline = [{ id: "t1", kind: "command", status: "running", text: "dir" }];
+  assert.deepEqual(plain(chat.liveTimeline("r1:w", { output: "partial", timeline })).map((item) => item.kind), ["command", "message"],
+    "the text follows what the card already did");
+  const own = [{ id: "m1", kind: "message", status: "running", text: "from the timeline" }];
+  assert.deepEqual(plain(chat.liveTimeline("r1:w", { output: "partial", timeline: own })), own, "an AO timeline's own message is not repeated");
+  assert.deepEqual(plain(chat.liveTimeline("r1:w", { output: "   " })), []);
+  assert.deepEqual(plain(chat.liveTimeline("r1:w", undefined)), []);
+});

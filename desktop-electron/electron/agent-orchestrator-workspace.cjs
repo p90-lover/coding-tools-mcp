@@ -25,6 +25,46 @@ async function recordLocalDefaultBranch(directory) {
   await git(directory, ["config", "--local", "ao.defaultBranch", branch]);
 }
 
+const MAX_BRANCHES = 300;
+
+/**
+ * The project's branches for the chat's branch bar: each local branch (newest commit first), the
+ * worktree that has it checked out, and which one the project folder and this chat are on.
+ * Read-only: nothing is checked out or created.
+ */
+async function listBranches(folder, chatRoot = null) {
+  const root = await git(folder, ["rev-parse", "--show-toplevel"]);
+  if (!root) return { git: false, branches: [] };
+  const headOf = async (directory) => {
+    const branch = await git(directory, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+    if (branch) return branch;
+    const commit = await git(directory, ["rev-parse", "--short", "HEAD"]);
+    return commit ? `detached at ${commit}` : null;
+  };
+  const [refs, worktrees, current, chatBranch] = await Promise.all([
+    git(folder, ["for-each-ref", "--sort=-committerdate", `--count=${MAX_BRANCHES}`,
+      "--format=%(refname:short)%09%(committerdate:unix)%09%(upstream:short)", "refs/heads"]),
+    git(folder, ["worktree", "list", "--porcelain"]),
+    headOf(folder),
+    chatRoot ? headOf(chatRoot) : Promise.resolve(null),
+  ]);
+  const checkedOut = new Map();
+  let worktree = null;
+  for (const line of String(worktrees || "").split(/\r?\n/)) {
+    if (line.startsWith("worktree ")) worktree = line.slice(9);
+    else if (line.startsWith("branch refs/heads/") && worktree) checkedOut.set(line.slice(18), worktree);
+  }
+  const branches = String(refs || "").split(/\r?\n/).filter(Boolean).map((line) => {
+    const [name, time, upstream] = line.split("\t");
+    return {
+      name, updatedAt: Number(time) > 0 ? new Date(Number(time) * 1000).toISOString() : null,
+      upstream: upstream || null, worktree: checkedOut.get(name) ?? null,
+      current: name === current, chat: Boolean(chatBranch) && name === chatBranch,
+    };
+  });
+  return { git: true, root, current, chatBranch, branches, truncated: branches.length >= MAX_BRANCHES };
+}
+
 // The dependency-link sync asks AO for the project, and on a busy machine that request ran into
 // its 30 s timeout: every launch waited for it before AO was even asked for a session. A launch
 // now waits a few seconds at most; the sync then finishes on its own (one per project at a time),
@@ -109,6 +149,12 @@ function createAoWorkspaceBoard({ listWorkspaces, listProjects, createProject, m
     },
     /** The workspace's AO project ({ workspaceId, projectId|null }) without registering one or syncing it. */
     project: id => binding(id, false),
+    /** The workspace folder's branches, and the one a chat's own folder (`chatRoot`) is on. */
+    async branches(id, chatRoot = null) {
+      const { item } = await workspace(id);
+      const folder = platform === "win32" ? item.path.replace(/^\\\\\?\\/, "") : item.path;
+      return listBranches(folder, chatRoot);
+    },
     readWorkspace,
     async read(projectId, runId) {
       const project = (await listProjects()).find(item => item.id === projectId);
@@ -120,4 +166,4 @@ function createAoWorkspaceBoard({ listWorkspaces, listProjects, createProject, m
   };
 }
 
-module.exports = { createAoWorkspaceBoard, recordLocalDefaultBranch };
+module.exports = { createAoWorkspaceBoard, listBranches, recordLocalDefaultBranch };

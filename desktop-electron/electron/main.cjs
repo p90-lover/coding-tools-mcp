@@ -619,6 +619,27 @@ async function waitForRuntimeHostIdle(timeoutMs = 30_000) {
   }
 }
 
+/**
+ * Runs a startup step on the runtime host once it is idle. Waiting alone is not enough: a
+ * sign-in's route check can begin between the wait and the step (seen live at launch, ~400 ms
+ * apart), and the host then refuses the step as "Another launcher operation is active". That
+ * left the bridge down and setup marked incomplete until the watchdog noticed. A step refused
+ * for it waits for idle again and retries, up to three attempts; any other error is thrown.
+ */
+async function whenRuntimeHostIdle(logger, step, run) {
+  for (let attempt = 1; ; attempt += 1) {
+    await waitForRuntimeHostIdle(120_000).catch((error) => logger.warn("runtime.startup_wait_idle", {
+      step, message: error instanceof Error ? error.message.slice(0, 200) : String(error) }));
+    try {
+      return await run();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (attempt >= 3 || !message.startsWith("Another launcher operation is active")) throw error;
+      logger.warn("runtime.startup_retry_busy", { step, attempt, message: message.slice(0, 200) });
+    }
+  }
+}
+
 function applyReadyRuntimeAfterBridge({ logger, stateStore, bridgeRouteChanged = false }) {
   const config = runtimeSupervisor.readConfig();
   const current = stateStore.read();
@@ -1752,17 +1773,17 @@ function registerIpc({ logger, stateStore }) {
     }
     return browser;
   });
-  const refreshBrowserAuthentication = async (reason) => {
+  // Each handler is whole by itself: module-host-parity.test.cjs runs them one at a time.
+  handle("launcher:browser-refresh-auth", async () => {
     if (stateStore.read().browserInteractionMode === "manual") return browserHost.snapshot();
     const browser = await browserHost.refreshAuthentication();
     if (browser.authenticated) {
       const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
       send("launcher:state-changed", state);
-      scheduleCodexBridgeAutoConnect({ logger, stateStore, reason });
+      scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "browser-refresh-auth" });
     }
     return browser;
-  };
-  handle("launcher:browser-refresh-auth", () => refreshBrowserAuthentication("browser-refresh-auth"));
+  });
   // Setup checks the sign-in on its own while it shows "Sign in". The first look asks
   // /api/auth/session with the browser's cookies and does not navigate, so a sign-in in progress
   // in the ChatGPT view is never interrupted; only a session that is signed in is then refreshed
@@ -1774,7 +1795,13 @@ function registerIpc({ logger, stateStore }) {
     const readiness = await browserHost.authenticationReadiness().catch(() => null);
     if (readiness?.authenticated !== true) return browserHost.snapshot();
     logger.info("browser.setup_signin_detected", { recent: readiness.recent === true });
-    return refreshBrowserAuthentication("setup-signin-check");
+    const browser = await browserHost.refreshAuthentication();
+    if (browser.authenticated) {
+      const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
+      send("launcher:state-changed", state);
+      scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "setup-signin-check" });
+    }
+    return browser;
   });
   handle("launcher:browser-passkey-login", async () => {
     const browser = await browserHost.openPasskeyLogin();
@@ -3307,7 +3334,9 @@ async function start() {
     // Otherwise a slow sign-in or proxy must not hold the Codex bridge down: start it after a bounded wait.
     if (runtimeHost.managedRuntimeUpgradeRequired()) await startupAuthenticationRefresh;
     else await Promise.race([startupAuthenticationRefresh, delay(STARTUP_AUTH_WAIT_MS)]);
-    const upgrade = await runtimeHost.upgradeManagedRuntime();
+    // The upgrade refuses to run while any operation is active, even when none is needed (seen
+    // live: a sign-in's route check made every such launch fail until the watchdog restarted it).
+    const upgrade = await whenRuntimeHostIdle(logger, "upgrade", () => runtimeHost.upgradeManagedRuntime());
     if (upgrade.updated) {
       const state = stateStore.update({
         coreSetupComplete: true,
@@ -3350,23 +3379,8 @@ async function start() {
     if (stateStore.read().codexRoute === false) {
       await connectCodexBridgeAfterAuthentication({ logger, stateStore, reason: "startup" });
     }
-    // That route check (or a sign-in's) may still be finishing; starting meanwhile was refused as
-    // "Another launcher operation is active" and the runtime stayed down until the next restart.
-    // The wait alone is not enough: a sign-in's route check can start between it and the start
-    // (seen live at launch, ~400 ms apart). A start refused for that waits again and retries.
-    let runtime;
-    for (let attempt = 1; ; attempt += 1) {
-      await waitForRuntimeHostIdle(120_000).catch((error) => logger.warn("runtime.startup_wait_idle", {
-        message: error instanceof Error ? error.message.slice(0, 200) : String(error) }));
-      try {
-        runtime = await runtimeSupervisor.startIfConfigured();
-        break;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (attempt >= 3 || !message.startsWith("Another launcher operation is active")) throw error;
-        logger.warn("runtime.startup_retry_busy", { attempt, message: message.slice(0, 200) });
-      }
-    }
+    // That route check (or a sign-in's) may still be finishing; see whenRuntimeHostIdle.
+    const runtime = await whenRuntimeHostIdle(logger, "start", () => runtimeSupervisor.startIfConfigured());
     // "degraded" means the bridge is up and only the MCP tunnel is still being retried.
     if (runtime.status !== "ready" && runtime.status !== "degraded") return runtime;
     const browser = await startupAuthenticationRefresh;
