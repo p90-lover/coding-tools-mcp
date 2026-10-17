@@ -29,6 +29,9 @@ const SET_ASIDE_LIST = "set-aside.json";
 const PACK_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const MAX_HEADER_BYTES = 4096;
 const MAX_MANIFEST_BYTES = 8 * 1024 * 1024;
+const PLAN_HASH_CONCURRENCY = 8;
+// The update bar: checking the installed files fills its first part, downloading the packs the rest.
+const CHECK_SHARE = 0.2;
 const MAX_FILES = 50_000;
 const WINDOWS_RESERVED = /(^|\/)(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|\/|$)/i;
 
@@ -120,18 +123,27 @@ async function hashFile(filePath) {
  * update listed that this one drops, and the packs to download. Electron's own files are
  * replaced only when the Electron version changes; otherwise only their version stamp differs.
  */
-async function planUpdate({ manifest, installRoot, electronVersion, previous = null, hash = hashFile }) {
+async function planUpdate({ manifest, installRoot, electronVersion, previous = null, hash = hashFile, onProgress }) {
   const withFramework = manifest.electron !== electronVersion;
-  const changed = [];
-  const listed = new Set();
-  for (const file of manifest.files) {
-    listed.add(file.path.toLowerCase());
-    if (isFrameworkFile(file.path) && !withFramework) continue;
-    const target = path.join(installRoot, ...file.path.split("/"));
-    const stat = fs.statSync(target, { throwIfNoEntry: false });
-    if (stat?.isFile() && stat.size === file.size && await hash(target) === file.sha256) continue;
-    changed.push(file);
-  }
+  const listed = new Set(manifest.files.map((file) => file.path.toLowerCase()));
+  const candidates = manifest.files.filter((file) => withFramework || !isFrameworkFile(file.path));
+  // An install holds thousands of files: hash several at once, and say how far the check is,
+  // since it runs before any download and took minutes with the bar still at 0%.
+  const differs = new Array(candidates.length);
+  let next = 0;
+  let checked = 0;
+  const worker = async () => {
+    while (next < candidates.length) {
+      const index = next++;
+      const file = candidates[index];
+      const target = path.join(installRoot, ...file.path.split("/"));
+      const stat = fs.statSync(target, { throwIfNoEntry: false });
+      differs[index] = !(stat?.isFile() && stat.size === file.size && await hash(target) === file.sha256);
+      onProgress?.(++checked, candidates.length);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(PLAN_HASH_CONCURRENCY, candidates.length) }, worker));
+  const changed = candidates.filter((_file, index) => differs[index]);
   const obsolete = [];
   for (const file of Array.isArray(previous?.files) ? previous.files : []) {
     const rel = safeInstallPath(file?.path);
@@ -315,7 +327,17 @@ function createAppUpdateController({
     const manifest = parseManifest(manifestText, { version: available.version, tag });
     const updateRoot = path.join(installRoot, STAGE_DIRECTORY);
     const previous = readJson(path.join(updateRoot, INSTALLED_MANIFEST));
-    const plan = await planUpdate({ manifest, installRoot, electronVersion, previous, hash: deps.hash });
+    let shown = -1;
+    const report = (fraction) => {
+      const progress = Math.min(1, Math.floor(fraction * 100) / 100);
+      if (progress === shown) return;
+      shown = progress;
+      transition({ status: "downloading", version: available.version, progress });
+    };
+    const plan = await planUpdate({
+      manifest, installRoot, electronVersion, previous, hash: deps.hash,
+      onProgress: (done, total) => report(CHECK_SHARE * (done / total)),
+    });
     logger?.info("launcher.app_update_plan", {
       version: available.version, files: plan.changed.length, obsolete: plan.obsolete.length,
       packs: plan.packs.map((pack) => pack.name), downloadBytes: plan.downloadBytes, withFramework: plan.withFramework,
@@ -329,9 +351,14 @@ function createAppUpdateController({
     const stageRoot = fs.mkdtempSync(path.join(updateRoot, "stage-"));
     const filesRoot = path.join(stageRoot, "files");
     let downloaded = 0;
+    const downloadShare = (bytes) => report(CHECK_SHARE + (1 - CHECK_SHARE) * (plan.downloadBytes ? bytes / plan.downloadBytes : 1));
     for (const pack of plan.packs) {
       const packPath = path.join(stageRoot, `${pack.name}.ctpack`);
-      await deps.downloadFile(available.packUrl(pack.name), packPath);
+      let received = 0;
+      await deps.downloadFile(available.packUrl(pack.name), packPath, (bytes) => {
+        received += bytes;
+        downloadShare(downloaded + Math.min(received, pack.size));
+      });
       const stat = fs.statSync(packPath);
       if (stat.size !== pack.size || await deps.hash(packPath) !== pack.sha256) {
         throw new Error(`Update pack ${pack.name} failed SHA-256 verification`);
@@ -340,10 +367,7 @@ function createAppUpdateController({
       await extractPack(packPath, wanted, filesRoot);
       fs.rmSync(packPath, { force: true });
       downloaded += pack.size;
-      transition({
-        status: "downloading", version: available.version,
-        progress: plan.downloadBytes ? Math.min(1, downloaded / plan.downloadBytes) : 1,
-      });
+      downloadShare(downloaded);
     }
     const workerPath = path.join(stageRoot, "app-update-worker.cjs");
     // The worker ships inside app.asar, which only Electron's fs reads.
