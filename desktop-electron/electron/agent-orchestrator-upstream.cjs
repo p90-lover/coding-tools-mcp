@@ -413,7 +413,10 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         const plan = typeof input.plan === "string" && input.plan.trim() ? utf8Prefix(input.plan, 20000) : "";
         // An MCP tool's arguments (read_file's path, search_text's pattern) are what it will do; the card
         // and the reviewer need them. Shown as JSON, so control characters arrive escaped.
-        const toolName = String(detail.toolName || "");
+        // AO's ACP approvals for an MCP tool carry no toolName, only the name as the activity's
+        // summary (seen live: subjectKind "mcp_tool", toolKind "other"). Without it the input was
+        // dropped, so the reviewer saw an exec_command with no command and answered "ask".
+        const toolName = String(detail.toolName || activity.summary || "");
         const toolInput = /^mcp__/.test(toolName) && Object.keys(input).length ? utf8Prefix(JSON.stringify(input), 1500) : "";
         return {
           approval_id: activity.requestId.slice(0, 200), source: "ao", kind: plan ? "plan" : command ? "command" : "permission",
