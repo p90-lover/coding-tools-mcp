@@ -24,7 +24,7 @@ const folderName = (worktree: string) => worktree.split(/[\\/]/).filter(Boolean)
  * otherwise the project folder's) and a menu of every branch in the project, newest first, with
  * the worktree each is checked out in. Read-only: it shows what is in use, it changes nothing.
  */
-export function ChatBranchBar({ workspaceId, sessionId }: { workspaceId?: string; sessionId?: string }) {
+export function ChatBranchBar({ workspaceId, sessionId, inline = false }: { workspaceId?: string; sessionId?: string; inline?: boolean }) {
   const [data, setData] = useState<ChatBranches | null>(null);
   const [search, setSearch] = useState("");
   const popup = useComposerPopover();
@@ -42,14 +42,16 @@ export function ChatBranchBar({ workspaceId, sessionId }: { workspaceId?: string
     return () => { live = false; window.clearInterval(timer); };
   }, [workspaceId, sessionId]);
   if (!data) return null;
+  // Inline, it is one chip in the new-chat strip; otherwise a bar over the composer of a chat.
+  const barClass = inline ? "cx-branch-bar is-inline" : "cx-branch-bar";
   if (!data.git) {
-    return <div className="cx-branch-bar"><span className="cx-branch-note" title="Agent harnesses need a git repository; Native Codex works here">
+    return <div className={barClass}><span className="cx-branch-note" title="Agent harnesses need a git repository; Native Codex works here">
       <Icon name="git" width="14" height="14" />Not a git repository</span></div>;
   }
   const inUse = data.chatBranch || data.current || "";
   const query = search.trim().toLowerCase();
   const shown = data.branches.filter((branch) => !query || branch.name.toLowerCase().includes(query));
-  return <div className="cx-branch-bar">
+  return <div className={barClass}>
     <div className="ao-composer-picker" ref={popup.root} onKeyDown={popup.onKeyDown}>
       <button type="button" className="cx-branch-chip" ref={popup.trigger} aria-haspopup="dialog" aria-expanded={popup.open}
         aria-label={`Branch: ${inUse}`} title={data.chatBranch && data.chatBranch !== data.current

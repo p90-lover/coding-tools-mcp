@@ -426,7 +426,10 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:last-child .ao-composer-popover { left: auto; right: 0; }
 .ao-chip-effort { color: var(--ao-muted); }
 /* The branch bar above the chat box: the branch in use, and every branch of the project. */
-.ao-workflow .cx-branch-bar { display: flex; align-items: center; gap: 8px; min-width: 0; margin: 0 4px 6px; color: var(--ao-muted); font-size: 12.5px; }
+/* In a chat it lines up with the composer column, like the route note; in the new-chat strip it is one chip. */
+.ao-workflow .cx-branch-bar { display: flex; align-items: center; gap: 8px; box-sizing: border-box; width: 100%; max-width: 760px; min-width: 0;
+  margin: 0 auto 6px; padding: 0 12px; color: var(--ao-muted); font-size: 12.5px; }
+.ao-workflow .cx-branch-bar.is-inline { display: inline-flex; width: auto; max-width: 40%; margin: 0; padding: 0; color: inherit; font-size: inherit; }
 .ao-workflow .cx-branch-bar > .ao-composer-picker { min-width: 0; }
 .ao-workflow .cx-branch-chip { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: min(420px, 100%); height: 26px; padding: 0 8px;
   border: 0; border-radius: 8px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
