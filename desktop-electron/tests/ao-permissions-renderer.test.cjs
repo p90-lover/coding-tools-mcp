@@ -112,11 +112,14 @@ test("WebGPT locks the harness; its model menu offers Native Codex's CPA models,
   // A pool row shows the tidied name; its tooltip keeps the exact id.
   const pool = rows.find(row => text(row.props.children).includes("Actual Local Model"));
   assert.match(pool.props.title, /actual-local-model/);
+  assert.equal(routes[0].context_window, 400_000, "the loaded list starts the chat at a 400K window");
   pool.props.onPick();
-  assert.equal(routes[0].harness_id, "codex-native");
-  assert.equal(routes[0].provider_id, "cliproxyapi-antigravity");
-  assert.equal(routes[0].model, "actual-local-model");
-  assert.equal(routes[0].permission_profile, "managed/raw");
+  const picked = routes.at(-1);
+  assert.equal(picked.harness_id, "codex-native");
+  assert.equal(picked.provider_id, "cliproxyapi-antigravity");
+  assert.equal(picked.model, "actual-local-model");
+  assert.equal(picked.permission_profile, "managed/raw");
+  assert.equal(picked.context_window, 400_000);
 });
 
 test("the effort and window chips show the pick and offer exactly what the model takes", () => {
@@ -129,19 +132,38 @@ test("the effort and window chips show the pick and offer exactly what the model
   const effort = menuNamed(tree, "Reasoning effort");
   assert.match(text(effort.props.label), /High/);
   const efforts = optionsIn(effort);
-  assert.deepEqual(efforts.map(row => text(row.props.children)), ["Model defaultWhatever the agent picks", "Low", "High", "Extra high"]);
+  assert.deepEqual(efforts.map(row => text(row.props.children)), ["Low", "High", "Extra high"], "no Model default row");
   assert.equal(efforts.find(row => row.props.picked).props.children, "High");
-  efforts[3].props.onPick();
+  efforts[2].props.onPick();
   assert.equal(routes.at(-1).effort, "xhigh");
   const window = menuNamed(tree, "Context window");
-  assert.match(text(window.props.label), /1M/, "a blank window reads as the model's full limit");
+  assert.match(text(window.props.label), /400k/i, "an unpicked window reads as the 400K default");
   const sizes = optionsIn(window).map(row => text(row.props.children));
-  assert.equal(sizes[0], "Full model limit · 1M");
-  assert.ok(sizes.includes("400k") && !sizes.includes("2M"), `presets stay within the model's range: ${sizes}`);
-  optionsIn(window).find(row => text(row.props.children) === "400k").props.onPick();
-  assert.equal(routes.at(-1).context_window, 400_000);
+  assert.ok(!sizes.some(size => /default/i.test(size)), `no default row: ${sizes}`);
+  assert.ok(sizes.includes("400k") && sizes.includes("1Mfull model limit") && !sizes.includes("2M"), `presets stay within the model's range: ${sizes}`);
+  assert.equal(optionsIn(window).find(row => row.props.picked).props.children[0], "400k");
+  optionsIn(window).find(row => text(row.props.children) === "1Mfull model limit").props.onPick();
+  assert.equal(routes.at(-1).context_window, 1_000_000);
   const harness = menuNamed(tree, "Harness");
-  assert.match(text(harness.props.label), /Claude Code/);
+  assert.doesNotMatch(text(harness.props.label), /Claude Code/, "the harness chip shows only its logo");
+  assert.match(harness.props.title, /Claude Code/);
+  assert.match(harness.props.ariaLabel, /Claude Code/);
+});
+
+test("unpicked, the effort chip names the model's own effort and the model chip shows no provider", () => {
+  const view = renderer("AgentOrchestratorComposerControls.tsx");
+  const routes = [];
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gemini-3.8-flash-high", permission_profile: ":ao-default", context_window: 400_000 };
+  const caps = { "cpa/gemini-3.8-flash-high": { provider: "gemini", efforts: ["low", "medium", "high"], contextWindow: { min: 4096, max: 1_048_576 } } };
+  const props = { mode: "single", onModeChange() {}, route, onRouteChange: next => routes.push(plain(next)), harnesses: [{ id: "ao:claude-code", label: "Claude Code", runnable: true, installed: true }], loadModels: async () => [], teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false };
+  const tree = view.render("AgentOrchestratorComposerControls", props, composerState(["cpa/gemini-3.8-flash-high"], caps));
+  const effort = menuNamed(tree, "Reasoning effort");
+  assert.equal(text(effort.props.label), "High", "the model's own effort, read from its id");
+  const rows = optionsIn(effort);
+  assert.equal(rows.find(row => row.props.picked).props.children, "High");
+  rows.find(row => row.props.children === "High").props.onPick();
+  assert.equal(routes.at(-1).effort, undefined, "picking the model's own effort keeps it the model's own");
+  assert.doesNotMatch(text(menuNamed(tree, "Model").props.label), /·/, "no provider after the model name");
 });
 
 test("a WebGPT model is one ChatGPT effort: the effort chip picks the model and the model list sets the effort", () => {
