@@ -49,6 +49,11 @@ const TURN_TAB_BOOTSTRAP_TIMEOUT_MS = 120_000;
 const RETAINED_TURN_TAB_TTL_MS = 30 * 60 * 1000;
 const BROWSER_NAVIGATION_TIMEOUT_MS = 60_000;
 const CHATGPT_AUTH_SESSION_TIMEOUT_MS = 5_000;
+// The open page's own session request (the fallback when Cloudflare answers the app's request)
+// took 2.6 s on a busy machine and more than 5 s while a turn had just ended.
+const CHATGPT_AUTH_PAGE_TIMEOUT_MS = 15_000;
+// How long a confirmed ChatGPT session vouches for a check that could not tell.
+const CHATGPT_AUTH_RECENT_MS = 10 * 60_000;
 function authenticatedChatGptSession(payload, now = Date.now()) {
   const user = payload?.user;
   if (!user || typeof user !== "object" || Array.isArray(user) || !Object.keys(user).length) return false;
@@ -2850,7 +2855,31 @@ class BrowserHost {
     return tracked;
   }
 
+  /**
+   * Whether the ChatGPT session can serve a turn. A check that could not tell (Cloudflare answering
+   * the app's own request, then the page's request slower than its limit on a busy machine) read
+   * as "Browser is not ready" while the page was signed in and working. Such an unknown result
+   * stands on a session this browser confirmed recently; a signed-out answer never does.
+   */
   async authenticationReadiness() {
+    const result = await this.checkAuthenticationReadiness();
+    const now = Date.now();
+    if (result?.authenticated === true && result.ready === true) {
+      this.lastAuthenticatedAt = now;
+      return result;
+    }
+    if (result?.authenticated === false) {
+      this.lastAuthenticatedAt = 0;
+      return result;
+    }
+    if (this.lastAuthenticatedAt && now - this.lastAuthenticatedAt < CHATGPT_AUTH_RECENT_MS) {
+      this.logger?.info?.("browser.readiness_recent", { ageMs: now - this.lastAuthenticatedAt });
+      return { authenticated: true, ready: true, recent: true };
+    }
+    return result;
+  }
+
+  async checkAuthenticationReadiness() {
     requireAutomaticBrowserInspection(this, "ChatGPT authentication readiness");
     const contents = this.view?.webContents;
     if (!contents || contents.isDestroyed() || typeof contents.session?.fetch !== "function") {
@@ -2892,7 +2921,7 @@ class BrowserHost {
           error: Boolean(body && body.error !== undefined && body.error !== null && body.error !== ""),
           expires: body && typeof body.expires === "string" ? body.expires : null };
       })()`, true),
-      new Promise(resolve => setTimeout(() => resolve(null), CHATGPT_AUTH_SESSION_TIMEOUT_MS)),
+      new Promise(resolve => setTimeout(() => resolve(null), CHATGPT_AUTH_PAGE_TIMEOUT_MS)),
     ]).catch(() => null);
     if (result?.status === 401) return { authenticated: false, ready: true };
     if (result?.status !== 200) {

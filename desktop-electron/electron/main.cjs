@@ -103,6 +103,8 @@ const {
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 const LAUNCHER_SMOKE_TEST = process.argv.includes("--launcher-smoke-test");
 const SOURCE_ROOT = path.resolve(__dirname, "../..");
+// The bridge runtime (codex-chatgpt-web, src/cli.ts) lives in runtime-web, not at the repo root.
+const RUNTIME_SOURCE_ROOT = path.join(SOURCE_ROOT, "runtime-web");
 const LAUNCHER_PROFILE = resolveLauncherProfile({ appData: app.getPath("appData") });
 const IS_DEV_PROFILE = LAUNCHER_PROFILE.kind === DEVELOPMENT_PROFILE;
 const CORE_HOME = LAUNCHER_PROFILE.coreHome;
@@ -2577,8 +2579,12 @@ async function start() {
     dataRoot: path.join(app.getPath("userData"), "integrations"),
     resolveRuntimeExecutable: () => {
       const runtimeRoot = runtimeRootProvider();
-      if (!runtimeRoot) throw new Error("Packaged runtime is unavailable for managed components");
-      return runtimeBundlePaths(runtimeRoot, process.platform).executable;
+      if (runtimeRoot) return runtimeBundlePaths(runtimeRoot, process.platform).executable;
+      // A source run has no bundled runtime: use the same Bun the bridge runtime runs on.
+      const sourceBun = !app.isPackaged
+        && (process.env.CODEX_CHATGPT_WEB_BUN?.trim() || process.env.CODEX_WEB_GPT_BUN?.trim());
+      if (sourceBun) return sourceBun;
+      throw new Error("Packaged runtime is unavailable for managed components");
     },
     filePath: path.join(app.getPath("userData"), "external-services.json"),
     keyPath: path.join(app.getPath("userData"), "external-services.key"),
@@ -3118,7 +3124,7 @@ async function start() {
   runtimeSupervisor = new RuntimeSupervisor({
     app,
     logger,
-    sourceRoot: SOURCE_ROOT,
+    sourceRoot: RUNTIME_SOURCE_ROOT,
     installedRuntimeRoot,
     runtimeRootProvider,
     coreHome: CORE_HOME,
@@ -3132,7 +3138,7 @@ async function start() {
   runtimeHost = new RuntimeHost({
     app,
     logger,
-    sourceRoot: SOURCE_ROOT,
+    sourceRoot: RUNTIME_SOURCE_ROOT,
     installedRuntimeRoot,
     runtimeRootProvider,
     browserDescriptorPath: BROWSER_DESCRIPTOR_PATH,
@@ -3332,9 +3338,21 @@ async function start() {
     }
     // That route check (or a sign-in's) may still be finishing; starting meanwhile was refused as
     // "Another launcher operation is active" and the runtime stayed down until the next restart.
-    await waitForRuntimeHostIdle(120_000).catch((error) => logger.warn("runtime.startup_wait_idle", {
-      message: error instanceof Error ? error.message.slice(0, 200) : String(error) }));
-    const runtime = await runtimeSupervisor.startIfConfigured();
+    // The wait alone is not enough: a sign-in's route check can start between it and the start
+    // (seen live at launch, ~400 ms apart). A start refused for that waits again and retries.
+    let runtime;
+    for (let attempt = 1; ; attempt += 1) {
+      await waitForRuntimeHostIdle(120_000).catch((error) => logger.warn("runtime.startup_wait_idle", {
+        message: error instanceof Error ? error.message.slice(0, 200) : String(error) }));
+      try {
+        runtime = await runtimeSupervisor.startIfConfigured();
+        break;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (attempt >= 3 || !message.startsWith("Another launcher operation is active")) throw error;
+        logger.warn("runtime.startup_retry_busy", { attempt, message: message.slice(0, 200) });
+      }
+    }
     // "degraded" means the bridge is up and only the MCP tunnel is still being retried.
     if (runtime.status !== "ready" && runtime.status !== "degraded") return runtime;
     const browser = await startupAuthenticationRefresh;
