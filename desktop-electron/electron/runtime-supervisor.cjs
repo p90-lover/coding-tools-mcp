@@ -193,6 +193,21 @@ function runtimeOwnershipMayBeLive(state) {
   return ["starting", "ready", "degraded", "stopping", "detached"].includes(state.status);
 }
 
+/** True only when both runtime folders are known and name different bundles. */
+function runtimeRootChanged(recorded, current) {
+  if (typeof recorded !== "string" || typeof current !== "string") return false;
+  const normal = (value) => {
+    const resolved = path.resolve(value);
+    return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  };
+  return normal(recorded) !== normal(current);
+}
+
+function bridgeIdle(health) {
+  return ["active_http_turns", "active_generations", "active_browser_turns"]
+    .every((field) => !(Number(health?.[field]) > 0));
+}
+
 function conciseTunnelLog(value) {
   if (typeof value !== "string" || !value.trim()) return undefined;
   const tail = value.trim().split(/\r?\n/).slice(-3).join(" | ");
@@ -539,6 +554,7 @@ class RuntimeSupervisor {
       version: 1,
       ownerPid: process.pid,
       daemonPid: this.daemon?.pid ?? null,
+      daemonRuntimeRoot: this.daemon ? this.daemonRuntimeRoot ?? null : null,
       tunnelPid: this.tunnel?.pid ?? null,
       status,
       ...(detail ? { detail } : {}),
@@ -719,8 +735,17 @@ class RuntimeSupervisor {
       || health?.pid !== state.daemonPid) {
       return false;
     }
+    // A patch can ship a new runtime under the same release version; it installs beside the folder
+    // this bridge still runs from. Replace an idle bridge so the new code takes effect. A busy one
+    // keeps its turns and is replaced on a later launch.
+    if (this.runtimeRootProvider) this.installedRuntimeRoot = this.runtimeRootProvider();
+    if (runtimeRootChanged(state.daemonRuntimeRoot, this.installedRuntimeRoot) && bridgeIdle(health)) {
+      this.logger.info("runtime.daemon_outdated", { pid: state.daemonPid });
+      return false;
+    }
     const handle = new AdoptedProcess(state.daemonPid);
     this.daemon = handle;
+    this.daemonRuntimeRoot = typeof state.daemonRuntimeRoot === "string" ? state.daemonRuntimeRoot : null;
     this.lastChildFailure.daemon = null;
     handle.once("exit", () => {
       const expected = this.stopping || this.expectedExits.has(handle);
@@ -1399,6 +1424,7 @@ class RuntimeSupervisor {
     let child;
     try {
       child = this.spawnChild("daemon", this.runtimeCommand(["serve"]));
+      this.daemonRuntimeRoot = this.installedRuntimeRoot ?? null;
       await this.waitForProxy(config);
       if (this.daemon !== child) throw new Error("Responses proxy exited immediately after becoming healthy");
       this.restartableChildren.add(child);

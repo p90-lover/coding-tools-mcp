@@ -1190,6 +1190,8 @@ interface ChatGptSubmissionBaseline {
   userTurns: Locator;
   responseTurns: Locator;
   initialTurnIdentities: readonly string[];
+  /** User turns on the page before the send; absent on baselines built by hand. */
+  initialUserTurnCount?: number;
   domCache: ChatGptSubmissionDomCache;
 }
 
@@ -1400,6 +1402,19 @@ export function chatGptDetachedTurnIdentity(
     return state.responseIdentities.at(-1);
   }
   return chatGptReboundTurnIdentity(initial, binding.identity, state.responseIdentities);
+}
+
+/**
+ * How many user turns a bound answer may sit under. The browser sends exactly one prompt, so the
+ * page may hold the user turns it had before the send plus that one. The count seen when the
+ * answer first appeared is not enough on its own: ChatGPT can expose the answer before it renders
+ * the prompt as a user turn (trace dfd2ba0dcc28), and a later prompt bubble is not a new turn.
+ */
+export function chatGptAcceptedUserTurnCount(
+  initialUserTurnCount: number | undefined,
+  observedUserTurnCount: number,
+): number {
+  return Math.max(observedUserTurnCount, (initialUserTurnCount ?? 0) + 1);
 }
 
 export class ChatGptCompletionTracker {
@@ -2792,6 +2807,7 @@ export class ChatGptBrowserWorker {
       userTurns,
       responseTurns,
       initialTurnIdentities: state.turnIdentities,
+      initialUserTurnCount: state.userIdentities.length,
       domCache,
     };
   }
@@ -2889,7 +2905,10 @@ export class ChatGptBrowserWorker {
         identity,
         locator: observationPage.locator(`[data-turn-id=${JSON.stringify(identity)}], [data-turn-key=${JSON.stringify(identity)}]`),
         acceptedTurnIdentities: state.turnIdentities,
-        acceptedUserTurnCount: state.userIdentities.length,
+        acceptedUserTurnCount: chatGptAcceptedUserTurnCount(
+          observationBaseline.initialUserTurnCount,
+          state.userIdentities.length,
+        ),
       };
       // A delayed renderer wake can cross the grace while the assistant appears. Only a fresh
       // observation can prove it is still missing; the explicit turn deadline remains above.
@@ -2926,7 +2945,7 @@ export class ChatGptBrowserWorker {
       identity,
       locator: page.locator(`[data-turn-id=${JSON.stringify(identity)}], [data-turn-key=${JSON.stringify(identity)}]`),
       acceptedTurnIdentities: state.turnIdentities,
-      acceptedUserTurnCount: state.userIdentities.length,
+      acceptedUserTurnCount: Math.max(binding.acceptedUserTurnCount, state.userIdentities.length),
     };
   }
 
