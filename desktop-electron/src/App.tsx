@@ -1491,6 +1491,18 @@ function SetupSurface({
     return () => { active = false; };
   }, [keysmithAvailable]);
   const manualInteraction = snapshot.state.browserInteractionMode === "manual";
+  // Setup finds an existing ChatGPT sign-in by itself: on open and every 10 s while it still shows
+  // "Sign in". The check never navigates a login in progress (launcher:browser-check-auth).
+  const signedIn = browser?.authenticated === true;
+  const canCheckSignIn = !manualInteraction && typeof api?.checkSignIn === "function";
+  useEffect(() => {
+    if (!canCheckSignIn || signedIn) return;
+    let active = true;
+    const check = () => { if (active) void api!.checkSignIn().catch(() => undefined); };
+    check();
+    const timer = window.setInterval(check, 10_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [canCheckSignIn, signedIn]);
   const busy = localBusy
     || operation?.status === "running"
     || (!manualInteraction && (
