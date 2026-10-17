@@ -58,14 +58,14 @@ export function useComposerPopover() {
 }
 
 /** One composer chip and the menu it opens: the chip shows what is picked, the menu the choices. */
-function ChipMenu({ label, ariaLabel, title, disabled, className = "", popupClass, heading, children }: {
+function ChipMenu({ label, ariaLabel, title, disabled, className = "", popupClass, heading, onOpen, children }: {
   label: ReactNode; ariaLabel: string; title?: string; disabled: boolean; className?: string; popupClass: string; heading: string;
-  children: (close: () => void) => ReactNode;
+  onOpen?: () => void; children: (close: () => void) => ReactNode;
 }) {
   const popup = useComposerPopover();
   return <div className="ao-composer-picker" ref={popup.root} onKeyDown={popup.onKeyDown}>
     <button type="button" className={`ao-composer-chip ${className}`.trim()} ref={popup.trigger} disabled={disabled} aria-expanded={popup.open}
-      aria-haspopup="dialog" aria-label={ariaLabel} title={title} onClick={() => popup.setOpen(value => !value)}>
+      aria-haspopup="dialog" aria-label={ariaLabel} title={title} onClick={() => { if (!popup.open) onOpen?.(); popup.setOpen(value => !value); }}>
       {label}<span aria-hidden="true">⌄</span>
     </button>
     {popup.open ? <section ref={popup.panel} role="dialog" aria-label={heading} className={`ao-composer-popover ${popupClass}`}>
@@ -95,10 +95,16 @@ export function AgentOrchestratorComposerControls({
   useEffect(() => { setSearch(""); }, [mode]);
   // The harness's catalog is read whenever the composer shows a single model, not only when its
   // menu opens: the effort and window chips need the picked model's options to label themselves.
+  // Opening the model menu reads the catalog again (the loader keeps it a minute), so a provider
+  // added in CPA shows up without switching harness or restarting.
+  const [reload, setReload] = useState(0);
+  const shown = useRef("");
   useEffect(() => {
     if (mode !== "single") return;
     let live = true;
-    setModels(null); setCaps({}); setError("");
+    const key = `${mode}|${route.harness_id}`;
+    if (shown.current !== key) { shown.current = key; setModels(null); setCaps({}); }
+    setError("");
     const none: AoModelCatalog = { models: [] };
     // Native Codex lists WebGPT and the CPA pool itself; other harnesses add the WebGPT models.
     const web = route.harness_id === NATIVE_HARNESS ? Promise.resolve(none)
@@ -113,7 +119,7 @@ export function AgentOrchestratorComposerControls({
       if (start) onRouteChange({ ...route, context_window: start });
     }).catch(cause => { if (live) { setModels([]); setError(cause instanceof Error ? cause.message : String(cause)); } });
     return () => { live = false; };
-  }, [mode, route.harness_id, loadModels]);
+  }, [mode, route.harness_id, loadModels, reload]);
   const selectedTeam = teams.find(team => team.id === teamId);
   // Native Codex runs a bare non-WebGPT id through the CPA pool; the labels need to know which.
   const viaPool = (model: string) => route.harness_id === NATIVE_HARNESS && !isWebModel(model);
@@ -193,6 +199,7 @@ export function AgentOrchestratorComposerControls({
         </div>}
       </ChipMenu>
       <ChipMenu heading="Model" popupClass="ao-model-popup" ariaLabel="Choose model" disabled={busy} className={unlisted ? "is-warning" : ""}
+        onOpen={() => setReload(value => value + 1)}
         title={unlisted ? `${modelName} is not offered right now; choose another model` : route.model ? modelName : undefined}
         label={<span>{route.model ? chipModel.name : modelName}
           {unlisted ? <span className="ao-chip-unavailable"> · not available</span> : null}</span>}>
@@ -209,7 +216,6 @@ export function AgentOrchestratorComposerControls({
                   title={[modelLabel(model, viaPool(model)), model, full].filter(Boolean).join("\n")}
                   onPick={() => { pickModel(model); close(); }}>
                   {modelShortLabel(model, viaPool(model)).name}
-                  {caps[model]?.paused ? <small>paused by CPA for now</small> : null}
                 </Option>;
               })}
             </div>)}

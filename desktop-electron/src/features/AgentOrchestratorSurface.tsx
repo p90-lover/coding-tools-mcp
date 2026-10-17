@@ -623,18 +623,22 @@ export function AgentOrchestratorSurface({ language, setError }: {
     return () => { queue.dispose(); if (configuration.current === queue) configuration.current = null; };
   }, []);
 
-  const modelCache = useRef(new Map<string, ReturnType<AoModelLoader>>());
+  // A catalog is kept a minute (as the main process keeps CPA's), then read again: a provider
+  // added in CPA meanwhile appears without a restart.
+  const modelCache = useRef(new Map<string, { at: number; models: ReturnType<AoModelLoader> }>());
   const loadModels = useCallback<AoModelLoader>((harness: string) => {
     const key = JSON.stringify([workspaceId, harness]);
-    let pending = modelCache.current.get(key);
+    const cached = modelCache.current.get(key);
+    let pending = cached && Date.now() - cached.at < 60_000 ? cached.models : undefined;
     if (!pending) {
       // Both catalogs carry model capabilities when their source reports them.
       pending = moduleCall("models", { harness, workspaceId }).then(result => {
         const models = Array.isArray(result.models) ? result.models as string[] : [];
         return result.capabilities ? { models, capabilities: result.capabilities as AoModelCatalog["capabilities"] } : models;
       });
-      pending.catch(() => modelCache.current.delete(key));
-      modelCache.current.set(key, pending);
+      const entry = { at: Date.now(), models: pending };
+      pending.catch(() => { if (modelCache.current.get(key) === entry) modelCache.current.delete(key); });
+      modelCache.current.set(key, entry);
     }
     return pending;
   }, [workspaceId]);

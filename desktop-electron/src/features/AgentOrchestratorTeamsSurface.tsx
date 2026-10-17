@@ -94,10 +94,13 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState("");
-  const modelCache = useRef(new Map<string, ReturnType<AoModelLoader>>());
+  // A catalog is kept a minute (as the main process keeps CPA's), then read again: a provider
+  // added in CPA meanwhile appears without a restart.
+  const modelCache = useRef(new Map<string, { at: number; models: ReturnType<AoModelLoader> }>());
   const loadModels = useCallback<AoModelLoader>((harness: string) => {
     const key = JSON.stringify([workspaceId, harness]);
-    let models = modelCache.current.get(key);
+    const cached = modelCache.current.get(key);
+    let models = cached && Date.now() - cached.at < 60_000 ? cached.models : undefined;
     if (!models) {
       // Keep the catalog's capabilities, as the chat does: without them the role editor shows
       // "Capabilities unverified" and offers no effort or context window.
@@ -105,8 +108,9 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
         const names = Array.isArray(result.models) ? result.models as string[] : [];
         return result.capabilities ? { models: names, capabilities: result.capabilities as AoModelCatalog["capabilities"] } : names;
       });
-      models.catch(() => modelCache.current.delete(key));
-      modelCache.current.set(key, models);
+      const entry = { at: Date.now(), models: models };
+      models.catch(() => { if (modelCache.current.get(key) === entry) modelCache.current.delete(key); });
+      modelCache.current.set(key, entry);
     }
     return models;
   }, [workspaceId]);
