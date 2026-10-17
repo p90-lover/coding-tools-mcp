@@ -66,6 +66,31 @@ function observeHarness(context) {
   });
 }
 
+test("a session's project folder is named for its tools only for the chat's own folder-mode project", async () => {
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("  async function folderModeRoot");
+  const fn = source.slice(start, source.indexOf("  const workspaceBoard =", start));
+  const folder = path.resolve(os.tmpdir(), "ct-folder-mode-project");
+  let project = { id: "p1", kind: "single_repo", path: folder, config: { workspaceMode: "folder" } };
+  const folderModeRoot = vm.runInNewContext(`${fn}; folderModeRoot`, {
+    path, process,
+    workspaceBoard: { project: async (workspaceId) => ({ projectId: workspaceId === "w1" ? "p1" : "p2" }) },
+    internalApi: async (_method, endpoint) => (endpoint.endsWith("/p1") ? { project } : { project: null }),
+  });
+  const session = { projectId: "p1" };
+  assert.equal(await folderModeRoot(session, folder, "w1"), folder);
+  assert.equal(await folderModeRoot(session, `${folder}${path.sep}`, "w1"), folder, "a trailing separator is the same folder");
+  assert.equal(await folderModeRoot(session, path.join(folder, "sub"), "w1"), null, "only the folder itself");
+  assert.equal(await folderModeRoot(session, folder, "w2"), null, "another workspace's chat");
+  assert.equal(await folderModeRoot({ projectId: "p9" }, folder, "w1"), null, "a session of another project");
+  assert.equal(await folderModeRoot(session, folder, null), null, "no chat workspace");
+  project = { ...project, config: { workspaceMode: "worktree" } };
+  assert.equal(await folderModeRoot(session, folder, "w1"), null, "a project that chose worktrees");
+  project = { ...project, config: {} };
+  assert.equal(await folderModeRoot(session, folder, "w1"), null, "a project that never chose");
+});
+
 test("actual upstream observe exposes bounded current streaming output separately from terminal evidence", async () => {
   let turn = "owned-turn";
   const messages = [

@@ -43,9 +43,9 @@ function fixture({ enabled = () => true, desktop = () => false, terminal = () =>
     // A fake confirm answers at once; the quick-answer check has its own test.
     minAnswerMs, ...(answerClock ? { answerClock } : {}),
     confirm: async (request) => { confirmations.push(request); return confirm(request); },
-    sessionWorkspace: async (id) => {
+    sessionWorkspace: async (id, workspaceId) => {
       asked.push(id);
-      if (workspaces) return workspaces(id);
+      if (workspaces) return workspaces(id, workspaceId);
       return root ? { root } : { ready: false };
     },
     requestHeadless: async (endpoint, body, options) => {
@@ -815,6 +815,28 @@ test("a root outside AO's worktrees folder is refused", async () => {
     const three = await session(tools, { id: "ao-3" });
     assert.match((await callTool(three.url, three.auth, "read_file", { path: "x" })).content[0].text, /not one of AO's worktrees/,
       "the folder itself is not a session's worktree");
+    assert.equal(calls.filter((call) => call.endpoint === "/api/v1/tools/call").length, 1);
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("a folder-mode project's own folder is a root, and only exactly it", async () => {
+  // Seen live after chats moved to the project folder: every tool call was refused as "not one of
+  // AO's worktrees". AO's side names the folder (projectFolder) only for the chat's own project.
+  const tree = tempTree();
+  let found = { root: tree.checkout, projectFolder: tree.checkout };
+  const { tools, calls } = fixture({ workspaces: (_id, workspaceId) => (workspaceId ? found : { root: tree.checkout }),
+    worktreesRoot: path.join(tree.base, "worktrees") });
+  try {
+    const one = await session(tools, { id: "ao-1" });
+    assert.equal((await callTool(one.url, one.auth, "read_file", { path: "src/a.txt" })).isError, false, "the folder itself works");
+    found = { root: tree.checkout, projectFolder: tree.root };
+    const two = await session(tools, { id: "ao-2" });
+    assert.match((await callTool(two.url, two.auth, "read_file", { path: "x" })).content[0].text, /not one of AO's worktrees/,
+      "a named folder that is not the session's root does not admit it");
+    found = { root: tree.checkout };
+    const three = await session(tools, { id: "ao-3" });
+    assert.match((await callTool(three.url, three.auth, "read_file", { path: "x" })).content[0].text, /not one of AO's worktrees/,
+      "without the folder-mode answer the checkout stays refused");
     assert.equal(calls.filter((call) => call.endpoint === "/api/v1/tools/call").length, 1);
   } finally { await tools.close(); tree.cleanup(); }
 });
