@@ -157,10 +157,28 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     file: path.join(dataRoot, "coding-tools-dependency-links.json"),
     request: (method, endpoint, body) => internalApi(method, endpoint, body), logger,
   });
+  // Chats work in the project folder, on the branch it has checked out, unless the project chose
+  // otherwise in Edit project: AO's own default, a worktree per chat, left one ao/<project>-<n>/root
+  // branch behind for every question. An explicit choice (including "worktree") is kept.
+  const folderModeChecked = new Set();
+  async function defaultToFolderMode(project) {
+    if (folderModeChecked.has(project.id)) return;
+    const endpoint = `/api/v1/projects/${encodeURIComponent(project.id)}`;
+    // On the dependency-link sync's queue: both rewrite the whole config.
+    await dependencyLinks.exclusive(project.id, async () => {
+      const current = (await internalApi("GET", endpoint))?.project;
+      if (!current || (current.kind && current.kind !== "single_repo")) return;
+      const config = current.config && typeof current.config === "object" ? current.config : {};
+      if (config.workspaceMode) return;
+      await internalApi("PUT", `${endpoint}/config`, { config: { ...config, workspaceMode: "folder" } });
+    });
+    folderModeChecked.add(project.id);
+  }
   const workspaceBoard = typeof getWorkspaces === "function" && typeof missionCall === "function"
     ? createAoWorkspaceBoard({
       listWorkspaces: getWorkspaces, missionCall,
       syncProject: (project, folder) => dependencyLinks.sync(project.id, folder),
+      defaultWorkspaceMode: defaultToFolderMode,
       readAccounting: async scope => collectMissionAccounting({
         ...scope, catalog: readCpaCatalog(getCpaPricesPath()),
         readSession: async id => {
@@ -1166,6 +1184,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       }
       return { ok: true, ...await workspaceBoard.branches(args.workspaceId, chatRoot) };
     }
+    // The branch bar's choice: checks out an existing branch in the project folder, which is where
+    // chats work. Nothing is created; uncommitted changes and branches held by another worktree are
+    // refused with the reason.
+    if (operation === "chat_switch_branch") {
+      if (!workspaceBoard?.switchBranch) throw new Error("Coding Tools mission service is unavailable");
+      return { ok: true, ...await workspaceBoard.switchBranch(args.workspaceId, args.branch) };
+    }
     // Where a project's chats work (the Edit project dialog): each in its own git worktree (the
     // default), all in one shared worktree, or in the project folder itself. AO keeps it in the
     // project's config (workspaceMode) and never removes a shared worktree or the folder. Without
@@ -1190,13 +1215,14 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         if (!project || (project.kind && project.kind !== "single_repo")) {
           return { ok: true, available: false, reason: "Only a single-folder project can choose where its chats work" };
         }
-        const current = WORKSPACE_MODES.has(config.workspaceMode) ? config.workspaceMode : "worktree";
+        // A project that never chose is moved to the folder before its next chat starts.
+        const current = WORKSPACE_MODES.has(config.workspaceMode) ? config.workspaceMode : "folder";
         if (args.mode === undefined) return { ok: true, available: true, mode: current };
-        if (args.mode !== current) {
-          // AO replaces the whole config, so every other setting is sent back as it was.
-          const { workspaceMode: _previous, ...rest } = config;
-          await internalApi("PUT", `${endpoint}/config`, { config: { ...rest, ...(args.mode === "worktree" ? {} : { workspaceMode: args.mode }) } });
-          const saved = (await read()).config.workspaceMode || "worktree";
+        if (args.mode !== config.workspaceMode) {
+          // AO replaces the whole config, so every other setting is sent back as it was. The mode
+          // is always written, "worktree" too, so the folder default never overrides a choice.
+          await internalApi("PUT", `${endpoint}/config`, { config: { ...config, workspaceMode: args.mode } });
+          const saved = (await read()).config.workspaceMode;
           if (saved !== args.mode) throw new Error("This Agent Orchestrator does not support choosing where chats work yet; update the app");
         }
         return { ok: true, available: true, mode: args.mode };
