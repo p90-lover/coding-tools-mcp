@@ -39,6 +39,7 @@ export function NativeCodexPanel({ copy, language, setError }: NativeCodexPanelP
   const [codexHome, setCodexHome] = useState("");
   const [model, setModel] = useState("");
   const [permissionProfile, setPermissionProfile] = useState<Profile>(":read-only");
+  const [approvalReviewer, setApprovalReviewer] = useState<"user" | "auto_review">("user");
   const [requestLimit, setRequestLimit] = useState("10");
   const [lifetimeSeconds, setLifetimeSeconds] = useState("600");
   const [allowModelUsage, setAllowModelUsage] = useState(false);
@@ -101,6 +102,7 @@ export function NativeCodexPanel({ copy, language, setError }: NativeCodexPanelP
       remember(selected.id, value);
       const result = await getCodingToolsClient().nativeCodex.connect({
         workspaceId: selected.id, ...value, allowModelUsage, allowCommandExecution, permissionProfile,
+        approvalsReviewer: permissionProfile === ":workspace" && allowModelUsage ? approvalReviewer : "user",
         requestLimit: Number(requestLimit), lifetimeSeconds: Number(lifetimeSeconds),
       });
       if (result.cancelled === true) setNotice(copy.workspaceAuthCancelled);
@@ -154,6 +156,14 @@ export function NativeCodexPanel({ copy, language, setError }: NativeCodexPanelP
             {typeof status?.model === "string" ? (
               <dl className="wsx-facts"><dt>{copy.nativeCodexModel}</dt><dd>{status.model}</dd></dl>
             ) : null}
+            {connected && typeof status?.approvals_reviewer === "string" ? (
+              <dl className="wsx-facts">
+                <dt>{language === "zh-TW" ? "Codex 自動審批" : "Codex Auto-review"}</dt>
+                <dd>{status.approval_policy === "on-request" && status.approvals_reviewer === "auto_review"
+                  ? (language === "zh-TW" ? "原生運作中" : "Active in native runtime")
+                  : (language === "zh-TW" ? "未啟用" : "Not enabled")}</dd>
+              </dl>
+            ) : null}
             {typeof status?.reason === "string" ? <p className="wsx-intro">{status.reason}</p> : null}
             <div className="wsx-actions">
               <button className="button-secondary" disabled={busy || !connected} onClick={() => void stop()} type="button">{copy.nativeCodexStop}</button>
@@ -178,7 +188,18 @@ export function NativeCodexPanel({ copy, language, setError }: NativeCodexPanelP
               <Field label={copy.ncPermissions} wide>
                 <Segmented<Profile> label={copy.nativeCodexPermissionProfile} value={permissionProfile} disabled={locked}
                   options={[{ value: ":read-only", label: copy.ncProfileReadOnly }, { value: ":workspace", label: copy.ncProfileWorkspace }]}
-                  onChange={setPermissionProfile} />
+                  onChange={(profile) => { setPermissionProfile(profile); if (profile !== ":workspace") setApprovalReviewer("user"); }} />
+              </Field>
+              <Field label={language === "zh-TW" ? "Codex 審批方式" : "Codex approval reviewer"} wide>
+                <select aria-label={language === "zh-TW" ? "Codex 審批方式" : "Codex approval reviewer"}
+                  value={approvalReviewer} disabled={locked || permissionProfile !== ":workspace" || !allowModelUsage}
+                  onChange={(event) => setApprovalReviewer(event.target.value === "auto_review" ? "auto_review" : "user")}>
+                  <option value="user">{language === "zh-TW" ? "由使用者審批" : "Ask me for approval"}</option>
+                  <option value="auto_review">{language === "zh-TW" ? "Codex 自動審批（Approve for me）" : "Codex Auto-review (Approve for me)"}</option>
+                </select>
+                <p className="wsx-field-hint">{language === "zh-TW"
+                  ? "只適用於工作區模式及已授權模型；原生 Codex 必須確認審批設定。自動審批不會繞過沙箱或管理政策，部分操作仍可能需要人工批准。"
+                  : "For workspace mode with model use enabled. Native Codex must acknowledge this setting. Auto-review does not bypass sandbox or managed policy; some requests may still need your approval."}</p>
               </Field>
               <Field label={copy.nativeCodexRequestLimit} hint={copy.ncRequestHint}>
                 <input disabled={locked} max={20} min={0} type="number" value={requestLimit} onChange={(event) => setRequestLimit(event.target.value)} />
@@ -187,7 +208,7 @@ export function NativeCodexPanel({ copy, language, setError }: NativeCodexPanelP
                 <input disabled={locked} max={900} min={0} type="number" value={lifetimeSeconds} onChange={(event) => setLifetimeSeconds(event.target.value)} />
               </Field>
               <label className="wsx-check" style={{ gridColumn: "1 / -1" }}>
-                <input checked={allowModelUsage} disabled={locked} type="checkbox" onChange={(event) => setAllowModelUsage(event.target.checked)} />
+                <input checked={allowModelUsage} disabled={locked} type="checkbox" onChange={(event) => { setAllowModelUsage(event.target.checked); if (!event.target.checked) setApprovalReviewer("user"); }} />
                 {copy.nativeCodexModelUse}
               </label>
               <label className="wsx-check" style={{ gridColumn: "1 / -1" }}>

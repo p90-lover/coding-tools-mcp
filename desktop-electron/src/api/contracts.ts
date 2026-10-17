@@ -121,6 +121,8 @@ export interface CodingToolsApi {
       readonly allowModelUsage: boolean;
       readonly allowCommandExecution: boolean;
       readonly permissionProfile: ":read-only" | ":workspace";
+      /** Native Codex reviewer; only auto_review in a writable workspace with explicit model consent. */
+      readonly approvalsReviewer?: "user" | "auto_review";
       readonly requestLimit: number;
       readonly lifetimeSeconds: number;
     }): Promise<JsonObject>;
