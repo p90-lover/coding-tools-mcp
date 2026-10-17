@@ -439,8 +439,14 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .ao-workflow .cx-branch-note { display: inline-flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ao-workflow .cx-branch-popup { width: min(400px, calc(100vw - 40px)); padding: 10px; }
 .ao-workflow .cx-branch-list { max-height: 320px; margin: 8px 0 0; padding: 0; overflow: auto; list-style: none; }
-.ao-workflow .cx-branch-list li { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px; font-size: 13px; }
+.ao-workflow .cx-branch-list li { border-radius: 8px; font-size: 13px; }
+.ao-workflow .cx-branch-list li.cx-branch-empty { padding: 6px 8px; }
 .ao-workflow .cx-branch-list li.is-in-use { background: var(--cx-hover); }
+.ao-workflow .cx-branch-option { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border: 0; border-radius: 8px; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.ao-workflow .cx-branch-option:hover:not(:disabled) { background: var(--cx-hover); }
+.ao-workflow .cx-branch-option:disabled { cursor: default; opacity: .55; }
+.ao-workflow .cx-branch-list li.is-in-use .cx-branch-option:disabled { opacity: 1; }
+.ao-workflow .cx-branch-error { margin: 8px 0 0; padding: 6px 8px; border-radius: 8px; background: var(--ao-danger-soft, #fdecea); color: var(--ao-danger, #b42318); font-size: 12px; }
 .ao-workflow .cx-branch-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ao-workflow .cx-branch-tags { display: inline-flex; flex: none; align-items: center; gap: 6px; color: var(--ao-muted); font-size: 11.5px; }
 .ao-workflow .cx-branch-tags em { padding: 0 6px; border-radius: 6px; background: var(--claude-accent-soft, #eef3ff); color: var(--color-text-primary); font-style: normal; }

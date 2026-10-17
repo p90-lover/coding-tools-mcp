@@ -17,12 +17,12 @@ export type WorkspaceMode = "worktree" | "shared" | "folder";
 export type WorkspaceModeState = { available: boolean; mode?: WorkspaceMode; reason?: string };
 
 export const WORKSPACE_MODE_OPTIONS: readonly { value: WorkspaceMode; label: string; hint: string }[] = [
+  { value: "folder", label: "The project folder itself (default)",
+    hint: "Chats edit this folder directly, on the branch chosen above the chat box, with your uncommitted work. No branch or copy is made; chats running at the same time can change the same files." },
   { value: "worktree", label: "A new worktree for each chat",
-    hint: "Each chat works on its own branch in its own copy, so chats never touch each other's files or yours." },
+    hint: "Each chat works on its own new branch in its own copy, so chats never touch each other's files or yours." },
   { value: "shared", label: "One shared worktree",
     hint: "Every chat in this project works in the same copy, set up once and kept. Chats running at the same time can change the same files." },
-  { value: "folder", label: "The project folder itself",
-    hint: "Chats edit this folder directly, on whatever branch it has checked out, with your uncommitted work. Nothing is copied or cleaned up; chats running at the same time can change the same files." },
 ];
 
 /** A folder's last path segment: "coding-tools-mcp" for G:\Projects\coding-tools-mcp. */
