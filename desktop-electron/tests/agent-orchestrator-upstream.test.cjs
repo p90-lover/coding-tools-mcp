@@ -744,22 +744,3 @@ test("a send binds its workspace in AO once, not for every catalog read and the 
   failing = false;
   assert.equal(await upstream.projectFor("ws-2"), "project-ws-2", "a failed binding is not kept");
 });
-
-test("the AO daemon's output is kept in a log file that rotates once, so a slow launch can be read afterwards", () => {
-  const { createDaemonLog } = require("../electron/agent-orchestrator-upstream.cjs");
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ao-daemon-log-"));
-  try {
-    const file = path.join(root, "logs", "ao-daemon.log");
-    const log = createDaemonLog(file, { maxBytes: 64 });
-    log.write(Buffer.from("chat: ACP start stage 1200ms\n"));
-    log.write("agent readiness check 900ms\n");
-    const first = "chat: ACP start stage 1200ms\nagent readiness check 900ms\n";
-    assert.equal(fs.readFileSync(file, "utf8"), first);
-    log.write("x".repeat(40) + "\n");
-    assert.equal(fs.readFileSync(`${file}.1`, "utf8"), first, "the full file moves aside");
-    assert.equal(fs.readFileSync(file, "utf8"), "x".repeat(40) + "\n");
-    log.write("y".repeat(40) + "\n");
-    assert.equal(fs.readFileSync(`${file}.1`, "utf8"), "x".repeat(40) + "\n", "only one previous file is kept");
-    assert.doesNotThrow(() => createDaemonLog(null).write("nothing"), "no file configured: nothing is written");
-  } finally { fs.rmSync(root, { recursive: true, force: true }); }
-});

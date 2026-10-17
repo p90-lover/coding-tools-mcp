@@ -117,39 +117,7 @@ async function allocatePort() {
   return port;
 }
 
-// The daemon says where a slow chat start spent its time ("chat: ACP start stage", "agent
-// readiness check"), but only into a 16 KB buffer that was gone with the app, so a three-minute
-// launch could not be explained afterwards. Its output is appended to a file as well, capped at
-// DAEMON_LOG_MAX_BYTES with the previous file kept as <file>.1. Logging never stops the daemon.
-const DAEMON_LOG_MAX_BYTES = 5 * 1024 * 1024;
-function createDaemonLog(file, { maxBytes = DAEMON_LOG_MAX_BYTES, logger = null } = {}) {
-  let size = null;
-  let broken = typeof file !== "string" || !file;
-  return {
-    file: broken ? null : file,
-    write(chunk) {
-      if (broken) return;
-      try {
-        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
-        if (size === null) {
-          fs.mkdirSync(path.dirname(file), { recursive: true });
-          try { size = fs.statSync(file).size; } catch { size = 0; }
-        }
-        if (size > 0 && size + bytes.length > maxBytes) {
-          fs.renameSync(file, `${file}.1`);
-          size = 0;
-        }
-        fs.appendFileSync(file, bytes, { mode: 0o600 });
-        size += bytes.length;
-      } catch (cause) {
-        broken = true;
-        logger?.warn?.("ao.daemon_log_unavailable", { message: String(cause?.message || cause).slice(0, 200) });
-      }
-    },
-  };
-}
-
-function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, daemonLogFile = null, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, cpaQuota = null, logger = console }) {
+function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, cpaQuota = null, logger = console }) {
   let child = null;
   let gateway = null;
   let view = null;
@@ -165,7 +133,6 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, daemonLogFile
   let state = "stopped";
   let error = null;
   let logTail = "";
-  const daemonLog = createDaemonLog(daemonLogFile, { logger });
   let missionSelection = null;
   let originalPath = "/";
 
@@ -1105,10 +1072,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, daemonLogFile
         logTail = "";
         // A new daemon may know its projects differently; workspaces bind again.
         forgetProject();
-        daemonLog.write(`\n--- ${new Date().toISOString()} AO daemon started (pid ${child.pid ?? "?"}, port ${daemonPort}) ---\n`);
         for (const output of [child.stdout, child.stderr]) output.on("data", (chunk) => {
           logTail = (logTail + chunk.toString()).slice(-16384);
-          daemonLog.write(chunk);
         });
         child.once("error", (cause) => { if (child === currentChild && startupGeneration === lifecycleGeneration) { error = cause.message; state = "error"; } });
         child.once("exit", (code) => { if (child === currentChild && startupGeneration === lifecycleGeneration) { state = "error"; error = `AO exited (${code})`; } });
@@ -1429,4 +1394,4 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, daemonLogFile
   return { call, start, stop, show, hide, snapshot, harness };
 }
 
-module.exports = { agentCatalog, createAgentOrchestratorUpstream, createAgentInventory, createDaemonLog, API_OPERATIONS };
+module.exports = { agentCatalog, createAgentOrchestratorUpstream, createAgentInventory, API_OPERATIONS };
