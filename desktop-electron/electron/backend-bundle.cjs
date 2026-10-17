@@ -37,6 +37,8 @@ const BACKEND_MODULES = Object.freeze([
   "chat-preview.cjs",
   "chat-sandbox.cjs",
   "cpa-quota.cjs",
+  "cpa-usage.cjs",
+  "cpa-model-prices.cjs",
   "antigravity-cli.cjs",
   "antigravity-auth-browser.cjs",
   "ao-session-events.cjs",

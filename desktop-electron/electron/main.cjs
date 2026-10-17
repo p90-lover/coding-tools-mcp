@@ -2934,6 +2934,9 @@ async function start() {
         default: throw new Error("Unknown Antigravity CLI operation");
       }
     };
+    const cpaQuota = backendBundles.requireModule(backend, "cpa-quota.cjs").createCpaQuota({
+      getConnection: () => externalServicesController?.cpaConnection(), logger,
+    });
     agentOrchestratorUpstream = createAgentOrchestratorUpstream({
       resourceRoot: backend.source === "bundle"
         ? path.join(backend.resourcesRoot, "agent-orchestrator")
@@ -2959,8 +2962,10 @@ async function start() {
       openAuth: (url) => antigravityAuthBrowser(url),
       agentTools: chatAgentTools,
       // The context meter's plan usage limits for chats on CPA's Codex accounts (CPA Helper).
-      cpaQuota: backendBundles.requireModule(backend, "cpa-quota.cjs").createCpaQuota({
-        getConnection: () => externalServicesController?.cpaConnection(), logger,
+      cpaQuota,
+      // Each CPA account's token use and estimated cost; Codex accounts carry those limits too.
+      cpaUsage: backendBundles.requireModule(backend, "cpa-usage.cjs").createCpaUsage({
+        getConnection: () => externalServicesController?.cpaConnection(), quota: cpaQuota, logger,
       }),
       WebContentsView, dialog, shell, logger,
     });
