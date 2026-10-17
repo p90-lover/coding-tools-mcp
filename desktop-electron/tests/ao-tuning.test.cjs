@@ -162,3 +162,36 @@ test("a saved model the harness no longer lists says so and offers the same mode
   use.props.onClick();
   assert.equal(view.changes.at(-1).model, "cpa/commandcode-go/deepseek-v4.1-flash");
 });
+
+test("Native Codex offers its own efforts only for WebGPT; a CPA model there offers what CPA advertised", async () => {
+  const { editor } = await picker(route(), ["cpa/gpt"]);
+  const native = model => route("codex-native", model);
+  assert.deepEqual(plain(editor.routeTuning(native("chatgpt-web/high"), undefined).efforts), ["minimal", "low", "medium", "high", "xhigh"]);
+  // Offering all five sent reasoning.effort "xhigh" to upstreams that reject it.
+  assert.deepEqual(plain(editor.routeTuning(native("glm-5"), { efforts: [], effortReason: "CPA did not advertise reasoning levels for this model." }).efforts), []);
+  assert.deepEqual(plain(editor.routeTuning(native("glm-5"), undefined).efforts), []);
+  assert.deepEqual(plain(editor.routeTuning(native("gpt-5.5"), { efforts: ["low", "high"] }).efforts), ["low", "high"]);
+  const p = await picker({ ...native("glm-5"), effort: "xhigh" }, []);
+  const effort = p.field("Reasoning effort");
+  assert.equal(effort.props.disabled, true);
+  assert.equal(effort.props["aria-invalid"], true, "a saved effort the model does not take is flagged");
+  assert.ok(walk(p.tree).some(item => item.type === "button" && item.props.children === "Model defaults"), "and can be cleared");
+});
+
+test("a window carried to a new model is fitted to the range that model takes", async () => {
+  const { editor } = await picker(route(), ["cpa/gpt"]);
+  const previous = { ...route("ao:claude-code", "cpa/gemini"), context_window: 1_000_000 };
+  const caps = { "cpa/small": { efforts: [], contextLimit: 262144, contextWindow: { min: 4096, max: 262144 } },
+    "cpa/fixed": { efforts: [], contextReason: "no setter" } };
+  assert.equal(editor.withTuning(route("ao:claude-code", "cpa/small"), previous, caps).context_window, 262144, "clamped to the model's limit");
+  assert.equal(Object.hasOwn(editor.withTuning(route("ao:claude-code", "cpa/fixed"), previous, caps), "context_window"), false, "dropped where none can be set");
+  assert.equal(editor.withTuning(route("ao:claude-code", "cpa/unknown"), previous, caps).context_window, 1_000_000, "an undescribed model keeps it");
+  assert.equal(editor.withTuning(route("ao:claude-code", "cpa/small"), previous).context_window, 1_000_000, "no catalog, no check");
+  const toNative = editor.withTuning(editor.workerRoute("codex-native", "chatgpt-web/high"), { ...previous, context_window: 3_000_000 }, {});
+  assert.equal(toNative.context_window, 2_000_000, "Native Codex's 2M ceiling is known without a catalog");
+  // The editor's model list passes its catalog.
+  const p = await picker({ ...route(), context_window: 1_000_000 }, { models: ["cpa/gpt", "cpa/small"],
+    capabilities: { "cpa/gpt": { efforts: [], contextWindow: { min: 4096, max: 1_000_000 } }, "cpa/small": caps["cpa/small"] } });
+  walk(p.tree).find(item => item.type === "select" && item.props.value === "cpa/gpt").props.onChange({ target: { value: "cpa/small" } });
+  assert.equal(p.changes.at(-1).context_window, 262144);
+});

@@ -87,7 +87,9 @@ test("Native Codex lists WebGPT even without CPA and never reads AO catalogs", a
   assert.deepEqual({ ...result.capabilities }, {}, "no CPA, so no pool models or capabilities");
 });
 
-async function dispatched(agent, model, tuning) {
+const DISPATCH_CATALOG = [{ slug: "gpt-5.5", context_window: 262144, supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }] },
+  { slug: "cline-pass/deepseek-v4.1-flash", supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }] }];
+async function dispatched(agent, model, tuning, catalog = DISPATCH_CATALOG) {
   const spawned = [];
   const route = { harness_id: "ao:" + agent, provider_id: "agent-orchestrator", account_id: "ao-local", model,
     permission_profile: ":ao-default", ...tuning };
@@ -95,8 +97,7 @@ async function dispatched(agent, model, tuning) {
   const workflow = createAgentOrchestratorWorkflow({
     aoHarness: { models: async () => [{ id: "own-model", efforts: ["high"] }], spawn: async input => { spawned.push(input); return "session-1"; } },
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-key" }),
-    fetchImpl: async () => ({ ok: true, json: async () => ({ models: [{ slug: "gpt-5.5", context_window: 262144, supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }] },
-      { slug: "cline-pass/deepseek-v4.1-flash", supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }] }] }) }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ models: catalog }) }),
     confirm: async () => true,
     requestHeadless: async endpoint => {
       if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run", workspace_id: "ws", revision: 1, cancelled: false,
@@ -148,6 +149,40 @@ test("a Cline Pass model reaches CPA by its bare name: the plugin passes the nam
   const { capabilities } = await workflow.call("models", { harness: "ao:claude-code", workspaceId: "ws" });
   assert.deepEqual(capabilities["cpa/cline-pass/deepseek-v4.1-flash"]?.efforts ?? capabilities["cline-pass/deepseek-v4.1-flash"]?.efforts, []);
   assert.deepEqual(capabilities["cpa/gpt-5.5"]?.efforts ?? capabilities["gpt-5.5"]?.efforts, ["high"]);
+});
+
+test("every provider plugin's model reaches CPA by its bare name, by namespace or by the provider CPA names", async () => {
+  // Seen live: "commandcode-go/…(high)" came back 503 auth_unavailable ("model not found").
+  const levels = [{ effort: "low" }, { effort: "high" }];
+  const catalog = [...DISPATCH_CATALOG, { slug: "commandcode-go/deepseek-v4.1-flash", supported_reasoning_levels: levels },
+    { slug: "kimi-k3", owned_by: "kimi", supported_reasoning_levels: levels }];
+  for (const model of ["cpa/commandcode-go/deepseek-v4.1-flash", "cpa/commandcode-go/deepseek-v4.1-flash(high)"]) {
+    const input = await dispatched("claude-code", model, { effort: "high" }, catalog);
+    assert.deepEqual(input.gateway, { provider: "cpa", model: "commandcode-go/deepseek-v4.1-flash" }, "no suffix is added, a saved one is dropped");
+  }
+  const owned = await dispatched("opencode", "cpa/kimi-k3", { effort: "high" }, catalog);
+  assert.equal(owned.model, "openai/kimi-k3", "a plugin model without a namespace is known by its owner");
+  assert.deepEqual(owned.gateway, { provider: "cpa", model: "kimi-k3" });
+  const plain = await dispatched("claude-code", "cpa/gpt-5.5", { effort: "high" }, catalog);
+  assert.equal(plain.gateway.model, "gpt-5.5(high)", "CPA's own providers still get the suffix");
+  const workflow = createAgentOrchestratorWorkflow({
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-key" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ models: catalog }) }),
+    aoHarness: { models: async () => [] },
+  });
+  const { capabilities } = await workflow.call("models", { harness: "ao:claude-code", workspaceId: "ws" });
+  for (const id of ["cpa/commandcode-go/deepseek-v4.1-flash", "cpa/kimi-k3"]) {
+    assert.deepEqual(capabilities[id].efforts, [], id);
+    assert.match(capabilities[id].effortReason, /provider plugin/, `${id} says why it takes no level`);
+  }
+  assert.deepEqual(capabilities["cpa/gpt-5.5"].efforts, ["low", "high"]);
+});
+
+test("a blank card on a model whose limit CPA did not report launches at the agent's own window", async () => {
+  // CPA's stock 272K for a plugin model is no limit; a known one still fills the card (above).
+  const input = await dispatched("claude-code", "cpa/commandcode-go/glm-5", {},
+    [...DISPATCH_CATALOG, { slug: "commandcode-go/glm-5", context_window: 272000, max_context_window: 272000 }]);
+  assert.equal(Object.hasOwn(input, "contextWindow"), false);
 });
 
 test("the permission menu reuses the agent catalog instead of probing every CLI on each open", async () => {

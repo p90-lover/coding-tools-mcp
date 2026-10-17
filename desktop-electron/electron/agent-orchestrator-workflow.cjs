@@ -246,8 +246,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     }
     // The gateway serves CPA through OpenAI- and Anthropic-compatible endpoints; opencode names
     // models as provider/model, so a CPA model is its OpenAI provider's "openai/<model>".
-    let wireModel = viaCpa && verbatimModel(viaCpa) ? viaCpa.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "") : viaCpa;
-    if (viaCpa && node.route.effort && !verbatimModel(viaCpa)) {
+    // A provider plugin's model goes by its bare name: any saved suffix is dropped, none is added.
+    const verbatim = Boolean(viaCpa) && verbatimModel(viaCpa);
+    let wireModel = verbatim ? viaCpa.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "") : viaCpa;
+    if (viaCpa && node.route.effort && !verbatim) {
       if (!tuningEfforts.has(node.route.effort)) throw new Error("Choose a supported CPA reasoning level");
       // The suffix is session-local; the saved mission model and account remain unchanged.
       wireModel = viaCpa.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "") + "(" + node.route.effort + ")";
@@ -538,11 +540,20 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   // A model list stops here; at 100, a provider added later (CPA lists in its own order) fell off.
   const MAX_LISTED_MODELS = 500;
   const tuningEfforts = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "auto"]);
-  // CPA reads a "(high)" suffix only for its own providers. The Cline Pass plugin hands the model
-  // name to Cline unchanged, so "cline-pass/deepseek-v4.1-flash(high)" came back "model not found":
-  // its models get no suffix and offer no reasoning level.
-  const verbatimModel = id => /^cline-pass\//i.test(id);
-  const VERBATIM_EFFORT_REASON = "Cline Pass passes the model name to Cline unchanged, so it takes no reasoning level.";
+  // CPA reads a "(high)" suffix only for its own providers. A provider plugin gets the model name
+  // unchanged, so "cline-pass/deepseek-v4.1-flash(high)" came back "model not found" (and
+  // "commandcode-go/…(high)" a 503 auth_unavailable): its models get no suffix and offer no
+  // reasoning level. A plugin model is known by its namespace, or by the provider CPA names for it.
+  const PLUGIN_NAMESPACES = new Set(["cline-pass", ...PLUGIN_PROVIDERS]);
+  // Ids the last catalog read named a plugin as provider of, for launches that have only the id.
+  let pluginModels = new Set();
+  const verbatimModel = (id, provider) => {
+    const base = id.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
+    const slash = base.indexOf("/");
+    return slash > 0 && PLUGIN_NAMESPACES.has(base.slice(0, slash).toLowerCase())
+      || typeof provider === "string" && PLUGIN_PROVIDERS.has(provider.trim().toLowerCase()) || pluginModels.has(base);
+  };
+  const VERBATIM_EFFORT_REASON = "This model is served by a CPA provider plugin, which passes the model name on unchanged, so it takes no reasoning level.";
   /** The window CPA reports for any provider-plugin model it knows no limit for (GPT-5's default). */
   const CPA_STOCK_WINDOW = 272_000;
   /**
@@ -563,7 +574,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const capabilities = { efforts };
     if (viaCpa && typeof info?.provider === "string") capabilities.provider = info.provider;
     if (!efforts.length) capabilities.effortReason = viaCpa
-      ? "CPA did not advertise reasoning levels for this model."
+      ? (typeof info?.effortReason === "string" ? info.effortReason : "CPA did not advertise reasoning levels for this model.")
       : "This harness/model has no verified reasoning-effort transport.";
     const limit = info?.contextLimit;
     if (Number.isSafeInteger(limit) && limit > 0) capabilities.contextLimit = limit;
@@ -672,10 +683,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       && !accountProviders.has(owners.get(id)));
     const capabilities = Object.create(null);
     const ids = [];
+    const plugins = new Set();
     for (const entry of rows || []) {
       const id = entry?.slug ?? entry?.id;
       if (typeof id !== "string" || !id || id.length > 128 || entry.visibility === "hide" || ids.includes(id) || unserved(id)) continue;
-      const efforts = verbatimModel(id) ? [] : reportedEfforts(entry.supported_reasoning_levels ?? entry.thinking?.levels);
+      // CPA names the upstream that serves the model (e.g. antigravity, codex, cline-pass).
+      const provider = [entry.provider, entry.owned_by, entry.ownedBy].find(value => typeof value === "string" && value.trim());
+      const verbatim = verbatimModel(id, provider) || verbatimModel(id, owners?.get(id));
+      if (verbatim) plugins.add(id);
+      const efforts = verbatim ? [] : reportedEfforts(entry.supported_reasoning_levels ?? entry.thinking?.levels);
       // context_window is the default the client starts with; max_context_window is how far the
       // model goes (Luna: 272K by default, up to 1M).
       // CPA gives every model of its provider plugins (cline-pass/…, commandcode-go/…) the same stock
@@ -685,9 +701,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       const stock = id.includes("/") && reported === CPA_STOCK_WINDOW && (entry.context_window ?? reported) === CPA_STOCK_WINDOW;
       // A real number CPA reports wins; the stock one gives way to a known ceiling, else stays unknown.
       const limit = stock ? knownContextLimit(id) : reported;
-      // CPA names the upstream that serves the model (e.g. antigravity, codex, cline-pass).
-      const provider = [entry.provider, entry.owned_by, entry.ownedBy].find(value => typeof value === "string" && value.trim());
-      capabilities[id] = { efforts, ...(!efforts.length ? { effortReason: verbatimModel(id) ? VERBATIM_EFFORT_REASON
+      capabilities[id] = { efforts, ...(!efforts.length ? { effortReason: verbatim ? VERBATIM_EFFORT_REASON
         : "CPA did not advertise reasoning levels for this model." } : {}),
         ...(provider ? { provider: String(provider).trim().slice(0, 64) } : {}),
         ...(Number.isSafeInteger(limit) && limit > 0 ? { contextLimit: limit } : {}) };
@@ -695,6 +709,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       if (ids.length === MAX_LISTED_MODELS) break;
     }
     if (!ids.length) throw new Error("CPA has no available models");
+    pluginModels = plugins;
     return { ok: true, models: ids, capabilities };
   }
 
@@ -743,8 +758,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
           }
           throw new Error(`${node.route.model} is no longer in this harness's model list, so its effort and context window cannot be checked. Choose a listed model, or clear the card's effort and context window.`);
         }
-        // A Cline Pass card saved with an effort before it stopped offering one launches without it.
-        const effortIgnored = baseModel.startsWith(CPA_MODEL_PREFIX) && verbatimModel(baseModel.slice(CPA_MODEL_PREFIX.length));
+        // A provider-plugin card saved with an effort before it stopped offering one launches without it.
+        const effortIgnored = baseModel.startsWith(CPA_MODEL_PREFIX) && verbatimModel(baseModel.slice(CPA_MODEL_PREFIX.length), capability.provider);
         if (node.route.effort && !effortIgnored && !capability?.efforts?.includes(node.route.effort)) {
           throw new Error("Reasoning effort is not supported by the current model/harness catalog");
         }
