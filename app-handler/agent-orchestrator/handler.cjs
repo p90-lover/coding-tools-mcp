@@ -73,6 +73,7 @@ const SPECS = Object.freeze({
   chat_files: { readOnly: true, description: "List one folder of a chat agent's worktree (the side panel's Files tab)." },
   chat_file: { readOnly: true, description: "Read one file of a chat agent's worktree as text (the side panel's Files tab)." },
   chat_branches: { readOnly: true, description: "List a project's git branches, the worktree each is checked out in, and which one the project folder and the chat are on (the composer's branch bar)." },
+  chat_switch_branch: { readOnly: false, description: "Check out an existing branch in a project's folder, where its chats work (the branch bar's choice). Creates nothing; refuses uncommitted changes and a branch another worktree holds." },
 
   create: { readOnly: false, description: "Create a task for the Coding Tools mission board at its expected revision." },
   append: { readOnly: false, description: "Append reviewed clauses to the old plan board with its expected revision." },
@@ -84,7 +85,7 @@ const SPECS = Object.freeze({
 // Operations served by the AO runtime service although their names do not start with "upstream_".
 const UPSTREAM_OPERATIONS = new Set(["dependency_link_info", "workspace_mode", "chat_processes", "chat_process_output", "chat_process_stop",
   "chat_process_input", "chat_preview_state", "chat_preview_show", "chat_preview_hide", "chat_preview_navigate", "chat_context",
-  "cpa_quota", "chat_terminal_start", "chat_changes", "chat_files", "chat_file", "chat_branches"]);
+  "cpa_quota", "chat_terminal_start", "chat_changes", "chat_files", "chat_file", "chat_branches", "chat_switch_branch"]);
 
 module.exports = Object.freeze({
   operations: Object.freeze(Object.keys(SPECS)),
