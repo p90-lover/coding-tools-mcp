@@ -1773,17 +1773,17 @@ function registerIpc({ logger, stateStore }) {
     }
     return browser;
   });
-  const refreshBrowserAuthentication = async (reason) => {
+  // Each handler is whole by itself: module-host-parity.test.cjs runs them one at a time.
+  handle("launcher:browser-refresh-auth", async () => {
     if (stateStore.read().browserInteractionMode === "manual") return browserHost.snapshot();
     const browser = await browserHost.refreshAuthentication();
     if (browser.authenticated) {
       const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
       send("launcher:state-changed", state);
-      scheduleCodexBridgeAutoConnect({ logger, stateStore, reason });
+      scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "browser-refresh-auth" });
     }
     return browser;
-  };
-  handle("launcher:browser-refresh-auth", () => refreshBrowserAuthentication("browser-refresh-auth"));
+  });
   // Setup checks the sign-in on its own while it shows "Sign in". The first look asks
   // /api/auth/session with the browser's cookies and does not navigate, so a sign-in in progress
   // in the ChatGPT view is never interrupted; only a session that is signed in is then refreshed
@@ -1795,7 +1795,13 @@ function registerIpc({ logger, stateStore }) {
     const readiness = await browserHost.authenticationReadiness().catch(() => null);
     if (readiness?.authenticated !== true) return browserHost.snapshot();
     logger.info("browser.setup_signin_detected", { recent: readiness.recent === true });
-    return refreshBrowserAuthentication("setup-signin-check");
+    const browser = await browserHost.refreshAuthentication();
+    if (browser.authenticated) {
+      const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
+      send("launcher:state-changed", state);
+      scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "setup-signin-check" });
+    }
+    return browser;
   });
   handle("launcher:browser-passkey-login", async () => {
     const browser = await browserHost.openPasskeyLogin();
