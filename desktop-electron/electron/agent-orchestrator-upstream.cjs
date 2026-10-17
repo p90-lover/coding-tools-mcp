@@ -408,6 +408,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return { ...base, kind: "approval", label: timedOut ? "Approval timed out" : "Approval cancelled",
         text: utf8Prefix(`${timedOut ? "Nobody answered within 30 minutes, so the agent could not run it" : "The turn ended before this was answered"}${summary ? `: ${summary}` : ""}. Send a follow-up to try again.`, 400) };
     }
+    // A provider failure's summary is only "Retrying Claude, attempt 2 of 10."; why it retries
+    // ("API error 429. Trying again in 1s.") is its detail text, and a rate limit needs saying.
+    if (activity.activityKind === "system" && detail.event === "provider.failure" && typeof detail.text === "string" && detail.text.trim()) {
+      return { ...base, kind: "system", text: utf8Prefix(`${summary ? `${summary} ` : ""}${detail.text.trim()}`, 400) };
+    }
     return { ...base, kind: activity.activityKind.slice(0, 32), text: utf8Prefix(summary || activity.activityKind, 400) };
   }
   /**
