@@ -6,7 +6,7 @@ const { spawnSync } = require("node:child_process");
 const test = require("node:test");
 
 const {
-  combineUpdateControllers, combinedUpdateState, createAppUpdateController, extractPack,
+  combineUpdateControllers, combinedUpdateState, createAppUpdateController, createAutoInstaller, extractPack,
   manifestAssetName, packAssetName, parseManifest, planUpdate, safeInstallPath, selectAppRelease,
   sweepUpdateLeftovers,
 } = require("../electron/app-update.cjs");
@@ -249,4 +249,59 @@ test("an app update outranks a GUI-only update, which still installs on its own"
   await combineUpdateControllers(fake("app", "up-to-date"), fake("gui", "available")).beginInstall();
   await combineUpdateControllers(fake("app", "available"), fake("gui", "available")).beginInstall();
   assert.deepEqual(calls, ["gui", "app"]);
+});
+
+function autoInstallerFixture(overrides = {}) {
+  const calls = { install: 0 };
+  const options = {
+    status: "available", enabled: true, idle: 600, busy: false, clock: 0,
+    install: async () => { calls.install += 1; return true; },
+    ...overrides,
+  };
+  const installer = createAutoInstaller({
+    controller: { getState: () => ({ status: options.status, version: "9.9.9", kind: "app" }), beginInstall: () => options.install() },
+    enabled: () => options.enabled,
+    idleSeconds: () => options.idle,
+    isBusy: async () => {
+      if (options.busy instanceof Error) throw options.busy;
+      return options.busy;
+    },
+    now: () => options.clock,
+  });
+  return { installer, calls, options };
+}
+
+test("automatic updates install a found update once the user is away and nothing runs", async () => {
+  const { installer, calls } = autoInstallerFixture();
+  assert.equal(await installer.tick(), true);
+  assert.equal(calls.install, 1);
+});
+
+test("an automatic update waits for an idle user, finished work and the setting", async () => {
+  for (const overrides of [
+    { idle: 599 },
+    { busy: true },
+    { busy: new Error("AO is not reachable") },
+    { enabled: false },
+    { status: "up-to-date" },
+    { status: "downloading" },
+  ]) {
+    const { installer, calls } = autoInstallerFixture(overrides);
+    assert.equal(await installer.tick(), false, JSON.stringify(overrides));
+    assert.equal(calls.install, 0, JSON.stringify(overrides));
+  }
+});
+
+test("a failed automatic update waits an hour before trying again", async () => {
+  const { installer, calls, options } = autoInstallerFixture({
+    install: async () => { calls.install += 1; throw new Error("network down"); },
+  });
+  assert.equal(await installer.tick(), false);
+  options.clock = 59 * 60 * 1000;
+  assert.equal(await installer.tick(), false);
+  assert.equal(calls.install, 1);
+  options.clock = 60 * 60 * 1000;
+  options.install = async () => { calls.install += 1; return true; };
+  assert.equal(await installer.tick(), true);
+  assert.equal(calls.install, 2);
 });

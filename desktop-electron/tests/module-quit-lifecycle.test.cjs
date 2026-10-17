@@ -37,7 +37,7 @@ function fixture({ active = null, failCleanup = false, restoreFails = false, qui
     browserHost: { currentOperation: () => null, persistSession: async () => {}, destroy() {} },
     runtimeSupervisor: { shutdown: async () => { order.push("stop-runtime"); nativeStops.push("runtime"); } },
     headlessHost: { shutdown: async () => {} }, browserControl: { close: async () => {} },
-    stopCatalogVerificationMonitor() {}, updateController: { stopPeriodicChecks() {} },
+    stopCatalogVerificationMonitor() {}, updateController: { stopPeriodicChecks() {} }, autoInstaller: { stop() {} },
     stopBridgeWatchdog() {}, backendBundles: { stopWatching() {} },
     agentOrchestratorUpstream: { stop: async () => {} }, antigravityReauth: { stop() {} },
     // The docked ChatGPT desktop host (main.cjs `chatgptDesktop`) is shut down on every quit.

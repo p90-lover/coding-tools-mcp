@@ -21,6 +21,7 @@ const {
   shell,
   Tray,
   webFrameMain,
+  powerMonitor,
   powerSaveBlocker,
 } = require("electron");
 const { BrowserHost, navigationErrorForLog, writeRestartMarker } = require("./browser-host.cjs");
@@ -50,7 +51,7 @@ const { assertLauncherRuntimeVersion, terminateLauncherSmoke } = require("./smok
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createGuiUpdateController, guiShellHash } = require("./gui-update.cjs");
-const { combineUpdateControllers, createAppUpdateController, sweepUpdateLeftovers } = require("./app-update.cjs");
+const { combineUpdateControllers, createAppUpdateController, createAutoInstaller, sweepUpdateLeftovers } = require("./app-update.cjs");
 const {
   providerNetworkReady,
   proxyGatewayDesktopRoute,
@@ -168,6 +169,7 @@ let automaticMcpAttemptPid = null;
 let mcpVerificationInFlight = null;
 let verifyMcpConnection = null;
 let updateController = null;
+let autoInstaller = null;
 let externalServicesController = null;
 let managedBootstrapController = null;
 let upstreamToolController = null;
@@ -2474,6 +2476,7 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     await step("headless", () => headlessHost?.shutdown("launcher-quit"));
     stopCatalogVerificationMonitor();
     updateController?.stopPeriodicChecks?.();
+    autoInstaller?.stop();
     backendBundles?.stopWatching();
     await step("agent-orchestrator", () => agentOrchestratorUpstream?.stop(), 20_000);
     antigravityReauth?.stop();
@@ -2627,6 +2630,17 @@ async function start() {
       logger,
     }),
   );
+  // With automatic updates on, a found update installs itself while the user is away and no
+  // browser, bridge or AO turn is running; the sidebar's "Update to" button still works any time.
+  autoInstaller = createAutoInstaller({
+    controller: updateController,
+    enabled: () => stateStore.read().automaticUpdates === true,
+    idleSeconds: () => powerMonitor.getSystemIdleTime(),
+    isBusy: async () => Boolean(browserHost?.currentOperation() || runtimeHost?.currentOperation()
+      || runtimeStartupInFlight || codexBridgeConnectInFlight
+      || await agentOrchestratorUpstream?.harness.anySessionWorking()),
+    logger,
+  });
   registerMinimalPreRendererIpc({ logger, stateStore });
   externalServicesController = createManagedExternalServicesController({
     dataRoot: path.join(app.getPath("userData"), "integrations"),
@@ -3275,6 +3289,7 @@ async function start() {
       });
     });
     if (stateStore.read().automaticUpdates) updateController.startPeriodicChecks();
+    autoInstaller.start();
   }
   if (launcherSmokeTest) {
     const smokeRuntimeRoot = runtimeRootProvider();

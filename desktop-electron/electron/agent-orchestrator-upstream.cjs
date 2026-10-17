@@ -812,6 +812,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       const projectFolder = await folderModeRoot(session, root, workspaceId).catch(() => null);
       return projectFolder ? { root, projectFolder } : { root };
     },
+    /** Whether any live session's agent is mid-turn: restarting the app now would cut it off. */
+    async anySessionWorking() {
+      const list = await internalApi("GET", "/api/v1/sessions");
+      const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
+      return sessions.some(session => session?.status === "working" && !session.isTerminated);
+    },
     /**
      * Live sessions with this display name that never ran a turn: pre-warmed ones nobody used,
      * e.g. left from an earlier run. One that took a chat keeps the name but has turns.
