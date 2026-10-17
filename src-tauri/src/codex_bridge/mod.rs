@@ -117,6 +117,17 @@ fn activity_for(method: &str, params: &Value) -> Option<&'static str> {
         _ => None,
     }
 }
+
+/// The approval policy and reviewer Codex is told, from the saved ones. A WebGPT card
+/// (`ao_web`) set to auto_review runs unattended in its sandbox ("never", "user"): Codex's own
+/// reviewer would need another call to the ChatGPT web bridge that the turn is already holding.
+fn codex_policy<'a>(ao_web: bool, policy: &'a str, reviewer: &'a str) -> (&'a str, &'a str) {
+    if ao_web && reviewer == "auto_review" {
+        ("never", "user")
+    } else {
+        (policy, reviewer)
+    }
+}
 struct NativeApproval {
     rpc_id: Value,
     method: String,
@@ -286,6 +297,8 @@ struct Bridge {
     root: PathBuf,
     options: Connection,
     ao_worker_command_approvals: bool,
+    /// A WebGPT (ChatGPT web bridge) card; see `web_unattended`.
+    ao_web: bool,
     started: Instant,
     live: AtomicBool,
     ready: AtomicBool,
@@ -676,6 +689,7 @@ impl Hub {
             options,
             // Every AO child routes its command approvals to the local approval queue.
             ao_worker_command_approvals: private_cpa_key.is_some() || ao_web,
+            ao_web,
             started: Instant::now(),
             live: AtomicBool::new(true),
             ready: AtomicBool::new(false),
@@ -1164,7 +1178,8 @@ impl Bridge {
             return false;
         }
         if matches!(kind, "command" | "file_change" | "permissions")
-            && (self.approval_policy() != "on-request" || self.approvals_reviewer() != "user")
+            && (self.codex_approval_policy() != "on-request"
+                || self.codex_approvals_reviewer() != "user")
         {
             return false;
         }
@@ -1502,6 +1517,30 @@ impl Bridge {
     fn approvals_reviewer(&self) -> &str {
         self.options.approvals_reviewer.as_deref().unwrap_or("user")
     }
+    /// What Codex is told (see `codex_policy`).
+    /// A WebGPT card's "Approve for me" (auto_review) cannot use Codex's own reviewer: its review
+    /// is another model call to the same ChatGPT web bridge, which is busy with the very turn
+    /// waiting on that tool call. Seen live: the command reached Codex, nothing followed, and the
+    /// bridge gave up after 90 s while the chat said "working" for good. Such a card runs
+    /// unattended in its sandbox instead, like every other AO card: commands within the profile
+    /// run, anything beyond it fails back to the model. The saved policy (status, reconnects) is
+    /// unchanged; only what Codex is told differs.
+    fn codex_approval_policy(&self) -> &str {
+        codex_policy(
+            self.ao_web,
+            self.approval_policy(),
+            self.approvals_reviewer(),
+        )
+        .0
+    }
+    fn codex_approvals_reviewer(&self) -> &str {
+        codex_policy(
+            self.ao_web,
+            self.approval_policy(),
+            self.approvals_reviewer(),
+        )
+        .1
+    }
     fn explicit_policy(&self) -> bool {
         self.options.approval_policy.is_some()
             || self.options.approvals_reviewer.is_some()
@@ -1548,13 +1587,13 @@ impl Bridge {
                 permissions::require_allowed(
                     &metadata,
                     profile,
-                    self.approval_policy(),
-                    self.approvals_reviewer(),
+                    self.codex_approval_policy(),
+                    self.codex_approvals_reviewer(),
                     &self.options.model,
                 )?;
             }
             let mut params = json!({"cwd":self.root,"model":self.options.model,
-                "permissions":profile,"approvalPolicy":self.approval_policy(),"approvalsReviewer":self.approvals_reviewer(),"ephemeral":true,
+                "permissions":profile,"approvalPolicy":self.codex_approval_policy(),"approvalsReviewer":self.codex_approvals_reviewer(),"ephemeral":true,
                 "developerInstructions":developer_instructions(profile)});
             if let Some(tokens) = self.options.context_window {
                 params["config"] = json!({"model_context_window": tokens});
@@ -1563,8 +1602,8 @@ impl Bridge {
             let effective = match permissions::effective_policy(
                 &value,
                 profile,
-                self.approval_policy(),
-                self.approvals_reviewer(),
+                self.codex_approval_policy(),
+                self.codex_approvals_reviewer(),
                 self.explicit_policy(),
             ) {
                 Ok(effective) => effective,
@@ -1683,8 +1722,8 @@ impl Bridge {
             _ => {
                 let mut params = json!({"threadId":id,"input":[{"type":"text","text":request.text}],
                 // Reassert the same supported boundary on every turn, including send.
-                "permissions":self.options.permission_profile,"approvalsReviewer":self.approvals_reviewer(),
-                "cwd":self.root,"model":self.options.model,"approvalPolicy":self.approval_policy()});
+                "permissions":self.options.permission_profile,"approvalsReviewer":self.codex_approvals_reviewer(),
+                "cwd":self.root,"model":self.options.model,"approvalPolicy":self.codex_approval_policy()});
                 if let Some(effort) = &self.options.effort {
                     params["effort"] = json!(effort);
                 }
@@ -1870,6 +1909,25 @@ fn apply_notification(memory: &mut Memory, method: &str, params: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn web_card_approve_for_me_runs_unattended_instead_of_waiting_on_codex_review() {
+        // Seen live: Codex's reviewer for a WebGPT card needed the busy ChatGPT web bridge.
+        assert_eq!(
+            codex_policy(true, "on-request", "auto_review"),
+            ("never", "user")
+        );
+        // Everything else is passed through unchanged.
+        assert_eq!(
+            codex_policy(true, "on-request", "user"),
+            ("on-request", "user")
+        );
+        assert_eq!(codex_policy(true, "never", "user"), ("never", "user"));
+        assert_eq!(
+            codex_policy(false, "on-request", "auto_review"),
+            ("on-request", "auto_review")
+        );
+        assert!(permissions::selection_valid(Some("never"), Some("user")));
+    }
     #[test]
     fn exact_external_write_requires_one_existing_file() {
         let file = std::env::current_exe().expect("test binary path");
