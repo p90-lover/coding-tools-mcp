@@ -312,6 +312,10 @@ function staleWindowMs(id) {
   return id === "paseo" ? PASEO_STALE_MS : HTTP_STALE_MS;
 }
 
+const SNAPSHOT_RELATIVE = /^snapshots\/[a-f0-9-]{36}$/;
+// Retired services never run again: their state under integrations/state/ is frozen.
+const isRetiredState = (relative) => relative.startsWith("integrations/state/");
+
 // The retired-state entries (sources and stats) of the latest snapshot, or null when there is
 // no snapshot yet or it predates recorded stats.
 function archivedRetiredState(archiveRoot) {
@@ -321,7 +325,7 @@ function archivedRetiredState(archiveRoot) {
     const pointer = path.join(archiveRoot, "latest.json");
     if (fs.existsSync(pointer)) {
       const relative = JSON.parse(fs.readFileSync(pointer, "utf8")).relative;
-      if (typeof relative !== "string" || !/^snapshots\/[a-f0-9-]{36}$/.test(relative)) return null;
+      if (typeof relative !== "string" || !SNAPSHOT_RELATIVE.test(relative)) return null;
       destination = path.join(archiveRoot, relative);
     }
     const manifest = JSON.parse(fs.readFileSync(path.join(destination, "manifest.json"), "utf8"));
@@ -408,7 +412,7 @@ function archiveRetiredServicesState({ filePath, keyPath, archiveDataRoot = null
     const pointer = path.join(archiveRoot, "latest.json");
     if (fs.existsSync(pointer)) {
       const relative = JSON.parse(fs.readFileSync(pointer, "utf8")).relative;
-      if (typeof relative !== "string" || !/^snapshots\/[a-f0-9-]{36}$/.test(relative)) {
+      if (typeof relative !== "string" || !SNAPSHOT_RELATIVE.test(relative)) {
         throw new Error("Paseo archive pointer is invalid");
       }
       destination = path.join(archiveRoot, relative);
@@ -425,12 +429,15 @@ function archiveRetiredServicesState({ filePath, keyPath, archiveDataRoot = null
     // (retired state never is); when only their mtimes moved, the stats are refreshed in place
     // instead of hard-linking every retired file into yet another snapshot.
     const sameLiveContent = (relative) => {
-      if (relative.startsWith("integrations/state/")) return false;
+      if (isRetiredState(relative)) return false;
       try { return fs.readFileSync(sources[relative]).equals(fs.readFileSync(path.join(destination, relative))); } catch { return false; }
     };
     if (sameSources && previous.stats
         && keys.every((relative) => sameStat(previous.stats[relative], stats[relative]) || sameLiveContent(relative))) {
-      writePrivateFileAtomic(path.join(destination, "manifest.json"), JSON.stringify({ schemaVersion: 1, sources, stats }, null, 2));
+      // Keep stateRoot: a snapshot that inherits its retired state must go on pointing at it.
+      writePrivateFileAtomic(path.join(destination, "manifest.json"), JSON.stringify({
+        schemaVersion: 1, sources, stats, ...(previous.stateRoot !== undefined ? { stateRoot: previous.stateRoot } : {}),
+      }, null, 2));
       return destination;
     }
     if (sameSources && !previous.stats
@@ -439,16 +446,35 @@ function archiveRetiredServicesState({ filePath, keyPath, archiveDataRoot = null
       writePrivateFileAtomic(path.join(destination, "manifest.json"), JSON.stringify({ schemaVersion: 1, sources, stats }, null, 2));
       return destination;
     }
-    prior = { root: destination, stats: previous.stats || {} };
+    // Where the previous snapshot's retired state physically is: its own folder, or the earlier
+    // snapshot its manifest points to ("" is the archive root, the very first snapshot).
+    const stateRoot = previous.stateRoot === undefined ? path.relative(archiveRoot, destination).split(path.sep).join("/") : previous.stateRoot;
+    if (typeof stateRoot !== "string" || (stateRoot !== "" && !SNAPSHOT_RELATIVE.test(stateRoot))) {
+      throw new Error("Paseo archive state pointer is invalid");
+    }
+    prior = { root: destination, stats: previous.stats || {}, stateRoot };
     destination = path.join(archiveRoot, "snapshots", crypto.randomUUID());
   }
+  // A change to the small live files (external-services.json, the keys) must not re-link the
+  // frozen retired state into every new snapshot: that was ~23,000 hard links on the main thread
+  // before the window opened (seen live: ~10 minutes on a hard disk). When none of it changed,
+  // the new snapshot holds only the live files and its manifest names where the state already is.
+  const retiredKeys = Object.keys(sources).filter(isRetiredState);
+  const inheritState = Boolean(prior) && retiredKeys.length > 0
+    && retiredKeys.every((relative) => sameStat(prior.stats[relative], stats[relative]));
+  const madeDirs = new Set();
   for (const [relative, source] of Object.entries(sources)) {
+    if (inheritState && isRetiredState(relative)) continue;
     const target = path.join(destination, relative);
-    fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+    if (!madeDirs.has(path.dirname(target))) {
+      fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+      madeDirs.add(path.dirname(target));
+    }
     // An unchanged file is hard-linked from the previous snapshot instead of copied again.
     if (prior && sameStat(prior.stats[relative], stats[relative])) {
+      const holder = isRetiredState(relative) ? path.join(archiveRoot, prior.stateRoot) : prior.root;
       try {
-        fs.linkSync(path.join(prior.root, relative), target);
+        fs.linkSync(path.join(holder, relative), target);
         continue;
       } catch {
         // Different volume or no link support: fall back to a verified copy.
@@ -460,11 +486,46 @@ function archiveRetiredServicesState({ filePath, keyPath, archiveDataRoot = null
       throw new Error("Paseo archive copy could not be verified");
     }
   }
-  writePrivateFileAtomic(path.join(destination, "manifest.json"), JSON.stringify({ schemaVersion: 1, sources, stats }, null, 2));
+  // The manifest is written last, so a snapshot folder without one was interrupted (see removeIncompleteSnapshots).
+  writePrivateFileAtomic(path.join(destination, "manifest.json"), JSON.stringify({
+    schemaVersion: 1, sources, stats, ...(inheritState ? { stateRoot: prior.stateRoot } : {}),
+  }, null, 2));
   if (destination !== archiveRoot) {
     writePrivateFileAtomic(path.join(archiveRoot, "latest.json"), JSON.stringify({ relative: path.relative(archiveRoot, destination).split(path.sep).join("/") }));
   }
   return destination;
+}
+
+const INCOMPLETE_SNAPSHOT_GRACE_MS = 10 * 60_000;
+
+/**
+ * Removes snapshot folders an interrupted launch left behind (killing the app mid-archive used to
+ * leave a ~23,000-file folder each time). The manifest is written last, so a folder without one
+ * never completed, and nothing names it: latest.json and stateRoot only point at completed
+ * snapshots. This runs on fs.promises, off the main thread, so it never delays startup; leaves
+ * alone a folder younger than the grace period (a launch may still be writing it); and never
+ * follows links: a junction or symlink entry is skipped, rm unlinks links inside rather than
+ * entering them, and a hard-linked file's data stays with its other names.
+ */
+async function removeIncompleteSnapshots(archiveRoot, { logger = null, now = Date.now() } = {}) {
+  const snapshots = path.join(archiveRoot, "snapshots");
+  let entries;
+  try { entries = await fs.promises.readdir(snapshots, { withFileTypes: true }); } catch { return []; }
+  const removed = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^[a-f0-9-]{36}$/.test(entry.name)) continue;
+    const folder = path.join(snapshots, entry.name);
+    try {
+      if (await fs.promises.access(path.join(folder, "manifest.json")).then(() => true, () => false)) continue;
+      if (now - (await fs.promises.lstat(folder)).mtimeMs < INCOMPLETE_SNAPSHOT_GRACE_MS) continue;
+      await fs.promises.rm(folder, { recursive: true, force: true });
+      removed.push(entry.name);
+    } catch (error) {
+      logger?.warn?.("external_services.archive_cleanup_failed", { snapshot: entry.name, message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  if (removed.length) logger?.info?.("external_services.archive_incomplete_removed", { count: removed.length });
+  return removed;
 }
 
 function createExternalServicesController({
@@ -486,6 +547,7 @@ function createExternalServicesController({
   if (!filePath || !keyPath) throw new Error("External service state paths are required");
   const meshFilePath = loopbackMeshPath || path.join(path.dirname(filePath), "loopback-mesh.json");
   archiveRetiredServicesState({ filePath, keyPath, archiveDataRoot });
+  void removeIncompleteSnapshots(path.join(path.dirname(filePath), "archives", "retired-services"), { logger });
   const codec = createSecretCodec({ safeStorage, keyPath });
   let state;
   try {
@@ -1004,6 +1066,7 @@ module.exports = {
   SERVICE_IDS,
   createExternalServicesController,
   nextKeepAliveDelayMs,
+  removeIncompleteSnapshots,
   normalizeLoopbackExecutionEndpoint,
   normalizeLoopbackServiceEndpoint,
 };
