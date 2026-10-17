@@ -471,6 +471,14 @@ function LauncherShell({
   const updateVisible = ["available", "downloading", "installing"].includes(snapshot.update.status);
   const updateBusy = snapshot.update.status === "downloading" || snapshot.update.status === "installing";
   const updateVersion = "version" in snapshot.update ? snapshot.update.version : null;
+  const appUpdate = "kind" in snapshot.update && snapshot.update.kind === "app";
+  const updateProgress = "progress" in snapshot.update && typeof snapshot.update.progress === "number"
+    ? ` ${Math.round(snapshot.update.progress * 100)}%` : "";
+  const updateLabel = updateBusy
+    ? `${copy.updating}${snapshot.update.status === "downloading" ? updateProgress : ""}`
+    : appUpdate
+      ? (language === "zh-TW" ? `更新至 v${updateVersion}` : `Update to v${updateVersion}`)
+      : (language === "zh-TW" ? `更新 GUI ${updateVersion}` : `Update GUI ${updateVersion}`);
   const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
 
   useEffect(() => {
@@ -835,7 +843,7 @@ function LauncherShell({
                   active={false}
                   disabled={updateBusy || operation?.status === "running" || browser?.status === "running"}
                   icon="update"
-                  label={updateBusy ? copy.updating : (language === "zh-TW" ? `更新 GUI ${updateVersion}` : `Update GUI ${updateVersion}`)}
+                  label={updateLabel}
                   onClick={() => void installUpdate()}
                   tone="update"
                 />
@@ -2104,7 +2112,7 @@ function SettingsSurface({
     setUpdateNotice("");
     try {
       const updated = await api!.installUpdate();
-      if (!updated) setUpdateNotice(language === "zh-TW" ? "GUI 已是最新版本。" : "The GUI is up to date.");
+      if (!updated) setUpdateNotice(language === "zh-TW" ? "已是最新版本。" : "Coding Tools is up to date.");
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -2152,13 +2160,13 @@ function SettingsSurface({
         </SettingRow> : null}
         {!devProfile ? <SettingRow
           body={updateNotice || (language === "zh-TW"
-            ? "自動檢查 GUI 更新；一鍵刷新介面。MCP、Codex Bridge 及 Proxy Bridge 持續執行。"
-            : "Automatically check for GUI updates. One click downloads and refreshes the interface while MCP, Codex Bridge and Proxy Bridge keep running.")}
-          label={language === "zh-TW" ? "GUI 更新" : "GUI updates"}
+            ? "自動檢查更新，在應用程式內安裝，不需安裝程式：只下載有變更的檔案，然後重新啟動。MCP、Codex Bridge 及 CPA 持續執行。"
+            : "Automatically check for updates and install them inside the app, with no installer: only the changed files download, then the app restarts. MCP, Codex Bridge and CPA keep running.")}
+          label={language === "zh-TW" ? "應用程式更新" : "App updates"}
         >
           <div className="inline-actions">
             <SecondaryButton disabled={busy || guiUpdating} onClick={() => void updateGui()}>
-              {guiUpdating ? (language === "zh-TW" ? "更新中…" : "Updating GUI…") : (language === "zh-TW" ? "更新 GUI" : "Update GUI")}
+              {guiUpdating ? (language === "zh-TW" ? "更新中…" : "Updating…") : (language === "zh-TW" ? "更新" : "Update")}
             </SecondaryButton>
             <Switch
               checked={snapshot.state.automaticUpdates}

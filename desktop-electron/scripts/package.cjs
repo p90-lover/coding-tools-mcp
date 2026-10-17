@@ -69,6 +69,8 @@ const staging = preservation.createWorkDirectory("builder-output");
 const publication = preservation.createWorkDirectory("publication");
 const artifactsDirectory = path.join(root, "artifacts");
 const distributablePattern = /\.(?:AppImage|dmg|exe|zip|blockmap)$/i;
+// A build's in-app update (electron/app-update.cjs) is made fresh each run, never carried over.
+const appUpdatePattern = /(?:\.ctpack|_update\.json|^SHA256SUMS\.txt)$/i;
 
 function runChecked(command, args) {
   const result = spawnSync(command, args, {
@@ -128,7 +130,7 @@ function verifySignedMacArchive() {
 function copyRetainedArtifactEntries() {
   if (!fs.existsSync(artifactsDirectory)) return;
   for (const entry of fs.readdirSync(artifactsDirectory, { withFileTypes: true })) {
-    if (entry.isFile() && distributablePattern.test(entry.name)) continue;
+    if (entry.isFile() && (distributablePattern.test(entry.name) || appUpdatePattern.test(entry.name))) continue;
     fs.cpSync(
       path.join(artifactsDirectory, entry.name),
       path.join(publication, entry.name),
@@ -156,6 +158,11 @@ function preparePublication() {
       path.join(publication, publicName),
       fs.constants.COPYFILE_EXCL,
     );
+  }
+  // Installed Windows apps update in place from these packs; no installer runs.
+  const unpacked = path.join(staging, "win-unpacked");
+  if (target === "--win" && fs.existsSync(unpacked)) {
+    runChecked(executable, [path.join(__dirname, "package-app-update.cjs"), "--app", unpacked, "--output", publication]);
   }
 }
 

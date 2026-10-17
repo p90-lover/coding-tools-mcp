@@ -50,6 +50,7 @@ const { assertLauncherRuntimeVersion, terminateLauncherSmoke } = require("./smok
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createGuiUpdateController, guiShellHash } = require("./gui-update.cjs");
+const { combineUpdateControllers, createAppUpdateController, sweepUpdateLeftovers } = require("./app-update.cjs");
 const {
   providerNetworkReady,
   proxyGatewayDesktopRoute,
@@ -2489,6 +2490,7 @@ async function start() {
       try {
         const { sweepSetAside, agentRuntimeRoots } = require("./in-use-files.cjs");
         sweepSetAside(agentRuntimeRoots(process.resourcesPath));
+        sweepUpdateLeftovers(path.dirname(process.execPath));
       } catch { /* best-effort cleanup */ }
     });
   }
@@ -2544,16 +2546,32 @@ async function start() {
   });
   app.on("will-quit", () => cpaPluginModels.stop());
   const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
-  updateController = createGuiUpdateController({
-    currentVersion: app.getVersion(),
-    shellHash: guiShellHash(__dirname),
-    packaged: app.isPackaged && !IS_DEV_PROFILE,
-    rendererPath: PACKAGED_RENDERER_PATH,
-    updateRoot: path.join(app.getPath("userData"), "gui-updates"),
-    reloadRenderer: (entry) => mainWindow.loadFile(entry),
-    publish: (state) => send("launcher:update-state", state),
-    logger,
-  });
+  // Updates install inside the app: a whole-app update (app-update.cjs) swaps the changed files
+  // in after the app closes the way "Restart app (keep Codex bridge, MCP, CPA)" does; a GUI-only
+  // update reloads the renderer in place. Neither runs an installer.
+  const publishUpdateState = () => { if (updateController) send("launcher:update-state", updateController.getState()); };
+  updateController = combineUpdateControllers(
+    createAppUpdateController({
+      currentVersion: app.getVersion(),
+      electronVersion: process.versions.electron,
+      packaged: app.isPackaged && !IS_DEV_PROFILE,
+      executablePath: process.execPath,
+      logsDirectory: app.getPath("logs"),
+      publish: publishUpdateState,
+      logger,
+      closeForUpdate: () => requestQuit({ keepBridge: true }),
+    }),
+    createGuiUpdateController({
+      currentVersion: app.getVersion(),
+      shellHash: guiShellHash(__dirname),
+      packaged: app.isPackaged && !IS_DEV_PROFILE,
+      rendererPath: PACKAGED_RENDERER_PATH,
+      updateRoot: path.join(app.getPath("userData"), "gui-updates"),
+      reloadRenderer: (entry) => mainWindow.loadFile(entry),
+      publish: publishUpdateState,
+      logger,
+    }),
+  );
   registerMinimalPreRendererIpc({ logger, stateStore });
   externalServicesController = createManagedExternalServicesController({
     dataRoot: path.join(app.getPath("userData"), "integrations"),

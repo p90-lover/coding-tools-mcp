@@ -584,7 +584,8 @@ export interface OperationState {
 
 export type UpdateState =
   | { status: "disabled" | "idle" | "checking" | "up-to-date" }
-  | { status: "available" | "downloading" | "installing"; version: string }
+  // kind "app": a whole-app update that restarts the app; otherwise a GUI-only reload.
+  | { status: "available" | "downloading" | "installing"; version: string; kind?: "app"; progress?: number }
   | { status: "error"; message: string };
 
 export interface LauncherSnapshot {
