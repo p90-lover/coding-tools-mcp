@@ -12,6 +12,7 @@ const {
   nextKeepAliveDelayMs,
   normalizeLoopbackExecutionEndpoint,
   normalizeLoopbackServiceEndpoint,
+  removeIncompleteSnapshots,
 } = require("../electron/external-services.cjs");
 
 const root = path.resolve(__dirname, "..");
@@ -210,9 +211,16 @@ test("new config and key are archived after an earlier state-only snapshot", () 
   const latest = JSON.parse(fs.readFileSync(path.join(archive, "latest.json"), "utf8")).relative;
   assert.equal(fs.readFileSync(path.join(archive, latest, "external-services.json"), "utf8"), original);
   assert.equal(fs.readFileSync(path.join(archive, latest, "external-services.key"), "utf8"), "late-key");
-  assert.equal(fs.readFileSync(path.join(archive, latest, "integrations", "state", "paseo", "run.json"), "utf8"), "legacy-state");
+  assert.equal(fs.readFileSync(archivedFile(archive, latest, "integrations/state/paseo/run.json"), "utf8"), "legacy-state");
   assert.equal(fs.readFileSync(filePath, "utf8"), original);
 });
+
+/** A file of a snapshot: live files sit in the snapshot; retired state may sit where its manifest's stateRoot says. */
+function archivedFile(archive, snapshot, relative) {
+  const manifest = JSON.parse(fs.readFileSync(path.join(archive, snapshot, "manifest.json"), "utf8"));
+  const holder = relative.startsWith("integrations/state/") && manifest.stateRoot !== undefined ? manifest.stateRoot : snapshot;
+  return path.join(archive, holder, relative);
+}
 
 test("legacy Paseo cannot reenable keep-alive through configuration", () => {
   const { controller } = controllerFixture();
@@ -388,7 +396,9 @@ test("an unchanged retired-services archive is confirmed without reading state c
   assert.equal(snapshotsAfter, snapshotsBefore, "no new snapshot for unchanged state");
 });
 
-test("a new snapshot links unchanged retired state instead of copying it again", () => {
+// Seen live: a changed external-services.json re-linked ~23,000 frozen files into a new snapshot on
+// the main thread, holding the window back ~10 minutes. A live-file change now touches live files only.
+test("a live-file change snapshots only the live files and points at the unchanged retired state", () => {
   const directory = temporaryDirectory();
   const dataRoot = path.join(directory, "integrations");
   const statePath = path.join(dataRoot, "state", "paseo", "big.bin");
@@ -397,13 +407,83 @@ test("a new snapshot links unchanged retired state instead of copying it again",
   fs.writeFileSync(statePath, Buffer.alloc(64 * 1024, 7));
   const options = { filePath, keyPath: path.join(directory, "external-services.key"), archiveDataRoot: dataRoot };
   createExternalServicesController(options).dispose();
-  fs.writeFileSync(filePath, JSON.stringify({ version: 1, services: {}, secrets: {} }));
+  const archive = path.join(directory, "archives", "retired-services");
+  const touched = [];
+  const { linkSync, copyFileSync } = fs;
+  fs.linkSync = function spy(from, to) { touched.push(String(to)); return linkSync.call(this, from, to); };
+  fs.copyFileSync = function spy(from, to, ...rest) { touched.push(String(to)); return copyFileSync.call(this, from, to, ...rest); };
+  try {
+    for (const version of [1, 2]) {
+      fs.writeFileSync(filePath, JSON.stringify({ version: 1, services: {}, secrets: { change: version } }));
+      createExternalServicesController(options).dispose();
+    }
+  } finally {
+    fs.linkSync = linkSync;
+    fs.copyFileSync = copyFileSync;
+  }
+  assert.deepEqual(touched.filter((file) => file.includes(path.join("integrations", "state"))), [], "retired state is neither linked nor copied");
+  const latest = JSON.parse(fs.readFileSync(path.join(archive, "latest.json"), "utf8")).relative;
+  assert.equal(fs.existsSync(path.join(archive, latest, "integrations", "state")), false);
+  // Two changes later, the newest snapshot still names the first one (the archive root), which holds the state.
+  assert.equal(JSON.parse(fs.readFileSync(path.join(archive, latest, "manifest.json"), "utf8")).stateRoot, "");
+  assert.deepEqual(fs.readFileSync(archivedFile(archive, latest, "integrations/state/paseo/big.bin")), fs.readFileSync(statePath));
+  assert.match(fs.readFileSync(path.join(archive, latest, "external-services.json"), "utf8"), /"change":2/);
+  // Each change is still its own snapshot: the history keeps every live version.
+  assert.equal(fs.readdirSync(path.join(archive, "snapshots")).length, 2);
+});
+
+test("a retired-state change after an inherited snapshot gets a full snapshot again", () => {
+  const directory = temporaryDirectory();
+  const dataRoot = path.join(directory, "integrations");
+  const stateDir = path.join(dataRoot, "state", "paseo");
+  const filePath = path.join(directory, "external-services.json");
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(path.join(stateDir, "kept.bin"), "kept");
+  const options = { filePath, keyPath: path.join(directory, "external-services.key"), archiveDataRoot: dataRoot };
+  createExternalServicesController(options).dispose();
+  fs.writeFileSync(filePath, JSON.stringify({ version: 1, services: {}, secrets: { change: 1 } }));
   createExternalServicesController(options).dispose();
   const archive = path.join(directory, "archives", "retired-services");
-  const latest = JSON.parse(fs.readFileSync(path.join(archive, "latest.json"), "utf8")).relative;
-  const linked = path.join(archive, latest, "integrations", "state", "paseo", "big.bin");
-  assert.deepEqual(fs.readFileSync(linked), fs.readFileSync(statePath));
-  assert.ok(fs.statSync(linked).nlink >= 2, "unchanged state should be a hard link to the previous snapshot");
+  // Retired state is normally frozen; if it ever changes, the walk notices only when no stats were recorded,
+  // so drop the recorded stats the way a pre-stats archive would look, then change a file.
+  fs.writeFileSync(path.join(stateDir, "added.bin"), "new");
+  const latest = () => JSON.parse(fs.readFileSync(path.join(archive, "latest.json"), "utf8")).relative;
+  const manifestPath = path.join(archive, latest(), "manifest.json");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  fs.writeFileSync(manifestPath, JSON.stringify({ ...manifest, stats: Object.fromEntries(Object.entries(manifest.stats).filter(([key]) => !key.startsWith("integrations/state/"))) }));
+  createExternalServicesController(options).dispose();
+  const full = JSON.parse(fs.readFileSync(path.join(archive, latest(), "manifest.json"), "utf8"));
+  assert.equal(full.stateRoot, undefined, "a snapshot holding its own state names no stateRoot");
+  assert.equal(fs.readFileSync(path.join(archive, latest(), "integrations", "state", "paseo", "kept.bin"), "utf8"), "kept");
+  assert.equal(fs.readFileSync(path.join(archive, latest(), "integrations", "state", "paseo", "added.bin"), "utf8"), "new");
+});
+
+test("snapshots an interrupted launch left behind are removed, but never a complete, young or linked one", async () => {
+  const directory = temporaryDirectory();
+  const archive = path.join(directory, "archives", "retired-services");
+  const snapshots = path.join(archive, "snapshots");
+  const id = (n) => `0000000${n}-0000-4000-8000-000000000000`;
+  const make = (name, files) => {
+    for (const [relative, content] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(snapshots, name, relative)), { recursive: true });
+      fs.writeFileSync(path.join(snapshots, name, relative), content);
+    }
+    return path.join(snapshots, name);
+  };
+  const old = new Date(Date.now() - 60 * 60_000);
+  const complete = make(id(1), { "manifest.json": "{}", "external-services.json": "{}" });
+  const interrupted = make(id(2), { "integrations/state/paseo/a.bin": "a" });
+  const young = make(id(3), { "integrations/state/paseo/b.bin": "b" });
+  for (const folder of [complete, interrupted]) fs.utimesSync(folder, old, old);
+  const outside = path.join(directory, "outside");
+  fs.mkdirSync(outside);
+  fs.writeFileSync(path.join(outside, "keep.txt"), "keep");
+  fs.symlinkSync(outside, path.join(snapshots, id(4)), "junction");
+  const removed = await removeIncompleteSnapshots(archive);
+  assert.deepEqual(removed, [id(2)]);
+  assert.equal(fs.existsSync(interrupted), false);
+  assert.equal(fs.existsSync(complete) && fs.existsSync(young), true);
+  assert.equal(fs.readFileSync(path.join(outside, "keep.txt"), "utf8"), "keep", "a linked folder is never entered");
 });
 
 test("archived retired state is not walked again on later launches", () => {

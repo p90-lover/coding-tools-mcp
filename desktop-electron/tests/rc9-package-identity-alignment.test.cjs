@@ -7,8 +7,8 @@ const test = require("node:test");
 
 const desktopRoot = path.resolve(__dirname, "..");
 const read = (relativePath) => fs.readFileSync(path.join(desktopRoot, relativePath), "utf8");
-const RELEASE_VERSION = "0.7.0-rc.15";
-const STALE_VERSIONS = ["0.7.0-rc.8", "0.7.0-rc.9", "0.7.0-rc.10", "0.7.0-rc.11", "0.7.0-rc.12", "0.7.0-rc.14"];
+const RELEASE_VERSION = "0.7.0-rc.16";
+const STALE_VERSIONS = ["0.7.0-rc.8", "0.7.0-rc.9", "0.7.0-rc.10", "0.7.0-rc.11", "0.7.0-rc.12", "0.7.0-rc.14", "0.7.0-rc.15"];
 
 const activeIdentityFiles = [
   "electron/product.cjs",
@@ -26,7 +26,7 @@ test("the rc.14 manifest and every active package identity use one release versi
 
   for (const relativePath of activeIdentityFiles) {
     const source = read(relativePath);
-    assert.match(source, /0\.7\.0-rc\.15/, `${relativePath} must declare ${RELEASE_VERSION}`);
+    assert.match(source, /0\.7\.0-rc\.16/, `${relativePath} must declare ${RELEASE_VERSION}`);
     for (const stale of STALE_VERSIONS) {
       const escaped = stale.replaceAll(".", "\\.");
       assert.doesNotMatch(source, new RegExp(escaped), `${relativePath} still declares ${stale}`);
@@ -37,5 +37,5 @@ test("the rc.14 manifest and every active package identity use one release versi
 test("the installer migration contract names the current rc.14 release", () => {
   const source = read("tests/installer-upgrade-migration.test.cjs");
   assert.match(source, /rc\.14 keeps the stable Electron installer identity/);
-  assert.match(source, /manifest\.version, "0\.7\.0-rc\.15"/);
+  assert.match(source, /manifest\.version, "0\.7\.0-rc\.16"/);
 });
