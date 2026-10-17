@@ -260,7 +260,9 @@ export function prettyModelName(id: string): string {
  * agent's own docs call it. modelLabel stays the full, unambiguous form for cards and hints.
  */
 export function modelShortLabel(model: string, cpaPool = false): { group: string; name: string } {
-  if (model.startsWith("chatgpt-web/")) return { group: "WebGPT", name: modelLabel(model).slice("WebGPT ".length) };
+  // WebGPT keeps its whole name ("WebGPT High") in the list and on the chip, ungrouped: the
+  // tier at its end is the effort, which the effort chip then shows and picks.
+  if (model.startsWith("chatgpt-web/")) return { group: "", name: modelLabel(model) };
   const cpa = model.startsWith("cpa/") ? model.slice(4) : cpaPool && model ? model : null;
   if (cpa === null) return { group: "", name: model };
   const { provider, name } = cpaParts(cpa);

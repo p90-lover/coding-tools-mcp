@@ -152,7 +152,7 @@ test("model list rows name the provider once in a group and tidy the model's own
     ["kimi-k2.7-code", "Kimi K2.7 Code"], ["glm-5.3-flash", "GLM 5.3 Flash"], ["mimo-v2.5-pro", "MiMo V2.5 Pro"],
     ["minimax-m3", "MiniMax M3"], ["qwen3.7-max", "Qwen3.7 Max"], ["gemini-3.1-flash-lite", "Gemini 3.1 Flash Lite"],
   ]) assert.equal(editor.prettyModelName(id), name, id);
-  assert.deepEqual(plain(editor.modelShortLabel("chatgpt-web/extra-high")), { group: "WebGPT", name: "Extra High" });
+  assert.deepEqual(plain(editor.modelShortLabel("chatgpt-web/extra-high")), { group: "", name: "WebGPT Extra High" }, "WebGPT keeps its whole name");
   assert.equal(editor.modelLabel("chatgpt-web/light"), "WebGPT Instant", "named as ChatGPT's effort picker names it");
   assert.equal(editor.modelLabel("chatgpt-web/luna"), "WebGPT Luna", "a saved Luna route keeps its name");
   assert.deepEqual(plain(editor.WEB_TIERS.map(tier => [tier.label, tier.effort])),
