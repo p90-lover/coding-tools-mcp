@@ -21,7 +21,12 @@ const acpOutputRoot = path.join(projectRoot, "desktop-electron", "build", "acp-r
 /** Builds AO's ACP runtime with AO's own pinned recipe (checksum-verified Node, npm ci from a
  * lockfile, no install scripts) and copies it next to the daemon build when it changed. */
 function buildAcpRuntime() {
-  run(process.execPath, [path.join(sourceRoot, "frontend", "scripts", "build-acp-runtime.mjs")], path.join(sourceRoot, "frontend"));
+  // AO runs npm_execpath with Node, as npm sets it. Under `bun run package:win` it is bun.exe, which
+  // Node cannot run; without it AO falls back to npm.cmd (or npm).
+  const npmExecPath = /\.[cm]?js$/i.test(process.env.npm_execpath || "") ? process.env.npm_execpath : undefined;
+  run(process.execPath, [path.join(sourceRoot, "frontend", "scripts", "build-acp-runtime.mjs")], path.join(sourceRoot, "frontend"), {
+    npm_execpath: npmExecPath,
+  });
   const built = path.join(sourceRoot, "frontend", "resources", "acp-runtime");
   const marker = (directory) => {
     try { return fs.readFileSync(path.join(directory, ".ao-acp-runtime.json"), "utf8"); } catch { return ""; }
