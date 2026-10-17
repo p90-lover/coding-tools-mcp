@@ -984,6 +984,37 @@ test("launch falls back to the previous route when the helper can be neither ado
   assert.equal(setup.store.snapshot().routing.globalEnabled, true);
 });
 
+test("a gateway that could not start at launch is started again by the watchdog", async (t) => {
+  const setup = tempSetup(t);
+  await addUpstream(setup, t);
+  const first = controllerFor(setup, []);
+  await first.configure({ upstreamProfileId: "isp-upstream", port: await freePort(), tokenlessPort: await freePort() });
+  const started = await first.setUseForApp(true);
+  await first.close();
+  process.kill(started.helper.pid);
+  assert.ok(await waitFor(() => !processAlive(started.helper.pid)));
+
+  let blocked = true;
+  const relaunched = controllerFor(setup, [], {
+    restartBackoffBaseMs: 0,
+    resolveRuntime: () => {
+      if (blocked) throw new Error("The bundled runtime is not installed yet");
+      return { executable: process.execPath, args: [], env: {}, kind: "node" };
+    },
+  });
+  const failed = await relaunched.startup();
+  assert.equal(failed.running, false);
+  assert.equal(setup.store.snapshot().routing.globalProfileId, "proxybridge-local-17891");
+  blocked = false;
+  await relaunched.watchdogTick();
+  const status = await relaunched.status();
+  assert.equal(status.running, true, "the watchdog retried the launch that failed");
+  // CPA reaches the gateway directly; the app's own traffic stays on the route it fell back to.
+  assert.equal(setup.store.snapshot().routing.globalProfileId, "proxybridge-local-17891");
+  await relaunched.setUseForApp(false);
+  await relaunched.setRunning(false);
+});
+
 test("concurrent gateway starts spawn one helper", async (t) => {
   const setup = tempSetup(t);
   await addUpstream(setup, t);
