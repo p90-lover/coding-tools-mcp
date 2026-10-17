@@ -93,6 +93,22 @@ test("actual upstream observe exposes bounded current streaming output separatel
   await assert.rejects(upstream.observe("bad/session"), /valid AO session ID/);
 });
 
+test("observe shows the reply of a turn that ended while AO still flagged it as streaming", async () => {
+  // Seen live: a provider error ended the turn mid-stream and AO kept streaming=true on its reply.
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {
+      turns: [{ id: "t", state: "failed", errorMessage: "provider error" }],
+      messages: [
+        { id: "m0", role: "user", turnId: "t", sequence: 1, text: "the prompt" },
+        { id: "m1", role: "assistant", turnId: "t", sequence: 2, text: "API Error: Request rejected (429)", streaming: true },
+      ],
+    } : { session: { id: "s", mode: "chat", status: "idle" } },
+  });
+  const observed = await upstream.observe("s");
+  assert.equal(observed.answer, "API Error: Request rejected (429)");
+  assert.equal(JSON.stringify(observed.timeline.map((item) => item.status)), '["completed"]');
+});
+
 test("observe returns the current turn's reasoning, tool calls and messages in order", async () => {
   const upstream = observeHarness({
     internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {

@@ -1209,6 +1209,7 @@ interface ChatGptAssistantTurnBinding {
   identity: string;
   locator: Locator;
   acceptedTurnIdentities: readonly string[];
+  acceptedUserTurnCount: number;
 }
 
 interface ChatGptSubmissionDomState {
@@ -1377,6 +1378,28 @@ export function chatGptReboundTurnIdentity(
 ): string | undefined {
   if (current.includes(boundIdentity)) return boundIdentity;
   return chatGptNewTurnIdentity(initial, current);
+}
+
+/**
+ * Where a bound assistant turn lives after its DOM node went away. ChatGPT re-keys a temporary
+ * chat's turns when the answer completes: the user and assistant turns get new data-turn-ids
+ * while their count stays the same. That is still the bound answer, now the newest assistant
+ * turn. Only an added user turn means ChatGPT moved on without it.
+ */
+export function chatGptDetachedTurnIdentity(
+  initial: readonly string[],
+  binding: { identity: string; acceptedTurnIdentities: readonly string[]; acceptedUserTurnCount: number },
+  state: { userIdentities: readonly string[]; responseIdentities: readonly string[] },
+): string | undefined {
+  const accepted = new Set(binding.acceptedTurnIdentities);
+  const rekeyed = state.userIdentities.some(identity => !accepted.has(identity));
+  if (rekeyed && state.userIdentities.length > binding.acceptedUserTurnCount) {
+    throw new Error("ChatGPT opened another user turn while the bound assistant response was detached");
+  }
+  if (rekeyed && !state.responseIdentities.includes(binding.identity)) {
+    return state.responseIdentities.at(-1);
+  }
+  return chatGptReboundTurnIdentity(initial, binding.identity, state.responseIdentities);
 }
 
 export class ChatGptCompletionTracker {
@@ -2866,6 +2889,7 @@ export class ChatGptBrowserWorker {
         identity,
         locator: observationPage.locator(`[data-turn-id=${JSON.stringify(identity)}], [data-turn-key=${JSON.stringify(identity)}]`),
         acceptedTurnIdentities: state.turnIdentities,
+        acceptedUserTurnCount: state.userIdentities.length,
       };
       // A delayed renderer wake can cross the grace while the assistant appears. Only a fresh
       // observation can prove it is still missing; the explicit turn deadline remains above.
@@ -2896,20 +2920,13 @@ export class ChatGptBrowserWorker {
       throw new Error(`ChatGPT exposed ${boundCount} DOM nodes for the bound assistant turn`);
     }
     const state = await this.submissionDomState(page, baseline.domCache, signal);
-    const acceptedTurns = new Set(binding.acceptedTurnIdentities);
-    if (state.userIdentities.some(identity => !acceptedTurns.has(identity))) {
-      throw new Error("ChatGPT opened another user turn while the bound assistant response was detached");
-    }
-    const identity = chatGptReboundTurnIdentity(
-      baseline.initialTurnIdentities,
-      binding.identity,
-      state.responseIdentities,
-    );
+    const identity = chatGptDetachedTurnIdentity(baseline.initialTurnIdentities, binding, state);
     if (!identity || identity === binding.identity) return binding;
     return {
       identity,
       locator: page.locator(`[data-turn-id=${JSON.stringify(identity)}], [data-turn-key=${JSON.stringify(identity)}]`),
       acceptedTurnIdentities: state.turnIdentities,
+      acceptedUserTurnCount: state.userIdentities.length,
     };
   }
 

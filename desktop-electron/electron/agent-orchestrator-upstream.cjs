@@ -251,13 +251,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
    * in AO sequence order. Bounded to the newest 40 items so a long turn stays a small IPC frame;
    * the prompt (user message) is left out because the chat already shows it.
    */
-  function turnTimeline(conversation, turnId) {
+  function turnTimeline(conversation, turnId, turnOver = false) {
     if (typeof turnId !== "string") return [];
     const items = [
       ...(Array.isArray(conversation?.messages) ? conversation.messages : [])
         .filter(message => message.turnId === turnId && message.role === "assistant" && typeof message.text === "string" && message.text.trim())
         .map(message => ({ id: String(message.id), sequence: Number(message.sequence) || 0, kind: "message",
-          status: message.streaming ? "running" : "completed", text: utf8Prefix(message.text.trim(), 4096) })),
+          status: message.streaming && !turnOver ? "running" : "completed", text: utf8Prefix(message.text.trim(), 4096) })),
       ...(Array.isArray(conversation?.activities) ? conversation.activities : [])
         .filter(activity => activity.turnId === turnId && typeof activity.activityKind === "string")
         .map(activity => activity.activityKind === "system" && activity.detail?.event === "steer" && typeof activity.detail.text === "string"
@@ -288,7 +288,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       conversation = await internalApi("GET",
         `/api/v1/sessions/${sessionId(id)}/conversation?limit=60&beforeSequence=${Number(conversation.oldestSequence)}`).catch(() => null);
     }
-    return turnTimeline(merged, turnId);
+    // An earlier turn has ended; a message AO left flagged as streaming is its final text.
+    return turnTimeline(merged, turnId, true);
   }
   // claude-agent-acp reports every tool call, its own Read/Grep/PowerShell included, as AO's
   // "mcp_tool"; the ACP tool kind says what it did. A real MCP server's tool is named mcp__<server>__.
@@ -633,15 +634,19 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         return { status: session?.session?.status, turnId: expectedTurn, turnState: "queued", needsInput: false, exited: false,
           answer: "", liveOutput: "", timeline: [], approvals: [] };
       }
+      // A turn that has ended can leave its last message flagged as streaming (a provider error
+      // ended it mid-stream). That text is final: counting only settled messages left the answer
+      // empty, so the chat showed no reply although AO had stored one.
+      const turnOver = TERMINAL_TURN_STATES.has(turn?.state);
       const answer = (Array.isArray(conversation?.messages) ? conversation.messages : [])
-        .filter(message => message.role === "assistant" && message.turnId === turn?.id && !message.streaming)
+        .filter(message => message.role === "assistant" && message.turnId === turn?.id && (!message.streaming || turnOver))
         .map(message => message.text).join("\n\n").trim();
       // Streaming is display-only evidence for this owned session's current turn.
       const liveOutput = (Array.isArray(conversation?.messages) && typeof turn?.id === "string" ? conversation.messages : [])
         .filter(message => message.role === "assistant" && message.turnId === turn.id && typeof message.text === "string")
         .map(message => message.text).join("\n\n").trim();
       const status = session?.session?.status;
-      const timeline = turnTimeline(conversation, turn?.id);
+      const timeline = turnTimeline(conversation, turn?.id, turnOver);
       // A chat turn whose host process is gone (e.g. killed with the app during an update) stays
       // "running" in AO forever. Settle it through AO's own interrupt path so the card can retry.
       // The reason is reported again for a turn already settled that way (a display-only read may

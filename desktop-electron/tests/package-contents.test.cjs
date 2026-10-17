@@ -19,7 +19,7 @@ const {
   bundledUpstreamSourcePath,
 } = require("../scripts/verify-package.cjs");
 
-const PRODUCT_VERSION = "0.7.0-rc.15";
+const PRODUCT_VERSION = "0.7.0-rc.16";
 const SOURCE_SHA = "a".repeat(40);
 
 function sha256(bytes) {
