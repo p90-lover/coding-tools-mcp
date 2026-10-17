@@ -1004,6 +1004,8 @@ export function AgentOrchestratorChat({
               { label: "Cloud", icon: "share", reason: "No cloud runner is set up; chats run on this computer" },
             ] }))}>
             <ChatGlyph name="monitor" size={13} />This computer<span className="cx-chip-caret" aria-hidden="true">⌄</span></button>
+          {/* The project's branch sits with where the chat runs, as in Claude Code's start bar. */}
+          <ChatBranchBar inline workspaceId={projectId} />
           <span className="cx-head-spacer" />
           <button type="button" className="cx-chip-icon" aria-label="Configure local environment" title="Configure local environment" aria-haspopup="menu"
             onClick={(event) => toggleMenu(event.currentTarget, (box) => ({ x: box.right - 260, y: box.top - 116, label: "Configure local environment", items: [
@@ -1088,7 +1090,7 @@ export function AgentOrchestratorChat({
           return runOpen && latest?.execution_mode === "single" && running && picked && picked !== running
             ? <p className="cx-route-note" role="status">This turn is running on <b>{running}</b>; your next message uses <b>{picked}</b>.</p> : null;
         })()}
-        <ChatBranchBar workspaceId={projectId} sessionId={selectedTaskId ? agentSessions[0]?.id : undefined} />
+        {selectedTaskId ? <ChatBranchBar workspaceId={projectId} sessionId={agentSessions[0]?.id} /> : null}
         <form className="cx-composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}
           onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
           onDrop={(event) => { if (event.dataTransfer.files.length) { event.preventDefault(); void addFiles(event.dataTransfer.files); } }}>

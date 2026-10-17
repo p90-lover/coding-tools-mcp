@@ -1131,6 +1131,10 @@ function createProxyGatewayController({
       fail(error);
       logger.warn("proxy_gateway.startup_failed", { message: lastError.message });
       if (routed) await leaveGatewayRoute("startup_failed", { apply: false });
+      // The watchdog retries it (with its backoff). Without this it saw no helper and nothing
+      // pending and never tried again: a launch while the old app's relay still held the ports
+      // left every CPA model failing with "proxyconnect" until the gateway was restarted by hand.
+      if (settings.enabled) restartPending = true;
     }
     startWatchdog();
     return status();
