@@ -24,6 +24,12 @@ const meter = load("ChatContextMeter.tsx", { "./ao-chat": chat, "./ChatMenu": me
   "../api/client": { getCodingToolsClient: () => ({ apps: { call: async () => ({ result: { sessions: {} } }) } }) } });
 const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
   "./ChatContextMeter": meter,
+  "./codex-prompts": load("codex-prompts.ts"),
+  // The branch bar reads git asynchronously and renders nothing until then, as here; composer
+  // controls and approval cards render only when a composer or an approval is passed.
+  "./ChatBranchBar": { ChatBranchBar: () => null },
+  "./AgentOrchestratorComposerControls": { AgentOrchestratorComposerControls: () => null },
+  "./AgentOrchestratorApproval": { AgentOrchestratorApproval: () => null },
   // The side panel opens on demand; the chat only needs its auto-open hook to exist here.
   "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => {} },
   "./ChatThreadList": load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu }) });
