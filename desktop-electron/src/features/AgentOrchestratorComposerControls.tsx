@@ -3,7 +3,7 @@ import type { KeyboardEvent, ReactNode } from "react";
 import { Icon } from "../icons";
 import {
   capabilityText, contextText, harnessLabel, parseTokens, rememberCpaProviders, routeTuning,
-  NATIVE_HARNESS, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, WEB_ROUTE, isWebModel, modelLabel, nativePermission, workerRoute, withTuning,
+  NATIVE_HARNESS, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, WEB_ROUTE, isWebModel, modelLabel, modelShortLabel, nativePermission, workerRoute, withTuning,
   type AoHarness, type AoModelCapabilities, type AoModelCatalog, type AoModelLoader, type AoRoute, type AoTeam,
 } from "./AgentOrchestratorRoleEditor";
 import { HarnessLogo } from "./HarnessLogo";
@@ -72,8 +72,8 @@ function ChipMenu({ label, ariaLabel, title, disabled, className = "", popupClas
 }
 
 /** An option row in a chip menu: a radio mark, its text, and a check when it is the pick. */
-function Option({ picked, disabled, onPick, children }: { picked: boolean; disabled: boolean; onPick: () => void; children: ReactNode }) {
-  return <button type="button" role="radio" aria-checked={picked} className="ao-picker-option" disabled={disabled} onClick={onPick}>
+function Option({ picked, disabled, onPick, title, children }: { picked: boolean; disabled: boolean; onPick: () => void; title?: string; children: ReactNode }) {
+  return <button type="button" role="radio" aria-checked={picked} className="ao-picker-option" disabled={disabled} onClick={onPick} title={title}>
     <span className="ao-option-radio" aria-hidden="true" /><span>{children}</span>{picked ? <Icon name="check" width="16" height="16" /> : null}
   </button>;
 }
@@ -106,7 +106,18 @@ export function AgentOrchestratorComposerControls({
     return () => { live = false; };
   }, [mode, route.harness_id, loadModels]);
   const selectedTeam = teams.find(team => team.id === teamId);
-  const matching = (models ?? []).filter(model => model !== "default" && (model.toLowerCase().includes(search.toLowerCase()) || modelLabel(model).toLowerCase().includes(search.toLowerCase())));
+  // Native Codex runs a bare non-WebGPT id through the CPA pool; the labels need to know which.
+  const viaPool = (model: string) => route.harness_id === NATIVE_HARNESS && !isWebModel(model);
+  const query = search.toLowerCase();
+  // Search reads the id, the full label and the short name, so shortening never hides a model.
+  const matching = (models ?? []).filter(model => model !== "default" && [model, modelLabel(model, viaPool(model)), modelShortLabel(model, viaPool(model)).name]
+    .some(text => text.toLowerCase().includes(query)));
+  // Rows sit under their provider ("Claude · CPA"), in the order the catalog first lists each one.
+  const groups = new Map<string, string[]>();
+  for (const model of matching) {
+    const group = modelShortLabel(model, viaPool(model)).group;
+    groups.set(group, [...(groups.get(group) ?? []), model]);
+  }
   const harness = harnesses.find(item => item.id === route.harness_id);
   const harnessName = harness?.label ?? harnessLabel(route.harness_id, harnesses);
   const capability = caps[route.model];
@@ -121,6 +132,10 @@ export function AgentOrchestratorComposerControls({
   const baseModel = route.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
   const unlisted = Boolean(route.model) && models !== null && models.length > 0 && !models.includes(route.model) && !models.includes(baseModel);
   const modelName = modelLabel(route.model, route.provider_id === "cliproxyapi-antigravity") || "Choose model";
+  // The chip shows the short name and, for a CPA model, who serves it ("Opus 4.6 Thinking · Claude"):
+  // the same model can come from two providers. The full label stays in its tooltip.
+  const chipModel = modelShortLabel(route.model, route.provider_id === "cliproxyapi-antigravity");
+  const chipProvider = chipModel.group.endsWith(" · CPA") ? chipModel.group.slice(0, -" · CPA".length) : "";
   return <div className="ao-composer-controls">
     {permissions}
     <div className="ao-mode-switch" role="group" aria-label="Who answers">
@@ -147,16 +162,26 @@ export function AgentOrchestratorComposerControls({
         </div>}
       </ChipMenu>
       <ChipMenu heading="Model" popupClass="ao-model-popup" ariaLabel="Choose model" disabled={busy} className={unlisted ? "is-warning" : ""}
-        title={unlisted ? `${modelName} is not offered right now; choose another model` : undefined}
-        label={<span>{modelName}{unlisted ? <span className="ao-chip-unavailable"> · not available</span> : null}</span>}>
+        title={unlisted ? `${modelName} is not offered right now; choose another model` : route.model ? modelName : undefined}
+        label={<span>{route.model ? chipModel.name : modelName}{chipProvider ? <span className="ao-chip-provider"> · {chipProvider}</span> : null}
+          {unlisted ? <span className="ao-chip-unavailable"> · not available</span> : null}</span>}>
         {(close) => <>
           <input className="ao-model-search" type="search" aria-label="Search models" placeholder="Search models…" value={search} onChange={event => setSearch(event.target.value)} />
           <div className="ao-model-options" role="radiogroup" aria-label="Available models">
-            {models === null ? <p role="status">Loading models…</p> : matching.map(model => <Option key={model} picked={route.model === model} disabled={busy}
-              onPick={() => { onRouteChange(withTuning(workerRoute(route.harness_id, model, nativePermission(route)), route)); close(); }}>
-              {modelLabel(model, route.harness_id === NATIVE_HARNESS && !isWebModel(model))}
-              {capabilityText(caps[model], route.harness_id === NATIVE_HARNESS && isWebModel(model)) ? <small>{capabilityText(caps[model], route.harness_id === NATIVE_HARNESS && isWebModel(model))}</small> : null}
-            </Option>)}
+            {models === null ? <p role="status">Loading models…</p> : [...groups].map(([group, items]) => <div key={group || "own"} className="ao-model-group" role="group" aria-label={group || harnessName}>
+              {group ? <h4 aria-hidden="true">{group}</h4> : null}
+              {items.map(model => {
+                const full = capabilityText(caps[model], route.harness_id === NATIVE_HARNESS && isWebModel(model));
+                // Rows name the model only: its efforts and window are in the tooltip and in the
+                // effort and window chips once picked. "Paused" stays visible: it decides whether it runs.
+                return <Option key={model} picked={route.model === model} disabled={busy}
+                  title={[modelLabel(model, viaPool(model)), model, full].filter(Boolean).join("\n")}
+                  onPick={() => { onRouteChange(withTuning(workerRoute(route.harness_id, model, nativePermission(route)), route)); close(); }}>
+                  {modelShortLabel(model, viaPool(model)).name}
+                  {caps[model]?.paused ? <small>paused by CPA for now</small> : null}
+                </Option>;
+              })}
+            </div>)}
             {models !== null && !matching.length ? <p role="status">{error || "No matching models available from this runtime."}</p> : null}
           </div>
         </>}

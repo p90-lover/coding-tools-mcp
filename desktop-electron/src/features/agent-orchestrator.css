@@ -457,6 +457,10 @@
 .ao-workflow .ao-option-radio { flex: 0 0 14px; width: 14px; height: 14px; border: 1px solid #8496ac; border-radius: 50%; }
 .ao-workflow .ao-picker-option[aria-checked="true"] .ao-option-radio { border-color: #1677ff; box-shadow: inset 0 0 0 3px #fff; background: #1677ff; }
 .ao-workflow .ao-picker-option small { display: block; margin-top: 5px; color: #7b899e; font-size: 11px; }
+/* The model list names each provider once, above its models, instead of in every row. */
+.ao-workflow .ao-model-group + .ao-model-group { margin-top: 6px; }
+.ao-workflow .ao-model-group > h4 { margin: 6px 8px 2px; color: #7b899e; font-size: 11px; font-weight: 600; letter-spacing: .02em; }
+.ao-workflow .ao-chip-provider { color: #7b899e; }
 .ao-workflow .ao-permissions-panel { width: min(390px, calc(100vw - 40px)); padding: 8px 6px 6px; border-radius: 14px; }
 .ao-workflow .ao-permissions-panel > header { display: flex; align-items: center; justify-content: space-between; margin: 0 8px 4px; }
 .ao-workflow .ao-permissions-panel > header h3 { margin: 0; color: #8a8f98; font-size: 12.5px; font-weight: 400; }

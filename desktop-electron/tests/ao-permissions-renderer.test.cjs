@@ -109,7 +109,10 @@ test("WebGPT locks the harness; its model menu offers Native Codex's CPA models,
   assert.equal(menuNamed(tree, "Harness").props.disabled, true, "a WebGPT model keeps the harness on Native Codex");
   const rows = optionsIn(menuNamed(tree, "Model"));
   assert.equal(rows.length, 2);
-  rows.find(row => text(row.props.children).includes("actual-local-model")).props.onPick();
+  // A pool row shows the tidied name; its tooltip keeps the exact id.
+  const pool = rows.find(row => text(row.props.children).includes("Actual Local Model"));
+  assert.match(pool.props.title, /actual-local-model/);
+  pool.props.onPick();
   assert.equal(routes[0].harness_id, "codex-native");
   assert.equal(routes[0].provider_id, "cliproxyapi-antigravity");
   assert.equal(routes[0].model, "actual-local-model");

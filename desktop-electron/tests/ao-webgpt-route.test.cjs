@@ -144,3 +144,18 @@ test("CPA models are labelled CPA, then their provider, then the model name", ()
   editor.rememberCpaProviders({ "cpa/gemini-3.8-flash-high": { provider: "antigravity" } });
   assert.equal(editor.modelLabel("cpa/gemini-3.8-flash-high"), "CPA · Antigravity · gemini-3.8-flash-high", "the provider CPA reported wins");
 });
+
+test("model list rows name the provider once in a group and tidy the model's own name", () => {
+  for (const [id, name] of [
+    ["claude-opus-4-6-thinking", "Opus 4.6 Thinking"], ["claude-sonnet-5-5-high", "Sonnet 5.5 High"],
+    ["gpt-5.6-terra", "GPT-5.6 Terra"], ["gpt-oss-120b-medium", "GPT OSS 120b Medium"], ["deepseek-v4-pro", "DeepSeek V4 Pro"],
+    ["kimi-k2.7-code", "Kimi K2.7 Code"], ["glm-5.3-flash", "GLM 5.3 Flash"], ["mimo-v2.5-pro", "MiMo V2.5 Pro"],
+    ["minimax-m3", "MiniMax M3"], ["qwen3.7-max", "Qwen3.7 Max"], ["gemini-3.1-flash-lite", "Gemini 3.1 Flash Lite"],
+  ]) assert.equal(editor.prettyModelName(id), name, id);
+  assert.deepEqual(plain(editor.modelShortLabel("chatgpt-web/extra-high")), { group: "WebGPT", name: "Extra High" });
+  assert.deepEqual(plain(editor.modelShortLabel("cpa/cline-pass/kimi-k3")), { group: "Cline Pass · CPA", name: "Kimi K3" });
+  assert.deepEqual(plain(editor.modelShortLabel("gpt-6-luna", true)), { group: "OpenAI · CPA", name: "GPT-6 Luna" }, "a Native Codex pool id");
+  assert.deepEqual(plain(editor.modelShortLabel("gpt-6-luna")), { group: "", name: "gpt-6-luna" }, "an agent's own model keeps its id");
+  // The full label is unchanged: cards and hints still say exactly which route runs.
+  assert.equal(editor.modelLabel("cpa/cline-pass/kimi-k3"), "CPA · Cline Pass · kimi-k3");
+});
