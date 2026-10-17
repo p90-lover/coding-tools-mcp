@@ -35,7 +35,8 @@ test("launcher publishes native packages for all supported desktop operating sys
     manifest.build.mac.signIgnore,
     ["[/\\\\]Contents[/\\\\]Resources[/\\\\]runtime[/\\\\]runtime[/\\\\]bun$"],
   );
-  assert.deepEqual(manifest.build.win.target, ["nsis"]);
+  // The zip is the portable app: unzip anywhere and run Coding Tools.exe, no installer.
+  assert.deepEqual(manifest.build.win.target, ["nsis", "zip"]);
   assert.equal(manifest.build.win.icon, "assets/icon.ico");
   assert.deepEqual(manifest.build.linux.target, ["AppImage"]);
   assert.ok(manifest.build.files.includes("assets/icon.png"));
