@@ -5,6 +5,7 @@ import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { ChatWorkbench, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
+import { ChatBranchBar } from "./ChatBranchBar";
 import { ChatContextMeter } from "./ChatContextMeter";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
@@ -1087,6 +1088,7 @@ export function AgentOrchestratorChat({
           return runOpen && latest?.execution_mode === "single" && running && picked && picked !== running
             ? <p className="cx-route-note" role="status">This turn is running on <b>{running}</b>; your next message uses <b>{picked}</b>.</p> : null;
         })()}
+        <ChatBranchBar workspaceId={projectId} sessionId={selectedTaskId ? agentSessions[0]?.id : undefined} />
         <form className="cx-composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}
           onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
           onDrop={(event) => { if (event.dataTransfer.files.length) { event.preventDefault(); void addFiles(event.dataTransfer.files); } }}>

@@ -1151,6 +1151,18 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       if (!projectId) return { ok: true, shared: [], farmed: [] };
       return { ok: true, ...await dependencyLinks.inEffect(projectId) };
     }
+    // The composer's branch bar: the project's branches and the one this chat works on (its own
+    // worktree's, once AO has made it). Read-only; with AO stopped it still lists the folder's.
+    if (operation === "chat_branches") {
+      if (!workspaceBoard?.branches) throw new Error("Coding Tools mission service is unavailable");
+      let chatRoot = null;
+      if (state === "ready" && typeof args.sessionId === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(args.sessionId)) {
+        const location = await requestApi("GET", `/api/v1/desktop/sessions/${sessionId(args.sessionId)}/workspace`).catch(() => null);
+        const root = location?.ok ? location.data?.workspacePath : null;
+        if (typeof root === "string" && path.isAbsolute(root)) chatRoot = root;
+      }
+      return { ok: true, ...await workspaceBoard.branches(args.workspaceId, chatRoot) };
+    }
     // Where a project's chats work (the Edit project dialog): each in its own git worktree (the
     // default), all in one shared worktree, or in the project folder itself. AO keeps it in the
     // project's config (workspaceMode) and never removes a shared worktree or the folder. Without

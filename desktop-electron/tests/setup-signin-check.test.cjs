@@ -18,7 +18,7 @@ test("Setup checks the ChatGPT sign-in by itself while it shows Sign in", () => 
   assert.match(handler, /currentOperation\?\.\(\) \|\| browserHost\.activeTraceId/);
   // The first look asks /api/auth/session without navigating; only a signed-in session is refreshed.
   const readiness = handler.indexOf("authenticationReadiness()");
-  const refresh = handler.indexOf("refreshBrowserAuthentication(");
+  const refresh = handler.indexOf("browserHost.refreshAuthentication()");
   assert.ok(readiness > 0 && refresh > readiness, "readiness is checked before any refresh");
   assert.match(handler, /readiness\?\.authenticated !== true\) return browserHost\.snapshot\(\)/);
   // The Setup page polls only while not signed in, and tolerates an older preload.
