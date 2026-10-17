@@ -446,6 +446,18 @@ export type ChatTurn = {
   startedAtMs?: number;
 };
 
+/**
+ * A working card's turn so far. AO harness cards report a timeline; Native Codex cards (WebGPT and
+ * the CPA pool) report only the reply streamed so far (`output`), which the chat used to drop, so a
+ * reply showed nothing but "working" until the turn ended. That text now shows as the running message.
+ */
+export function liveTimeline(key: string, live: ChatActivity | undefined): ChatLiveItem[] {
+  const timeline = live?.timeline ?? [];
+  const output = live?.output?.trim();
+  if (!output || timeline.some(item => item.kind === "message")) return timeline;
+  return [...timeline, { id: `${key}:live`, kind: "message", status: "running", text: output }];
+}
+
 function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: number): ChatStep {
   const key = `${run.id}:${node.id}`;
   const step: ChatStep = {
@@ -460,8 +472,9 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
   if (node.state === "running" || node.state === "reserved") {
     const live = options.activity?.[key];
     const working = chatWorkingDetail(node, live, now);
+    const timeline = liveTimeline(key, live);
     step.working = { ...working, ...(live?.activity ? { activity: live.activity } : {}),
-      ...(live?.timeline?.length ? { timeline: live.timeline } : {}) };
+      ...(timeline.length ? { timeline } : {}) };
   }
   return step;
 }

@@ -82,7 +82,7 @@ test("Native Codex lists WebGPT even without CPA and never reads AO catalogs", a
   });
   const result = await workflow.call("models", { harness: "codex-native" });
   assert.equal(result.harness, "codex-native");
-  assert.equal(result.models.length, 7);
+  assert.equal(result.models.length, 5, "ChatGPT's five effort tiers; Luna and Think are not offered");
   assert.ok(result.models.every(id => id.startsWith("chatgpt-web/")));
   assert.deepEqual({ ...result.capabilities }, {}, "no CPA, so no pool models or capabilities");
 });
