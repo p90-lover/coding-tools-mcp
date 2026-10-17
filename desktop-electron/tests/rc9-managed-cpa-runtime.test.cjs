@@ -37,14 +37,14 @@ test("CPA is the fifth app-managed component and external service", () => {
   assert.match(surface, /Start CPA \/ CLIProxyAPI/);
 });
 
-test("CPA uses checksum-pinned official v8.0.2 binaries on every supported desktop platform", () => {
+test("CPA uses checksum-pinned official v8.0.32 binaries on every supported desktop platform", () => {
   const manifestPath = requireFile("desktop-electron/vendor/managed-components/cpa.json");
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 
   assert.equal(manifest.id, "cpa");
   assert.equal(manifest.name, "CPA / CLIProxyAPI");
   assert.equal(manifest.repository, "router-for-me/CLIProxyAPI");
-  assert.equal(manifest.version, "8.0.2");
+  assert.equal(manifest.version, "8.0.32");
   assert.equal(manifest.strategy, "release-binary");
   assert.equal(manifest.loopbackOnly, true);
   assert.equal(manifest.health.endpoint, "http://127.0.0.1:8317/v1/models");
@@ -52,16 +52,16 @@ test("CPA uses checksum-pinned official v8.0.2 binaries on every supported deskt
 
   const expected = {
     win32: {
-      x64: ["CLIProxyAPI_8.0.2_windows_amd64.zip", "75118e47d27d5446620a9e6b558ee54fa8377858c8c9b4cab7ba44b313aa10f2"],
-      arm64: ["CLIProxyAPI_8.0.2_windows_aarch64.zip", "28818ee9a504a89a2b239e0f0a714d2d395538492a9c64fd5a010db1e960df6b"],
+      x64: ["CLIProxyAPI_8.0.32_windows_amd64.zip", "df364b1f2dc9fe357f6a481bfb8a4066c3e5f5ef4ad7abfe45e59b4cec547c18"],
+      arm64: ["CLIProxyAPI_8.0.32_windows_aarch64.zip", "9e83b3f19f3359b52a1fe7acc763ed9285698a46d49caec650943d5b67e82010"],
     },
     linux: {
-      x64: ["CLIProxyAPI_8.0.2_linux_amd64.tar.gz", "7478ab50f5b59cb34911547b2b527275bd0bf64f52687588dcce65a386f244ad"],
-      arm64: ["CLIProxyAPI_8.0.2_linux_aarch64.tar.gz", "e790af5d63b6bd803c4173ef0d7dc8aaf8e5d66f822d28551c45fd5112918065"],
+      x64: ["CLIProxyAPI_8.0.32_linux_amd64.tar.gz", "082a4a38d9470c070ac85ab2d9c4a2aa51f9a7ee19831c3b811e26fe5b7480a7"],
+      arm64: ["CLIProxyAPI_8.0.32_linux_aarch64.tar.gz", "76aac452dd224490ea5ea1ea0224199d7a410f14ef39a087b81893d15c62f363"],
     },
     darwin: {
-      x64: ["CLIProxyAPI_8.0.2_darwin_amd64.tar.gz", "7f5d192bd92fd06d24c5e286b673e3fbd0b05fee69983729cdb20792b5a857a1"],
-      arm64: ["CLIProxyAPI_8.0.2_darwin_aarch64.tar.gz", "305424f9a67e12b1e0e37f772c0f960f946f0e3c385226ab481a12e50f0621ae"],
+      x64: ["CLIProxyAPI_8.0.32_darwin_amd64.tar.gz", "c327f421d995692f6590a752abd449db5e71df61803b7041e4d3bd59cd1e1bd8"],
+      arm64: ["CLIProxyAPI_8.0.32_darwin_aarch64.tar.gz", "48fe6a391a01e730ee6ebe3f1609ff92578a97a7a9a44579013ca8f3a6d58d51"],
     },
   };
 
@@ -72,7 +72,7 @@ test("CPA uses checksum-pinned official v8.0.2 binaries on every supported deskt
       assert.equal(asset?.sha256, sha256, `${platform}/${architecture} SHA-256`);
       assert.equal(
         asset?.url,
-        `https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.2/${fileName}`,
+        `https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.32/${fileName}`,
         `${platform}/${architecture} URL`,
       );
     }
