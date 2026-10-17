@@ -1752,15 +1752,29 @@ function registerIpc({ logger, stateStore }) {
     }
     return browser;
   });
-  handle("launcher:browser-refresh-auth", async () => {
+  const refreshBrowserAuthentication = async (reason) => {
     if (stateStore.read().browserInteractionMode === "manual") return browserHost.snapshot();
     const browser = await browserHost.refreshAuthentication();
     if (browser.authenticated) {
       const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
       send("launcher:state-changed", state);
-      scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "browser-refresh-auth" });
+      scheduleCodexBridgeAutoConnect({ logger, stateStore, reason });
     }
     return browser;
+  };
+  handle("launcher:browser-refresh-auth", () => refreshBrowserAuthentication("browser-refresh-auth"));
+  // Setup checks the sign-in on its own while it shows "Sign in". The first look asks
+  // /api/auth/session with the browser's cookies and does not navigate, so a sign-in in progress
+  // in the ChatGPT view is never interrupted; only a session that is signed in is then refreshed
+  // in the view. Nothing runs under a login, smoke test or turn.
+  handle("launcher:browser-check-auth", async () => {
+    const current = browserHost.snapshot();
+    if (stateStore.read().browserInteractionMode === "manual" || current?.authenticated === true
+      || browserHost.currentOperation?.() || browserHost.activeTraceId) return current;
+    const readiness = await browserHost.authenticationReadiness().catch(() => null);
+    if (readiness?.authenticated !== true) return browserHost.snapshot();
+    logger.info("browser.setup_signin_detected", { recent: readiness.recent === true });
+    return refreshBrowserAuthentication("setup-signin-check");
   });
   handle("launcher:browser-passkey-login", async () => {
     const browser = await browserHost.openPasskeyLogin();

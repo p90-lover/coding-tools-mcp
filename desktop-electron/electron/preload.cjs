@@ -55,6 +55,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   copyManualPrompt: (tabId) => ipcRenderer.invoke("launcher:manual-prompt-copy", tabId),
   confirmManualSent: (tabId) => ipcRenderer.invoke("launcher:manual-prompt-sent", tabId),
   openLogin: () => ipcRenderer.invoke("launcher:browser-login"),
+  checkSignIn: () => ipcRenderer.invoke("launcher:browser-check-auth"),
   gptBrowserStatus: () => ipcRenderer.invoke("launcher:gpt-browser-status"),
   addGptBrowserAccount: () => ipcRenderer.invoke("launcher:gpt-browser-add"),
   switchGptBrowserAccount: (id) => ipcRenderer.invoke("launcher:gpt-browser-switch", id),
