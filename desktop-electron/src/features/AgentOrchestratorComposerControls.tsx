@@ -13,6 +13,12 @@ const modelIds = (items: string[] | AoModelCatalog) => Array.isArray(items) ? it
 const modelCaps = (items: string[] | AoModelCatalog) => Array.isArray(items) ? {} : items.capabilities ?? {};
 /** The effort word Codex dims after the model name ("High", "Extra high"). */
 const effortWord = (effort?: string) => !effort ? "" : effort === "xhigh" ? "Extra high" : effort[0].toUpperCase() + effort.slice(1);
+/** The effort a model id carries itself ("gemini-3.8-flash-high", "gpt-oss-120b-medium", "…(high)"). */
+const ownEffort = (model: string) => /[-(](minimal|low|medium|high|xhigh|max)\)?$/i.exec(model)?.[1]?.toLowerCase();
+/** A chat's window when none is picked: 400K, kept inside what the model accepts. */
+export const DEFAULT_CONTEXT_WINDOW = 400_000;
+const defaultWindow = (context: { min: number; max?: number } | undefined) => !context ? null
+  : Math.max(context.min, Math.min(DEFAULT_CONTEXT_WINDOW, context.max ?? DEFAULT_CONTEXT_WINDOW));
 
 export type ComposerControlsProps = {
   mode: "single" | "team"; onModeChange: (mode: "single" | "team") => void;
@@ -99,9 +105,12 @@ export function AgentOrchestratorComposerControls({
       : loadModels(NATIVE_HARNESS).then(items => modelIds(items).filter(isWebModel), () => none);
     void Promise.all([loadModels(route.harness_id), web]).then(([catalog, webCatalog]) => {
       if (!live) return;
+      const loaded = { ...modelCaps(webCatalog), ...modelCaps(catalog) };
       setModels([...new Set([...modelIds(catalog), ...modelIds(webCatalog)])]);
-      setCaps({ ...modelCaps(webCatalog), ...modelCaps(catalog) });
-      rememberCpaProviders({ ...modelCaps(webCatalog), ...modelCaps(catalog) });
+      setCaps(loaded);
+      rememberCpaProviders(loaded);
+      const start = route.context_window ? null : defaultWindow(routeTuning(route, loaded[route.model]).context);
+      if (start) onRouteChange({ ...route, context_window: start });
     }).catch(cause => { if (live) { setModels([]); setError(cause instanceof Error ? cause.message : String(cause)); } });
     return () => { live = false; };
   }, [mode, route.harness_id, loadModels]);
@@ -121,21 +130,26 @@ export function AgentOrchestratorComposerControls({
   const harness = harnesses.find(item => item.id === route.harness_id);
   const harnessName = harness?.label ?? harnessLabel(route.harness_id, harnesses);
   const capability = caps[route.model];
-  const { efforts, context, fullLimit, presets, native } = routeTuning(route, models === null ? undefined : capability);
+  const { efforts, context, fullLimit, presets } = routeTuning(route, models === null ? undefined : capability);
   const effortUnsupported = Boolean(route.effort && efforts && !efforts.includes(route.effort));
   const setEffort = (effort: string | null) => { const next = { ...route }; if (effort) next.effort = effort; else delete next.effort; onRouteChange(next); };
   const setWindow = (tokens: number | null) => { const next = { ...route }; if (tokens) next.context_window = tokens; else delete next.context_window; onRouteChange(next); };
   const inRange = (tokens: number) => Boolean(context) && Number.isSafeInteger(tokens) && tokens >= context!.min && (context!.max === undefined || tokens <= context!.max);
-  const windowLabel = route.context_window ? contextText(route.context_window) : fullLimit ? contextText(fullLimit) : "Default";
+  // No "Default" window: a chat starts at 400K (or the model's limit, if lower). The model list sets
+  // it once it knows the model's range, and so does picking a model.
+  const startWindow = defaultWindow(context);
+  const windowLabel = contextText(route.context_window || startWindow || fullLimit || DEFAULT_CONTEXT_WINDOW);
+  // No "Default" effort either: unpicked, a model runs at its own effort, which the chip names
+  // when the model's id carries it ("Gemini 3.8 Flash High" -> High) and otherwise calls "Auto".
+  const modelEffort = ownEffort(route.model);
+  const effortLabel = route.effort ? effortWord(route.effort) : modelEffort ? effortWord(modelEffort) : "Auto";
   // A picked model the harness no longer offers (CPA dropped cline-pass/deepseek-v4.1-flash when
   // Cline stopped serving it) must not look as if it would run; the send is refused up front too.
   const baseModel = route.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
   const unlisted = Boolean(route.model) && models !== null && models.length > 0 && !models.includes(route.model) && !models.includes(baseModel);
   const modelName = modelLabel(route.model, route.provider_id === "cliproxyapi-antigravity") || "Choose model";
-  // The chip shows the short name and, for a CPA model, who serves it ("Opus 4.6 Thinking · Claude"):
-  // the same model can come from two providers. The full label stays in its tooltip.
+  // The chip shows the model's name only; who serves it is in the menu's groups and the tooltip.
   const chipModel = modelShortLabel(route.model, route.provider_id === "cliproxyapi-antigravity");
-  const chipProvider = chipModel.group.endsWith(" · CPA") ? chipModel.group.slice(0, -" · CPA".length) : "";
   // A WebGPT model is one ChatGPT effort, so the effort chip picks the WebGPT model and the model
   // list sets the effort: the two can never disagree (High model, Low effort).
   const tier = webTier(route.model);
@@ -143,6 +157,13 @@ export function AgentOrchestratorComposerControls({
     const next = withTuning(workerRoute(route.harness_id, model, nativePermission(route)), route);
     const picked = webTier(model);
     if (picked) next.effort = picked.effort;
+    const tuning = routeTuning(next, caps[model]);
+    const kept = next.context_window && tuning.context && next.context_window >= tuning.context.min
+      && (tuning.context.max === undefined || next.context_window <= tuning.context.max);
+    if (!kept) {
+      const start = defaultWindow(tuning.context);
+      if (start) next.context_window = start; else delete next.context_window;
+    }
     onRouteChange(next);
   };
   return <div className="ao-composer-controls">
@@ -154,9 +175,10 @@ export function AgentOrchestratorComposerControls({
         onClick={() => { if (mode !== option) onModeChange(option); }}>{option === "single" ? "Single" : "Team"}</button>)}
     </div>
     {mode === "single" ? <>
-      <ChipMenu heading="Harness" popupClass="ao-tuning-popup" ariaLabel={`Harness: ${harnessName}`} disabled={busy || isWebModel(route.model)}
-        title={isWebModel(route.model) ? "WebGPT runs only on Native Codex" : "The agent that runs this chat"}
-        label={<><HarnessLogo harnessId={route.harness_id} label={harnessName} /><span>{harnessName}</span></>}>
+      {/* The harness shows only its logo; its name is in the tooltip and the accessible label. */}
+      <ChipMenu heading="Harness" popupClass="ao-tuning-popup" className="is-logo" ariaLabel={`Harness: ${harnessName}`} disabled={busy || isWebModel(route.model)}
+        title={isWebModel(route.model) ? `${harnessName} · WebGPT runs only on Native Codex` : `${harnessName} · the agent that runs this chat`}
+        label={<HarnessLogo harnessId={route.harness_id} label={harnessName} />}>
         {(close) => <div role="radiogroup" aria-label="Harnesses">
           {harnesses.map(item => <Option key={item.id} picked={item.id === route.harness_id} disabled={busy || !item.runnable} onPick={() => {
             // Each harness starts on an explicit model; one without a known model shows "Choose a model".
@@ -172,7 +194,7 @@ export function AgentOrchestratorComposerControls({
       </ChipMenu>
       <ChipMenu heading="Model" popupClass="ao-model-popup" ariaLabel="Choose model" disabled={busy} className={unlisted ? "is-warning" : ""}
         title={unlisted ? `${modelName} is not offered right now; choose another model` : route.model ? modelName : undefined}
-        label={<span>{route.model ? chipModel.name : modelName}{chipProvider ? <span className="ao-chip-provider"> · {chipProvider}</span> : null}
+        label={<span>{route.model ? chipModel.name : modelName}
           {unlisted ? <span className="ao-chip-unavailable"> · not available</span> : null}</span>}>
         {(close) => <>
           <input className="ao-model-search" type="search" aria-label="Search models" placeholder="Search models…" value={search} onChange={event => setSearch(event.target.value)} />
@@ -203,13 +225,15 @@ export function AgentOrchestratorComposerControls({
             onPick={() => { pickModel(item.model); close(); }}>{item.label}</Option>)}
         </div>}
       </ChipMenu> : <ChipMenu heading="Reasoning effort" popupClass="ao-tuning-popup" className={effortUnsupported ? "is-warning" : ""}
-        ariaLabel={`Reasoning effort: ${route.effort ? effortWord(route.effort) : "model default"}`}
+        ariaLabel={`Reasoning effort: ${effortLabel}`}
         disabled={busy || (!efforts?.length && !route.effort)}
-        title={!efforts ? capability?.effortReason || "This model's efforts are not known yet" : !efforts.length ? capability?.effortReason || "This model takes no effort setting" : "How hard the model thinks"}
-        label={<span>{route.effort ? effortWord(route.effort) : "Default"}</span>}>
+        title={!efforts ? capability?.effortReason || "This model's efforts are not known yet" : !efforts.length ? capability?.effortReason || "This model takes no effort setting"
+          : route.effort ? "How hard the model thinks" : "The model's own effort until you pick one"}
+        label={<span>{effortLabel}</span>}>
         {(close) => <div role="radiogroup" aria-label="Efforts">
-          <Option picked={!route.effort} disabled={busy} onPick={() => { setEffort(null); close(); }}>Model default<small>{native ? "The model's own level" : "Whatever the agent picks"}</small></Option>
-          {(efforts ?? []).map(effort => <Option key={effort} picked={route.effort === effort} disabled={busy} onPick={() => { setEffort(effort); close(); }}>{effortWord(effort)}</Option>)}
+          {/* Unpicked, the model's own effort shows as the pick; picking it again keeps it the model's own. */}
+          {(efforts ?? []).map(effort => <Option key={effort} picked={route.effort ? route.effort === effort : modelEffort === effort} disabled={busy}
+            onPick={() => { setEffort(!route.effort && modelEffort === effort ? null : effort); close(); }}>{effortWord(effort)}</Option>)}
           {effortUnsupported ? <p className="ao-popup-muted" role="status">{effortWord(route.effort)} is saved but this model does not take it; pick one above.</p> : null}
         </div>}
       </ChipMenu>}
@@ -217,11 +241,9 @@ export function AgentOrchestratorComposerControls({
         title={!context ? capability?.contextReason || "This agent's window cannot be set" : "How much of the conversation the agent keeps in view"}
         label={<span>{windowLabel}</span>}>
         {(close) => <div role="radiogroup" aria-label="Context windows">
-          <Option picked={!route.context_window} disabled={busy} onPick={() => { setWindow(null); close(); }}>
-            {fullLimit ? `Full model limit · ${contextText(fullLimit)}` : native ? "Model default" : "Agent default"}
-          </Option>
-          {presets.filter(tokens => tokens !== fullLimit).map(tokens => <Option key={tokens} picked={route.context_window === tokens} disabled={busy}
-            onPick={() => { setWindow(tokens); close(); }}>{contextText(tokens)}</Option>)}
+          {[...new Set([...presets, ...(fullLimit ? [fullLimit] : [])])].sort((a, b) => a - b).map(tokens => <Option key={tokens}
+            picked={(route.context_window || startWindow) === tokens} disabled={busy}
+            onPick={() => { setWindow(tokens); close(); }}>{contextText(tokens)}{tokens === fullLimit ? <small>full model limit</small> : null}</Option>)}
           <form className="ao-context-custom" onSubmit={event => {
             event.preventDefault();
             const tokens = parseTokens(contextDraft);

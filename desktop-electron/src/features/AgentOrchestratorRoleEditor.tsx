@@ -84,13 +84,12 @@ export function withTuning(next: AoRoute, previous: AoRoute): AoRoute {
   if (route.harness_id === NATIVE_HARNESS && previous.native_permission_profile !== undefined) route.native_permission_profile = previous.native_permission_profile;
   if (previous.approval_policy !== undefined) route.approval_policy = previous.approval_policy;
   if (previous.approvals_reviewer !== undefined) route.approvals_reviewer = previous.approvals_reviewer;
+  // A new model starts on its own effort: carrying the last one over gave DeepSeek and Gemini
+  // "effort high" because WebGPT High had been picked before. The window carries where it applies.
+  // (A WebGPT model sets its own effort: it is one ChatGPT effort.)
   delete route.effort;
   delete route.context_window;
   const betweenAgents = next.harness_id.startsWith("ao:") && previous.harness_id.startsWith("ao:");
-  const keepEffort = route.harness_id === NATIVE_HARNESS
-    ? EFFORTS.some(effort => effort === previous.effort)
-    : betweenAgents || effortApplies(route);
-  if (previous.effort && keepEffort) route.effort = previous.effort;
   if (previous.context_window && (betweenAgents || contextApplies(route))) route.context_window = previous.context_window;
   return route;
 }

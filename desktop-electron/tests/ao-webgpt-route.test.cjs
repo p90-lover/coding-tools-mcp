@@ -96,7 +96,7 @@ test("every harness lists the WebGPT models and marks that they switch to Native
 test("effort and context window carry over only where the new route applies them", () => {
   const native = { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web", model: "chatgpt-web/high", permission_profile: ":read-only", effort: "high", context_window: 262144 };
   const own = editor.withTuning(editor.workerRoute("ao:codex", "gpt-5.5"), native);
-  assert.equal(own.effort, "high", "an AO agent's own model takes effort");
+  assert.equal(own.effort, undefined, "a new model starts on its own effort, not WebGPT High's");
   assert.equal(own.context_window, undefined, "AO harnesses have no context window");
   const gateway = editor.withTuning(editor.workerRoute("ao:codex", "cpa/gpt-6-luna"), native);
   assert.equal(gateway.effort, undefined, "AO skips effort for gateway models");

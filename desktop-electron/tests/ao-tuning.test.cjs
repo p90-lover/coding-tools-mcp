@@ -76,7 +76,7 @@ test("legacy catalogs stay usable without inventing AO tuning support or erasing
   assert.equal(p.field("Context window").props.disabled, true);
   const model = walk(p.tree).find(item => item.type === "select" && item.props.value === "cpa/gpt");
   model.props.onChange({ target: { value: "cpa/next" } });
-  assert.equal(p.changes[0].effort, "high");
+  assert.equal(p.changes[0].effort, undefined, "a new model starts on its own effort");
   assert.equal(p.changes[0].context_window, 32768);
 });
 
@@ -130,22 +130,19 @@ test("Surface caches model capability catalogs for AO harnesses and Native Codex
 });
 
 
-test("AO-only efforts never cross into Native Codex; valid high, max and AO-to-AO tuning still carry over", async () => {
+test("a new model starts on its own effort; AO-to-AO context still carries over", async () => {
   const p = await picker(route(), ["cpa/gpt"]);
   const maxed = p.editor.withTuning(p.editor.workerRoute("ao:claude-code", "chatgpt-web/high"), { ...route("ao:claude-code", "cpa/fixture"), effort: "max" });
-  assert.equal(maxed.effort, "max", "Native Codex takes max, as Luna and Sol offer it");
-  for (const effort of ["none", "auto"]) {
+  assert.equal(maxed.effort, undefined, "no effort crosses to another model");
+  for (const effort of ["none", "auto", "high"]) {
     const previous = { ...route("ao:claude-code", "cpa/fixture"), effort, context_window: 32768 };
     const native = p.editor.withTuning(p.editor.workerRoute("ao:claude-code", "chatgpt-web/high"), previous);
     assert.equal(native.harness_id, "codex-native");
-    assert.equal(native.effort, undefined, `Native Codex does not accept ${effort}`);
+    assert.equal(native.effort, undefined, `${effort} does not cross into Native Codex`);
     const ao = p.editor.withTuning(route("ao:opencode", "cpa/next"), previous);
-    assert.equal(ao.effort, effort, "AO-to-AO requested effort is retained");
+    assert.equal(ao.effort, undefined, `${effort} does not cross to another AO model`);
     assert.equal(ao.context_window, 32768, "AO-to-AO client context is retained");
   }
-  const valid = p.editor.withTuning(p.editor.workerRoute("ao:codex", "chatgpt-web/high"),
-    { ...route(), effort: "high", context_window: 32768 });
-  assert.equal(valid.effort, "high", "valid Native effort carry-over remains unchanged");
 });
 
 test("model lists show a context size only when the catalog reported one, never the 2M client ceiling", async () => {

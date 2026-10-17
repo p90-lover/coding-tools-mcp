@@ -418,6 +418,13 @@
 .ao-workflow .ao-permissions { padding: 0; }
 .ao-workflow .ao-composer-chip { display: flex; align-items: center; gap: 8px; height: 32px; max-width: 300px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 8px; background: #fbfcfe; color: #22324b; font-size: 12px; cursor: pointer; }
 .ao-workflow .ao-composer-chip > span:nth-last-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A chip shrinks with its picker and cuts its own text short ("Gemini 3.8 Fl…"): the button kept
+   its full width inside a shrunken picker and its text ran over the next chip. */
+.ao-workflow .ao-composer-picker { flex: 0 1 auto; }
+.ao-workflow .ao-composer-chip { min-width: 0; max-width: min(300px, 100%); overflow: hidden; }
+.ao-workflow .ao-composer-chip > span:nth-last-child(2) { min-width: 0; }
+.ao-workflow .ao-composer-chip.is-logo { padding: 0 6px; gap: 3px; }
+.ao-workflow .ao-composer-chip.is-logo > :first-child { flex: none; }
 .ao-workflow .ao-composer-chip:hover:not(:disabled) { border-color: #bed6ff; background: #f4f8ff; }
 /* Harness, model, effort and window each get their own chip, as Claude Code lays them out. */
 .ao-workflow .ao-composer-controls .ao-composer-picker + .ao-composer-picker { margin-left: -2px; }
