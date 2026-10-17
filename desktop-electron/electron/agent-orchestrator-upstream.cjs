@@ -174,6 +174,20 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     });
     folderModeChecked.add(project.id);
   }
+  /** The project folder a folder-mode session works in, when it is this chat workspace's own; else null. */
+  async function folderModeRoot(session, root, workspaceId) {
+    if (!workspaceBoard || typeof workspaceId !== "string" || !workspaceId || typeof session?.projectId !== "string") return null;
+    const { projectId } = await workspaceBoard.project(workspaceId);
+    if (!projectId || projectId !== session.projectId) return null;
+    const project = (await internalApi("GET", `/api/v1/projects/${encodeURIComponent(projectId)}`))?.project;
+    if (!project || (project.kind && project.kind !== "single_repo") || project.config?.workspaceMode !== "folder") return null;
+    if (typeof project.path !== "string" || !path.isAbsolute(project.path)) return null;
+    const normal = (value) => {
+      const resolved = path.resolve(value).replace(/[\\/]+$/, "");
+      return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+    };
+    return normal(project.path) === normal(root) ? project.path : null;
+  }
   const workspaceBoard = typeof getWorkspaces === "function" && typeof missionCall === "function"
     ? createAoWorkspaceBoard({
       listWorkspaces: getWorkspaces, missionCall,
@@ -779,7 +793,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
      * false` before that, `ended` once the session is gone. Never starts AO; the path stays in
      * the main process.
      */
-    async sessionWorkspace(id) {
+    async sessionWorkspace(id, workspaceId = null) {
       const record = await requestApi("GET", `/api/v1/sessions/${sessionId(id)}`);
       if (record.status === 404) return { ended: true };
       if (!record.ok) throw new Error(aoErrorMessage(record));
@@ -790,7 +804,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       if (location.status === 404) return { ready: false };
       if (!location.ok) throw new Error(aoErrorMessage(location));
       const root = location.data?.workspacePath;
-      return typeof root === "string" && path.isAbsolute(root) ? { root } : { ready: false };
+      if (typeof root !== "string" || !path.isAbsolute(root)) return { ready: false };
+      // A project whose chats work in its own folder (workspaceMode "folder") runs its sessions
+      // there, not in a worktree. The chat's tools may use that folder only when the session is
+      // this chat workspace's own AO project, the project chose the folder, and AO reports exactly
+      // the project's path; any other session stays worktree-only.
+      const projectFolder = await folderModeRoot(session, root, workspaceId).catch(() => null);
+      return projectFolder ? { root, projectFolder } : { root };
     },
     /**
      * Live sessions with this display name that never ran a turn: pre-warmed ones nobody used,

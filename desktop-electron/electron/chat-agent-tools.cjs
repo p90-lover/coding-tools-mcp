@@ -918,7 +918,7 @@ function createChatAgentTools({
     if (typeof sessionWorkspace !== "function") throw new ScopeError("This chat's session workspace is unavailable.");
     let found;
     try {
-      found = await sessionWorkspace(entry.aoSession);
+      found = await sessionWorkspace(entry.aoSession, entry.workspaceId);
     } catch (error) {
       // AO did not answer; a worktree it reported before is still this session's.
       if (entry.root) return entry.root;
@@ -939,8 +939,16 @@ function createChatAgentTools({
       throw new ScopeError("This chat's session workspace is not ready yet; try again in a moment.");
     }
     const base = worktreesBase();
-    if (base && (!inside(base, real) || path.relative(base, real) === "")) {
-      // Only AO's own session worktrees are roots, never the user's checkout or anything else.
+    // A folder-mode project's session works in the project folder itself; AO's side (see
+    // sessionWorkspace) names it only for this chat workspace's own project, and only exactly it.
+    let folder = null;
+    if (typeof found?.projectFolder === "string" && path.isAbsolute(found.projectFolder)) {
+      try { folder = fs.realpathSync.native(found.projectFolder); } catch { folder = null; }
+    }
+    const inFolder = Boolean(folder) && path.relative(folder, real) === "";
+    if (base && !inFolder && (!inside(base, real) || path.relative(base, real) === "")) {
+      // Only AO's own session worktrees are roots, and a folder-mode project's own folder; never
+      // the user's checkout otherwise, or anything else.
       throw new ScopeError("This chat's session workspace is not one of AO's worktrees; its tools are unavailable.");
     }
     if (entry.root && path.relative(entry.root.path, reported) !== "") {

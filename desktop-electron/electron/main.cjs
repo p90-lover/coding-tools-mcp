@@ -2838,9 +2838,9 @@ async function start() {
           if (!headlessHost) throw new Error("Local Coding Tools runtime is unavailable");
           return headlessHost.request(endpoint, body, options);
         },
-        sessionWorkspace: (id) => {
+        sessionWorkspace: (id, workspaceId) => {
           if (!agentOrchestratorUpstream) throw new Error("Agent Orchestrator is unavailable");
-          return agentOrchestratorUpstream.harness.sessionWorkspace(id);
+          return agentOrchestratorUpstream.harness.sessionWorkspace(id, workspaceId);
         },
         worktreesRoot: aoWorktreesRoot,
         // Every command, sensitive operation and screen or window observation is the user's call,
