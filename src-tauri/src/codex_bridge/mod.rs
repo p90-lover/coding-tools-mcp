@@ -78,8 +78,12 @@ struct ThreadState {
     answer_truncated: bool,
     notice: Option<String>,
     effective_policy: Option<Value>,
+    /// The turn's agentMessage items since its last tool step, in order; `answer` joins them.
     #[serde(skip)]
-    item_id: String,
+    messages: Vec<MessageItem>,
+    /// A tool step ran since the last message, so the next message starts a new answer.
+    #[serde(skip)]
+    tool_step: bool,
     /// What the turn is doing now ("thinking", "running a command", ...): the kind of step only,
     /// never command text or file contents.
     activity: Option<String>,
@@ -88,6 +92,126 @@ struct ThreadState {
     last_event_at_ms: u64,
     /// When the thread was opened (Unix ms), so a turn that never starts shows how long it waited.
     started_at_ms: u64,
+}
+
+/// One agentMessage item of the current turn.
+#[derive(Clone, Default)]
+struct MessageItem {
+    id: String,
+    text: String,
+    /// Codex's "commentary" phase: progress notes, not the final answer.
+    commentary: bool,
+    truncated: bool,
+}
+
+/// Message items kept per turn; later ones are dropped and the answer is marked truncated.
+const MAX_MESSAGE_ITEMS: usize = 256;
+
+impl ThreadState {
+    /// Forgets the turn's messages, as a new turn or an inline review result does.
+    fn clear_messages(&mut self) {
+        self.messages.clear();
+        self.tool_step = false;
+        self.answer.clear();
+        self.answer_truncated = false;
+    }
+    /// The index of message `id`, added (with its phase when known) if it is new. A message after
+    /// a tool step starts a new answer, so a progress note before a tool call is not part of it.
+    fn message(&mut self, id: &str, phase: Option<&str>) -> Option<usize> {
+        let commentary = phase.map(|phase| phase == "commentary");
+        if let Some(index) = self.messages.iter().position(|item| item.id == id) {
+            if commentary.is_some_and(|commentary| commentary != self.messages[index].commentary) {
+                self.messages[index].commentary = commentary == Some(true);
+                self.rebuild_answer();
+            }
+            return Some(index);
+        }
+        if self.tool_step {
+            self.clear_messages();
+        }
+        if self.messages.len() >= MAX_MESSAGE_ITEMS {
+            // The text that cannot be kept is missing after the last kept message.
+            if let Some(last) = self.messages.last_mut() {
+                last.truncated = true;
+            }
+            self.answer_truncated = true;
+            return None;
+        }
+        self.messages.push(MessageItem {
+            id: id.into(),
+            commentary: commentary == Some(true),
+            ..Default::default()
+        });
+        // A first final-answer message replaces the commentary shown until then.
+        self.rebuild_answer();
+        Some(self.messages.len() - 1)
+    }
+    /// Whether the answer is the commentary: the turn has given no final-answer message so far.
+    fn only_commentary(&self) -> bool {
+        self.messages.iter().all(|item| item.commentary)
+    }
+    /// Whether message `index` is part of the answer.
+    fn answers(&self, index: usize) -> bool {
+        !self.messages[index].commentary || self.only_commentary()
+    }
+    /// Bytes left for message text across the turn.
+    fn message_room(&self) -> usize {
+        MAX_TEXT.saturating_sub(self.messages.iter().map(|item| item.text.len()).sum())
+    }
+    /// Streams `delta` into message `index`; the answer grows in place when it is the last one.
+    fn append_message(&mut self, index: usize, delta: &str) {
+        let kept = bounded(delta, self.message_room());
+        let item = &mut self.messages[index];
+        let was_empty = item.text.is_empty();
+        item.truncated |= kept.len() != delta.len();
+        item.text.push_str(&kept);
+        if index + 1 != self.messages.len() {
+            self.rebuild_answer();
+        } else if self.answers(index) {
+            let separator = if was_empty && !kept.is_empty() && !self.answer.is_empty() {
+                "\n\n"
+            } else {
+                ""
+            };
+            let piece = format!("{separator}{kept}");
+            let fits = bounded(&piece, MAX_TEXT.saturating_sub(self.answer.len()));
+            self.answer_truncated |= kept.len() != delta.len() || fits.len() != piece.len();
+            self.answer.push_str(&fits);
+        }
+    }
+    /// Replaces message `index` with its completed text.
+    fn complete_message(&mut self, index: usize, text: &str) {
+        self.messages[index].text.clear();
+        let kept = bounded(text, self.message_room());
+        let item = &mut self.messages[index];
+        item.truncated = kept.len() != text.len();
+        item.text = kept;
+        self.rebuild_answer();
+    }
+    /// The answer: the answering messages joined in order with a blank line.
+    fn rebuild_answer(&mut self) {
+        let only_commentary = self.only_commentary();
+        let mut answer = String::new();
+        let mut truncated = false;
+        for item in &self.messages {
+            if item.text.is_empty() || (item.commentary && !only_commentary) {
+                continue;
+            }
+            truncated |= item.truncated;
+            let separator = if answer.is_empty() { "" } else { "\n\n" };
+            let room = MAX_TEXT.saturating_sub(answer.len() + separator.len());
+            if room == 0 {
+                truncated = true;
+                break;
+            }
+            let fits = bounded(&item.text, room);
+            truncated |= fits.len() != item.text.len();
+            answer.push_str(separator);
+            answer.push_str(&fits);
+        }
+        self.answer = answer;
+        self.answer_truncated = truncated;
+    }
 }
 
 fn unix_ms() -> u64 {
@@ -1715,9 +1839,7 @@ impl Bridge {
             }
             .into();
             thread.turn_id = None;
-            thread.answer.clear();
-            thread.item_id.clear();
-            thread.answer_truncated = false;
+            thread.clear_messages();
             thread.notice = None;
         }
         let result = match request.operation.as_str() {
@@ -1863,14 +1985,19 @@ fn apply_notification(memory: &mut Memory, method: &str, params: &Value) {
                 if !token(item) {
                     return;
                 }
-                if thread.item_id != item {
-                    thread.item_id = item.into();
-                    thread.answer.clear();
-                    thread.answer_truncated = false;
+                if let Some(index) = thread.message(item, None) {
+                    thread.append_message(index, delta);
                 }
-                let kept = bounded(delta, MAX_TEXT.saturating_sub(thread.answer.len()));
-                thread.answer_truncated |= kept.len() != delta.len();
-                thread.answer.push_str(&kept);
+            }
+        }
+        // A turn's answer can span several message items: the WebGPT bridge starts a new one
+        // after each thinking block or guarded continuation. All of them, in order, are the answer.
+        "item/started" if params["item"]["type"] == "agentMessage" => {
+            if params["turnId"].as_str() != thread.turn_id.as_deref() {
+                return;
+            }
+            if let Some(item) = params["item"]["id"].as_str().filter(|s| token(s)) {
+                thread.message(item, params["item"]["phase"].as_str());
             }
         }
         "item/completed" if params["item"]["type"] == "agentMessage" => {
@@ -1884,9 +2011,9 @@ fn apply_notification(memory: &mut Memory, method: &str, params: &Value) {
                 if !token(item) {
                     return;
                 }
-                thread.item_id = item.into();
-                thread.answer = bounded(text, MAX_TEXT);
-                thread.answer_truncated = text.len() > MAX_TEXT;
+                if let Some(index) = thread.message(item, params["item"]["phase"].as_str()) {
+                    thread.complete_message(index, text);
+                }
             }
         }
         "item/completed" if params["item"]["type"] == "exitedReviewMode" => {
@@ -1897,9 +2024,11 @@ fn apply_notification(memory: &mut Memory, method: &str, params: &Value) {
                 params["item"]["id"].as_str().filter(|s| token(s)),
                 params["item"]["review"].as_str(),
             ) {
-                thread.item_id = item.into();
-                thread.answer = bounded(review, MAX_TEXT);
-                thread.answer_truncated = review.len() > MAX_TEXT;
+                // The review result is the answer on its own.
+                thread.clear_messages();
+                if let Some(index) = thread.message(item, None) {
+                    thread.complete_message(index, review);
+                }
             }
         }
         "item/completed" if params["item"]["type"] == "contextCompaction" => {
@@ -1909,6 +2038,16 @@ fn apply_notification(memory: &mut Memory, method: &str, params: &Value) {
         }
         "thread/compacted" if thread.status == "compacting" => {
             thread.status = "idle".into();
+        }
+        // Any other step (a command, a file change, a tool call) ends the answer so far: a message
+        // after it is a new answer, and the note before it was progress, not the answer.
+        "item/started" | "item/completed"
+            if params["turnId"].as_str() == thread.turn_id.as_deref()
+                && params["item"]["type"].as_str().is_some_and(|kind| {
+                    !matches!(kind, "agentMessage" | "reasoning" | "userMessage")
+                }) =>
+        {
+            thread.tool_step = true;
         }
         _ => {}
     }
@@ -2511,6 +2650,101 @@ mod tests {
             &json!({"threadId":"owned","delta":"not exposed"}),
         );
         assert_eq!(memory.threads["owned"].answer, "reply complete");
+    }
+    #[test]
+    fn native_bridge_answer_joins_every_final_message_of_the_turn() {
+        let mut memory = Memory::default();
+        memory.threads.insert(
+            "owned".into(),
+            ThreadState {
+                id: "owned".into(),
+                status: "inProgress".into(),
+                turn_id: Some("t".into()),
+                ..Default::default()
+            },
+        );
+        let notify = |memory: &mut Memory, method: &str, params: Value| {
+            let mut params = params;
+            params["threadId"] = json!("owned");
+            params["turnId"] = json!("t");
+            apply_notification(memory, method, &params);
+        };
+        let answer = |memory: &Memory| memory.threads["owned"].answer.clone();
+        // The WebGPT bridge closes a message item at each thinking block: one answer, two items.
+        notify(
+            &mut memory,
+            "item/started",
+            json!({"item":{"id":"a","type":"agentMessage","text":""}}),
+        );
+        notify(
+            &mut memory,
+            "item/agentMessage/delta",
+            json!({"itemId":"a","delta":"Part "}),
+        );
+        notify(
+            &mut memory,
+            "item/agentMessage/delta",
+            json!({"itemId":"a","delta":"one"}),
+        );
+        notify(
+            &mut memory,
+            "item/started",
+            json!({"item":{"id":"r","type":"reasoning","summary":[]}}),
+        );
+        notify(
+            &mut memory,
+            "item/completed",
+            json!({"item":{"id":"r","type":"reasoning","summary":["Thought for 3s"]}}),
+        );
+        assert_eq!(answer(&memory), "Part one");
+        notify(
+            &mut memory,
+            "item/agentMessage/delta",
+            json!({"itemId":"b","delta":"Part two"}),
+        );
+        assert_eq!(answer(&memory), "Part one\n\nPart two");
+        notify(
+            &mut memory,
+            "item/completed",
+            json!({"item":{"id":"a","type":"agentMessage","text":"Part one."}}),
+        );
+        notify(
+            &mut memory,
+            "item/completed",
+            json!({"item":{"id":"b","type":"agentMessage","text":"Part two."}}),
+        );
+        assert_eq!(answer(&memory), "Part one.\n\nPart two.");
+        assert!(!memory.threads["owned"].answer_truncated);
+        // Commentary is progress, not the answer.
+        notify(
+            &mut memory,
+            "item/completed",
+            json!({"item":{"id":"c","type":"agentMessage","text":"Checking one more thing","phase":"commentary"}}),
+        );
+        assert_eq!(answer(&memory), "Part one.\n\nPart two.");
+        // A message after a tool step starts a new answer: the note before the tool call is not
+        // the answer, so a reviewer's verdict stays its answer's first word.
+        notify(
+            &mut memory,
+            "item/started",
+            json!({"item":{"id":"cmd","type":"commandExecution"}}),
+        );
+        assert_eq!(answer(&memory), "Part one.\n\nPart two.");
+        notify(
+            &mut memory,
+            "item/completed",
+            json!({"item":{"id":"d","type":"agentMessage","text":"APPROVED all good","phase":"final_answer"}}),
+        );
+        assert_eq!(answer(&memory), "APPROVED all good");
+        // A turn of commentary only still has an answer.
+        let thread = memory.threads.get_mut("owned").unwrap();
+        thread.clear_messages();
+        notify(
+            &mut memory,
+            "item/completed",
+            json!({"item":{"id":"e","type":"agentMessage","text":"Only a note","phase":"commentary"}}),
+        );
+        assert_eq!(answer(&memory), "Only a note");
     }
     #[test]
     fn native_bridge_unicode_output_is_bounded() {

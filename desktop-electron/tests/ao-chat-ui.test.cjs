@@ -84,6 +84,19 @@ test("terminal failed work never becomes a successful chat just because review f
   assert.ok(messages.some(message => message.text.includes("Partial trace") && message.text.includes("account pool unavailable")));
 });
 
+test("a held card shows its error and still shows the reply it gave", () => {
+  const html = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, {
+    runs: [{ id: "run", project_id: "task", cancelled: false, execution_mode: "single", nodes: [{ id: "lead", role: "planner", state: "held",
+      route: { harness_id: "codex-native", model: "chatgpt-web/high" },
+      receipt: { error: "Native turn returned no verifiable final answer", answer: "WebGPT's long reply" } }] }],
+    tasks: [{ id: "task", title: "Task" }], selectedTaskId: "task", busy: false, approvals: [],
+    loadDescription: async () => "", send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {},
+  }));
+  const error = html.indexOf("Native turn returned no verifiable final answer");
+  const reply = html.indexOf("WebGPT&#x27;s long reply");
+  assert.ok(error >= 0 && reply > error, "the error is shown first, then the reply");
+});
+
 test("mission inspectors keep Retry structural changes in saved team templates", () => {
   const team = roles.defaultTeam("workspace", roles.workerRoute(roles.DEFAULT_WORKER_HARNESS, roles.DEFAULT_WORKER_MODEL));
   const node = team.nodes[1];
