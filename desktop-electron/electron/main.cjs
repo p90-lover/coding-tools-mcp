@@ -52,6 +52,7 @@ const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs")
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createGuiUpdateController, guiShellHash } = require("./gui-update.cjs");
 const { combineUpdateControllers, createAppUpdateController, createAutoInstaller, sweepUpdateLeftovers } = require("./app-update.cjs");
+const { useNativeUpdateTransport } = require("./update.cjs");
 const {
   providerNetworkReady,
   proxyGatewayDesktopRoute,
@@ -309,25 +310,27 @@ function getGptBrowser(logger) {
   return gptBrowser;
 }
 
+// The launcher's own network for a cookie-less native fetch: its browser session (Global Routing's
+// proxy, else the system's) with that proxy's credentials, as the browser control server uses (NFR-2).
+async function fetchThroughLauncherNetwork(url, options) {
+  const network = await providerNetworkReady();
+  const routing = network.store.snapshot().routing;
+  const profile = routing.globalEnabled ? network.store.activeProxy(routing.globalProfileId) : null;
+  const credentials = profile ? network.store.proxySecret(profile.id) : null;
+  return fetchNativeWithProxyAuth({
+    electronNet, browserSession: session.fromPartition(LAUNCHER_PROFILE.browserPartition), url, options,
+    getProxyCredentials: (authInfo) => (
+      profile && authInfo.port === profile.endpoint.port
+      && String(authInfo.host).replace(/^\[|\]$/g, "").toLowerCase()
+        === String(profile.endpoint.host).replace(/^\[|\]$/g, "").toLowerCase()
+        ? credentials : null
+    ),
+  });
+}
+
 function getEmailHost(logger) {
   if (emailHost) return emailHost;
-  const partition = LAUNCHER_PROFILE.browserPartition;
-  // Same proxy-aware, cookie-less native fetch the browser control server uses (NFR-2).
-  const fetchNative = async (url, options) => {
-    const network = await providerNetworkReady();
-    const routing = network.store.snapshot().routing;
-    const profile = routing.globalEnabled ? network.store.activeProxy(routing.globalProfileId) : null;
-    const credentials = profile ? network.store.proxySecret(profile.id) : null;
-    return fetchNativeWithProxyAuth({
-      electronNet, browserSession: session.fromPartition(partition), url, options,
-      getProxyCredentials: (authInfo) => (
-        profile && authInfo.port === profile.endpoint.port
-        && String(authInfo.host).replace(/^\[|\]$/g, "").toLowerCase()
-          === String(profile.endpoint.host).replace(/^\[|\]$/g, "").toLowerCase()
-          ? credentials : null
-      ),
-    });
-  };
+  const fetchNative = fetchThroughLauncherNetwork;
   emailHost = createEmailHost({
     logger,
     filePath: path.join(app.getPath("userData"), "runtime-email.json"),
@@ -2608,6 +2611,9 @@ async function start() {
   // in after the app closes the way "Restart app (keep Codex bridge, MCP, CPA)" does; a GUI-only
   // update reloads the renderer in place. Neither runs an installer.
   const publishUpdateState = () => { if (updateController) send("launcher:update-state", updateController.getState()); };
+  // Update checks and downloads use the launcher's network (proxy, Chromium's resolver), as the
+  // ChatGPT browser does; Node's https alone failed with "getaddrinfo ENOTFOUND github.com".
+  useNativeUpdateTransport(fetchThroughLauncherNetwork);
   updateController = combineUpdateControllers(
     createAppUpdateController({
       currentVersion: app.getVersion(),
@@ -3157,22 +3163,7 @@ async function start() {
     getBrowserHost: () => browserHost,
     getPreferences: () => stateStore.read(),
     resolveProxy: url => session.fromPartition(LAUNCHER_PROFILE.browserPartition).resolveProxy(url),
-    fetchNative: async (url, options) => {
-      const network = await providerNetworkReady();
-      const routing = network.store.snapshot().routing;
-      const profile = routing.globalEnabled ? network.store.activeProxy(routing.globalProfileId) : null;
-      const credentials = profile ? network.store.proxySecret(profile.id) : null;
-      return fetchNativeWithProxyAuth({
-        electronNet, browserSession: session.fromPartition(LAUNCHER_PROFILE.browserPartition),
-        url, options,
-        getProxyCredentials: (authInfo) => (
-          profile && authInfo.port === profile.endpoint.port
-          && String(authInfo.host).replace(/^\[|\]$/g, "").toLowerCase()
-            === String(profile.endpoint.host).replace(/^\[|\]$/g, "").toLowerCase()
-            ? credentials : null
-        ),
-      });
-    },
+    fetchNative: fetchThroughLauncherNetwork,
     getCodingToolsWorkspaces: () => headlessHost.request("/api/v1/workspaces", null, { method: "GET" }),
     callReadOnlyAppTool: (tool) => appsMcp.callTool(tool, {}),
     callNativeCodexTool: (body) => headlessHost.request("/api/v1/tools/call", body, { timeout: 80_000 }),

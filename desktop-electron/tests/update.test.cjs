@@ -326,3 +326,59 @@ test("detached worker replaces an installed Linux AppImage and removes the old v
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("update downloads go through the app's network, follow redirects and report bytes", async () => {
+  const update = require("../electron/update.cjs");
+  const seen = [];
+  update.useNativeUpdateTransport(async (url, options) => {
+    seen.push([url, options.headers["User-Agent"]]);
+    if (url.endsWith("/release.zip")) return new Response(null, { status: 302, headers: { location: "https://objects.example.test/blob" } });
+    return new Response("packed bytes", { status: 200 });
+  });
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "update-native-"));
+  try {
+    let bytes = 0;
+    const file = path.join(root, "pack");
+    await update.downloadFile("https://github.com/p90-lover/coding-tools-mcp/releases/download/v1/release.zip", file, (count) => { bytes += count; });
+    assert.equal(fs.readFileSync(file, "utf8"), "packed bytes");
+    assert.equal(bytes, "packed bytes".length);
+    assert.deepEqual(seen.map(([url]) => url), [
+      "https://github.com/p90-lover/coding-tools-mcp/releases/download/v1/release.zip", "https://objects.example.test/blob",
+    ]);
+    assert.ok(seen.every(([, agent]) => agent === "coding-tools-launcher-updater"));
+    assert.equal(await update.downloadText("https://api.github.com/x"), "packed bytes");
+  } finally {
+    update.useNativeUpdateTransport(null);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an update response other than 200 fails instead of saving its body", async () => {
+  const update = require("../electron/update.cjs");
+  update.useNativeUpdateTransport(async () => new Response("rate limited", { status: 403 }));
+  try {
+    await assert.rejects(update.downloadText("https://api.github.com/x"), /HTTP 403/);
+  } finally { update.useNativeUpdateTransport(null); }
+});
+
+test("a lookup that fails (ENOTFOUND github.com) is retried before the update gives up", async () => {
+  const update = require("../electron/update.cjs");
+  const waits = [];
+  update.setUpdateSleepForTests(async (ms) => { waits.push(ms); });
+  let calls = 0;
+  // The first try fails in the app's network and in Node's fallback (a closed local port), the
+  // second succeeds: the user sees the update, not "getaddrinfo ENOTFOUND github.com".
+  update.useNativeUpdateTransport(async () => {
+    calls += 1;
+    if (calls === 1) throw new Error("net::ERR_NAME_NOT_RESOLVED");
+    return new Response("manifest", { status: 200 });
+  });
+  try {
+    assert.equal(await update.downloadText("https://127.0.0.1:1/manifest.json"), "manifest");
+    assert.equal(calls, 2);
+    assert.deepEqual(waits, [1000]);
+  } finally {
+    update.useNativeUpdateTransport(null);
+    update.setUpdateSleepForTests((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  }
+});

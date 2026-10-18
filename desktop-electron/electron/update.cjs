@@ -4,7 +4,7 @@ const https = require("node:https");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
-const { Transform } = require("node:stream");
+const { Readable, Transform } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
 
 const REPOSITORY = "p90-lover/coding-tools-mcp";
@@ -97,27 +97,64 @@ function validateReleaseAssetUrl(raw, version, assetName) {
   return url.toString();
 }
 
-function request(url, redirects = 0) {
+// Update requests go through the app's own network (the launcher session: its proxy, the system
+// proxy, Chromium's resolver) when main.cjs provides it. Node's https knew none of those, so a
+// machine that reaches GitHub only through a proxy, or whose resolver missed github.com once,
+// failed with "getaddrinfo ENOTFOUND github.com". Node's https stays the fallback.
+let nativeFetch = null;
+function useNativeUpdateTransport(fetchImpl) { nativeFetch = typeof fetchImpl === "function" ? fetchImpl : null; }
+
+const RETRY_DELAYS_MS = [1_000, 3_000];
+const TRANSIENT_NETWORK = /ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|ENETUNREACH|EHOSTUNREACH|ERR_NAME_NOT_RESOLVED|ERR_INTERNET_DISCONNECTED|ERR_NETWORK_CHANGED|ERR_CONNECTION_(?:RESET|CLOSED|REFUSED|TIMED_OUT)|ERR_TIMED_OUT|timed out/i;
+let sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** A 200 response body as a Node stream, following redirects; transient network errors are retried. */
+async function request(url) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await requestOnce(url, 0);
+    } catch (error) {
+      if (attempt >= RETRY_DELAYS_MS.length || !TRANSIENT_NETWORK.test(String(error?.code || "") + " " + String(error?.message || ""))) throw error;
+      await sleep(RETRY_DELAYS_MS[attempt]);
+    }
+  }
+}
+
+async function requestOnce(url, redirects) {
+  if (redirects > MAX_REDIRECTS) throw new Error(`Too many redirects while downloading ${url}`);
+  const parsed = new URL(url);
+  if (parsed.protocol !== "https:") throw new Error(`Refusing non-HTTPS update URL: ${parsed.protocol}`);
+  const headers = { Accept: "application/vnd.github+json", "User-Agent": USER_AGENT };
+  if (nativeFetch) {
+    let response = null;
+    try {
+      response = await nativeFetch(parsed.toString(), { method: "GET", headers });
+    } catch {
+      response = null; // the app's network failed outright: Node's https gets one go below
+    }
+    if (response) {
+      const location = response.headers.get("location");
+      if ([301, 302, 303, 307, 308].includes(response.status) && location) {
+        await response.body?.cancel?.().catch?.(() => {});
+        return requestOnce(new URL(location, parsed).toString(), redirects + 1);
+      }
+      if (response.status !== 200) {
+        await response.body?.cancel?.().catch?.(() => {});
+        throw new Error(`Update download failed with HTTP ${response.status}`);
+      }
+      return Readable.fromWeb(response.body);
+    }
+  }
+  return nodeRequest(parsed, headers, redirects);
+}
+
+function nodeRequest(parsed, headers, redirects) {
   return new Promise((resolve, reject) => {
-    if (redirects > MAX_REDIRECTS) {
-      reject(new Error(`Too many redirects while downloading ${url}`));
-      return;
-    }
-    const parsed = new URL(url);
-    if (parsed.protocol !== "https:") {
-      reject(new Error(`Refusing non-HTTPS update URL: ${parsed.protocol}`));
-      return;
-    }
-    const req = https.get(parsed, {
-      headers: {
-        Accept: "application/vnd.github+json",
-        "User-Agent": USER_AGENT,
-      },
-    }, (response) => {
+    const req = https.get(parsed, { headers }, (response) => {
       if ([301, 302, 303, 307, 308].includes(response.statusCode) && response.headers.location) {
         response.resume();
         const next = new URL(response.headers.location, parsed).toString();
-        request(next, redirects + 1).then(resolve, reject);
+        requestOnce(next, redirects + 1).then(resolve, reject);
         return;
       }
       if (response.statusCode !== 200) {
@@ -449,6 +486,8 @@ function createUpdateController({
 }
 
 module.exports = {
+  useNativeUpdateTransport,
+  setUpdateSleepForTests: (fn) => { sleep = fn; },
   DEFAULT_UPDATE_CHECK_INTERVAL_MS,
   RELEASE_API_URL,
   downloadFile,
