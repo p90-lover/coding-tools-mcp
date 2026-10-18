@@ -329,6 +329,16 @@ fn cancellation_stops_descendants_and_releases_only_owned_work() {
         &json!({"command_id":id,"wait_ms":1000}),
     );
     assert_eq!(cancel["ok"], true, "{cancel}");
+    eprintln!("Initial cancellation observation: {cancel}");
+    let cancel = if cancel["status"] == "terminating" {
+        wait(&ctx, id)
+    } else {
+        cancel
+    };
+    assert!(
+        matches!(cancel["status"].as_str(), Some("killed" | "exited")),
+        "cancellation must be confirmed before checking the next command: {cancel}"
+    );
     assert_ne!(
         cancel["finalization_pending"], true,
         "confirmed cancellation must release its project write lease: {cancel}"
