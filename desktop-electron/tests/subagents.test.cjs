@@ -182,6 +182,25 @@ test("chat agents get the subagent tools when subagents are on; a subagent's own
   } finally { await tools.close(); }
 });
 
+test("a subagent's request too long to check whole, or hiding a blocked command in JSON escapes, is denied, never allowed", async () => {
+  const w = world();
+  try {
+    const { subagent_id: id } = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "implementer", task: "x" }));
+    const decisions = [{ id: "allow", kind: "allow_once" }, { id: "deny", kind: "reject_once" }];
+    // As AO's upstream reads them: an MCP tool's arguments as JSON cut at 1500 bytes, a command at 4000.
+    const cut = (text, bytes) => Buffer.from(text).subarray(0, bytes).toString();
+    w.sessions.set(id, { turnState: "running", approvals: [
+      { approval_id: "e1", kind: "permission", tool: "mcp__coding-tools__run_command", toolInput: JSON.stringify({ cmd: "cd app\ngit push origin main" }), decisions },
+      { approval_id: "l1", kind: "permission", tool: "mcp__coding-tools__run_command",
+        toolInput: cut(JSON.stringify({ cmd: `echo ${"a".repeat(1600)} && git push origin main` }), 1500), decisions },
+      { approval_id: "l2", kind: "command", tool: "Bash", command: cut(`${"echo ok; ".repeat(450)}rm -rf ~/`, 4000), decisions },
+      { approval_id: "s1", kind: "command", tool: "Bash", command: "npm test", decisions },
+    ] });
+    parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 }));
+    assert.deepEqual(w.resolved, [[id, "e1", "deny"], [id, "l1", "deny"], [id, "l2", "deny"], [id, "s1", "allow"]]);
+  } finally { w.cleanup(); }
+});
+
 test("starts made at the same moment cannot pass the per-chat or running-at-once limit together", async () => {
   const w = world({ settings: { maxConcurrent: 2, maxPerChat: 1 } });
   try {

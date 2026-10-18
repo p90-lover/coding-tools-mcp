@@ -29,6 +29,8 @@ const MAX_REPORT = 24_000;
 const MAX_RUNS = 200;
 const POLL_MS = 2_000;
 const MAX_WAIT_SECONDS = 60;
+// The longest request answered for a subagent; a longer one is denied (the workflow's autoVerdict).
+const MAX_CHECKED_REQUEST = 1500;
 const TERMINAL_TURN = new Set(["completed", "failed", "interrupted", "cancelled", "recovered"]);
 const ACTIVE = new Set(["starting", "running"]);
 
@@ -225,7 +227,9 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
         let decision;
         if (approval.kind === "plan") {
           decision = decisions.find((item) => /acceptEdits/i.test(item.id)) ?? decisions.find((item) => item.kind === "allow_once");
-        } else if (blockedRequest(request)) {
+        } else if (Buffer.byteLength(request, "utf8") >= MAX_CHECKED_REQUEST || blockedRequest(request)) {
+          // Too long to be sure of (AO's upstream cuts a tool's input at 1500 bytes and a command
+          // at 4000, so the blocked part may sit past the cut): denied, as "Approve for me" does.
           decision = decisions.find((item) => item.kind === "reject_once") ?? decisions.find((item) => item.kind === "reject_always");
           logger?.info?.("subagents.request_denied", { agent: run.agentId, tool: String(approval.tool ?? "").slice(0, 80) });
         } else {
