@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Icon } from "../icons";
+import { Caret, Icon } from "../icons";
 import { useComposerPopover } from "./AgentOrchestratorComposerControls";
 import type { ReactNode } from "react";
 import type { AoMission, AoNode } from "./AgentOrchestratorSurface";
@@ -128,7 +128,7 @@ export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles
     <button type="button" className="ao-composer-chip" ref={popup.trigger} aria-expanded={popup.open} aria-haspopup="menu"
       aria-controls="ao-permissions-panel" disabled={busy || saving} title={permissionSummary(nodes) + (effective ? " · " + effective : "") + (notice && !failed ? " · " + notice : "")}
       onClick={() => popup.setOpen(value => !value)}>
-      <Icon name={active?.icon ?? "shield"} width="16" height="16" /><span>{active?.label || "Custom / Mixed"}</span><span aria-hidden="true">⌄</span>
+      <Icon name={active?.icon ?? "shield"} width="16" height="16" /><span>{active?.label || "Custom / Mixed"}</span><Caret />
     </button>
     {popup.open ? <section ref={popup.panel} id="ao-permissions-panel" className="ao-composer-popover ao-permissions-panel" aria-label="Access permissions" role="menu">
       <header><h3>How should actions be approved?</h3><button type="button" className="ao-popover-close" aria-label="Close permissions" onClick={popup.close}><Icon name="close" width="14" height="14" /></button></header>

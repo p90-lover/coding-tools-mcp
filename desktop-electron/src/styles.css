@@ -2986,3 +2986,6 @@ code {
 .refresh-menu-list button { padding: 7px 10px; border: 0; border-radius: 6px; background: transparent; color: var(--color-text-primary); font-size: 12px; text-align: left; }
 .refresh-menu-list button:hover, .refresh-menu-list button:focus-visible { background: rgb(255 255 255 / 7%); }
 @media (prefers-reduced-motion: reduce) { .refresh-menu .icon-button.is-busy svg { animation: none; } }
+
+/* A menu's down arrow (icons.tsx Caret): centred on its row, never squeezed by the text beside it. */
+.ui-caret { flex: none; align-self: center; display: block; opacity: .7; }

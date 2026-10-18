@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import { Icon } from "../icons";
+import { Caret, Icon } from "../icons";
 import { AgentOrchestratorComposerControls, type ComposerControlsProps } from "./AgentOrchestratorComposerControls";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
@@ -351,7 +351,7 @@ export function AgentOrchestratorChat({
   send: (input: { taskId?: string; title?: string; message: string; goal?: string }) => Promise<void>;
   /** Hands a message to the running agent at once (Codex's steer); false when its turn already ended. */
   /** true: steered; "wait": the agent waits on a request, so the message is queued; false: send it normally. */
-  steer?: (input: { taskId: string; message: string }) => Promise<boolean | "wait">;
+  steer?: (input: { taskId: string; message: string }) => Promise<boolean | "wait" | "restart" | "starting">;
   openStructure: (runId: string) => void;
   approvals: ChatApproval[];
   approve: (approval: ChatApproval, reply: ApprovalReply) => void;
@@ -591,12 +591,16 @@ export function AgentOrchestratorChat({
     try {
       // A steer the turn outran (it ended first) is sent as an ordinary follow-up instead; a goal is never steered.
       const steered = !goal && steering && steer && selectedTaskId ? await steer({ taskId: selectedTaskId, message }) : false;
-      if (steered === "wait" && selectedTaskId) {
+      if ((steered === "wait" || steered === "restart" || steered === "starting") && selectedTaskId) {
         // The agent was found waiting on its own request just now (the page had not seen it yet):
         // steering would cancel that request, so the message waits for the turn like a queued one.
+        // Or its turn had hung and was stopped: the message goes as the next turn once it settles.
         setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what: "Message", message }));
         setDraft(""); setAttachments([]); setAttachNote("");
-        say("Queued", "The agent is waiting for your answer to its request; your message is sent when the turn finishes.");
+        say(steered === "restart" ? "Restarting" : "Queued", steered === "restart"
+          ? "The agent had stopped responding, so its turn was stopped; your message is sent as the next turn."
+          : steered === "starting" ? "The agent is still starting; your message is sent when its first turn finishes."
+          : "The agent is waiting for your answer to its request; your message is sent when the turn finishes.");
         return true;
       }
       // A rewound chat's first message takes the earlier messages along ahead of it, as context.
@@ -999,13 +1003,13 @@ export function AgentOrchestratorChat({
           {/* Codex's context chips are menus: the project picker, where it runs, and its environment. */}
           <button type="button" className="cx-chip" title={projectName} aria-haspopup="dialog" aria-expanded={Boolean(projectPicker)}
             onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); setProjectPicker(projectPicker ? null : { left: box.left, bottom: window.innerHeight - box.top + 6 }); setPickerQuery(""); }}>
-            <ChatGlyph name="folder" size={13} />{projectName || "No project"}<span className="cx-chip-caret" aria-hidden="true">⌄</span></button>
+            <ChatGlyph name="folder" size={13} />{projectName || "No project"}<Caret className="cx-chip-caret" /></button>
           <button type="button" className="cx-chip" aria-haspopup="menu"
             onClick={(event) => toggleMenu(event.currentTarget, (box) => ({ x: box.left, y: box.top - 96, label: "Work in", items: [
               { label: "This computer", icon: "monitor", checked: true, run: () => undefined },
               { label: "Cloud", icon: "share", reason: "No cloud runner is set up; chats run on this computer" },
             ] }))}>
-            <ChatGlyph name="monitor" size={13} />This computer<span className="cx-chip-caret" aria-hidden="true">⌄</span></button>
+            <ChatGlyph name="monitor" size={13} />This computer<Caret className="cx-chip-caret" /></button>
           {/* The project's branch sits with where the chat runs, as in Claude Code's start bar. */}
           <ChatBranchBar inline workspaceId={projectId} />
           <span className="cx-head-spacer" />

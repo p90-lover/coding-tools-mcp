@@ -23,7 +23,7 @@ const menu = load("ChatMenu.tsx");
 const client = { getCodingToolsClient: () => ({ apps: { call: async () => ({ result: { sessions: {} } }) } }) };
 const meter = load("ChatContextMeter.tsx", { "./ao-chat": chat, "./ChatMenu": menu, "./AgentOrchestratorRoleEditor": roles,
   "../api/client": client, "./cpa-usage": load("cpa-usage.ts", { "../api/client": client }) });
-const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
+const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null, Caret: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
   "./ChatContextMeter": meter,
   "./codex-prompts": load("codex-prompts.ts"),
   // The branch bar reads git asynchronously and renders nothing until then, as here; composer
@@ -195,4 +195,18 @@ test("an AO agent's question shows as a card with its options, an Other box, and
   assert.match(html, /placeholder="Other: type your own answer"/);
   assert.match(html, /<button[^>]*disabled=""[^>]*>Send answer<\/button>/, "nothing chosen yet");
   assert.match(html, />Skip<\/button>/);
+});
+
+test("an agent's new page brings the Preview pane forward, even over the Terminal its dev server opened", () => {
+  // Seen live: the agent started its dev server (the Terminal opened), then preview_open'd the page,
+  // and the panel stayed on the Terminal: the user never saw the browser.
+  const workbench = load("ChatWorkbench.tsx", { "../api/client": client, "../icons": { Icon: () => null } });
+  assert.equal(workbench.autoOpenTab(["page:ao-1:http://localhost:8000"], false), "preview", "a closed panel opens on the page");
+  assert.equal(workbench.autoOpenTab(["page:ao-1:http://localhost:8000", "cmd:c1"], true), "preview", "an open one switches to it");
+  assert.equal(workbench.autoOpenTab(["cmd:c1"], false), "terminal", "a command opens a closed panel on the Terminal");
+  assert.equal(workbench.autoOpenTab(["cmd:c1"], true), null, "but never takes the place of what the user looks at");
+  assert.equal(workbench.autoOpenTab([], false), null);
+  const polled = new Set(["ao-1"]);
+  assert.equal(workbench.startsNewChat(["ao-2"], polled), true, "another chat starts over");
+  assert.equal(workbench.startsNewChat(["ao-1", "ao-3"], polled), false, "an agent joining the same chat does not");
 });

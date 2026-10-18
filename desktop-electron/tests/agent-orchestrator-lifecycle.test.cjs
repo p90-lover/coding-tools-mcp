@@ -107,6 +107,8 @@ function createHarness(hooks = {}) {
     "./agent-orchestrator-accounting.cjs": require("../electron/agent-orchestrator-accounting.cjs"),
     "./ao-context-breakdown.cjs": require("../electron/ao-context-breakdown.cjs"),
     "./chat-agent-shell.cjs": require("../electron/chat-agent-shell.cjs"),
+    // The daemon's environment helper (Windows essentials, a bounded PATH); tested in chat-sandbox.test.cjs.
+    "./chat-sandbox.cjs": require("../electron/chat-sandbox.cjs"),
     "node:crypto": crypto,
     "node:path": path,
     "node:fs": {
@@ -775,5 +777,64 @@ test("a chat started in the background whose agent failed to come up is resumed 
     const other = await h.controller.harness.observe("s2");
     assert.equal(other.turnState, "failed");
     assert.equal(resumed.length, 1, "a failure that is not about time is not retried");
+  } finally { await h.controller.stop(); }
+});
+
+test("a failed background start read by two observers at once is resumed once and fails neither", async () => {
+  // The run loop and the chat's activity poll both observe a working card, about once a second each.
+  let resumes = 0, resumed = false, release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const h = createHarness({
+    getWorkspaces: async () => [], missionCall: async () => ({ ok: true }),
+    workspaceBoard: { bind: async () => ({ projectId: "project-fixture" }) },
+    api: async (endpoint) => {
+      if (/^\/api\/v1\/sessions\/[^/]+$/.test(endpoint.pathname)) {
+        return { session: { id: "s1", mode: "chat", status: "spawning", provisionState: resumed ? "provisioning" : "failed",
+          provisionError: "persistent ACP host did not start: deadline exceeded" } };
+      }
+      if (endpoint.pathname.endsWith("/conversation")) return { turns: [{ id: "t1", state: "queued" }], messages: [], activities: [] };
+      if (endpoint.pathname.endsWith("/resume-agent")) { resumes += 1; await gate; resumed = true; return { ok: true }; }
+    },
+  });
+  try {
+    await h.controller.start();
+    const first = h.controller.harness.observe("s1");
+    const second = h.controller.harness.observe("s1");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    release();
+    const [one, two] = await Promise.all([first, second]);
+    assert.equal(resumes, 1);
+    assert.equal(one.turnState, "queued");
+    assert.equal(two.turnState, "queued", "a read from before the resume answered is not the resumed start failing again");
+    assert.equal((await h.controller.harness.observe("s1")).turnState, "queued");
+  } finally { await h.controller.stop(); }
+});
+
+test("stopping a chat whose agent is still starting cancels the start, so its queued prompt never runs unseen", async () => {
+  const posted = [];
+  let provisionState = "provisioning";
+  const h = createHarness({
+    getWorkspaces: async () => [], missionCall: async () => ({ ok: true }),
+    workspaceBoard: { bind: async () => ({ projectId: "project-fixture" }) },
+    api: async (endpoint, options) => {
+      if (options?.method === "POST") posted.push(endpoint.pathname);
+      if (endpoint.pathname.endsWith("/conversation/interrupt")) {
+        // AO has no chat controller until the agent is up: nothing to interrupt yet.
+        return provisionState === "ready" ? { ok: true }
+          : { $status: 409, body: { error: "conflict", code: "CHAT_CONTROLLER_NOT_READY", message: "the agent controller for this session is not running" } };
+      }
+      if (/^\/api\/v1\/sessions\/[^/]+$/.test(endpoint.pathname)) return { session: { id: "s1", mode: "chat", status: "spawning", provisionState } };
+      if (endpoint.pathname.endsWith("/kill")) return { ok: true };
+    },
+  });
+  try {
+    await h.controller.start();
+    await h.controller.harness.interrupt("s1");
+    assert.deepEqual(posted, ["/api/v1/sessions/s1/conversation/interrupt", "/api/v1/sessions/s1/kill"],
+      "the background start is cancelled: AO would send the queued prompt once the agent is up");
+    posted.length = 0;
+    provisionState = "ready";
+    await h.controller.harness.interrupt("s1");
+    assert.deepEqual(posted, ["/api/v1/sessions/s1/conversation/interrupt"], "a running agent's turn is only interrupted");
   } finally { await h.controller.stop(); }
 });

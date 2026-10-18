@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
+const { windowsChildEnvironment, systemEnvironment } = require("./chat-sandbox.cjs");
 
 const CONTROL_SCHEMA = 1;
 const CONTROL_PROTOCOL_VERSION = 1;
@@ -223,7 +224,9 @@ class HeadlessHost {
     const child = spawn(executable, ["serve"], {
       cwd: path.dirname(executable),
       env: {
-        ...process.env,
+        // The commands headless starts for exec_command (Git Bash among them) inherit this: on
+        // Windows it carries what a process needs to start and a bounded PATH.
+        ...windowsChildEnvironment(process.env, { system: systemEnvironment() }),
         CODING_TOOLS_APP_DATA_DIR: appDataDir,
         ...(process.env.CODING_TOOLS_DEV_HOME ? { CODING_TOOLS_STATE_DIR: process.env.CODING_TOOLS_STATE_DIR || path.join(appDataDir, "state") } : {}),
         // Read once at startup; headless never passes them (or any other CODING_TOOLS_* secret) on

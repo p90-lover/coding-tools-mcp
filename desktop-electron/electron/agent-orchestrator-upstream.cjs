@@ -12,6 +12,7 @@ const { createAoSessionEvents } = require("./ao-session-events.cjs");
 const { createAoDependencyLinks } = require("./ao-dependency-links.cjs");
 const { readContextBreakdown } = require("./ao-context-breakdown.cjs");
 const { withAgentShellCommands, CONVERSATION_LIMITS: AGENT_SHELL_CONVERSATION_LIMITS } = require("./chat-agent-shell.cjs");
+const { windowsChildEnvironment, systemEnvironment } = require("./chat-sandbox.cjs");
 
 const API_OPERATIONS = Object.freeze({
   upstream_projects: { method: "GET", endpoint: "/api/v1/projects" },
@@ -187,6 +188,27 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return process.platform === "win32" ? resolved.toLowerCase() : resolved;
     };
     return normal(project.path) === normal(root) ? project.path : null;
+  }
+  /**
+   * The chat workspace's own folder, when AO reports exactly it (by real path) as the session's
+   * root; else null. A session AO runs in the project's folder works there whatever led AO to put
+   * it there (the project's folder mode, or a binding the check above could not confirm just then:
+   * several AO projects on the folder, a project kind other than single_repo, AO slow to answer):
+   * its tools may use that folder, which is the very folder the user opened as this workspace.
+   */
+  async function workspaceFolderRoot(root, workspaceId) {
+    if (typeof getWorkspaces !== "function" || typeof workspaceId !== "string" || !workspaceId) return null;
+    const item = (await getWorkspaces()).find(candidate => candidate?.id === workspaceId);
+    if (typeof item?.path !== "string" || !item.path) return null;
+    const folder = process.platform === "win32" ? item.path.replace(/^\\\\\?\\/, "") : item.path;
+    if (!path.isAbsolute(folder)) return null;
+    const real = (value) => {
+      let resolved;
+      try { resolved = fs.realpathSync.native(value); } catch { resolved = path.resolve(value); }
+      resolved = resolved.replace(/^\\\\\?\\/, "").replace(/[\\/]+$/, "");
+      return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+    };
+    return real(folder) === real(root) ? folder : null;
   }
   const workspaceBoard = typeof getWorkspaces === "function" && typeof missionCall === "function"
     ? createAoWorkspaceBoard({
@@ -513,7 +535,10 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   }
   /** A chat start that failed only for time (the persistent host's startup window, a deadline). */
   const TRANSIENT_CHAT_START = /persistent (ACP )?host|timed out|timeout|deadline exceeded|context canceled/i;
-  const provisionRetried = new Set(); // sessions whose failed background start was resumed once
+  // Sessions whose failed background start was resumed once: id -> { resumed: Promise<boolean>,
+  // after: the observe() read count when AO answered the resume }.
+  const provisionRetried = new Map();
+  let observeReads = 0;
   const CHAT_RETRY_PAUSE_MS = 2000;
   /** The longest prefix of `text` that is at most `maxBytes` of UTF-8 (AO limits prompts in bytes). */
   function utf8Prefix(text, maxBytes) {
@@ -582,13 +607,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
    * the worktree AO creates for it), or null. Never fails a launch: without them the agent starts
    * without them.
    */
-  async function chatTools(agent, workspaceId, approvalMode, autoReview = false) {
+  async function chatTools(agent, workspaceId, approvalMode, autoReview = false, subagent = false) {
     if (!agentTools) return null;
     try {
       // The session's permission mode goes with its credential: only a session launched to
       // bypass permissions runs every terminal command without the user confirming each one, and
       // one set to "Approve for me" (autoReview) its routine project commands.
-      const lease = await agentTools.lease({ agent, workspaceId, ...(approvalMode ? { approvalMode } : {}), ...(autoReview ? { autoReview: true } : {}) });
+      const lease = await agentTools.lease({ agent, workspaceId, ...(approvalMode ? { approvalMode } : {}), ...(autoReview ? { autoReview: true } : {}),
+        // A subagent (subagents.cjs) gets the app's tools but no subagents of its own.
+        ...(subagent ? { subagent: true } : {}) });
       return Array.isArray(lease?.servers) && lease.servers.length ? lease : null;
     } catch (cause) {
       logger.warn?.("ao.agent_tools_unavailable", { agent, message: String(cause?.message || cause).slice(0, 200) });
@@ -620,7 +647,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         .slice(0, 500).map(model => ({ id: model.id, label: String(model.label || model.id).slice(0, 128), isDefault: model.isDefault === true,
           efforts: Array.isArray(model.efforts) ? model.efforts.filter(value => typeof value === "string" && value.length <= 32).slice(0, 16) : [] }));
     },
-    async spawn({ workspaceId, agent, model, prompt, name, gateway = null, effort = null, contextWindow = null, approvalMode = null, autoReview = false, plain = false, warm = false }) {
+    async spawn({ workspaceId, agent, model, prompt, name, gateway = null, effort = null, contextWindow = null, approvalMode = null, autoReview = false, plain = false, warm = false, subagent = false }) {
       if (approvalMode !== null && !["default", "accept-edits", "auto", "bypass-permissions"].includes(approvalMode)) throw new Error("Unsupported AO permission mode");
       const projectId = await projectFor(workspaceId);
       const settings = await internalApi("GET", "/api/v1/settings");
@@ -636,7 +663,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       const launch = async (mode) => {
         // Chat sessions only: a terminal launch has no controller to attach tool servers to. Each
         // attempt gets its own credential, bound to the session it creates and to nothing else.
-        const tools = mode === "chat" ? await chatTools(agent, workspaceId, approvalMode, autoReview === true) : null;
+        const tools = mode === "chat" ? await chatTools(agent, workspaceId, approvalMode, autoReview === true, subagent === true) : null;
         let created;
         try {
           created = await launchSession(mode, tools?.servers ?? []);
@@ -688,6 +715,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return created;
     },
     async observe(id, expectedTurn) {
+      const read = ++observeReads;
       const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`);
       if (record?.session?.mode === "tui") return observeTui(id, record.session.status, record.session.activity);
       const [session, conversation] = [record, await conversationTail(id)];
@@ -717,11 +745,19 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       // otherwise the turn fails with AO's reason.
       if (session?.session?.provisionState === "failed") {
         const reason = String(session.session.provisionError || "The agent could not start").slice(0, 500);
-        if (TRANSIENT_CHAT_START.test(reason) && !provisionRetried.has(id)) {
-          provisionRetried.add(id);
-          if (provisionRetried.size > 500) provisionRetried.delete(provisionRetried.values().next().value);
-          const resumed = await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/resume-agent`, {}).then(() => true, () => false);
-          if (resumed) return { status, turnId: turn?.id, turnState: "queued", needsInput: false, exited: false, answer: "", liveOutput: "", timeline, approvals: [] };
+        let retry = provisionRetried.get(id);
+        if (!retry && TRANSIENT_CHAT_START.test(reason)) {
+          retry = { after: Infinity };
+          retry.resumed = internalApi("POST", `/api/v1/sessions/${sessionId(id)}/resume-agent`, {}).then(() => true, () => false)
+            .then((resumed) => { retry.after = observeReads; return resumed; });
+          provisionRetried.set(id, retry);
+          if (provisionRetried.size > 500) provisionRetried.delete(provisionRetried.keys().next().value);
+        }
+        // The run loop and the chat's activity poll observe the same card: a read taken before AO
+        // answered the resume saw the failure being resumed, not the resumed start failing again,
+        // and failed the card while its agent was coming up.
+        if (retry && read <= retry.after && await retry.resumed) {
+          return { status, turnId: turn?.id, turnState: "queued", needsInput: false, exited: false, answer: "", liveOutput: "", timeline, approvals: [] };
         }
         return { status, turnId: turn?.id, turnState: "failed", error: `The agent could not start: ${reason}`,
           needsInput: false, exited: false, answer: "", liveOutput: "", timeline, approvals: [] };
@@ -741,8 +777,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           needsInput: false, exited: false, answer: "", liveOutput: utf8Prefix(liveOutput, 4096), timeline,
         };
       }
+      // When the turn last showed any sign of life (a message, a tool step, a retry notice): a turn
+      // whose agent hung (a model request that never returns) keeps "running" with nothing new.
+      const stamps = [turn?.updatedAt, turn?.startedAt, turn?.createdAt,
+        ...(Array.isArray(conversation?.activities) ? conversation.activities : []).filter(item => item.turnId === turn?.id).map(item => item.updatedAt || item.createdAt),
+        ...(Array.isArray(conversation?.messages) ? conversation.messages : []).filter(item => item.turnId === turn?.id).map(item => item.updatedAt || item.createdAt)]
+        .map(value => Date.parse(value ?? "")).filter(Number.isFinite);
       return {
         status, turnId: turn?.id, turnState: turn?.state, error: turn?.errorMessage,
+        ...(stamps.length ? { lastActivityAt: Math.max(...stamps) } : {}),
         needsInput: status === "needs_input", exited: ["exited", "terminated"].includes(status),
         answer: answer.slice(0, 12000), liveOutput: utf8Prefix(liveOutput, 4096), timeline,
         // A question the agent asked waits like an approval: the chat shows it and the card needs you.
@@ -848,7 +891,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       // there, not in a worktree. The chat's tools may use that folder only when the session is
       // this chat workspace's own AO project, the project chose the folder, and AO reports exactly
       // the project's path; any other session stays worktree-only.
-      const projectFolder = await folderModeRoot(session, root, workspaceId).catch(() => null);
+      const projectFolder = await folderModeRoot(session, root, workspaceId).catch(() => null)
+        ?? await workspaceFolderRoot(root, workspaceId).catch(() => null);
       return projectFolder ? { root, projectFolder } : { root };
     },
     /** Whether any live session's agent is mid-turn: restarting the app now would cut it off. */
@@ -895,7 +939,19 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return pastTurnTimeline(id, turnId);
     },
     async interrupt(id) {
-      await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/interrupt`, {}).catch(() => undefined);
+      const interrupt = () => internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/interrupt`, {});
+      await interrupt().catch(async (error) => {
+        // A chat created in the background (spawn's async) whose agent is still starting has no
+        // controller, so nothing to interrupt; AO would send its queued prompt once the agent is up,
+        // and the stopped card would leave it working unseen. Its start is cancelled instead. One
+        // that came up meanwhile is interrupted.
+        if (!/CHAT_CONTROLLER_NOT_READY/.test(String(error?.message))) return;
+        const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`).catch(() => null);
+        if (record?.session?.provisionState === "provisioning") {
+          await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/kill`, {}).catch(() => undefined);
+          agentTools?.forgetSession?.(id);
+        } else await interrupt().catch(() => undefined);
+      });
     },
     // A standalone AO terminal running one program (e.g. the Antigravity CLI) with
     // proxy-only environment additions; AO rejects any other variable.
@@ -1077,11 +1133,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           const pathKey = Object.keys(environment).find(key => key.toUpperCase() === "PATH") || "PATH";
           environment[pathKey] = [toolBin, environment[pathKey]].filter(Boolean).join(path.delimiter);
         }
+        // AO hands this environment on to every chat agent and through it to the Git Bash its Bash
+        // tool runs: on Windows it carries SystemRoot, TEMP and the rest a process needs to start,
+        // and a de-duplicated PATH of bounded length (forks failed with 0xC0000142 without them).
+        const daemonEnvironment = windowsChildEnvironment(environment, { system: systemEnvironment() });
           // The AO CLI build answers the daemon command and the internal commands the daemon
           // relaunches itself with (pty-host, chat-host, agent-process); a daemon-only build cannot.
           child = spawn(executable, ["daemon"], {
           cwd: resourceRoot, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
-          env: { ...environment, AO_PORT: String(daemonPort), AO_DATA_DIR: dataRoot, AO_RUN_FILE: path.join(dataRoot, "running.json"), AO_ALLOWED_ORIGINS: gatewayOrigin, AO_TELEMETRY_EVENTS: "off", AO_TELEMETRY_METRICS: "off", AO_TELEMETRY_REMOTE: "off", AO_SENTRY_DSN: "",
+          env: { ...daemonEnvironment, AO_PORT: String(daemonPort), AO_DATA_DIR: dataRoot, AO_RUN_FILE: path.join(dataRoot, "running.json"), AO_ALLOWED_ORIGINS: gatewayOrigin, AO_TELEMETRY_EVENTS: "off", AO_TELEMETRY_METRICS: "off", AO_TELEMETRY_REMOTE: "off", AO_SENTRY_DSN: "",
             // AO bounds every request at 60 s, and starting a chat agent (worktree, agent process,
             // its handshake) took longer on a busy machine: the chat failed with SPAWN_TIMEOUT
             // while the agent came up seconds later. Just under this app's own 180 s for a POST,

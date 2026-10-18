@@ -261,7 +261,7 @@
   color: var(--ao-muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 button.cx-chip { background: transparent; font: inherit; font-size: 12px; cursor: pointer; }
 button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--cx-hover); color: var(--color-text-primary); }
-.cx-chip-caret { margin-left: 2px; font-size: 10px; opacity: .7; }
+.cx-chip-caret { margin-left: 2px; }
 .cx-project-picker { position: fixed; z-index: 70; display: grid; gap: 4px; width: 300px; max-height: min(420px, 60vh); padding: 6px; border: 1px solid var(--ao-line);
   border-radius: 12px; background: var(--color-bg-primary); box-shadow: 0 12px 36px rgb(0 0 0 / 18%); color: var(--color-text-primary); font-size: 13px; }
 .cx-project-picker input { height: 30px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 8px; background: transparent; color: inherit; font: inherit; }

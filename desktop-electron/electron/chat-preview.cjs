@@ -42,6 +42,23 @@ const IDLE_SLEEP_MS = 30_000;
 const BLACK_HOLE_PROXY = "127.0.0.1:9";
 const LOOPBACK_NAMES = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 
+// Load failures where the connection itself broke (not an HTTP error page), and those of them a
+// moment later may cure.
+const CONNECTION_FAILURES = new Set(["ERR_CONNECTION_RESET", "ERR_CONNECTION_REFUSED", "ERR_CONNECTION_CLOSED",
+  "ERR_EMPTY_RESPONSE", "ERR_CONNECTION_ABORTED", "ERR_ADDRESS_UNREACHABLE", "ERR_SOCKET_NOT_CONNECTED"]);
+const TRANSIENT_FAILURES = new Set(["ERR_CONNECTION_RESET", "ERR_CONNECTION_CLOSED", "ERR_EMPTY_RESPONSE", "ERR_CONNECTION_ABORTED"]);
+const RETRY_DELAY_MS = 750;
+
+/** The same address over IPv4 (127.0.0.1) when it names "localhost", else null. */
+function ipv4Alternative(raw) {
+  try {
+    const url = new URL(raw);
+    if (url.hostname.toLowerCase() !== "localhost") return null;
+    url.hostname = "127.0.0.1";
+    return url.href;
+  } catch { return null; }
+}
+
 class PreviewError extends Error {}
 
 const portOf = (url) => Number(url.port || (url.protocol === "https:" ? 443 : 80));
@@ -122,13 +139,13 @@ const refArgument = { type: "string", description: "An element's ref from previe
 /** The preview tools as MCP tool definitions. */
 const PREVIEW_TOOL_DEFS = Object.freeze([
   { name: "preview_open", title: "Open a page in the preview",
-    description: "Open a page your dev server serves on this machine (http://localhost:<port>/...) in this chat's preview, which the user sees in the chat's Preview pane. Waits for the page to load. Only localhost, 127.0.0.1 and [::1] addresses open; the first time this chat opens an address, the user may be asked. The page may only reach addresses this chat opened: another port (an API on :3000, a separate hot-reload port), the other spelling of the host (localhost vs 127.0.0.1) and anything on the internet (CDN scripts, web fonts) are blocked and show in preview_console. Open a second local address with preview_open (then return to the page) if the app needs it.",
+    description: "The browser for checking any web page, frontend or GUI you build or change: open a page your dev server serves on this machine (http://localhost:<port>/... or http://127.0.0.1:<port>/...) in this chat's own browser, which opens the chat's Preview pane for the user. Use it (then preview_screenshot and preview_read) instead of curl, a headless browser or asking the user to open the page. Waits for the page to load. Only localhost, 127.0.0.1 and [::1] addresses open; the first time this chat opens an address, the user may be asked. The page may only reach addresses this chat opened: another port (an API on :3000, a separate hot-reload port), the other spelling of the host (localhost vs 127.0.0.1) and anything on the internet (CDN scripts, web fonts) are blocked and show in preview_console. Open a second local address with preview_open (then return to the page) if the app needs it.",
     inputSchema: object({ url: { type: "string", description: "e.g. http://localhost:5173/" } }, ["url"]) },
   { name: "preview_read", title: "Read the preview page",
     description: "The page's URL, title, visible text and the elements you can use (links, buttons, fields), each with a ref for preview_click and preview_type.",
     inputSchema: object({ max_chars: { type: "integer", minimum: 500, maximum: MAX_TEXT, description: `Text limit (default 12000, at most ${MAX_TEXT})` } }) },
   { name: "preview_screenshot", title: "Screenshot the preview",
-    description: "A PNG of what the preview shows now.",
+    description: "A PNG of what the preview shows now: how the page you opened with preview_open looks to the user.",
     inputSchema: object({ full_page: { type: "boolean", description: "Capture the whole page, not only the visible part" } }) },
   { name: "preview_click", title: "Click in the preview",
     description: "Click an element by its ref from preview_read, or a point (x, y in CSS pixels of the visible page).",
@@ -359,25 +376,60 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
     }
   }
 
-  async function load(preview, url) {
-    const contents = preview.view.webContents;
-    // The black-hole proxy is in place before the first request.
-    await preview.ready;
+  async function loadOnce(contents, url) {
     let timer;
     try {
       await Promise.race([
         contents.loadURL(url),
         new Promise((_, reject) => { timer = setTimeout(() => reject(new PreviewError(`The page did not finish loading within ${LOAD_TIMEOUT_MS / 1000} s`)), LOAD_TIMEOUT_MS); }),
       ]);
+      return null;
     } catch (error) {
       if (error instanceof PreviewError) throw error;
-      const code = /ERR_[A-Z_]+/.exec(String(error?.message ?? error))?.[0] ?? "load failed";
-      throw new PreviewError(code === "ERR_CONNECTION_REFUSED"
-        ? `Nothing is listening at ${url} (${code}); start the dev server first, then open it again.`
-        : `The page did not load (${code}).`);
+      return /ERR_[A-Z_]+/.exec(String(error?.message ?? error))?.[0] ?? "load failed";
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /**
+   * Loads `url`, and when the connection itself failed, the same page over IPv4: "localhost" is
+   * tried on [::1] first, where on Windows another listener (WSL's localhost relay, a proxy, a
+   * second server) can take or reset the connection while the agent's dev server listens on
+   * 127.0.0.1 only; its health check (curl 127.0.0.1) passed while the preview got
+   * ERR_CONNECTION_RESET. A reset is also retried once after a moment, as a dev server that is
+   * reloading drops its first connections. Returns the URL that loaded.
+   */
+  async function load(preview, url) {
+    const contents = preview.view.webContents;
+    // The black-hole proxy is in place before the first request.
+    await preview.ready;
+    let code = await loadOnce(contents, url);
+    if (!code) return url;
+    let loaded = url;
+    const ipv4 = ipv4Alternative(url);
+    if (ipv4 && CONNECTION_FAILURES.has(code)) {
+      // The same machine and port: the chat may open it as it may open the address it asked for.
+      preview.origins.add(new URL(ipv4).origin);
+      const retried = await loadOnce(contents, ipv4);
+      if (!retried) return ipv4;
+      code = retried;
+      loaded = ipv4;
+    }
+    if (TRANSIENT_FAILURES.has(code)) {
+      await sleep(RETRY_DELAY_MS);
+      const retried = await loadOnce(contents, loaded);
+      if (!retried) return loaded;
+      code = retried;
+    }
+    if (code === "ERR_CONNECTION_REFUSED") {
+      throw new PreviewError(`Nothing is listening at ${url} (${code}); start the dev server first, then open it again.`);
+    }
+    if (CONNECTION_FAILURES.has(code)) {
+      throw new PreviewError(`The dev server at ${url} closed the connection (${code})${ipv4 ? `, over ${new URL(ipv4).host} too` : ""}. `
+        + "This is the page's server, not the preview: check the server's output, and that it serves http (not https) on that port.");
+    }
+    throw new PreviewError(`The page did not load (${code}).`);
   }
 
   const summary = (preview) => {

@@ -182,6 +182,8 @@ let aoChangeWatch = null;
 let missionWorkflowRuntime = null;
 /** The app's tool server for AO chat agents; one per app run, kept across backend restarts. */
 let chatAgentTools = null;
+// Runtime > Subagents (subagents.cjs): created once, like the chat agents' tools it serves.
+let subagentsService = null;
 let antigravityReauth = null;
 let antigravityAuthBrowser = null;
 // The swappable backend tier (see backend-bundle.cjs): restarted in place, never with the core.
@@ -931,13 +933,18 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
     const at = Date.now();
     while (rendererCrashes.length && at - rendererCrashes[0] > 120_000) rendererCrashes.shift();
     rendererCrashes.push(at);
-    if (rendererCrashes.length > 3) { void requestQuit({ keepBridge: true, relaunch: true }); return; }
-    setTimeout(() => {
-      if (window.isDestroyed()) return;
+    const reload = () => {
+      if (window.isDestroyed() || quitting) return;
       void loadRenderer(window).catch((error) => logger.warn("launcher.renderer_reload_failed", {
         message: error instanceof Error ? error.message : String(error),
       }));
-    }, 500);
+    };
+    if (rendererCrashes.length >= 3) {
+      // A restart the app refuses (a browser operation still running) leaves the window reloaded instead.
+      void requestQuit({ keepBridge: true, relaunch: true }).catch(() => undefined).finally(() => setTimeout(reload, 500));
+      return;
+    }
+    setTimeout(reload, 500);
   });
   window.on("unresponsive", () => logger.warn("launcher.renderer_unresponsive", {}));
   window.on("closed", () => {
@@ -2854,6 +2861,23 @@ async function start() {
     // permissions; and screen capture and computer control only when the user opts in (Settings >
     // "Let chat agents see and control the screen"). Created once: a live session keeps its
     // server URL and credential across a backend restart.
+    if (!subagentsService) {
+      const { createSubagents } = backendBundles.requireModule(backend, "subagents.cjs");
+      // Each subagent is an AO session started on its route the way a chat card is (the workflow's
+      // launch arguments), and its requests are answered by the workflow's own rules.
+      subagentsService = createSubagents({
+        statePath: path.join(app.getPath("userData"), "subagents.json"),
+        launchArgs: (workspaceId, route, name) => {
+          if (!missionWorkflowRuntime?.subagentLaunchArgs) throw new Error("Agent Orchestrator is not ready yet");
+          return missionWorkflowRuntime.subagentLaunchArgs(workspaceId, route, name);
+        },
+        harness: () => agentOrchestratorUpstream?.harness ?? null,
+        blockedRequest: (text) => missionWorkflowRuntime?.blockedRequest?.(text) ?? true,
+        recommendedAnswer: (approval) => missionWorkflowRuntime?.recommendedAnswer?.(approval) ?? { action: "decline" },
+        logger,
+      });
+      app.on("will-quit", () => subagentsService?.dispose());
+    }
     if (!chatAgentTools) {
       const { createChatAgentTools } = backendBundles.requireModule(backend, "chat-agent-tools.cjs");
       const { createChatPreviews } = backendBundles.requireModule(backend, "chat-preview.cjs");
@@ -2899,6 +2923,8 @@ async function start() {
         routineCommand: (command) => agentOrchestratorWorkflow.routineCommand(command),
         // ...and never answers for the user what the command approver's safety rules block.
         blockedCommand: (text) => agentOrchestratorWorkflow?.blockedRequest?.(text) ?? true,
+        // The subagents a chat agent may start (Runtime > Subagents).
+        subagents: subagentsService,
         // Running agents keep their tools across app restarts (credential hashes and the port only).
         statePath: path.join(app.getPath("userData"), "chat-agent-tools.json"),
         previewEnabled: () => stateStore.read().chatAgentPreviewTools !== false,
@@ -3025,6 +3051,8 @@ async function start() {
       logger,
       // A pre-warmed session is reused only by a launch that attaches the same app tools.
       agentToolsIdentity: (workspaceId) => chatAgentTools?.identity(workspaceId) ?? null,
+      // Runtime > Subagents: its settings, saved subagents and running ones.
+      subagents: subagentsService,
       // Chat goals (/goal) survive an app restart.
       goalsFile: path.join(app.getPath("userData"), "integrations", "chat-goals.json"),
       // So do deleted chat messages (their hidden runs and fresh-session flags).

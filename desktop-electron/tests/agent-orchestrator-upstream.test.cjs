@@ -91,6 +91,31 @@ test("a session's project folder is named for its tools only for the chat's own 
   assert.equal(await folderModeRoot(session, folder, "w1"), null, "a project that never chose");
 });
 
+test("a session AO runs in the chat workspace's own folder is named a project folder, whatever its project lookup says", async () => {
+  // Seen live (project "reg-machine"): an exec_command failed with "not one of AO's worktrees"
+  // although the chat ran in the project's own folder; the folder-mode lookup could not confirm it.
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("  async function workspaceFolderRoot");
+  const fn = source.slice(start, source.indexOf("  const workspaceBoard =", start));
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "ct-workspace-folder-"));
+  const folder = path.join(base, "reg-machine");
+  fs.mkdirSync(path.join(folder, "sub"), { recursive: true });
+  fs.mkdirSync(path.join(base, "other"));
+  try {
+    const workspaceFolderRoot = vm.runInNewContext(`${fn}; workspaceFolderRoot`, {
+      path, fs, process, getWorkspaces: async () => [{ id: "w1", path: folder }, { id: "w2", path: path.join(base, "other") }],
+    });
+    assert.equal(await workspaceFolderRoot(folder, "w1"), folder);
+    assert.equal(await workspaceFolderRoot(`${folder}${path.sep}`, "w1"), folder, "a trailing separator is the same folder");
+    assert.equal(await workspaceFolderRoot(path.join(folder, "sub", ".."), "w1"), folder, "the same folder by another spelling");
+    assert.equal(await workspaceFolderRoot(path.join(folder, "sub"), "w1"), null, "only the folder itself");
+    assert.equal(await workspaceFolderRoot(folder, "w2"), null, "another workspace's folder");
+    assert.equal(await workspaceFolderRoot(folder, "w9"), null, "an unknown workspace");
+    assert.equal(await workspaceFolderRoot(folder, null), null, "no chat workspace");
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
 test("actual upstream observe exposes bounded current streaming output separately from terminal evidence", async () => {
   let turn = "owned-turn";
   const messages = [
