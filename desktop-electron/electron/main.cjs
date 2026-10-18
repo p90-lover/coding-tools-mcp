@@ -933,13 +933,18 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
     const at = Date.now();
     while (rendererCrashes.length && at - rendererCrashes[0] > 120_000) rendererCrashes.shift();
     rendererCrashes.push(at);
-    if (rendererCrashes.length > 3) { void requestQuit({ keepBridge: true, relaunch: true }); return; }
-    setTimeout(() => {
-      if (window.isDestroyed()) return;
+    const reload = () => {
+      if (window.isDestroyed() || quitting) return;
       void loadRenderer(window).catch((error) => logger.warn("launcher.renderer_reload_failed", {
         message: error instanceof Error ? error.message : String(error),
       }));
-    }, 500);
+    };
+    if (rendererCrashes.length >= 3) {
+      // A restart the app refuses (a browser operation still running) leaves the window reloaded instead.
+      void requestQuit({ keepBridge: true, relaunch: true }).catch(() => undefined).finally(() => setTimeout(reload, 500));
+      return;
+    }
+    setTimeout(reload, 500);
   });
   window.on("unresponsive", () => logger.warn("launcher.renderer_unresponsive", {}));
   window.on("closed", () => {

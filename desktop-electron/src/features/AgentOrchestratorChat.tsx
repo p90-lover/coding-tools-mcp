@@ -351,7 +351,7 @@ export function AgentOrchestratorChat({
   send: (input: { taskId?: string; title?: string; message: string; goal?: string }) => Promise<void>;
   /** Hands a message to the running agent at once (Codex's steer); false when its turn already ended. */
   /** true: steered; "wait": the agent waits on a request, so the message is queued; false: send it normally. */
-  steer?: (input: { taskId: string; message: string }) => Promise<boolean | "wait" | "restart">;
+  steer?: (input: { taskId: string; message: string }) => Promise<boolean | "wait" | "restart" | "starting">;
   openStructure: (runId: string) => void;
   approvals: ChatApproval[];
   approve: (approval: ChatApproval, reply: ApprovalReply) => void;
@@ -591,7 +591,7 @@ export function AgentOrchestratorChat({
     try {
       // A steer the turn outran (it ended first) is sent as an ordinary follow-up instead; a goal is never steered.
       const steered = !goal && steering && steer && selectedTaskId ? await steer({ taskId: selectedTaskId, message }) : false;
-      if ((steered === "wait" || steered === "restart") && selectedTaskId) {
+      if ((steered === "wait" || steered === "restart" || steered === "starting") && selectedTaskId) {
         // The agent was found waiting on its own request just now (the page had not seen it yet):
         // steering would cancel that request, so the message waits for the turn like a queued one.
         // Or its turn had hung and was stopped: the message goes as the next turn once it settles.
@@ -599,6 +599,7 @@ export function AgentOrchestratorChat({
         setDraft(""); setAttachments([]); setAttachNote("");
         say(steered === "restart" ? "Restarting" : "Queued", steered === "restart"
           ? "The agent had stopped responding, so its turn was stopped; your message is sent as the next turn."
+          : steered === "starting" ? "The agent is still starting; your message is sent when its first turn finishes."
           : "The agent is waiting for your answer to its request; your message is sent when the turn finishes.");
         return true;
       }
