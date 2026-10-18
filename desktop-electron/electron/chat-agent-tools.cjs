@@ -61,6 +61,7 @@ const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
 const { PREVIEW_TOOL_DEFS, PREVIEW_TOOLS } = require("./chat-preview.cjs");
+const { SUBAGENT_TOOL_DEFS, SUBAGENT_TOOLS } = require("./subagents.cjs");
 
 const SERVER_NAME = "coding-tools";
 const PROTOCOL_VERSIONS = Object.freeze(["2025-06-18", "2025-03-26", "2024-11-05"]);
@@ -122,9 +123,9 @@ const CHAT_DESCRIPTIONS = Object.freeze({
 });
 // Consent the agent may never give itself: stripped from every call it makes.
 const CONSENT_ARGUMENTS = Object.freeze(["confirm", "confirmed", "approval_token"]);
-const GROUPS = Object.freeze(["agent", "terminal", "desktop", "preview"]);
+const GROUPS = Object.freeze(["agent", "terminal", "desktop", "preview", "subagents"]);
 const groupOf = (name) => (AGENT_TOOLS.has(name) ? "agent" : TERMINAL_TOOLS.has(name) ? "terminal" : DESKTOP_TOOLS.has(name) ? "desktop"
-  : PREVIEW_TOOLS.has(name) ? "preview" : null);
+  : PREVIEW_TOOLS.has(name) ? "preview" : SUBAGENT_TOOLS.has(name) ? "subagents" : null);
 // Commands remembered per session for the chat's Terminal pane, newest kept.
 const MAX_TRACKED_COMMANDS = 40;
 const MAX_PANE_READ_BYTES = 64 * 1024;
@@ -688,7 +689,7 @@ function paneRulesFor(groups) {
   return rules.length ? "How to work in this chat: " + rules.join(" ") + " " : "";
 }
 
-function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview = false } = {}) {
+function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview = false, subagents = "" } = {}) {
   return paneRulesFor(groups)
     + "Coding Tools tools for this chat's own git worktree: read_file, list_dir, search_text and apply_patch "
     + "for files; git_* for this worktree's history. Paths are relative to the worktree root and paths outside it are refused. "
@@ -721,6 +722,12 @@ function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview
     + (groups.includes("desktop")
       ? "capture_screenshot, list_windows and computer_* see and drive the desktop: the user confirms each screen "
         + "capture, and computer control works only while the user has enabled it in the app and allowed this chat. "
+      : "")
+    + (groups.includes("subagents")
+      ? "Subagents: for a self-contained piece of work (exploring part of the codebase, an independent change, a review) you can "
+        + "start a subagent with subagent_start and keep working; it runs in this project on its own model and ends with a report "
+        + "you read with subagent_result. It cannot see this conversation, so give it the whole task. Several may run in parallel. "
+        + (subagents ? `Available: ${String(subagents).slice(0, 1500)}. ` : "subagent_list shows the ones the user set up. ")
       : "")
     + "Large results are paged; ask for less per call.";
 }
@@ -765,6 +772,8 @@ function createChatAgentTools({
   previews = null, previewEnabled = () => true,
   // Why a command line is a routine project command "Approve for me" may run unasked, or null.
   routineCommand = () => null,
+  // Runtime > Subagents (subagents.cjs): the helpers a chat agent may start, when the user set any up.
+  subagents = null,
   // Whether the command approver's safety rules block a request's text (never answered for the user).
   blockedCommand = () => false,
   // Runs the terminal's commands in Codex's Windows sandbox (chat-sandbox.cjs) when it is installed.
@@ -793,7 +802,8 @@ function createChatAgentTools({
   const isEnabled = () => {
     try { return enabled() !== false; } catch { return false; }
   };
-  const optIns = { terminal: terminalEnabled, desktop: desktopEnabled, preview: () => Boolean(previews) && previewEnabled() };
+  const optIns = { terminal: terminalEnabled, desktop: desktopEnabled, preview: () => Boolean(previews) && previewEnabled(),
+    subagents: () => Boolean(subagents) && subagents.enabled() };
   /** The groups a new session gets now: agent tools when the setting is on, plus each opted-in group. */
   const currentGroups = () => (isEnabled() ? GROUPS.filter((group) => group === "agent" || setting(optIns[group])) : []);
   // A group is usable only if the session got it and the setting still allows it.
@@ -815,7 +825,7 @@ function createChatAgentTools({
     }
   }
 
-  function mint({ agent, workspaceId, approvalMode, autoReview = false }) {
+  function mint({ agent, workspaceId, approvalMode, autoReview = false, subagent = false }) {
     while (sessions.size >= MAX_SESSIONS) {
       const oldest = [...sessions.values()].sort((left, right) => left.usedAt - right.usedAt)[0];
       forget(oldest.key);
@@ -824,7 +834,9 @@ function createChatAgentTools({
     const token = crypto.randomBytes(32).toString("base64url");
     const entry = {
       // Only the credential's hash is held (and kept on disk), never the credential itself.
-      key, agent, workspaceId, groups: currentGroups(), expected: hashBearer(`Bearer ${token}`),
+      // A subagent's own session never starts subagents (one level only).
+      key, agent, workspaceId, groups: currentGroups().filter((group) => !subagent || group !== "subagents"), expected: hashBearer(`Bearer ${token}`),
+      subagent: subagent === true,
       // Only a session launched to bypass permissions runs commands without a confirmation each.
       // Captured once, at spawn time, from the mode the session was launched with: changing the
       // session's mode in AO later does not change it here, either way (a relaunch gets a new lease).
@@ -872,7 +884,7 @@ function createChatAgentTools({
       version: LEASE_FILE_VERSION, port,
       sessions: [...sessions.values()].filter((entry) => entry.expected).map((entry) => ({
         key: entry.key, hash: entry.expected.toString("hex"), agent: entry.agent, workspaceId: entry.workspaceId, aoSession: entry.aoSession,
-        groups: entry.groups, bypass: entry.bypass, autoReview: entry.autoReview, createdAt: entry.createdAt, usedAt: entry.usedAt,
+        groups: entry.groups, bypass: entry.bypass, autoReview: entry.autoReview, subagent: entry.subagent === true, createdAt: entry.createdAt, usedAt: entry.usedAt,
         origins: [...entry.origins].slice(0, 50),
       })),
     };
@@ -904,7 +916,7 @@ function createChatAgentTools({
       .map((saved) => ({
         key: saved.key, agent: saved.agent, workspaceId: saved.workspaceId, expected: Buffer.from(saved.hash, "hex"),
         groups: (Array.isArray(saved.groups) ? saved.groups : []).filter((group) => GROUPS.includes(group)),
-        bypass: saved.bypass === true, controlAllowed: false, autoReview: saved.autoReview === true,
+        bypass: saved.bypass === true, controlAllowed: false, autoReview: saved.autoReview === true, subagent: saved.subagent === true,
         aoSession: saved.aoSession ?? null, root: null, checkedAt: 0, createdAt: Number(saved.createdAt) || now(), usedAt: saved.usedAt,
         commands: new Map(), origins: new Set((Array.isArray(saved.origins) ? saved.origins : []).filter((origin) => typeof origin === "string").slice(0, 50)),
       }));
@@ -971,8 +983,8 @@ function createChatAgentTools({
   async function listTools(entry) {
     const catalog = await requestHeadless(`/api/v1/tools/catalog?workspace_id=${encodeURIComponent(entry.workspaceId)}`, null, { method: "GET" });
     // The preview's tools are the app's own, not headless's.
-    const own = allowed(entry, "preview") ? PREVIEW_TOOL_DEFS : [];
-    return [...(Array.isArray(catalog?.tools) ? catalog.tools : []).filter((tool) => !PREVIEW_TOOLS.has(tool?.name)), ...own]
+    const own = [...(allowed(entry, "preview") ? PREVIEW_TOOL_DEFS : []), ...(allowed(entry, "subagents") ? SUBAGENT_TOOL_DEFS : [])];
+    return [...(Array.isArray(catalog?.tools) ? catalog.tools : []).filter((tool) => !PREVIEW_TOOLS.has(tool?.name) && !SUBAGENT_TOOLS.has(tool?.name)), ...own]
       .filter((tool) => typeof tool?.name === "string" && groupOf(tool.name) && allowed(entry, groupOf(tool.name)))
       // outputSchema is left out: clients would validate structuredContent against it, and the
       // agent gains nothing from it.
@@ -1182,6 +1194,8 @@ function createChatAgentTools({
     const group = groupOf(name);
     if (!group || !allowed(entry, group)) return failedCall(`Unknown tool: ${name}`);
     const given = params.arguments && typeof params.arguments === "object" && !Array.isArray(params.arguments) ? params.arguments : {};
+    // Subagents are the app's own (subagents.cjs): no worktree is needed to start or read one.
+    if (group === "subagents") return subagents.call(entry.aoSession, entry.workspaceId, name, withoutConsent(given));
     let args = withoutConsent(given);
     let root;
     try {
@@ -1384,7 +1398,8 @@ function createChatAgentTools({
             protocolVersion: PROTOCOL_VERSIONS.includes(requested) ? requested : PROTOCOL_VERSIONS[0],
             capabilities: { tools: { listChanged: false } },
             serverInfo: { name: SERVER_NAME, title: "Coding Tools", version: String(version) },
-            instructions: instructionsFor(entry.groups.filter((group) => allowed(entry, group)), { bypass: entry.bypass, sandboxed: sandboxed(), autoReview: reviewedUpstream(entry) }),
+            instructions: instructionsFor(entry.groups.filter((group) => allowed(entry, group)), { bypass: entry.bypass, sandboxed: sandboxed(), autoReview: reviewedUpstream(entry),
+              subagents: allowed(entry, "subagents") ? (() => { try { return subagents.describe(); } catch { return ""; } })() : "" }),
           } };
         }
         case "ping": return { jsonrpc: "2.0", id, result: {} };
@@ -1624,10 +1639,10 @@ function createChatAgentTools({
      * is the session's AO permission mode: only "bypass-permissions" runs every command unconfirmed;
      * `autoReview` (the card is set to "Approve for me") runs its routine project commands unconfirmed.
      */
-    async lease({ agent, workspaceId, approvalMode = null, autoReview = false } = {}) {
+    async lease({ agent, workspaceId, approvalMode = null, autoReview = false, subagent = false } = {}) {
       if (!isEnabled() || !MCP_HTTP_AGENTS.has(agent) || typeof workspaceId !== "string" || !WORKSPACE_ID.test(workspaceId)) return null;
       await listen();
-      const { entry, token } = mint({ agent, workspaceId, approvalMode, autoReview });
+      const { entry, token } = mint({ agent, workspaceId, approvalMode, autoReview, subagent });
       const url = `http://127.0.0.1:${port}/mcp/${encodeURIComponent(workspaceId)}/${entry.key}`;
       return Object.freeze({
         servers: [{ name: SERVER_NAME, type: "http", url, headers: { Authorization: `Bearer ${token}` } }],
@@ -1664,7 +1679,7 @@ function createChatAgentTools({
       if (!previous || !isEnabled() || !MCP_HTTP_AGENTS.has(previous.agent)) return null;
       await listen();
       const { entry, token } = mint({ agent: previous.agent, workspaceId: previous.workspaceId,
-        approvalMode: previous.bypass ? "bypass-permissions" : null, autoReview: previous.autoReview });
+        approvalMode: previous.bypass ? "bypass-permissions" : null, autoReview: previous.autoReview, subagent: previous.subagent === true });
       // The old credential stays valid until the new one is first used: an AO that ignores the
       // resume's servers (or still holds them from before) resumes the agent with the old one.
       entry.supersedes = [];

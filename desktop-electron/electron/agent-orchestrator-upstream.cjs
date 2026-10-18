@@ -582,13 +582,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
    * the worktree AO creates for it), or null. Never fails a launch: without them the agent starts
    * without them.
    */
-  async function chatTools(agent, workspaceId, approvalMode, autoReview = false) {
+  async function chatTools(agent, workspaceId, approvalMode, autoReview = false, subagent = false) {
     if (!agentTools) return null;
     try {
       // The session's permission mode goes with its credential: only a session launched to
       // bypass permissions runs every terminal command without the user confirming each one, and
       // one set to "Approve for me" (autoReview) its routine project commands.
-      const lease = await agentTools.lease({ agent, workspaceId, ...(approvalMode ? { approvalMode } : {}), ...(autoReview ? { autoReview: true } : {}) });
+      const lease = await agentTools.lease({ agent, workspaceId, ...(approvalMode ? { approvalMode } : {}), ...(autoReview ? { autoReview: true } : {}),
+        // A subagent (subagents.cjs) gets the app's tools but no subagents of its own.
+        ...(subagent ? { subagent: true } : {}) });
       return Array.isArray(lease?.servers) && lease.servers.length ? lease : null;
     } catch (cause) {
       logger.warn?.("ao.agent_tools_unavailable", { agent, message: String(cause?.message || cause).slice(0, 200) });
@@ -620,7 +622,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         .slice(0, 500).map(model => ({ id: model.id, label: String(model.label || model.id).slice(0, 128), isDefault: model.isDefault === true,
           efforts: Array.isArray(model.efforts) ? model.efforts.filter(value => typeof value === "string" && value.length <= 32).slice(0, 16) : [] }));
     },
-    async spawn({ workspaceId, agent, model, prompt, name, gateway = null, effort = null, contextWindow = null, approvalMode = null, autoReview = false, plain = false, warm = false }) {
+    async spawn({ workspaceId, agent, model, prompt, name, gateway = null, effort = null, contextWindow = null, approvalMode = null, autoReview = false, plain = false, warm = false, subagent = false }) {
       if (approvalMode !== null && !["default", "accept-edits", "auto", "bypass-permissions"].includes(approvalMode)) throw new Error("Unsupported AO permission mode");
       const projectId = await projectFor(workspaceId);
       const settings = await internalApi("GET", "/api/v1/settings");
@@ -636,7 +638,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       const launch = async (mode) => {
         // Chat sessions only: a terminal launch has no controller to attach tool servers to. Each
         // attempt gets its own credential, bound to the session it creates and to nothing else.
-        const tools = mode === "chat" ? await chatTools(agent, workspaceId, approvalMode, autoReview === true) : null;
+        const tools = mode === "chat" ? await chatTools(agent, workspaceId, approvalMode, autoReview === true, subagent === true) : null;
         let created;
         try {
           created = await launchSession(mode, tools?.servers ?? []);

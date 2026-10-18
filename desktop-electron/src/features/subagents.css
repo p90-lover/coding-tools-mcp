@@ -1,0 +1,60 @@
+/* Runtime > Subagents. Settings rows reuse the app's .setting-row and .switch; the model pickers are
+   the team editor's HarnessPicker, which takes its look from .ao-workflow. */
+.subagents-page { height: 100%; min-height: 0; color: var(--color-text-primary); }
+.subagents-scroll { flex: 1 1 auto; min-width: 0; min-height: 0; overflow: auto; padding: 28px 32px 48px; }
+.subagents-scroll > * { max-width: 860px; margin-left: auto; margin-right: auto; }
+.subagents-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 18px; }
+.subagents-head h1 { margin: 0 0 6px; font-size: 22px; font-weight: 600; }
+.subagents-head p { margin: 0; max-width: 620px; color: var(--color-text-secondary); font-size: 13px; line-height: 1.5; }
+.subagents-actions { display: flex; flex: none; gap: 8px; }
+.subagents-section { margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--color-border); }
+.subagents-section h2 { margin: 0 0 8px; font-size: 15px; font-weight: 600; }
+.subagents-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.subagents-section-head h2 { margin: 0; }
+.subagents-primary, .subagents-secondary { height: 32px; padding: 0 14px; border-radius: 8px; font: inherit; font-size: 13px; cursor: pointer; }
+.subagents-primary { border: 0; background: var(--color-text-primary); color: var(--color-background-surface, #181818); }
+.subagents-secondary { border: 1px solid var(--color-border); background: var(--color-background-control); color: var(--color-text-primary); }
+.subagents-primary:disabled, .subagents-secondary:disabled { cursor: default; opacity: .5; }
+.subagents-secondary:hover:not(:disabled) { background: var(--color-background-control-hover); }
+.subagents-link { padding: 0; border: 0; background: none; color: var(--color-text-secondary); font: inherit; font-size: 12.5px; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.subagents-link:hover { color: var(--color-text-primary); }
+.subagents-link.is-danger:hover { color: var(--color-text-error, #f85149); }
+.subagents-number { width: 72px; height: 30px; padding: 0 8px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-background-control); color: inherit; font: inherit; }
+.subagents-select { height: 30px; padding: 0 8px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-background-control); color: inherit; font: inherit; }
+.subagents-model { display: grid; gap: 10px; padding: 14px 0; }
+.subagents-model .setting-row-text strong { font-size: 13px; }
+.subagents-model .setting-row-text p { margin: 4px 0 0; color: var(--color-text-secondary); font-size: 12.5px; }
+.subagents-picker { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; align-items: start; }
+.subagents-picker > label { display: grid; gap: 5px; min-width: 0; color: var(--color-text-secondary); font-size: 12px; }
+.subagents-picker select, .subagents-picker input { height: 30px; min-width: 0; padding: 0 8px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-background-control); color: var(--color-text-primary); font: inherit; font-size: 12.5px; }
+.subagents-picker > .subagents-link { grid-column: 1 / -1; justify-self: start; }
+.subagents-warning { margin: 4px 0 0; color: var(--color-text-warning, #d29922); font-size: 12.5px; }
+.subagents-notice { margin: 0 0 8px; color: var(--color-text-success, #3fb950); font-size: 12.5px; }
+.subagents-empty { color: var(--color-text-secondary); font-size: 13px; }
+.subagents-card { display: grid; gap: 10px; margin-top: 12px; padding: 14px; border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-background-elevated); }
+.subagents-card.is-off { opacity: .65; }
+.subagents-card-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.subagents-card-head code { flex: none; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text-tertiary); font-size: 11.5px; }
+.subagents-name { flex: 1 1 auto; min-width: 0; height: 30px; padding: 0 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: inherit; font: inherit; font-size: 14px; font-weight: 600; }
+.subagents-name:hover, .subagents-name:focus { border-color: var(--color-border); background: var(--color-background-control); }
+.subagents-field { display: grid; gap: 6px; color: var(--color-text-secondary); font-size: 12.5px; }
+.subagents-field small { color: var(--color-text-tertiary); }
+.subagents-field textarea { width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-background-control); color: var(--color-text-primary); font: inherit; font-size: 13px; line-height: 1.45; resize: vertical; }
+.subagents-inline { display: inline-flex; align-items: center; gap: 6px; color: var(--color-text-primary); font-size: 12.5px; }
+.subagents-runs { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.subagents-runs li { padding: 10px 12px; border: 1px solid var(--color-border); border-radius: 8px; }
+.subagents-run-head { display: flex; align-items: center; gap: 10px; min-width: 0; font-size: 13px; }
+.subagents-run-head strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subagents-state { flex: none; padding: 1px 8px; border-radius: 999px; background: var(--color-background-control); color: var(--color-text-secondary); font-size: 11.5px; }
+.subagents-runs li.is-running .subagents-state, .subagents-runs li.is-starting .subagents-state { color: var(--color-text-accent, #58a6ff); }
+.subagents-runs li.is-completed .subagents-state { color: var(--color-text-success, #3fb950); }
+.subagents-runs li.is-failed .subagents-state, .subagents-runs li.is-timed_out .subagents-state { color: var(--color-text-error, #f85149); }
+.subagents-muted { color: var(--color-text-tertiary); font-size: 12px; }
+.subagents-run-head .subagents-link:first-of-type { margin-left: auto; }
+.subagents-task { margin: 6px 0 0; color: var(--color-text-secondary); font-size: 12.5px; line-height: 1.45; }
+.subagents-report { max-height: 320px; margin: 8px 0 0; padding: 10px; overflow: auto; border-radius: 6px; background: var(--color-background-control); font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+@media (max-width: 640px) {
+  .subagents-scroll { padding: 20px 16px 40px; }
+  .subagents-head { flex-direction: column; }
+  .subagents-picker { grid-template-columns: 1fr; }
+}

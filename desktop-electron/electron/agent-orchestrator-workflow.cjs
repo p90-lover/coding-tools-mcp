@@ -165,7 +165,7 @@ function delayToMilliseconds(value, unit) {
   }
   return ms;
 }
-function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, chatEditsFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, chatEditsFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, logger = null }) {
   const goals = createGoalStore({ file: goalsFile, now });
   // Deleted chat messages: their runs are hidden from the chat, and the next follow-up starts afresh.
   const chatEdits = createChatEditStore({ file: chatEditsFile });
@@ -3159,6 +3159,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "task_rename": return taskRename(args);
       case "models": return models(args);
       case "harnesses": return harnesses();
+      // Runtime > Subagents (subagents.cjs): its settings and subagents, and the ones running now.
+      case "subagents_config": return { ok: true, available: Boolean(subagents), ...(subagents ? subagents.config() : {}) };
+      case "subagents_save": {
+        if (!subagents) throw new Error("Subagents are unavailable");
+        return { ok: true, ...subagents.save({ settings: args.settings, agents: args.agents }) };
+      }
+      case "subagents_runs": return { ok: true, runs: subagents ? subagents.runs() : [] };
+      case "subagents_stop": {
+        if (!subagents) throw new Error("Subagents are unavailable");
+        return { ok: true, run: await subagents.stop(clean(args.subagentId, 128)) };
+      }
       case "runs": {
         const saved = await runs(args);
         // The runs of deleted chat messages stay in AO's history but are not shown in their chat.
@@ -3202,9 +3213,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
 
   // goalAfterRun runs on its own when a run settles (reportRun); it is exposed for tests and recovery.
+  /**
+   * AO's spawn arguments for a subagent (subagents.cjs) on `route`, as a single chat card's: its
+   * model through CPA's gateway, effort and window honoured, a plain session.
+   */
+  const subagentLaunchArgs = (workspaceId, route, name) => aoLaunchArgs(clean(workspaceId, 128),
+    { id: "subagent", role: "worker", route, settings: { name } }, true);
   /** Whether the command approver's safety rules block this request text whatever anyone answers. */
   const blockedRequest = (text) => HARD_DENY.some((pattern) => pattern.test(String(text ?? "")));
-  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, routineCommand, routineAppTool, routineAppCommand, blockedRequest, recommendedAnswer });
+  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, routineCommand, routineAppTool, routineAppCommand, blockedRequest, recommendedAnswer, subagentLaunchArgs });
 }
 
 module.exports = { createAgentOrchestratorWorkflow, delayToMilliseconds, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
