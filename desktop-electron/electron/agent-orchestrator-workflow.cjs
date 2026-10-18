@@ -1891,7 +1891,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    */
   function autoVerdict(mission, node, approval) {
     const advice = approverAdvice.get(approval.approval_id);
-    if (cardApprover(mission, node)?.settings?.auto_decide === true && (!advice || advice.action !== "ask")) return "wait";
+    const approver = cardApprover(mission, node);
+    if (approver && (!advice || (approver.settings?.auto_decide === true && advice.action !== "ask"))) return "wait";
     const request = describeRequest(approval);
     if (hardDenied(request) || advice?.action === "deny" || advice?.unsent === "deny") return "deny";
     if (advice?.action === "allow") return "allow";
