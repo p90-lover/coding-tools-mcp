@@ -6,7 +6,10 @@ import {
   MANAGED_ROUTE_COMMENT,
   MANAGED_MULTI_AGENT_LINE,
   MANAGED_REMOTE_COMPACTION_LINE,
+  MANAGED_REALTIME_ROUTE_LINE,
+  isBridgeRouteUrl,
   managedAgentMaxDepthLine,
+  restorablePreviousRoute,
 } from "./codex-integration-shared";
 import type {
   CodexIntegrationJournal,
@@ -70,6 +73,39 @@ function compatibilityV1Evidence(
     previousAgentMaxDepth: journal.previousAgentMaxDepth,
     installedAgentMaxDepth: journal.installed.agent_max_depth,
   };
+}
+
+/**
+ * The journal's prior route as it may be put back: a prior value that was itself a bridge route is
+ * absent (see restorablePreviousRoute), so removing or disconnecting the bridge never leaves Codex
+ * pointing at one.
+ */
+export function journalRestorablePrevious(journal: ManagedRouteJournal): {
+  route: PreviousAssignment;
+  realtime: PreviousAssignment | undefined;
+} {
+  return restorablePreviousRoute(
+    journal.previous.openai_base_url,
+    journal.version === 9 || journal.version === 10 ? journal.previousRealtimeWebrtcCallBaseUrl : undefined,
+    [journal.installed.openai_base_url],
+  );
+}
+
+/**
+ * Removes a top-level `openai_base_url` that points at a bridge (and the Voice line the bridge
+ * writes beside it). Uninstall runs it last, so a route an earlier install left behind, or one an
+ * older build "restored", never survives the removal.
+ */
+export function removeLeftoverBridgeRoute(text: string, bridgeRoutes: readonly string[] = []): string {
+  const document = parseDocument(text);
+  const route = findTopLevelAssignment(document.lines, "openai_base_url");
+  if (route.index === undefined || !isBridgeRouteUrl(route.value, bridgeRoutes)) return text;
+  const owned = [route.index];
+  const realtime = findTopLevelAssignment(document.lines, "experimental_realtime_webrtc_call_base_url");
+  if (realtime.index !== undefined && realtime.rawLine === MANAGED_REALTIME_ROUTE_LINE) owned.push(realtime.index);
+  for (const index of owned.sort((left, right) => right - left)) removeDocumentLine(document, index);
+  removeManagedComment(document);
+  return renderDocument(document);
 }
 
 function restoreOwnedManagedFeatures(text: string, journal: ManagedRouteJournal): string {
@@ -138,12 +174,13 @@ function restoreStillManagedRouteAssignments(text: string, journal: ManagedRoute
   const document = parseDocument(text);
   removeManagedComment(document);
   const current = assignments(document.lines);
+  const previous = { ...journal.previous, openai_base_url: journalRestorablePrevious(journal).route };
   const target = Object.fromEntries(
     (Object.keys(current) as ManagedAssignmentKey[]).map(key => {
       const stillManaged = key === "openai_base_url"
         ? current[key].present && current[key].value === journal.installed.openai_base_url
         : !current[key].present;
-      return [key, stillManaged ? journal.previous[key] : current[key]];
+      return [key, stillManaged ? previous[key] : current[key]];
     }),
   ) as Record<ManagedAssignmentKey, PreviousAssignment>;
   const currentIndices = Object.values(current)
@@ -151,10 +188,10 @@ function restoreStillManagedRouteAssignments(text: string, journal: ManagedRoute
     .sort((left, right) => right - left);
   for (const index of currentIndices) removeDocumentLine(document, index);
 
-  const previous = (Object.entries(target) as Array<[ManagedAssignmentKey, PreviousAssignment]>)
+  const restoredAssignments = (Object.entries(target) as Array<[ManagedAssignmentKey, PreviousAssignment]>)
     .filter(([, assignment]) => assignment.present)
     .sort(([, left], [, right]) => (left.index ?? Number.MAX_SAFE_INTEGER) - (right.index ?? Number.MAX_SAFE_INTEGER));
-  for (const [key, assignment] of previous) {
+  for (const [key, assignment] of restoredAssignments) {
     if (!assignment.rawLine) throw new Error(`Codex integration journal is missing the prior ${key} line`);
     const index = Math.min(assignment.index ?? firstTableIndex(document.lines), firstTableIndex(document.lines));
     insertDocumentLine(document, index, assignment.rawLine);
@@ -185,12 +222,13 @@ export function replacementBaseline(
     const baseline = restoreOwnedManagedFeatures(withoutHook, journal);
     const document = parseDocument(baseline);
     removeManagedComment(document);
+    const restorable = journalRestorablePrevious(journal);
     for (const [key, installedValue, previous] of [
-      ["openai_base_url", journal.installed.openai_base_url, journal.previous.openai_base_url],
+      ["openai_base_url", journal.installed.openai_base_url, restorable.route],
       [
         "experimental_realtime_webrtc_call_base_url",
         journal.installed.experimental_realtime_webrtc_call_base_url,
-        journal.previousRealtimeWebrtcCallBaseUrl,
+        restorable.realtime ?? journal.previousRealtimeWebrtcCallBaseUrl,
       ],
     ] as const) {
       const current = findTopLevelAssignment(document.lines, key);
@@ -211,7 +249,7 @@ export function replacementBaseline(
     removeManagedComment(document);
     const current = findTopLevelAssignment(document.lines, "openai_base_url");
     if (current.value === journal.installed.openai_base_url && current.index !== undefined) {
-      const previous = journal.previous.openai_base_url;
+      const previous = journalRestorablePrevious(journal).route;
       if (previous.present) {
         if (!previous.rawLine) throw new Error("Codex integration journal is missing the prior openai_base_url line");
         document.lines[current.index] = previous.rawLine;
@@ -238,7 +276,16 @@ export function installRoute(
   previousRealtimeWebrtcCallBaseUrl: PreviousAssignment;
 } {
   const document = parseDocument(text);
-  const previous = assignments(document.lines);
+  const found = assignments(document.lines);
+  // A route that already points at a bridge (an earlier install whose journal is gone) is this
+  // integration's own, not the user's: it is adopted without --replace-codex-route and recorded as
+  // absent, so uninstall removes it instead of "restoring" it.
+  const restorable = restorablePreviousRoute(
+    found.openai_base_url,
+    findTopLevelAssignment(document.lines, "experimental_realtime_webrtc_call_base_url"),
+    [installedUrl],
+  );
+  const previous = { ...found, openai_base_url: restorable.route };
   if (previous.openai_base_url.present && !replaceExistingRoute) {
     throw new Error(
       `Codex already configures model routing (openai_base_url=${JSON.stringify(previous.openai_base_url.value)}). `
@@ -246,10 +293,7 @@ export function installRoute(
       + "Check whether another Codex extension or wrapper (for example, OpenCodex or Headroom) is replacing the bridge port.",
     );
   }
-  const previousRealtimeWebrtcCallBaseUrl = findTopLevelAssignment(
-    document.lines,
-    "experimental_realtime_webrtc_call_base_url",
-  );
+  const previousRealtimeWebrtcCallBaseUrl = restorable.realtime!;
   if (previousRealtimeWebrtcCallBaseUrl.present
     && previousRealtimeWebrtcCallBaseUrl.value !== CODEX_REALTIME_WEBRTC_CALL_BASE_URL
     && !replaceExistingRealtimeRoute) {
@@ -335,11 +379,15 @@ export function verifyRestoredRoute(
 ): void {
   const lines = splitLines(text);
   const current = assignments(lines);
+  // A disconnected config holds the prior route, or, when that prior value was itself a bridge
+  // route, no route (an older build restored the bridge value; this one removes it).
+  const restorable = journalRestorablePrevious(journal);
   const keys = journal.version === 7 || journal.version === 8 || journal.version === 9 || journal.version === 10
     ? (["openai_base_url"] as const)
     : (["openai_base_url", "model_provider", "model_catalog_json"] as const);
   for (const key of keys) {
-    if (!previousAssignmentMatches(current[key], journal.previous[key])) {
+    if (!previousAssignmentMatches(current[key], journal.previous[key])
+      && !(key === "openai_base_url" && previousAssignmentMatches(current[key], restorable.route))) {
       throw new Error(`Codex ${key} changed while the bridge was disconnected; refusing to overwrite the user's newer value`);
     }
   }
@@ -348,7 +396,8 @@ export function verifyRestoredRoute(
   }
   if (journal.version === 9 || journal.version === 10) {
     const realtime = findTopLevelAssignment(lines, "experimental_realtime_webrtc_call_base_url");
-    if (!previousAssignmentMatchesExactly(realtime, journal.previousRealtimeWebrtcCallBaseUrl)) {
+    if (!previousAssignmentMatchesExactly(realtime, journal.previousRealtimeWebrtcCallBaseUrl)
+      && !(restorable.realtime && previousAssignmentMatchesExactly(realtime, restorable.realtime))) {
       throw new Error(
         "Codex realtime WebRTC call route changed while the bridge was disconnected; refusing to overwrite the user's newer value",
       );
@@ -438,7 +487,8 @@ export function restoreManagedRoute(text: string, journal: ManagedRouteJournal):
   removeManagedComment(document);
   const currentBaseUrl = findTopLevelAssignment(document.lines, "openai_base_url");
   if (currentBaseUrl.index === undefined) throw new Error("Managed Codex openai_base_url is missing");
-  const previousBaseUrl = journal.previous.openai_base_url;
+  const restorable = journalRestorablePrevious(journal);
+  const previousBaseUrl = restorable.route;
   if (previousBaseUrl.present) {
     if (!previousBaseUrl.rawLine) throw new Error("Codex integration journal is missing the prior openai_base_url line");
     document.lines[currentBaseUrl.index] = previousBaseUrl.rawLine;
@@ -448,7 +498,7 @@ export function restoreManagedRoute(text: string, journal: ManagedRouteJournal):
   if (journal.version === 9 || journal.version === 10) {
     const currentRealtime = findTopLevelAssignment(document.lines, "experimental_realtime_webrtc_call_base_url");
     if (currentRealtime.index === undefined) throw new Error("Managed Codex realtime WebRTC call route is missing");
-    const previousRealtime = journal.previousRealtimeWebrtcCallBaseUrl;
+    const previousRealtime = restorable.realtime ?? journal.previousRealtimeWebrtcCallBaseUrl;
     if (previousRealtime.present) {
       if (!previousRealtime.rawLine) {
         throw new Error("Codex integration journal is missing the prior realtime WebRTC call route line");

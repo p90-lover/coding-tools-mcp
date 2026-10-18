@@ -267,6 +267,53 @@ export function routeUrl(config: AppConfig): string {
   return `http://${config.host}:${config.port}/v1`;
 }
 
+/** The Responses route of a bridge on its default port (any codex-chatgpt-web install, this one or an earlier one). */
+export const DEFAULT_BRIDGE_ROUTE_URL = "http://127.0.0.1:17841/v1";
+export const MANAGED_REALTIME_ROUTE_LINE =
+  `experimental_realtime_webrtc_call_base_url = ${JSON.stringify(CODEX_REALTIME_WEBRTC_CALL_BASE_URL)}`;
+
+function loopbackRouteIdentity(value: string): string | undefined {
+  let url: URL;
+  try { url = new URL(value.trim()); } catch { return undefined; }
+  if (url.protocol !== "http:" || url.username || url.password || url.search || url.hash) return undefined;
+  if (!["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) return undefined;
+  if (url.pathname.replace(/\/+$/, "") !== "/v1") return undefined;
+  return `loopback:${url.port || "80"}/v1`;
+}
+
+/**
+ * Whether a Codex `openai_base_url` points at a codex-chatgpt-web bridge: the default bridge port
+ * or one of `bridgeRoutes` (the route an install wrote). Such a value is never the user's own
+ * route, so it is never "restored": restoring it would leave Codex on a bridge being removed.
+ */
+export function isBridgeRouteUrl(value: string | undefined, bridgeRoutes: readonly string[] = []): boolean {
+  if (typeof value !== "string") return false;
+  const identity = loopbackRouteIdentity(value);
+  return identity !== undefined
+    && [DEFAULT_BRIDGE_ROUTE_URL, ...bridgeRoutes].some(route => loopbackRouteIdentity(route) === identity);
+}
+
+/**
+ * The prior route this integration may put back. A prior value that was itself a bridge route
+ * (left by an earlier install whose journal is gone, or another codex-chatgpt-web home) is
+ * treated as absent, and so is the Voice line that bridge wrote beside it.
+ */
+export function restorablePreviousRoute(
+  previous: PreviousAssignment,
+  previousRealtime: PreviousAssignment | undefined,
+  bridgeRoutes: readonly string[],
+): { route: PreviousAssignment; realtime: PreviousAssignment | undefined } {
+  if (!previous.present || !isBridgeRouteUrl(previous.value, bridgeRoutes)) {
+    return { route: previous, realtime: previousRealtime };
+  }
+  return {
+    route: { present: false },
+    realtime: previousRealtime?.present && previousRealtime.rawLine === MANAGED_REALTIME_ROUTE_LINE
+      ? { present: false }
+      : previousRealtime,
+  };
+}
+
 export function sha256(value: string | Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
 }

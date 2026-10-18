@@ -315,3 +315,28 @@ test("a failed automatic update waits an hour before trying again", async () => 
   assert.equal(await installer.tick(), true);
   assert.equal(calls.install, 2);
 });
+
+test("a launch during an update's file swap waits for it; a marker whose worker is gone is cleared", async () => {
+  const { waitForUpdateApply } = require("../electron/app-update.cjs");
+  const fsMod = require("node:fs");
+  const osMod = require("node:os");
+  const pathMod = require("node:path");
+  const root = fsMod.mkdtempSync(pathMod.join(osMod.tmpdir(), "app-update-apply-"));
+  const marker = pathMod.join(root, "_update", "applying.json");
+  try {
+    assert.equal(await waitForUpdateApply(root), false, "no update applying: no wait");
+    fsMod.mkdirSync(pathMod.dirname(marker), { recursive: true });
+    fsMod.writeFileSync(marker, JSON.stringify({ pid: 4242, at: 1000 }));
+    let checks = 0;
+    const waited = await waitForUpdateApply(root, { now: () => 2000, sleep: async () => { if (++checks === 3) fsMod.rmSync(marker); }, alive: () => true });
+    assert.equal(waited, false, "returned once the worker removed its marker");
+    assert.equal(checks, 3);
+    fsMod.writeFileSync(marker, JSON.stringify({ pid: 4242, at: 1000 }));
+    assert.equal(await waitForUpdateApply(root, { now: () => 2000, sleep: async () => {}, alive: () => false }), true);
+    assert.equal(fsMod.existsSync(marker), false, "a dead worker's marker is removed");
+    fsMod.writeFileSync(marker, JSON.stringify({ pid: 4242, at: 0 }));
+    assert.equal(await waitForUpdateApply(root, { now: () => 11 * 60_000, sleep: async () => {}, alive: () => true }), true, "never waits past the cap");
+  } finally {
+    fsMod.rmSync(root, { recursive: true, force: true });
+  }
+});

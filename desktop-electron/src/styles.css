@@ -497,6 +497,17 @@ code {
   -webkit-backdrop-filter: blur(22px) saturate(1.04);
 }
 
+/* Off macOS the window is opaque (#181818, no vibrancy), so these blurs only blur a flat colour,
+   yet each one keeps a full-height backdrop render pass that the compositor filters again on
+   every frame anything under it repaints (a spinner, a pulsing dot, a streaming reply). The
+   compact sidebar still blurs: it is drawn over the workspace's content. */
+.app-root:not([data-platform="darwin"]) .app-shell:not(.is-compact) .app-sidebar,
+.app-root:not([data-platform="darwin"]) .workspace,
+.app-root:not([data-platform="darwin"]) .welcome {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
 .surface-transition {
   width: 100%;
   height: 100%;

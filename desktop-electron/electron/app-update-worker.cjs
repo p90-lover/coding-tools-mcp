@@ -154,10 +154,18 @@ async function main() {
     return;
   }
   const stamp = Date.now();
+  // While files are being swapped the app must not start from a half-updated install: a launch
+  // meanwhile waits for this marker to go (see waitForUpdateApply in app-update.cjs).
+  const marker = path.join(job.installRoot, "_update", "applying.json");
+  try {
+    fs.mkdirSync(path.dirname(marker), { recursive: true });
+    fs.writeFileSync(marker, `${JSON.stringify({ pid: process.pid, version: job.version, at: stamp })}\n`);
+  } catch {}
   let journal;
   try {
     journal = await swapIn(job, stamp);
   } catch (error) {
+    try { fs.rmSync(marker, { force: true }); } catch {}
     appendLog(job, `update failed and was rolled back: ${error instanceof Error ? error.stack || error.message : String(error)}`);
     launch(job.executable);
     return;
@@ -169,6 +177,7 @@ async function main() {
   }
   try { updateUninstallEntry(job); } catch {}
   const leftover = sweep(job, journal);
+  try { fs.rmSync(marker, { force: true }); } catch {}
   appendLog(job, `v${job.version} applied: ${job.changed.length} file(s) replaced, ${job.obsolete.length} removed${leftover ? `, ${leftover} still in use` : ""}`);
   launch(job.executable);
   try { fs.rmSync(job.stageRoot, { recursive: true, force: true }); } catch {}

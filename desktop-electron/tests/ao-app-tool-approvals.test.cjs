@@ -4,7 +4,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { createAgentOrchestratorWorkflow } = require("../electron/agent-orchestrator-workflow.cjs");
 
-const { routineAppTool } = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }) });
+const { routineAppTool, recommendedAnswer, blockedRequest } = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }) });
 
 test("Approve for me answers the app's own reads and worktree edits itself", () => {
   for (const name of ["list_dir", "read_file", "search_text", "git_status", "git_diff", "git_log", "view_image", "apply_patch", "patch_check", "read_output"]) {
@@ -20,4 +20,22 @@ test("the terminal, the screen, unknown tools and look-alike servers still go to
     "mcp__coding-tools-evil__read_file", "mcp__coding_tools__read_file", "mcp__other__read_file", "read_file",
     "mcp__coding-tools__read_file_extra", "", undefined,
   ]) assert.equal(routineAppTool(name), null, String(name));
+});
+
+test("a question nobody answers gets each field's recommended choice, and a URL request is declined", () => {
+  const answer = recommendedAnswer({ mode: "form", fields: [
+    { key: "framework", type: "choice", options: [{ value: "vue", label: "Vue", description: "" }, { value: "react", label: "React (Recommended)", description: "" }] },
+    { key: "extras", type: "multi", options: [{ value: "lint", label: "Lint", description: "" }] },
+    { key: "proceed", type: "boolean", options: [] },
+    { key: "notes", type: "text", options: [] },
+  ] });
+  assert.equal(answer.action, "accept");
+  assert.deepEqual({ ...answer.content, notes: typeof answer.content.notes }, { framework: "react", extras: ["lint"], proceed: true, notes: "string" });
+  assert.deepEqual(recommendedAnswer({ mode: "url", url: "https://example.com", fields: [] }), { action: "decline" });
+});
+
+test("the safety rules block what is never answered for the person", () => {
+  assert.equal(blockedRequest("git push origin main"), true);
+  assert.equal(blockedRequest("rm -rf /"), true);
+  assert.equal(blockedRequest("powershell -Command Invoke-WebRequest http://127.0.0.1:8000"), false);
 });

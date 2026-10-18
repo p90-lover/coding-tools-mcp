@@ -51,7 +51,7 @@ const { assertLauncherRuntimeVersion, terminateLauncherSmoke } = require("./smok
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createGuiUpdateController, guiShellHash } = require("./gui-update.cjs");
-const { combineUpdateControllers, createAppUpdateController, createAutoInstaller, sweepUpdateLeftovers } = require("./app-update.cjs");
+const { combineUpdateControllers, createAppUpdateController, createAutoInstaller, sweepUpdateLeftovers, waitForUpdateApply } = require("./app-update.cjs");
 const { useNativeUpdateTransport } = require("./update.cjs");
 const {
   providerNetworkReady,
@@ -921,6 +921,25 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
     if (stateStore.read().keepRunningOnClose && tray) window.hide();
     else void requestQuit();
   });
+  // A crashed renderer left a blank window while this process kept the single-instance lock, so
+  // launching the app again only woke the dead window: it "could not be launched back". The page
+  // is reloaded instead; after three crashes in two minutes the whole app restarts.
+  const rendererCrashes = [];
+  window.webContents.on("render-process-gone", (_event, details) => {
+    logger.warn("launcher.renderer_gone", { reason: details?.reason, exitCode: details?.exitCode });
+    if (quitting || window.isDestroyed() || details?.reason === "clean-exit") return;
+    const at = Date.now();
+    while (rendererCrashes.length && at - rendererCrashes[0] > 120_000) rendererCrashes.shift();
+    rendererCrashes.push(at);
+    if (rendererCrashes.length > 3) { void requestQuit({ keepBridge: true, relaunch: true }); return; }
+    setTimeout(() => {
+      if (window.isDestroyed()) return;
+      void loadRenderer(window).catch((error) => logger.warn("launcher.renderer_reload_failed", {
+        message: error instanceof Error ? error.message : String(error),
+      }));
+    }, 500);
+  });
+  window.on("unresponsive", () => logger.warn("launcher.renderer_unresponsive", {}));
   window.on("closed", () => {
     if (mainWindow === window) {
       mainWindow = null;
@@ -2517,8 +2536,16 @@ async function start() {
     app.quit();
     return;
   }
-  app.on("second-instance", () => showMainWindow());
+  app.on("second-instance", () => {
+    // A window whose renderer died is reloaded before it is shown, so launching again recovers it.
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.isCrashed()) {
+      void loadRenderer(mainWindow).catch(() => undefined);
+    }
+    showMainWindow();
+  });
 
+  // An update still swapping files in is waited out first (app-update-worker.cjs).
+  if (app.isPackaged) await waitForUpdateApply(path.dirname(process.execPath)).catch(() => false);
   await waitForPackagedRuntimeSource({ app, resourcesPath: process.resourcesPath });
   let installedRuntimeRoot = null;
   let runtimeRootResolved = false;
@@ -2597,6 +2624,10 @@ async function start() {
     publish: (record) => send("launcher:log", record),
   });
   quitLogger = logger;
+  // The GPU process (or a utility process) dying is logged with its reason; Chromium restarts it.
+  app.on("child-process-gone", (_event, details) => {
+    logger.warn("launcher.child_process_gone", { type: details?.type, reason: details?.reason, exitCode: details?.exitCode, name: details?.name });
+  });
   // Provider Network and the Proxy Gateway log here too (their launch events are kept until now).
   setProviderLogger(logger);
   if (autostartStartupError) logger.warn("launcher.autostart_unavailable", { message: autostartStartupError });
@@ -2742,7 +2773,9 @@ async function start() {
     },
   });
   if (!LAUNCHER_SMOKE_TEST) mcpEventMonitor.start();
-  const confirmAoAction = async ({ message, detail }) => {
+  // `signal` closes the dialog unanswered (a chat agent's prompt "Approve for me" answers itself
+  // after 20 seconds).
+  const confirmAoAction = async ({ message, detail, signal }) => {
     if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() || !mainWindow.isFocused()) {
       throw new Error("Use the focused Coding Tools window to approve workflow changes");
     }
@@ -2750,6 +2783,7 @@ async function start() {
       type: "warning", title: "Coding Tools: Agent Orchestrator",
       message: String(message).slice(0, 200), detail: String(detail).slice(0, 65_536),
       buttons: ["Cancel", "Continue"], defaultId: 0, cancelId: 0, noLink: true,
+      ...(signal ? { signal } : {}),
       // Room for a 72-column line of the detail (chat-agent-tools DISPLAY_COLUMNS) without the
       // alert wrapping it again; macOS only, Windows sizes the box to its content.
       textWidth: 640,
@@ -2863,6 +2897,8 @@ async function start() {
         // "Approve for me" runs the same routine project commands through the app's terminal as it
         // allows from the agent's own shell (the workflow's list), without a dialog each.
         routineCommand: (command) => agentOrchestratorWorkflow.routineCommand(command),
+        // ...and never answers for the user what the command approver's safety rules block.
+        blockedCommand: (text) => agentOrchestratorWorkflow?.blockedRequest?.(text) ?? true,
         // Running agents keep their tools across app restarts (credential hashes and the port only).
         statePath: path.join(app.getPath("userData"), "chat-agent-tools.json"),
         previewEnabled: () => stateStore.read().chatAgentPreviewTools !== false,

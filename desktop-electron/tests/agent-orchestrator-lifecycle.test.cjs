@@ -583,6 +583,9 @@ test("AO harness sends each explicit permission mode to the session API without 
     assert.equal(Object.hasOwn(launches.at(-1), "plainPrompt"), false, "AO keeps its worker prompt by default");
     await h.controller.harness.spawn({ workspaceId: "ws", agent: "claude-code", model: "model", prompt: "hello", plain: true });
     assert.equal(launches.at(-1).plainPrompt, true, "a single-model chat asks AO for a plain session");
+    assert.equal(launches.at(-1).async, true, "a chat returns once recorded; its agent starts behind it");
+    await h.controller.harness.spawn({ workspaceId: "ws", agent: "claude-code", model: "model", prompt: "", warm: true });
+    assert.equal(Object.hasOwn(launches.at(-1), "async"), false, "a pre-warmed chat is ready only once its agent is");
     const count = launches.length;
     await assert.rejects(h.controller.harness.spawn({ workspaceId: "ws", agent: "codex", prompt: "read", approvalMode: "unrecognized" }), /Unsupported AO permission mode/);
     assert.equal(launches.length, count);
@@ -742,5 +745,35 @@ test("without a tool server the launch body is unchanged", async () => {
     await h.controller.start();
     await h.controller.harness.spawn({ workspaceId: "ws", agent: "claude-code", model: "model", prompt: "hello" });
     assert.equal(Object.hasOwn(launches[0], "mcpServers"), false);
+  } finally { await h.controller.stop(); }
+});
+
+test("a chat started in the background whose agent failed to come up is resumed once for a timeout, otherwise fails with AO's reason", async () => {
+  const resumed = [];
+  let reason = "persistent ACP host did not start: deadline exceeded";
+  const h = createHarness({
+    getWorkspaces: async () => [], missionCall: async () => ({ ok: true }),
+    workspaceBoard: { bind: async () => ({ projectId: "project-fixture" }) },
+    api: async (endpoint) => {
+      if (/^\/api\/v1\/sessions\/[^/]+$/.test(endpoint.pathname)) {
+        return { session: { id: "s1", mode: "chat", status: "working", provisionState: "failed", provisionError: reason } };
+      }
+      if (endpoint.pathname.endsWith("/conversation")) return { turns: [{ id: "t1", state: "queued" }], messages: [], activities: [] };
+      if (endpoint.pathname.endsWith("/resume-agent")) { resumed.push(endpoint.pathname); return { ok: true }; }
+    },
+  });
+  try {
+    await h.controller.start();
+    const first = await h.controller.harness.observe("s1");
+    assert.equal(first.turnState, "queued", "a start that failed for time is resumed and keeps waiting");
+    assert.equal(resumed.length, 1);
+    const second = await h.controller.harness.observe("s1");
+    assert.equal(second.turnState, "failed", "resumed at most once");
+    assert.match(second.error, /could not start: persistent ACP host/);
+    assert.equal(resumed.length, 1);
+    reason = "claude: not installed";
+    const other = await h.controller.harness.observe("s2");
+    assert.equal(other.turnState, "failed");
+    assert.equal(resumed.length, 1, "a failure that is not about time is not retried");
   } finally { await h.controller.stop(); }
 });

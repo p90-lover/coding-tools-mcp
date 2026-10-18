@@ -387,3 +387,21 @@ test("a same-version release whose directory is in use runs beside it, then is p
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a file an update set aside because something still ran it does not fail startup or get copied", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-set-aside-"));
+  const resourcesPath = runtimeFixture(root);
+  const executable = process.platform === "win32" ? "bun.exe" : "bun";
+  fs.writeFileSync(path.join(resourcesPath, "runtime", "runtime", `${executable}.old-1791112467550`), "old bun");
+  const app = { isPackaged: true, getVersion: () => "0.2.0" };
+  try {
+    assert.equal(await waitForPackagedRuntimeSource({ app, resourcesPath, timeoutMs: 100, intervalMs: 10 }), path.join(resourcesPath, "runtime"));
+    const installed = ensurePackagedRuntime({ app, coreHome: path.join(root, "core-home"), resourcesPath });
+    assert.equal(fs.existsSync(path.join(installed, "runtime", `${executable}.old-1791112467550`)), false);
+    // Any other stray file is still refused.
+    fs.writeFileSync(path.join(resourcesPath, "runtime", "app", "stray.js"), "x");
+    await assert.rejects(waitForPackagedRuntimeSource({ app, resourcesPath, timeoutMs: 30, intervalMs: 10 }), /unmanifested file/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

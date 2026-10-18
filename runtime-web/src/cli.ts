@@ -20,6 +20,7 @@ import {
   setCodexSubagentProtocol,
   uninstallCodexIntegration,
 } from "./codex-integration";
+import { routeUrl } from "./codex-integration-shared";
 import { formatDoctorReport, runDoctor } from "./doctor";
 import { runChatGptMcpMain } from "./adapters/chatgpt-web/mcp-main";
 import { runCommand } from "./process";
@@ -541,7 +542,8 @@ async function uninstallCommand(args: string[]): Promise<void> {
     stopTunnel(config);
   }
   if (config && process.platform === "darwin" && !launcherRuntimeStopped) await uninstallService(config);
-  uninstallCodexIntegration();
+  // This installation's own route (its configured port) is never left in, or restored to, Codex.
+  uninstallCodexIntegration({ bridgeRoutes: config ? [routeUrl(config)] : [] });
   if (!keepData) rmSync(getConfigDir(), { recursive: true, force: true });
   stdout.write(keepData ? "Uninstalled; private application data was preserved.\n" : "Uninstalled and removed private application data.\n");
 }

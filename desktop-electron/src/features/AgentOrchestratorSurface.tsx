@@ -1628,7 +1628,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
             return Object.entries(result.nodes ?? {}).map(([nodeId, value]) => [`${runId}:${nodeId}`, value] as const);
           } catch { return []; }
         }));
-        if (live) setChatActivity(Object.fromEntries(frames.flat()));
+        // An unchanged frame keeps the same object, so the surface does not re-render every second.
+        const next = Object.fromEntries(frames.flat());
+        if (live) setChatActivity(current => JSON.stringify(current) === JSON.stringify(next) ? current : next);
       } finally { reading = false; }
     };
     void poll();

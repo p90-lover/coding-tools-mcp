@@ -227,6 +227,10 @@ export function launcherRestartAnnounced(configuredPath: string, now = Date.now(
  * writes a new one once its browser is up again, so for the length of an update a turn would find
  * it missing (or naming the old, exited process) and fail at once; it waits for the new one
  * instead, up to `timeoutMs`. Any other problem with the descriptor fails at once.
+ *
+ * `missingIsRestart: false` waits only when the evidence says the app is coming back: a descriptor
+ * left by an app that exited without removing it (a crash) or an announced restart. A descriptor
+ * removed by a clean quit with nothing announced then fails at once.
  */
 export async function waitForLauncherBrowserHostDescriptor(
   configuredPath: string,
@@ -236,12 +240,14 @@ export async function waitForLauncherBrowserHostDescriptor(
     now = Date.now,
     sleep = (ms: number) => new Promise<void>(resolveSleep => setTimeout(resolveSleep, ms)),
     signal,
+    missingIsRestart = true,
   }: {
     timeoutMs?: number;
     intervalMs?: number;
     now?: () => number;
     sleep?: (ms: number) => Promise<void>;
     signal?: AbortSignal;
+    missingIsRestart?: boolean;
   } = {},
 ): Promise<LauncherBrowserHostDescriptor> {
   const started = now();
@@ -260,9 +266,11 @@ export async function waitForLauncherBrowserHostDescriptor(
     } catch (error) {
       if (error instanceof Error && error.message.startsWith("Launcher browser host is restarting")) throw error;
       const message = error instanceof Error ? error.message : String(error);
-      const restarting = /descriptor is missing|host process is not running/.test(message);
+      const crashed = /host process is not running/.test(message);
+      const missing = /descriptor is missing/.test(message);
       // An announced restart (an update installing) keeps the turn waiting until it should be over.
-      const announced = restarting && timeoutMs > 0 ? launcherRestartAnnouncedUntil(configuredPath, now()) : null;
+      const announced = (crashed || missing) && timeoutMs > 0 ? launcherRestartAnnouncedUntil(configuredPath, now()) : null;
+      const restarting = crashed || (missing && (missingIsRestart || announced !== null));
       if (!restarting || signal?.aborted || now() >= Math.max(deadline, announced ?? 0)) {
         if (restarting && !signal?.aborted && timeoutMs > 0) {
           throw new Error(`${message} (waited ${Math.round((now() - started) / 1000)} s for Coding Tools to start again)`);
