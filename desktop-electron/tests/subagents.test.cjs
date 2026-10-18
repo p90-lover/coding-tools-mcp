@@ -219,6 +219,19 @@ test("a subagent still ends at its time limit while AO is not running, and the p
   } finally { w.cleanup(); }
 });
 
+test("the app's chat tools and subagents read the safety rules of the workflow running now", () => {
+  // Both are created once, inside the first backend start, and outlive it. A closure over that
+  // start's `const agentOrchestratorWorkflow` (declared further down) threw "Cannot access before
+  // initialization" for good when that start failed before reaching it (AO not starting), and
+  // otherwise kept a disposed backend's rules after every backend restart.
+  const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const once = main.slice(main.indexOf("    if (!subagentsService) {"), main.indexOf("    const createCodingToolsAppsHost"));
+  assert.ok(once.includes("createChatAgentTools({") && once.includes("createSubagents({"));
+  assert.doesNotMatch(once, /\bagentOrchestratorWorkflow\b/);
+  assert.match(once, /routineCommand: \(command\) => missionWorkflowRuntime\?\.routineCommand\?\.\(command\) \?\? null/);
+  assert.match(once, /blockedCommand: \(text\) => missionWorkflowRuntime\?\.blockedRequest\?\.\(text\) \?\? true/);
+});
+
 test("starts made at the same moment cannot pass the per-chat or running-at-once limit together", async () => {
   const w = world({ settings: { maxConcurrent: 2, maxPerChat: 1 } });
   try {
