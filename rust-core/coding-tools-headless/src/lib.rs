@@ -3505,7 +3505,7 @@ mod session_root_tests {
             "busy change partially retired another context"
         );
         drop(fence);
-        let failed = tools::live_policy::retire_contexts(&[rooted.clone()], || {
+        let failed = tools::live_policy::retire_contexts(std::slice::from_ref(&rooted), || {
             Err::<(), _>(coding_tools_core::error::AppError::Message(
                 "fixture save failed".into(),
             ))
