@@ -361,15 +361,23 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     return run;
   }
 
-  async function stop(id, parent = null) {
+  async function stop(id, parent = null, includeRetained = false) {
     const run = runs.get(id);
     if (!run || (parent !== null && run.parent !== parent)) throw new Error("No such subagent");
-    if (!ACTIVE.has(run.state)) return run;
+    const active = ACTIVE.has(run.state);
+    if (!active && (!includeRetained || run.released)) return run;
     run.stopping = true;
-    const outcome = await harness()?.exitAgent?.(run.id);
+    let outcome;
+    try { outcome = await harness()?.exitAgent?.(run.id); }
+    catch (error) {
+      // A retained report can outlive a session the user already removed.
+      if (active || !/\b(?:SESSION_NOT_FOUND|SESSION_TERMINATED)\b/.test(String(error?.message))) throw error;
+      outcome = { ok: true };
+    }
     if (outcome?.ok !== true) throw new Error(`Subagent ${run.id} shutdown is unconfirmed`);
     // Shutdown was acknowledged here; automatic release must not submit it a second time.
     finish(run, "stopped", { released: true });
+    run.released = true;
     return run;
   }
 
@@ -377,7 +385,7 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     stopGenerations.set(parent, (stopGenerations.get(parent) ?? 0) + 1);
     const children = [...runs.values()].filter(run => run.parent === parent);
     const outcomes = await Promise.allSettled([
-      ...children.flatMap(run => [stop(run.id, parent), stopParent(run.id)]),
+      ...children.flatMap(run => [stop(run.id, parent, true), stopParent(run.id)]),
       ...(pendingLaunches.get(parent) ?? []),
     ]);
     const failures = outcomes.filter(outcome => outcome.status === "rejected").map(outcome => String(outcome.reason?.message || outcome.reason));

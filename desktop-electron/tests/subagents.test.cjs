@@ -49,6 +49,33 @@ test("stopping a parent exits only its own children even with releaseWhenDone di
   } finally { w.cleanup(); }
 });
 
+test("a parent stop exits a completed child's retained host without changing its report", async () => {
+  const w = world({ settings: { releaseWhenDone: false } });
+  try {
+    const child = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read one" }));
+    w.sessions.set(child.subagent_id, { turnState: "completed", answer: "Saved report" });
+    await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: child.subagent_id, wait_seconds: 0 });
+    assert.deepEqual(w.released, []);
+    await w.service.stopParent("chat-1");
+    assert.deepEqual(w.released, [child.subagent_id]);
+    const saved = w.service.runs()[0];
+    assert.equal(saved.state, "completed");
+    assert.equal(saved.report, "Saved report");
+  } finally { w.cleanup(); }
+});
+
+test("a retained child already removed from AO does not prevent parent shutdown", async () => {
+  const w = world({ settings: { releaseWhenDone: false } });
+  try {
+    const child = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read one" }));
+    w.sessions.set(child.subagent_id, { turnState: "completed", answer: "Saved report" });
+    await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: child.subagent_id, wait_seconds: 0 });
+    w.harness.exitAgent = async () => { throw new Error("Unknown session (SESSION_NOT_FOUND)"); };
+    await w.service.stopParent("chat-1");
+    assert.equal(w.service.runs()[0].report, "Saved report");
+  } finally { w.cleanup(); }
+});
+
 test("a parent stop waits for its pending launch and ends the returned child", async () => {
   const w = world({ settings: { releaseWhenDone: false } });
   let finishLaunch;
@@ -72,7 +99,7 @@ test("a parent stop traverses completed children and reports a descendant exit r
     const grandchild = parse(await w.service.call(child.subagent_id, "ws-1", "subagent_start", { agent: "explorer", task: "Read two" }));
     w.harness.exitAgent = async id => { w.released.push(id); return { ok: false }; };
     await assert.rejects(w.service.stopParent("chat-1"), /shutdown is unconfirmed/);
-    assert.deepEqual(w.released, [grandchild.subagent_id]);
+    assert.deepEqual(w.released, [child.subagent_id, grandchild.subagent_id]);
     assert.equal(w.service.runs().find(run => run.subagent_id === grandchild.subagent_id).state, "starting");
   } finally { w.cleanup(); }
 });
