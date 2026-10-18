@@ -27,6 +27,79 @@ const LOCATE_TTL_MS = 60_000;
 // Environment the sandboxed command never sees: the app's own credentials and runtime switches.
 const PRIVATE_ENV = /^(?:CODING_TOOLS_|ELECTRON_|NODE_OPTIONS$|.*(?:TOKEN|SECRET|PASSWORD|API_?KEY|CREDENTIAL)S?$)/i;
 
+// Variables a Windows process needs to start at all. Without SystemRoot/windir system DLLs fail to
+// initialise (STATUS_DLL_INIT_FAILED, 0xC0000142); without TEMP/TMP and USERPROFILE MSYS2 and Node
+// have nowhere for their temporary and home files; ComSpec/PATHEXT are how shells find cmd.exe and
+// programs. Git Bash, which chat agents' shell tools run, needs all of them in every process it forks.
+const WINDOWS_ESSENTIALS = ["SystemRoot", "windir", "SystemDrive", "ComSpec", "PATHEXT", "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "ProgramData"];
+const DEFAULT_PATHEXT = ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC";
+// PATH grows with every launcher that prepends its own folder; MSYS2 converts it in every fork.
+const MAX_WINDOWS_PATH = 16 * 1024;
+
+/** PATH without empty or repeated entries (no case, no trailing separator), cut before `limit` characters. */
+function compactWindowsPath(value, limit = MAX_WINDOWS_PATH) {
+  const seen = new Set();
+  const kept = [];
+  let size = 0;
+  for (const raw of String(value ?? "").split(";")) {
+    const entry = raw.trim();
+    if (!entry) continue;
+    const key = entry.replace(/^"|"$/g, "").replace(/[\\/]+$/, "").toLowerCase();
+    if (seen.has(key)) continue;
+    const grow = entry.length + (kept.length ? 1 : 0);
+    if (kept.length && size + grow > limit) break;
+    seen.add(key);
+    kept.push(entry);
+    size += grow;
+  }
+  return kept.join(";");
+}
+
+/**
+ * A child environment that can start processes on Windows: each essential variable that is missing
+ * or empty is filled from the others or from `system` (this process's view of the machine), and PATH
+ * is de-duplicated and capped. Values already set are kept, under their own spelling. Elsewhere the
+ * environment is returned as it is.
+ */
+function windowsChildEnvironment(env, { platform = process.platform, system = {} } = {}) {
+  const out = { ...env };
+  if (platform !== "win32") return out;
+  const keyOf = (name) => Object.keys(out).find((key) => key.toUpperCase() === name.toUpperCase());
+  const get = (name) => { const key = keyOf(name); return key && typeof out[key] === "string" ? out[key] : ""; };
+  const fromSystem = (name) => {
+    const key = Object.keys(system).find((candidate) => candidate.toUpperCase() === name.toUpperCase());
+    return key && typeof system[key] === "string" ? system[key] : "";
+  };
+  const first = (...values) => values.find((value) => typeof value === "string" && value.trim()) ?? "";
+  for (const name of WINDOWS_ESSENTIALS) {
+    if (get(name).trim()) continue;
+    const root = get("SystemRoot");
+    const value = {
+      SYSTEMROOT: () => first(get("windir"), fromSystem("SystemRoot"), fromSystem("windir"), "C:\\Windows"),
+      WINDIR: () => first(root, fromSystem("windir")),
+      SYSTEMDRIVE: () => first(/^[A-Za-z]:/.exec(root)?.[0], fromSystem("SystemDrive")),
+      COMSPEC: () => first(root ? `${root.replace(/[\\/]+$/, "")}\\System32\\cmd.exe` : "", fromSystem("ComSpec")),
+      PATHEXT: () => first(fromSystem("PATHEXT"), DEFAULT_PATHEXT),
+      TEMP: () => first(get("TMP"), fromSystem("TEMP"), fromSystem("TMP")),
+      TMP: () => first(get("TEMP"), fromSystem("TMP"), fromSystem("TEMP")),
+    }[name.toUpperCase()]?.() ?? fromSystem(name);
+    if (value) out[keyOf(name) ?? name] = value;
+  }
+  const pathKey = keyOf("PATH");
+  if (pathKey) out[pathKey] = compactWindowsPath(out[pathKey]);
+  return out;
+}
+
+/** What this machine says the essential Windows variables are, for windowsChildEnvironment. */
+function systemEnvironment() {
+  const system = { TEMP: os.tmpdir(), TMP: os.tmpdir(), USERPROFILE: os.homedir() };
+  for (const name of WINDOWS_ESSENTIALS) {
+    const key = Object.keys(process.env).find((candidate) => candidate.toUpperCase() === name.toUpperCase());
+    if (key && process.env[key]) system[name] = process.env[key];
+  }
+  return system;
+}
+
 /** Codex's sandbox: a folder holding codex.exe and its Windows sandbox helper, newest first. */
 function findCodexSandbox({ localAppData = process.env.LOCALAPPDATA, home = os.homedir(), platform = process.platform } = {}) {
   if (platform !== "win32") return null;
@@ -62,7 +135,7 @@ const tomlPath = (value) => `'${String(value).replace(/\\/g, "/").replace(/'/g, 
 
 function createSandboxRunner({
   locate = findCodexSandbox, roots = cacheRoots, scriptDir = path.join(os.tmpdir(), "coding-tools-sandbox"),
-  env = process.env, spawnProcess = spawn, logger = console, now = Date.now,
+  env = process.env, spawnProcess = spawn, logger = console, now = Date.now, platform = process.platform,
 } = {}) {
   const processes = new Map(); // id -> record
   let located = { at: 0, value: null };
@@ -76,7 +149,8 @@ function createSandboxRunner({
   };
 
   function childEnv() {
-    return Object.fromEntries(Object.entries(env).filter(([key]) => !PRIVATE_ENV.test(key)));
+    const kept = Object.fromEntries(Object.entries(env).filter(([key]) => !PRIVATE_ENV.test(key)));
+    return windowsChildEnvironment(kept, { platform, system: systemEnvironment() });
   }
 
   function keep(record, stream, chunk) {
@@ -242,4 +316,7 @@ function createSandboxRunner({
   });
 }
 
-module.exports = Object.freeze({ createSandboxRunner, findCodexSandbox, cacheRoots, PRIVATE_ENV });
+module.exports = Object.freeze({
+  createSandboxRunner, findCodexSandbox, cacheRoots, PRIVATE_ENV, windowsChildEnvironment, systemEnvironment, compactWindowsPath,
+  MAX_WINDOWS_PATH,
+});

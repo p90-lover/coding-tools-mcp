@@ -12,6 +12,7 @@ const { createAoSessionEvents } = require("./ao-session-events.cjs");
 const { createAoDependencyLinks } = require("./ao-dependency-links.cjs");
 const { readContextBreakdown } = require("./ao-context-breakdown.cjs");
 const { withAgentShellCommands, CONVERSATION_LIMITS: AGENT_SHELL_CONVERSATION_LIMITS } = require("./chat-agent-shell.cjs");
+const { windowsChildEnvironment, systemEnvironment } = require("./chat-sandbox.cjs");
 
 const API_OPERATIONS = Object.freeze({
   upstream_projects: { method: "GET", endpoint: "/api/v1/projects" },
@@ -187,6 +188,27 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return process.platform === "win32" ? resolved.toLowerCase() : resolved;
     };
     return normal(project.path) === normal(root) ? project.path : null;
+  }
+  /**
+   * The chat workspace's own folder, when AO reports exactly it (by real path) as the session's
+   * root; else null. A session AO runs in the project's folder works there whatever led AO to put
+   * it there (the project's folder mode, or a binding the check above could not confirm just then:
+   * several AO projects on the folder, a project kind other than single_repo, AO slow to answer):
+   * its tools may use that folder, which is the very folder the user opened as this workspace.
+   */
+  async function workspaceFolderRoot(root, workspaceId) {
+    if (typeof getWorkspaces !== "function" || typeof workspaceId !== "string" || !workspaceId) return null;
+    const item = (await getWorkspaces()).find(candidate => candidate?.id === workspaceId);
+    if (typeof item?.path !== "string" || !item.path) return null;
+    const folder = process.platform === "win32" ? item.path.replace(/^\\\\\?\\/, "") : item.path;
+    if (!path.isAbsolute(folder)) return null;
+    const real = (value) => {
+      let resolved;
+      try { resolved = fs.realpathSync.native(value); } catch { resolved = path.resolve(value); }
+      resolved = resolved.replace(/^\\\\\?\\/, "").replace(/[\\/]+$/, "");
+      return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+    };
+    return real(folder) === real(root) ? folder : null;
   }
   const workspaceBoard = typeof getWorkspaces === "function" && typeof missionCall === "function"
     ? createAoWorkspaceBoard({
@@ -869,7 +891,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       // there, not in a worktree. The chat's tools may use that folder only when the session is
       // this chat workspace's own AO project, the project chose the folder, and AO reports exactly
       // the project's path; any other session stays worktree-only.
-      const projectFolder = await folderModeRoot(session, root, workspaceId).catch(() => null);
+      const projectFolder = await folderModeRoot(session, root, workspaceId).catch(() => null)
+        ?? await workspaceFolderRoot(root, workspaceId).catch(() => null);
       return projectFolder ? { root, projectFolder } : { root };
     },
     /** Whether any live session's agent is mid-turn: restarting the app now would cut it off. */
@@ -1110,11 +1133,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           const pathKey = Object.keys(environment).find(key => key.toUpperCase() === "PATH") || "PATH";
           environment[pathKey] = [toolBin, environment[pathKey]].filter(Boolean).join(path.delimiter);
         }
+        // AO hands this environment on to every chat agent and through it to the Git Bash its Bash
+        // tool runs: on Windows it carries SystemRoot, TEMP and the rest a process needs to start,
+        // and a de-duplicated PATH of bounded length (forks failed with 0xC0000142 without them).
+        const daemonEnvironment = windowsChildEnvironment(environment, { system: systemEnvironment() });
           // The AO CLI build answers the daemon command and the internal commands the daemon
           // relaunches itself with (pty-host, chat-host, agent-process); a daemon-only build cannot.
           child = spawn(executable, ["daemon"], {
           cwd: resourceRoot, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
-          env: { ...environment, AO_PORT: String(daemonPort), AO_DATA_DIR: dataRoot, AO_RUN_FILE: path.join(dataRoot, "running.json"), AO_ALLOWED_ORIGINS: gatewayOrigin, AO_TELEMETRY_EVENTS: "off", AO_TELEMETRY_METRICS: "off", AO_TELEMETRY_REMOTE: "off", AO_SENTRY_DSN: "",
+          env: { ...daemonEnvironment, AO_PORT: String(daemonPort), AO_DATA_DIR: dataRoot, AO_RUN_FILE: path.join(dataRoot, "running.json"), AO_ALLOWED_ORIGINS: gatewayOrigin, AO_TELEMETRY_EVENTS: "off", AO_TELEMETRY_METRICS: "off", AO_TELEMETRY_REMOTE: "off", AO_SENTRY_DSN: "",
             // AO bounds every request at 60 s, and starting a chat agent (worktree, agent process,
             // its handshake) took longer on a busy machine: the chat failed with SPAWN_TIMEOUT
             // while the agent came up seconds later. Just under this app's own 180 s for a POST,

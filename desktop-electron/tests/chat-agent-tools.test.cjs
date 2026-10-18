@@ -34,7 +34,7 @@ function tempTree() {
 }
 
 function fixture({ enabled = () => true, desktop = () => false, terminal = () => false, results = {}, workspaces = null, confirm = async () => true, root = null, worktreesRoot = null,
-  minAnswerMs = 0, answerClock = undefined, sandbox = null, autoAnswerMs = undefined, blockedCommand = undefined } = {}) {
+  minAnswerMs = 0, answerClock = undefined, sandbox = null, autoAnswerMs = undefined, blockedCommand = undefined, now = undefined } = {}) {
   const calls = [];
   const asked = [];
   const confirmations = [];
@@ -42,7 +42,7 @@ function fixture({ enabled = () => true, desktop = () => false, terminal = () =>
     enabled, desktopEnabled: desktop, terminalEnabled: terminal, worktreesRoot, version: "9.9.9", logger: { info() {}, warn() {} }, sandbox,
     // A fake confirm answers at once; the quick-answer check has its own test.
     minAnswerMs, ...(answerClock ? { answerClock } : {}),
-    ...(autoAnswerMs !== undefined ? { autoAnswerMs } : {}), ...(blockedCommand ? { blockedCommand } : {}),
+    ...(autoAnswerMs !== undefined ? { autoAnswerMs } : {}), ...(blockedCommand ? { blockedCommand } : {}), ...(now ? { now } : {}),
     confirm: async (request) => { confirmations.push(request); return confirm(request); },
     sessionWorkspace: async (id, workspaceId) => {
       asked.push(id);
@@ -839,6 +839,34 @@ test("a folder-mode project's own folder is a root, and only exactly it", async 
     assert.match((await callTool(three.url, three.auth, "read_file", { path: "x" })).content[0].text, /not one of AO's worktrees/,
       "without the folder-mode answer the checkout stays refused");
     assert.equal(calls.filter((call) => call.endpoint === "/api/v1/tools/call").length, 1);
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("a project-folder root is sent to headless as one, and keeps its tools when a recheck cannot confirm it", async () => {
+  // Seen live: list_dir failed with headless's "The session root cannot be the workspace's own
+  // checkout", and a later exec_command with "not one of AO's worktrees" once the root was rechecked.
+  const tree = tempTree();
+  let clock = 1_000_000;
+  let found = { root: tree.checkout, projectFolder: tree.checkout };
+  const { tools, calls } = fixture({ workspaces: () => found, worktreesRoot: path.join(tree.base, "worktrees"), now: () => clock });
+  try {
+    const one = await session(tools, { id: "ao-1" });
+    assert.equal((await callTool(one.url, one.auth, "list_dir", { path: "." })).isError, false);
+    assert.equal(calls.at(-1).body.root, path.resolve(tree.checkout));
+    assert.equal(calls.at(-1).body.root_kind, "project_folder", "headless is told the root is the project's folder");
+    // AO could not confirm the folder on the next recheck (a lookup failed): the same folder stays the root.
+    found = { root: tree.checkout };
+    clock += 60_000;
+    assert.equal((await callTool(one.url, one.auth, "list_dir", { path: "." })).isError, false, "the tools stay");
+    assert.equal(calls.at(-1).body.root_kind, "project_folder");
+    // A session that was never admitted as the folder is still refused it.
+    const two = await session(tools, { id: "ao-2" });
+    assert.match((await callTool(two.url, two.auth, "list_dir", { path: "." })).content[0].text, /not one of AO's worktrees/);
+    // A session worktree is not marked as a project folder.
+    found = { root: tree.root };
+    const three = await session(tools, { id: "ao-3" });
+    assert.equal((await callTool(three.url, three.auth, "read_file", { path: "src/a.txt" })).isError, false);
+    assert.equal(calls.at(-1).body.root_kind, undefined);
   } finally { await tools.close(); tree.cleanup(); }
 });
 

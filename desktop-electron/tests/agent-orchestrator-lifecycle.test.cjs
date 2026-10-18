@@ -107,6 +107,8 @@ function createHarness(hooks = {}) {
     "./agent-orchestrator-accounting.cjs": require("../electron/agent-orchestrator-accounting.cjs"),
     "./ao-context-breakdown.cjs": require("../electron/ao-context-breakdown.cjs"),
     "./chat-agent-shell.cjs": require("../electron/chat-agent-shell.cjs"),
+    // The daemon's environment helper (Windows essentials, a bounded PATH); tested in chat-sandbox.test.cjs.
+    "./chat-sandbox.cjs": require("../electron/chat-sandbox.cjs"),
     "node:crypto": crypto,
     "node:path": path,
     "node:fs": {

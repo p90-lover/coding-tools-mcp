@@ -940,6 +940,18 @@ fn base_input_schema(name: &str) -> Value {
                     "maximum": 67108864,
                     "default": 67108864,
                     "description": "Skip files larger than this many bytes (default 2MiB) to avoid memory spikes"
+                },
+                "include_ignored": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Also search what .gitignore ignores and heavy folders (node_modules, target, .venv, ...)"
+                },
+                "time_budget_ms": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 60000,
+                    "default": 15000,
+                    "description": "Stop after this long and return the matches found so far (timed_out: true)"
                 }
             },
             "required": ["query"],

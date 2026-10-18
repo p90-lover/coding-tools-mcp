@@ -380,7 +380,7 @@ struct ServiceState {
 
 impl ServiceState {
     fn context(&self, workspace_id: &str) -> Result<Arc<tools::ToolContext>, String> {
-        self.context_at(workspace_id, None)
+        self.context_at(workspace_id, None, RootKind::Worktree)
     }
 
     /// The workspace's tool context or, with `root`, one rooted at an AO chat session's own git
@@ -390,6 +390,7 @@ impl ServiceState {
         &self,
         workspace_id: &str,
         root: Option<&str>,
+        kind: RootKind,
     ) -> Result<Arc<tools::ToolContext>, String> {
         let profile = self
             .core
@@ -401,12 +402,13 @@ impl ServiceState {
             })
             .map_err(text_error)?;
         let root = root
-            .map(|root| {
-                session_root(
+            .map(|root| match kind {
+                RootKind::Worktree => session_root(
                     Path::new(&profile.path),
                     root,
                     self.ao_worktrees_root.as_deref(),
-                )
+                ),
+                RootKind::ProjectFolder => project_folder_root(Path::new(&profile.path), root),
             })
             .transpose()?;
         let mut bytes = serde_json::to_vec(&profile).map_err(text_error)?;
@@ -630,6 +632,21 @@ struct ToolCallRequest {
     /// instead of the workspace path (see `session_root`).
     #[serde(default)]
     root: Option<String>,
+    /// What kind of session root `root` is: an AO session worktree (the default) or, for a session
+    /// AO runs in the project's own folder (its folder workspace mode), that folder.
+    #[serde(default)]
+    root_kind: Option<RootKind>,
+}
+
+/// What kind of directory a rooted tool call names (see `session_root`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RootKind {
+    /// An AO chat session's own linked git worktree of the workspace repository.
+    Worktree,
+    /// The workspace's own folder (or a folder inside it), where AO runs a project-folder
+    /// session: the user's checkout itself, which a worktree root may never be.
+    ProjectFolder,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2109,6 +2126,7 @@ mod workspace_auth_tests {
                 tool: "codex_runtime_status".into(),
                 arguments: json!({}),
                 root: None,
+                root_kind: None,
             }),
         )
         .await;
@@ -2888,6 +2906,30 @@ fn session_root(
     }
 }
 
+/// Where a rooted tool call of a project-folder session may run: AO runs such a session in the
+/// project's own folder (its folder workspace mode), which is the workspace's checkout, so the
+/// root must be the workspace folder itself or a directory inside it. Nothing outside the
+/// workspace is ever admitted: the call is confined exactly as the workspace's own calls are.
+fn project_folder_root(workspace: &Path, requested: &str) -> Result<PathBuf, String> {
+    let requested = Path::new(requested);
+    if requested.as_os_str().is_empty() || !requested.is_absolute() {
+        return Err("The session root must be an absolute path".into());
+    }
+    let root = requested
+        .canonicalize()
+        .map_err(|_| "The session root does not exist".to_string())?;
+    if !root.is_dir() {
+        return Err("The session root must be a directory".into());
+    }
+    let workspace = workspace
+        .canonicalize()
+        .map_err(|_| "The workspace path does not exist".to_string())?;
+    if !root.starts_with(&workspace) {
+        return Err("A project-folder session root must be the workspace's own folder".into());
+    }
+    Ok(root)
+}
+
 /// The shared git directory of a linked worktree's top: its `.git` is a file naming a gitdir at
 /// `<common>/worktrees/<name>` whose `commondir` leads back to `<common>`, as `git worktree add`
 /// leaves it. A checkout with its own `.git` directory, or a `.git` file pointing straight at a
@@ -3052,6 +3094,17 @@ mod session_root_tests {
         arguments: Value,
         root: Option<&Path>,
     ) -> (StatusCode, Value) {
+        call_as(state, id, tool, arguments, root, None).await
+    }
+
+    async fn call_as(
+        state: &ServiceState,
+        id: &str,
+        tool: &str,
+        arguments: Value,
+        root: Option<&Path>,
+        root_kind: Option<RootKind>,
+    ) -> (StatusCode, Value) {
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::AUTHORIZATION,
@@ -3066,6 +3119,7 @@ mod session_root_tests {
                 tool: tool.into(),
                 arguments,
                 root: root.map(|root| root.to_string_lossy().into_owned()),
+                root_kind,
             }),
         )
         .await;
@@ -3074,6 +3128,179 @@ mod session_root_tests {
             .await
             .unwrap();
         (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_project_folder_session_works_in_the_workspace_folder_and_nowhere_else() {
+        // Seen live: chats run in the project's own folder (AO's folder workspace mode), and
+        // every list_dir failed with "The session root cannot be the workspace's own checkout".
+        let base = tempfile::tempdir().unwrap();
+        let (repo, worktree) = repository(base.path());
+        fs::write(repo.join("main.txt"), "main checkout").unwrap();
+        fs::create_dir_all(repo.join("sub")).unwrap();
+        fs::write(repo.join("sub").join("inner.txt"), "inner").unwrap();
+        let outside = base.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("x.txt"), "outside").unwrap();
+        let data = serde_json::from_value(json!({
+            "profiles": [{
+                "id": "ws-1", "name": "Demo", "path": repo.to_string_lossy(),
+                "tunnel": {}, "auth": {"type": "bearer"}, "runtime": {}, "actions": {}
+            }]
+        }))
+        .unwrap();
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(None);
+        let state = ServiceState {
+            lifecycle: Lifecycle::new(4),
+            auth: ControlAuth::generate(),
+            local_ui_token: None,
+            core: Arc::new(CoreState::from_data(data).unwrap()),
+            contexts: Arc::new(Mutex::new(HashMap::new())),
+            ao_hubs: Arc::new(Mutex::new(HashMap::new())),
+            ao_home_root: PathBuf::from("aiTemp/ao-test-home"),
+            ao_worktrees_root: Some(base.path().join("worktrees")),
+            operations: Arc::new(Mutex::new(OperationStore::default())),
+            shutdown_tx,
+            drain_timeout: Duration::from_secs(1),
+        };
+        let folder = Some(RootKind::ProjectFolder);
+        let read = |path: &str| json!({ "path": path });
+
+        let (status, value) = call_as(&state, "p1", "list_dir", json!({ "path": "." }), Some(&repo), folder).await;
+        assert_eq!(status, StatusCode::OK, "{value}");
+        assert_eq!(value["operation"]["result"]["ok"], true, "{value}");
+        let (_, value) = call_as(&state, "p2", "read_file", read("main.txt"), Some(&repo), folder).await;
+        assert_eq!(value["operation"]["result"]["ok"], true, "{value}");
+        // Still confined to the folder.
+        for (id, escape) in [
+            ("p3", "../outside/x.txt".to_string()),
+            ("p4", outside.join("x.txt").to_string_lossy().into_owned()),
+        ] {
+            let (_, value) = call_as(&state, id, "read_file", read(&escape), Some(&repo), folder).await;
+            assert_eq!(value["operation"]["result"]["ok"], false, "{escape}: {value}");
+        }
+        let (status, value) = call_as(&state, "p5", "read_file", read("x.txt"), Some(&outside), folder).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "a folder outside the workspace: {value}");
+        let (status, value) = call_as(&state, "p6", "read_file", read("x"), Some(base.path()), folder).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "the workspace's parent: {value}");
+        let (status, value) = call_as(&state, "p7", "read_file", read("inner.txt"), Some(&repo.join("sub")), folder).await;
+        assert_eq!(status, StatusCode::OK, "a folder inside the workspace: {value}");
+        assert_eq!(value["operation"]["result"]["ok"], true, "{value}");
+        // Without the project-folder kind the checkout stays refused, and a worktree root is unchanged.
+        let (status, _) = call(&state, "p8", "read_file", read("main.txt"), Some(&repo)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = call(&state, "p9", "read_file", read("x"), Some(&worktree)).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn search_text_skips_what_git_ignores_and_returns_partial_results_when_out_of_time() {
+        // Seen live: a chat's search in a project folder holding a virtualenv and build output
+        // failed with "Ripgrep search timed out after 20 seconds".
+        let base = tempfile::tempdir().unwrap();
+        let repo = base.path().join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::create_dir_all(repo.join("src")).unwrap();
+        fs::create_dir_all(repo.join("generated").join("deep")).unwrap();
+        fs::create_dir_all(repo.join("logs")).unwrap();
+        fs::create_dir_all(repo.join("many")).unwrap();
+        fs::write(
+            repo.join(".gitignore"),
+            "# build output\ngenerated/\n*.log\n!keep.log\n/many/\n",
+        )
+        .unwrap();
+        fs::write(repo.join("src").join("app.py"), "needle in source\n").unwrap();
+        fs::write(repo.join("generated").join("deep").join("out.py"), "needle generated\n").unwrap();
+        fs::write(repo.join("logs").join("run.log"), "needle logged\n").unwrap();
+        fs::write(repo.join("logs").join("keep.log"), "needle kept\n").unwrap();
+        for index in 0..3000 {
+            fs::write(repo.join("many").join(format!("f{index}.txt")), "needle many\n").unwrap();
+        }
+        let data = serde_json::from_value(json!({
+            "profiles": [{
+                "id": "ws-1", "name": "Demo", "path": repo.to_string_lossy(),
+                "tunnel": {}, "auth": {"type": "bearer"}, "runtime": {}, "actions": {}
+            }]
+        }))
+        .unwrap();
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(None);
+        let state = ServiceState {
+            lifecycle: Lifecycle::new(4),
+            auth: ControlAuth::generate(),
+            local_ui_token: None,
+            core: Arc::new(CoreState::from_data(data).unwrap()),
+            contexts: Arc::new(Mutex::new(HashMap::new())),
+            ao_hubs: Arc::new(Mutex::new(HashMap::new())),
+            ao_home_root: PathBuf::from("aiTemp/ao-test-home"),
+            ao_worktrees_root: None,
+            operations: Arc::new(Mutex::new(OperationStore::default())),
+            shutdown_tx,
+            drain_timeout: Duration::from_secs(1),
+        };
+        let found = |value: &Value| -> Vec<String> {
+            let mut paths: Vec<String> = value["operation"]["result"]["matches"]
+                .as_array()
+                .unwrap_or(&Vec::new())
+                .iter()
+                .filter_map(|hit| hit["path"].as_str().map(str::to_string))
+                .collect();
+            paths.sort();
+            paths
+        };
+        let (_, value) = call(&state, "s1", "search_text", json!({ "query": "needle", "path": "src" }), None).await;
+        assert_eq!(found(&value), vec!["src/app.py"], "{value}");
+        let (_, value) = call(&state, "s2", "search_text", json!({ "query": "needle", "path": "logs" }), None).await;
+        assert_eq!(found(&value), vec!["logs/keep.log"], "*.log is ignored, !keep.log is not: {value}");
+        let (_, value) = call(&state, "s3", "search_text", json!({ "query": "needle generated" }), None).await;
+        assert!(found(&value).is_empty(), "an ignored folder is skipped: {value}");
+        assert_eq!(value["operation"]["result"]["timed_out"], false, "{value}");
+        let (_, value) = call(
+            &state,
+            "s4",
+            "search_text",
+            json!({ "query": "needle generated", "include_ignored": true }),
+            None,
+        )
+        .await;
+        assert_eq!(found(&value), vec!["generated/deep/out.py"], "{value}");
+        let (_, value) = call(
+            &state,
+            "s5",
+            "search_text",
+            json!({ "query": "needle many", "include_ignored": true, "time_budget_ms": 1 }),
+            None,
+        )
+        .await;
+        let result = &value["operation"]["result"];
+        assert_eq!(result["ok"], true, "{value}");
+        assert_eq!(result["timed_out"], true, "{value}");
+        assert_eq!(result["truncated"], true, "{value}");
+        assert!(found(&value).len() < 3000, "the scan stopped early");
+    }
+
+    #[test]
+    fn a_project_folder_root_is_the_workspace_or_inside_it() {
+        let base = tempfile::tempdir().unwrap();
+        let (repo, worktree) = repository(base.path());
+        fs::create_dir_all(repo.join("sub")).unwrap();
+        assert_eq!(
+            project_folder_root(&repo, &repo.to_string_lossy()).unwrap(),
+            repo.canonicalize().unwrap()
+        );
+        assert!(project_folder_root(&repo, &repo.join("sub").to_string_lossy()).is_ok());
+        assert!(project_folder_root(&repo, &worktree.to_string_lossy()).is_err(), "a worktree elsewhere");
+        assert!(project_folder_root(&repo, &base.path().to_string_lossy()).is_err(), "a parent");
+        assert!(project_folder_root(&repo, "relative").is_err());
+        assert!(project_folder_root(&repo, &repo.join("missing").to_string_lossy()).is_err());
+        #[cfg(unix)]
+        {
+            let link = repo.join("escape");
+            std::os::unix::fs::symlink(base.path(), &link).unwrap();
+            assert!(
+                project_folder_root(&repo, &link.to_string_lossy()).is_err(),
+                "a link inside the folder that leads out of it"
+            );
+        }
     }
 
     #[tokio::test]
@@ -5174,7 +5401,8 @@ async fn tool_call(
                 body.workspace_id,
                 body.tool,
                 body.arguments,
-                body.root
+                body.root,
+                body.root_kind
             ]))
             .unwrap_or_default(),
         )
@@ -5216,7 +5444,11 @@ async fn tool_call(
             .with_runtime(|runtime| runtime.native_bridge_context(&body.workspace_id))
             .map_err(text_error)
     } else {
-        state.context_at(&body.workspace_id, body.root.as_deref())
+        state.context_at(
+            &body.workspace_id,
+            body.root.as_deref(),
+            body.root_kind.unwrap_or(RootKind::Worktree),
+        )
     } {
         Ok(context) => context,
         Err(error) => {

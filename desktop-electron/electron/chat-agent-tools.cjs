@@ -671,17 +671,25 @@ function scopeArguments(name, args, root) {
 // preference for its own shell. The rules come first, and name the panes as the user does.
 function paneRulesFor(groups) {
   const rules = [];
+  // First: agents told "use the browser for the GUI" still checked pages with curl or their own
+  // tools, or asked the user to open them, and never opened the Preview pane.
+  if (groups.includes("preview")) {
+    rules.push("BROWSER / GUI PREVIEW: this chat has its own browser, the Preview pane (what the user calls the browser, "
+      + "the sandbox browser, the preview or the frontend). Whenever you build or change anything with a user interface "
+      + "(a web page, a frontend, a web app's GUI), or the user asks you to look at, test or show it, check it there: "
+      + "1) start the dev server (with exec_command when you have it) and note its port; 2) call preview_open with its URL, "
+      + "e.g. http://localhost:5173/ or http://127.0.0.1:8000/ (this opens the Preview pane for the user); 3) call "
+      + "preview_screenshot to see the page and preview_read for its text and elements; 4) use preview_click, preview_type "
+      + "and preview_press to try it, and preview_console for errors and failed requests. Do not check a page with curl, "
+      + "a headless browser, Playwright or a browser tool of your own, and do not ask the user to open it themselves; if "
+      + "preview_open fails, read its message, fix the cause (start the server, try http://127.0.0.1:<port>/), and open it again.");
+  }
   if (groups.includes("terminal")) {
     rules.push("The chat's Terminal pane (what the user calls the terminal, the backend terminal or the sandbox terminal) "
       + "runs commands started with this server's exec_command. Start dev servers, backends and anything else that keeps "
       + "running, and anything the user asks to run in the terminal or sandbox, with exec_command: they run there, the user "
       + "watches their output, and you read more with read_output and type into them with write_stdin. Your own shell tool "
       + "still works for quick one-off commands. When the user asks what is running in the terminal, read_output the commands you started.");
-  }
-  if (groups.includes("preview")) {
-    rules.push("The chat's Preview pane (what the user calls the browser, the sandbox browser or the frontend) is driven "
-      + "with preview_open and the other preview_* tools; use them to open and check pages your dev server serves, rather "
-      + "than a browser of your own.");
   }
   if (groups.includes("desktop")) {
     rules.push("Seeing the screen (vision) is capture_screenshot, capture_window and list_windows; operating apps on it is computer_*.");
@@ -691,8 +699,11 @@ function paneRulesFor(groups) {
 
 function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview = false, subagents = "" } = {}) {
   return paneRulesFor(groups)
-    + "Coding Tools tools for this chat's own git worktree: read_file, list_dir, search_text and apply_patch "
-    + "for files; git_* for this worktree's history. Paths are relative to the worktree root and paths outside it are refused. "
+    + "Coding Tools tools for this chat's own folder (its git worktree, or the project folder it works in): read_file, "
+    + "list_dir, search_text and apply_patch for files; git_* for its history. Paths are relative to that folder and paths "
+    + "outside it are refused. search_text skips what .gitignore ignores and heavy folders (node_modules, .venv, build "
+    + "output) and returns partial results rather than failing when a search runs long: use it when your own search "
+    + "(Grep, ripgrep) times out. "
     + (groups.includes("terminal")
       ? sandboxed
         ? "exec_command, write_stdin, read_output and kill_command run commands in a sandbox (Codex's Windows sandbox), "
@@ -715,9 +726,10 @@ function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview
         + "more of it with read_output. "
       : "")
     + (groups.includes("preview")
-      ? "preview_open opens a page your dev server serves on this machine (localhost only) in this chat's own browser, "
-        + "which the user sees in the chat's Preview pane; preview_read, preview_screenshot, preview_click, preview_type, "
-        + "preview_press, preview_scroll, preview_wait and preview_console let you check the page works as intended. "
+      ? "preview_open opens a page your dev server serves on this machine (localhost, 127.0.0.1 or [::1] only) in this "
+        + "chat's own browser and shows it to the user in the chat's Preview pane; preview_read, preview_screenshot, "
+        + "preview_click, preview_type, preview_press, preview_scroll, preview_wait and preview_console let you check the "
+        + "page works as intended. Use them for every GUI or frontend check. "
       : "")
     + (groups.includes("desktop")
       ? "capture_screenshot, list_windows and computer_* see and drive the desktop: the user confirms each screen "
@@ -740,10 +752,17 @@ function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview
  * was launched to bypass permissions; `servedHere` is true when one of this chat's own running
  * commands printed that host and port (usually its dev server). It is a hint, not proof: the agent
  * writes those commands, so `echo localhost:8888` would set it for a port it never served.
+ * `reviewed` is true when this very preview_open call already reached the chat's approval reviewer
+ * ("Approve for me" on Claude Code), which saw the address it opens.
+ *
+ * The address is opened without a prompt only when nothing would be gained by one: the session
+ * bypasses permissions (it may run any command, which reaches the same loopback page anyway), or
+ * the call was already reviewed with its address. Asking again there only held the agent's first
+ * preview_open up to the 20 s auto-answer. `servedHere` alone never opens one: the agent can fake it.
  */
-function previewOriginDecision({ origin, bypass, servedHere }) {
-  // TODO(human): decide when a new origin opens without a prompt.
-  return "ask";
+function previewOriginDecision({ origin, bypass, servedHere, reviewed = false }) {
+  void origin; void servedHere;
+  return bypass === true || reviewed === true ? "allow" : "ask";
 }
 
 /** What the agent is told when a call cannot be shown to the user in full: nothing ran. */
@@ -964,7 +983,11 @@ function createChatAgentTools({
     if (typeof found?.projectFolder === "string" && path.isAbsolute(found.projectFolder)) {
       try { folder = fs.realpathSync.native(found.projectFolder); } catch { folder = null; }
     }
-    const inFolder = Boolean(folder) && path.relative(folder, real) === "";
+    // A root admitted as the project's folder stays admitted while it is the same folder: a
+    // recheck that could not confirm the folder this time (AO slow to answer, a project lookup
+    // that failed) must not take a working chat's tools away mid-task.
+    const inFolder = (Boolean(folder) && path.relative(folder, real) === "")
+      || (entry.root?.projectFolder === true && path.relative(entry.root.real, real) === "");
     if (base && !inFolder && (!inside(base, real) || path.relative(base, real) === "")) {
       // Only AO's own session worktrees are roots, and a folder-mode project's own folder; never
       // the user's checkout otherwise, or anything else.
@@ -975,7 +998,9 @@ function createChatAgentTools({
       forget(entry.key, { ended: true });
       throw new ScopeError("This chat's session workspace changed; its tools are no longer available.");
     }
-    entry.root = { path: reported, real };
+    // Headless confines a project-folder root to that folder; it admits the workspace's own
+    // checkout only when told this is one (root_kind, see invoke).
+    entry.root = { path: reported, real, ...(inFolder && !(base && inside(base, real) && path.relative(base, real) !== "") ? { projectFolder: true } : {}) };
     entry.checkedAt = now();
     return entry.root;
   }
@@ -1072,6 +1097,9 @@ function createChatAgentTools({
         // Desktop tools act on the screen, not on files, and computer control is leased to the
         // workspace itself; everything else runs in the session's worktree.
         ...(root ? { root: root.path } : {}),
+        // A folder-mode (project-folder) session works in the project's own checkout, which
+        // headless otherwise refuses as a session root.
+        ...(root?.projectFolder ? { root_kind: "project_folder" } : {}),
       }, { timeout: TOOL_CALL_TIMEOUT_MS });
     } catch (error) {
       return { failed: failedCall(errorMessage(error)) };
@@ -1370,7 +1398,9 @@ function createChatAgentTools({
    */
   async function permitOrigin(entry, origin) {
     if (entry.origins.has(origin)) return true;
-    const decision = previewOriginDecision({ origin, bypass: entry.bypass, servedHere: await servedHere(entry, origin).catch(() => false) });
+    const reviewed = reviewedUpstream(entry);
+    const decision = previewOriginDecision({ origin, bypass: entry.bypass, reviewed,
+      servedHere: entry.bypass || reviewed ? false : await servedHere(entry, origin).catch(() => false) });
     if (decision !== "allow") {
       const answer = await ask("A chat agent wants to open a page in its preview",
         dialogText([...who(entry), "Address: ", { value: origin }, "\n\nThe chat's own browser would load this page served on this computer; the\n"
@@ -1414,9 +1444,13 @@ function createChatAgentTools({
 
   function send(response, status, body, headers = {}) {
     const payload = body === undefined ? "" : JSON.stringify(body);
+    // Every answer closes its connection. Node drops an idle keep-alive connection after 5 s; an
+    // agent's MCP client that sent its next call (a preview_open after starting the dev server)
+    // on such a pooled connection as Node closed it got ECONNRESET, and the call was lost.
+    response.shouldKeepAlive = false;
     response.writeHead(status, {
       ...(payload ? { "content-type": "application/json", "content-length": Buffer.byteLength(payload) } : {}),
-      "cache-control": "no-store", ...headers,
+      "cache-control": "no-store", connection: "close", ...headers,
     });
     response.end(payload);
   }
@@ -1858,6 +1892,7 @@ module.exports = Object.freeze({
   parsePatch,
   patchTargets,
   previewOriginDecision,
+  instructionsFor,
   scopePath,
   toolResult,
   windowsQuirk,
