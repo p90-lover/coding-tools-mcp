@@ -110,7 +110,19 @@ function isDesktopBundledCodex(file, env = process.env) {
 function findInstalledCodexExecutable(env = process.env) {
   const cli = codexCliExecutable(env);
   if (cli) return cli;
-  if (process.platform !== "win32" || !env.LOCALAPPDATA) return null;
+  if (process.platform !== "win32") {
+    // macOS/Linux npm and package-manager installs expose the CLI on PATH, often as a symlink.
+    for (const directory of String(env.PATH || env.Path || "").split(path.delimiter).filter(Boolean)) {
+      const candidate = path.resolve(directory, "codex");
+      try {
+        if (!fs.statSync(candidate).isFile()) continue;
+        fs.accessSync(candidate, fs.constants.X_OK);
+        return fs.realpathSync(candidate);
+      } catch { /* Keep looking past missing, broken or non-executable entries. */ }
+    }
+    return null;
+  }
+  if (!env.LOCALAPPDATA) return null;
   const root = path.join(env.LOCALAPPDATA, "OpenAI", "Codex", "bin");
   let best = null;
   let builds = [];

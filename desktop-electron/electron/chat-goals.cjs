@@ -6,7 +6,7 @@
 // chat decides from its final answers whether the goal is achieved, stalled or worth another round.
 
 const fs = require("node:fs");
-const path = require("node:path");
+const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 
 /** Rounds a goal may take before it stops as "limited" (Codex stops on a token budget). */
 const DEFAULT_GOAL_ROUNDS = 6;
@@ -35,9 +35,9 @@ function goalVerdict(answers) {
   let verdict = null;
   for (const answer of answers) {
     const lines = String(answer || "").split(/\r?\n/).map(line => line.replace(/[*_`]/g, "").trim());
-    const said = lines.reverse().find(line => /^GOAL\s*:\s*(ACHIEVED|CONTINUE)\b/i.test(line));
+    const said = lines.reverse().map(line => line.match(/^GOAL\s*:\s*(ACHIEVED|CONTINUE)\b/i)).find(Boolean);
     if (!said) continue;
-    if (/ACHIEVED/i.test(said)) return "achieved";
+    if (said[1].toUpperCase() === "ACHIEVED") return "achieved";
     verdict = "continue";
   }
   return verdict;
@@ -74,12 +74,8 @@ function createGoalStore({ file = null, now = Date.now } = {}) {
     } catch { /* No goals saved yet. */ }
   }
   const key = (workspaceId, taskId) => `${workspaceId}:${taskId}`;
-  const persist = () => {
-    if (!file) return;
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    const temporary = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(temporary, JSON.stringify(goals, null, 2));
-    fs.renameSync(temporary, file);
+  const persist = next => {
+    if (file) writePrivateFileAtomic(file, JSON.stringify(next, null, 2));
   };
   return {
     get: (workspaceId, taskId) => goals[key(workspaceId, taskId)] ?? null,
@@ -93,22 +89,28 @@ function createGoalStore({ file = null, now = Date.now } = {}) {
       const goal = { objective: cleanObjective(objective), status: "active", round: 0,
         rounds: Math.max(1, Math.min(MAX_GOAL_ROUNDS, Math.round(Number(rounds) || DEFAULT_GOAL_ROUNDS))),
         startedAt: at, updatedAt: at, lastRunId: "", evaluatedRunId: "", note: "" };
-      goals[key(workspaceId, taskId)] = goal;
-      persist();
+      const id = key(workspaceId, taskId);
+      persist({ ...goals, [id]: goal });
+      goals[id] = goal;
       return goal;
     },
     update(workspaceId, taskId, change) {
       const goal = goals[key(workspaceId, taskId)];
       if (!goal) return null;
-      Object.assign(goal, change, { updatedAt: now() });
-      if (!STATUSES.has(goal.status)) throw new Error("Unknown goal status");
-      persist();
+      const next = { ...goal, ...change, updatedAt: now() };
+      if (!STATUSES.has(next.status)) throw new Error("Unknown goal status");
+      persist({ ...goals, [key(workspaceId, taskId)]: next });
+      Object.assign(goal, next);
       return goal;
     },
     clear(workspaceId, taskId) {
       const had = Boolean(goals[key(workspaceId, taskId)]);
-      delete goals[key(workspaceId, taskId)];
-      if (had) persist();
+      if (had) {
+        const next = { ...goals };
+        delete next[key(workspaceId, taskId)];
+        persist(next);
+        delete goals[key(workspaceId, taskId)];
+      }
       return had;
     },
   };

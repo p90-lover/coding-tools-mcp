@@ -61,6 +61,10 @@ function requestJson(origin, {
     }, (response) => {
       const chunks = [];
       let size = 0;
+      // A socket can fail after headers, when only IncomingMessage reports the error.
+      // Without these listeners a truncated response never resolves or rejects the call.
+      response.once("aborted", () => reject(new Error("Module response interrupted before completion")));
+      response.once("error", (error) => reject(new Error(errorMessage(error))));
       response.on("data", (chunk) => {
         size += chunk.length;
         if (size > MAX_BODY_BYTES) {
