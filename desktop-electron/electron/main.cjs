@@ -51,7 +51,7 @@ const { assertLauncherRuntimeVersion, terminateLauncherSmoke } = require("./smok
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createGuiUpdateController, guiShellHash } = require("./gui-update.cjs");
-const { combineUpdateControllers, createAppUpdateController, createAutoInstaller, sweepUpdateLeftovers } = require("./app-update.cjs");
+const { combineUpdateControllers, createAppUpdateController, createAutoInstaller, sweepUpdateLeftovers, waitForUpdateApply } = require("./app-update.cjs");
 const { useNativeUpdateTransport } = require("./update.cjs");
 const {
   providerNetworkReady,
@@ -2544,6 +2544,8 @@ async function start() {
     showMainWindow();
   });
 
+  // An update still swapping files in is waited out first (app-update-worker.cjs).
+  if (app.isPackaged) await waitForUpdateApply(path.dirname(process.execPath)).catch(() => false);
   await waitForPackagedRuntimeSource({ app, resourcesPath: process.resourcesPath });
   let installedRuntimeRoot = null;
   let runtimeRootResolved = false;

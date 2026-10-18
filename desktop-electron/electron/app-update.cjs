@@ -255,6 +255,27 @@ function sweepUpdateLeftovers(installRoot) {
   return removed;
 }
 
+const APPLY_WAIT_MAX_MS = 10 * 60_000;
+/**
+ * Waits while an update worker is swapping files into the install (its `_update/applying.json`
+ * names a live process), at most APPLY_WAIT_MAX_MS from when it started. A launch during the swap
+ * found the runtime half-replaced and aborted. A stale marker (its worker gone) is removed.
+ */
+async function waitForUpdateApply(installRoot, { now = Date.now, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  alive = (pid) => { try { process.kill(pid, 0); return true; } catch (error) { return error?.code === "EPERM"; } } } = {}) {
+  const marker = path.join(installRoot, STAGE_DIRECTORY, "applying.json");
+  for (;;) {
+    const state = readJson(marker);
+    if (!state) return false;
+    const started = Number.isFinite(state.at) ? state.at : 0;
+    if (!Number.isInteger(state.pid) || !alive(state.pid) || now() - started > APPLY_WAIT_MAX_MS) {
+      try { fs.rmSync(marker, { force: true }); } catch {}
+      return true;
+    }
+    await sleep(500);
+  }
+}
+
 function createAppUpdateController({
   currentVersion, electronVersion, platform = process.platform, arch = process.arch,
   packaged, executablePath, logsDirectory, publish, logger, closeForUpdate, dependencies = {},
@@ -548,4 +569,5 @@ module.exports = {
   safeInstallPath,
   selectAppRelease,
   sweepUpdateLeftovers,
+  waitForUpdateApply,
 };

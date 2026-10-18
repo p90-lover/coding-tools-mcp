@@ -6,6 +6,7 @@ const { runtimeBundlePaths } = require("./runtime-command.cjs");
 
 const DEFAULT_SOURCE_WAIT_TIMEOUT_MS = 30_000;
 const DEFAULT_SOURCE_WAIT_INTERVAL_MS = 50;
+const SET_ASIDE_FILE = /\.old-\d+$/;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 
 function comparePaths(left, right) {
@@ -107,6 +108,9 @@ function runtimeFilePaths(runtimeRoot) {
       const absolutePath = path.join(directory, entry.name);
       const relativePath = path.relative(runtimeRoot, absolutePath).split(path.sep).join("/");
       if (relativePath === "manifest.json") continue;
+      // A file an update renamed aside because something still ran it (app-update-worker.cjs) is
+      // not part of the bundle; it is deleted once nothing runs it. Counting it failed startup.
+      if (!entry.isDirectory() && SET_ASIDE_FILE.test(entry.name)) continue;
       if (entry.isDirectory()) {
         visit(absolutePath);
         continue;
@@ -307,6 +311,8 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
       errorOnExist: true,
       force: false,
       verbatimSymlinks: true,
+      // Not a file an update set aside because something still ran it.
+      filter: (from) => !SET_ASIDE_FILE.test(path.basename(from)),
     });
     validateRuntimeBundle(temporary, expectedIdentity);
     if (fs.existsSync(destination)) {
