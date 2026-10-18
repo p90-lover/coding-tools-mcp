@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fetchNativeCodex, nativeProxyFromPac } from "../src/native-network";
 import { LAUNCHER_BROWSER_IDLE_URL, LAUNCHER_BROWSER_PARTITION_PRODUCTION } from "../src/launcher-browser-host";
@@ -47,7 +47,7 @@ test("native relay forwards the request through the launcher without proxy crede
     helper: { executable: process.execPath, script: import.meta.path },
     partition: LAUNCHER_BROWSER_PARTITION_PRODUCTION, idleUrl: LAUNCHER_BROWSER_IDLE_URL,
     surfaceId: "launcher_surface_id_0123456789AB", surfaceTargets: {}, createdAt: new Date().toISOString(),
-  }));
+  }), { mode: 0o600 });
   process.env.CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR = descriptor;
   // The launcher exports its global proxy, but the native request must still use
   // Electron's authenticated proxy session instead of Bun's credential-free route.
@@ -83,4 +83,60 @@ test("standalone native fetch retains Bun's explicitly configured proxy", async 
     expect(childOutput).toContain("[DONE]");
     expect(calls).toHaveLength(1);
   } finally { proxy.stop(true); }
+});
+
+test("native relay waits for a crashed launcher's relaunch and re-reads its descriptor", async () => {
+  for (const key of envKeys) delete process.env[key];
+  const root = mkdtempSync(join(import.meta.dir, "../../aiTemp/native-relay-crash-"));
+  const descriptor = join(root, "launcher-browser.json");
+  const relaunchedToken = "launcher-native-relay-relaunched-token-0123456789";
+  const seen: Array<string | null> = [];
+  const control = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+    seen.push(request.headers.get("authorization"));
+    return new Response("data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } });
+  } });
+  // The pid of a process that has exited: what a crashed app leaves in its descriptor.
+  const exited = Bun.spawn([process.execPath, "-e", "0"]);
+  await exited.exited;
+  const write = (pid: number, token: string) => writeFileSync(descriptor, JSON.stringify({
+    version: 3, kind: "codex-web-gpt-launcher", profile: "production", pid,
+    endpoint: "http://127.0.0.1:39110", control: { endpoint: control.url.origin, token },
+    helper: { executable: process.execPath, script: import.meta.path },
+    partition: LAUNCHER_BROWSER_PARTITION_PRODUCTION, idleUrl: LAUNCHER_BROWSER_IDLE_URL,
+    surfaceId: "launcher_surface_id_0123456789AB", surfaceTargets: {}, createdAt: new Date().toISOString(),
+  }), { mode: 0o600 });
+  process.env.CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR = descriptor;
+  const request = () => new Request("https://chatgpt.com/backend-api/codex/responses", {
+    method: "POST", headers: { authorization: "Bearer native-test-token", "content-type": "application/json" },
+    body: '{"model":"gpt-5.6-sol"}',
+  });
+  try {
+    // Crashed: the descriptor still names the dead pid. The request waits; the relaunched app
+    // rewrites the descriptor (new pid and token) and the request goes through it.
+    write(exited.pid, "launcher-native-relay-crashed-token-0123456789ab");
+    let looks = 0;
+    const response = await fetchNativeCodex(request(), {
+      intervalMs: 1,
+      sleep: async () => { looks += 1; if (looks === 3) write(process.pid, relaunchedToken); },
+    });
+    expect(response.status).toBe(200);
+    expect(looks).toBe(3);
+    expect(seen).toEqual([`Bearer ${relaunchedToken}`]);
+
+    // Never relaunched: it fails after the wait, saying so.
+    write(exited.pid, "launcher-native-relay-crashed-token-0123456789ab");
+    let clock = 0;
+    await expect(fetchNativeCodex(request(), { timeoutMs: 1_000, now: () => clock, sleep: async () => { clock += 500; } }))
+      .rejects.toThrow(/host process is not running.*waited 1 s for Coding Tools to start again/);
+
+    // A clean quit removes the descriptor and announces nothing: fail at once, no wait.
+    rmSync(descriptor);
+    let slept = 0;
+    await expect(fetchNativeCodex(request(), { sleep: async () => { slept += 1; } }))
+      .rejects.toThrow("descriptor is missing");
+    expect(slept).toBe(0);
+  } finally {
+    control.stop(true);
+    rmSync(root, { recursive: true, force: true });
+  }
 });

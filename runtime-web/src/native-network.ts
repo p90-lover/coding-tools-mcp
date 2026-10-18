@@ -1,4 +1,4 @@
-import { readLauncherBrowserHostDescriptor } from "./launcher-browser-host";
+import { waitForLauncherBrowserHostDescriptor } from "./launcher-browser-host";
 
 function proxyError(message: string): Error {
   return Object.assign(new Error(message), { code: "NativeProxyConfigurationError" });
@@ -24,14 +24,29 @@ export function nativeProxyFromPac(value: unknown): string | undefined {
   }
 }
 
-/** Native Codex keeps its own bearer auth while Chromium supplies the launcher's proxy session. */
-export async function fetchNativeCodex(request: Request): Promise<Response> {
+/**
+ * Native Codex keeps its own bearer auth while Chromium supplies the launcher's proxy session.
+ *
+ * The launcher's descriptor is read for every request, never cached. When the app crashed (its
+ * descriptor names an exited process) or announced a restart, the request waits for the relaunched
+ * app's descriptor (LAUNCHER_RESTART_WAIT_MS) instead of failing with a 502 at once; a clean quit
+ * fails at once.
+ */
+export async function fetchNativeCodex(
+  request: Request,
+  descriptorWait: Pick<Parameters<typeof waitForLauncherBrowserHostDescriptor>[1] & object,
+    "timeoutMs" | "intervalMs" | "now" | "sleep"> = {},
+): Promise<Response> {
   const descriptorPath = process.env.CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR?.trim();
   // The launcher owns proxy authentication; its exported proxy environment has no credentials.
   // Standalone CLI requests still use Bun's proxy settings when there is no launcher.
   if (!descriptorPath) return fetch(request);
 
-  const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+  const descriptor = await waitForLauncherBrowserHostDescriptor(descriptorPath, {
+    ...descriptorWait,
+    signal: request.signal,
+    missingIsRestart: false,
+  });
   const headers = new Headers(request.headers);
   const nativeAuthorization = headers.get("authorization");
   if (!nativeAuthorization?.startsWith("Bearer ") || nativeAuthorization.length <= 7) {

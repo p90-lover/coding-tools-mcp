@@ -1097,4 +1097,107 @@ describe("reversible native Codex route integration", () => {
     expect(readFileSync(configPath, "utf8")).not.toContain("multi_agent");
   });
 
+  test("adopts a bridge route an earlier install left behind and never restores it on uninstall", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const user = 'model = "gpt-5.6-sol"\n\n[features]\ngoals = true\n';
+    // An earlier install (a lost journal, another codex-chatgpt-web home) left its unmarked route.
+    const leftover = 'model = "gpt-5.6-sol"\nopenai_base_url = "http://127.0.0.1:17841/v1"\n'
+      + `experimental_realtime_webrtc_call_base_url = ${JSON.stringify(CODEX_REALTIME_WEBRTC_CALL_BASE_URL)}\n`
+      + "\n[features]\ngoals = true\n";
+    writeFileSync(configPath, leftover);
+
+    // The bridge's own route is not the user's: no --replace-codex-route needed, nothing recorded.
+    const journal = installCodexIntegration(nativeConfig("browser-only"));
+    expect(journal.previous.openai_base_url).toEqual({ present: false });
+    expect(journal.previousRealtimeWebrtcCallBaseUrl).toEqual({ present: false });
+
+    deactivateCodexIntegration();
+    expect(readFileSync(configPath, "utf8")).toBe(user);
+    expect(inspectCodexIntegration().errors).toEqual([]);
+    activateCodexIntegration();
+    expect(uninstallCodexIntegration()).toEqual({ changed: true });
+    expect(readFileSync(configPath, "utf8")).toBe(user);
+  });
+
+  test("uninstall removes a bridge value an older build recorded as the prior route", () => {
+    const user = 'model = "gpt-5.6-sol"\n\n[features]\ngoals = true\n';
+    const bridgeLine = 'openai_base_url = "http://127.0.0.1:17841/v1"';
+    const realtimeLine = `experimental_realtime_webrtc_call_base_url = ${JSON.stringify(CODEX_REALTIME_WEBRTC_CALL_BASE_URL)}`;
+    // Rewrites both journal copies as an older build wrote them: "previous" was a bridge route.
+    const recordBridgeAsPrevious = () => {
+      for (const path of [getCodexJournalPath(), getCodexJournalRecoveryPath()]) {
+        const journal = JSON.parse(readFileSync(path, "utf8"));
+        journal.previous.openai_base_url = {
+          present: true, rawLine: bridgeLine, value: "http://127.0.0.1:17841/v1", index: 1,
+        };
+        journal.previousRealtimeWebrtcCallBaseUrl = {
+          present: true, rawLine: realtimeLine, value: CODEX_REALTIME_WEBRTC_CALL_BASE_URL, index: 2,
+        };
+        writeFileSync(path, `${JSON.stringify(journal, null, 2)}\n`);
+      }
+    };
+
+    for (const flow of ["uninstall", "disconnect-then-uninstall", "legacy-disconnected", "reinstall"] as const) {
+      const { codexHome } = fixture();
+      const configPath = join(codexHome, "config.toml");
+      writeFileSync(configPath, user);
+      installCodexIntegration(compatibilityV1Config("browser-only"));
+      recordBridgeAsPrevious();
+
+      if (flow === "disconnect-then-uninstall") {
+        // Turning the route off leaves Codex on OpenAI, not on the recorded bridge value.
+        deactivateCodexIntegration();
+        expect(readFileSync(configPath, "utf8")).toBe(user);
+        expect(inspectCodexIntegration().errors).toEqual([]);
+      }
+      if (flow === "legacy-disconnected") {
+        // The state an older build's disconnect left: the bridge value "restored" into Codex.
+        deactivateCodexIntegration();
+        writeFileSync(configPath, `model = "gpt-5.6-sol"\n${bridgeLine}\n${realtimeLine}\n\n[features]\ngoals = true\n`);
+        expect(inspectCodexIntegration().errors).toEqual([]);
+        // Reconnecting adopts it and stops carrying it as the prior value.
+        const reconnected = activateCodexIntegration();
+        expect(reconnected).toEqual({ changed: true, active: true });
+        const journal = JSON.parse(readFileSync(getCodexJournalPath(), "utf8"));
+        expect(journal.previous.openai_base_url).toEqual({ present: false });
+        expect(journal.previousRealtimeWebrtcCallBaseUrl).toEqual({ present: false });
+      }
+      if (flow === "reinstall") {
+        const journal = installCodexIntegration(compatibilityV1Config("browser-only"));
+        expect(journal.previous.openai_base_url).toEqual({ present: false });
+        expect(journal.previousRealtimeWebrtcCallBaseUrl).toEqual({ present: false });
+      }
+
+      expect(uninstallCodexIntegration()).toEqual({ changed: true });
+      const restored = readFileSync(configPath, "utf8");
+      expect(restored).toBe(user);
+      expect(restored).not.toContain("17841");
+      expect(existsSync(getCodexJournalPath())).toBe(false);
+    }
+  });
+
+  test("uninstall without a journal removes an unmarked route to this bridge but keeps other loopback routes", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const user = 'model = "gpt-5.6-sol"\n';
+    writeFileSync(configPath, 'model = "gpt-5.6-sol"\nopenai_base_url = "http://localhost:17841/v1/"\n');
+    expect(uninstallCodexIntegration()).toEqual({ changed: true });
+    expect(readFileSync(configPath, "utf8")).toBe(user);
+
+    // A bridge on a configured port is recognised through the installation's own route.
+    const custom = 'model = "gpt-5.6-sol"\nopenai_base_url = "http://127.0.0.1:17950/v1"\n';
+    writeFileSync(configPath, custom);
+    expect(uninstallCodexIntegration()).toEqual({ changed: false });
+    expect(readFileSync(configPath, "utf8")).toBe(custom);
+    expect(uninstallCodexIntegration({ bridgeRoutes: ["http://127.0.0.1:17950/v1"] })).toEqual({ changed: true });
+    expect(readFileSync(configPath, "utf8")).toBe(user);
+
+    // Another local proxy (a different port) is the user's own routing.
+    const other = 'model = "gpt-5.6-sol"\nopenai_base_url = "http://127.0.0.1:9999/v1"\n';
+    writeFileSync(configPath, other);
+    expect(uninstallCodexIntegration({ bridgeRoutes: ["http://127.0.0.1:17950/v1"] })).toEqual({ changed: false });
+    expect(readFileSync(configPath, "utf8")).toBe(other);
+  });
+
 });

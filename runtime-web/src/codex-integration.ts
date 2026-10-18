@@ -55,7 +55,9 @@ import {
   assertPreservedPreviousAssignments,
   assertPreservedPreviousRealtimeAssignment,
   installRoute,
+  journalRestorablePrevious,
   managedJournalIsActive,
+  removeLeftoverBridgeRoute,
   replacementBaseline,
   restoreLegacyV2,
   restoreManagedRoute,
@@ -278,12 +280,15 @@ export function installCodexIntegration(
       true,
       !preservePrevious || existing.version === 9 || existing.version === 10 || options.replaceExistingRoute === true,
     );
+    // A prior value that was itself a bridge route is never carried forward as "previous".
+    const restorable = journalRestorablePrevious(existing);
+    const existingPrevious = { ...existing.previous, openai_base_url: restorable.route };
     if (preservePrevious) {
-      assertPreservedPreviousAssignments(patched.previous, existing.previous);
+      assertPreservedPreviousAssignments(patched.previous, existingPrevious);
       if (existing.version === 9 || existing.version === 10) {
         assertPreservedPreviousRealtimeAssignment(
           patched.previousRealtimeWebrtcCallBaseUrl,
-          existing.previousRealtimeWebrtcCallBaseUrl,
+          restorable.realtime ?? existing.previousRealtimeWebrtcCallBaseUrl,
         );
       }
     }
@@ -299,9 +304,9 @@ export function installCodexIntegration(
           agent_max_depth: patched.installedAgentMaxDepth,
         } : {}),
       },
-      previous: preservePrevious ? existing.previous : patched.previous,
+      previous: preservePrevious ? existingPrevious : patched.previous,
       previousRealtimeWebrtcCallBaseUrl: preservePrevious && (existing.version === 9 || existing.version === 10)
-        ? existing.previousRealtimeWebrtcCallBaseUrl
+        ? restorable.realtime ?? existing.previousRealtimeWebrtcCallBaseUrl
         : patched.previousRealtimeWebrtcCallBaseUrl,
       interruptHook: patched.interruptHook,
       ...(config.subagentProtocol === "compatibility-v1" ? {
@@ -417,11 +422,13 @@ export function activateCodexIntegration(): SetCodexIntegrationActiveResult {
     true,
     existing.version === 9 || existing.version === 10,
   );
-  assertPreservedPreviousAssignments(route.previous, existing.previous);
+  const restorable = journalRestorablePrevious(existing);
+  const existingPrevious = { ...existing.previous, openai_base_url: restorable.route };
+  assertPreservedPreviousAssignments(route.previous, existingPrevious);
   if (existing.version === 9 || existing.version === 10) {
     assertPreservedPreviousRealtimeAssignment(
       route.previousRealtimeWebrtcCallBaseUrl,
-      existing.previousRealtimeWebrtcCallBaseUrl,
+      restorable.realtime ?? existing.previousRealtimeWebrtcCallBaseUrl,
     );
   }
   const connected: CodexIntegrationJournal = {
@@ -436,9 +443,9 @@ export function activateCodexIntegration(): SetCodexIntegrationActiveResult {
         agent_max_depth: route.installedAgentMaxDepth,
       } : {}),
     },
-    previous: existing.previous,
+    previous: existingPrevious,
     previousRealtimeWebrtcCallBaseUrl: existing.version === 9 || existing.version === 10
-      ? existing.previousRealtimeWebrtcCallBaseUrl
+      ? restorable.realtime ?? existing.previousRealtimeWebrtcCallBaseUrl
       : route.previousRealtimeWebrtcCallBaseUrl,
     interruptHook: route.interruptHook,
     ...(protocol === "compatibility-v1" ? {
@@ -542,13 +549,22 @@ function restoreOrphanedManagedConfig(text: string): string {
   return changed ? renderDocument(document) : text;
 }
 
-export function uninstallCodexIntegration(): UninstallCodexIntegrationResult {
+/**
+ * Removes the integration and leaves Codex on its own route: every bridge-managed line goes, the
+ * user's prior values come back, and a prior value that was itself a bridge route is removed
+ * rather than restored. `bridgeRoutes` names this installation's route (its configured port) in
+ * addition to the default bridge route, for a config that no journal describes.
+ */
+export function uninstallCodexIntegration(
+  options: { bridgeRoutes?: readonly string[] } = {},
+): UninstallCodexIntegrationResult {
+  const bridgeRoutes = options.bridgeRoutes ?? [];
   const journal = readJournal();
   if (!journal) {
     const configPath = getCodexConfigPath();
     if (!existsSync(configPath)) return { changed: false };
     const current = readFileSync(configPath, "utf8");
-    const restored = restoreOrphanedManagedConfig(current);
+    const restored = removeLeftoverBridgeRoute(restoreOrphanedManagedConfig(current), bridgeRoutes);
     if (restored === current) return { changed: false };
     writeFilesWithCompensation(
       [{ path: configPath, data: restored, followSymlink: true }],
@@ -570,6 +586,10 @@ export function uninstallCodexIntegration(): UninstallCodexIntegrationResult {
   } else {
     restored = restoreManagedRoute(current, journal);
   }
+  restored = removeLeftoverBridgeRoute(restored, [
+    ...bridgeRoutes,
+    ...(journal.version === 2 ? [] : [journal.installed.openai_base_url]),
+  ]);
   const configSnapshot = snapshotFile(journal.configPath, { followSymlink: true });
   const catalogSnapshot = journal.version === 2 ? snapshotFile(journal.catalogPath) : undefined;
   const modelsCacheSnapshot = snapshotFile(getCodexModelsCachePath());
