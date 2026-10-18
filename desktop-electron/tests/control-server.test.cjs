@@ -709,3 +709,28 @@ test("the Codex model catalog is served from the last good copy when the live re
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a native fetch aborted before its response arrives fails instead of hanging", async () => {
+  const { EventEmitter } = require("node:events");
+  const { fetchNativeWithProxyAuth } = require("../electron/control-server.cjs");
+  const requests = [];
+  // Electron's ClientRequest: abort() emits "abort" and "close", never "error".
+  const electronNet = { request: () => {
+    const request = Object.assign(new EventEmitter(), {
+      aborted: false,
+      abort() { if (this.aborted) return; this.aborted = true; process.nextTick(() => { this.emit("abort"); this.emit("close"); }); },
+      end() {},
+    });
+    requests.push(request);
+    return request;
+  } };
+  const controller = new AbortController();
+  // A stalled proxy: no response, ever. The update's idle guard (or a caller's deadline) aborts it.
+  const pending = fetchNativeWithProxyAuth({ electronNet, browserSession: {}, url: "https://github.com/x",
+    options: { method: "GET", headers: {}, signal: controller.signal }, getProxyCredentials: () => null });
+  setTimeout(() => controller.abort(new Error("Update request timed out")), 10);
+  const settled = await Promise.race([pending.then(() => "resolved", (error) => error.message),
+    new Promise((resolve) => setTimeout(() => resolve("still pending"), 500))]);
+  assert.equal(settled, "Update request timed out");
+  assert.equal(requests[0].aborted, true, "the request itself is cancelled");
+});

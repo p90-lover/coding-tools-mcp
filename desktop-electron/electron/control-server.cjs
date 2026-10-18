@@ -61,10 +61,15 @@ function fetchNativeWithProxyAuth({ electronNet, browserSession, url, options, g
       session: browserSession, credentials: "omit", useSessionCookies: false,
       redirect: "manual",
     });
-    const abort = () => request.abort();
+    // Electron's abort() emits "abort" and "close", never "error": an abort before the response
+    // (a stalled proxy timed out by its caller) left this promise pending for good. It rejects
+    // here; after the response it only cancels the body.
+    const abort = () => {
+      request.abort();
+      reject(options.signal.reason ?? new DOMException("Native fetch aborted", "AbortError"));
+    };
     if (options.signal?.aborted) {
       abort();
-      reject(options.signal.reason ?? new DOMException("Native fetch aborted", "AbortError"));
       return;
     }
     options.signal?.addEventListener("abort", abort, { once: true });
