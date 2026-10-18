@@ -634,11 +634,14 @@ export function AgentOrchestratorSurface({ language, setError }: {
       // Both catalogs carry model capabilities when their source reports them.
       pending = moduleCall("models", { harness, workspaceId }).then(result => {
         const models = Array.isArray(result.models) ? result.models as string[] : [];
-        return result.capabilities || result.unavailable ? { models, ...(result.capabilities ? { capabilities: result.capabilities as AoModelCatalog["capabilities"] } : {}),
-          ...(result.unavailable ? { unavailable: result.unavailable as AoModelCatalog["unavailable"] } : {}) } : models;
+        return result.capabilities || result.unavailable || result.held ? { models, ...(result.capabilities ? { capabilities: result.capabilities as AoModelCatalog["capabilities"] } : {}),
+          ...(result.unavailable ? { unavailable: result.unavailable as AoModelCatalog["unavailable"] } : {}),
+          ...(result.held ? { held: result.held as AoModelCatalog["held"] } : {}), ...(result.stale === true ? { stale: true } : {}) } : models;
       });
       const entry = { at: Date.now(), models: pending };
-      pending.catch(() => { if (modelCache.current.get(key) === entry) modelCache.current.delete(key); });
+      const forget = () => { if (modelCache.current.get(key) === entry) modelCache.current.delete(key); };
+      // The remembered list (CPA could not be read) is asked for again next time, not kept a minute.
+      pending.then(items => { if (!Array.isArray(items) && items.stale) forget(); }, forget);
       modelCache.current.set(key, entry);
     }
     return pending;
