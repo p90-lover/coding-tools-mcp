@@ -208,7 +208,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   function continuationCard(previous, executionMode, singleRoute) {
     const card = previous?.execution_mode === "single" ? previous.nodes?.[0] : null;
     if (executionMode !== "single" || !singleRoute || !card || !externalAgent(card) || !card.receipt?.thread_id) return null;
-    if (!["finished", "failed", "cancelled"].includes(card.state)) return null;
+    // A held card (a hung turn the user's message stopped, an interrupted one) continues its session
+    // as a failed one does: starting fresh lost the whole conversation for "keep going".
+    if (!["finished", "failed", "cancelled", "held"].includes(card.state)) return null;
     return ROUTE_IDENTITY.every(field => (card.route?.[field] ?? null) === (singleRoute[field] ?? null)) ? card : null;
   }
   // Everything that decides how an agent is launched; two routes alike in these share a session.

@@ -2875,12 +2875,12 @@ test("the pinned executable digest is reused only while the file is unchanged", 
   assert.equal((await resolve()).expected_sha256, sha("other-binary"), "a replaced executable is hashed again");
 });
 
-test("a single-model follow-up continues the chat's live AO session with just the new message", async () => {
+async function followUpContinues(previousState) {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
   const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
   const previous = { id: "r1", project_id: "task-1", execution_mode: "single", cancelled: false,
-    nodes: [{ id: "one", role: "planner", state: "finished", parents: [], route, receipt: { thread_id: "sess-1" } }] };
+    nodes: [{ id: "one", role: "planner", state: previousState, parents: [], route, receipt: { thread_id: "sess-1" } }] };
   const world = chatWorld({ tasks: [task], runs: [previous] });
   const created = new Map();
   const spawned = [], sent = [], observedWith = [];
@@ -2914,7 +2914,10 @@ test("a single-model follow-up continues the chat's live AO session with just th
   assert.deepEqual(JSON.parse(JSON.stringify(sent)), [["sess-1", "now run the tests", "key-1"]], "only the new message, idempotent by its request key");
   assert.deepEqual(JSON.parse(JSON.stringify(observedWith[0])), ["sess-1", "turn-2"], "observed on the follow-up's own turn");
   assert.match(world.edits[0].description, /Follow-up \([^)]+ UTC\):\nnow run the tests$/, "the chat still records the follow-up");
-});
+}
+
+test("a single-model follow-up continues the chat's live AO session with just the new message", () => followUpContinues("finished"));
+test("a follow-up after a held turn (a hung turn the user's message stopped) continues its session too", () => followUpContinues("held"));
 
 test("steering hands the message to the running AO agent and notes it in the chat", async () => {
   const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
