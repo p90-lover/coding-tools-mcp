@@ -4,7 +4,7 @@ const https = require("node:https");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
-const { Transform } = require("node:stream");
+const { Readable, Transform } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
 
 const REPOSITORY = "p90-lover/coding-tools-mcp";
@@ -97,27 +97,102 @@ function validateReleaseAssetUrl(raw, version, assetName) {
   return url.toString();
 }
 
-function request(url, redirects = 0) {
+// Update requests go through the app's own network (the launcher session: its proxy, the system
+// proxy, Chromium's resolver) when main.cjs provides it. Node's https knew none of those, so a
+// machine that reaches GitHub only through a proxy, or whose resolver missed github.com once,
+// failed with "getaddrinfo ENOTFOUND github.com". Node's https stays the fallback.
+let nativeFetch = null;
+function useNativeUpdateTransport(fetchImpl) { nativeFetch = typeof fetchImpl === "function" ? fetchImpl : null; }
+
+const RETRY_DELAYS_MS = [1_000, 3_000];
+const TRANSIENT_NETWORK = /ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|ENETUNREACH|EHOSTUNREACH|ERR_NAME_NOT_RESOLVED|ERR_INTERNET_DISCONNECTED|ERR_NETWORK_CHANGED|ERR_CONNECTION_(?:RESET|CLOSED|REFUSED|TIMED_OUT)|ERR_TIMED_OUT|timed out/i;
+let sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// A whole download is retried, not only its request: a connection reset halfway through a pack
+// arrives while the body is read, after the request has already returned.
+async function withRetries(download) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await download();
+    } catch (error) {
+      if (attempt >= RETRY_DELAYS_MS.length || !TRANSIENT_NETWORK.test(String(error?.code || "") + " " + String(error?.message || ""))) throw error;
+      await sleep(RETRY_DELAYS_MS[attempt]);
+    }
+  }
+}
+
+/** A 200 response body as a Node stream, following redirects. */
+function request(url) { return requestOnce(url, 0); }
+
+// Node's https timed out a request that went quiet for a minute; the app's network has no such
+// deadline of its own, and a stalled proxy left the update "downloading" until a restart. No
+// response, or no body bytes, for REQUEST_IDLE_MS aborts it.
+let REQUEST_IDLE_MS = 60_000;
+function idleGuard() {
+  const controller = new AbortController();
+  let timer = null;
+  const guard = {
+    signal: controller.signal,
+    arm(onIdle) {
+      clearTimeout(timer);
+      timer = setTimeout(() => { controller.abort(new Error("Update request timed out")); onIdle?.(); }, REQUEST_IDLE_MS);
+      timer.unref?.();
+    },
+    stop() { clearTimeout(timer); },
+  };
+  return guard;
+}
+
+function guardedBody(webBody, guard) {
+  const source = Readable.fromWeb(webBody);
+  const out = new Transform({ transform(chunk, _encoding, done) { guard.arm(idle); done(null, chunk); } });
+  function idle() { out.destroy(new Error("Update request timed out")); source.destroy(); }
+  source.once("error", (error) => out.destroy(error));
+  out.once("close", () => guard.stop());
+  guard.arm(idle);
+  return source.pipe(out);
+}
+
+async function requestOnce(url, redirects) {
+  if (redirects > MAX_REDIRECTS) throw new Error(`Too many redirects while downloading ${url}`);
+  const parsed = new URL(url);
+  if (parsed.protocol !== "https:") throw new Error(`Refusing non-HTTPS update URL: ${parsed.protocol}`);
+  const headers = { Accept: "application/vnd.github+json", "User-Agent": USER_AGENT };
+  if (nativeFetch) {
+    let response = null;
+    const guard = idleGuard();
+    guard.arm();
+    try {
+      response = await nativeFetch(parsed.toString(), { method: "GET", headers, signal: guard.signal });
+    } catch {
+      response = null; // the app's network failed outright or went quiet: Node's https gets one go below
+    }
+    if (!response) guard.stop();
+    if (response) {
+      const location = response.headers.get("location");
+      if ([301, 302, 303, 307, 308].includes(response.status) && location) {
+        guard.stop();
+        await response.body?.cancel?.().catch?.(() => {});
+        return requestOnce(new URL(location, parsed).toString(), redirects + 1);
+      }
+      if (response.status !== 200) {
+        guard.stop();
+        await response.body?.cancel?.().catch?.(() => {});
+        throw new Error(`Update download failed with HTTP ${response.status}`);
+      }
+      return guardedBody(response.body, guard);
+    }
+  }
+  return nodeRequest(parsed, headers, redirects);
+}
+
+function nodeRequest(parsed, headers, redirects) {
   return new Promise((resolve, reject) => {
-    if (redirects > MAX_REDIRECTS) {
-      reject(new Error(`Too many redirects while downloading ${url}`));
-      return;
-    }
-    const parsed = new URL(url);
-    if (parsed.protocol !== "https:") {
-      reject(new Error(`Refusing non-HTTPS update URL: ${parsed.protocol}`));
-      return;
-    }
-    const req = https.get(parsed, {
-      headers: {
-        Accept: "application/vnd.github+json",
-        "User-Agent": USER_AGENT,
-      },
-    }, (response) => {
+    const req = https.get(parsed, { headers }, (response) => {
       if ([301, 302, 303, 307, 308].includes(response.statusCode) && response.headers.location) {
         response.resume();
         const next = new URL(response.headers.location, parsed).toString();
-        request(next, redirects + 1).then(resolve, reject);
+        requestOnce(next, redirects + 1).then(resolve, reject);
         return;
       }
       if (response.statusCode !== 200) {
@@ -133,22 +208,29 @@ function request(url, redirects = 0) {
 }
 
 async function downloadText(url, maxBytes = 2 * 1024 * 1024) {
-  const response = await request(url);
-  const chunks = [];
-  let bytes = 0;
-  for await (const chunk of response) {
-    bytes += chunk.length;
-    if (bytes > maxBytes) throw new Error("Update metadata exceeded its size limit");
-    chunks.push(chunk);
-  }
-  return Buffer.concat(chunks).toString("utf8");
+  return withRetries(async () => {
+    const response = await request(url);
+    const chunks = [];
+    let bytes = 0;
+    for await (const chunk of response) {
+      bytes += chunk.length;
+      if (bytes > maxBytes) throw new Error("Update metadata exceeded its size limit");
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks).toString("utf8");
+  });
 }
 
 /** Downloads to destination; onBytes (optional) hears each received chunk's length. */
 async function downloadFile(url, destination, onBytes) {
-  const response = await request(url);
-  const counted = new Transform({ transform(chunk, _encoding, done) { onBytes?.(chunk.length); done(null, chunk); } });
-  await pipeline(response, counted, fs.createWriteStream(destination, { flags: "wx", mode: 0o600 }));
+  let attempt = 0;
+  return withRetries(async () => {
+    // A retry starts the file again: the broken attempt's part is removed (it is opened "wx").
+    if (attempt++ > 0) fs.rmSync(destination, { force: true });
+    const response = await request(url);
+    const counted = new Transform({ transform(chunk, _encoding, done) { onBytes?.(chunk.length); done(null, chunk); } });
+    await pipeline(response, counted, fs.createWriteStream(destination, { flags: "wx", mode: 0o600 }));
+  });
 }
 
 function sha256(filePath) {
@@ -449,6 +531,9 @@ function createUpdateController({
 }
 
 module.exports = {
+  useNativeUpdateTransport,
+  setUpdateSleepForTests: (fn) => { sleep = fn; },
+  setUpdateIdleMsForTests: (ms) => { REQUEST_IDLE_MS = ms; },
   DEFAULT_UPDATE_CHECK_INTERVAL_MS,
   RELEASE_API_URL,
   downloadFile,
