@@ -269,8 +269,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       // A card left blank gets its model's full known limit (defaultContextWindow).
       ...(contextWindow != null ? { contextWindow } : {}),
       ...(plain ? { plain: true } : {}),
-      // Native effort validation stays skipped for foreign models; CPA reads the suffix.
-      ...(!viaCpa && node.route.effort ? { effort: node.route.effort } : {}) };
+      // Verified Claude plugin routes use the SDK body option; other CPA providers read the suffix.
+      ...((!viaCpa || verbatim && agent === "claude-code" && bodyEffortModel(wireModel)) && node.route.effort
+        ? { effort: node.route.effort } : {}) };
   }
 
   // Pre-warming: a chat's first launch (its worktree, the agent process and its handshake) took
@@ -600,18 +601,22 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   const tuningEfforts = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "auto"]);
   // CPA reads a "(high)" suffix only for its own providers. A provider plugin gets the model name
   // unchanged, so "cline-pass/deepseek-v4.1-flash(high)" came back "model not found" (and
-  // "commandcode-go/…(high)" a 503 auth_unavailable): its models get no suffix and offer no
-  // reasoning level. A plugin model is known by its namespace, or by the provider CPA names for it.
+  // "commandcode-go/…(high)" a 503 auth_unavailable): its models get no suffix. Verified
+  // body effort transport is handled separately. A plugin is known by namespace or provider.
   const PLUGIN_NAMESPACES = new Set(["cline-pass", ...PLUGIN_PROVIDERS]);
   // Ids the last catalog read named a plugin as provider of, for launches that have only the id.
   let pluginModels = new Set();
+  const claudeEfforts = new Set(["low", "medium", "high", "xhigh", "max"]);
+  let bodyEffortModels = new Set();
+  const bodyEffortModel = (id, provider) => /^(?:cline-pass|cline|commandcode-go)\//i.test(id)
+    || (provider === undefined ? bodyEffortModels.has(id) : ["cline", "cline-pass", "commandcode-go"].includes(provider.trim().toLowerCase()));
   const verbatimModel = (id, provider) => {
     const base = id.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
     const slash = base.indexOf("/");
     return slash > 0 && PLUGIN_NAMESPACES.has(base.slice(0, slash).toLowerCase())
       || typeof provider === "string" && PLUGIN_PROVIDERS.has(provider.trim().toLowerCase()) || pluginModels.has(base);
   };
-  const VERBATIM_EFFORT_REASON = "This model is served by a CPA provider plugin, which passes the model name on unchanged, so it takes no reasoning level.";
+  const VERBATIM_EFFORT_REASON = "This CPA provider plugin has no advertised reasoning level with verified transport for this harness.";
   /** The window CPA reports for any provider-plugin model it knows no limit for (GPT-5's default). */
   const CPA_STOCK_WINDOW = 272_000;
   /**
@@ -628,7 +633,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   function modelCapabilities(agent, model, info, viaCpa = false) {
     // Operating modes and unimplemented generic Chat effort are not reasoning setters.
     const nativeEffort = agent === "codex" || agent === "claude-code";
-    const efforts = viaCpa || nativeEffort ? reportedEfforts(info?.efforts) : [];
+    const efforts = viaCpa && agent === "claude-code" && bodyEffortModel(model)
+      ? reportedEfforts(info?.bodyEfforts).filter(effort => claudeEfforts.has(effort))
+      : viaCpa || nativeEffort ? reportedEfforts(info?.efforts) : [];
     const capabilities = { efforts };
     if (viaCpa && typeof info?.provider === "string") capabilities.provider = info.provider;
     if (!efforts.length) capabilities.effortReason = viaCpa
@@ -793,6 +800,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       rememberedModels(ids, capabilities, plugins, held, () => `CPA could not be read just now (${String(error?.message || error).slice(0, 120)}); a message still goes to CPA`);
       if (!ids.length) throw error;
       pluginModels = plugins;
+      bodyEffortModels = new Set(ids.filter(id => Array.isArray(capabilities[id]?.bodyEfforts)));
       return { ok: true, models: ids, capabilities, held: { ...held }, stale: true };
     }
   }
@@ -825,6 +833,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const capabilities = Object.create(null);
     const ids = [];
     const plugins = new Set();
+    const bodyModels = new Set();
     const unavailable = Object.create(null); // model -> why it is not offered (a plugin with no enabled account)
     const held = Object.create(null); // listed model -> why CPA may not serve it right now
     for (const entry of rows || []) {
@@ -840,7 +849,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       const provider = [entry.provider, entry.owned_by, entry.ownedBy].find(value => typeof value === "string" && value.trim());
       const verbatim = verbatimModel(id, provider) || verbatimModel(id, owners?.get(id));
       if (verbatim) plugins.add(id);
-      const efforts = verbatim ? [] : reportedEfforts(entry.supported_reasoning_levels ?? entry.thinking?.levels);
+      const advertised = reportedEfforts(entry.supported_reasoning_levels ?? entry.thinking?.levels);
+      const bodySupported = verbatim && (bodyEffortModel(id, provider ?? "") || bodyEffortModel(id, owners?.get(id) ?? ""));
+      const bodyEfforts = bodySupported ? advertised.filter(effort => claudeEfforts.has(effort)) : [];
+      if (bodySupported) bodyModels.add(id);
+      const efforts = verbatim ? [] : advertised;
       // context_window is the default the client starts with; max_context_window is how far the
       // model goes (Luna: 272K by default, up to 1M).
       // CPA gives every model of its provider plugins (cline-pass/…, commandcode-go/…) the same stock
@@ -850,7 +863,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       const stock = id.includes("/") && reported === CPA_STOCK_WINDOW && (entry.context_window ?? reported) === CPA_STOCK_WINDOW;
       // A real number CPA reports wins; the stock one gives way to a known ceiling, else stays unknown.
       const limit = stock ? knownContextLimit(id) : reported;
-      capabilities[id] = { efforts, ...(!efforts.length ? { effortReason: verbatim ? VERBATIM_EFFORT_REASON
+      capabilities[id] = { efforts, ...(bodySupported ? { bodyEfforts } : {}), ...(!efforts.length ? { effortReason: verbatim ? VERBATIM_EFFORT_REASON
         : "CPA did not advertise reasoning levels for this model." } : {}),
         ...(provider ? { provider: String(provider).trim().slice(0, 64) } : {}),
         ...(Number.isSafeInteger(limit) && limit > 0 ? { contextLimit: limit } : {}) };
@@ -879,6 +892,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     if (changed) saveKnownModels();
     if (!ids.length) throw new Error("CPA has no available models");
     pluginModels = plugins;
+    for (const id of ids) if (Array.isArray(capabilities[id]?.bodyEfforts)) bodyModels.add(id);
+    bodyEffortModels = bodyModels;
     return { ok: true, models: ids, capabilities, ...(Object.keys(unavailable).length ? { unavailable: { ...unavailable } } : {}),
       ...(Object.keys(held).length ? { held: { ...held } } : {}) };
   }
@@ -928,8 +943,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
           }
           throw new Error(`${node.route.model} is no longer in this harness's model list, so its effort and context window cannot be checked. Choose a listed model, or clear the card's effort and context window.`);
         }
-        // A provider-plugin card saved with an effort before it stopped offering one launches without it.
-        const effortIgnored = baseModel.startsWith(CPA_MODEL_PREFIX) && verbatimModel(baseModel.slice(CPA_MODEL_PREFIX.length), capability.provider);
+        // Legacy unsupported plugin/harness routes ignore saved effort; verified body routes validate it.
+        const effortIgnored = baseModel.startsWith(CPA_MODEL_PREFIX) && verbatimModel(baseModel.slice(CPA_MODEL_PREFIX.length), capability.provider)
+          && !(externalAgent(node) === "claude-code" && bodyEffortModel(baseModel.slice(CPA_MODEL_PREFIX.length)));
         if (node.route.effort && !effortIgnored && !capability?.efforts?.includes(node.route.effort)) {
           throw new Error("Reasoning effort is not supported by the current model/harness catalog");
         }

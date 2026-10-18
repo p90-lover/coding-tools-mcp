@@ -138,7 +138,7 @@ test("a Cline Pass model reaches CPA by its bare name: the plugin passes the nam
     assert.equal(input.model, "cline-pass/deepseek-v4.1-flash");
     assert.deepEqual(input.gateway, { provider: "cpa", model: "cline-pass/deepseek-v4.1-flash" });
   }
-  // CPA advertises its stock levels for the plugin's models; the card offers none.
+  // Claude transports the provider's advertised levels as a body option, never a model suffix.
   const workflow = createAgentOrchestratorWorkflow({
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-key" }),
     fetchImpl: async () => ({ ok: true, json: async () => ({ models: [
@@ -147,7 +147,7 @@ test("a Cline Pass model reaches CPA by its bare name: the plugin passes the nam
     aoHarness: { models: async () => [] },
   });
   const { capabilities } = await workflow.call("models", { harness: "ao:claude-code", workspaceId: "ws" });
-  assert.deepEqual(capabilities["cpa/cline-pass/deepseek-v4.1-flash"]?.efforts ?? capabilities["cline-pass/deepseek-v4.1-flash"]?.efforts, []);
+  assert.deepEqual(capabilities["cpa/cline-pass/deepseek-v4.1-flash"]?.efforts, ["low", "high"]);
   assert.deepEqual(capabilities["cpa/gpt-5.5"]?.efforts ?? capabilities["gpt-5.5"]?.efforts, ["high"]);
 });
 
@@ -171,7 +171,8 @@ test("every provider plugin's model reaches CPA by its bare name, by namespace o
     aoHarness: { models: async () => [] },
   });
   const { capabilities } = await workflow.call("models", { harness: "ao:claude-code", workspaceId: "ws" });
-  for (const id of ["cpa/commandcode-go/deepseek-v4.1-flash", "cpa/kimi-k3"]) {
+  assert.deepEqual(capabilities["cpa/commandcode-go/deepseek-v4.1-flash"].efforts, ["low", "high"]);
+  for (const id of ["cpa/kimi-k3"]) {
     assert.deepEqual(capabilities[id].efforts, [], id);
     assert.match(capabilities[id].effortReason, /provider plugin/, `${id} says why it takes no level`);
   }
@@ -255,7 +256,7 @@ test("upstream spawn preserves context on Chat/TUI fallback without adding nativ
     rememberLaunchWindow: () => {},
     chatTools: async () => null,
     internalApi: async (verb, endpoint, body) => {
-      if (verb === "GET") return { chatHarnesses: ["codex"] };
+      if (verb === "GET") return { chatHarnesses: ["codex", "claude-code"] };
       bodies.push(body);
       if (body.mode === "chat") throw Error("CHAT_DRIVER_UNAVAILABLE");
       return { session: { id: "session" } };
@@ -269,6 +270,11 @@ test("upstream spawn preserves context on Chat/TUI fallback without adding nativ
     assert.equal(body.effort, undefined);
     assert.equal(body.gateway.model, "gpt-5.5(high)");
   }
+  await assert.rejects(spawn({ workspaceId: "ws", agent: "claude-code", model: "cline-pass/deepseek-v4.1-flash",
+    gateway: { provider: "cpa", model: "cline-pass/deepseek-v4.1-flash" }, effort: "xhigh" }), /effort requires Chat mode/);
+  assert.equal(bodies.length, 3, "explicit effort never silently falls back to a terminal");
+  assert.equal(bodies[2].effort, "xhigh", "selected effort reaches actual session POST body");
+  assert.equal(bodies[2].gateway.model, "cline-pass/deepseek-v4.1-flash");
 });
 
 test("a CPA model's ceiling is its max context window and its own efforts, up to ultra", async () => {
@@ -362,4 +368,80 @@ test("a chat host that was only slow to start is retried as chat, not turned int
   assert.match(stillSlow.outcome, /^error: .*persistent ACP host/, "the card is held with the real reason");
   const missing = await run(["AO ACP runtime is not installed (CHAT_DRIVER_UNAVAILABLE)"]);
   assert.deepEqual(missing.modes, ["chat", "tui"], "without a chat runtime the agent still runs in its terminal");
+});
+
+test("Claude plugin body effort is advertised SDK intersection, isolated from other harnesses", async () => {
+  const levels = ["none", "low", "medium", "high", "xhigh", "max", "ultra"];
+  const catalog = [{ slug: "cline-pass/deepseek-v4.1-flash", supported_reasoning_levels: levels }];
+  const workflow = createAgentOrchestratorWorkflow({
+    aoHarness: { models: async () => [] },
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-key" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ models: catalog }) }),
+  });
+  const id = "cpa/cline-pass/deepseek-v4.1-flash";
+  const caps = (await workflow.call("models", { harness: "ao:claude-code" })).capabilities[id];
+  assert.deepEqual(caps.efforts, ["low", "medium", "high", "xhigh", "max"]);
+  for (const harness of ["ao:codex", "ao:opencode", "codex-native"]) {
+    const result = await workflow.call("models", { harness });
+    assert.deepEqual(result.capabilities[harness === "codex-native" ? id.slice(4) : id].efforts, [], harness);
+  }
+  const input = await dispatched("claude-code", id, { effort: "xhigh" }, catalog);
+  assert.equal(input.effort, "xhigh");
+  assert.equal(input.model, id.slice(4));
+  assert.equal(input.gateway.model, id.slice(4));
+  assert.equal((await dispatched("claude-code", id, {}, catalog)).effort, undefined, "Auto clears body effort");
+  await assert.rejects(dispatched("claude-code", id, { effort: "ultra" }, catalog), /reasoning.*not.*support/i);
+  const unadvertised = [{ slug: id.slice(4) }];
+  await assert.rejects(dispatched("claude-code", id, { effort: "high" }, unadvertised), /reasoning.*not.*support/i);
+});
+
+test("changing effort invalidates both prewarm and existing-session continuation identity", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-workflow.cjs"), "utf8");
+  const ast = ts.createSourceFile("workflow.cjs", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const selected = new Map();
+  const visit = node => {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === "continuationCard") selected.set(node.name.text, node.getText(ast));
+    if (ts.isVariableDeclaration(node) && ["ROUTE_IDENTITY", "warmKey"].includes(node.name.getText(ast))) selected.set(node.name.getText(ast), "const " + node.getText(ast) + ";");
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  const actual = vm.runInNewContext([...selected.values()].join("\n") + "\n({continuationCard,warmKey})", {
+    toolsKey: () => null, externalAgent: node => node.route.harness_id === "ao:claude-code",
+  });
+  const route = {harness_id:"ao:claude-code",model:"cpa/cline-pass/deepseek-v4.1-flash",effort:"high"};
+  const card = {route,state:"finished",receipt:{thread_id:"old-session"}};
+  const previous = {execution_mode:"single",nodes:[card]};
+  assert.equal(actual.continuationCard(previous,"single",{...route}),card);
+  for (const effort of ["xhigh", undefined]) {
+    const changed = {...route,effort};
+    assert.equal(actual.continuationCard(previous,"single",changed),null);
+    assert.notEqual(actual.warmKey("ws",route,true),actual.warmKey("ws",changed,true));
+    assert.equal(changed.model,route.model);
+  }
+});
+
+test("plugin alias body transport follows the current catalog owner after refresh", async () => {
+  let owner = "cline", clock = 1000;
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock, aoHarness: { models: async () => [] },
+    cpaConnection: () => ({baseUrl:"http://127.0.0.1:8317",proxyApiKey:"fixture",managementKey:"manage"}),
+    fetchImpl: async url => ({ok:true,json:async () => String(url).includes("/auth-files")
+      ? {files:[{provider:owner}]}
+      : String(url).includes("client_version")
+        ? {models:[{slug:"deepseek-alias",supported_reasoning_levels:["low","high","xhigh"]}]}
+        : {data:[{id:"deepseek-alias",owned_by:owner}]} }),
+  });
+  const id = "cpa/deepseek-alias";
+  const route = {harness_id:"ao:claude-code",model:id,effort:"xhigh"};
+  let catalog = await workflow.call("models",{harness:"ao:claude-code"});
+  assert.deepEqual(catalog.capabilities[id].efforts,["low","high","xhigh"],"plain catalog owner supplies body transport identity");
+  assert.equal(workflow.subagentLaunchArgs("ws",route,"fixture").effort,"xhigh");
+  owner = "kimi"; clock += 61000;
+  catalog = await workflow.call("models",{harness:"ao:claude-code"});
+  assert.deepEqual(catalog.capabilities[id].efforts,[],"old owner's verified transport is not retained");
+  assert.equal(workflow.subagentLaunchArgs("ws",route,"fixture").effort,undefined);
+  owner = "commandcode-go"; clock += 61000;
+  catalog = await workflow.call("models",{harness:"ao:claude-code"});
+  assert.deepEqual(catalog.capabilities[id].efforts,["low","high","xhigh"]);
+  assert.equal(workflow.subagentLaunchArgs("ws",route,"fixture").gateway.model,"deepseek-alias");
 });

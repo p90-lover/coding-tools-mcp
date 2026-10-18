@@ -800,8 +800,9 @@ test("a finished turn's work is read back from AO, paging back until it reaches 
 test("a send binds its workspace in AO once, not for every catalog read and the launch", async () => {
   const vm = require("node:vm");
   const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
-  const start = source.indexOf("  async function projectFor");
-  const block = source.slice(start, source.indexOf("  /**\n   * The app's own tools for one chat session", start));
+  const normalized = source.replace(/\r\n/g, "\n");
+  const start = normalized.indexOf("  async function projectFor");
+  const block = normalized.slice(start, normalized.indexOf("  /**\n   * The app's own tools for one chat session", start));
   const binds = [];
   let failing = false;
   const upstream = vm.runInNewContext(block + "({ projectFor, forgetProject })", {

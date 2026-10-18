@@ -663,6 +663,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       // AO caps prompts at 16 KiB of UTF-8; leave room for the TUI result instruction.
       const brief = utf8Prefix(prompt, 16384 - Buffer.byteLength(TUI_RESULT_INSTRUCTION, "utf8") - 2);
       const launch = async (mode) => {
+        if (mode !== "chat" && gateway && agent === "claude-code" && effort) {
+          throw new Error("CPA Claude reasoning effort requires Chat mode; clear effort to use the terminal fallback.");
+        }
         // Chat sessions only: a terminal launch has no controller to attach tool servers to. Each
         // attempt gets its own credential, bound to the session it creates and to nothing else.
         const tools = mode === "chat" ? await chatTools(agent, workspaceId, approvalMode, autoReview === true, subagent === true) : null;
@@ -681,7 +684,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         ...(approvalMode ? { approvalMode } : {}),
         ...(brief ? { prompt: mode === "chat" ? brief : `${brief}\n\n${TUI_RESULT_INSTRUCTION}` } : {}),
         ...(model && model !== "default" ? { model: String(model).slice(0, 256) } : {}),
-        ...(effort && !gateway ? { effort: String(effort).slice(0, 32) } : {}),
+        ...(effort && (!gateway || agent === "claude-code") ? { effort: String(effort).slice(0, 32) } : {}),
         ...(contextWindow != null ? { contextWindow } : {}),
         // A single-model chat is a plain assistant: AO adds none of its worker/orchestrator prompt.
         ...(plain ? { plainPrompt: true } : {}),
