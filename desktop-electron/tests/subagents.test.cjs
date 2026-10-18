@@ -181,3 +181,25 @@ test("chat agents get the subagent tools when subagents are on; a subagent's own
     assert.equal(off.result.tools.some((tool) => SUBAGENT_TOOLS.has(tool.name)), false, "turned off on the Subagents page");
   } finally { await tools.close(); }
 });
+
+test("starts made at the same moment cannot pass the per-chat or running-at-once limit together", async () => {
+  const w = world({ settings: { maxConcurrent: 2, maxPerChat: 1 } });
+  try {
+    // A chat agent calls tools in parallel; AO takes a moment to create each session.
+    const spawn = w.harness.spawn;
+    w.harness.spawn = async (input) => { await new Promise((resolve) => setTimeout(resolve, 20)); return spawn(input); };
+    const chat = await Promise.all(["one", "two", "three"].map((task) => w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task })));
+    assert.equal(chat.filter((result) => !result.isError).length, 1, "one per chat");
+    assert.match(chat.find((result) => result.isError).content[0].text, /limit per chat/);
+    const others = await Promise.all(["chat-2", "chat-3", "chat-4"].map((parent) => w.service.call(parent, "ws-1", "subagent_start", { agent: "explorer", task: "x" })));
+    assert.equal(others.filter((result) => !result.isError).length, 1, "two running at once in all");
+    assert.match(others.find((result) => result.isError).content[0].text, /2 subagents are already running/);
+    assert.equal(w.spawned.length, 2);
+    // A start that failed gives its place back.
+    w.harness.spawn = async () => { throw new Error("AO refused"); };
+    await w.service.call("chat-1", "ws-1", "subagent_stop", { subagent_id: "sub-1" });
+    assert.match((await w.service.call("chat-5", "ws-1", "subagent_start", { agent: "explorer", task: "y" })).content[0].text, /AO refused/);
+    w.harness.spawn = spawn;
+    assert.equal(parse(await w.service.call("chat-6", "ws-1", "subagent_start", { agent: "explorer", task: "z" })).state, "starting");
+  } finally { w.cleanup(); }
+});

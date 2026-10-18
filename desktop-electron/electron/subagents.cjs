@@ -136,6 +136,7 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
   logger = console, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
   let config = null;
   const runs = new Map(); // AO session id -> run
+  const launching = []; // the parent chat of each start AO has not answered yet
   let poller = null;
   let polling = false;
   const answered = new Set(); // approval ids already answered
@@ -298,10 +299,19 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     if (!route) throw new Error(`"${agent.name}" has no model: the user sets one on the Subagents page (its own, or the default model)`);
     const brief = text(task, MAX_TASK);
     if (!brief) throw new Error("Give the subagent a task");
-    if (active().length >= settings.maxConcurrent) throw new Error(`${settings.maxConcurrent} subagents are already running (the limit); wait for one with subagent_result`);
-    if (active().filter((run) => run.parent === parent).length >= settings.maxPerChat) {
+    // Starts still waiting on AO count too: a chat agent calls tools in parallel, and each start
+    // checked the limits before any of them was running, so all of them went ahead.
+    const holders = [...active().map((run) => run.parent), ...launching];
+    if (holders.length >= settings.maxConcurrent) throw new Error(`${settings.maxConcurrent} subagents are already running (the limit); wait for one with subagent_result`);
+    if (holders.filter((holder) => holder === parent).length >= settings.maxPerChat) {
       throw new Error(`This chat already runs ${settings.maxPerChat} subagents (the limit per chat); wait for one with subagent_result`);
     }
+    launching.push(parent);
+    try { return await launch(parent, workspaceId, agent, route, brief, settings); }
+    finally { launching.splice(launching.indexOf(parent), 1); }
+  }
+
+  async function launch(parent, workspaceId, agent, route, brief, settings) {
     const permissions = settings.permission === "full"
       ? { permission_profile: ":danger-full-access", approval_policy: "never", approvals_reviewer: "user" }
       : { permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
