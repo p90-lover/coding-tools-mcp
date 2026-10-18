@@ -219,6 +219,18 @@ test("a subagent still ends at its time limit while AO is not running, and the p
   } finally { w.cleanup(); }
 });
 
+test("a subagent whose AO session ended mid-turn fails at once instead of running until its time limit", async () => {
+  const w = world({ settings: { timeoutMinutes: 240 } });
+  try {
+    const { subagent_id: id } = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "x" }));
+    // Killed in AO (or its agent died): AO reports the session exited while the turn it left still reads "running".
+    w.sessions.set(id, { status: "terminated", exited: true, turnState: "running", approvals: [] });
+    const result = parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 }));
+    assert.equal(result.state, "failed");
+    assert.match(result.error, /session ended/);
+  } finally { w.cleanup(); }
+});
+
 test("the app's chat tools and subagents read the safety rules of the workflow running now", () => {
   // Both are created once, inside the first backend start, and outlive it. A closure over that
   // start's `const agentOrchestratorWorkflow` (declared further down) threw "Cannot access before

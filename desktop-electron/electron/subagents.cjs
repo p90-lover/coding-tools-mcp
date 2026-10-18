@@ -264,6 +264,12 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     if (Array.isArray(observed?.approvals) && observed.approvals.length) await answer(run, observed.approvals);
     const state = observed?.turnState;
     if (run.state === "starting" && state && state !== "queued") run.state = "running";
+    // A session AO ended (killed, or its agent died) can leave its turn reading "running": that run
+    // would otherwise hold its place until the time limit (up to four hours). A chat card ends on it too.
+    if (observed?.exited && !TERMINAL_TURN.has(state)) {
+      finish(run, run.stopping ? "stopped" : "failed", run.stopping ? {} : { error: "The subagent's session ended before it finished" });
+      return;
+    }
     if (!TERMINAL_TURN.has(state)) return;
     const report = String(observed.answer || "").slice(0, MAX_REPORT);
     if (state === "completed") finish(run, "completed", { report: report || "(The subagent finished without a written report.)" });
