@@ -31,6 +31,14 @@ export function subagentId(name: string, taken: readonly string[]): string {
   while (taken.includes(id)) id = `${base}-${n++}`;
   return id;
 }
+/**
+ * The draft the page shows once the saved config is (re)loaded: edits not saved yet are kept, so
+ * leaving the page and coming back (it reloads on each visit) never drops them; an untouched draft
+ * follows what was loaded.
+ */
+export function keptDraft(draft: SubagentConfig | null, saved: SubagentConfig | null, loaded: SubagentConfig): SubagentConfig {
+  return draft && saved && JSON.stringify(draft) !== JSON.stringify(saved) ? draft : structuredClone(loaded);
+}
 const STATE_LABEL: Record<string, string> = { starting: "Starting", running: "Running", completed: "Done", failed: "Failed", stopped: "Stopped", timed_out: "Timed out" };
 const elapsed = (seconds: number) => seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s` : `${Math.floor(seconds / 3600)}h ${Math.floor(seconds % 3600 / 60)}m`;
 
@@ -53,12 +61,16 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
   const [harnesses, setHarnesses] = useState<AoHarness[]>([]);
   const [workspaceId, setWorkspaceId] = useState(() => { try { return localStorage.getItem("coding-tools:ao:workspace") || ""; } catch { return ""; } });
 
+  // The saved config the draft was last compared with; the page stays mounted between visits.
+  const savedRef = useRef<SubagentConfig | null>(null);
   const load = useCallback(async () => {
     const result = await moduleCall("subagents_config");
     setAvailable(result.available !== false);
     if (result.settings && Array.isArray(result.agents)) {
       const config = { settings: result.settings as SubagentSettings, agents: result.agents as Subagent[] };
-      setSaved(config); setDraft(structuredClone(config));
+      const previous = savedRef.current;
+      savedRef.current = config;
+      setSaved(config); setDraft(current => keptDraft(current, previous, config));
     }
   }, []);
   useEffect(() => {
@@ -110,6 +122,7 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
     try {
       const result = await moduleCall("subagents_save", { settings: draft.settings as unknown as JsonObject, agents: draft.agents as unknown as JsonObject[] } as unknown as JsonObject);
       const config = { settings: result.settings as SubagentSettings, agents: result.agents as Subagent[] };
+      savedRef.current = config;
       setSaved(config); setDraft(structuredClone(config)); setNotice("Saved. New chats get these subagents; open chats pick them up on their next agent start.");
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setBusy(false); }
