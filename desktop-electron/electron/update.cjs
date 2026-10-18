@@ -115,7 +115,10 @@ async function withRetries(download) {
     try {
       return await download();
     } catch (error) {
-      if (attempt >= RETRY_DELAYS_MS.length || !TRANSIENT_NETWORK.test(String(error?.code || "") + " " + String(error?.message || ""))) throw error;
+      const failures = error instanceof AggregateError ? error.errors : [error];
+      const transientFailure = failures.some((failure) =>
+        TRANSIENT_NETWORK.test(String(failure?.code || "") + " " + String(failure?.message || "")));
+      if (attempt >= RETRY_DELAYS_MS.length || !transientFailure) throw error;
       await sleep(RETRY_DELAYS_MS[attempt]);
     }
   }
@@ -158,13 +161,15 @@ async function requestOnce(url, redirects) {
   const parsed = new URL(url);
   if (parsed.protocol !== "https:") throw new Error(`Refusing non-HTTPS update URL: ${parsed.protocol}`);
   const headers = { Accept: "application/vnd.github+json", "User-Agent": USER_AGENT };
+  let nativeError = null;
   if (nativeFetch) {
     let response = null;
     const guard = idleGuard();
     guard.arm();
     try {
       response = await nativeFetch(parsed.toString(), { method: "GET", headers, signal: guard.signal });
-    } catch {
+    } catch (error) {
+      nativeError = error;
       response = null; // the app's network failed outright or went quiet: Node's https gets one go below
     }
     if (!response) guard.stop();
@@ -183,7 +188,15 @@ async function requestOnce(url, redirects) {
       return guardedBody(response.body, guard);
     }
   }
-  return nodeRequest(parsed, headers, redirects);
+  try {
+    return await nodeRequest(parsed, headers, redirects);
+  } catch (fallbackError) {
+    if (!nativeError) throw fallbackError;
+    // A blocked direct connection must not hide a retryable failure of the proxy-aware network.
+    const fallbackFailures = fallbackError instanceof AggregateError ? fallbackError.errors : [fallbackError];
+    throw new AggregateError([nativeError, ...fallbackFailures],
+      `Update request failed: app network: ${nativeError.message || nativeError}; Node fallback: ${fallbackError.message || fallbackError}`);
+  }
 }
 
 function nodeRequest(parsed, headers, redirects) {

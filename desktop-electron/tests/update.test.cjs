@@ -1,9 +1,12 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const https = require("node:https");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const { EventEmitter } = require("node:events");
+const { Readable } = require("node:stream");
 const {
   buildJob,
   compareVersions,
@@ -353,12 +356,20 @@ test("update downloads go through the app's network, follow redirects and report
   }
 });
 
-test("an update response other than 200 fails instead of saving its body", async () => {
+test("an update response other than 200 fails instead of saving its body", async (testContext) => {
   const update = require("../electron/update.cjs");
+  const waits = [];
+  testContext.mock.method(https, "get", () => assert.fail("HTTP errors must not fall back to Node"));
+  update.setUpdateSleepForTests(async (milliseconds) => { waits.push(milliseconds); });
   update.useNativeUpdateTransport(async () => new Response("rate limited", { status: 403 }));
   try {
     await assert.rejects(update.downloadText("https://api.github.com/x"), /HTTP 403/);
-  } finally { update.useNativeUpdateTransport(null); }
+    assert.equal(https.get.mock.callCount(), 0);
+    assert.deepEqual(waits, []);
+  } finally {
+    update.useNativeUpdateTransport(null);
+    update.setUpdateSleepForTests((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+  }
 });
 
 test("a lookup that fails (ENOTFOUND github.com) is retried before the update gives up", async () => {
@@ -381,6 +392,149 @@ test("a lookup that fails (ENOTFOUND github.com) is retried before the update gi
     update.useNativeUpdateTransport(null);
     update.setUpdateSleepForTests((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
+});
+
+test("native DNS failures remain retryable when the Node fallback is blocked", async (testContext) => {
+  for (const downloadKind of ["metadata", "file"]) {
+    await testContext.test(downloadKind, async (subtest) => {
+      const update = require("../electron/update.cjs");
+      const waits = [];
+      let nativeCalls = 0;
+      let fallbackCalls = 0;
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), "update-blocked-fallback-"));
+      subtest.after(() => {
+        update.useNativeUpdateTransport(null);
+        update.setUpdateSleepForTests((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+        fs.rmSync(directory, { recursive: true, force: true });
+      });
+      subtest.mock.method(https, "get", () => {
+        fallbackCalls += 1;
+        const request = new EventEmitter();
+        request.setTimeout = () => request;
+        process.nextTick(() => request.emit("error", Object.assign(new Error("connect EACCES"), { code: "EACCES" })));
+        return request;
+      });
+      update.setUpdateSleepForTests(async (milliseconds) => { waits.push(milliseconds); });
+      update.useNativeUpdateTransport(async () => {
+        nativeCalls += 1;
+        if (nativeCalls === 1) {
+          const failure = downloadKind === "metadata"
+            ? new Error("net::ERR_NAME_NOT_RESOLVED")
+            : Object.assign(new Error("native lookup failed"), { code: "EAI_AGAIN" });
+          throw failure;
+        }
+        return new Response("verified response", { status: 200 });
+      });
+
+      if (downloadKind === "metadata") {
+        assert.equal(await update.downloadText("https://example.test/metadata.json"), "verified response");
+      } else {
+        const destination = path.join(directory, "pack.ctpack");
+        await update.downloadFile("https://example.test/pack.ctpack", destination);
+        assert.equal(fs.readFileSync(destination, "utf8"), "verified response");
+      }
+      assert.equal(nativeCalls, 2);
+      assert.equal(fallbackCalls, 1);
+      assert.deepEqual(waits, [1_000]);
+    });
+  }
+});
+
+test("dual transport failures preserve both causes and keep retries bounded", async (testContext) => {
+  for (const nativeCode of ["EAI_AGAIN", "ERR_CERT_AUTHORITY_INVALID"]) {
+    await testContext.test(nativeCode, async (subtest) => {
+      const update = require("../electron/update.cjs");
+      const waits = [];
+      const nativeFailure = Object.assign(new Error("native transport failed"), { code: nativeCode });
+      const fallbackFailure = Object.assign(new Error("connect EACCES"), { code: "EACCES" });
+      let nativeCalls = 0;
+      let fallbackCalls = 0;
+      subtest.after(() => {
+        update.useNativeUpdateTransport(null);
+        update.setUpdateSleepForTests((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+      });
+      subtest.mock.method(https, "get", () => {
+        fallbackCalls += 1;
+        const request = new EventEmitter();
+        request.setTimeout = () => request;
+        process.nextTick(() => request.emit("error", fallbackFailure));
+        return request;
+      });
+      update.setUpdateSleepForTests(async (milliseconds) => { waits.push(milliseconds); });
+      update.useNativeUpdateTransport(async () => {
+        nativeCalls += 1;
+        throw nativeFailure;
+      });
+
+      await assert.rejects(update.downloadText("https://example.test/metadata.json"), (failure) => {
+        assert.ok(failure instanceof AggregateError);
+        assert.deepEqual(failure.errors, [nativeFailure, fallbackFailure]);
+        assert.match(failure.message, /native transport failed/);
+        assert.match(failure.message, /connect EACCES/);
+        return true;
+      });
+      const retryable = nativeCode === "EAI_AGAIN";
+      assert.equal(nativeCalls, retryable ? 3 : 1);
+      assert.equal(fallbackCalls, nativeCalls);
+      assert.deepEqual(waits, retryable ? [1_000, 3_000] : []);
+    });
+  }
+});
+
+test("a successful Node fallback still supplies the update without a retry", async (testContext) => {
+  const update = require("../electron/update.cjs");
+  testContext.after(() => update.useNativeUpdateTransport(null));
+  testContext.mock.method(https, "get", (_url, _options, onResponse) => {
+    const request = new EventEmitter();
+    request.setTimeout = () => request;
+    const response = Readable.from([Buffer.from("fallback response")]);
+    response.statusCode = 200;
+    response.headers = {};
+    process.nextTick(() => onResponse(response));
+    return request;
+  });
+  update.useNativeUpdateTransport(async () => { throw new Error("net::ERR_NAME_NOT_RESOLVED"); });
+  assert.equal(await update.downloadText("https://example.test/metadata.json"), "fallback response");
+  assert.equal(https.get.mock.callCount(), 1);
+});
+
+test("a fallback redirect does not hide a retryable native failure on the next host", async (testContext) => {
+  const update = require("../electron/update.cjs");
+  const waits = [];
+  let nativeCalls = 0;
+  testContext.after(() => {
+    update.useNativeUpdateTransport(null);
+    update.setUpdateSleepForTests((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+  });
+  testContext.mock.method(https, "get", (url, _options, onResponse) => {
+    const request = new EventEmitter();
+    request.setTimeout = () => request;
+    process.nextTick(() => {
+      if (url.hostname === "example.test") {
+        const response = Readable.from([]);
+        response.statusCode = 302;
+        response.headers = { location: "https://assets.example.test/metadata.json" };
+        onResponse(response);
+      } else {
+        request.emit("error", Object.assign(new Error("connect EACCES"), { code: "EACCES" }));
+      }
+    });
+    return request;
+  });
+  update.setUpdateSleepForTests(async (milliseconds) => { waits.push(milliseconds); });
+  update.useNativeUpdateTransport(async (url) => {
+    nativeCalls += 1;
+    if (nativeCalls === 1) throw new Error("native connection failed");
+    if (url.includes("assets.example.test")) {
+      throw Object.assign(new Error("native lookup failed"), { code: "EAI_AGAIN" });
+    }
+    return new Response("recovered response", { status: 200 });
+  });
+
+  assert.equal(await update.downloadText("https://example.test/metadata.json"), "recovered response");
+  assert.equal(nativeCalls, 3);
+  assert.equal(https.get.mock.callCount(), 2);
+  assert.deepEqual(waits, [1_000]);
 });
 
 test("a pack whose connection breaks partway is downloaded again from the start", async () => {
