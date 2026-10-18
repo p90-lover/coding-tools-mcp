@@ -165,7 +165,7 @@ function delayToMilliseconds(value, unit) {
   }
   return ms;
 }
-function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, chatEditsFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, chatEditsFile = null, knownModelsFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, logger = null }) {
   const goals = createGoalStore({ file: goalsFile, now });
   // Deleted chat messages: their runs are hidden from the chat, and the next follow-up starts afresh.
   const chatEdits = createChatEditStore({ file: chatEditsFile });
@@ -682,9 +682,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         capabilities[routed] = modelCapabilities(agent, id, catalog.capabilities[id], true);
         return routed;
       });
-      const unavailable = catalog?.unavailable
-        ? Object.fromEntries(Object.entries(catalog.unavailable).map(([id, why]) => [`${CPA_MODEL_PREFIX}${id}`, why])) : null;
-      return { ok: true, harness, models: [...new Set([...items.map(item => item.id), ...cpa])], capabilities, ...(unavailable ? { unavailable } : {}) };
+      const routedNotes = notes => notes ? Object.fromEntries(Object.entries(notes).map(([id, why]) => [`${CPA_MODEL_PREFIX}${id}`, why])) : null;
+      const unavailable = routedNotes(catalog?.unavailable);
+      const held = routedNotes(catalog?.held);
+      return { ok: true, harness, models: [...new Set([...items.map(item => item.id), ...cpa])], capabilities,
+        ...(unavailable ? { unavailable } : {}), ...(held ? { held } : {}), ...(catalog?.stale ? { stale: true } : {}) };
     }
     if (harness === "codex-native") {
       // Native Codex runs WebGPT through the bridge and every CPA model through the shared pool.
@@ -696,7 +698,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       // without the effort picker, and there the bridge already runs these tiers as Luna (Instant,
       // Medium) or Think (High and up). A saved Luna or Think route still runs (webModel).
       return { ok: true, harness, models: [...WEB_TIERS, ...cpa],
-        capabilities: Object.fromEntries(cpa.map(id => [id, pool.capabilities[id]]).filter(([, value]) => value)) };
+        capabilities: Object.fromEntries(cpa.map(id => [id, pool.capabilities[id]]).filter(([, value]) => value)),
+        ...(pool.held ? { held: pool.held } : {}), ...(pool.stale ? { stale: true } : {}) };
     }
     return cachedCpaCatalog();
   }
@@ -729,12 +732,72 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const at = now();
     if (cpaCatalogCache && at - cpaCatalogCache.at < CPA_CATALOG_TTL_MS) return cpaCatalogCache.promise;
     const entry = { at, promise: fetchCpaCatalog() };
-    entry.promise.catch(() => { if (cpaCatalogCache === entry) cpaCatalogCache = null; });
+    const forget = () => { if (cpaCatalogCache === entry) cpaCatalogCache = null; };
+    // The remembered list served while CPA cannot be read is not kept: the next read asks CPA again.
+    entry.promise.then(catalog => { if (catalog?.stale) forget(); }, forget);
     cpaCatalogCache = entry;
     return entry.promise;
   }
 
+  // Every model CPA has listed, with its capabilities and when CPA last listed it. CPA leaves a
+  // model out of its list while it cools down after upstream errors (Cline's 502s), while its
+  // account is disabled, or while CPA itself restarts or cannot be reached; the model vanished from
+  // the menu and a chat saved on it showed "not available" and refused to send. A model CPA listed
+  // in the last 30 days stays in the list (its effort and window too), and a send goes to CPA,
+  // which answers for itself. Saved in the user data folder, so it survives a restart.
+  const KNOWN_MODEL_MS = 30 * 24 * 60 * 60_000;
+  const KNOWN_MODEL_REFRESH_MS = 24 * 60 * 60_000;
+  const knownModels = (() => {
+    try {
+      const saved = knownModelsFile ? JSON.parse(fs.readFileSync(knownModelsFile, "utf8"))?.models : null;
+      const kept = Object.create(null);
+      if (saved && typeof saved === "object" && !Array.isArray(saved)) {
+        for (const [id, entry] of Object.entries(saved).slice(0, MAX_LISTED_MODELS)) {
+          if (id && id.length <= 128 && Number.isFinite(entry?.seen) && entry.capability && typeof entry.capability === "object") {
+            kept[id] = { seen: entry.seen, capability: entry.capability, ...(entry.plugin ? { plugin: true } : {}) };
+          }
+        }
+      }
+      return kept;
+    } catch { return Object.create(null); }
+  })();
+  function saveKnownModels() {
+    if (!knownModelsFile) return;
+    try {
+      fs.mkdirSync(path.dirname(knownModelsFile), { recursive: true });
+      const temporary = `${knownModelsFile}.${process.pid}.tmp`;
+      fs.writeFileSync(temporary, JSON.stringify({ models: knownModels }));
+      fs.renameSync(temporary, knownModelsFile);
+    } catch (error) { logger?.warn?.("cpa.known_models.save_failed", { error: String(error?.message || error).slice(0, 200) }); }
+  }
+  const HELD_NOTE = "CPA is not listing it right now (cooling down after upstream errors, or CPA is restarting); a message still goes to CPA, which answers for itself";
+  /** The remembered models CPA did not list (ids already listed stay as CPA gave them). */
+  function rememberedModels(ids, capabilities, plugins, held, note, at = now()) {
+    for (const [id, entry] of Object.entries(knownModels)) {
+      if (ids.includes(id) || at - entry.seen > KNOWN_MODEL_MS || ids.length >= MAX_LISTED_MODELS) continue;
+      ids.push(id);
+      capabilities[id] = entry.capability;
+      if (entry.plugin) plugins.add(id);
+      held[id] = note(id);
+    }
+  }
+
   async function fetchCpaCatalog() {
+    try { return await readCpaCatalog(); }
+    catch (error) {
+      // CPA cannot be read at all: the models it listed before stay, marked as not checked now.
+      const ids = [];
+      const capabilities = Object.create(null);
+      const held = Object.create(null);
+      const plugins = new Set(pluginModels);
+      rememberedModels(ids, capabilities, plugins, held, () => `CPA could not be read just now (${String(error?.message || error).slice(0, 120)}); a message still goes to CPA`);
+      if (!ids.length) throw error;
+      pluginModels = plugins;
+      return { ok: true, models: ids, capabilities, held: { ...held }, stale: true };
+    }
+  }
+
+  async function readCpaCatalog() {
     const cpa = connection();
     const { baseUrl, key } = cpa;
     let rows;
@@ -763,11 +826,14 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const ids = [];
     const plugins = new Set();
     const unavailable = Object.create(null); // model -> why it is not offered (a plugin with no enabled account)
+    const held = Object.create(null); // listed model -> why CPA may not serve it right now
     for (const entry of rows || []) {
       const id = entry?.slug ?? entry?.id;
       if (typeof id === "string" && id && id.length <= 128 && unserved(id)) {
         unavailable[id] = pluginUnavailable(owners.get(id), accountProviders);
-        continue;
+        // A provider whose account is only disabled keeps its models listed, like any model CPA
+        // set aside for a while; one nobody ever added stays hidden (its plugin lists every model).
+        if (!accountProviders.disabled?.has(owners.get(id)) && !knownModels[id]) continue;
       }
       if (typeof id !== "string" || !id || id.length > 128 || entry.visibility === "hide" || ids.includes(id)) continue;
       // CPA names the upstream that serves the model (e.g. antigravity, codex, cline-pass).
@@ -789,11 +855,32 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         ...(provider ? { provider: String(provider).trim().slice(0, 64) } : {}),
         ...(Number.isSafeInteger(limit) && limit > 0 ? { contextLimit: limit } : {}) };
       ids.push(id);
+      if (unavailable[id]) { held[id] = unavailable[id]; delete unavailable[id]; }
       if (ids.length === MAX_LISTED_MODELS) break;
     }
+    // CPA's list is remembered (a model it serves now, with what it reports) and every model it
+    // listed lately and left out now is listed again from memory.
+    const at = now();
+    let changed = false;
+    for (const id of ids) {
+      if (held[id]) continue;
+      const prior = knownModels[id];
+      const plugin = plugins.has(id);
+      if (prior && at - prior.seen < KNOWN_MODEL_REFRESH_MS && Boolean(prior.plugin) === plugin
+        && JSON.stringify(prior.capability) === JSON.stringify(capabilities[id])) continue;
+      knownModels[id] = { seen: at, capability: capabilities[id], ...(plugin ? { plugin: true } : {}) };
+      changed = true;
+    }
+    for (const [id, entry] of Object.entries(knownModels)) {
+      if (at - entry.seen > KNOWN_MODEL_MS) { delete knownModels[id]; changed = true; }
+    }
+    rememberedModels(ids, capabilities, plugins, held, id => unavailable[id] || HELD_NOTE, at);
+    for (const id of Object.keys(held)) delete unavailable[id];
+    if (changed) saveKnownModels();
     if (!ids.length) throw new Error("CPA has no available models");
     pluginModels = plugins;
-    return { ok: true, models: ids, capabilities, ...(Object.keys(unavailable).length ? { unavailable: { ...unavailable } } : {}) };
+    return { ok: true, models: ids, capabilities, ...(Object.keys(unavailable).length ? { unavailable: { ...unavailable } } : {}),
+      ...(Object.keys(held).length ? { held: { ...held } } : {}) };
   }
 
   // Native Codex runs WebGPT/CPA routes in-process; every other worker harness is AO's own.
@@ -1047,7 +1134,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const viaCpa = route.model.startsWith(CPA_MODEL_PREFIX);
     const catalog = await (viaCpa ? models() : models({ harness: route.harness_id, workspaceId })).catch(() => null);
     const listed = Array.isArray(catalog?.models) ? catalog.models.map(id => viaCpa ? `${CPA_MODEL_PREFIX}${id}` : id) : [];
-    if (!listed.length) return null;
+    // Only the remembered list (CPA could not be read) is no verdict either.
+    if (!listed.length || catalog.stale) return null;
     if (listed.includes(route.model) || listed.includes(base)) return null;
     const why = (viaCpa ? catalog.unavailable?.[base.slice(CPA_MODEL_PREFIX.length)] ?? catalog.unavailable?.[route.model.slice(CPA_MODEL_PREFIX.length)] : null);
     if (why) return `${who ? who + ": " : ""}${route.model.replace(/^cpa\//, "")} is not offered right now: ${why}${who ? " in Team settings" : ""}, then send again.`;
@@ -1553,13 +1641,27 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function controlRun({ workspaceId, runId, action, executable, nodeId } = {}) {
     if (!["pause", "resume", "stop", "retry", "retry_auto", "review_failures"].includes(action)) throw new Error("Choose a mission control");
     const id = clean(workspaceId, 128), run = clean(runId, 80);
-    const result = await requestHeadless("/api/v1/ao/control", { workspace_id: id, run_id: run, action, ...(nodeId ? { node_id: clean(nodeId, 80) } : {}), confirm: true }, { localConfirmation: true });
-    if (result?.ok !== true || result.run?.workspace_id !== id) throw new Error("Mission control needs a fresh status check");
+    let result;
+    try {
+      result = await requestHeadless("/api/v1/ao/control", { workspace_id: id, run_id: run, action, ...(nodeId ? { node_id: clean(nodeId, 80) } : {}), confirm: true }, { localConfirmation: true });
+      if (result?.ok !== true || result.run?.workspace_id !== id) throw new Error("Mission control needs a fresh status check");
+    } catch (error) {
+      // Stop always stops. When the service refuses or cannot be reached (a run it changed
+      // meanwhile, a restart), the run's working agents are still interrupted and this app stops
+      // driving it; Stop failed with "apps.call failed" and the agent kept going.
+      if (action !== "stop") throw error;
+      const saved = await runs({ workspaceId: id, runId: run }).catch(() => null);
+      const mission = saved?.runs.find(entry => entry.id === run && entry.workspace_id === id);
+      if (!mission && !backgroundRuns.has(runKey(id, run))) throw error;
+      logger?.warn?.("ao.stop.control_failed", { run, error: String(error?.message || error).slice(0, 200) });
+      result = { ok: true, run: mission ?? { id: run, workspace_id: id, nodes: [] }, notice: "Stopped here; the run's saved state updates on the next status check" };
+    }
     if (action === "stop") {
-      const saved = await runs({workspaceId:id});
-      const life = taskLifecycle(saved,result.run.project_id);
+      const saved = result.run.project_id ? await runs({workspaceId:id}).catch(() => null) : null;
+      const life = saved ? taskLifecycle(saved,result.run.project_id) : {};
       if (life.schedule?.run_id === run && !["cancelled","missed"].includes(life.schedule.state)) {
-        await cancelSchedule({workspaceId:id,taskId:result.run.project_id,intentId:life.schedule.id});
+        await cancelSchedule({workspaceId:id,taskId:result.run.project_id,intentId:life.schedule.id})
+          .catch(error => logger?.warn?.("ao.stop.schedule_cancel_failed", { run, error: String(error?.message || error).slice(0, 200) }));
       }
       for (const node of result.run.nodes ?? []) {
         if (externalAgent(node) && node.state === "running" && node.receipt?.thread_id) {

@@ -2181,7 +2181,7 @@ test("an agent's own models take CPA's real window for the same model, and a no-
   assert.match(message, /no longer in this harness's model list/, message);
 });
 
-test("a model CPA stops listing leaves the picker (a launch on it is refused, see above)", async () => {
+test("a model CPA stops listing stays in the picker with its effort and window, and a send on it goes to CPA", async () => {
   let catalog = { data: [{ id: "gemini-3.8-flash-high", context_window: 1000000 }, { id: "cline-pass/deepseek-v4-flash", context_window: 1000000 }] };
   let clock = 1_000_000;
   const workflow = createAgentOrchestratorWorkflow({
@@ -2192,12 +2192,50 @@ test("a model CPA stops listing leaves the picker (a launch on it is refused, se
     now: () => clock, confirm: async () => true,
   });
   assert.ok((await workflow.call("models", { harness: "ao:claude-code" })).models.includes("cpa/cline-pass/deepseek-v4-flash"));
-  // CPA no longer serves it (rate-limited, or the upstream answers "model not found").
+  // CPA stops listing it (cooling down after Cline's 502s, or CPA restarting).
   catalog = { data: [{ id: "gemini-3.8-flash-high", context_window: 1000000 }] };
   clock += 2 * 60_000;
   const listed = await workflow.call("models", { harness: "ao:claude-code" });
-  assert.ok(!listed.models.includes("cpa/cline-pass/deepseek-v4-flash"), "only what CPA lists is offered");
-  assert.equal(listed.capabilities["cpa/cline-pass/deepseek-v4-flash"], undefined);
+  assert.ok(listed.models.includes("cpa/cline-pass/deepseek-v4-flash"), "a model CPA listed before stays listed");
+  assert.ok(listed.capabilities["cpa/cline-pass/deepseek-v4-flash"]?.contextWindow, "its window stays settable");
+  assert.match(listed.held["cpa/cline-pass/deepseek-v4-flash"], /CPA is not listing it right now/);
+  assert.equal(listed.unavailable, undefined, "it is not reported as unavailable");
+  // Thirty days after CPA last listed it, it goes.
+  clock += 31 * 24 * 60 * 60_000;
+  assert.ok(!(await workflow.call("models", { harness: "ao:claude-code" })).models.includes("cpa/cline-pass/deepseek-v4-flash"));
+});
+
+test("the models CPA listed are remembered across restarts, and a send on one CPA set aside is not refused", async (t) => {
+  const dir = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "known-models-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const knownModelsFile = path.join(dir, "integrations", "cpa-known-models.json");
+  let catalog = { data: [{ id: "gemini-3.8-flash-high" }, { id: "cline-pass/deepseek-v4.1-flash", owned_by: "cline", context_window: 1000000 }] };
+  const writes = [];
+  const make = () => createAgentOrchestratorWorkflow({
+    knownModelsFile, findCodexExecutable: () => "C:/codex.exe", exists: () => true,
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async url => String(url).includes("/v1/models") ? { ok: true, json: async () => catalog } : { ok: false, status: 404, json: async () => ({}) },
+    requestHeadless: async endpoint => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [], teams: [], worker_capacity: {} };
+      writes.push(endpoint);
+      return { ok: true };
+    },
+    aoHarness: { catalog: async () => [], models: async () => [], spawn: async () => "session" },
+    confirm: async () => true,
+  });
+  await make().call("models", {});
+  assert.ok(fs.existsSync(knownModelsFile), "the list is saved");
+  // After a restart CPA lists only Gemini (Cline cooling down).
+  catalog = { data: [{ id: "gemini-3.8-flash-high" }] };
+  const workflow = make();
+  const listed = await workflow.call("models", {});
+  assert.deepEqual(listed.models, ["gemini-3.8-flash-high", "cline-pass/deepseek-v4.1-flash"]);
+  assert.deepEqual(listed.capabilities["cline-pass/deepseek-v4.1-flash"].efforts, [], "a plugin model still takes no effort suffix");
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/cline-pass/deepseek-v4.1-flash",
+    permission_profile: ":ao-default" };
+  const sent = await workflow.call("chat_send", { workspaceId: "ws", message: "hi", executionMode: "single", singleRoute: route }).catch(error => ({ error }));
+  assert.ok(!/not offered right now/.test(String(sent?.reason ?? sent?.error?.message ?? "")), `the send is not refused: ${sent?.reason ?? sent?.error?.message}`);
+  assert.ok(writes.length > 0, "the chat is created");
 });
 
 test("a chat on a model CPA no longer offers is refused before a task or run is created", async () => {
@@ -2257,16 +2295,19 @@ test("CPA's model list leaves out a provider plugin's models when nobody is sign
     { name: "cline-pass-switcher.json", provider: "cline" },
     { name: "commandcode-old.json", provider: "commandcode-go", disabled: true },
   ];
-  assert.deepEqual((await make(signedIn).call("models", {})).models, ["gpt-5.5", "cline-pass/deepseek-v4-flash", "myclaude/claude-sonnet-5"],
-    "commandcode-go has only a disabled account; built-in and API-key providers are never judged by their owner name");
+  // A disabled account's models stay listed (with why they may not run); built-in and API-key
+  // providers are never judged by their owner name.
+  const listed = await make(signedIn).call("models", {});
+  assert.deepEqual(listed.models, ["gpt-5.5", "cline-pass/deepseek-v4-flash", "commandcode-go/deepseek-v4.1-flash", "myclaude/claude-sonnet-5"]);
+  assert.match(listed.held["commandcode-go/deepseek-v4.1-flash"], /CommandCode Go's account is disabled in CPA/);
+  assert.equal(listed.unavailable, undefined);
   assert.equal((await make(null).call("models", {})).models.length, 4, "an unreadable account list hides nothing");
-  // Why a hidden model is not offered, for the model menu and a refused send.
-  const why = (await make(signedIn).call("models", {})).unavailable;
-  assert.match(why["commandcode-go/deepseek-v4.1-flash"], /CommandCode Go's account is disabled in CPA/);
-  const none = (await make([{ name: "codex-a.json", provider: "codex" }]).call("models", {})).unavailable;
-  assert.match(none["cline-pass/deepseek-v4-flash"], /no Cline Pass account is added in CPA/);
+  // A provider nobody ever added stays out of the list, with why, for a refused send.
+  const noCline = await make([{ name: "codex-a.json", provider: "codex" }]).call("models", {});
+  assert.ok(!noCline.models.includes("cline-pass/deepseek-v4-flash"));
+  assert.match(noCline.unavailable["cline-pass/deepseek-v4-flash"], /no Cline Pass account is added in CPA/);
   const agent = await make(signedIn).call("models", { harness: "ao:claude-code", workspaceId: "ws" });
-  assert.match(agent.unavailable["cpa/commandcode-go/deepseek-v4.1-flash"], /disabled in CPA/, "an agent's catalog names it by its CPA route");
+  assert.match(agent.held["cpa/commandcode-go/deepseek-v4.1-flash"], /disabled in CPA/, "an agent's catalog names it by its CPA route");
 });
 
 test("permission capabilities use installed AO adapter modes without fabricating native metadata", async () => {
@@ -3835,9 +3876,21 @@ test("CPA's catalog is read once a minute, and a failed read is not kept", async
   assert.equal(reads, 1, "a second menu or launch within the minute reuses the read");
   clock += 61_000;
   fail = true;
-  await assert.rejects(workflow.call("models", {}));
+  // CPA cannot be read: the models it listed before stay, marked as not checked now.
+  const kept = await workflow.call("models", {});
+  assert.deepEqual(kept.models, ["gpt-5.5"]);
+  assert.equal(kept.stale, true);
+  assert.match(kept.held["gpt-5.5"], /CPA could not be read just now/);
   fail = false;
-  assert.deepEqual((await workflow.call("models", {})).models, ["gpt-5.5"], "the failure was not cached");
+  const before = reads;
+  const fresh = await workflow.call("models", {});
+  assert.ok(reads > before, "the remembered list was not cached");
+  assert.equal(fresh.stale, undefined);
+  // With nothing remembered, a failed read is still an error.
+  fail = true;
+  const empty = createAgentOrchestratorWorkflow({ now: () => clock, cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async () => { throw new Error("CPA busy"); } });
+  await assert.rejects(empty.call("models", {}));
 });
 
 test("each launch logs where its time went", async () => {
@@ -3857,4 +3910,29 @@ test("each launch logs where its time went", async () => {
   assert.equal(timing.via, "spawn");
   assert.equal(timing.ok, true);
   for (const field of ["prepareMs", "launchMs", "totalMs"]) assert.ok(Number.isFinite(timing[field]) && timing[field] >= 0, field);
+});
+
+test("Stop interrupts the run's working agents even when the service refuses the stop", async () => {
+  const interrupted = [];
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "sonnet", permission_profile: ":ao-default" };
+  const mission = { id: "run", workspace_id: "ws", project_id: "task", revision: 3, nodes: [
+    { id: "one", role: "worker", state: "running", parents: [], route, receipt: { thread_id: "session-1" } },
+    { id: "two", role: "worker", state: "finished", parents: [], route, receipt: { thread_id: "session-2" } },
+  ] };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async endpoint => {
+      if (endpoint.endsWith("/control")) throw new Error("revision changed");
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], teams: [], worker_capacity: {} };
+      return { ok: true };
+    },
+    aoHarness: { interrupt: async id => { interrupted.push(id); } },
+    confirm: async () => true,
+  });
+  const stopped = await workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" });
+  assert.equal(stopped.ok, true);
+  assert.deepEqual(interrupted, ["session-1"], "only the working agent is interrupted");
+  // Other controls still report the refusal.
+  await assert.rejects(workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "pause" }), /revision changed/);
+  // A run the service does not know either is not pretended stopped.
+  await assert.rejects(workflow.call("control_run", { workspaceId: "ws", runId: "other", action: "stop" }), /revision changed/);
 });
