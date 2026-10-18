@@ -1,3 +1,4 @@
+const fs = require("node:fs");
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("node:path");
@@ -97,4 +98,35 @@ test("DEV launcher ignores generic production and legacy path overrides", () => 
   assert.equal(development.coreHome, path.join(homeDir, "isolated-dev"));
   assert.equal(development.codexHome, path.join(homeDir, "isolated-dev", "codex-home"));
   assert.equal(development.userData, path.join(homeDir, "isolated-dev", "launcher"));
+});
+
+test("production userData resolves an existing junction without changing other profile paths", (t) => {
+  const scratch = path.resolve(__dirname, "../../aiTemp");
+  fs.mkdirSync(scratch, { recursive: true });
+  const fixture = fs.mkdtempSync(path.join(scratch, "profile-junction-"));
+  t.after(() => fs.rmSync(fixture, { recursive: true, force: true }));
+  const appData = path.join(fixture, "logical-appdata");
+  const physical = path.join(fixture, "physical-profile");
+  const logical = path.join(appData, "Coding Tools");
+  fs.mkdirSync(appData);
+  fs.mkdirSync(physical);
+  fs.symlinkSync(physical, logical, process.platform === "win32" ? "junction" : "dir");
+  const env = { CODING_TOOLS_HOME: path.join(logical, "core"), CODEX_HOME: path.join(logical, "codex") };
+  for (const overrides of [env, { ...env, CODING_TOOLS_LAUNCHER_DATA_DIR: logical }]) {
+    const profile = resolveLauncherProfile({ argv: ["electron"], env: overrides, appData, homeDir: fixture });
+    assert.equal(profile.userData, fs.realpathSync(physical));
+    assert.equal(profile.coreHome, env.CODING_TOOLS_HOME);
+    assert.equal(profile.codexHome, env.CODEX_HOME);
+  }
+  const missing = path.join(logical, "new-profile");
+  assert.equal(resolveLauncherProfile({ argv: ["electron"], env: { CODING_TOOLS_LAUNCHER_DATA_DIR: missing },
+    appData, homeDir: fixture }).userData, missing);
+  fs.writeFileSync(path.join(physical, "file"), "fixture");
+  const file = path.join(logical, "file");
+  assert.equal(resolveLauncherProfile({ argv: ["electron"], env: { CODING_TOOLS_LAUNCHER_DATA_DIR: file },
+    appData, homeDir: fixture }).userData, file);
+  fs.mkdirSync(path.join(physical, "launcher"));
+  const development = resolveLauncherProfile({ argv: ["electron", "--dev-profile"], env: { CODING_TOOLS_DEV_HOME: logical },
+    appData, homeDir: fixture });
+  assert.equal(development.userData, path.join(logical, "launcher"));
 });
