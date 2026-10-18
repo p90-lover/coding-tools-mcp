@@ -133,3 +133,82 @@ test("chat_processes lists the app's commands with AO stopped and without the ag
   const none = await make(null).call("chat_processes", { sessionIds: ["s1"] });
   assert.deepEqual(none, { ok: true, sessions: [] });
 });
+
+// Claude Code's Bash with run_in_background: the call completes at once with a notice naming the
+// task and its output file; the dev server keeps running and writing to that file.
+function backgroundConversation(file, extra = []) {
+  return {
+    activities: [
+      { id: "bg", sequence: 10, activityKind: "command", status: "completed", createdAt: "2026-10-16T11:00:00.000Z",
+        detail: { command: "npm run dev", input: { command: "npm run dev", run_in_background: true }, exitCode: 0,
+          output: `Command running in background with ID: b7x2k9. Output is being written to: ${file}` } },
+      { id: "ls", sequence: 11, activityKind: "command", status: "completed", createdAt: "2026-10-16T11:00:05.000Z",
+        detail: { command: "ls", output: "src\n", exitCode: 0 } },
+      ...extra,
+    ],
+  };
+}
+
+test("a backgrounded dev server is listed as running with the live tail of its output file", async () => {
+  const fsp = require("node:fs/promises");
+  const path = require("node:path");
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "shell-bg-"));
+  const file = path.join(dir, "claude-0", "-proj", "tasks", "b7x2k9.output");
+  await fsp.mkdir(path.dirname(file), { recursive: true });
+  await fsp.writeFile(file, "VITE ready\n  Local: http://localhost:5173/\n");
+  try {
+    const [session] = await withAgentShellCommands([], ["bg1"], async () => backgroundConversation(file), { warn() {} });
+    const server = session.commands.find((command) => command.id === "agent:bg");
+    assert.equal(server.status, "background");
+    assert.equal(server.running, true);
+    assert.equal(server.background, true);
+    assert.equal(server.exitCode, null);
+    assert.equal(server.output, "VITE ready\n  Local: http://localhost:5173/\n");
+    assert.equal("outputFile" in server, false, "the file's path is not handed to the renderer");
+    assert.equal(session.commands.find((command) => command.id === "agent:ls").status, "completed");
+
+    // Later polls: the launch scrolled out of AO's page, yet the server stays listed with new output.
+    await fsp.appendFile(file, "page reload src/App.tsx\n");
+    const later = await withAgentShellCommands([], ["bg1"], async () => ({ activities: [] }), { warn() {} });
+    assert.equal(later[0].commands[0].id, "agent:bg");
+    assert.ok(later[0].commands[0].output.endsWith("page reload src/App.tsx\n"));
+
+    // TaskStop ends it.
+    const stopped = await withAgentShellCommands([], ["bg1"], async () => ({ activities: [
+      { id: "stop", sequence: 20, activityKind: "mcp_tool", status: "completed", detail: { toolName: "TaskStop", input: { task_id: "b7x2k9" } } },
+    ] }), { warn() {} });
+    assert.equal(stopped[0].commands[0].status, "killed");
+    assert.equal(stopped[0].commands[0].running, false);
+    // And the end stands once the TaskStop scrolls out while the launch is back in the page.
+    const after = await withAgentShellCommands([], ["bg1"], async () => backgroundConversation(file), { warn() {} });
+    assert.equal(after[0].commands.find((command) => command.id === "agent:bg").status, "killed");
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a TaskOutput report settles a background command; a missing output file reads as gone", async () => {
+  const file = "/tmp/claude-0/-proj/tasks/b7x2k9.output";
+  const done = { id: "out", sequence: 12, activityKind: "mcp_tool", status: "completed",
+    detail: { toolName: "TaskOutput", input: { task_id: "b7x2k9", block: false },
+      output: "<retrieval_status>success</retrieval_status><task_id>b7x2k9</task_id><status>failed</status><exit_code>1</exit_code>" } };
+  const [settled] = await withAgentShellCommands([], ["bg2"], async () => backgroundConversation(file, [done]), { warn() {} }, async () => "tail");
+  const server = settled.commands.find((command) => command.id === "agent:bg");
+  assert.equal(server.status, "failed");
+  assert.equal(server.exitCode, 1);
+  assert.equal(server.running, false);
+
+  const [gone] = await withAgentShellCommands([], ["bg3"], async () => backgroundConversation(file), { warn() {} }, async () => null);
+  assert.equal(gone.commands.find((command) => command.id === "agent:bg").status, "gone");
+});
+
+test("only Claude Code's own task output files are read", () => {
+  const { backgroundOutputPath } = require("../electron/chat-agent-shell.cjs");
+  assert.equal(backgroundOutputPath("/tmp/claude-1000/-home-me-app/tasks/b1.output", "b1"), "/tmp/claude-1000/-home-me-app/tasks/b1.output");
+  assert.equal(backgroundOutputPath("/tmp/claude/-p/tasks/b1.output", "b1"), "/tmp/claude/-p/tasks/b1.output");
+  assert.equal(backgroundOutputPath("/home/me/.ssh/id_rsa", "b1"), null);
+  assert.equal(backgroundOutputPath("/tmp/claude/-p/tasks/b2.output", "b1"), null, "the file must be the announced task's");
+  assert.equal(backgroundOutputPath("/tmp/other/tasks/b1.output", "b1"), null);
+  assert.equal(backgroundOutputPath("relative/claude/tasks/b1.output", "b1"), null);
+  assert.equal(backgroundOutputPath(undefined, "b1"), null);
+});

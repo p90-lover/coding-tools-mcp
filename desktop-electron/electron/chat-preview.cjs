@@ -35,6 +35,9 @@ const MAX_SHOT_HEIGHT = 6_000;
 const MAX_SHOT_WIDTH = 1_280;
 // How far outside the window a hidden preview sits.
 const OFFSCREEN_MARGIN = 20_000;
+// A preview neither shown nor used by its agent this long stops painting (its page's animations
+// kept the GPU busy for nothing); the agent's next call wakes it first.
+const IDLE_SLEEP_MS = 30_000;
 // The partition's proxy: a port nothing serves (discard), which loopback bypasses implicitly.
 const BLACK_HOLE_PROXY = "127.0.0.1:9";
 const LOOPBACK_NAMES = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
@@ -212,7 +215,15 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
       } catch { /* the renderer is not ready; dom-ready places it again */ }
       preview.view.setBounds(bounds);
     }
-    preview.view.setVisible?.(true);
+    const awake = visible || now() - preview.usedAt < IDLE_SLEEP_MS;
+    try { contents.setBackgroundThrottling?.(!awake); } catch { /* destroyed */ }
+    preview.view.setVisible?.(awake);
+    clearTimeout(preview.sleepTimer);
+    preview.sleepTimer = null;
+    if (awake && !visible) {
+      preview.sleepTimer = setTimeout(() => place(preview), IDLE_SLEEP_MS + 100);
+      preview.sleepTimer.unref?.();
+    }
   }
 
   function remember(preview, list, max, entry) {
@@ -303,6 +314,7 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
     const preview = previews.get(key);
     if (!preview) return;
     previews.delete(key);
+    clearTimeout(preview.sleepTimer);
     if (shown?.key === key) shown = null;
     try { detachView?.(preview.view); } catch { /* the window is gone */ }
     const contents = preview.view.webContents;
@@ -508,6 +520,7 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
           }
           preview = previews.get(key) ?? create(key);
           preview.usedAt = now();
+          place(preview);
           preview.origins.add(allowed.origin);
           await load(preview, allowed.url);
           return textResult({ ok: true, ...summary(preview) });
@@ -515,6 +528,7 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
         const preview = previews.get(key);
         if (!preview) return failure("This chat has no page open yet; open one with preview_open first.");
         preview.usedAt = now();
+        place(preview);
         return await run(preview, name, args);
       } catch (error) {
         if (error instanceof PreviewError) return failure(error.message);

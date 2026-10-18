@@ -17,12 +17,15 @@ type PanelTab = { id: string; kind: WorkbenchTab };
 type PreviewState = { url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; errors: number };
 // "app": started through the app's exec_command (live output, stoppable, takes input). "agent": a
 // shell command the agent ran with its own tool (Bash, PowerShell), read from its AO conversation
-// with the tail of its output; read-only.
+// with the tail of its output; read-only. One it ran in the background (a dev server) has status
+// "background" and the live tail of the output file Claude Code writes for it.
 type Command = {
   id: string; cmd: string; workdir: string; startedAt: number; status: string; exitCode: number | null; user?: boolean;
-  source?: "app" | "agent"; output?: string;
+  source?: "app" | "agent"; output?: string; background?: boolean;
 };
 const isAgentShell = (command: Command | undefined) => command?.source === "agent";
+/** Still running: an app command, an agent's command mid-call, or one it left running in the background. */
+const isLive = (command: Command | undefined) => command?.status === "running" || command?.status === "background";
 
 const TAB_TITLES: Record<WorkbenchTab, string> = { preview: "Preview", terminal: "Terminal", changes: "Changes", files: "Files", new: "New tab" };
 const PANEL_WIDTH_KEY = "coding-tools:ao:workbench-width";
@@ -60,7 +63,7 @@ export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen
         const pages = Object.entries((previews.previews as Record<string, PreviewState> | undefined) ?? {})
           .filter(([, state]) => state.url && state.url !== "about:blank").map(([id, state]) => `page:${id}:${new URL(state.url).origin}`);
         const commands = ((processes.sessions as { commands: Command[] }[] | undefined) ?? [])
-          .flatMap((session) => session.commands).filter((command) => command.status === "running" && !command.user).map((command) => `cmd:${command.id}`);
+          .flatMap((session) => session.commands).filter((command) => isLive(command) && !command.user).map((command) => `cmd:${command.id}`);
         const fresh = [...pages, ...commands].filter((item) => !seen.current.has(item));
         for (const item of fresh) seen.current.add(item);
         // What was already there when the chat opened does not open the panel by itself.
@@ -79,6 +82,8 @@ const PREVIEW_POLL_MS = 1500;
 const COMMANDS_POLL_MS = 2000;
 const OUTPUT_POLL_MS = 1000;
 const MAX_OUTPUT_CHARS = 200_000;
+// A command chosen in the pane starts at its newest output, as a terminal shows it, not its first byte.
+const TAIL_BYTES = 32 * 1024;
 // Terminal colours and cursor movement, OSC titles and links: the pane shows plain text.
 const ANSI = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[@-Z\\-_]/g;
 
@@ -307,23 +312,29 @@ function TerminalPane({ sessionId, workspaceId }: { sessionId: string; workspace
 
   useEffect(() => {
     let live = true;
-    const tick = () => void paneCall("chat_processes", { sessionIds: [sessionId], ...(workspaceId ? { workspaceId } : {}) })
-      .then((result) => {
+    const tick = () => {
+      // A minimized or hidden window does not poll.
+      if (document.visibilityState !== "visible") return;
+      void paneCall("chat_processes", { sessionIds: [sessionId], ...(workspaceId ? { workspaceId } : {}) }).then((result) => {
         if (!live) return;
-        const found = ((result.sessions as { commands: Command[] }[] | undefined)?.[0]?.commands) ?? [];
+        // What still runs comes first (a dev server started long ago above the newest one-off
+        // commands), newest first within each.
+        const found = [...(((result.sessions as { commands: Command[] }[] | undefined)?.[0]?.commands) ?? [])]
+          .sort((left, right) => Number(isLive(right)) - Number(isLive(left)));
         setCommands(found);
         setNow(Date.now());
+        // First choice: a running app the agent started (not the user's own shell), then anything live.
         setSelected((current) => (found.some((command) => command.id === current) ? current
-          : (found.find((command) => command.status === "running") ?? found[0])?.id ?? ""));
-      })
-      .catch(() => undefined);
+          : (found.find((command) => isLive(command) && !command.user) ?? found.find(isLive) ?? found[0])?.id ?? ""));
+      }).catch(() => undefined);
+    };
     tick();
     const timer = window.setInterval(tick, COMMANDS_POLL_MS);
     return () => { live = false; window.clearInterval(timer); };
   }, [sessionId]);
 
   const command = commands.find((item) => item.id === selected);
-  const running = command?.status === "running";
+  const running = isLive(command);
   const agentShell = isAgentShell(command);
   // An agent shell command's output tail comes with the listing; only app commands are read here.
   const selectedAgentShell = selected.startsWith("agent:");
@@ -334,11 +345,24 @@ function TerminalPane({ sessionId, workspaceId }: { sessionId: string; workspace
     if (!selected || selectedAgentShell) return undefined;
     let live = true;
     let busy = false;
+    let started = false;
     const read = async () => {
       if (busy) return;
       busy = true;
       try {
         let added = "";
+        if (!started) {
+          // Where each stream ends now (an offset past the end reads nothing and reports the end).
+          let skipped = false;
+          for (const stream of ["stdout", "stderr"] as const) {
+            const end = await paneCall("chat_process_output", { sessionId, ...(workspaceId ? { workspaceId } : {}), commandId: selected, stream, offset: Number.MAX_SAFE_INTEGER });
+            const last = Number(end.nextOffset) || 0;
+            offsets.current[stream] = Math.max(0, last - TAIL_BYTES);
+            skipped ||= last > TAIL_BYTES;
+          }
+          started = true;
+          if (skipped) added += "[earlier output not shown]\n";
+        }
         for (const stream of ["stdout", "stderr"] as const) {
           const result = await paneCall("chat_process_output", { sessionId, ...(workspaceId ? { workspaceId } : {}), commandId: selected, stream, offset: offsets.current[stream] });
           offsets.current[stream] = Number(result.nextOffset) || offsets.current[stream];
@@ -394,16 +418,19 @@ function TerminalPane({ sessionId, workspaceId }: { sessionId: string; workspace
     <ul className="cx-terminal-list" aria-label="Commands">
       {commands.map((item) => <li key={item.id}>
         <button type="button" aria-pressed={item.id === selected} title={item.cmd} onClick={() => setSelected(item.id)}>
-          <span className={`cx-terminal-dot is-${item.status === "running" ? "running" : item.exitCode === 0 || (isAgentShell(item) && item.exitCode === null && item.status === "completed") ? "ok" : "failed"}`} aria-hidden="true" />
+          <span className={`cx-terminal-dot is-${isLive(item) ? "running" : item.exitCode === 0 || (isAgentShell(item) && item.exitCode === null && item.status === "completed") ? "ok" : "failed"}`} aria-hidden="true" />
           <code>{item.user ? "Your terminal" : item.cmd}</code>
           {isAgentShell(item) ? agentShellLabel : null}
-          <small>{item.status === "running" ? since(item.startedAt, now) : item.exitCode !== null ? `exit ${item.exitCode}` : item.status}</small>
+          <small>{isLive(item) ? `${item.status === "background" ? "background · " : ""}${since(item.startedAt, now)}` : item.exitCode !== null ? `exit ${item.exitCode}` : item.status}</small>
         </button>
       </li>)}
     </ul>
     {command ? <div className="cx-terminal-head">
       <code title={command.workdir || command.cmd}>{command.cmd}</code>
       {agentShell ? agentShellLabel : null}
+      <small className="cx-terminal-status" role="status">{running
+        ? `${command.status === "background" ? "running in the background" : "running"} · ${since(command.startedAt, now)}`
+        : command.exitCode !== null ? `exited ${command.exitCode}` : command.status}</small>
       {running && !agentShell ? <button type="button" className="cx-terminal-stop" onClick={stop}>Stop</button> : null}
     </div> : null}
     {error ? <p className="cx-workbench-error" role="alert">{error}</p> : null}
