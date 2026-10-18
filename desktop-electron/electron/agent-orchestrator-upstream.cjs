@@ -741,8 +741,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           needsInput: false, exited: false, answer: "", liveOutput: utf8Prefix(liveOutput, 4096), timeline,
         };
       }
+      // When the turn last showed any sign of life (a message, a tool step, a retry notice): a turn
+      // whose agent hung (a model request that never returns) keeps "running" with nothing new.
+      const stamps = [turn?.updatedAt, turn?.startedAt, turn?.createdAt,
+        ...(Array.isArray(conversation?.activities) ? conversation.activities : []).filter(item => item.turnId === turn?.id).map(item => item.updatedAt || item.createdAt),
+        ...(Array.isArray(conversation?.messages) ? conversation.messages : []).filter(item => item.turnId === turn?.id).map(item => item.updatedAt || item.createdAt)]
+        .map(value => Date.parse(value ?? "")).filter(Number.isFinite);
       return {
         status, turnId: turn?.id, turnState: turn?.state, error: turn?.errorMessage,
+        ...(stamps.length ? { lastActivityAt: Math.max(...stamps) } : {}),
         needsInput: status === "needs_input", exited: ["exited", "terminated"].includes(status),
         answer: answer.slice(0, 12000), liveOutput: utf8Prefix(liveOutput, 4096), timeline,
         // A question the agent asked waits like an approval: the chat shows it and the card needs you.

@@ -2864,6 +2864,33 @@ test("steering hands the message to the running AO agent and notes it in the cha
   assert.equal(world.edits.length, 1, "nothing is noted for an undelivered steer");
 });
 
+test("a message sent to a hung turn stops it and goes as the next turn instead of being steered into it", async () => {
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  const steered = [], interrupted = [];
+  let lastActivityAt = 1_000_000, timeline = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 4 * 60_000,
+    aoHarness: {
+      observe: async () => ({ turnId: "t1", turnState: "running", lastActivityAt, timeline, approvals: [] }),
+      steer: async (id, text) => { steered.push([id, text]); return { steered: true }; },
+      interrupt: async id => { interrupted.push(id); },
+    } });
+  const hung = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
+  assert.equal(hung.steered, false);
+  assert.equal(hung.restarted, true, "the chat queues it for the next turn");
+  assert.deepEqual(interrupted, ["sess-1"], "the hung turn is stopped");
+  assert.equal(steered.length, 0, "nothing is steered into a turn that cannot read it");
+  timeline = [{ kind: "tool", status: "running" }];
+  const building = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "and then lint" });
+  assert.equal(building.steered, true, "a tool call still running (a long build) is not a hang yet");
+  timeline = [];
+  lastActivityAt = 1_000_000 + 3 * 60_000;
+  assert.equal((await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "ok" })).steered, true, "a working agent is steered");
+  assert.equal(interrupted.length, 1);
+});
+
 test("a run waiting on input reports it steadily, not on and off with each observation tick", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
   const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) },

@@ -1380,8 +1380,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
     try {
       const result = await moduleCall("chat_steer", { workspaceId, taskId: input.taskId, message: input.message });
       if (result.steered) void loadBoard(workspaceId).catch(() => undefined);
-      // The agent waits on a request of its own: the message waits for the turn instead.
-      return result.steered === true ? true : result.waiting === true ? "wait" as const : false;
+      // The agent waits on a request of its own (or its hung turn was just stopped): the message
+      // waits for the turn instead.
+      return result.steered === true ? true : result.restarted === true ? "restart" as const : result.waiting === true ? "wait" as const : false;
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); throw cause; }
   };
   // Have the agent the next message needs running before it is sent, so sending does not wait half

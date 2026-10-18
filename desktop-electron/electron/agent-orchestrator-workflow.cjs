@@ -2518,6 +2518,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * steering), like Codex's steer. It is kept in the chat under the latest message. If the turn
    * ended before it arrived, `steered` is false and the caller sends it as a normal follow-up.
    */
+  const STEER_STALL_MS = 3 * 60_000;
+  const STEER_STALL_TOOL_MS = 20 * 60_000;
   async function chatSteer({ workspaceId, taskId, message } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
     const text = clean(message, 8192, false);
@@ -2535,6 +2537,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       .catch(() => null);
     if (waiting?.approvals?.length || waiting?.needsInput) {
       return { ok: true, steered: false, waiting: true, reason: "The agent is waiting for your answer to its request; your message is sent after it" };
+    }
+    // A turn whose agent hung (a model request that never came back, a retry loop) takes a steer and
+    // never reads it: "keep going" did nothing. Nothing new for STEER_STALL_MS (longer while a tool
+    // call is still running, e.g. a long build) stops that turn; the message is then sent as the
+    // chat's next turn, like a queued one.
+    const idle = Number.isFinite(waiting?.lastActivityAt) ? now() - waiting.lastActivityAt : 0;
+    const toolRunning = Array.isArray(waiting?.timeline) && waiting.timeline.some(item => item?.status === "running" && item.kind !== "message");
+    if (idle > (toolRunning ? STEER_STALL_TOOL_MS : STEER_STALL_MS)) {
+      await harnessService().interrupt(card.receipt.thread_id).catch(() => undefined);
+      logger?.info?.("ao.steer_restarted_stalled_turn", { idleSeconds: Math.round(idle / 1000) });
+      return { ok: true, steered: false, waiting: true, restarted: true,
+        reason: `The agent had shown nothing for ${Math.round(idle / 60_000)} minutes, so its turn was stopped; your message is sent as the next turn` };
     }
     const result = await harnessService().steer(card.receipt.thread_id, text, `steer-${randomUUID()}`);
     if (!result.steered) return { ok: true, steered: false, reason: "The agent's turn already ended" };
