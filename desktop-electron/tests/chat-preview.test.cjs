@@ -405,8 +405,14 @@ test("a session set to Approve for me runs routine commands through the app's te
   assert.equal((await call({ cmd: "npm ci" })).isError, false);
   assert.equal((await call({ cmd: "npm run dev" })).isError, false);
   assert.equal(env.confirmations.length, before, "routine commands ran without a dialog");
+  // Claude Code asks for every MCP call on the chat card, where the reviewer (or the person) answers it.
   await call({ cmd: "npm install left-pad" });
-  assert.equal(env.confirmations.length, before + 1, "anything else is still the person's call");
+  assert.equal(env.confirmations.length, before, "a Claude Code command was already reviewed on its card");
+  const codex = await withRule.lease({ agent: "codex", workspaceId: "ws1", approvalMode: "accept-edits", autoReview: true });
+  codex.bind("ao-11");
+  await post(codex.servers[0].url, { jsonrpc: "2.0", id: id++, method: "tools/call", params: { name: "exec_command", arguments: { cmd: "npm install left-pad" } } },
+    { authorization: codex.servers[0].headers.Authorization });
+  assert.equal(env.confirmations.length, before + 1, "anything else is still the person's call where nothing reviewed it");
   const plain = await withRule.lease({ agent: "claude-code", workspaceId: "ws1", approvalMode: "accept-edits" });
   plain.bind("ao-10");
   await post(plain.servers[0].url, { jsonrpc: "2.0", id: id++, method: "tools/call", params: { name: "exec_command", arguments: { cmd: "npm ci" } } },
