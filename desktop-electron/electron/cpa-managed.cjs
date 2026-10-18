@@ -1,12 +1,13 @@
 "use strict";
 
-const { createHash } = require("node:crypto");
+const { createHash, randomBytes } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { watchCpaPluginModels } = require("./cpa-plugin-models.cjs");
 const { cpaLongRunYamlLines } = require("./cpa-codex-long-run.cjs");
+const { createProxyGateway, validateUpstream } = require("./proxy-gateway-relay.cjs");
 
 const RUNTIME_MARKER = "CPA_RUNTIME.json";
 const MAX_ARCHIVE_LIST_BYTES = 16 * 1024 * 1024;
@@ -177,7 +178,7 @@ function installBundledCommandCodePlugin(state) {
   });
 }
 
-function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUrl = "") {
+function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUrl = "", clineProxyUrl = outboundProxyUrl) {
   const authDirectory = path.join(state, "auth");
   const logDirectory = path.join(state, "logs");
   const pluginDirectory = path.resolve(state, "plugins");
@@ -222,7 +223,7 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     "      enabled: true",
     `      runtime-executable: ${yamlString(process.execPath)}`,
     `      data-dir: ${yamlString(path.join(state, "cline-pass-switcher-data"))}`,
-    ...(outboundProxyUrl ? [`      proxy-url: ${yamlString(outboundProxyUrl)}`] : []),
+    ...(clineProxyUrl ? [`      proxy-url: ${yamlString(clineProxyUrl)}`] : []),
     "    grok-login-provider:",
     "      enabled: true",
     // Ask OpenAI's Responses models for a reasoning summary. Claude Code never sends the
@@ -242,7 +243,34 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
   ].join("\n");
 }
 
-function run(homeValue, stateValue) {
+// CPA's Go transport supports SOCKS5; the Cline child's fetch only accepts HTTP(S).
+// Keep CPA's selected route intact and adapt only the child through an authenticated,
+// ephemeral loopback relay owned by this wrapper (which can outlive the desktop app).
+async function createClineProxyRoute(outboundProxyUrl) {
+  if (!outboundProxyUrl) return { url: "", stop: async () => {} };
+  let parsed;
+  try { parsed = new URL(outboundProxyUrl); }
+  catch { throw new Error("Invalid CPA outbound proxy URL"); }
+  if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+    return { url: outboundProxyUrl, stop: async () => {} };
+  }
+  if (parsed.protocol !== "socks5:") throw new Error("CPA needs an HTTP, HTTPS or SOCKS5 proxy");
+  const upstream = validateUpstream({
+    protocol: "socks5", host: parsed.hostname, port: Number(parsed.port || 1080),
+    username: decodeURIComponent(parsed.username), password: decodeURIComponent(parsed.password),
+  });
+  const proxyToken = randomBytes(32).toString("hex");
+  const relay = createProxyGateway({ port: 0, proxyToken, getUpstream: () => upstream });
+  try {
+    const address = await relay.start();
+    return { url: `http://ct:${proxyToken}@127.0.0.1:${address.port}`, stop: () => relay.stop() };
+  } catch (error) {
+    await relay.stop();
+    throw error;
+  }
+}
+
+async function run(homeValue, stateValue) {
   const home = requiredAbsolutePath(homeValue, "CPA managed home");
   const state = requiredAbsolutePath(stateValue, "CPA state root");
   const marker = JSON.parse(fs.readFileSync(markerPath(home), "utf8"));
@@ -261,19 +289,25 @@ function run(homeValue, stateValue) {
   const managementKey = requiredSecret("CODING_TOOLS_CPA_MANAGEMENT_KEY");
   const proxyApiKey = requiredSecret("CODING_TOOLS_CPA_PROXY_API_KEY");
   const configPath = path.join(state, "config.yaml");
-  writePrivateFileAtomic(configPath, runtimeConfiguration(
-    state, managementKey, proxyApiKey,
-    String(process.env.CODING_TOOLS_CPA_OUTBOUND_PROXY_URL || ""),
-  ));
-  if (process.platform !== "win32") fs.chmodSync(configPath, 0o600);
-
-  const child = spawn(executable, ["--config", configPath, "--no-browser"], {
-    cwd: state,
-    env: { ...process.env },
-    shell: false,
-    windowsHide: true,
-    stdio: "inherit",
-  });
+  const outboundProxyUrl = String(process.env.CODING_TOOLS_CPA_OUTBOUND_PROXY_URL || "");
+  const clineRoute = await createClineProxyRoute(outboundProxyUrl);
+  let child;
+  try {
+    writePrivateFileAtomic(configPath, runtimeConfiguration(
+      state, managementKey, proxyApiKey, outboundProxyUrl, clineRoute.url,
+    ));
+    if (process.platform !== "win32") fs.chmodSync(configPath, 0o600);
+    child = spawn(executable, ["--config", configPath, "--no-browser"], {
+      cwd: state,
+      env: { ...process.env },
+      shell: false,
+      windowsHide: true,
+      stdio: "inherit",
+    });
+  } catch (error) {
+    await clineRoute.stop();
+    throw error;
+  }
 
   const forward = (signal) => {
     try {
@@ -283,6 +317,8 @@ function run(homeValue, stateValue) {
   process.once("SIGINT", () => forward("SIGINT"));
   process.once("SIGTERM", () => forward("SIGTERM"));
   child.once("error", (error) => {
+    pluginModels.stop();
+    void clineRoute.stop();
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   });
@@ -295,6 +331,7 @@ function run(homeValue, stateValue) {
   });
   child.once("exit", (code, signal) => {
     pluginModels.stop();
+    void clineRoute.stop();
     process.exitCode = Number.isInteger(code) ? code : signal ? 1 : 0;
   });
 }
@@ -304,7 +341,10 @@ if (require.main === module) {
   if (command === "prepare") {
     prepare(process.argv[3], process.argv[4], process.argv[5]);
   } else if (command === "run") {
-    run(process.argv[3], process.argv[4]);
+    void run(process.argv[3], process.argv[4]).catch((error) => {
+      console.error(error instanceof Error ? error.message : String(error));
+      process.exitCode = 1;
+    });
   } else {
     throw new Error("CPA managed adapter command must be prepare or run");
   }
@@ -316,6 +356,7 @@ function helperPricesPath(stateRoot) {
 
 module.exports = {
   helperPricesPath,
+  createClineProxyRoute,
   prepare,
   run,
   runtimeConfiguration,
