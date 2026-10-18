@@ -244,12 +244,14 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
 
   async function check(run) {
     const service = harness();
-    if (!service) return;
+    // The time limit holds while AO is away too: checked only with AO up, a run whose backend
+    // stopped stayed "running" for good, kept its chat's place and was polled every 2 s forever.
     if (now() - run.startedAt > read().settings.timeoutMinutes * 60_000) {
-      await service.interrupt?.(run.id).catch?.(() => undefined);
+      await service?.interrupt?.(run.id)?.catch?.(() => undefined);
       finish(run, "timed_out", { error: `Stopped after ${read().settings.timeoutMinutes} minutes (the Subagents page's time limit)` });
       return;
     }
+    if (!service) return;
     let observed;
     try { observed = await service.observe(run.id); }
     catch (error) {

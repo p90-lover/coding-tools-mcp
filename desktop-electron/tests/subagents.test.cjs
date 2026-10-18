@@ -12,7 +12,7 @@ const ROUTE = { harness_id: "ao:claude-code", model: "cpa/test-model" };
 const parse = (result) => JSON.parse(result.content[0].text);
 
 /** A subagents service over a fake AO harness whose sessions the test drives. */
-function world({ settings = {}, agents = null, now = () => 1_000_000 } = {}) {
+function world({ settings = {}, agents = null, now = () => 1_000_000, aoUp = () => true, setTimer = undefined } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-"));
   const spawned = [], resolved = [], inputs = [], interrupted = [], released = [];
   const sessions = new Map();
@@ -29,8 +29,8 @@ function world({ settings = {}, agents = null, now = () => 1_000_000 } = {}) {
   const service = createSubagents({
     statePath: path.join(dir, "subagents.json"),
     launchArgs: (workspaceId, route, name) => workflow.subagentLaunchArgs(workspaceId, route, name),
-    harness: () => harness, blockedRequest: workflow.blockedRequest, recommendedAnswer: workflow.recommendedAnswer,
-    logger: { info() {}, warn() {} }, now,
+    harness: () => (aoUp() ? harness : null), blockedRequest: workflow.blockedRequest, recommendedAnswer: workflow.recommendedAnswer,
+    logger: { info() {}, warn() {} }, now, ...(setTimer ? { setTimer } : {}),
   });
   service.save({ settings: { defaultRoute: ROUTE, ...settings }, agents: agents ?? STARTERS });
   return { service, harness, sessions, spawned, resolved, inputs, interrupted, released, dir,
@@ -198,6 +198,24 @@ test("a subagent's request too long to check whole, or hiding a blocked command 
     ] });
     parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 }));
     assert.deepEqual(w.resolved, [[id, "e1", "deny"], [id, "l1", "deny"], [id, "l2", "deny"], [id, "s1", "allow"]]);
+  } finally { w.cleanup(); }
+});
+
+test("a subagent still ends at its time limit while AO is not running, and the poller then stops", async () => {
+  let clock = 1_000_000, up = true;
+  const timers = [];
+  const w = world({ settings: { timeoutMinutes: 5 }, now: () => clock, aoUp: () => up,
+    setTimer: (callback, ms) => { const timer = { callback, ms, unref() {} }; timers.push(timer); return timer; } });
+  try {
+    const { subagent_id: id } = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "x" }));
+    const polls = () => timers.filter((timer) => timer.ms === 2_000);
+    assert.equal(polls().length, 1, "polled while it runs");
+    up = false; // the backend stopped (or never came up) with the subagent running
+    clock += 6 * 60_000;
+    const tick = async () => { const timer = polls().at(-1); timers.splice(timers.indexOf(timer), 1); timer.callback(); await new Promise((resolve) => setImmediate(resolve)); };
+    await tick();
+    assert.equal(w.service.runs().find((run) => run.subagent_id === id).state, "timed_out", "the time limit holds without AO");
+    assert.equal(polls().length, 0, "nothing left to poll: no timer is set again");
   } finally { w.cleanup(); }
 });
 
