@@ -47,8 +47,8 @@ const node = (id, harness = "codex-native", profile = "managed/custom") => ({ id
 // options are Option elements (role="radio" once rendered).
 const menuNamed = (tree, heading) => elements(tree, item => typeof item.type === "function" && item.type.name === "ChipMenu" && item.props.heading === heading)[0];
 const optionsIn = (menu, close = () => {}) => elements(menu.props.children(close), item => typeof item.type === "function" && item.type.name === "Option");
-// Composer state order: search, models, caps, gaps, error, catalogReady, contextDraft.
-const composerState = (models, caps = {}, search = "", gaps = {}, error = "", ready = models !== null) => [search, models, caps, gaps, error, ready, ""];
+// Composer state order: search, models, caps, gaps, held, error, catalogReady, contextDraft.
+const composerState = (models, caps = {}, search = "", gaps = {}, error = "", ready = models !== null, held = {}) => [search, models, caps, gaps, held, error, ready, ""];
 
 test("composer mode clicks show only the corresponding real selector without sending", () => {
   const view = renderer("AgentOrchestratorComposerControls.tsx");
@@ -461,6 +461,18 @@ test("a picked model the harness no longer offers is marked not available", () =
   assert.equal(model.props.className, "", "an effort suffix still matches its listed model");
   model = menuNamed(view.render("AgentOrchestratorComposerControls", props, composerState(null)), "Model");
   assert.equal(model.props.className, "", "nothing is flagged before the list loads");
+});
+
+test("remembered held models keep their runnable tooltip without an unavailable dot", () => {
+  const view = renderer("AgentOrchestratorComposerControls.tsx");
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/remembered", permission_profile: ":ao-default" };
+  const props = { mode: "single", onModeChange() {}, route, onRouteChange() {}, harnesses: [], loadModels: async () => [], teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false };
+  const tree = view.render("AgentOrchestratorComposerControls", props, composerState(["cpa/remembered"], {}, "", {}, "", true, { "cpa/remembered": "Using the remembered offering; it can still run" }));
+  const model = menuNamed(tree, "Model");
+  assert.equal(elements(model.props.label, item => item.type?.name === "ModelStatusDot")[0].props.reason, undefined);
+  assert.match(model.props.title, /can still run/);
+  assert.equal(optionsIn(model)[0].props.disabled, false);
+  assert.match(optionsIn(model)[0].props.title, /can still run/);
 });
 
 test("composer rows retain offering gaps while loading and network failures remain unknown", async () => {

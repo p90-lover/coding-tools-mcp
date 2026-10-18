@@ -42,14 +42,20 @@ test("model pickers retain unavailable IDs and WebGPT metadata without claiming 
   const catalog = await p.editor.pickerModels("ao:claude-code", async harness => harness === "codex-native" ? {
     models: ["chatgpt-web/high", "pool-only"], capabilities: { "chatgpt-web/high": { efforts: ["high"] } },
     unavailable: { "chatgpt-web/pro": "No ChatGPT account offers Pro", "pool-only": "Not a web tier" },
-  } : { models: ["cpa/available"], unavailable: { "cpa/paused": "No connected account offers this model" } });
+    held: { "chatgpt-web/high": "Using the remembered web offering", "pool-only": "Not a web tier" },
+  } : { models: ["cpa/available"], unavailable: { "cpa/paused": "No connected account offers this model" }, held: { "cpa/available": "Using the remembered offering" }, stale: true });
   assert.deepEqual(plain(catalog.models), ["cpa/available", "chatgpt-web/high", "chatgpt-web/pro", "cpa/paused"]);
   assert.equal(catalog.unavailable["chatgpt-web/pro"], "No ChatGPT account offers Pro");
   assert.equal(catalog.capabilities["chatgpt-web/high"].efforts[0], "high");
   assert.equal(catalog.unavailable["pool-only"], undefined);
+  assert.equal(catalog.held["pool-only"], undefined);
+  assert.equal(catalog.held["chatgpt-web/high"], "Using the remembered web offering");
+  assert.equal(catalog.held["cpa/available"], "Using the remembered offering");
+  assert.equal(catalog.stale, true, "primary catalog freshness is preserved");
   const agents = await p.editor.pickerModels("ao:claude-code", async () => catalog, true);
   assert.deepEqual(plain(agents.models), ["cpa/available", "cpa/paused"]);
   assert.equal(agents.unavailable["chatgpt-web/pro"], undefined);
+  assert.equal(agents.held["chatgpt-web/high"], undefined);
 });
 
 test("known offering gaps show before model names and remain selectable without changing permissions", async () => {

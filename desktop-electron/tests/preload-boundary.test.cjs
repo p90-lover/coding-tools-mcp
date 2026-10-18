@@ -321,6 +321,17 @@ test("main-process transport failures do not leak raw credential-bearing errors"
   });
 });
 
+test("a main-process failure keeps its own reason, without Electron's wrapper", async () => {
+  const { api } = loadPreload(() => {
+    throw new Error("Error invoking remote method 'diagnostics:snapshot': Error: Mission control needs a fresh status check");
+  });
+
+  await assert.rejects(api.diagnostics.snapshot(), (error) => {
+    assert.match(error.message, /^IPC_TRANSPORT_FAILED: .* failed: Mission control needs a fresh status check$/);
+    return true;
+  });
+});
+
 test("prototype-pollution keys are rejected from main-process responses", async () => {
   const response = Object.create(null);
   Object.defineProperty(response, "__proto__", {

@@ -14,7 +14,10 @@ export type AoModelCapabilities = {
   contextLimit?: number; effortReason?: string; contextReason?: string;
 };
 /** `unavailable`: models CPA lists but cannot serve now, with why (e.g. their plugin's account is disabled in CPA). */
-export type AoModelCatalog = { models: string[]; capabilities?: Record<string, AoModelCapabilities>; unavailable?: Record<string, string> };
+/** `held`: listed models CPA is not listing right now (kept from memory), with why; they still run.
+ *  `stale`: CPA could not be read, so the list is the remembered one. */
+export type AoModelCatalog = { models: string[]; capabilities?: Record<string, AoModelCapabilities>; unavailable?: Record<string, string>;
+  held?: Record<string, string>; stale?: boolean };
 export type AoModelLoader = (harness: string) => Promise<string[] | AoModelCatalog>;
 export const emptyRoleSettings = (): RoleSettings => ({ name: "", specialty: "", instructions: "", expected_output: "", working_directory: "", revision: 0 });
 
@@ -337,19 +340,22 @@ export function defaultTeam(workspaceId: string, worker: AoRoute): AoTeam {
  */
 export async function pickerModels(harness: string, loadModels: AoModelLoader, agentsOnly = false): Promise<AoModelCatalog> {
   const catalogOf = (items: string[] | AoModelCatalog): AoModelCatalog => Array.isArray(items) ? { models: items } : items;
-  const web = harness === NATIVE_HARNESS || agentsOnly ? Promise.resolve({ models: [] } as AoModelCatalog)
+  const web: Promise<AoModelCatalog> = harness === NATIVE_HARNESS || agentsOnly ? Promise.resolve({ models: [] })
     : loadModels(NATIVE_HARNESS).then(items => {
       const catalog = catalogOf(items);
       return { models: catalog.models.filter(isWebModel),
         capabilities: Object.fromEntries(Object.entries(catalog.capabilities ?? {}).filter(([id]) => isWebModel(id))),
-        unavailable: Object.fromEntries(Object.entries(catalog.unavailable ?? {}).filter(([id]) => isWebModel(id))) };
+        unavailable: Object.fromEntries(Object.entries(catalog.unavailable ?? {}).filter(([id]) => isWebModel(id))),
+        held: Object.fromEntries(Object.entries(catalog.held ?? {}).filter(([id]) => isWebModel(id))) };
     }, () => ({ models: [] } as AoModelCatalog));
   const [items, webItems] = await Promise.all([loadModels(harness), web]);
   const catalog = catalogOf(items);
   const unavailable = { ...webItems.unavailable, ...catalog.unavailable };
-  return { models: [...new Set([...catalog.models, ...webItems.models, ...Object.keys(unavailable)])].filter(model => !agentsOnly || !isWebModel(model)),
+  const held = { ...webItems.held, ...catalog.held };
+  return { ...catalog, models: [...new Set([...catalog.models, ...webItems.models, ...Object.keys(unavailable)])].filter(model => !agentsOnly || !isWebModel(model)),
     capabilities: { ...webItems.capabilities, ...catalog.capabilities },
-    unavailable: Object.fromEntries(Object.entries(unavailable).filter(([id]) => !agentsOnly || !isWebModel(id))) };
+    unavailable: Object.fromEntries(Object.entries(unavailable).filter(([id]) => !agentsOnly || !isWebModel(id))),
+    held: Object.fromEntries(Object.entries(held).filter(([id]) => !agentsOnly || !isWebModel(id))) };
 }
 
 /** Shared keyboard/outside-click behavior for the three independent composer popovers. */

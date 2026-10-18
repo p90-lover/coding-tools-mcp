@@ -70,6 +70,8 @@ export function AgentOrchestratorComposerControls({
   const [caps, setCaps] = useState<Record<string, AoModelCapabilities>>({});
   // Why a model cannot currently be served (its plugin’s account is disabled in CPA, say).
   const [gaps, setGaps] = useState<Record<string, string>>({});
+  // Listed models CPA set aside for now (kept from memory): they stay pickable and still run.
+  const [held, setHeld] = useState<Record<string, string>>({});
   const [error, setError] = useState("");
   const [catalogReady, setCatalogReady] = useState(false);
   const [contextDraft, setContextDraft] = useState("");
@@ -97,6 +99,7 @@ export function AgentOrchestratorComposerControls({
       setCatalogReady(true);
       setCaps(loaded);
       setGaps(catalog.unavailable ?? {});
+      setHeld(catalog.held ?? {});
       rememberCpaProviders(loaded);
       const current = latest.current;
       if (current.harness_id !== route.harness_id || current.model !== route.model) return;
@@ -199,7 +202,8 @@ export function AgentOrchestratorComposerControls({
       </ChipMenu>
       <ChipMenu heading="Model" popupClass="ao-model-popup" ariaLabel="Choose model" disabled={busy} className={selectedGap ? "is-warning" : ""}
         onOpen={() => setReload(value => value + 1)}
-        title={selectedGap ? `${modelName}: ${selectedGap}` : error ? `Model availability could not be checked: ${error}` : route.model ? modelName : undefined}
+        title={selectedGap ? `${modelName}: ${selectedGap}` : error ? `Model availability could not be checked: ${error}`
+          : route.model ? [modelName, held[route.model] ?? held[baseModel]].filter(Boolean).join("\n") : undefined}
         label={<span><ModelStatusDot reason={selectedGap} />{route.model ? chipModel.name : modelName}</span>}>
         {(close) => <>
           <input className="ao-model-search" type="search" aria-label="Search models" placeholder="Search models…" value={search} onChange={event => setSearch(event.target.value)} />
@@ -212,7 +216,7 @@ export function AgentOrchestratorComposerControls({
                 // Rows name the model only: its efforts and window are in the tooltip and in the
                 // effort and window chips once picked. "Paused" stays visible: it decides whether it runs.
                 return <Option key={model} picked={route.model === model} disabled={busy}
-                  title={[modelLabel(model, viaPool(model)), model, full, reason].filter(Boolean).join("\n")}
+                  title={[modelLabel(model, viaPool(model)), model, full, reason, held[model]].filter(Boolean).join("\n")}
                   onPick={() => { pickModel(model); close(); }}>
                   <ModelStatusDot reason={reason} />{modelShortLabel(model, viaPool(model)).name}
                   {reason ? <small>{reason}</small> : null}
@@ -241,7 +245,14 @@ export function AgentOrchestratorComposerControls({
           {/* Unpicked, the model's own effort shows as the pick; picking it again keeps it the model's own. */}
           {(efforts ?? []).map(effort => <Option key={effort} picked={route.effort ? route.effort === effort : modelEffort === effort} disabled={busy}
             onPick={() => { setEffort(!route.effort && modelEffort === effort ? null : effort); close(); }}>{effortWord(effort)}</Option>)}
-          {effortUnsupported ? <p className="ao-popup-muted" role="status">{effortWord(route.effort)} is saved but this model does not take it; pick one above.</p> : null}
+          {/* With no efforts to pick, the menu says why instead of opening empty, and a carried
+              effort the model cannot take can be cleared back to the model's own. */}
+          {!efforts?.length ? <p className="ao-popup-muted" role="status">{!efforts
+            ? capability?.effortReason || "This model's efforts are not known yet."
+            : capability?.effortReason || "This model takes no effort setting."}</p> : null}
+          {!efforts?.length && route.effort ? <Option picked={false} disabled={busy} onPick={() => { setEffort(null); close(); }}>
+            Auto<small>the model's own</small></Option> : null}
+          {effortUnsupported && efforts?.length ? <p className="ao-popup-muted" role="status">{effortWord(route.effort)} is saved but this model does not take it; pick one above.</p> : null}
         </div>}
       </ChipMenu>}
       <ChipMenu heading="Context window" popupClass="ao-tuning-popup" ariaLabel={`Context window: ${windowLabel}`} disabled={busy || !context}
