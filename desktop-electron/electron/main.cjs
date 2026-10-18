@@ -2920,9 +2920,11 @@ async function start() {
         sandbox: chatSandbox,
         // "Approve for me" runs the same routine project commands through the app's terminal as it
         // allows from the agent's own shell (the workflow's list), without a dialog each.
-        routineCommand: (command) => agentOrchestratorWorkflow.routineCommand(command),
+        // The workflow running now: these tools outlive the backend start that created them, and
+        // that start's own workflow is declared further down (unset if the start failed first).
+        routineCommand: (command) => missionWorkflowRuntime?.routineCommand?.(command) ?? null,
         // ...and never answers for the user what the command approver's safety rules block.
-        blockedCommand: (text) => agentOrchestratorWorkflow?.blockedRequest?.(text) ?? true,
+        blockedCommand: (text) => missionWorkflowRuntime?.blockedRequest?.(text) ?? true,
         // The subagents a chat agent may start (Runtime > Subagents).
         subagents: subagentsService,
         // Running agents keep their tools across app restarts (credential hashes and the port only).

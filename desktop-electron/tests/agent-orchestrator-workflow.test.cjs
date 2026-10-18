@@ -2978,6 +2978,27 @@ test("a message sent to a hung turn stops it and goes as the next turn instead o
   assert.equal(interrupted.length, 1);
 });
 
+test("a turn that has only been retrying its model request for minutes is restarted by a message, not given 20 minutes as a running tool", async () => {
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  const interrupted = [], steered = [];
+  // The retry notice is a running "system" row in the timeline (observe's lastActivityAt leaves it out).
+  const timeline = [{ kind: "message", status: "completed", text: "Looking at it" },
+    { kind: "system", status: "running", text: "Retrying Claude, attempt 7 of 10. API error 503. Trying again in 30s." }];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 4 * 60_000,
+    aoHarness: {
+      observe: async () => ({ turnId: "t1", turnState: "running", lastActivityAt: 1_000_000, timeline, approvals: [] }),
+      steer: async (id, text) => { steered.push([id, text]); return { steered: true }; },
+      interrupt: async id => { interrupted.push(id); },
+    } });
+  const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "try again" });
+  assert.equal(result.restarted, true, "four minutes of retries only is a hang");
+  assert.deepEqual(interrupted, ["sess-1"]);
+  assert.equal(steered.length, 0);
+});
+
 test("a run waiting on input reports it steadily, not on and off with each observation tick", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
   const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) },

@@ -330,9 +330,22 @@ export function defaultTeam(workspaceId: string, worker: AoRoute): AoTeam {
     ] };
 }
 
+/**
+ * The models a picker lists for `harness`. Every harness also lists the WebGPT models; choosing one
+ * moves the card to Native Codex, the only harness WebGPT runs on (workerRoute). `agentsOnly` (the
+ * Subagents page, whose subagents run on AO agents only) lists the harness's own models alone.
+ */
+export async function pickerModels(harness: string, loadModels: AoModelLoader, agentsOnly = false): Promise<AoModelCatalog> {
+  const web = harness === NATIVE_HARNESS || agentsOnly ? Promise.resolve([] as string[])
+    : loadModels(NATIVE_HARNESS).then(items => (Array.isArray(items) ? items : items.models).filter(isWebModel), () => [] as string[]);
+  const [items, webItems] = await Promise.all([loadModels(harness), web]);
+  const catalog = Array.isArray(items) ? { models: items } : items;
+  return { ...catalog, models: [...new Set([...catalog.models, ...webItems])].filter(model => !agentsOnly || !isWebModel(model)) };
+}
+
 /** Harness + model pickers shared by the inspector, New mission and Add worker sheets. */
-export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled = false, hideModel = false, hidePermissionNote = false }: {
-  route: AoRoute; harnesses: AoHarness[]; disabled?: boolean; hideModel?: boolean; hidePermissionNote?: boolean;
+export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled = false, hideModel = false, hidePermissionNote = false, agentsOnly = false }: {
+  route: AoRoute; harnesses: AoHarness[]; disabled?: boolean; hideModel?: boolean; hidePermissionNote?: boolean; agentsOnly?: boolean;
   loadModels: AoModelLoader;
   onChange: (route: AoRoute) => void;
 }) {
@@ -343,20 +356,15 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
   useEffect(() => {
     let live = true;
     setModels(null); setCapabilities(null); setNotice("");
-    // Every harness also lists the WebGPT models; choosing one moves the card to Native Codex,
-    // the only harness WebGPT runs on (workerRoute).
-    const web = harness === NATIVE_HARNESS ? Promise.resolve([])
-      : loadModels(NATIVE_HARNESS).then(items => (Array.isArray(items) ? items : items.models).filter(isWebModel), () => []);
-    Promise.all([loadModels(harness), web]).then(([items, webItems]) => {
+    pickerModels(harness, loadModels, agentsOnly).then(catalog => {
       if (!live) return;
-      const catalog = Array.isArray(items) ? { models: items } : items;
-      setModels([...new Set([...catalog.models, ...webItems])]);
+      setModels(catalog.models);
       setCapabilities({ harness, models: catalog.capabilities ?? {} });
       rememberCpaProviders(catalog.capabilities);
     })
       .catch(cause => { if (live) { setModels([]); setNotice(cause instanceof Error ? cause.message : String(cause)); } });
     return () => { live = false; };
-  }, [harness, loadModels]);
+  }, [harness, loadModels, agentsOnly]);
   const [query, setQuery] = useState("");
   // The current model always stays listed, whatever the search.
   const shown = (models ?? []).filter(model => model === route.model || !query.trim()

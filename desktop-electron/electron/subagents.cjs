@@ -29,6 +29,8 @@ const MAX_REPORT = 24_000;
 const MAX_RUNS = 200;
 const POLL_MS = 2_000;
 const MAX_WAIT_SECONDS = 60;
+// The longest request answered for a subagent; a longer one is denied (the workflow's autoVerdict).
+const MAX_CHECKED_REQUEST = 1500;
 const TERMINAL_TURN = new Set(["completed", "failed", "interrupted", "cancelled", "recovered"]);
 const ACTIVE = new Set(["starting", "running"]);
 
@@ -136,6 +138,7 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
   logger = console, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
   let config = null;
   const runs = new Map(); // AO session id -> run
+  const launching = []; // the parent chat of each start AO has not answered yet
   let poller = null;
   let polling = false;
   const answered = new Set(); // approval ids already answered
@@ -224,7 +227,9 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
         let decision;
         if (approval.kind === "plan") {
           decision = decisions.find((item) => /acceptEdits/i.test(item.id)) ?? decisions.find((item) => item.kind === "allow_once");
-        } else if (blockedRequest(request)) {
+        } else if (Buffer.byteLength(request, "utf8") >= MAX_CHECKED_REQUEST || blockedRequest(request)) {
+          // Too long to be sure of (AO's upstream cuts a tool's input at 1500 bytes and a command
+          // at 4000, so the blocked part may sit past the cut): denied, as "Approve for me" does.
           decision = decisions.find((item) => item.kind === "reject_once") ?? decisions.find((item) => item.kind === "reject_always");
           logger?.info?.("subagents.request_denied", { agent: run.agentId, tool: String(approval.tool ?? "").slice(0, 80) });
         } else {
@@ -239,12 +244,14 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
 
   async function check(run) {
     const service = harness();
-    if (!service) return;
+    // The time limit holds while AO is away too: checked only with AO up, a run whose backend
+    // stopped stayed "running" for good, kept its chat's place and was polled every 2 s forever.
     if (now() - run.startedAt > read().settings.timeoutMinutes * 60_000) {
-      await service.interrupt?.(run.id).catch?.(() => undefined);
+      await service?.interrupt?.(run.id)?.catch?.(() => undefined);
       finish(run, "timed_out", { error: `Stopped after ${read().settings.timeoutMinutes} minutes (the Subagents page's time limit)` });
       return;
     }
+    if (!service) return;
     let observed;
     try { observed = await service.observe(run.id); }
     catch (error) {
@@ -257,6 +264,12 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     if (Array.isArray(observed?.approvals) && observed.approvals.length) await answer(run, observed.approvals);
     const state = observed?.turnState;
     if (run.state === "starting" && state && state !== "queued") run.state = "running";
+    // A session AO ended (killed, or its agent died) can leave its turn reading "running": that run
+    // would otherwise hold its place until the time limit (up to four hours). A chat card ends on it too.
+    if (observed?.exited && !TERMINAL_TURN.has(state)) {
+      finish(run, run.stopping ? "stopped" : "failed", run.stopping ? {} : { error: "The subagent's session ended before it finished" });
+      return;
+    }
     if (!TERMINAL_TURN.has(state)) return;
     const report = String(observed.answer || "").slice(0, MAX_REPORT);
     if (state === "completed") finish(run, "completed", { report: report || "(The subagent finished without a written report.)" });
@@ -298,10 +311,19 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     if (!route) throw new Error(`"${agent.name}" has no model: the user sets one on the Subagents page (its own, or the default model)`);
     const brief = text(task, MAX_TASK);
     if (!brief) throw new Error("Give the subagent a task");
-    if (active().length >= settings.maxConcurrent) throw new Error(`${settings.maxConcurrent} subagents are already running (the limit); wait for one with subagent_result`);
-    if (active().filter((run) => run.parent === parent).length >= settings.maxPerChat) {
+    // Starts still waiting on AO count too: a chat agent calls tools in parallel, and each start
+    // checked the limits before any of them was running, so all of them went ahead.
+    const holders = [...active().map((run) => run.parent), ...launching];
+    if (holders.length >= settings.maxConcurrent) throw new Error(`${settings.maxConcurrent} subagents are already running (the limit); wait for one with subagent_result`);
+    if (holders.filter((holder) => holder === parent).length >= settings.maxPerChat) {
       throw new Error(`This chat already runs ${settings.maxPerChat} subagents (the limit per chat); wait for one with subagent_result`);
     }
+    launching.push(parent);
+    try { return await launch(parent, workspaceId, agent, route, brief, settings); }
+    finally { launching.splice(launching.indexOf(parent), 1); }
+  }
+
+  async function launch(parent, workspaceId, agent, route, brief, settings) {
     const permissions = settings.permission === "full"
       ? { permission_profile: ":danger-full-access", approval_policy: "never", approvals_reviewer: "user" }
       : { permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };

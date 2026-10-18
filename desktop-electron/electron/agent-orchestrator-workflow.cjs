@@ -2595,7 +2595,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // call is still running, e.g. a long build) stops that turn; the message is then sent as the
     // chat's next turn, like a queued one.
     const idle = Number.isFinite(waiting?.lastActivityAt) ? now() - waiting.lastActivityAt : 0;
-    const toolRunning = Array.isArray(waiting?.timeline) && waiting.timeline.some(item => item?.status === "running" && item.kind !== "message");
+    // A notice (a provider retry's "Retrying Claude, attempt 7 of 10" stays "running") is no tool.
+    const toolRunning = Array.isArray(waiting?.timeline) && waiting.timeline.some(item => item?.status === "running" && !["message", "system"].includes(item.kind));
     if (idle > (toolRunning ? STEER_STALL_TOOL_MS : STEER_STALL_MS)) {
       await harnessService().interrupt(card.receipt.thread_id).catch(() => undefined);
       logger?.info?.("ao.steer_restarted_stalled_turn", { idleSeconds: Math.round(idle / 1000) });
