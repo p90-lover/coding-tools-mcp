@@ -563,9 +563,22 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       if (!response.ok) return null;
       const listing = await response.json();
       if (!Array.isArray(listing?.files)) return null;
-      return new Set(listing.files.map(normalizedAuthFile).filter(entry => entry && entry.status !== "disabled").map(entry => entry.provider));
+      const files = listing.files.map(normalizedAuthFile).filter(Boolean);
+      const enabled = new Set(files.filter(entry => entry.status !== "disabled").map(entry => entry.provider));
+      // Why a provider has none: its accounts are all disabled in CPA, or none was added. The model
+      // menu and a refused send say so, instead of only "not offered right now".
+      const disabled = new Set(files.filter(entry => entry.status === "disabled" && !enabled.has(entry.provider)).map(entry => entry.provider));
+      return Object.assign(enabled, { disabled });
     } catch { return null; }
   }
+  const PLUGIN_NAMES = { cline: "Cline Pass", "commandcode-go": "CommandCode Go", commandcode: "CommandCode", grok: "Grok", kimi: "Kimi" };
+  /** Why a plugin provider's models are not offered, in the user's words. */
+  const pluginUnavailable = (provider, accounts) => {
+    const name = PLUGIN_NAMES[provider] || provider;
+    return accounts?.disabled?.has(provider)
+      ? `${name}'s account is disabled in CPA; enable it again on the CPA page (Accounts), or choose another model`
+      : `no ${name} account is added in CPA; add one on the CPA page (Accounts), or choose another model`;
+  };
 
   /** Which CPA provider serves each model (the plain list's owned_by), or null when unreadable. */
   async function modelOwners({ baseUrl, key }) {
@@ -667,7 +680,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         capabilities[routed] = modelCapabilities(agent, id, catalog.capabilities[id], true);
         return routed;
       });
-      return { ok: true, harness, models: [...new Set([...items.map(item => item.id), ...cpa])], capabilities };
+      const unavailable = catalog?.unavailable
+        ? Object.fromEntries(Object.entries(catalog.unavailable).map(([id, why]) => [`${CPA_MODEL_PREFIX}${id}`, why])) : null;
+      return { ok: true, harness, models: [...new Set([...items.map(item => item.id), ...cpa])], capabilities, ...(unavailable ? { unavailable } : {}) };
     }
     if (harness === "codex-native") {
       // Native Codex runs WebGPT through the bridge and every CPA model through the shared pool.
@@ -745,9 +760,14 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const capabilities = Object.create(null);
     const ids = [];
     const plugins = new Set();
+    const unavailable = Object.create(null); // model -> why it is not offered (a plugin with no enabled account)
     for (const entry of rows || []) {
       const id = entry?.slug ?? entry?.id;
-      if (typeof id !== "string" || !id || id.length > 128 || entry.visibility === "hide" || ids.includes(id) || unserved(id)) continue;
+      if (typeof id === "string" && id && id.length <= 128 && unserved(id)) {
+        unavailable[id] = pluginUnavailable(owners.get(id), accountProviders);
+        continue;
+      }
+      if (typeof id !== "string" || !id || id.length > 128 || entry.visibility === "hide" || ids.includes(id)) continue;
       // CPA names the upstream that serves the model (e.g. antigravity, codex, cline-pass).
       const provider = [entry.provider, entry.owned_by, entry.ownedBy].find(value => typeof value === "string" && value.trim());
       const verbatim = verbatimModel(id, provider) || verbatimModel(id, owners?.get(id));
@@ -771,7 +791,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     }
     if (!ids.length) throw new Error("CPA has no available models");
     pluginModels = plugins;
-    return { ok: true, models: ids, capabilities };
+    return { ok: true, models: ids, capabilities, ...(Object.keys(unavailable).length ? { unavailable: { ...unavailable } } : {}) };
   }
 
   // Native Codex runs WebGPT/CPA routes in-process; every other worker harness is AO's own.
@@ -1027,6 +1047,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const listed = Array.isArray(catalog?.models) ? catalog.models.map(id => viaCpa ? `${CPA_MODEL_PREFIX}${id}` : id) : [];
     if (!listed.length) return null;
     if (listed.includes(route.model) || listed.includes(base)) return null;
+    const why = (viaCpa ? catalog.unavailable?.[base.slice(CPA_MODEL_PREFIX.length)] ?? catalog.unavailable?.[route.model.slice(CPA_MODEL_PREFIX.length)] : null);
+    if (why) return `${who ? who + ": " : ""}${route.model.replace(/^cpa\//, "")} is not offered right now: ${why}${who ? " in Team settings" : ""}, then send again.`;
     return `${who ? who + ": " : ""}${route.model.replace(/^cpa\//, "")} is not offered right now (renamed, or no account is signed in for it). Choose another model${who ? " in Team settings" : ""}, then send again.`;
   }
   function missingModelNotice(team) {
