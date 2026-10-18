@@ -382,3 +382,55 @@ test("a lookup that fails (ENOTFOUND github.com) is retried before the update gi
     update.setUpdateSleepForTests((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 });
+
+test("a pack whose connection breaks partway is downloaded again from the start", async () => {
+  const update = require("../electron/update.cjs");
+  update.setUpdateSleepForTests(async () => {});
+  let calls = 0;
+  update.useNativeUpdateTransport(async () => {
+    calls += 1;
+    if (calls === 1) {
+      // Headers and a first chunk arrive, then the connection resets.
+      const body = new ReadableStream({
+        start(controller) { controller.enqueue(new TextEncoder().encode("half")); },
+        pull(controller) { const error = new Error("read ECONNRESET"); error.code = "ECONNRESET"; controller.error(error); },
+      });
+      return new Response(body, { status: 200 });
+    }
+    return new Response("whole pack", { status: 200 });
+  });
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "update-retry-"));
+  try {
+    const file = path.join(root, "pack");
+    await update.downloadFile("https://github.com/x/pack", file);
+    assert.equal(fs.readFileSync(file, "utf8"), "whole pack", "the broken attempt's part is not kept");
+    assert.equal(calls, 2);
+  } finally {
+    update.useNativeUpdateTransport(null);
+    update.setUpdateSleepForTests((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an update request that goes quiet times out instead of hanging", async () => {
+  const update = require("../electron/update.cjs");
+  update.setUpdateIdleMsForTests(50);
+  update.setUpdateSleepForTests(async () => {});
+  let aborted = 0;
+  // The app's network answers with headers, then sends nothing more; the body never ends.
+  update.useNativeUpdateTransport(async (_url, options) => {
+    options.signal.addEventListener("abort", () => { aborted += 1; });
+    return new Response(new ReadableStream({ pull() { return new Promise(() => {}); } }), { status: 200 });
+  });
+  // The idle timer is unref'd (it must not hold the app open); Electron's loop keeps it alive, here this does.
+  const keepAlive = setInterval(() => {}, 1_000);
+  try {
+    await assert.rejects(update.downloadText("https://github.com/x/manifest.json"), /timed out/);
+    assert.ok(aborted >= 1, "the stalled request is aborted, not left open");
+  } finally {
+    update.useNativeUpdateTransport(null);
+    clearInterval(keepAlive);
+    update.setUpdateIdleMsForTests(60_000);
+    update.setUpdateSleepForTests((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  }
+});
