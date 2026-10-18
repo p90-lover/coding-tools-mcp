@@ -777,10 +777,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           needsInput: false, exited: false, answer: "", liveOutput: utf8Prefix(liveOutput, 4096), timeline,
         };
       }
-      // When the turn last showed any sign of life (a message, a tool step, a retry notice): a turn
-      // whose agent hung (a model request that never returns) keeps "running" with nothing new.
-      const stamps = [turn?.updatedAt, turn?.startedAt, turn?.createdAt,
-        ...(Array.isArray(conversation?.activities) ? conversation.activities : []).filter(item => item.turnId === turn?.id).map(item => item.updatedAt || item.createdAt),
+      // When the turn last showed any sign of life (a message, a tool step): a turn whose agent hung
+      // (a model request that never returns) keeps "running" with nothing new. A provider retry
+      // notice ("Retrying Claude, attempt 7 of 10") is not one: a turn stuck on 503s posts one every
+      // few seconds and does nothing else, and counting them hid the hang from chat_steer. Nor is
+      // the turn's own updatedAt, which AO may touch with any activity, retries included.
+      const retryNotice = item => item.activityKind === "system" && item.detail?.event === "provider.failure";
+      const stamps = [turn?.startedAt, turn?.createdAt,
+        ...(Array.isArray(conversation?.activities) ? conversation.activities : []).filter(item => item.turnId === turn?.id && !retryNotice(item))
+          .map(item => item.updatedAt || item.createdAt),
         ...(Array.isArray(conversation?.messages) ? conversation.messages : []).filter(item => item.turnId === turn?.id).map(item => item.updatedAt || item.createdAt)]
         .map(value => Date.parse(value ?? "")).filter(Number.isFinite);
       return {
