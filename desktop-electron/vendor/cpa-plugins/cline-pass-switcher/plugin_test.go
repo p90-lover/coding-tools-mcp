@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -24,6 +25,74 @@ func result(t *testing.T, b []byte) json.RawMessage {
 	}
 	return e.Result
 }
+
+func TestDeepSeekEffortCatalogAndTransport(t *testing.T) {
+	var sent map[string]any
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/models" {
+			fmt.Fprint(w, `{"data":[{"id":"cline-pass/deepseek-v4.1-flash"},{"id":"cline-pass/unknown"}]}`)
+			return
+		}
+		calls++
+		if err := json.NewDecoder(r.Body).Decode(&sent); err != nil {
+			t.Error(err)
+		}
+		fmt.Fprint(w, `{"choices":[{"message":{"content":"OK"}}]}`)
+	}))
+	defer upstream.Close()
+	previous := active
+	active = &service{base: upstream.URL, key: "fixture", ctx: context.Background(), cfg: pluginConfig{DataDir: t.TempDir()}}
+	t.Cleanup(func() { active = previous })
+	catalog, err := models()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listed struct {
+		Models []struct {
+			ID       string
+			Thinking struct {
+				Levels []string `json:"levels"`
+			} `json:"thinking"`
+		}
+	}
+	if err := json.Unmarshal(result(t, catalog), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Models) != 2 || strings.Join(listed.Models[0].Thinking.Levels, ",") != "none,low,high,max" {
+		t.Fatalf("wrong native efforts: %s", catalog)
+	}
+	if len(listed.Models[1].Thinking.Levels) != 0 {
+		t.Fatal("unknown model inherited generic reasoning tiers")
+	}
+	for _, effort := range []string{"none", "low", "high", "max"} {
+		req, _ := json.Marshal(map[string]any{
+			"Model":   "cline-pass/deepseek-v4.1-flash(" + effort + ")",
+			"Payload": []byte(`{"model":"ignored","reasoning_effort":"xhigh","messages":[{"role":"user","content":"OK"}]}`),
+		})
+		reply, err := execute(req, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result(t, reply)
+		if sent["model"] != "cline-pass/deepseek-v4.1-flash" || sent["reasoning_effort"] != effort {
+			t.Fatalf("%s sent wrong model/effort: %v", effort, sent)
+		}
+	}
+	before := calls
+	req, _ := json.Marshal(map[string]any{"Model": "cline-pass/deepseek-v4.1-flash(xhigh)", "Payload": []byte(`{}`)})
+	reply, err := execute(req, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rejected envelope
+	_ = json.Unmarshal(reply, &rejected)
+	if rejected.OK || rejected.Error == nil || rejected.Error.HTTPStatus != 400 || calls != before {
+		t.Fatal("unsupported effort was sent upstream")
+	}
+}
+
 func TestSSEPreservesReasoningToolsAndUsage(t *testing.T) {
 	wire := ": keepalive\n\ndata: {\"choices\":[{\"delta\":{\"reasoning_content\":\"reason\",\"tool_calls\":[{\"id\":\"call_1\"}]}}]}\n\ndata: {\"choices\":[],\"usage\":{\"completion_tokens\":1}}\n\ndata: [DONE]\n\n"
 	var chunks [][]byte
