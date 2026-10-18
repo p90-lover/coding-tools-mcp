@@ -13,7 +13,8 @@ export type AoModelCapabilities = {
   contextWindow?: { min: number; max?: number; kind?: "context" | "compaction" };
   contextLimit?: number; effortReason?: string; contextReason?: string;
 };
-export type AoModelCatalog = { models: string[]; capabilities?: Record<string, AoModelCapabilities> };
+/** `unavailable`: models CPA lists but cannot serve now, with why (e.g. their plugin's account is disabled in CPA). */
+export type AoModelCatalog = { models: string[]; capabilities?: Record<string, AoModelCapabilities>; unavailable?: Record<string, string> };
 export type AoModelLoader = (harness: string) => Promise<string[] | AoModelCatalog>;
 export const emptyRoleSettings = (): RoleSettings => ({ name: "", specialty: "", instructions: "", expected_output: "", working_directory: "", revision: 0 });
 

@@ -11,6 +11,7 @@ import { HarnessLogo } from "./HarnessLogo";
 /** A loader may return a plain id list or a catalog with capabilities; the list needs only ids. */
 const modelIds = (items: string[] | AoModelCatalog) => Array.isArray(items) ? items : items.models;
 const modelCaps = (items: string[] | AoModelCatalog) => Array.isArray(items) ? {} : items.capabilities ?? {};
+const modelGaps = (items: string[] | AoModelCatalog) => Array.isArray(items) ? {} : items.unavailable ?? {};
 /** The effort word Codex dims after the model name ("High", "Extra high"). */
 const effortWord = (effort?: string) => !effort ? "" : effort === "xhigh" ? "Extra high" : effort[0].toUpperCase() + effort.slice(1);
 /** The effort a model id carries itself ("gemini-3.8-flash-high", "gpt-oss-120b-medium", "…(high)"). */
@@ -98,6 +99,8 @@ export function AgentOrchestratorComposerControls({
   const [search, setSearch] = useState("");
   const [models, setModels] = useState<string[] | null>(null);
   const [caps, setCaps] = useState<Record<string, AoModelCapabilities>>({});
+  // Why a listed-but-unserved model is not offered (its plugin's account is disabled in CPA, say).
+  const [gaps, setGaps] = useState<Record<string, string>>({});
   const [error, setError] = useState("");
   const [contextDraft, setContextDraft] = useState("");
   useEffect(() => { setSearch(""); }, [mode]);
@@ -126,6 +129,7 @@ export function AgentOrchestratorComposerControls({
       const loaded = { ...modelCaps(webCatalog), ...modelCaps(catalog) };
       setModels([...new Set([...modelIds(catalog), ...modelIds(webCatalog)])]);
       setCaps(loaded);
+      setGaps({ ...modelGaps(webCatalog), ...modelGaps(catalog) });
       rememberCpaProviders(loaded);
       const current = latest.current;
       if (current.harness_id !== route.harness_id || current.model !== route.model) return;
@@ -227,7 +231,7 @@ export function AgentOrchestratorComposerControls({
       </ChipMenu>
       <ChipMenu heading="Model" popupClass="ao-model-popup" ariaLabel="Choose model" disabled={busy} className={unlisted ? "is-warning" : ""}
         onOpen={() => setReload(value => value + 1)}
-        title={unlisted ? `${modelName} is not offered right now; choose another model` : route.model ? modelName : undefined}
+        title={unlisted ? `${modelName} is not offered right now: ${gaps[route.model] ?? gaps[baseModel] ?? "choose another model"}` : route.model ? modelName : undefined}
         label={<span>{route.model ? chipModel.name : modelName}
           {unlisted ? <span className="ao-chip-unavailable"> · not available</span> : null}</span>}>
         {(close) => <>

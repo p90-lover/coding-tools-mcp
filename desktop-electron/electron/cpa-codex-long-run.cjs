@@ -85,6 +85,12 @@ function cpaLongRunYamlLines() {
     "request-retry: 3",
     "max-retry-interval: 30",
     "save-cooldown-status: true",
+    // A transient upstream error (a 502, an unreachable upstream, a 408 or 5xx) took the model away
+    // for a minute and more per failure (Cline Pass's deepseek-v4.1-flash after six 502s): CPA
+    // stopped offering it, the chat's model showed "not offered right now" and every request got
+    // 503 until the timer ran out. Such errors no longer cool the model down; the next request
+    // simply tries again. Quota limits (429) and rejected keys keep their cooldowns.
+    "transient-error-cooldown-seconds: -1",
     "error-logs-max-files: 20",
     `logs-max-total-size-mb: ${CPA_LOGS_MAX_TOTAL_SIZE_MB}`,
     "nonstream-keepalive-interval: 30",

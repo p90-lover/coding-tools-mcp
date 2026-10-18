@@ -2260,6 +2260,13 @@ test("CPA's model list leaves out a provider plugin's models when nobody is sign
   assert.deepEqual((await make(signedIn).call("models", {})).models, ["gpt-5.5", "cline-pass/deepseek-v4-flash", "myclaude/claude-sonnet-5"],
     "commandcode-go has only a disabled account; built-in and API-key providers are never judged by their owner name");
   assert.equal((await make(null).call("models", {})).models.length, 4, "an unreadable account list hides nothing");
+  // Why a hidden model is not offered, for the model menu and a refused send.
+  const why = (await make(signedIn).call("models", {})).unavailable;
+  assert.match(why["commandcode-go/deepseek-v4.1-flash"], /CommandCode Go's account is disabled in CPA/);
+  const none = (await make([{ name: "codex-a.json", provider: "codex" }]).call("models", {})).unavailable;
+  assert.match(none["cline-pass/deepseek-v4-flash"], /no Cline Pass account is added in CPA/);
+  const agent = await make(signedIn).call("models", { harness: "ao:claude-code", workspaceId: "ws" });
+  assert.match(agent.unavailable["cpa/commandcode-go/deepseek-v4.1-flash"], /disabled in CPA/, "an agent's catalog names it by its CPA route");
 });
 
 test("permission capabilities use installed AO adapter modes without fabricating native metadata", async () => {

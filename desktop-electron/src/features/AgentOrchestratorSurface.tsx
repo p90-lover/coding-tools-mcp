@@ -634,7 +634,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
       // Both catalogs carry model capabilities when their source reports them.
       pending = moduleCall("models", { harness, workspaceId }).then(result => {
         const models = Array.isArray(result.models) ? result.models as string[] : [];
-        return result.capabilities ? { models, capabilities: result.capabilities as AoModelCatalog["capabilities"] } : models;
+        return result.capabilities || result.unavailable ? { models, ...(result.capabilities ? { capabilities: result.capabilities as AoModelCatalog["capabilities"] } : {}),
+          ...(result.unavailable ? { unavailable: result.unavailable as AoModelCatalog["unavailable"] } : {}) } : models;
       });
       const entry = { at: Date.now(), models: pending };
       pending.catch(() => { if (modelCache.current.get(key) === entry) modelCache.current.delete(key); });

@@ -93,6 +93,8 @@ test("CPA managed config keeps the original panel and turns on long-run keep-ali
   assert.match(yaml, /^request-retry: 3$/m);
   assert.match(yaml, /^max-retry-interval: 30$/m);
   assert.doesNotMatch(yaml, /max-retry-interval: 300/);
+  assert.match(yaml, /^transient-error-cooldown-seconds: -1$/m, "a 502 or an unreachable upstream does not take the model away");
+  assert.doesNotMatch(yaml, /disable-cooling: true/, "quota cooldowns stay");
   assert.match(yaml, new RegExp(`logs-max-total-size-mb: ${CPA_LOGS_MAX_TOTAL_SIZE_MB}`));
   assert.match(yaml, /request-log: false/);
   assert.equal(cpaLongRunYamlLines().includes("debug: false"), false);
