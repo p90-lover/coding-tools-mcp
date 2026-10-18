@@ -16,7 +16,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-const EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
+const EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
 const PERMISSIONS = new Set(["auto", "full"]);
 const LIMITS = Object.freeze({ maxConcurrent: [1, 10], maxPerChat: [1, 10], timeoutMinutes: [1, 240] });
 const DEFAULT_SETTINGS = Object.freeze({

@@ -1,6 +1,6 @@
 {
   "name": "coding-tools-full-harness-desktop",
-  "version": "0.7.0-rc.24",
+  "version": "0.7.0-rc.25",
   "private": true,
   "description": "Coding Tools desktop with the pinned full Codex ChatGPT Web harness",
   "author": "Coding Tools MCP Contributors",
@@ -25,6 +25,7 @@
     "package:backend": "node scripts/package-backend.cjs",
     "patch:portable": "node scripts/patch-portable.cjs",
     "test": "node --test tests/*.test.cjs",
+    "test:preview-native": "electron tests/native/chat-preview.cjs",
     "start": "bun run build:preload && electron ."
   },
   "dependencies": {

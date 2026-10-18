@@ -67,6 +67,44 @@ fn read_file_happy_path() {
     assert_eq!(payload["project_instructions"]["target"], "src/math.js");
 }
 
+#[test]
+fn list_dir_entries_round_trip_from_root_subdirectories_and_absolute_inputs() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_for(&fx.root);
+    let root = fx.root.to_string_lossy().into_owned();
+    let subdir = fx.root.join("src").to_string_lossy().into_owned();
+    for (input, name, expected) in [
+        (".", "package.json", "package.json"),
+        ("src", "math.js", "src/math.js"),
+        (root.as_str(), "package.json", "package.json"),
+        (subdir.as_str(), "math.js", "src/math.js"),
+    ] {
+        let listed = invoke(&ctx, "list_dir", json!({"path": input}));
+        let entry = assert_ok(&listed)["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == name)
+            .expect("listed fixture file");
+        assert_eq!(entry["path"], expected, "listing {input}");
+        let read = invoke(&ctx, "read_file", json!({"path": entry["path"]}));
+        assert_eq!(
+            assert_ok(&read)["content"],
+            fs::read_to_string(fx.root.join(expected)).unwrap()
+        );
+    }
+    let recursive = invoke(
+        &ctx,
+        "list_dir",
+        json!({"path": ".", "recursive": true, "max_depth": 2}),
+    );
+    assert!(assert_ok(&recursive)["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["path"] == "src/math.js"));
+}
+
 /// Reads a whole file page by page with `next_offset`, as a model would.
 fn read_all_pages(
     ctx: &coding_tools_mcp_desktop_lib::tools::ToolContext,

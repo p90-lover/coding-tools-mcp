@@ -38,7 +38,11 @@ fn wait(ctx: &ToolContext, id: &str) -> Value {
             &json!({"command_id":id,"chars":"","yield_time_ms":100,"max_output_bytes":1024}),
         );
         assert_eq!(value["ok"], true, "{value}");
-        if value["status"] == "exited" && value["finalization_pending"] != true {
+        if value["status"] == "exited" {
+            assert_ne!(
+                value["finalization_pending"], true,
+                "terminal exit must release the project write lease before returning: {value}"
+            );
             return value;
         }
         assert!(Instant::now() < until, "command did not terminate: {value}");
@@ -61,6 +65,35 @@ fn zero_wait_delivers_stdin_and_completed_clock_stops() {
     );
     assert_eq!(launched["ok"], true, "{launched}");
     let id = launched["command_id"].as_str().unwrap();
+    let output_ref = format!("command:{id}:stdout");
+    let until = Instant::now() + Duration::from_secs(20);
+    loop {
+        let output = call_tool(
+            &ctx,
+            "read_output",
+            &json!({"output_ref":output_ref,"offset":0,"limit":1024}),
+        );
+        assert_eq!(output["ok"], true, "{output}");
+        if output["status"] == "exited" {
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "command did not terminate: {output}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let next = call_tool(
+        &ctx,
+        "exec_command",
+        &json!({"cmd":py("-V"),"yield_time_ms":1000,"timeout_ms":5000}),
+    );
+    assert_eq!(
+        next["ok"], true,
+        "completed output must release its project write lease: {next}"
+    );
+    let completed = wait(&ctx, next["command_id"].as_str().unwrap());
+    assert_eq!(completed["command_ok"], true, "{completed}");
     let first = wait(&ctx, id);
     assert_eq!(first["command_ok"], true, "{first}");
     assert!(
@@ -296,10 +329,19 @@ fn cancellation_stops_descendants_and_releases_only_owned_work() {
         &json!({"command_id":id,"wait_ms":1000}),
     );
     assert_eq!(cancel["ok"], true, "{cancel}");
-    thread::sleep(Duration::from_millis(2300));
+    eprintln!("Initial cancellation observation: {cancel}");
+    let cancel = if cancel["status"] == "terminating" {
+        wait(&ctx, id)
+    } else {
+        cancel
+    };
     assert!(
-        !root.join("aiTemp/escaped.txt").exists(),
-        "a descendant survived cancellation and continued modifying the workspace"
+        matches!(cancel["status"].as_str(), Some("killed" | "exited")),
+        "cancellation must be confirmed before checking the next command: {cancel}"
+    );
+    assert_ne!(
+        cancel["finalization_pending"], true,
+        "confirmed cancellation must release its project write lease: {cancel}"
     );
     assert_eq!(
         overlapping["error"]["code"], "PROJECT_WRITE_BUSY",
@@ -316,4 +358,9 @@ fn cancellation_stops_descendants_and_releases_only_owned_work() {
     );
     let completed = wait(&ctx, next["command_id"].as_str().unwrap());
     assert_eq!(completed["command_ok"], true, "{completed}");
+    thread::sleep(Duration::from_millis(2300));
+    assert!(
+        !root.join("aiTemp/escaped.txt").exists(),
+        "a descendant survived cancellation and continued modifying the workspace"
+    );
 }

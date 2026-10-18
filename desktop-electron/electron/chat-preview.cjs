@@ -2,7 +2,7 @@
 
 // Each chat agent's own browser, for previewing what it builds: the web app or API its dev server
 // serves on this machine. One preview per AO session (a chat card's agent), drawn in the chat's
-// Preview pane while the user looks at it and kept painting just outside the window otherwise,
+// Preview pane while the user looks at it and kept painting in an invisible native host otherwise,
 // so the agent can always see, read and use the page it opened.
 //
 // - Loopback only: http(s) on localhost, *.localhost, 127.0.0.0/8 or [::1]. A page never reaches
@@ -33,8 +33,6 @@ const EVALUATE_TIMEOUT_MS = 5_000;
 // A full-page screenshot is cut at this height (CSS pixels).
 const MAX_SHOT_HEIGHT = 6_000;
 const MAX_SHOT_WIDTH = 1_280;
-// How far outside the window a hidden preview sits.
-const OFFSCREEN_MARGIN = 20_000;
 // A preview neither shown nor used by its agent this long stops painting (its page's animations
 // kept the GPU busy for nothing); the agent's next call wakes it first.
 const IDLE_SLEEP_MS = 30_000;
@@ -192,11 +190,6 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
   };
   const target = (raw) => previewTarget(raw, { blockedPorts: blocked() });
 
-  function offscreen() {
-    // Wholly outside the window at a real size, so the page keeps a viewport and paints. Above and
-    // to the left of it: no later resize or maximize can bring a hidden page into view.
-    return { x: -(VIEWPORT.width + OFFSCREEN_MARGIN), y: -(VIEWPORT.height + OFFSCREEN_MARGIN), ...VIEWPORT };
-  }
 
   /**
    * Whether the page may make this request: http(s) and ws(s) only to an origin this chat opened
@@ -219,19 +212,10 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
     const contents = preview.view.webContents;
     if (contents.isDestroyed()) return;
     const visible = shown?.key === preview.key;
-    if (visible) {
-      preview.view.setBounds(shown.bounds);
-      if (preview.emulated) { try { contents.disableDeviceEmulation(); } catch { /* not ready */ } preview.emulated = false; }
-    } else {
-      const bounds = offscreen();
-      // A view outside the window gets no renderer viewport of its own: give it one.
-      try {
-        contents.enableDeviceEmulation({ screenPosition: "desktop", screenSize: VIEWPORT, viewPosition: { x: 0, y: 0 },
-          deviceScaleFactor: 0, viewSize: VIEWPORT, scale: 1 });
-        preview.emulated = true;
-      } catch { /* the renderer is not ready; dom-ready places it again */ }
-      preview.view.setBounds(bounds);
-    }
+    // A clipped view can have a 0x0 native surface even when Blink emulates a viewport.
+    // Keep background views at real bounds in their own invisible host.
+    attachView?.(preview.view, visible);
+    preview.view.setBounds(visible ? shown.bounds : { x: 0, y: 0, ...VIEWPORT });
     const awake = visible || now() - preview.usedAt < IDLE_SLEEP_MS;
     try { contents.setBackgroundThrottling?.(!awake); } catch { /* destroyed */ }
     preview.view.setVisible?.(awake);
@@ -257,7 +241,7 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
     }
     const view = createView(`chat-preview-${crypto.randomUUID()}`);
     const contents = view.webContents;
-    const preview = { key, view, origins: new Set(), console: [], failures: [], emulated: false, debuggerReady: false, usedAt: now(), loading: false };
+    const preview = { key, view, origins: new Set(), console: [], failures: [], debuggerReady: false, usedAt: now(), loading: false };
     const session = contents.session;
     session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     session.setPermissionCheckHandler?.(() => false);
@@ -321,7 +305,6 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
     contents.on("dom-ready", () => place(preview));
     contents.on("did-start-loading", () => { preview.loading = true; });
     contents.on("did-stop-loading", () => { preview.loading = false; });
-    attachView?.(view);
     previews.set(key, preview);
     place(preview);
     return preview;
@@ -581,7 +564,15 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
         if (!preview) return failure("This chat has no page open yet; open one with preview_open first.");
         preview.usedAt = now();
         place(preview);
-        return await run(preview, name, args);
+        const hidden = shown?.key !== preview.key;
+        const contents = preview.view.webContents;
+        try {
+          // Keep the page producing frames while its agent interacts, without OS window focus.
+          if (hidden) await protocol(preview, "Emulation.setFocusEmulationEnabled", { enabled: true });
+          return await run(preview, name, args);
+        } finally {
+          if (hidden && !contents.isDestroyed()) await protocol(preview, "Emulation.setFocusEmulationEnabled", { enabled: false });
+        }
       } catch (error) {
         if (error instanceof PreviewError) return failure(error.message);
         logger.warn?.("chat_preview.call_failed", { tool: name, message: String(error?.message ?? error).slice(0, 300) });
@@ -616,7 +607,7 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
       place(preview);
       return true;
     },
-    /** Takes the shown preview out of the pane; it keeps running just outside the window. */
+    /** Takes the shown preview out of the pane; it keeps running in the background host. */
     hide() {
       const preview = shown ? previews.get(shown.key) : null;
       shown = null;
@@ -644,4 +635,52 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
   });
 }
 
-module.exports = Object.freeze({ PREVIEW_TOOL_DEFS, PREVIEW_TOOLS, createChatPreviews, previewTarget, isLoopbackHost });
+
+/** Native hosting shared by the app and the Electron regression fixture. */
+function createNativeChatPreviews({ BaseWindow, WebContentsView, mainWindow, platform = process.platform, ...options }) {
+  let background = null;
+  const windows = new WeakSet();
+  let previews;
+  const closeAll = () => {
+    previews.closeAll();
+    if (background && !background.isDestroyed()) background.destroy();
+    background = null;
+  };
+  previews = createChatPreviews({
+    ...options,
+    createView: (partition) => new WebContentsView({
+      webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: false, backgroundThrottling: false },
+    }),
+    attachView: (view, visible) => {
+      const window = mainWindow();
+      if (!window || window.isDestroyed()) return;
+      if (!visible && (!background || background.isDestroyed())) {
+        // Windows needs a shown native surface to paint reliably. Zero opacity, no focus and
+        // click-through keep this host invisible and unable to intercept the user's input.
+        const needsSurface = platform === "win32" || platform === "darwin";
+        background = new BaseWindow({ show: false, frame: false, useContentSize: true, ...VIEWPORT,
+          skipTaskbar: true, focusable: false, ...(needsSurface ? { opacity: 0 } : {}) });
+        background.setIgnoreMouseEvents(true);
+        if (needsSurface) background.showInactive();
+      }
+      const host = visible ? window : background;
+      if (!host.contentView.children.includes(view)) host.contentView.addChildView(view);
+      if (!windows.has(window)) {
+        windows.add(window);
+        window.once("closed", closeAll);
+      }
+    },
+    detachView: (view) => {
+      for (const host of [mainWindow(), background]) {
+        if (host && !host.isDestroyed() && host.contentView.children.includes(view)) host.contentView.removeChildView(view);
+      }
+    },
+    contentSize: () => {
+      const window = mainWindow();
+      return window && !window.isDestroyed() ? window.getContentSize() : [VIEWPORT.width, VIEWPORT.height];
+    },
+  });
+  return Object.freeze({ ...previews, closeAll });
+}
+
+module.exports = Object.freeze({ PREVIEW_TOOL_DEFS, PREVIEW_TOOLS, createChatPreviews, createNativeChatPreviews, previewTarget, isLoopbackHost });
