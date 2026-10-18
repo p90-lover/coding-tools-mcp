@@ -2875,12 +2875,12 @@ test("the pinned executable digest is reused only while the file is unchanged", 
   assert.equal((await resolve()).expected_sha256, sha("other-binary"), "a replaced executable is hashed again");
 });
 
-test("a single-model follow-up continues the chat's live AO session with just the new message", async () => {
+async function followUpContinues(previousState) {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
   const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
   const previous = { id: "r1", project_id: "task-1", execution_mode: "single", cancelled: false,
-    nodes: [{ id: "one", role: "planner", state: "finished", parents: [], route, receipt: { thread_id: "sess-1" } }] };
+    nodes: [{ id: "one", role: "planner", state: previousState, parents: [], route, receipt: { thread_id: "sess-1" } }] };
   const world = chatWorld({ tasks: [task], runs: [previous] });
   const created = new Map();
   const spawned = [], sent = [], observedWith = [];
@@ -2914,7 +2914,10 @@ test("a single-model follow-up continues the chat's live AO session with just th
   assert.deepEqual(JSON.parse(JSON.stringify(sent)), [["sess-1", "now run the tests", "key-1"]], "only the new message, idempotent by its request key");
   assert.deepEqual(JSON.parse(JSON.stringify(observedWith[0])), ["sess-1", "turn-2"], "observed on the follow-up's own turn");
   assert.match(world.edits[0].description, /Follow-up \([^)]+ UTC\):\nnow run the tests$/, "the chat still records the follow-up");
-});
+}
+
+test("a single-model follow-up continues the chat's live AO session with just the new message", () => followUpContinues("finished"));
+test("a follow-up after a held turn (a hung turn the user's message stopped) continues its session too", () => followUpContinues("held"));
 
 test("steering hands the message to the running AO agent and notes it in the chat", async () => {
   const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
@@ -2976,6 +2979,27 @@ test("a message sent to a hung turn stops it and goes as the next turn instead o
   lastActivityAt = 1_000_000 + 3 * 60_000;
   assert.equal((await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "ok" })).steered, true, "a working agent is steered");
   assert.equal(interrupted.length, 1);
+});
+
+test("a turn that has only been retrying its model request for minutes is restarted by a message, not given 20 minutes as a running tool", async () => {
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  const interrupted = [], steered = [];
+  // The retry notice is a running "system" row in the timeline (observe's lastActivityAt leaves it out).
+  const timeline = [{ kind: "message", status: "completed", text: "Looking at it" },
+    { kind: "system", status: "running", text: "Retrying Claude, attempt 7 of 10. API error 503. Trying again in 30s." }];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 4 * 60_000,
+    aoHarness: {
+      observe: async () => ({ turnId: "t1", turnState: "running", lastActivityAt: 1_000_000, timeline, approvals: [] }),
+      steer: async (id, text) => { steered.push([id, text]); return { steered: true }; },
+      interrupt: async id => { interrupted.push(id); },
+    } });
+  const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "try again" });
+  assert.equal(result.restarted, true, "four minutes of retries only is a hang");
+  assert.deepEqual(interrupted, ["sess-1"]);
+  assert.equal(steered.length, 0);
 });
 
 test("a run waiting on input reports it steadily, not on and off with each observation tick", async () => {

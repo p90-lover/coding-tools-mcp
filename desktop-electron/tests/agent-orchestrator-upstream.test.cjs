@@ -434,6 +434,25 @@ test("a provider retry says why it retries, such as a rate limit", async () => {
     [["system", "Retrying Claude, attempt 2 of 10. API error 429. Trying again in 1s."]]);
 });
 
+test("a turn that only retries its model request shows no new sign of life, so a message can restart it", async () => {
+  // Claude Code stuck on 503s: a "Retrying Claude, attempt n of 10" notice every few seconds and
+  // nothing else. Each notice refreshed lastActivityAt, so chat_steer never saw the hang.
+  const at = minutes => new Date(Date.parse("2026-10-18T10:00:00Z") + minutes * 60_000).toISOString();
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {
+      // AO may touch the turn itself with each activity, retries included.
+      turns: [{ id: "t", state: "running", createdAt: at(0), startedAt: at(0), updatedAt: at(5) }],
+      messages: [{ id: "m", turnId: "t", role: "assistant", text: "Looking at the parser.", streaming: false, createdAt: at(1), updatedAt: at(1) }],
+      activities: [
+        { id: "a1", turnId: "t", sequence: 2, activityKind: "mcp_tool", status: "completed", summary: "Read", createdAt: at(1.5), updatedAt: at(1.5), detail: {} },
+        { id: "r1", turnId: "t", sequence: 3, activityKind: "system", status: "running", summary: "Retrying Claude, attempt 7 of 10.",
+          createdAt: at(2), updatedAt: at(5), detail: { event: "provider.failure", severity: "warning", text: "API error 503. Trying again in 30s." } },
+      ],
+    } : { session: { id: "s", mode: "chat", status: "working" } },
+  });
+  assert.equal((await upstream.observe("s")).lastActivityAt, Date.parse(at(1.5)), "the last real step, not the retry notices after it");
+});
+
 test("an idle agent is found by its last turn, released with exit-agent, and resumed when its chat continues", async () => {
   const vm = require("node:vm");
   const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
@@ -515,6 +534,44 @@ test("a resumed chat gets the app's tools again, and an AO that refuses them sti
   status = "exited"; bodies.length = 0;
   assert.equal(await upstream.continuable("chat-2"), true);
   assert.deepEqual(bodies, [{}], "a session that never had the app's tools resumes as before");
+});
+
+test("reopening a released chat and sending at once resumes its agent once, and the send continues it", async () => {
+  // The chat's pre-warm (600 ms after it opens) and its send both ask continuable() while the
+  // agent released while idle comes back. The second asked mid-resume: AO refused a second resume,
+  // and the send started a fresh session beside the one coming back.
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("    async continuable(id)");
+  const end = source.indexOf("    /** Sends a follow-up as a new turn", start);
+  const methods = source.slice(start, end).trim().replace(/,$/, "");
+  const helpers = source.slice(source.indexOf("  async function chatHostGone"), source.indexOf("  // Mission-owned AO calls."));
+  const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
+  const states = source.match(/const TERMINAL_TURN_STATES = .*;/)[0];
+  let status = "exited", resuming = false, resumes = 0, renewals = 0;
+  const upstream = vm.runInNewContext(states + helpers + identity + "({" + methods + "})", {
+    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), Date, Math, Number, Promise,
+    agentTools: { renew: async () => { renewals += 1; return null; } },
+    internalApi: async (method, endpoint) => {
+      if (endpoint.endsWith("/resume-agent")) {
+        resumes += 1;
+        if (resuming) throw new Error("The session's agent is already starting (SESSION_BUSY)");
+        resuming = true;
+        await new Promise(resolve => setTimeout(resolve, 30));
+        resuming = false; status = "idle";
+        return { ok: true };
+      }
+      return { session: { id: endpoint.split("/")[4], mode: "chat", status } };
+    },
+  });
+  const [prewarm, send] = await Promise.all([upstream.continuable("chat-1"), upstream.continuable("chat-1")]);
+  assert.equal(prewarm, true);
+  assert.equal(send, true, "the send continues the chat's own agent");
+  assert.equal(resumes, 1, "one resume");
+  assert.equal(renewals, 1, "one fresh credential for it");
+  status = "exited";
+  assert.equal(await upstream.continuable("chat-1"), true, "asked again later, it is checked again");
+  assert.equal(resumes, 2);
 });
 
 test("a terminal agent AO lost the signal of settles as failed once idle past the limit, never while it may still report", async () => {

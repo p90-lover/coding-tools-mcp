@@ -12,7 +12,7 @@ const ROUTE = { harness_id: "ao:claude-code", model: "cpa/test-model" };
 const parse = (result) => JSON.parse(result.content[0].text);
 
 /** A subagents service over a fake AO harness whose sessions the test drives. */
-function world({ settings = {}, agents = null, now = () => 1_000_000 } = {}) {
+function world({ settings = {}, agents = null, now = () => 1_000_000, aoUp = () => true, setTimer = undefined } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-"));
   const spawned = [], resolved = [], inputs = [], interrupted = [], released = [];
   const sessions = new Map();
@@ -29,8 +29,8 @@ function world({ settings = {}, agents = null, now = () => 1_000_000 } = {}) {
   const service = createSubagents({
     statePath: path.join(dir, "subagents.json"),
     launchArgs: (workspaceId, route, name) => workflow.subagentLaunchArgs(workspaceId, route, name),
-    harness: () => harness, blockedRequest: workflow.blockedRequest, recommendedAnswer: workflow.recommendedAnswer,
-    logger: { info() {}, warn() {} }, now,
+    harness: () => (aoUp() ? harness : null), blockedRequest: workflow.blockedRequest, recommendedAnswer: workflow.recommendedAnswer,
+    logger: { info() {}, warn() {} }, now, ...(setTimer ? { setTimer } : {}),
   });
   service.save({ settings: { defaultRoute: ROUTE, ...settings }, agents: agents ?? STARTERS });
   return { service, harness, sessions, spawned, resolved, inputs, interrupted, released, dir,
@@ -180,4 +180,88 @@ test("chat agents get the subagent tools when subagents are on; a subagent's own
     const off = await post(url, headers.Authorization, { jsonrpc: "2.0", id: 5, method: "tools/list", params: {} });
     assert.equal(off.result.tools.some((tool) => SUBAGENT_TOOLS.has(tool.name)), false, "turned off on the Subagents page");
   } finally { await tools.close(); }
+});
+
+test("a subagent's request too long to check whole, or hiding a blocked command in JSON escapes, is denied, never allowed", async () => {
+  const w = world();
+  try {
+    const { subagent_id: id } = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "implementer", task: "x" }));
+    const decisions = [{ id: "allow", kind: "allow_once" }, { id: "deny", kind: "reject_once" }];
+    // As AO's upstream reads them: an MCP tool's arguments as JSON cut at 1500 bytes, a command at 4000.
+    const cut = (text, bytes) => Buffer.from(text).subarray(0, bytes).toString();
+    w.sessions.set(id, { turnState: "running", approvals: [
+      { approval_id: "e1", kind: "permission", tool: "mcp__coding-tools__run_command", toolInput: JSON.stringify({ cmd: "cd app\ngit push origin main" }), decisions },
+      { approval_id: "l1", kind: "permission", tool: "mcp__coding-tools__run_command",
+        toolInput: cut(JSON.stringify({ cmd: `echo ${"a".repeat(1600)} && git push origin main` }), 1500), decisions },
+      { approval_id: "l2", kind: "command", tool: "Bash", command: cut(`${"echo ok; ".repeat(450)}rm -rf ~/`, 4000), decisions },
+      { approval_id: "s1", kind: "command", tool: "Bash", command: "npm test", decisions },
+    ] });
+    parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 }));
+    assert.deepEqual(w.resolved, [[id, "e1", "deny"], [id, "l1", "deny"], [id, "l2", "deny"], [id, "s1", "allow"]]);
+  } finally { w.cleanup(); }
+});
+
+test("a subagent still ends at its time limit while AO is not running, and the poller then stops", async () => {
+  let clock = 1_000_000, up = true;
+  const timers = [];
+  const w = world({ settings: { timeoutMinutes: 5 }, now: () => clock, aoUp: () => up,
+    setTimer: (callback, ms) => { const timer = { callback, ms, unref() {} }; timers.push(timer); return timer; } });
+  try {
+    const { subagent_id: id } = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "x" }));
+    const polls = () => timers.filter((timer) => timer.ms === 2_000);
+    assert.equal(polls().length, 1, "polled while it runs");
+    up = false; // the backend stopped (or never came up) with the subagent running
+    clock += 6 * 60_000;
+    const tick = async () => { const timer = polls().at(-1); timers.splice(timers.indexOf(timer), 1); timer.callback(); await new Promise((resolve) => setImmediate(resolve)); };
+    await tick();
+    assert.equal(w.service.runs().find((run) => run.subagent_id === id).state, "timed_out", "the time limit holds without AO");
+    assert.equal(polls().length, 0, "nothing left to poll: no timer is set again");
+  } finally { w.cleanup(); }
+});
+
+test("a subagent whose AO session ended mid-turn fails at once instead of running until its time limit", async () => {
+  const w = world({ settings: { timeoutMinutes: 240 } });
+  try {
+    const { subagent_id: id } = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "x" }));
+    // Killed in AO (or its agent died): AO reports the session exited while the turn it left still reads "running".
+    w.sessions.set(id, { status: "terminated", exited: true, turnState: "running", approvals: [] });
+    const result = parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 }));
+    assert.equal(result.state, "failed");
+    assert.match(result.error, /session ended/);
+  } finally { w.cleanup(); }
+});
+
+test("the app's chat tools and subagents read the safety rules of the workflow running now", () => {
+  // Both are created once, inside the first backend start, and outlive it. A closure over that
+  // start's `const agentOrchestratorWorkflow` (declared further down) threw "Cannot access before
+  // initialization" for good when that start failed before reaching it (AO not starting), and
+  // otherwise kept a disposed backend's rules after every backend restart.
+  const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const once = main.slice(main.indexOf("    if (!subagentsService) {"), main.indexOf("    const createCodingToolsAppsHost"));
+  assert.ok(once.includes("createChatAgentTools({") && once.includes("createSubagents({"));
+  assert.doesNotMatch(once, /\bagentOrchestratorWorkflow\b/);
+  assert.match(once, /routineCommand: \(command\) => missionWorkflowRuntime\?\.routineCommand\?\.\(command\) \?\? null/);
+  assert.match(once, /blockedCommand: \(text\) => missionWorkflowRuntime\?\.blockedRequest\?\.\(text\) \?\? true/);
+});
+
+test("starts made at the same moment cannot pass the per-chat or running-at-once limit together", async () => {
+  const w = world({ settings: { maxConcurrent: 2, maxPerChat: 1 } });
+  try {
+    // A chat agent calls tools in parallel; AO takes a moment to create each session.
+    const spawn = w.harness.spawn;
+    w.harness.spawn = async (input) => { await new Promise((resolve) => setTimeout(resolve, 20)); return spawn(input); };
+    const chat = await Promise.all(["one", "two", "three"].map((task) => w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task })));
+    assert.equal(chat.filter((result) => !result.isError).length, 1, "one per chat");
+    assert.match(chat.find((result) => result.isError).content[0].text, /limit per chat/);
+    const others = await Promise.all(["chat-2", "chat-3", "chat-4"].map((parent) => w.service.call(parent, "ws-1", "subagent_start", { agent: "explorer", task: "x" })));
+    assert.equal(others.filter((result) => !result.isError).length, 1, "two running at once in all");
+    assert.match(others.find((result) => result.isError).content[0].text, /2 subagents are already running/);
+    assert.equal(w.spawned.length, 2);
+    // A start that failed gives its place back.
+    w.harness.spawn = async () => { throw new Error("AO refused"); };
+    await w.service.call("chat-1", "ws-1", "subagent_stop", { subagent_id: "sub-1" });
+    assert.match((await w.service.call("chat-5", "ws-1", "subagent_start", { agent: "explorer", task: "y" })).content[0].text, /AO refused/);
+    w.harness.spawn = spawn;
+    assert.equal(parse(await w.service.call("chat-6", "ws-1", "subagent_start", { agent: "explorer", task: "z" })).state, "starting");
+  } finally { w.cleanup(); }
 });

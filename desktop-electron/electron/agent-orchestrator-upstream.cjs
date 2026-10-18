@@ -283,6 +283,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       socket.once("error", error => settle(error?.code === "ECONNREFUSED"));
     });
   }
+  // continuable() checks in flight, by session (see there).
+  const continuing = new Map();
   /**
    * The newest items of a session's conversation. AO counts messages and tool activities alike,
    * and a tool's output can be tens of KB (an MCP browser tool's page dumps), so 100 items reached
@@ -777,10 +779,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           needsInput: false, exited: false, answer: "", liveOutput: utf8Prefix(liveOutput, 4096), timeline,
         };
       }
-      // When the turn last showed any sign of life (a message, a tool step, a retry notice): a turn
-      // whose agent hung (a model request that never returns) keeps "running" with nothing new.
-      const stamps = [turn?.updatedAt, turn?.startedAt, turn?.createdAt,
-        ...(Array.isArray(conversation?.activities) ? conversation.activities : []).filter(item => item.turnId === turn?.id).map(item => item.updatedAt || item.createdAt),
+      // When the turn last showed any sign of life (a message, a tool step): a turn whose agent hung
+      // (a model request that never returns) keeps "running" with nothing new. A provider retry
+      // notice ("Retrying Claude, attempt 7 of 10") is not one: a turn stuck on 503s posts one every
+      // few seconds and does nothing else, and counting them hid the hang from chat_steer. Nor is
+      // the turn's own updatedAt, which AO may touch with any activity, retries included.
+      const retryNotice = item => item.activityKind === "system" && item.detail?.event === "provider.failure";
+      const stamps = [turn?.startedAt, turn?.createdAt,
+        ...(Array.isArray(conversation?.activities) ? conversation.activities : []).filter(item => item.turnId === turn?.id && !retryNotice(item))
+          .map(item => item.updatedAt || item.createdAt),
         ...(Array.isArray(conversation?.messages) ? conversation.messages : []).filter(item => item.turnId === turn?.id).map(item => item.updatedAt || item.createdAt)]
         .map(value => Date.parse(value ?? "")).filter(Number.isFinite);
       return {
@@ -797,22 +804,30 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
      * A follow-up then continues it instead of starting a new session and worktree.
      */
     async continuable(id) {
-      const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`).catch(() => null);
-      const status = record?.session?.status;
-      if (!record?.session || record.session.mode === "tui" || record.session.isTerminated || ["terminated", "killed", "errored"].includes(status)) return false;
-      if (status === "exited") {
-        // An agent released while idle (exitAgent) keeps its session, worktree and conversation:
-        // bring it back (a few seconds) rather than start over and replay the whole chat.
-        // AO holds a chat's tool servers only while its daemon runs: one resumed after a restart
-        // came back without the app's tools. Fresh ones for the session go with the resume.
-        const renewed = await Promise.resolve().then(() => agentTools?.renew?.(sessionId(id))).catch(() => null);
-        const resume = body => internalApi("POST", `/api/v1/sessions/${sessionId(id)}/resume-agent`, body).catch(() => null);
-        let resumed = await resume(renewed?.servers?.length ? { mcpServers: renewed.servers } : {});
-        // An AO from before resume took servers refuses the field; resume as before then.
-        if (resumed?.ok !== true && renewed?.servers?.length) resumed = await resume({});
-        if (resumed?.ok !== true) return false;
-      }
-      return !(await chatHostGone(id));
+      // One check per session at a time: reopening a chat pre-warms it (chat_prewarm) and a message
+      // sent right after asks again while a released agent is still being resumed. The second
+      // check resumed it again (AO refuses that) or read its old chat host as gone, and the message
+      // started a fresh session beside the agent coming back. Callers share the first check.
+      const key = sessionId(id);
+      if (!continuing.has(key)) continuing.set(key, (async () => {
+        const record = await internalApi("GET", `/api/v1/sessions/${key}`).catch(() => null);
+        const status = record?.session?.status;
+        if (!record?.session || record.session.mode === "tui" || record.session.isTerminated || ["terminated", "killed", "errored"].includes(status)) return false;
+        if (status === "exited") {
+          // An agent released while idle (exitAgent) keeps its session, worktree and conversation:
+          // bring it back (a few seconds) rather than start over and replay the whole chat.
+          // AO holds a chat's tool servers only while its daemon runs: one resumed after a restart
+          // came back without the app's tools. Fresh ones for the session go with the resume.
+          const renewed = await Promise.resolve().then(() => agentTools?.renew?.(key)).catch(() => null);
+          const resume = body => internalApi("POST", `/api/v1/sessions/${key}/resume-agent`, body).catch(() => null);
+          let resumed = await resume(renewed?.servers?.length ? { mcpServers: renewed.servers } : {});
+          // An AO from before resume took servers refuses the field; resume as before then.
+          if (resumed?.ok !== true && renewed?.servers?.length) resumed = await resume({});
+          if (resumed?.ok !== true) return false;
+        }
+        return !(await chatHostGone(key));
+      })().finally(() => continuing.delete(key)));
+      return continuing.get(key);
     },
     /**
      * Stops a session's agent (its chat host and model process) but keeps the session, worktree and
