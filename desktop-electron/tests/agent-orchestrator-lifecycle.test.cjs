@@ -778,6 +778,36 @@ test("a chat started in the background whose agent failed to come up is resumed 
   } finally { await h.controller.stop(); }
 });
 
+test("a failed background start read by two observers at once is resumed once and fails neither", async () => {
+  // The run loop and the chat's activity poll both observe a working card, about once a second each.
+  let resumes = 0, resumed = false, release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const h = createHarness({
+    getWorkspaces: async () => [], missionCall: async () => ({ ok: true }),
+    workspaceBoard: { bind: async () => ({ projectId: "project-fixture" }) },
+    api: async (endpoint) => {
+      if (/^\/api\/v1\/sessions\/[^/]+$/.test(endpoint.pathname)) {
+        return { session: { id: "s1", mode: "chat", status: "spawning", provisionState: resumed ? "provisioning" : "failed",
+          provisionError: "persistent ACP host did not start: deadline exceeded" } };
+      }
+      if (endpoint.pathname.endsWith("/conversation")) return { turns: [{ id: "t1", state: "queued" }], messages: [], activities: [] };
+      if (endpoint.pathname.endsWith("/resume-agent")) { resumes += 1; await gate; resumed = true; return { ok: true }; }
+    },
+  });
+  try {
+    await h.controller.start();
+    const first = h.controller.harness.observe("s1");
+    const second = h.controller.harness.observe("s1");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    release();
+    const [one, two] = await Promise.all([first, second]);
+    assert.equal(resumes, 1);
+    assert.equal(one.turnState, "queued");
+    assert.equal(two.turnState, "queued", "a read from before the resume answered is not the resumed start failing again");
+    assert.equal((await h.controller.harness.observe("s1")).turnState, "queued");
+  } finally { await h.controller.stop(); }
+});
+
 test("stopping a chat whose agent is still starting cancels the start, so its queued prompt never runs unseen", async () => {
   const posted = [];
   let provisionState = "provisioning";
