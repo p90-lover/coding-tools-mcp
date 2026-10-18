@@ -62,6 +62,13 @@ if (target === "--win" && !env.CSC_LINK && !env.AZURE_TRUSTED_SIGNING_ENDPOINT) 
   console.warn("[package] Windows build is unsigned; antivirus tools may quarantine Coding Tools.exe.");
 }
 
+// Reused build resources must match this launcher before any distributable is produced.
+validateRuntimeBundle(path.join(root, "build", "runtime"), {
+  version: launcherManifest.version,
+  platform: process.platform,
+  arch: process.arch,
+});
+
 const preservation = createPreservationSession({
   repositoryRoot,
   label: `electron-package-${target.slice(2)}`,

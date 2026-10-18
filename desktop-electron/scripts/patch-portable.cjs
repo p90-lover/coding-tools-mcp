@@ -7,14 +7,16 @@
 //   node scripts/patch-portable.cjs --target "G:\Apps\Coding Tools" --from <win-unpacked>
 //
 // --build packages only the unpacked app (electron-builder --dir: no installer, no zip) from
-// this checkout; it needs one full `bun run package:win` first for the AO, runtime and package
-// resources it reuses. If the app is running from the target, the patch applies once it closes.
+// this checkout; it refreshes the versioned runtime and package resources, and needs the AO
+// and other native components from one full `bun run package:win` first. If the app is running
+// from the target, the patch applies once it closes.
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const { parseArgs } = require("node:util");
 const { hashFile, isFrameworkFile, STAGE_DIRECTORY, INSTALLED_MANIFEST } = require("../electron/app-update.cjs");
 const { listFiles } = require("./package-app-update.cjs");
+const { validateRuntimeBundle } = require("../electron/runtime-install.cjs");
 
 const root = path.resolve(__dirname, "..");
 const HASH_CACHE = "hash-cache.json";
@@ -35,6 +37,8 @@ function buildUnpacked() {
     if (result.error || result.status !== 0) throw result.error || new Error(`${command} ${args.join(" ")} exited ${result.status}`);
   };
   run("bun", ["run", "build"]);
+  run("bun", ["run", "build:runtime"]);
+  run("bun", ["run", "build:package-resources"]);
   const cli = require.resolve("electron-builder/out/cli/cli.js", { paths: [root] });
   run(process.execPath, [cli, "--win", "--dir", "--publish", "never", `--config.directories.output=${output}`]);
   return path.join(output, "win-unpacked");
@@ -88,6 +92,10 @@ async function main() {
   const from = values.build ? buildUnpacked() : path.resolve(values.from);
   if (!fs.existsSync(path.join(from, "resources", "app.asar"))) throw new Error(`${from} is not an unpacked build`);
 
+  const version = readJson(path.join(from, "resources", "coding-tools", "package-manifest.json"))?.product?.version;
+  if (typeof version !== "string" || !version) throw new Error("The source build has no package version; rebuild package resources first");
+  validateRuntimeBundle(path.join(from, "resources", "runtime"), { version, platform: "win32", arch: "x64" });
+
   const updateRoot = path.join(target, STAGE_DIRECTORY);
   fs.mkdirSync(updateRoot, { recursive: true });
   const cachePath = path.join(updateRoot, HASH_CACHE);
@@ -110,7 +118,6 @@ async function main() {
     .filter((rel) => typeof rel === "string" && !listed.has(rel.toLowerCase()) && !isFrameworkFile(rel)
       && fs.existsSync(path.join(target, ...rel.split("/"))));
   fs.writeFileSync(cachePath, `${JSON.stringify(cache)}\n`);
-  const version = readJson(path.join(from, "resources", "coding-tools", "package-manifest.json"))?.product?.version || "local";
   console.log(`patch ${version}: ${changed.length} file(s) changed, ${obsolete.length} removed`);
   for (const rel of changed.slice(0, 20)) console.log(`  ${rel}`);
   if (changed.length > 20) console.log(`  ... and ${changed.length - 20} more`);
