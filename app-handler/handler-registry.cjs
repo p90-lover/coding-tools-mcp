@@ -5,7 +5,7 @@ const path = require("node:path");
 
 const MODULES_ROOT = __dirname;
 const FOREIGN_SLOTS = Object.freeze(["cpa"]);
-const ACTIVE_MODULE_IDS = new Set(["cpa", "agent-orchestrator", "antigravity-cli"]);
+const ACTIVE_MODULE_IDS = new Set(["cpa", "agent-orchestrator", "antigravity-cli", "reg-machine"]);
 const CORE_OPERATIONS = Object.freeze([
   "inspect",
   "install",

@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Encrypted Authenticator</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <p class="eyebrow">Local encrypted TOTP vault</p>
+      <h1>Authenticator</h1>
+      <p class="subcopy">Your secrets stay encrypted on disk and unlock only after username/password login.</p>
+    </section>
+
+    <section id="auth-panel" class="panel">
+      <div class="panel-heading">
+        <h2 id="auth-title">Unlock vault</h2>
+        <p id="auth-help">Enter your username and password.</p>
+      </div>
+      <form id="auth-form" class="stack">
+        <label>
+          Username
+          <input id="username" autocomplete="username" spellcheck="false" required minlength="3" maxlength="64">
+        </label>
+        <label>
+          Password
+          <input id="password" type="password" autocomplete="current-password" required minlength="12" maxlength="256">
+        </label>
+        <button id="auth-button" type="submit">Unlock</button>
+      </form>
+      <p id="auth-message" class="message" role="status"></p>
+    </section>
+
+    <section id="vault-panel" class="panel hidden">
+      <div class="panel-heading split">
+        <div>
+          <h2>Codes</h2>
+          <p>Codes refresh automatically. Secrets are never displayed after saving.</p>
+        </div>
+        <button id="logout-button" class="secondary" type="button">Lock</button>
+      </div>
+
+      <form id="entry-form" class="entry-form">
+        <label>
+          Issuer
+          <input id="issuer" maxlength="80" placeholder="Steam, GitHub, email">
+        </label>
+        <label>
+          Account label
+          <input id="label" maxlength="80" placeholder="name@example.com">
+        </label>
+        <label class="wide">
+          Base32 secret or otpauth URL
+          <input id="secret" autocomplete="off" spellcheck="false" required placeholder="JBSWY3DPEHPK3PXP">
+        </label>
+        <button type="submit">Add code</button>
+      </form>
+      <p class="message">Recovery codes can be added later from each saved entry.</p>
+
+      <div id="entries" class="entries"></div>
+      <p id="vault-message" class="message" role="status"></p>
+
+      <details class="danger-zone">
+        <summary>Change vault login</summary>
+        <form id="password-form" class="stack">
+          <label>
+            Current username
+            <input id="current-username" autocomplete="username" minlength="3" maxlength="64">
+          </label>
+          <label>
+            Current password
+            <input id="current-password" type="password" autocomplete="current-password" minlength="12" maxlength="256">
+          </label>
+          <label>
+            New username
+            <input id="new-username" autocomplete="username" minlength="3" maxlength="64">
+          </label>
+          <label>
+            New password
+            <input id="new-password" type="password" autocomplete="new-password" minlength="12" maxlength="256">
+          </label>
+          <button type="submit" class="secondary">Re-encrypt vault</button>
+        </form>
+      </details>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

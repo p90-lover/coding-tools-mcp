@@ -7,6 +7,7 @@ const MODULE_IDS = Object.freeze([
   "cpa",
   "agent-orchestrator",
   "antigravity-cli",
+  "reg-machine",
 ]);
 
 const RETIRED_MODULE_IDS = new Set(["paseo", "codex-router", "commandcode-proxy", "anneal"]);

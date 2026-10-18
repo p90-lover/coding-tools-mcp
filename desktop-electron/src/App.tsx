@@ -17,6 +17,7 @@ import { NetworkProxySurface } from "./features/NetworkProxySurface";
 import { ProxyGatewaySurface } from "./features/ProxyGatewaySurface";
 import { ExternalServicesSurface } from "./features/ExternalServicesSurface";
 import { OriginalUiSurface } from "./features/OriginalUiSurface";
+import { RegisterSurface } from "./features/RegisterSurface";
 import { WorkspacePanel } from "./features/WorkspacePanel";
 import { WorkspaceAuthPanel } from "./features/WorkspaceAuthPanel";
 import { NativeCodexPanel } from "./features/NativeCodexPanel";
@@ -773,6 +774,7 @@ function LauncherShell({
                 />
               </SidebarGroup>
               <SidebarGroup label={copy.runtime}>
+                <SidebarItem active={surface === "register"} icon="setup" label="Register" onClick={() => navigateSurface("register")} />
                 <SidebarItem active={surface === "agent-orchestrator"} icon="orchestrator" label="Chat" onClick={() => navigateSurface("agent-orchestrator")} />
                 <SidebarItem active={surface === "agent-orchestrator-teams"} icon="orchestrator" label="Orchestrator Team" onClick={() => navigateSurface("agent-orchestrator-teams")} />
                 <SidebarItem active={surface === "subagents"} icon="orchestrator" label="Subagents" onClick={() => navigateSurface("subagents")} />
@@ -935,6 +937,7 @@ function LauncherShell({
             {keepAlive("native-codex", () => (
               <ContentSurface title={copy.nativeCodex}><NativeCodexPanel copy={copy} language={language} setError={setError} /></ContentSurface>
             ))}
+            {keepAlive("register", () => <RegisterSurface />)}
             {keepAlive("oauth", () => (
               <OriginalUiSurface initialSection="auth-files" language={language} setError={setError} toolId="cpa" />
             ))}

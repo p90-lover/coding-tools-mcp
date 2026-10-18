@@ -23,6 +23,7 @@ const {
   webFrameMain,
   powerMonitor,
   powerSaveBlocker,
+  protocol,
 } = require("electron");
 const { BrowserHost, navigationErrorForLog, writeRestartMarker } = require("./browser-host.cjs");
 const { createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatgpt-desktop.cjs");
@@ -67,6 +68,10 @@ const { createManagedExternalServicesController, resolveManagedProxyEnvironment 
 const { createManagedBootstrap } = require("./managed-bootstrap.cjs");
 const { createUpstreamToolController } = require("./upstream-tools.cjs");
 const { createOriginalUiController } = require("./original-ui.cjs");
+const { createRegMachineService } = require("./reg-machine-managed.cjs");
+protocol.registerSchemesAsPrivileged([{ scheme: "coding-tools-register", privileges: {
+  standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true,
+} }]);
 const { installCpaPanelSession } = require("./cpa-panel-session.cjs");
 const { resolveAppHandlerRoot } = require("./app-handler-paths.cjs");
 const { createBackendBundles } = require("./backend-bundle.cjs");
@@ -175,6 +180,7 @@ let externalServicesController = null;
 let managedBootstrapController = null;
 let upstreamToolController = null;
 let originalUiController = null;
+let regMachineService = null;
 let appsHost = null;
 let agentOrchestratorUpstream = null;
 /** Stops the AO change push wired up with the current upstream module. */
@@ -2483,6 +2489,7 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
       });
     }
     managedBootstrapController?.dispose();
+    await regMachineService?.stop();
     originalUiController?.dispose();
     externalServicesController?.dispose({ keepPersistent: keepBridge });
     upstreamToolController?.dispose();
@@ -2543,6 +2550,13 @@ async function start() {
     app.quit();
     return;
   }
+  regMachineService = createRegMachineService({
+    moduleRoot: path.join(resolveAppHandlerRoot(), "reg-machine"),
+    runtimeRoot: app.isPackaged ? path.join(process.resourcesPath, "reg-machine")
+      : process.env.CODING_TOOLS_REGISTER_RUNTIME_ROOT || path.join(SOURCE_ROOT, "aiTemp", "reg-machine-build", "resources"),
+    dataRoot: path.join(app.getPath("userData"), "register"),
+  });
+  protocol.handle("coding-tools-register", (request) => regMachineService.handleRequest(request));
   app.on("second-instance", () => {
     // A window whose renderer died is reloaded before it is shown, so launching again recovers it.
     if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.isCrashed()) {
@@ -3112,6 +3126,7 @@ async function start() {
         agentOrchestrator: (operation, args) => agentOrchestratorWorkflow.call(operation, args),
         agentOrchestratorUpstream: (operation, args) => agentOrchestratorUpstream.call(operation, args),
         antigravityCli: antigravityCall,
+        regMachine: (operation, args) => regMachineService.call(operation, args),
         start: (id) => externalServicesController.start(id),
         stop: (id) => externalServicesController.stop(id),
         restart: (id) => externalServicesController.restart(id),

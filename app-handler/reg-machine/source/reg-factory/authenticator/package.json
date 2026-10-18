@@ -1,0 +1,16 @@
+{
+  "name": "local-encrypted-authenticator",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local encrypted TOTP authenticator with username/password login.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "check": "node --check src/server.js && node --check public/app.js",
+    "test": "node tests/smoke.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "UNLICENSED"
+}

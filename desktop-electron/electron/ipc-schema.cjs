@@ -469,7 +469,7 @@ const appsCallRequest = Object.freeze({
   properties: Object.freeze({
     moduleId: Object.freeze({
       type: "string",
-      enum: Object.freeze(["cpa", "agent-orchestrator", "antigravity-cli", ...RETIRED_APP_MODULE_IDS]),
+      enum: Object.freeze(["cpa", "agent-orchestrator", "antigravity-cli", "reg-machine", ...RETIRED_APP_MODULE_IDS]),
     }),
     operation: Object.freeze({ type: "string", minLength: 1, maxLength: 64 }),
     requestId: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),

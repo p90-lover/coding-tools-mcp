@@ -1,0 +1,1010 @@
+[
+  {
+    "name": "accounts_list_accounts",
+    "method": "GET",
+    "path": "/api/accounts",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "accounts_create_account",
+    "method": "POST",
+    "path": "/api/accounts",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "accounts_get_stats",
+    "method": "GET",
+    "path": "/api/accounts/stats",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "accounts_export_accounts",
+    "method": "GET",
+    "path": "/api/accounts/export",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "accounts_export_accounts_table_csv",
+    "method": "POST",
+    "path": "/api/accounts/export/table-csv",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "accounts_export_accounts_json",
+    "method": "POST",
+    "path": "/api/accounts/export/json",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "accounts_export_accounts_csv",
+    "method": "POST",
+    "path": "/api/accounts/export/csv",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "accounts_export_accounts_sub2api",
+    "method": "POST",
+    "path": "/api/accounts/export/sub2api",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "accounts_export_accounts_cpa",
+    "method": "POST",
+    "path": "/api/accounts/export/cpa",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "accounts_export_accounts_kiro_go",
+    "method": "POST",
+    "path": "/api/accounts/export/kiro-go",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "accounts_export_accounts_any2api",
+    "method": "POST",
+    "path": "/api/accounts/export/any2api",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "accounts_import_accounts",
+    "method": "POST",
+    "path": "/api/accounts/import",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "accounts_get_account",
+    "method": "GET",
+    "path": "/api/accounts/{account_id}",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "accounts_update_account",
+    "method": "PATCH",
+    "path": "/api/accounts/{account_id}",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "accounts_delete_account",
+    "method": "DELETE",
+    "path": "/api/accounts/{account_id}",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "account_checks_check_all_accounts",
+    "method": "POST",
+    "path": "/api/accounts/check-all",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "account_checks_check_account",
+    "method": "POST",
+    "path": "/api/accounts/{account_id}/check",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "actions_list_actions",
+    "method": "GET",
+    "path": "/api/actions/{platform}",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "actions_list_capabilities",
+    "method": "GET",
+    "path": "/api/actions/{platform}/capabilities",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "actions_execute_bulk_recovery",
+    "method": "POST",
+    "path": "/api/actions/{platform}/bulk/complete_registration",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "actions_execute_bulk_refresh",
+    "method": "POST",
+    "path": "/api/actions/{platform}/bulk/refresh_token",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "actions_execute_action",
+    "method": "POST",
+    "path": "/api/actions/{platform}/{account_id}/{action_id}",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "auth_auth_check",
+    "method": "GET",
+    "path": "/api/auth/check",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "auth_auth_login",
+    "method": "POST",
+    "path": "/api/auth/login",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "authenticator_get_entries",
+    "method": "GET",
+    "path": "/api/authenticator/entries",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "config_get_config",
+    "method": "GET",
+    "path": "/api/config",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "config_get_config_options",
+    "method": "GET",
+    "path": "/api/config/options",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "config_update_config",
+    "method": "PUT",
+    "path": "/api/config",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "health_health",
+    "method": "GET",
+    "path": "/api/health",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "health_ready",
+    "method": "GET",
+    "path": "/api/ready",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "lifecycle_trigger_validity_check",
+    "method": "POST",
+    "path": "/api/lifecycle/check",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "lifecycle_trigger_token_refresh",
+    "method": "POST",
+    "path": "/api/lifecycle/refresh",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "lifecycle_trigger_expiry_warning",
+    "method": "POST",
+    "path": "/api/lifecycle/warn",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "lifecycle_lifecycle_status",
+    "method": "GET",
+    "path": "/api/lifecycle/status",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "platforms_list_platforms",
+    "method": "GET",
+    "path": "/api/platforms",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "platforms_get_desktop_state",
+    "method": "GET",
+    "path": "/api/platforms/{platform}/desktop-state",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "platform_capabilities_update_platform_capabilities",
+    "method": "PUT",
+    "path": "/api/platforms/{name}/capabilities",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "platform_capabilities_reset_platform_capabilities",
+    "method": "DELETE",
+    "path": "/api/platforms/{name}/capabilities",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "provider_definitions_list_provider_definitions",
+    "method": "GET",
+    "path": "/api/provider-definitions",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "provider_definitions_list_provider_drivers",
+    "method": "GET",
+    "path": "/api/provider-definitions/drivers",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "provider_definitions_save_provider_definition",
+    "method": "PUT",
+    "path": "/api/provider-definitions",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "provider_definitions_create_provider_definition",
+    "method": "POST",
+    "path": "/api/provider-definitions",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "provider_definitions_delete_provider_definition",
+    "method": "DELETE",
+    "path": "/api/provider-definitions/{definition_id}",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "provider_settings_list_provider_settings",
+    "method": "GET",
+    "path": "/api/provider-settings",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "provider_settings_save_provider_setting",
+    "method": "PUT",
+    "path": "/api/provider-settings",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "provider_settings_create_provider_setting",
+    "method": "POST",
+    "path": "/api/provider-settings",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "provider_settings_delete_provider_setting",
+    "method": "DELETE",
+    "path": "/api/provider-settings/{setting_id}",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "provider_settings_test_provider",
+    "method": "POST",
+    "path": "/api/provider-settings/test",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "proxies_list_proxies",
+    "method": "GET",
+    "path": "/api/proxies",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "proxies_create_proxy",
+    "method": "POST",
+    "path": "/api/proxies",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "proxies_bulk_create_proxies",
+    "method": "POST",
+    "path": "/api/proxies/bulk",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "proxies_delete_proxy",
+    "method": "DELETE",
+    "path": "/api/proxies/{proxy_id}",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "proxies_toggle_proxy",
+    "method": "PATCH",
+    "path": "/api/proxies/{proxy_id}/toggle",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "proxies_get_proxy_check_status",
+    "method": "GET",
+    "path": "/api/proxies/check",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "proxies_check_proxies",
+    "method": "POST",
+    "path": "/api/proxies/check",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "sms_herosms_countries",
+    "method": "GET",
+    "path": "/api/sms/herosms/countries",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "sms_herosms_services",
+    "method": "GET",
+    "path": "/api/sms/herosms/services",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "sms_herosms_balance",
+    "method": "POST",
+    "path": "/api/sms/herosms/balance",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "sms_herosms_prices",
+    "method": "POST",
+    "path": "/api/sms/herosms/prices",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "sms_herosms_top_countries",
+    "method": "POST",
+    "path": "/api/sms/herosms/top-countries",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "sms_herosms_best_country",
+    "method": "POST",
+    "path": "/api/sms/herosms/best-country",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "sms_smsbower_countries",
+    "method": "GET",
+    "path": "/api/sms/smsbower/countries",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "sms_smsbower_services",
+    "method": "GET",
+    "path": "/api/sms/smsbower/services",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "sms_smsbower_balance",
+    "method": "POST",
+    "path": "/api/sms/smsbower/balance",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "sms_smsbower_prices",
+    "method": "POST",
+    "path": "/api/sms/smsbower/prices",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "stats_stats_overview",
+    "method": "GET",
+    "path": "/api/stats/overview",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "stats_stats_by_platform",
+    "method": "GET",
+    "path": "/api/stats/by-platform",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "stats_stats_by_day",
+    "method": "GET",
+    "path": "/api/stats/by-day",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "stats_stats_by_proxy",
+    "method": "GET",
+    "path": "/api/stats/by-proxy",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "stats_stats_errors",
+    "method": "GET",
+    "path": "/api/stats/errors",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "system_solver_status",
+    "method": "GET",
+    "path": "/api/solver/status",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "system_solver_restart",
+    "method": "POST",
+    "path": "/api/solver/restart",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "system_get_version",
+    "method": "GET",
+    "path": "/api/version",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "tasks_list_tasks",
+    "method": "GET",
+    "path": "/api/tasks",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "tasks_get_verification_hold",
+    "method": "GET",
+    "path": "/api/tasks/verification-hold",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "tasks_get_task",
+    "method": "GET",
+    "path": "/api/tasks/{task_id}",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "tasks_list_task_events",
+    "method": "GET",
+    "path": "/api/tasks/{task_id}/events",
+    "readOnly": true,
+    "stream": true
+  },
+  {
+    "name": "task_commands_create_register_task",
+    "method": "POST",
+    "path": "/api/tasks/register",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "task_commands_cancel_task",
+    "method": "POST",
+    "path": "/api/tasks/{task_id}/cancel",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "task_commands_stream_logs",
+    "method": "GET",
+    "path": "/api/tasks/{task_id}/logs/stream",
+    "readOnly": true,
+    "stream": true
+  },
+  {
+    "name": "task_logs_list_task_logs",
+    "method": "GET",
+    "path": "/api/tasks/logs",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_list_users",
+    "method": "GET",
+    "path": "/portal/api/admin/users",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_create_user",
+    "method": "POST",
+    "path": "/portal/api/admin/users",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_update_user",
+    "method": "PATCH",
+    "path": "/portal/api/admin/users/{user_id}",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_get_user_platform_access",
+    "method": "GET",
+    "path": "/portal/api/admin/users/{user_id}/platform-access",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_set_user_platform_access",
+    "method": "POST",
+    "path": "/portal/api/admin/users/{user_id}/platform-access",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_remove_user_platform_access",
+    "method": "DELETE",
+    "path": "/portal/api/admin/users/{user_id}/platform-access/{platform_code}",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_list_roles",
+    "method": "GET",
+    "path": "/portal/api/admin/roles",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_list_permissions",
+    "method": "GET",
+    "path": "/portal/api/admin/permissions",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_list_products",
+    "method": "GET",
+    "path": "/portal/api/admin/products",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_list_platforms",
+    "method": "GET",
+    "path": "/portal/api/platforms",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_get_desktop_state",
+    "method": "GET",
+    "path": "/portal/api/platforms/{platform}/desktop-state",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_get_config",
+    "method": "GET",
+    "path": "/portal/api/config",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_get_config_options",
+    "method": "GET",
+    "path": "/portal/api/config/options",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_update_config",
+    "method": "PUT",
+    "path": "/portal/api/config",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_create_register_task",
+    "method": "POST",
+    "path": "/portal/api/tasks/register",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_list_task_logs",
+    "method": "GET",
+    "path": "/portal/api/tasks/logs",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_list_tasks",
+    "method": "GET",
+    "path": "/portal/api/tasks",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_get_task",
+    "method": "GET",
+    "path": "/portal/api/tasks/{task_id}",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_list_task_events",
+    "method": "GET",
+    "path": "/portal/api/tasks/{task_id}/events",
+    "readOnly": true,
+    "stream": true
+  },
+  {
+    "name": "portal_admin_stream_task_events",
+    "method": "GET",
+    "path": "/portal/api/tasks/{task_id}/logs/stream",
+    "readOnly": true,
+    "stream": true
+  },
+  {
+    "name": "portal_admin_cancel_task",
+    "method": "POST",
+    "path": "/portal/api/tasks/{task_id}/cancel",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_list_accounts",
+    "method": "GET",
+    "path": "/portal/api/accounts",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_create_account",
+    "method": "POST",
+    "path": "/portal/api/accounts",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_get_account_stats",
+    "method": "GET",
+    "path": "/portal/api/accounts/stats",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_import_accounts",
+    "method": "POST",
+    "path": "/portal/api/accounts/import",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_export_accounts",
+    "method": "GET",
+    "path": "/portal/api/accounts/export",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_export_accounts_json",
+    "method": "POST",
+    "path": "/portal/api/accounts/export/json",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_export_accounts_csv",
+    "method": "POST",
+    "path": "/portal/api/accounts/export/csv",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_export_accounts_sub2api",
+    "method": "POST",
+    "path": "/portal/api/accounts/export/sub2api",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_export_accounts_cpa",
+    "method": "POST",
+    "path": "/portal/api/accounts/export/cpa",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_get_account",
+    "method": "GET",
+    "path": "/portal/api/accounts/{account_id}",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_update_account",
+    "method": "PATCH",
+    "path": "/portal/api/accounts/{account_id}",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_delete_account",
+    "method": "DELETE",
+    "path": "/portal/api/accounts/{account_id}",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_list_actions",
+    "method": "GET",
+    "path": "/portal/api/actions/{platform}",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_execute_action",
+    "method": "POST",
+    "path": "/portal/api/actions/{platform}/{account_id}/{action_id}",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_list_proxies",
+    "method": "GET",
+    "path": "/portal/api/proxies",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_create_proxy",
+    "method": "POST",
+    "path": "/portal/api/proxies",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_bulk_create_proxies",
+    "method": "POST",
+    "path": "/portal/api/proxies/bulk",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_delete_proxy",
+    "method": "DELETE",
+    "path": "/portal/api/proxies/{proxy_id}",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_toggle_proxy",
+    "method": "PATCH",
+    "path": "/portal/api/proxies/{proxy_id}/toggle",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_check_proxies",
+    "method": "POST",
+    "path": "/portal/api/proxies/check",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_solver_status",
+    "method": "GET",
+    "path": "/portal/api/solver/status",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_admin_solver_restart",
+    "method": "POST",
+    "path": "/portal/api/solver/restart",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_app_api_list_platforms",
+    "method": "GET",
+    "path": "/portal/api/app/platforms",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_app_api_get_config_options",
+    "method": "GET",
+    "path": "/portal/api/app/config/options",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_app_api_list_products",
+    "method": "GET",
+    "path": "/portal/api/app/products",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_app_api_create_register_task",
+    "method": "POST",
+    "path": "/portal/api/app/tasks/register",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_app_api_list_tasks",
+    "method": "GET",
+    "path": "/portal/api/app/tasks",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_app_api_get_task",
+    "method": "GET",
+    "path": "/portal/api/app/tasks/{task_id}",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_app_api_list_task_events",
+    "method": "GET",
+    "path": "/portal/api/app/tasks/{task_id}/events",
+    "readOnly": true,
+    "stream": true
+  },
+  {
+    "name": "portal_app_api_stream_task_events",
+    "method": "GET",
+    "path": "/portal/api/app/tasks/{task_id}/logs/stream",
+    "readOnly": true,
+    "stream": true
+  },
+  {
+    "name": "portal_app_api_list_orders",
+    "method": "GET",
+    "path": "/portal/api/app/orders",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_app_api_create_order",
+    "method": "POST",
+    "path": "/portal/api/app/orders",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_app_api_get_order",
+    "method": "GET",
+    "path": "/portal/api/app/orders/{order_no}",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_app_api_submit_payment",
+    "method": "POST",
+    "path": "/portal/api/app/payments/{order_no}/submit",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_app_api_list_subscriptions",
+    "method": "GET",
+    "path": "/portal/api/app/subscriptions",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_app_api_get_profile",
+    "method": "GET",
+    "path": "/portal/api/app/profile",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_app_api_update_profile",
+    "method": "PATCH",
+    "path": "/portal/api/app/profile",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_auth_login",
+    "method": "POST",
+    "path": "/portal/api/auth/login",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_auth_refresh",
+    "method": "POST",
+    "path": "/portal/api/auth/refresh",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_auth_logout",
+    "method": "POST",
+    "path": "/portal/api/auth/logout",
+    "readOnly": false,
+    "stream": false
+  },
+  {
+    "name": "portal_auth_me",
+    "method": "GET",
+    "path": "/portal/api/auth/me",
+    "readOnly": true,
+    "stream": false
+  },
+  {
+    "name": "portal_payment_payment_callback",
+    "method": "POST",
+    "path": "/portal/api/payment/callback/{channel_code}",
+    "readOnly": false,
+    "stream": false
+  }
+]

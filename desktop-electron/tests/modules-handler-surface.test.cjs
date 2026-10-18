@@ -26,6 +26,7 @@ const LIFECYCLE = Object.freeze([
 ]);
 
 const EXPECTED_OPS = Object.freeze({
+  "reg-machine": ["inspect", "status", "start", "stop", "restart", "ui-open"],
   "agent-orchestrator": ["inspect", "board", "runs", "update_run"],
   "antigravity-cli": ["inspect", "status", "install", "terminal_open", "terminal_close", "refresh", "sign_in", "sweep", "set_auto"],
   cpa: [
@@ -542,7 +543,7 @@ test("AO apps.call reaches the host while retired IDs fail before dispatch", asy
 
 test("app catalog and registry expose only CPA, AO and the Antigravity CLI tool", () => {
   const host = createCodingToolsAppsHost();
-  assert.deepEqual(host.moduleIds, ["cpa", "agent-orchestrator", "antigravity-cli"]);
+  assert.deepEqual(host.moduleIds, ["cpa", "agent-orchestrator", "antigravity-cli", "reg-machine"]);
   assert.deepEqual(host.list().modules.map((entry) => entry.id), host.moduleIds);
   assert.deepEqual(host.catalog().modules.map((entry) => entry.id), host.moduleIds);
   assert.deepEqual(defaultRegistry.ids().sort(), [...host.moduleIds].sort());

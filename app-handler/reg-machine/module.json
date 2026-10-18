@@ -1,0 +1,12 @@
+{
+  "id": "reg-machine",
+  "name": "Register",
+  "kind": "managed-app",
+  "transport": "in-process",
+  "source": {
+    "strategy": "vendored-local-snapshot",
+    "repository": "lxf746/any-auto-register",
+    "manifest": "app-handler/reg-machine/SOURCE_SNAPSHOT.json"
+  },
+  "note": "Complete original reg-machine UI and APIs, hosted by Coding Tools with an isolated private data directory and owned loopback backend."
+}
