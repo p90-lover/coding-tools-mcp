@@ -53,7 +53,11 @@ test("a command runs under codex sandbox, unelevated, with the worktree and cach
     assert.ok(!args.join(" ").includes("elevated'") || args.includes("windows.sandbox='unelevated'"), "never the elevated mode");
     assert.ok(script.endsWith('echo "a b" && echo second\r\n'), "the command reaches cmd.exe through a script, quotes intact");
     assert.equal(options.cwd, "G:/work/src");
-    assert.deepEqual(Object.keys(options.env).sort(), ["HOME", "PATH"], "the app's credentials and runtime switches stay out");
+    assert.equal(options.env.HOME, "C:/u");
+    assert.equal(options.env.PATH, "C:/bin");
+    for (const name of ["OPENAI_API_KEY", "CODING_TOOLS_TOKEN", "NODE_OPTIONS", "GITHUB_TOKEN"]) {
+      assert.equal(options.env[name], undefined, `${name} stays out of the command's environment`);
+    }
   } finally { cleanup(); }
 });
 

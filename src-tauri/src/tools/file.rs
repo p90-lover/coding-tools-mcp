@@ -982,7 +982,7 @@ fn collect_dir_entries(
             continue;
         }
         let name = item.file_name().to_string_lossy().into_owned();
-        let rel = if display == "." {
+        let rel = if display.is_empty() || display == "." {
             name.clone()
         } else {
             format!("{display}/{name}")

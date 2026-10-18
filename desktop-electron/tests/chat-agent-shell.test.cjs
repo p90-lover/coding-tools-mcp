@@ -2,6 +2,7 @@
 
 const assert = require("node:assert/strict");
 const os = require("node:os");
+const path = require("node:path");
 const test = require("node:test");
 const { agentShellCommands, withAgentShellCommands, utf8Suffix, MAX_OUTPUT_BYTES } = require("../electron/chat-agent-shell.cjs");
 
@@ -204,8 +205,8 @@ test("a TaskOutput report settles a background command; a missing output file re
 
 test("only Claude Code's own task output files are read", () => {
   const { backgroundOutputPath } = require("../electron/chat-agent-shell.cjs");
-  assert.equal(backgroundOutputPath("/tmp/claude-1000/-home-me-app/tasks/b1.output", "b1"), "/tmp/claude-1000/-home-me-app/tasks/b1.output");
-  assert.equal(backgroundOutputPath("/tmp/claude/-p/tasks/b1.output", "b1"), "/tmp/claude/-p/tasks/b1.output");
+  assert.equal(backgroundOutputPath("/tmp/claude-1000/-home-me-app/tasks/b1.output", "b1"), path.resolve("/tmp/claude-1000/-home-me-app/tasks/b1.output"));
+  assert.equal(backgroundOutputPath("/tmp/claude/-p/tasks/b1.output", "b1"), path.resolve("/tmp/claude/-p/tasks/b1.output"));
   assert.equal(backgroundOutputPath("/home/me/.ssh/id_rsa", "b1"), null);
   assert.equal(backgroundOutputPath("/tmp/claude/-p/tasks/b2.output", "b1"), null, "the file must be the announced task's");
   assert.equal(backgroundOutputPath("/tmp/other/tasks/b1.output", "b1"), null);

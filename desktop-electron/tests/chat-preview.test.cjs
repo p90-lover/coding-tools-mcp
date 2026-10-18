@@ -2,7 +2,7 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { PREVIEW_TOOL_DEFS, createChatPreviews, previewTarget } = require("../electron/chat-preview.cjs");
+const { PREVIEW_TOOL_DEFS, createChatPreviews, createNativeChatPreviews, previewTarget } = require("../electron/chat-preview.cjs");
 const { createChatAgentTools, instructionsFor, previewOriginDecision } = require("../electron/chat-agent-tools.cjs");
 
 /** A WebContentsView stand-in: records bounds, protocol commands and the session's handlers. */
@@ -23,6 +23,7 @@ function fakeView({ page = {} } = {}) {
       if (failed) throw new Error(`${failed} (-101) loading '${url}'`);
       this.url = url;
       this.title = page.title ?? "Page";
+      this.emit("dom-ready");
     },
     getURL() { return this.url; },
     getTitle() { return this.title; },
@@ -64,12 +65,13 @@ function fakeView({ page = {} } = {}) {
 function previews({ page, blocked = [4000] } = {}) {
   const views = [];
   const attached = new Set();
+  const placements = new Map();
   const service = createChatPreviews({
     createView: () => { const view = fakeView({ page }); views.push(view); return view; },
-    attachView: (view) => attached.add(view), detachView: (view) => attached.delete(view),
+    attachView: (view, visible) => { attached.add(view); placements.set(view, visible); }, detachView: (view) => attached.delete(view),
     contentSize: () => [1600, 1000], blockedPorts: () => blocked, logger: { warn() {} },
   });
-  return { service, views, attached };
+  return { service, views, attached, placements };
 }
 
 test("a preview opens only http(s) pages on this machine, never the app's own service ports", () => {
@@ -98,8 +100,7 @@ test("the agent opens its page once allowed, and reads, screenshots, clicks and 
   assert.deepEqual(asked, ["http://localhost:5173"]);
   assert.equal(views.length, 1);
   assert.ok(attached.has(views[0]), "the view lives in the window");
-  assert.ok(views[0].bounds.x < -1280 && views[0].bounds.y < -800 && views[0].webContents.emulated,
-    "but above and left of it, with a real viewport, while the pane does not show it: no resize can bring it into view");
+  assert.deepEqual(views[0].bounds, { x: 0, y: 0, width: 1280, height: 800 }, "the background host keeps a real native viewport");
   await service.call("s1", "preview_open", { url: "http://localhost:5173/other" }, { permit });
   assert.deepEqual(asked, ["http://localhost:5173"], "an origin already opened is not asked about again");
 
@@ -116,6 +117,80 @@ test("the agent opens its page once allowed, and reads, screenshots, clicks and 
   assert.ok(views[0].sent.some(([method, params]) => method === "Input.dispatchKeyEvent" && params.key === "Enter" && params.type === "keyDown"));
   assert.match((await service.call("s1", "preview_click", { ref: "x'); alert(1); ('" })).content[0].text, /ref must be/, "a ref is only digits, never script");
   assert.match((await service.call("s1", "preview_press", { key: "F13" })).content[0].text, /Unknown key/);
+});
+
+test("opening and reloading a preview never calls Electron's unsafe renderer emulation API", async () => {
+  const view = fakeView();
+  const emulations = [];
+  view.webContents.enableDeviceEmulation = () => { emulations.push("enable"); };
+  view.webContents.disableDeviceEmulation = () => { emulations.push("disable"); };
+  const service = createChatPreviews({ createView: () => view, logger: { warn() {} } });
+  try {
+    assert.equal((await service.call("s1", "preview_open", { url: "http://localhost:5173/" })).isError, false);
+    view.webContents.emit("render-process-gone", {}, { reason: "crashed" });
+    service.relayout();
+    view.webContents.emit("dom-ready");
+    service.show("s1", { x: 0, y: 0, width: 400, height: 300 });
+    service.hide();
+    assert.deepEqual(emulations, [], "the old native call could terminate the app before its renderer existed");
+  } finally { service.closeAll(); }
+});
+
+test("native background views keep a surface, move into the pane and close with their owner", async () => {
+  const windows = [];
+  const views = [];
+  class Window extends (require("node:events").EventEmitter) {
+    constructor(options) {
+      super(); this.options = options; this.destroyed = false; windows.push(this);
+      this.contentView = {
+        children: [],
+        addChildView(view) {
+          view.parent?.removeChildView(view);
+          this.children.push(view); view.parent = this;
+        },
+        removeChildView(view) { this.children = this.children.filter((item) => item !== view); view.parent = null; },
+      };
+    }
+    isDestroyed() { return this.destroyed; }
+    getContentSize() { return [1600, 1000]; }
+    setIgnoreMouseEvents(value) { this.clickThrough = value; }
+    showInactive() { this.shownInactive = true; }
+    destroy() { this.destroyed = true; this.emit("closed"); }
+  }
+  const main = new Window({});
+  const service = createNativeChatPreviews({
+    BaseWindow: Window, platform: "win32", mainWindow: () => main,
+    WebContentsView: class { constructor() { const view = fakeView(); views.push(view); return view; } },
+    logger: { warn() {} },
+  });
+  try {
+    await service.call("a", "preview_open", { url: "http://localhost:3000/" });
+    await service.call("b", "preview_open", { url: "http://localhost:3001/" });
+    const background = windows[1];
+    assert.equal(windows.length, 2, "sessions share one background native host");
+    assert.equal(background.options.opacity, 0);
+    assert.equal(background.options.focusable, false);
+    assert.equal(background.options.skipTaskbar, true);
+    assert.equal(background.clickThrough, true);
+    assert.equal(background.shownInactive, true);
+    assert.deepEqual(background.contentView.children, views);
+    service.show("a", { x: 10, y: 20, width: 400, height: 300 });
+    assert.deepEqual(main.contentView.children, [views[0]]);
+    assert.deepEqual(background.contentView.children, [views[1]]);
+    service.hide();
+    assert.ok(background.contentView.children.includes(views[0]));
+    await service.call("a", "preview_screenshot");
+    assert.deepEqual(views[0].sent.filter(([method]) => method === "Emulation.setFocusEmulationEnabled").map(([, params]) => params.enabled), [true, false]);
+    views[0].webContents.debugger.sendCommand = async (method) => {
+      if (method === "Page.captureScreenshot") throw new Error("capture failed");
+      return {};
+    };
+    assert.equal((await service.call("a", "preview_screenshot")).isError, true);
+    main.destroy();
+    assert.equal(background.isDestroyed(), true);
+    assert.equal(service.state("a"), null);
+    assert.ok(views.every((view) => view.webContents.isDestroyed()));
+  } finally { service.closeAll(); }
 });
 
 test("a localhost page whose connection is reset opens over 127.0.0.1, where the dev server listens", async () => {
@@ -218,17 +293,18 @@ test("the page stays away from the app's services and anything of the user's, an
   assert.deepEqual([later.messages.length, later.failed_requests.length], [0, 0], "`after` returns only what is new");
 });
 
-test("the pane draws one agent's preview at its slot, scaled by the page zoom, and puts it back outside the window after", async () => {
-  const { service, views, attached } = previews();
+test("the pane draws one agent's preview at its slot, scaled by the page zoom, and returns it to the background host", async () => {
+  const { service, views, attached, placements } = previews();
   await service.call("a", "preview_open", { url: "http://localhost:3000/" });
   await service.call("b", "preview_open", { url: "http://localhost:3001/" });
   assert.equal(service.show("a", { x: 100, y: 50, width: 400, height: 300 }, 1.25), true);
   assert.deepEqual(views[0].bounds, { x: 125, y: 63, width: 500, height: 375 });
-  assert.equal(views[0].webContents.emulated, false, "drawn for real while shown");
-  assert.ok(views[1].bounds.x < 0, "the other agent's stays outside");
+  assert.equal(placements.get(views[0]), true, "the shown view attaches to the main window");
+  assert.equal(placements.get(views[1]), false, "the other agent stays in the background host");
   assert.equal(service.state("a").shown, true);
   service.hide();
-  assert.ok(views[0].bounds.x < 0);
+  assert.equal(placements.get(views[0]), false);
+  assert.deepEqual(views[0].bounds, { x: 0, y: 0, width: 1280, height: 800 });
   assert.equal(service.show("nobody", { x: 0, y: 0, width: 1, height: 1 }), false);
   const closedSession = views[0].session;
   service.close("a");

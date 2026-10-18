@@ -6,6 +6,7 @@ const { pathToFileURL } = require("node:url");
 const {
   app,
   BrowserWindow,
+  BaseWindow,
   WebContentsView,
   clipboard,
   dialog,
@@ -2880,7 +2881,7 @@ async function start() {
     }
     if (!chatAgentTools) {
       const { createChatAgentTools } = backendBundles.requireModule(backend, "chat-agent-tools.cjs");
-      const { createChatPreviews } = backendBundles.requireModule(backend, "chat-preview.cjs");
+      const { createNativeChatPreviews } = backendBundles.requireModule(backend, "chat-preview.cjs");
       // Each chat agent's own browser for previewing its dev server (Settings > "Let chat agents
       // preview their pages", on by default): loopback pages only, never the app's own services.
       const portOf = (url) => { try { return Number(new URL(url).port) || null; } catch { return null; } };
@@ -2891,25 +2892,10 @@ async function start() {
         (() => { try { return agentOrchestratorUpstream?.snapshot?.().port; } catch { return null; } })(),
         (() => { try { return portOf(externalServicesController.cpaConnection()?.baseUrl); } catch { return null; } })(),
       ].filter((port) => Number.isInteger(port) && port > 0);
-      const previewWindows = new WeakSet();
-      const chatPreviews = createChatPreviews({
-        createView: (partition) => new WebContentsView({
-          webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: false, backgroundThrottling: false },
-        }),
-        attachView: (view) => {
-          if (!mainWindow || mainWindow.isDestroyed()) return;
-          mainWindow.contentView.addChildView(view);
-          // A preview never outlives the window it is drawn in (a re-created window starts without).
-          if (!previewWindows.has(mainWindow)) {
-            previewWindows.add(mainWindow);
-            mainWindow.once("closed", () => chatPreviews.closeAll());
-          }
-        },
-        detachView: (view) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.contentView.removeChildView(view); },
-        contentSize: () => (mainWindow && !mainWindow.isDestroyed() ? mainWindow.getContentSize() : [1280, 800]),
-        blockedPorts: appServicePorts,
-        logger,
+      const chatPreviews = createNativeChatPreviews({
+        BaseWindow, WebContentsView, mainWindow: () => mainWindow, blockedPorts: appServicePorts, logger,
       });
+      app.on("will-quit", () => chatPreviews.closeAll());
       // Agents' commands run in Codex's Windows sandbox when it is installed (its unelevated mode:
       // the worktree and package caches writable, the network on), as Codex runs its own.
       const { createSandboxRunner } = backendBundles.requireModule(backend, "chat-sandbox.cjs");

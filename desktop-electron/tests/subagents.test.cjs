@@ -55,6 +55,20 @@ test("the saved settings and subagents are validated and kept", () => {
   } finally { w.cleanup(); }
 });
 
+test("a subagent preserves the model's none effort when saved and launched", async () => {
+  const route = { harness_id: "ao:claude-code", model: "cpa/cline-pass/deepseek-v4.1-flash", effort: "none" };
+  const w = world({ settings: { defaultRoute: route } });
+  try {
+    assert.deepEqual(w.service.config().settings.defaultRoute, route);
+    const saved = JSON.parse(fs.readFileSync(path.join(w.dir, "subagents.json"), "utf8"));
+    assert.equal(saved.settings.defaultRoute.effort, "none");
+    const started = await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read the source" });
+    assert.equal(started.isError, false);
+    assert.equal(w.spawned[0].gateway.model, "cline-pass/deepseek-v4.1-flash(none)");
+    assert.equal(w.service.config().settings.defaultRoute.effort, "none");
+  } finally { w.cleanup(); }
+});
+
 test("a chat agent starts a subagent on its route as a plain, unattended AO session and reads its report", async () => {
   const w = world();
   try {
