@@ -1836,6 +1836,90 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return note;
   }
 
+  // "Approve for me" and "Full access" never leave the agent stuck on a request nobody answers: one
+  // still waiting after AUTO_ANSWER_MS is answered for the person. A command or tool request is
+  // allowed once (one the safety rules block is denied), a plan is accepted with edits allowed,
+  // and a question gets its recommended answer (the option marked "Recommended", else the first).
+  // "Ask for approval" keeps waiting for the person.
+  const AUTO_ANSWER_MS = 20_000;
+  const NO_ANSWER_TEXT = "No answer from the user within 20 seconds; use your best judgment and continue.";
+  const pendingSeen = new Map(); // approval_id -> when it was first seen waiting
+  const autoAnswered = new Set();
+  const answersForPerson = (node) => node?.route?.approvals_reviewer === "auto_review" || node?.route?.approval_policy === "never";
+  /** The answer a question gets when nobody answers it: each field's recommended choice. */
+  function recommendedAnswer(approval) {
+    if (approval.mode === "url") return { action: "decline" };
+    const content = {};
+    for (const field of approval.fields ?? []) {
+      const options = Array.isArray(field.options) ? field.options : [];
+      const pick = options.find((option) => /\brecommended\b/i.test(`${option.label} ${option.description}`)) ?? options[0];
+      if (field.type === "choice" && pick) content[field.key] = pick.value;
+      else if (field.type === "multi" && pick) content[field.key] = [pick.value];
+      else if (field.type === "boolean") content[field.key] = true;
+      else if (field.type === "text") content[field.key] = NO_ANSWER_TEXT;
+    }
+    return { action: "accept", content };
+  }
+  /** The offered decision that accepts a plan: keep editing without asking, as the card was launched. */
+  function planDecision(approval, node) {
+    const decisions = (approval.decisions || []).filter((decision) => !decision.kind.startsWith("reject"));
+    const prefer = node?.route?.approval_policy === "never" ? [/bypass/i, /acceptEdits/i] : [/acceptEdits/i, /^auto$/i];
+    for (const pattern of prefer) {
+      const found = decisions.find((decision) => pattern.test(decision.id));
+      if (found) return found.id;
+    }
+    return (decisions.find((decision) => decision.kind === "allow_once") ?? decisions[0])?.id ?? null;
+  }
+  async function autoAnswerStale(workspaceId, runId, waiting) {
+    const at = now();
+    const live = new Set();
+    let note = null;
+    for (const { node, pending } of waiting) {
+      for (const approval of pending) {
+        const id = approval?.approval_id;
+        if (!id) continue;
+        live.add(id);
+        if (!pendingSeen.has(id)) pendingSeen.set(id, at);
+        if (!answersForPerson(node) || autoAnswered.has(id)) continue;
+        const since = Date.parse(approval.since ?? "");
+        const opened = Math.min(pendingSeen.get(id), Number.isFinite(since) ? since : Infinity);
+        if (at - opened < AUTO_ANSWER_MS) continue;
+        autoAnswered.add(id);
+        if (autoAnswered.size > 500) autoAnswered.delete(autoAnswered.values().next().value);
+        try {
+          if (approval.source === "ao" && approval.kind === "question") {
+            const answer = recommendedAnswer(approval);
+            await harnessService().resolveInput(approval.thread_id, id, answer.action, answer.content)
+              .catch(() => harnessService().resolveInput(approval.thread_id, id, "decline"));
+            note = "Nobody answered the agent's question in 20 seconds, so it got the recommended answer";
+          } else if (approval.source === "ao") {
+            const blocked = approval.kind !== "plan" && HARD_DENY.some((pattern) => pattern.test(describeRequest(approval)));
+            const decision = approval.kind === "plan" ? planDecision(approval, node) : aoDecision(approval, !blocked);
+            if (!decision) continue;
+            await harnessService().resolveApproval(approval.thread_id, id, decision);
+            note = blocked ? "Denied after 20 seconds: blocked by the command approver's safety rules"
+              : approval.kind === "plan" ? "Nobody answered in 20 seconds, so the plan was accepted" : "Nobody answered in 20 seconds, so the request was allowed once";
+          } else if (approval.kind === "command") {
+            const request = describeRequest(approval);
+            const allow = !HARD_DENY.some((pattern) => pattern.test(request));
+            await requestHeadless("/api/v1/ao/harness/approval", {
+              workspace_id: workspaceId, run_id: runId, node_id: node.id, approval_id: id, allow, confirm: false,
+              approver_reason: allow ? "Nobody answered within 20 seconds" : "Blocked by the command approver's safety rules", approver_request: request,
+            });
+            note = allow ? "Nobody answered in 20 seconds, so the command was allowed once" : "Denied after 20 seconds: blocked by the command approver's safety rules";
+          }
+          logger?.info?.("ao.auto_answered", { kind: approval.kind, tool: String(approval.tool ?? "").slice(0, 80) });
+        } catch (error) {
+          logger?.warn?.("ao.auto_answer_failed", { kind: approval.kind, message: publicText(error?.message || error, 200) });
+        }
+      }
+    }
+    // Runs share these maps, so a request is forgotten by age, not by one run no longer showing it.
+    for (const [id, seen] of pendingSeen) if (!live.has(id) && at - seen > 60 * 60_000) pendingSeen.delete(id);
+    while (pendingSeen.size > 1000) pendingSeen.delete(pendingSeen.keys().next().value);
+    return note;
+  }
+
   async function askRecoveryHelper({ mission, node, task }) {
     const { baseUrl, key } = connection();
     const catalog = (await models()).models;
@@ -2068,6 +2152,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             .then(note => { if (note) state.detail = note; },
               error => { state.detail = "Command approver unavailable: " + publicText(error?.message || error, 200); })
             .finally(() => { state.screening = false; });
+        }
+        if (waiting.length && !state.autoAnswering) {
+          state.autoAnswering = true;
+          void autoAnswerStale(workspaceId, runId, waiting)
+            .then(note => { if (note) state.detail = note; }, () => undefined)
+            .finally(() => { state.autoAnswering = false; });
         }
         const helped = mission.paused || mission.cancelled ? null : await recoverHeld(workspaceId, mission, state);
         if (helped?.detail) state.detail = helped.detail;
@@ -3098,7 +3188,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
 
   // goalAfterRun runs on its own when a run settles (reportRun); it is exposed for tests and recovery.
-  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, routineCommand, routineAppTool, routineAppCommand });
+  /** Whether the command approver's safety rules block this request text whatever anyone answers. */
+  const blockedRequest = (text) => HARD_DENY.some((pattern) => pattern.test(String(text ?? "")));
+  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, routineCommand, routineAppTool, routineAppCommand, blockedRequest, recommendedAnswer });
 }
 
 module.exports = { createAgentOrchestratorWorkflow, delayToMilliseconds, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

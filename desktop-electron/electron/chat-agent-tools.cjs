@@ -162,6 +162,10 @@ const MAX_CONFIRM_PATHS = 20;
 // held down): the prompt is shown again, at most MAX_QUICK_ANSWERS times.
 const MIN_ANSWER_MS = 500;
 const MAX_QUICK_ANSWERS = 3;
+// "Approve for me": a command, typed input, workspace approval or preview address nobody answers
+// within this long (or that cannot be shown, the app not being focused) is allowed once, so the
+// agent keeps working. Whatever the command approver's safety rules block still needs the person.
+const AUTO_ANSWER_MS = 20_000;
 
 const ROOT_RECHECK_MS = 30_000;
 const UNBOUND_TTL_MS = 10 * 60_000;
@@ -761,6 +765,8 @@ function createChatAgentTools({
   previews = null, previewEnabled = () => true,
   // Why a command line is a routine project command "Approve for me" may run unasked, or null.
   routineCommand = () => null,
+  // Whether the command approver's safety rules block a request's text (never answered for the user).
+  blockedCommand = () => false,
   // Runs the terminal's commands in Codex's Windows sandbox (chat-sandbox.cjs) when it is installed.
   sandbox = null,
   // Where the leases (credential hashes, never credentials) and the port are kept across restarts.
@@ -770,6 +776,7 @@ function createChatAgentTools({
   // How long the user must have had a prompt open for an approval to count (see MIN_ANSWER_MS),
   // on a monotonic clock.
   minAnswerMs = MIN_ANSWER_MS, answerClock = () => performance.now(),
+  autoAnswerMs = AUTO_ANSWER_MS,
 } = {}) {
   if (typeof requestHeadless !== "function") throw new Error("The headless tool service is required");
   // Identifies this server's lifetime in warm-session keys without exposing any credential.
@@ -986,21 +993,54 @@ function createChatAgentTools({
    * `detail` is the full dialog text (see dialogText): null means it cannot be shown in full, and
    * the call is refused without asking.
    */
-  function ask(message, detail, declined, tooLong = "This call cannot be shown to the user in full, so it was not run.") {
+  function ask(message, detail, declined, tooLong = "This call cannot be shown to the user in full, so it was not run.", { auto = false } = {}) {
     if (detail === null) return Promise.resolve(failedCall(tooLong));
-    const turn = prompting.then(() => askNow(message, detail, declined));
+    const turn = prompting.then(() => askNow(message, detail, declined, auto));
     prompting = turn.catch(() => undefined);
     return turn;
   }
 
-  async function askNow(message, detail, declined) {
+  /**
+   * Shows the prompt until `deadline` (answerClock): the user's answer, or "timeout" when nobody
+   * answered by then. A prompt that cannot be shown (the window is not focused) is tried again each
+   * second, so the user can still answer it by coming back; the open dialog is closed at the deadline.
+   */
+  async function confirmBefore(deadline, request) {
+    for (;;) {
+      const left = deadline - answerClock();
+      if (left <= 0) return "timeout";
+      const closing = new AbortController();
+      let timer;
+      const late = new Promise((resolve) => { timer = setTimeout(() => resolve("timeout"), left); });
+      try {
+        const shown = typeof confirm === "function"
+          ? Promise.resolve().then(() => confirm({ ...request, signal: closing.signal })).then((value) => value === true, () => null)
+          : Promise.resolve(null);
+        const answer = await Promise.race([shown, late]);
+        if (answer === "timeout") { closing.abort(); return "timeout"; }
+        if (answer !== null) return answer;
+        await new Promise((resolve) => setTimeout(resolve, Math.max(0, Math.min(1000, deadline - answerClock()))));
+      } finally { clearTimeout(timer); }
+    }
+  }
+
+  async function askNow(message, detail, declined, auto = false) {
+    const deadline = auto ? answerClock() + autoAnswerMs : null;
     for (let attempt = 0; attempt < MAX_QUICK_ANSWERS; attempt += 1) {
       const opened = answerClock();
       let approved = false;
+      const request = { message: attempt ? `That answer came too quickly to have been read. ${message}` : message, detail };
       try {
-        approved = typeof confirm === "function" && await confirm({
-          message: attempt ? `That answer came too quickly to have been read. ${message}` : message, detail,
-        }) === true;
+        if (deadline !== null) {
+          const answer = await confirmBefore(deadline, request);
+          if (answer === "timeout") {
+            logger?.info?.("chat_agent_tools.auto_answered", { message: String(message).slice(0, 120) });
+            return true;
+          }
+          approved = answer === true;
+        } else {
+          approved = typeof confirm === "function" && await confirm(request) === true;
+        }
       } catch (error) {
         return failedCall(`The user could not be asked, so nothing was run: ${errorMessage(error)}`);
       }
@@ -1044,6 +1084,7 @@ function createChatAgentTools({
       let routine = null;
       try { routine = entry.autoReview && !(typeof args.stdin === "string" && args.stdin) ? routineCommand(String(args.cmd ?? "")) : null; } catch { routine = null; }
       if (routine) return true;
+      const auto = entry.autoReview === true && !blockedCommand(`${args.cmd ?? ""}\n${args.stdin ?? ""}`);
       return ask("A chat agent wants to run a command",
         dialogText([...who(entry), ...describeCall(name, args, root),
           inSandbox
@@ -1051,13 +1092,15 @@ function createChatAgentTools({
               + "worktree and the package caches, reads the rest, and has the network. Run it once?"
             : "\n\nThe command starts in the chat's worktree but is not confined to it:\n"
               + "it can read and change anything your user account can. Run it once?"]),
-        "The user declined this command; it was not run.", tooLongToShow(name));
+        "The user declined this command; it was not run.", tooLongToShow(name), { auto });
     }
     // An empty write only polls the command's output; it sends nothing.
     if (name === "write_stdin" && typeof args.chars === "string" && args.chars) {
       return ask("A chat agent wants to type into a running command",
         dialogText([...who(entry), "Worktree: ", { value: root.path, own: true }, "\n", ...describeCall(name, args, root), "\n\nSend it once?"]),
-        "The user declined this input; it was not sent.", tooLongToShow(name));
+        "The user declined this input; it was not sent.", tooLongToShow(name),
+        // Answered for the user only for a command this session started itself.
+        { auto: entry.autoReview === true && entry.commands.has(commandIdOf(name, args)) && !blockedCommand(args.chars) });
     }
     return false;
   }
@@ -1092,7 +1135,8 @@ function createChatAgentTools({
           ...(reason ? ["\nWhy:\n", { value: reason, own: true }, "\n"] : []),
           "\n", ...call, "\n\nAllow it once?",
         ]),
-        `The user declined ${name}; it was not run.`, tooLongToShow(name));
+        `The user declined ${name}; it was not run.`, tooLongToShow(name),
+        { auto: entry.autoReview === true && !blockedCommand(JSON.stringify(args)) });
       if (answer === true) shown.add(gateKey(current));
       return answer;
     };
@@ -1177,7 +1221,10 @@ function createChatAgentTools({
       return runSandboxed(entry, name, args, root);
     }
     let confirmed = false;
-    if (group === "terminal") {
+    // A command the chat's reviewer (or the person, on its card) already answered is not asked
+    // again; typing into a terminal the session did not start (the user's own) still is.
+    if (name === "exec_command" && reviewedUpstream(entry)) confirmed = true;
+    else if (group === "terminal") {
       const answer = await confirmTerminal(entry, name, args, root);
       if (answer !== true && answer !== false) return answer;
       confirmed = answer === true;
@@ -1314,7 +1361,7 @@ function createChatAgentTools({
       const answer = await ask("A chat agent wants to open a page in its preview",
         dialogText([...who(entry), "Address: ", { value: origin }, "\n\nThe chat's own browser would load this page served on this computer; the\n"
           + "agent could read it, click and type in it. Allow this address for this chat?"]),
-        `The user did not allow this chat to open ${origin}.`);
+        `The user did not allow this chat to open ${origin}.`, undefined, { auto: entry.autoReview === true });
       if (answer !== true) return answer;
     }
     entry.origins.add(origin);

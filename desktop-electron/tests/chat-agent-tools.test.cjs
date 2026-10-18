@@ -34,7 +34,7 @@ function tempTree() {
 }
 
 function fixture({ enabled = () => true, desktop = () => false, terminal = () => false, results = {}, workspaces = null, confirm = async () => true, root = null, worktreesRoot = null,
-  minAnswerMs = 0, answerClock = undefined, sandbox = null } = {}) {
+  minAnswerMs = 0, answerClock = undefined, sandbox = null, autoAnswerMs = undefined, blockedCommand = undefined } = {}) {
   const calls = [];
   const asked = [];
   const confirmations = [];
@@ -42,6 +42,7 @@ function fixture({ enabled = () => true, desktop = () => false, terminal = () =>
     enabled, desktopEnabled: desktop, terminalEnabled: terminal, worktreesRoot, version: "9.9.9", logger: { info() {}, warn() {} }, sandbox,
     // A fake confirm answers at once; the quick-answer check has its own test.
     minAnswerMs, ...(answerClock ? { answerClock } : {}),
+    ...(autoAnswerMs !== undefined ? { autoAnswerMs } : {}), ...(blockedCommand ? { blockedCommand } : {}),
     confirm: async (request) => { confirmations.push(request); return confirm(request); },
     sessionWorkspace: async (id, workspaceId) => {
       asked.push(id);
@@ -1317,4 +1318,52 @@ test("a confirmed command that then needs a dangerous or non-routine approval as
     assert.equal(calls.length, before + 1, "only the first, refused attempt ran");
     assert.equal(calls.at(-1).body.arguments.confirm, undefined);
   } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("Approve for me: a command nobody answers within the wait runs once; one the safety rules block keeps waiting for the person", async () => {
+  const tree = tempTree();
+  let release;
+  const never = () => new Promise((resolve) => { release = resolve; });
+  const { tools, calls, confirmations } = fixture({ root: tree.root, terminal: () => true, confirm: never, autoAnswerMs: 50,
+    blockedCommand: (text) => /git push/.test(text) });
+  try {
+    const { url, auth } = await session(tools, { agent: "codex", autoReview: true });
+    const ran = await callTool(url, auth, "exec_command", { cmd: "powershell -Command \"Invoke-WebRequest http://127.0.0.1:8000\"" });
+    assert.equal(ran.isError, false, "answered for the person after the wait");
+    assert.equal(confirmations.length, 1);
+    assert.ok(confirmations[0].signal.aborted, "the unanswered dialog is closed");
+    assert.equal(calls.at(-1).body.tool, "exec_command");
+
+    const pending = callTool(url, auth, "exec_command", { cmd: "git push origin main" });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(confirmations.length, 2, "still asking");
+    release(false);
+    assert.equal((await pending).isError, true, "the person's answer decides a blocked command");
+  } finally { await tools.close?.(); tree.cleanup?.(); }
+});
+
+test("Approve for me: a prompt that cannot be shown (the app not focused) is tried again, then answered after the wait", async () => {
+  const tree = tempTree();
+  let tries = 0;
+  const { tools, calls } = fixture({ root: tree.root, terminal: () => true, autoAnswerMs: 1_500,
+    confirm: async () => { tries += 1; throw new Error("Use the focused Coding Tools window"); } });
+  try {
+    const { url, auth } = await session(tools, { agent: "codex", autoReview: true });
+    const ran = await callTool(url, auth, "exec_command", { cmd: "python main.py" });
+    assert.equal(ran.isError, false);
+    assert.ok(tries >= 2, "asked again while waiting");
+    assert.equal(calls.at(-1).body.tool, "exec_command");
+  } finally { await tools.close?.(); tree.cleanup?.(); }
+});
+
+test("Ask for approval: a prompt is never answered for the person", async () => {
+  const tree = tempTree();
+  const { tools } = fixture({ root: tree.root, terminal: () => true, autoAnswerMs: 10,
+    confirm: async () => { throw new Error("Use the focused Coding Tools window"); } });
+  try {
+    const { url, auth } = await session(tools, { agent: "codex" });
+    const ran = await callTool(url, auth, "exec_command", { cmd: "python main.py" });
+    assert.equal(ran.isError, true);
+    assert.match(ran.content[0].text, /could not be asked/);
+  } finally { await tools.close?.(); tree.cleanup?.(); }
 });
