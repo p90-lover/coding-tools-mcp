@@ -3,7 +3,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const { PREVIEW_TOOL_DEFS, createChatPreviews, previewTarget } = require("../electron/chat-preview.cjs");
-const { createChatAgentTools } = require("../electron/chat-agent-tools.cjs");
+const { createChatAgentTools, instructionsFor, previewOriginDecision } = require("../electron/chat-agent-tools.cjs");
 
 /** A WebContentsView stand-in: records bounds, protocol commands and the session's handlers. */
 function fakeView({ page = {} } = {}) {
@@ -18,6 +18,9 @@ function fakeView({ page = {} } = {}) {
     setWindowOpenHandler(fn) { this.openHandler = fn; },
     async loadURL(url) {
       if (page.refused?.(url)) throw new Error(`ERR_CONNECTION_REFUSED (-102) loading '${url}'`);
+      (this.loads ??= []).push(url);
+      const failed = page.fail?.(url);
+      if (failed) throw new Error(`${failed} (-101) loading '${url}'`);
       this.url = url;
       this.title = page.title ?? "Page";
     },
@@ -113,6 +116,36 @@ test("the agent opens its page once allowed, and reads, screenshots, clicks and 
   assert.ok(views[0].sent.some(([method, params]) => method === "Input.dispatchKeyEvent" && params.key === "Enter" && params.type === "keyDown"));
   assert.match((await service.call("s1", "preview_click", { ref: "x'); alert(1); ('" })).content[0].text, /ref must be/, "a ref is only digits, never script");
   assert.match((await service.call("s1", "preview_press", { key: "F13" })).content[0].text, /Unknown key/);
+});
+
+test("a localhost page whose connection is reset opens over 127.0.0.1, where the dev server listens", async () => {
+  // Seen live: preview_open of a running app on :8000 failed with a reset while its health check
+  // (to 127.0.0.1) passed: "localhost" reached another listener on [::1].
+  const { service, views } = previews({ page: { fail: (url) => (url.includes("localhost:8000") ? "ERR_CONNECTION_RESET" : null) } });
+  const opened = await service.call("s1", "preview_open", { url: "http://localhost:8000/admin" }, { permit: async () => true });
+  assert.equal(opened.isError, false, opened.content[0].text);
+  assert.equal(opened.structuredContent.url, "http://127.0.0.1:8000/admin");
+  assert.deepEqual(views[0].webContents.loads, ["http://localhost:8000/admin", "http://127.0.0.1:8000/admin"]);
+  // Its requests to both spellings of the same address stay allowed; another port does not.
+  const before = views[0].session.handlers.before;
+  for (const [url, cancel] of [["http://127.0.0.1:8000/api", false], ["http://localhost:8000/api", false], ["http://127.0.0.1:8001/", true]]) {
+    let verdict;
+    before({ url }, (answer) => { verdict = answer; });
+    assert.equal(verdict.cancel, cancel, url);
+  }
+});
+
+test("a dev server that keeps resetting the connection gets a message naming the server, not the preview", async () => {
+  const { service, views } = previews({ page: { fail: () => "ERR_CONNECTION_RESET" } });
+  const failed = await service.call("s1", "preview_open", { url: "http://localhost:8000/" }, { permit: async () => true });
+  assert.equal(failed.isError, true);
+  assert.match(failed.content[0].text, /dev server at http:\/\/localhost:8000\/ closed the connection \(ERR_CONNECTION_RESET\), over 127\.0\.0\.1:8000 too/);
+  assert.match(failed.content[0].text, /not the preview/);
+  assert.equal(views[0].webContents.loads.length, 3, "localhost, then 127.0.0.1, then 127.0.0.1 once more after a moment");
+  let calls = 0;
+  const flaky = previews({ page: { fail: () => (calls++ === 0 ? "ERR_CONNECTION_RESET" : null) } });
+  const retried = await flaky.service.call("s1", "preview_open", { url: "http://[::1]:5173/" }, { permit: async () => true });
+  assert.equal(retried.isError, false, "a single reset (a reloading dev server) is retried");
 });
 
 test("refusals: other hosts, the app's ports, a declined origin, nothing listening, and calls before any page", async () => {
@@ -316,6 +349,57 @@ test("chat agents get the preview tools (on by default, off with the setting) an
   on = false;
   assert.equal((await list()).some((name) => name.startsWith("preview_")), false);
   assert.match((await call("preview_read")).content[0].text, /Unknown tool/);
+});
+
+test("a session whose calls are already reviewed (Approve for me) or that bypasses permissions opens a new address without a second prompt", async (t) => {
+  // Seen live: under "Approve for me" the first preview_open waited on a dialog for the 20 s
+  // auto-answer although the call, with its address, had already been reviewed on the chat card.
+  const env = server();
+  t.after(env.cleanup);
+  const reviewed = await leased(env.tools, { approvalMode: "accept-edits", autoReview: true });
+  assert.equal((await reviewed.call("preview_open", { url: "http://localhost:8000/" })).isError, false);
+  assert.equal(env.confirmations.length, 0, "no dialog for a reviewed call");
+  const bypass = await leased(env.tools, { approvalMode: "bypass-permissions" });
+  assert.equal((await bypass.call("preview_open", { url: "http://127.0.0.1:9000/" })).isError, false);
+  assert.equal(env.confirmations.length, 0, "nor for a session that bypasses permissions");
+  const plain = await leased(env.tools, { approvalMode: "accept-edits" });
+  await plain.call("preview_open", { url: "http://localhost:7000/" });
+  assert.equal(env.confirmations.length, 1, "an unreviewed session still asks");
+  assert.equal(previewOriginDecision({ origin: "http://localhost:1", bypass: false, servedHere: true }), "ask", "a printed address alone is not enough");
+});
+
+test("the tools server closes each connection after answering, so an agent never reuses one Node has dropped", async (t) => {
+  // Seen live: "Preview open failed (ECONNRESET)": the agent's MCP client sent preview_open on a
+  // pooled keep-alive connection that the server's 5 s idle timeout had just closed.
+  const env = server();
+  t.after(env.cleanup);
+  const lease = await env.tools.lease({ agent: "claude-code", workspaceId: "ws1" });
+  lease.bind("ao-1");
+  const [{ url, headers }] = lease.servers;
+  const answer = await new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const request = http.request({ hostname: target.hostname, port: target.port, path: target.pathname, method: "POST",
+      agent: new http.Agent({ keepAlive: true }),
+      headers: { "content-type": "application/json", authorization: headers.Authorization } }, (response) => {
+      response.resume();
+      response.on("end", () => resolve(response.headers));
+    });
+    request.on("error", reject);
+    request.end(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }));
+  });
+  assert.equal(answer.connection, "close");
+});
+
+test("the agent is told first to check any GUI in the Preview pane with preview_open and preview_screenshot", () => {
+  const text = instructionsFor(["files", "terminal", "preview"], { autoReview: true });
+  assert.ok(text.indexOf("preview_open") > -1 && text.indexOf("preview_open") < 600, "the preview rule leads the instructions");
+  assert.match(text, /preview_screenshot/);
+  assert.match(text, /curl/);
+  assert.match(text, /search_text/);
+  assert.doesNotMatch(instructionsFor(["files"], {}), /preview_open/);
+  const open = PREVIEW_TOOL_DEFS.find((tool) => tool.name === "preview_open");
+  assert.match(open.description, /frontend or GUI/);
+  assert.match(open.description, /Preview pane/);
 });
 
 test("a declined address is not opened", async (t) => {

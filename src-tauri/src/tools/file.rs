@@ -13,6 +13,11 @@ use crate::tools::workspace::{tool_ok, Workspace, WorkspaceError};
 /// Default per-file cap for `search_text`. Files are scanned line by line, so this only keeps
 /// multi-GB assets out of a search; large logs and generated sources are searched.
 const DEFAULT_SEARCH_MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
+/// How long one `search_text` call may scan before it stops and returns what it found so far
+/// (`timed_out: true`), well inside the callers' own deadlines: a search over a huge folder answers
+/// with partial results instead of failing.
+const DEFAULT_SEARCH_TIME_BUDGET_MS: u64 = 15_000;
+const MAX_SEARCH_TIME_BUDGET_MS: u64 = 60_000;
 const BINARY_PEEK_BYTES: usize = 8192;
 /// Largest `content` one read_file call returns. Tool results pass through the headless service,
 /// which keeps at most 256 KiB of serialized result, so a page stays under that even after JSON
@@ -514,25 +519,50 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
         .get("context_lines")
         .and_then(Value::as_u64)
         .unwrap_or(0) as usize;
+    let include_ignored = args
+        .get("include_ignored")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let budget = std::time::Duration::from_millis(
+        args.get("time_budget_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(DEFAULT_SEARCH_TIME_BUDGET_MS)
+            .clamp(1, MAX_SEARCH_TIME_BUDGET_MS),
+    );
+    let started = std::time::Instant::now();
     let matcher = build_matcher(query, use_regex, case_sensitive)?;
+    // What git ignores (generated output, virtualenvs, caches) is skipped like the heavy folders
+    // is_ignored_path already skips, unless the caller asks for ignored files too.
+    let gitignore = if include_ignored {
+        GitignoreRules::default()
+    } else {
+        GitignoreRules::load(ws.root(), &resolved.path)
+    };
 
     let mut matches = Vec::new();
     let mut warnings = Vec::new();
     let mut skipped_large = 0usize;
     let mut skipped_binary = 0usize;
     let mut truncated = false;
+    let mut timed_out = false;
+    let mut files_searched = 0usize;
 
     let mut consider_file = |p: &Path| {
         if matches.len() >= max_results {
             truncated = true;
             return false;
         }
+        if started.elapsed() >= budget {
+            timed_out = true;
+            return false;
+        }
         if !ws.is_safe_read_path(p) {
             return true;
         }
-        if ws.is_ignored_path(p, false, false) {
+        if ws.is_ignored_path(p, false, include_ignored) {
             return true;
         }
+        files_searched += 1;
         let rel = ws.display_path(p);
         if !passes_glob_filters(&rel, &include_globs, &exclude_globs) {
             return true;
@@ -578,8 +608,9 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
             .into_iter()
             .filter_entry(|entry| {
                 entry.path() == resolved.path
-                    || !entry.file_type().is_dir()
-                    || !ws.is_ignored_path(entry.path(), false, false)
+                    || (!(entry.file_type().is_dir()
+                        && ws.is_ignored_path(entry.path(), false, include_ignored))
+                        && !gitignore.ignores(entry.path(), entry.file_type().is_dir()))
             })
             .filter_map(Result::ok)
         {
@@ -594,6 +625,14 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
 
     if truncated {
         warnings.push("result limit reached; scan stopped early".to_string());
+    }
+    if timed_out {
+        truncated = true;
+        warnings.push(format!(
+            "search stopped after {} ms with partial results ({files_searched} file(s) searched); \
+             narrow it with path or include_globs",
+            budget.as_millis()
+        ));
     }
     if skipped_large > 0 {
         warnings.push(format!(
@@ -611,11 +650,113 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
         "matches": matches,
         "total_matches": matches.len(),
         "truncated": truncated,
+        "timed_out": timed_out,
+        "files_searched": files_searched,
         "max_file_bytes": max_file_bytes,
         "skipped_large_files": skipped_large,
         "skipped_binary_files": skipped_binary,
         "warnings": warnings
     })))
+}
+
+/// The `.gitignore` rules `search_text` honours: those of the workspace root and of the folder
+/// being searched (and each folder between them), as git reads them for that tree. Patterns are
+/// matched with git's main rules (a pattern without a slash matches a name at any depth, one with
+/// a slash is anchored to its `.gitignore`'s folder, a trailing slash matches only folders, `!`
+/// re-includes). Nested `.gitignore` files below the searched folder are not read.
+#[derive(Default)]
+struct GitignoreRules {
+    rules: Vec<GitignoreRule>,
+}
+
+struct GitignoreRule {
+    base: std::path::PathBuf,
+    pattern: glob::Pattern,
+    anchored: bool,
+    dir_only: bool,
+    negated: bool,
+}
+
+impl GitignoreRules {
+    fn load(workspace_root: &Path, search_root: &Path) -> Self {
+        let mut folders = Vec::new();
+        let mut cursor = Some(search_root);
+        while let Some(folder) = cursor {
+            folders.push(folder.to_path_buf());
+            if folder == workspace_root || !folder.starts_with(workspace_root) {
+                break;
+            }
+            cursor = folder.parent();
+        }
+        folders.reverse();
+        let mut rules = Vec::new();
+        for folder in folders {
+            let Ok(text) = fs::read_to_string(folder.join(".gitignore")) else {
+                continue;
+            };
+            for line in text.lines() {
+                let line = line.trim_end();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let (negated, line) = match line.strip_prefix('!') {
+                    Some(rest) => (true, rest),
+                    None => (false, line.strip_prefix('\\').unwrap_or(line)),
+                };
+                let dir_only = line.ends_with('/');
+                let body = line.trim_end_matches('/');
+                let anchored = body.contains('/');
+                let body = body.trim_start_matches('/');
+                if body.is_empty() {
+                    continue;
+                }
+                let Ok(pattern) = glob::Pattern::new(body) else {
+                    continue;
+                };
+                rules.push(GitignoreRule {
+                    base: folder.clone(),
+                    pattern,
+                    anchored,
+                    dir_only,
+                    negated,
+                });
+            }
+        }
+        Self { rules }
+    }
+
+    /// Whether git would ignore `path` (a folder when `is_dir`). The walk prunes ignored folders,
+    /// so a path's ancestors were already checked.
+    fn ignores(&self, path: &Path, is_dir: bool) -> bool {
+        let options = glob::MatchOptions {
+            case_sensitive: !cfg!(windows),
+            require_literal_separator: true,
+            require_literal_leading_dot: false,
+        };
+        let mut ignored = false;
+        for rule in &self.rules {
+            if rule.dir_only && !is_dir {
+                continue;
+            }
+            let Ok(relative) = path.strip_prefix(&rule.base) else {
+                continue;
+            };
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            if relative.is_empty() {
+                continue;
+            }
+            let hit = if rule.anchored {
+                rule.pattern.matches_with(&relative, options)
+            } else {
+                let name = relative.rsplit('/').next().unwrap_or(&relative);
+                rule.pattern.matches_with(name, options)
+            };
+            if hit {
+                ignored = !rule.negated;
+            }
+        }
+        ignored
+    }
 }
 
 enum FileEligibility {

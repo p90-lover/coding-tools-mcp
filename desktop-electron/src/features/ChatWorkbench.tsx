@@ -40,17 +40,45 @@ function rememberPage(sessionId: string, url: string, title: string) {
 }
 
 /**
+ * Which tab the side panel should show for what a chat's agents just did (`fresh`: new pages,
+ * `page:...`, and new commands, `cmd:...`), or null to leave the panel as it is. A page the agent
+ * opens always brings the Preview pane forward, opening the panel or switching it from another tab:
+ * agents start their dev server first, which opened the Terminal, and the page they then opened
+ * with preview_open stayed behind it, so the user never saw the browser. A new command opens the
+ * Terminal only while the panel is closed, never taking the place of what the user looks at.
+ */
+export function autoOpenTab(fresh: string[], open: boolean): WorkbenchTab | null {
+  if (fresh.some((item) => item.startsWith("page:"))) return "preview";
+  return !open && fresh.length ? "terminal" : null;
+}
+
+/**
+ * Whether a poll of `sessionIds` starts over for another chat (none of its sessions was polled
+ * before), so what its agents already did when it was opened does not open the panel by itself.
+ * A session joining the same chat (a new agent, a restarted one) is not a new chat: what it does
+ * counts at once.
+ */
+export function startsNewChat(sessionIds: string[], polled: Set<string>): boolean {
+  return !sessionIds.some((id) => polled.has(id));
+}
+
+/**
  * Opens the side panel the first time a chat agent opens a page in its preview or starts a command,
  * as Codex shows the browser or terminal when its agent uses one. A command counts whether it went
  * through the app's exec_command or the agent's own shell tool (source "agent"). Each page and command opens it
- * once; closing the panel is respected until the agent does something new.
+ * once; closing the panel is respected until the agent does something new (see autoOpenTab).
  */
 export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen: (tab: WorkbenchTab) => void, workspaceId?: string) {
   const seen = useRef(new Set<string>());
-  const primed = useRef(false);
+  const polled = useRef(new Set<string>());
+  // The latest panel state and callback, read by the poll without restarting it: a restart on each
+  // open/close swallowed whatever the agent did in its first tick.
+  const openNow = useRef(open);
+  openNow.current = open;
+  const onOpenNow = useRef(onOpen);
+  onOpenNow.current = onOpen;
   const key = sessionIds.join(",");
   useEffect(() => {
-    primed.current = false;
     if (!sessionIds.length) return undefined;
     let live = true;
     const tick = async () => {
@@ -67,15 +95,19 @@ export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen
         const fresh = [...pages, ...commands].filter((item) => !seen.current.has(item));
         for (const item of fresh) seen.current.add(item);
         // What was already there when the chat opened does not open the panel by itself.
-        if (!primed.current) { primed.current = true; return; }
-        if (!open && fresh.length) onOpen(fresh.some((item) => item.startsWith("page:")) ? "preview" : "terminal");
+        const newChat = startsNewChat(sessionIds, polled.current);
+        if (newChat) polled.current = new Set(sessionIds);
+        else for (const id of sessionIds) polled.current.add(id);
+        if (newChat) return;
+        const tab = autoOpenTab(fresh, openNow.current);
+        if (tab) onOpenNow.current(tab);
       } catch { /* the next tick tries again */ }
     };
     void tick();
     const timer = window.setInterval(() => void tick(), 4000);
     return () => { live = false; window.clearInterval(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, open]);
+  }, [key]);
 }
 
 const PREVIEW_POLL_MS = 1500;

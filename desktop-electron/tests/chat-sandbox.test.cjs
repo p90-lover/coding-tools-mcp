@@ -7,7 +7,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { PassThrough } = require("node:stream");
 const test = require("node:test");
-const { createSandboxRunner, findCodexSandbox, PRIVATE_ENV } = require("../electron/chat-sandbox.cjs");
+const { createSandboxRunner, findCodexSandbox, PRIVATE_ENV, windowsChildEnvironment, compactWindowsPath, MAX_WINDOWS_PATH } = require("../electron/chat-sandbox.cjs");
 
 /** A spawn that records its call and hands back a child the test drives. */
 function fakeSpawn() {
@@ -128,4 +128,44 @@ test("an empty command is refused, and private environment names are recognised"
     assert.ok(PRIVATE_ENV.test(name), name);
   }
   for (const name of ["PATH", "HOME", "NODE_ENV", "TOKENIZERS_PARALLELISM"]) assert.ok(!PRIVATE_ENV.test(name), name);
+});
+
+// Chat agents' Bash commands failed on Windows with "dofork: child -1 - CreateProcess failed ...
+// 0xC0000142": Git Bash forks need SystemRoot, TEMP and the rest in every child's environment.
+test("a Windows child environment gets what a process needs to start, without changing what it has", () => {
+  const env = windowsChildEnvironment({ Path: "C:\\tools;c:\\TOOLS\\;;C:\\bin", TMP: "C:\\t", USERPROFILE: "C:\\Users\\me" },
+    { platform: "win32", system: { SystemRoot: "D:\\Win", LOCALAPPDATA: "C:\\Users\\me\\AppData\\Local", USERPROFILE: "C:\\elsewhere" } });
+  assert.equal(env.SystemRoot, "D:\\Win");
+  assert.equal(env.windir, "D:\\Win");
+  assert.equal(env.SystemDrive, "D:");
+  assert.equal(env.ComSpec, "D:\\Win\\System32\\cmd.exe");
+  assert.match(env.PATHEXT, /\.EXE/);
+  assert.equal(env.TEMP, "C:\\t", "TEMP follows TMP");
+  assert.equal(env.TMP, "C:\\t");
+  assert.equal(env.USERPROFILE, "C:\\Users\\me", "a value it has is kept");
+  assert.equal(env.LOCALAPPDATA, "C:\\Users\\me\\AppData\\Local");
+  assert.equal(env.Path, "C:\\tools;C:\\bin", "PATH keeps its spelling, without empty or repeated entries");
+  assert.equal(env.PATH, undefined);
+  const kept = { systemroot: "C:\\Windows", Windir: "C:\\Windows" };
+  const same = windowsChildEnvironment(kept, { platform: "win32" });
+  assert.equal(same.systemroot, "C:\\Windows");
+  assert.equal(same.SystemRoot, undefined, "never a second spelling of a variable it has");
+  assert.deepEqual(windowsChildEnvironment({ PATH: "/a:/a" }, { platform: "linux" }), { PATH: "/a:/a" }, "unchanged off Windows");
+});
+
+test("a long Windows PATH is capped, keeping its first (highest-priority) entries", () => {
+  const entries = Array.from({ length: 2000 }, (_, index) => `C:\\some\\long\\directory\\number${index}`);
+  const capped = compactWindowsPath(entries.join(";"));
+  assert.ok(capped.length <= MAX_WINDOWS_PATH, `${capped.length} characters`);
+  assert.ok(capped.startsWith(`${entries[0]};${entries[1]};`));
+});
+
+test("sandboxed commands on Windows carry the essential variables", () => {
+  const { sandbox, spawned, cleanup } = runner({ platform: "win32" });
+  try {
+    sandbox.start({ cmd: "bash -lc ls", cwd: "G:/work", writable: "G:/work" });
+    const [{ options }] = spawned;
+    for (const name of ["SystemRoot", "windir", "ComSpec", "PATHEXT", "TEMP", "TMP"]) assert.ok(options.env[name], name);
+    assert.equal(options.env.OPENAI_API_KEY, undefined, "credentials still stay out");
+  } finally { cleanup(); }
 });
