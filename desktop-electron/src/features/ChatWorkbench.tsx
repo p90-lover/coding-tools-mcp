@@ -388,6 +388,7 @@ function TerminalPane({ sessionId, workspaceId }: { sessionId: string; workspace
           let skipped = false;
           for (const stream of ["stdout", "stderr"] as const) {
             const end = await paneCall("chat_process_output", { sessionId, ...(workspaceId ? { workspaceId } : {}), commandId: selected, stream, offset: Number.MAX_SAFE_INTEGER });
+            if (!live) return;
             const last = Number(end.nextOffset) || 0;
             offsets.current[stream] = Math.max(0, last - TAIL_BYTES);
             skipped ||= last > TAIL_BYTES;
@@ -397,6 +398,7 @@ function TerminalPane({ sessionId, workspaceId }: { sessionId: string; workspace
         }
         for (const stream of ["stdout", "stderr"] as const) {
           const result = await paneCall("chat_process_output", { sessionId, ...(workspaceId ? { workspaceId } : {}), commandId: selected, stream, offset: offsets.current[stream] });
+          if (!live) return;
           offsets.current[stream] = Number(result.nextOffset) || offsets.current[stream];
           if (result.gap === true) added += "\n[earlier output was dropped]\n";
           if (typeof result.content === "string" && result.content) added += plain(result.content);

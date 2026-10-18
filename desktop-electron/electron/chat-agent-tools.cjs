@@ -815,6 +815,7 @@ function createChatAgentTools({
   // Identifies this server's lifetime in warm-session keys without exposing any credential.
   const instance = crypto.randomUUID();
   const sessions = new Map(); // key -> session entry (see mint)
+  const paneEntries = new Map(); // AO session -> retained command owner, independent of credentials
   let server = null;
   let listening = null;
   let port = 0;
@@ -832,6 +833,13 @@ function createChatAgentTools({
   const currentGroups = () => (isEnabled() ? GROUPS.filter((group) => group === "agent" || setting(optIns[group])) : []);
   // A group is usable only if the session got it and the setting still allows it.
   const allowed = (entry, group) => entry.groups.includes(group) && currentGroups().includes(group);
+  const unavailable = (entry, name, signal = entry.lifetime.signal) => {
+    if (closing || !entry.expected || sessions.get(entry.key) !== entry) {
+      return failedCall("This chat's session has ended; its tools are no longer available.");
+    }
+    if (signal.aborted) return failedCall("This chat's tool call was cancelled.");
+    return allowed(entry, groupOf(name)) ? null : failedCall("This tool is no longer enabled for this chat.");
+  };
 
   /**
    * Forgets a credential. `ended` means its AO session is over (it ended, moved, or was killed),
@@ -843,9 +851,15 @@ function createChatAgentTools({
     if (!entry) return;
     sessions.delete(key);
     entry.expected = null;
+    entry.lifetime.abort();
     save();
-    if (ended && entry.aoSession && ![...sessions.values()].some((other) => other.aoSession === entry.aoSession)) {
-      try { previews?.close(entry.aoSession); } catch { /* the window is gone */ }
+    if (entry.aoSession && ![...sessions.values()].some((other) => other.aoSession === entry.aoSession)) {
+      paneEntries.set(entry.aoSession, entry);
+      prunePaneEntries();
+      if (ended) {
+        endCommands(entry);
+        try { previews?.close(entry.aoSession); } catch { /* the window is gone */ }
+      }
     }
   }
 
@@ -869,7 +883,7 @@ function createChatAgentTools({
       autoReview: autoReview === true,
       aoSession: null, root: null, checkedAt: 0, createdAt: now(), usedAt: now(),
       // The commands it started (for the Terminal pane) and the preview origins it may open.
-      commands: new Map(), origins: new Set(),
+      commands: new Map(), commandState: { ended: false }, origins: new Set(), lifetime: new AbortController(),
     };
     sessions.set(key, entry);
     save();
@@ -942,8 +956,16 @@ function createChatAgentTools({
         groups: (Array.isArray(saved.groups) ? saved.groups : []).filter((group) => GROUPS.includes(group)),
         bypass: saved.bypass === true, controlAllowed: false, autoReview: saved.autoReview === true, subagent: saved.subagent === true,
         aoSession: saved.aoSession ?? null, root: null, checkedAt: 0, createdAt: Number(saved.createdAt) || now(), usedAt: saved.usedAt,
-        commands: new Map(), origins: new Set((Array.isArray(saved.origins) ? saved.origins : []).filter((origin) => typeof origin === "string").slice(0, 50)),
+        commands: new Map(), commandState: { ended: false }, origins: new Set((Array.isArray(saved.origins) ? saved.origins : []).filter((origin) => typeof origin === "string").slice(0, 50)), lifetime: new AbortController(),
       }));
+    const owners = new Map();
+    for (const entry of entries) {
+      if (!entry.aoSession) continue;
+      const key = JSON.stringify([entry.workspaceId, entry.aoSession]);
+      const owner = owners.get(key);
+      if (owner) { entry.commands = owner.commands; entry.commandState = owner.commandState; }
+      else owners.set(key, entry);
+    }
     return { port: data.port, entries };
   }
   restored = readLeases();
@@ -1035,11 +1057,35 @@ function createChatAgentTools({
    * `detail` is the full dialog text (see dialogText): null means it cannot be shown in full, and
    * the call is refused without asking.
    */
-  function ask(message, detail, declined, tooLong = "This call cannot be shown to the user in full, so it was not run.", { auto = false } = {}) {
+  function ask(message, detail, declined, tooLong = "This call cannot be shown to the user in full, so it was not run.", { auto = false, entry, tool, signal = entry.lifetime.signal } = {}) {
     if (detail === null) return Promise.resolve(failedCall(tooLong));
-    const turn = prompting.then(() => askNow(message, detail, declined, auto));
+    const turn = prompting.then(() => unavailable(entry, tool, signal)
+      ?? askNow(message, detail, declined, auto, signal));
     prompting = turn.catch(() => undefined);
-    return turn;
+    let aborted;
+    const cancelled = new Promise((resolve) => {
+      aborted = () => resolve(failedCall("This chat's tool call was cancelled."));
+      if (signal.aborted) aborted();
+      else signal.addEventListener("abort", aborted, { once: true });
+    });
+    return Promise.race([turn, cancelled]).finally(() => signal.removeEventListener("abort", aborted));
+  }
+
+  async function confirmRequest(request) {
+    const signal = request.signal;
+    if (signal?.aborted) return false;
+    let aborted;
+    try {
+      const answer = Promise.resolve().then(() => typeof confirm === "function" ? confirm(request) : false);
+      if (!signal) return await answer;
+      const stopped = new Promise((resolve) => {
+        aborted = () => resolve(false);
+        signal.addEventListener("abort", aborted, { once: true });
+      });
+      return await Promise.race([answer, stopped]);
+    } finally {
+      if (aborted) signal.removeEventListener("abort", aborted);
+    }
   }
 
   /**
@@ -1055,9 +1101,8 @@ function createChatAgentTools({
       let timer;
       const late = new Promise((resolve) => { timer = setTimeout(() => resolve("timeout"), left); });
       try {
-        const shown = typeof confirm === "function"
-          ? Promise.resolve().then(() => confirm({ ...request, signal: closing.signal })).then((value) => value === true, () => null)
-          : Promise.resolve(null);
+        const signal = request.signal ? AbortSignal.any([request.signal, closing.signal]) : closing.signal;
+        const shown = confirmRequest({ ...request, signal }).then((value) => value === true, () => null);
         const answer = await Promise.race([shown, late]);
         if (answer === "timeout") { closing.abort(); return "timeout"; }
         if (answer !== null) return answer;
@@ -1066,12 +1111,12 @@ function createChatAgentTools({
     }
   }
 
-  async function askNow(message, detail, declined, auto = false) {
+  async function askNow(message, detail, declined, auto = false, signal) {
     const deadline = auto ? answerClock() + autoAnswerMs : null;
     for (let attempt = 0; attempt < MAX_QUICK_ANSWERS; attempt += 1) {
       const opened = answerClock();
       let approved = false;
-      const request = { message: attempt ? `That answer came too quickly to have been read. ${message}` : message, detail };
+      const request = { message: attempt ? `That answer came too quickly to have been read. ${message}` : message, detail, signal };
       try {
         if (deadline !== null) {
           const answer = await confirmBefore(deadline, request);
@@ -1081,11 +1126,12 @@ function createChatAgentTools({
           }
           approved = answer === true;
         } else {
-          approved = typeof confirm === "function" && await confirm(request) === true;
+          approved = await confirmRequest(request) === true;
         }
       } catch (error) {
         return failedCall(`The user could not be asked, so nothing was run: ${errorMessage(error)}`);
       }
+      if (signal?.aborted) return failedCall("This chat's tool call was cancelled.");
       if (!approved) return failedCall(declined);
       // An approval sooner than the user could have read the prompt is not one: ask again.
       if (answerClock() - opened >= minAnswerMs) return true;
@@ -1094,7 +1140,9 @@ function createChatAgentTools({
   }
 
   /** One call to headless: `{ result }` once it completed, or `{ failed }` with the agent's error. */
-  async function invoke(entry, name, args, root) {
+  async function invoke(entry, name, args, root, agentTool = null, signal = entry.lifetime?.signal) {
+    const stopped = agentTool && unavailable(entry, agentTool, signal);
+    if (stopped) return { failed: stopped };
     let response;
     try {
       response = await requestHeadless("/api/v1/tools/call", {
@@ -1120,7 +1168,7 @@ function createChatAgentTools({
   const who = (entry) => [`Agent: ${entry.agent}\nAO session: `, { value: String(entry.aoSession), own: true }, "\n"];
 
   /** The user's confirmation of one command or one input to a command, unless the session bypasses permissions. */
-  async function confirmTerminal(entry, name, args, root, { sandboxed: inSandbox = false } = {}) {
+  async function confirmTerminal(entry, name, args, root, { sandboxed: inSandbox = false, signal = entry.lifetime.signal } = {}) {
     if (entry.bypass) return false;
     if (name === "exec_command") {
       // "Approve for me": a routine project command (an install from the lockfile, the project's
@@ -1137,7 +1185,7 @@ function createChatAgentTools({
               + "worktree and the package caches, reads the rest, and has the network. Run it once?"
             : "\n\nThe command starts in the chat's worktree but is not confined to it:\n"
               + "it can read and change anything your user account can. Run it once?"]),
-        "The user declined this command; it was not run.", tooLongToShow(name), { auto });
+        "The user declined this command; it was not run.", tooLongToShow(name), { auto, entry, tool: name, signal });
     }
     // An empty write only polls the command's output; it sends nothing.
     if (name === "write_stdin" && typeof args.chars === "string" && args.chars) {
@@ -1145,7 +1193,7 @@ function createChatAgentTools({
         dialogText([...who(entry), "Worktree: ", { value: root.path, own: true }, "\n", ...describeCall(name, args, root), "\n\nSend it once?"]),
         "The user declined this input; it was not sent.", tooLongToShow(name),
         // Answered for the user only for a command this session started itself.
-        { auto: entry.autoReview === true && entry.commands.has(commandIdOf(name, args)) && !blockedCommand(args.chars) });
+        { auto: entry.autoReview === true && entry.commands.has(commandIdOf(name, args)) && !blockedCommand(args.chars), entry, tool: name, signal });
     }
     return false;
   }
@@ -1164,7 +1212,7 @@ function createChatAgentTools({
    * the user was not shown, so each new gate (a dangerous command, a destructive, network,
    * interpreter or elevation risk) is asked about with its own risk.
    */
-  async function approveAndRetry(entry, name, args, root, failure, alreadyConfirmed) {
+  async function approveAndRetry(entry, name, args, root, failure, alreadyConfirmed, signal = entry.lifetime.signal) {
     const shown = new Set();
     const gate = async (current) => {
       if (shown.has(gateKey(current))) return true;
@@ -1181,7 +1229,7 @@ function createChatAgentTools({
           "\n", ...call, "\n\nAllow it once?",
         ]),
         `The user declined ${name}; it was not run.`, tooLongToShow(name),
-        { auto: entry.autoReview === true && !blockedCommand(JSON.stringify(args)) });
+        { auto: entry.autoReview === true && !blockedCommand(JSON.stringify(args)), entry, tool: name, signal });
       if (answer === true) shown.add(gateKey(current));
       return answer;
     };
@@ -1201,7 +1249,7 @@ function createChatAgentTools({
         callArgs = { ...callArgs, confirm: true };
       } else {
         const granted = await invoke(entry, "request_permissions",
-          { request_id: current.details.request_id, scope: "once", confirm: true, reason: "Approved by the user in Coding Tools" }, root);
+          { request_id: current.details.request_id, scope: "once", confirm: true, reason: "Approved by the user in Coding Tools" }, root, name, signal);
         const token = granted.result?.ok === true && typeof granted.result.approval_token === "string" ? granted.result.approval_token : null;
         if (!token) {
           const why = granted.failed?.content?.[0]?.text || granted.result?.error?.message || "no grant was issued";
@@ -1210,7 +1258,7 @@ function createChatAgentTools({
         tokens.push(token);
         callArgs = { ...callArgs, approval_token: token };
       }
-      const retried = await invoke(entry, name, callArgs, root);
+      const retried = await invoke(entry, name, callArgs, root, name, signal);
       if (retried.failed) return retried.failed;
       // Nothing of a grant goes back to the agent.
       result = JSON.parse(tokens.reduce((text, token) => text.split(token).join("[redacted]"), JSON.stringify(retried.result ?? null)));
@@ -1226,9 +1274,20 @@ function createChatAgentTools({
     if (!isEnabled()) return failedCall("The app's tools for chat agents are turned off in Settings.");
     const group = groupOf(name);
     if (!group || !allowed(entry, group)) return failedCall(`Unknown tool: ${name}`);
+    const signal = entry.lifetime.signal;
+    const stopped = unavailable(entry, name, signal);
+    if (stopped) return stopped;
     const given = params.arguments && typeof params.arguments === "object" && !Array.isArray(params.arguments) ? params.arguments : {};
     // Subagents are the app's own (subagents.cjs): no worktree is needed to start or read one.
-    if (group === "subagents") return subagents.call(entry.aoSession, entry.workspaceId, name, withoutConsent(given));
+    if (group === "subagents") {
+      const found = await Promise.resolve().then(() => sessionWorkspace?.(entry.aoSession, entry.workspaceId)).catch(() => null);
+      if (found?.ended) {
+        forget(entry.key, { ended: true });
+        return failedCall("This chat's session has ended; its tools are no longer available.");
+      }
+      const stopped = unavailable(entry, name, signal);
+      return stopped || subagents.call(entry.aoSession, entry.workspaceId, name, withoutConsent(given));
+    }
     let args = withoutConsent(given);
     let root;
     try {
@@ -1242,7 +1301,7 @@ function createChatAgentTools({
       // What it observes (which window, which display) is part of what the user allows.
       const details = Object.keys(args).length ? ["\n", ...describeCall(name, args, null)] : [];
       const answer = await ask(`A chat agent wants to ${CONFIRMED_TOOLS.get(name)}`,
-        dialogText([...who(entry), `Tool: ${name}\n`, ...details, "\nAllow this once?"]), `The user declined ${name}.`, tooLongToShow(name));
+        dialogText([...who(entry), `Tool: ${name}\n`, ...details, "\nAllow this once?"]), `The user declined ${name}.`, tooLongToShow(name), { entry, tool: name, signal });
       if (answer !== true) return answer;
     }
     if (CONTROL_TOOLS.has(name) && !entry.controlAllowed) {
@@ -1252,7 +1311,7 @@ function createChatAgentTools({
           + "click and type in the window you enabled it for. Control is enabled for the\n"
           + "workspace, not for one chat: every chat you allow here can use it while it\n"
           + "is on. Allow this chat?"]),
-        `The user did not allow this chat to control the screen (${name}).`);
+        `The user did not allow this chat to control the screen (${name}).`, undefined, { entry, tool: name, signal });
       if (answer !== true) return answer;
       entry.controlAllowed = true;
     }
@@ -1262,49 +1321,61 @@ function createChatAgentTools({
     // command by itself. A command the sandbox did not start (the user's own terminal) goes on below.
     if (group === "terminal" && sandboxed() && sandboxRuns(name, args)) {
       if (!entry.bypass && !reviewedUpstream(entry)) {
-        const answer = await confirmTerminal(entry, name, args, root, { sandboxed: true });
+        const answer = await confirmTerminal(entry, name, args, root, { sandboxed: true, signal });
         if (answer !== true && answer !== false) return answer;
       }
-      return runSandboxed(entry, name, args, root);
+      return runSandboxed(entry, name, args, root, signal);
     }
     let confirmed = false;
     // A command the chat's reviewer (or the person, on its card) already answered is not asked
     // again; typing into a terminal the session did not start (the user's own) still is.
     if (name === "exec_command" && reviewedUpstream(entry)) confirmed = true;
     else if (group === "terminal") {
-      const answer = await confirmTerminal(entry, name, args, root);
+      const answer = await confirmTerminal(entry, name, args, root, { signal });
       if (answer !== true && answer !== false) return answer;
       confirmed = answer === true;
     }
     if (group === "preview") {
       // The session's own browser; which addresses it may open is the user's call (permitOrigin).
-      return previews.call(entry.aoSession, name, args, { permit: (origin) => permitOrigin(entry, origin) });
+      const stopped = unavailable(entry, name, signal);
+      if (stopped) return stopped;
+      return previews.call(entry.aoSession, name, args, { permit: (origin) => permitOrigin(entry, origin, signal), signal });
     }
     const rooted = group === "desktop" ? null : root;
-    const outcome = await invoke(entry, name, args, rooted);
-    if (outcome.failed) return outcome.failed;
-    const failure = outcome.result && typeof outcome.result === "object" && outcome.result.ok === false ? outcome.result.error : null;
-    const result = (failure?.code === "APPROVAL_REQUIRED" && typeof failure.details?.request_id === "string")
-      || failure?.code === "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION"
-      ? await approveAndRetry(entry, name, args, rooted, failure, confirmed)
-      : toolResult(name, args, outcome.result);
-    track(entry, name, args, result);
-    return result;
+    if (name === "exec_command") entry.commandState.pending = (entry.commandState.pending ?? 0) + 1;
+    try {
+      const outcome = await invoke(entry, name, args, rooted, name, signal);
+      if (outcome.failed) return outcome.failed;
+      const failure = outcome.result && typeof outcome.result === "object" && outcome.result.ok === false ? outcome.result.error : null;
+      const result = (failure?.code === "APPROVAL_REQUIRED" && typeof failure.details?.request_id === "string")
+        || failure?.code === "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION"
+        ? await approveAndRetry(entry, name, args, rooted, failure, confirmed, signal)
+        : toolResult(name, args, outcome.result);
+      track(entry, name, args, result);
+      return result;
+    } finally {
+      if (name === "exec_command") entry.commandState.pending -= 1;
+      prunePaneEntries();
+    }
   }
 
   /** Remembers a command the session started, and what became of it, for the chat's Terminal pane. */
-  function track(entry, name, args, result) {
+  function track(entry, name, args, result, sandboxed = false) {
     const value = result?.structuredContent;
     const id = typeof value?.command_id === "string" && COMMAND_ID.test(value.command_id) ? value.command_id : null;
     if (!id || result.isError) return;
-    const status = { status: value.status === "running" ? "running" : String(value.status ?? "exited"),
+    const status = { status: value.finalization_pending === true || ["running", "terminating"].includes(value.status) ? "running" : value.termination_reason === "killed" ? "killed" : String(value.status ?? "exited"),
       exitCode: Number.isInteger(value.exit_code) ? value.exit_code : null };
     if (name === "exec_command") {
-      entry.commands.set(id, { id, cmd: String(args.cmd ?? "").slice(0, 2000), workdir: String(args.workdir ?? "."), startedAt: now(), ...status });
+      const command = Object.assign(entry.commands.get(id) ?? { id, cmd: String(args.cmd ?? "").slice(0, 2000),
+        workdir: String(args.workdir ?? "."), startedAt: now(), root: entry.root }, status, sandboxed ? { sandboxed: true } : {});
+      entry.commands.set(id, command);
       while (entry.commands.size > MAX_TRACKED_COMMANDS) {
-        const oldest = [...entry.commands.values()].sort((left, right) => (left.status === "running") - (right.status === "running") || left.startedAt - right.startedAt)[0];
+        const oldest = [...entry.commands.values()].filter((command) => command.status !== "running").sort((left, right) => left.startedAt - right.startedAt)[0];
+        if (!oldest) break; // Retention bounds completed output, never the only handle to a live child.
         entry.commands.delete(oldest.id);
       }
+      if (entry.commandState.ended) endCommands(entry);
     } else if (entry.commands.has(id) && ["write_stdin", "kill_command", "kill_session"].includes(name)) {
       Object.assign(entry.commands.get(id), status);
     }
@@ -1337,7 +1408,9 @@ function createChatAgentTools({
   }
 
   /** A terminal call sandboxRuns, run in the sandbox. Results are shaped like headless's, so the agent sees no difference. */
-  async function runSandboxed(entry, name, args, root) {
+  async function runSandboxed(entry, name, args, root, signal = entry.lifetime.signal) {
+    const stopped = unavailable(entry, name, signal);
+    if (stopped) return stopped;
     try {
       if (name === "check_exec_environment") {
         const described = sandbox.describe();
@@ -1348,15 +1421,14 @@ function createChatAgentTools({
         const workdir = typeof args.workdir === "string" ? args.workdir : typeof args.cwd === "string" ? args.cwd : ".";
         const id = sandbox.start({ cmd: String(args.cmd ?? ""), cwd: path.resolve(root.path, workdir), writable: root.path,
           stdin: typeof args.stdin === "string" ? args.stdin : "" });
+        track(entry, name, args, toolResult(name, args, { ok: true, command_id: id, status: "running" }), true);
         await sandbox.wait(id, yieldOf(args.yield_time_ms, 1000));
         const result = toolResult(name, args, sandbox.snapshot(id, args.max_output_bytes ?? 65_536));
-        track(entry, name, args, result);
-        const command = entry.commands.get(id);
-        if (command) command.sandboxed = true;
+        track(entry, name, args, result, true);
         return result;
       }
       const id = commandIdOf(name, args);
-      if (typeof id !== "string" || !sandbox.owns(id)) return failedCall("No such sandboxed command");
+      if (typeof id !== "string" || !entry.commands.get(id)?.sandboxed || !sandbox.owns(id)) return failedCall("That command is not one of this chat\'s sandboxed commands");
       if (name === "read_output") {
         const stream = args.output_ref.split(":")[2] === "stderr" ? "stderr" : "stdout";
         return toolResult(name, args, sandbox.read(id, stream, args.offset ?? 0, args.limit ?? 4096));
@@ -1380,7 +1452,7 @@ function createChatAgentTools({
   }
 
   /** Whether one of the session's running commands printed this origin's port: its own dev server. */
-  async function servedHere(entry, origin) {
+  async function servedHere(entry, origin, signal) {
     const { hostname, port } = new URL(origin);
     const number = port || (origin.startsWith("https:") ? "443" : "80");
     // The same host (localhost, 127.0.0.1 and [::1] count as one), then the port.
@@ -1390,7 +1462,7 @@ function createChatAgentTools({
     for (const command of entry.commands.values()) {
       if (command.status !== "running") continue;
       for (const stream of ["stdout", "stderr"]) {
-        const read = await invoke(entry, "read_output", { output_ref: `command:${command.id}:${stream}`, offset: 0, limit: MAX_PANE_READ_BYTES }, entry.root);
+        const read = await invoke(entry, "read_output", { output_ref: `command:${command.id}:${stream}`, offset: 0, limit: MAX_PANE_READ_BYTES }, entry.root, "preview_open", signal);
         if (mention.test(String(read.result?.content ?? ""))) return true;
       }
     }
@@ -1401,18 +1473,22 @@ function createChatAgentTools({
    * Whether this chat may open `origin` in its preview for the first time: true, or the refusal to
    * return to the agent. Once allowed, an origin stays allowed for the session.
    */
-  async function permitOrigin(entry, origin) {
+  async function permitOrigin(entry, origin, signal = entry.lifetime.signal) {
+    const stopped = unavailable(entry, "preview_open", signal);
+    if (stopped) return stopped;
     if (entry.origins.has(origin)) return true;
     const reviewed = reviewedUpstream(entry);
     const decision = previewOriginDecision({ origin, bypass: entry.bypass, reviewed,
-      servedHere: entry.bypass || reviewed ? false : await servedHere(entry, origin).catch(() => false) });
+      servedHere: entry.bypass || reviewed ? false : await servedHere(entry, origin, signal).catch(() => false) });
     if (decision !== "allow") {
       const answer = await ask("A chat agent wants to open a page in its preview",
         dialogText([...who(entry), "Address: ", { value: origin }, "\n\nThe chat's own browser would load this page served on this computer; the\n"
           + "agent could read it, click and type in it. Allow this address for this chat?"]),
-        `The user did not allow this chat to open ${origin}.`, undefined, { auto: entry.autoReview === true });
+        `The user did not allow this chat to open ${origin}.`, undefined, { auto: entry.autoReview === true, entry, tool: "preview_open", signal });
       if (answer !== true) return answer;
     }
+    const changed = unavailable(entry, "preview_open", signal);
+    if (changed) return changed;
     entry.origins.add(origin);
     save();
     return true;
@@ -1550,17 +1626,24 @@ function createChatAgentTools({
   // The panes reach a session the app holds no lease for (one started before the app restarted
   // and lost it, or with the tools off) through its AO worktree all the same: the user's own view
   // of it, with no credential and none of the agent's tools.
-  const paneEntries = new Map(); // AO session -> its pane-only entry
+  function prunePaneEntries() {
+    for (const [id, retained] of paneEntries) {
+      if (paneEntries.size <= 64) break;
+      if (!retained.commandState.pending && ![...retained.commands.values()].some((command) => command.status === "running" || command.user)) paneEntries.delete(id);
+    }
+  }
   function paneEntry(sessionId, workspaceId) {
     const leased = entryFor(sessionId);
     if (leased) return leased;
-    if (typeof sessionId !== "string" || !SESSION_ID.test(sessionId) || typeof workspaceId !== "string" || !WORKSPACE_ID.test(workspaceId)) return null;
+    if (typeof sessionId !== "string" || !SESSION_ID.test(sessionId)) return null;
     let entry = paneEntries.get(sessionId);
+    if (entry && (workspaceId == null || entry.workspaceId === workspaceId)) return entry;
+    if (typeof workspaceId !== "string" || !WORKSPACE_ID.test(workspaceId)) return null;
     if (!entry || entry.workspaceId !== workspaceId) {
       entry = { key: `pane-${sessionId}`, agent: "user", workspaceId, groups: [], expected: null, bypass: false, autoReview: false, controlAllowed: false,
-        aoSession: sessionId, root: null, checkedAt: 0, createdAt: now(), usedAt: now(), commands: entry?.commands ?? new Map(), origins: new Set(), pane: true };
+        aoSession: sessionId, root: null, checkedAt: 0, createdAt: now(), usedAt: now(), commands: new Map(), commandState: { ended: false }, origins: new Set(), pane: true };
       paneEntries.set(sessionId, entry);
-      while (paneEntries.size > 64) paneEntries.delete(paneEntries.keys().next().value);
+      prunePaneEntries();
     }
     return entry;
   }
@@ -1570,8 +1653,8 @@ function createChatAgentTools({
    * so a routine approval or a confirmation the workspace policy asks for is granted for that one
    * call. Returns the tool's structured result, or throws with the reason.
    */
-  async function invokeAsUser(entry, name, args) {
-    const root = await rootOf(entry);
+  async function invokeAsUser(entry, name, args, { root: knownRoot, reason = "The user did this from the chat's Terminal pane" } = {}) {
+    const root = knownRoot ?? await rootOf(entry);
     let callArgs = args;
     for (let round = 0; round < 3; round += 1) {
       const outcome = await invoke(entry, name, callArgs, root);
@@ -1581,7 +1664,7 @@ function createChatAgentTools({
         callArgs = { ...callArgs, confirm: true };
       } else if (failure?.code === "APPROVAL_REQUIRED" && typeof failure.details?.request_id === "string" && !callArgs.approval_token) {
         const granted = await invoke(entry, "request_permissions",
-          { request_id: failure.details.request_id, scope: "once", confirm: true, reason: "The user did this from the chat's Terminal pane" }, root);
+          { request_id: failure.details.request_id, scope: "once", confirm: true, reason }, root);
         const token = granted.result?.ok === true && typeof granted.result.approval_token === "string" ? granted.result.approval_token : null;
         if (!token) throw new Error("The workspace policy did not allow it");
         callArgs = { ...callArgs, approval_token: token };
@@ -1599,6 +1682,29 @@ function createChatAgentTools({
     return command;
   };
 
+  /** The same owned-command stop used by the pane and by semantic session cleanup. */
+  async function stopCommand(entry, command, cleanup = false) {
+    if (command.sandboxed) {
+      const value = sandbox?.owns(command.id) ? await sandbox.kill(command.id) : null;
+      command.status = value?.status === "terminating" || value?.finalization_pending ? "running" : "killed";
+    } else {
+      const value = await invokeAsUser(entry, "kill_command", { command_id: command.id, wait_ms: 3000 },
+        { root: command.root, ...(cleanup ? { reason: "Cleanup of an ended chat's owned command" } : {}) });
+      command.status = value?.status === "terminating" || value?.finalization_pending ? "running" : "killed";
+    }
+    return { ok: true, status: command.status };
+  }
+
+  function endCommands(entry) {
+    entry.commandState.ended = true;
+    for (const command of entry.commands.values()) {
+      if (command.user || command.status !== "running" || command.stopPromise) continue;
+      command.stopPromise = stopCommand(entry, command, true)
+        .catch((error) => logger.warn?.("chat_agent_tools.command_cleanup_failed", { message: errorMessage(error) }))
+        .finally(() => { delete command.stopPromise; prunePaneEntries(); });
+    }
+  }
+
   /** One read of a command's output from `offset`, with whether it still runs. */
   async function readCommand(entry, command, stream, offset) {
     if (command.sandboxed && sandbox?.owns(command.id)) {
@@ -1612,17 +1718,21 @@ function createChatAgentTools({
       if (command.status === "running") command.status = "gone";
       return { content: "", nextOffset: Math.max(0, Number(offset) || 0), gap: false, status: command.status, exitCode: command.exitCode };
     }
-    const root = await rootOf(entry);
+    const root = command.root ?? await rootOf(entry);
     const read = await invoke(entry, "read_output", {
       output_ref: `command:${command.id}:${stream}`, offset: Math.max(0, Number(offset) || 0), limit: MAX_PANE_READ_BYTES,
     }, root);
-    const value = read.result?.ok === false ? null : read.result;
+    if (read.failed) throw new Error(read.failed.content?.[0]?.text ?? "The command's output could not be read");
+    const failure = read.result?.ok === false ? read.result.error : null;
+    if (failure && failure.code !== "SESSION_NOT_FOUND") throw new Error(String(failure.message ?? failure.code ?? "The command's output could not be read").slice(0, 300));
+    if (!read.result || typeof read.result !== "object") throw new Error("The command's output could not be read");
+    const value = failure ? null : read.result;
     if (!value) {
-      // Headless forgot it (its output expired, or headless restarted): it no longer runs.
+      // Only an explicit missing handle confirms headless no longer owns the command.
       if (command.status === "running") command.status = "gone";
       return { content: "", nextOffset: Math.max(0, Number(offset) || 0), gap: false, status: command.status, exitCode: command.exitCode };
     }
-    if (typeof value.status === "string") command.status = value.status;
+    if (typeof value.status === "string") command.status = value.finalization_pending === true || value.status === "terminating" ? "running" : value.status;
     if (Number.isInteger(value.exit_code)) command.exitCode = value.exit_code;
     return {
       content: String(value.content ?? ""), nextOffset: Number(value.next_read_offset ?? offset) || 0, gap: value.output_gap === true,
@@ -1691,11 +1801,18 @@ function createChatAgentTools({
             forget(entry.key);
             return false;
           }
+          const retained = paneEntries.get(sessionId);
+          if (retained?.workspaceId === entry.workspaceId) {
+            entry.commands = retained.commands; entry.commandState = retained.commandState; entry.root = retained.root;
+          }
           // One credential per session: an older one for the same session is retired.
           for (const other of [...sessions.values()]) {
             if (other === entry || other.aoSession !== sessionId) continue;
             // The session's commands and the origins it was allowed to open stay its own.
-            for (const [id, command] of other.commands) if (!entry.commands.has(id)) entry.commands.set(id, command);
+            for (const [id, command] of entry.commands) if (!other.commands.has(id)) other.commands.set(id, command);
+            entry.commands = other.commands;
+            entry.commandState = other.commandState;
+            entry.root ??= other.root;
             for (const origin of other.origins) entry.origins.add(origin);
             forget(other.key);
           }
@@ -1724,7 +1841,10 @@ function createChatAgentTools({
       entry.supersedes = [];
       for (const other of [...sessions.values()]) {
         if (other === entry || other.aoSession !== sessionId) continue;
-        for (const [id, command] of other.commands) if (!entry.commands.has(id)) entry.commands.set(id, command);
+        for (const [id, command] of entry.commands) if (!other.commands.has(id)) other.commands.set(id, command);
+        entry.commands = other.commands;
+        entry.commandState = other.commandState;
+        entry.root ??= other.root;
         for (const origin of other.origins) entry.origins.add(origin);
         entry.supersedes.push(other.key);
       }
@@ -1733,9 +1853,18 @@ function createChatAgentTools({
       const url = `http://127.0.0.1:${port}/mcp/${encodeURIComponent(entry.workspaceId)}/${entry.key}`;
       return Object.freeze({ servers: [{ name: SERVER_NAME, type: "http", url, headers: { Authorization: `Bearer ${token}` } }] });
     },
+    /** Cancels the current turn's pending calls without retiring a reusable session's tools. */
+    cancelSessionCalls(sessionId) {
+      for (const entry of sessions.values()) if (entry.aoSession === sessionId) {
+        entry.lifetime.abort();
+        entry.lifetime = new AbortController();
+      }
+    },
     /** Forgets the credential of an AO session that has ended (it was killed or deleted). */
     forgetSession(sessionId) {
       for (const entry of [...sessions.values()]) if (entry.aoSession === sessionId) forget(entry.key, { ended: true });
+      const retained = paneEntries.get(sessionId);
+      if (retained) endCommands(retained);
     },
     /**
      * What a launch would attach now: the tool groups (agent[+terminal][+desktop]) and this
@@ -1772,14 +1901,7 @@ function createChatAgentTools({
       const entry = paneEntry(sessionId, workspaceId);
       if (!entry) throw new Error("That chat agent's session has ended");
       const command = commandOf(entry, commandId);
-      if (command.sandboxed) {
-        if (sandbox?.owns(command.id)) await sandbox.kill(command.id);
-        command.status = "killed";
-        return { ok: true, status: command.status };
-      }
-      const value = await invokeAsUser(entry, "kill_command", { command_id: command.id, wait_ms: 3000 });
-      command.status = value?.status === "terminating" ? "running" : "killed";
-      return { ok: true, status: command.status };
+      return stopCommand(entry, command);
     },
     /** The user types into one of the chat's running commands (a newline is sent as typed). */
     async processInput({ sessionId, workspaceId, commandId, text } = {}) {
@@ -1792,7 +1914,7 @@ function createChatAgentTools({
         sandbox.write(command.id, text);
         return { ok: true };
       }
-      await invokeAsUser(entry, "write_stdin", { command_id: command.id, chars: text, yield_time_ms: 200, max_output_bytes: 0 });
+      await invokeAsUser(entry, "write_stdin", { command_id: command.id, chars: text, yield_time_ms: 200, max_output_bytes: 0 }, { root: command.root });
       return { ok: true };
     },
     /**
@@ -1803,12 +1925,15 @@ function createChatAgentTools({
     async terminalStart({ sessionId, workspaceId } = {}) {
       const entry = paneEntry(sessionId, workspaceId);
       if (!entry) throw new Error("That chat agent's session has ended");
-      const cmd = WINDOWS ? 'powershell.exe -NoLogo -NoProfile -NoExit -Command "Remove-Module PSReadLine -ErrorAction SilentlyContinue"' : "bash -i";
-      const value = await invokeAsUser(entry, "exec_command", { cmd, workdir: ".", tty: true, yield_time_ms: 500, max_output_bytes: 4096 });
-      const id = typeof value?.command_id === "string" && COMMAND_ID.test(value.command_id) ? value.command_id : null;
-      if (!id) throw new Error("The terminal did not start");
-      entry.commands.set(id, { id, cmd: "Terminal", workdir: ".", startedAt: now(), status: "running", exitCode: null, user: true });
-      return { ok: true, commandId: id };
+      entry.commandState.pending = (entry.commandState.pending ?? 0) + 1;
+      try {
+        const cmd = WINDOWS ? 'powershell.exe -NoLogo -NoProfile -NoExit -Command "Remove-Module PSReadLine -ErrorAction SilentlyContinue"' : "bash -i";
+        const value = await invokeAsUser(entry, "exec_command", { cmd, workdir: ".", tty: true, yield_time_ms: 500, max_output_bytes: 4096 });
+        const id = typeof value?.command_id === "string" && COMMAND_ID.test(value.command_id) ? value.command_id : null;
+        if (!id) throw new Error("The terminal did not start");
+        entry.commands.set(id, { id, cmd: "Terminal", workdir: ".", startedAt: now(), status: "running", exitCode: null, user: true, root: entry.root });
+        return { ok: true, commandId: id };
+      } finally { entry.commandState.pending -= 1; prunePaneEntries(); }
     },
     /**
      * The session worktree's changes for the side panel's Changes tab: git's status (with new files)

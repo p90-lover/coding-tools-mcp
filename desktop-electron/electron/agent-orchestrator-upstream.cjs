@@ -834,6 +834,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
      * provider conversation; continuable() resumes it on the next message.
      */
     async exitAgent(id) {
+      agentTools?.cancelSessionCalls?.(id);
       await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/exit-agent`, {});
       return { ok: true };
     },
@@ -881,6 +882,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     },
     /** Ends a session and its agent (a pre-warmed one nobody used). */
     async kill(id) {
+      agentTools?.cancelSessionCalls?.(id);
       await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/kill`, {});
       agentTools?.forgetSession?.(id);
       return { ok: true };
@@ -954,18 +956,21 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return pastTurnTimeline(id, turnId);
     },
     async interrupt(id) {
-      const interrupt = () => internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/interrupt`, {});
+      agentTools?.cancelSessionCalls?.(id);
+      const interrupt = () => internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/interrupt`, {}).catch(error => {
+        if (!/CHAT_NO_ACTIVE_TURN/.test(String(error?.message))) throw error;
+      });
       await interrupt().catch(async (error) => {
         // A chat created in the background (spawn's async) whose agent is still starting has no
         // controller, so nothing to interrupt; AO would send its queued prompt once the agent is up,
         // and the stopped card would leave it working unseen. Its start is cancelled instead. One
         // that came up meanwhile is interrupted.
-        if (!/CHAT_CONTROLLER_NOT_READY/.test(String(error?.message))) return;
-        const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`).catch(() => null);
+        if (!/CHAT_CONTROLLER_NOT_READY/.test(String(error?.message))) throw error;
+        const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`);
         if (record?.session?.provisionState === "provisioning") {
-          await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/kill`, {}).catch(() => undefined);
+          await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/kill`, {});
           agentTools?.forgetSession?.(id);
-        } else await interrupt().catch(() => undefined);
+        } else await interrupt();
       });
     },
     // A standalone AO terminal running one program (e.g. the Antigravity CLI) with

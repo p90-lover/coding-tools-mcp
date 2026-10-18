@@ -11,6 +11,7 @@ pub struct LivePolicy {
     pub policy: PolicySettings,
     pub tool_profile: String,
     pub revision: u64,
+    pub(crate) retired: bool,
 }
 
 fn unavailable() -> WorkspaceError {
@@ -21,11 +22,22 @@ fn unavailable() -> WorkspaceError {
         retryable: false,
     }
 }
+fn retired() -> WorkspaceError {
+    WorkspaceError::Tool {
+        code: "CONTEXT_RETIRED",
+        message: "This workspace context was removed or replaced; execution is blocked.".into(),
+        category: "permission",
+        retryable: false,
+    }
+}
 impl ToolContext {
     pub fn for_request(&self) -> Result<Self, WorkspaceError> {
         let live = self.live_policy.read().map_err(|_| unavailable())?;
         let mut request = self.clone();
         if let Some(value) = live.as_ref() {
+            if value.retired {
+                return Err(retired());
+            }
             request.policy = value.policy.clone();
             request.tool_profile = value.tool_profile.clone();
             request.policy_revision = value.revision;
@@ -52,6 +64,9 @@ impl ToolContext {
     ) -> Result<RwLockReadGuard<'_, Option<LivePolicy>>, WorkspaceError> {
         self.workspace.ensure_roots_current()?;
         let guard = self.live_policy.read().map_err(|_| unavailable())?;
+        if guard.as_ref().is_some_and(|value| value.retired) {
+            return Err(retired());
+        }
         if guard.as_ref().map_or(0, |p| p.revision) != self.policy_revision {
             return Err(WorkspaceError::Tool {
                 code: "PERMISSION_CHANGED_BEFORE_EXECUTION",
@@ -63,11 +78,48 @@ impl ToolContext {
     }
 
     pub fn current_policy_revision(&self) -> Result<u64, WorkspaceError> {
-        self.live_policy
-            .read()
-            .map(|p| p.as_ref().map_or(0, |p| p.revision))
-            .map_err(|_| unavailable())
+        let live = self.live_policy.read().map_err(|_| unavailable())?;
+        if live.as_ref().is_some_and(|value| value.retired) {
+            return Err(retired());
+        }
+        Ok(live.as_ref().map_or(0, |value| value.revision))
     }
+}
+
+/// End a context's lifetime under the same fence used to admit side effects.
+/// Acquire every fence before persistence so a refused change retires no context.
+pub fn retire_contexts<T>(
+    contexts: &[Arc<ToolContext>],
+    persist: impl FnOnce() -> AppResult<T>,
+) -> AppResult<T> {
+    let mut guards = Vec::new();
+    for context in contexts {
+        guards.push(context.live_policy.try_write().map_err(|_| {
+            AppError::Message(
+                "LIVE_POLICY_BUSY: A short local operation is finishing. Retry the workspace change; nothing was partially saved.".into(),
+            )
+        })?);
+    }
+    let result = persist()?;
+    for (context, guard) in contexts.iter().zip(guards.iter_mut()) {
+        let policy = guard.get_or_insert_with(|| LivePolicy {
+            policy: context.policy.clone(),
+            tool_profile: context.tool_profile.clone(),
+            revision: context.policy_revision,
+            retired: false,
+        });
+        if policy.retired {
+            continue;
+        }
+        // The terminal flag blocks snapshots even if the revision counter is exhausted.
+        policy.revision = policy.revision.saturating_add(1);
+        policy.retired = true;
+        context.approvals.revoke_all();
+        context.sessions.revoke_for_policy_change();
+        context.disconnect_native_codex();
+        crate::tools::computer::stop_workspace(context.workspace.root());
+    }
+    Ok(result)
 }
 
 pub fn refreshable_observation(name: &str) -> bool {
@@ -127,15 +179,20 @@ pub fn commit_updates(
                     policy,
                     tool_profile: profile,
                     revision,
+                    retired: false,
                 },
             ));
         }
     }
     let mut guards = Vec::new();
     for (context, _, _) in &changes {
-        guards.push(context.live_policy.try_write().map_err(|_| AppError::Message(
+        let guard = context.live_policy.try_write().map_err(|_| AppError::Message(
             "LIVE_POLICY_BUSY: A short local operation is finishing. Retry Save; no restart or MCP relink is required and nothing was partially saved.".into()
-        ))?);
+        ))?;
+        if guard.as_ref().is_some_and(|value| value.retired) {
+            return Err(AppError::Message(retired().message()));
+        }
+        guards.push(guard);
     }
     persist()?;
     if !changes.is_empty() {

@@ -34,12 +34,12 @@ function tempTree() {
 }
 
 function fixture({ enabled = () => true, desktop = () => false, terminal = () => false, results = {}, workspaces = null, confirm = async () => true, root = null, worktreesRoot = null,
-  minAnswerMs = 0, answerClock = undefined, sandbox = null, autoAnswerMs = undefined, blockedCommand = undefined, now = undefined } = {}) {
+  minAnswerMs = 0, answerClock = undefined, sandbox = null, subagents = null, statePath = null, autoAnswerMs = undefined, blockedCommand = undefined, now = undefined } = {}) {
   const calls = [];
   const asked = [];
   const confirmations = [];
   const tools = createChatAgentTools({
-    enabled, desktopEnabled: desktop, terminalEnabled: terminal, worktreesRoot, version: "9.9.9", logger: { info() {}, warn() {} }, sandbox,
+    enabled, desktopEnabled: desktop, terminalEnabled: terminal, worktreesRoot, version: "9.9.9", logger: { info() {}, warn() {} }, sandbox, subagents, statePath,
     // A fake confirm answers at once; the quick-answer check has its own test.
     minAnswerMs, ...(answerClock ? { answerClock } : {}),
     ...(autoAnswerMs !== undefined ? { autoAnswerMs } : {}), ...(blockedCommand ? { blockedCommand } : {}), ...(now ? { now } : {}),
@@ -54,7 +54,7 @@ function fixture({ enabled = () => true, desktop = () => false, terminal = () =>
       if (endpoint.startsWith("/api/v1/tools/catalog?")) return CATALOG;
       if (endpoint === "/api/v1/tools/call") {
         const given = results[body.tool];
-        const outcome = typeof given === "function" ? given(body) : given;
+        const outcome = await (typeof given === "function" ? given(body) : given);
         if (outcome instanceof Error) throw outcome;
         return { ok: true, operation: outcome ?? { state: "completed", result: { ok: true, tool: body.tool, echo: body.arguments } } };
       }
@@ -100,6 +100,123 @@ let nextId = 100;
 const callTool = (url, auth, name, args = {}) =>
   post(url, { jsonrpc: "2.0", id: nextId++, method: "tools/call", params: { name, arguments: args } }, auth).then((reply) => reply.body.result);
 const listed = (url, auth) => post(url, { jsonrpc: "2.0", id: nextId++, method: "tools/list" }, auth).then((reply) => reply.body.result.tools.map((entry) => entry.name));
+
+test("a command awaiting approval cannot run after its session ends or tools are disabled", async (t) => {
+  for (const change of ["session ended", "tools disabled"]) await t.test(change, async () => {
+    const tree = tempTree();
+    let on = true;
+    let answer;
+    let opened;
+    const shown = new Promise((resolve) => { opened = resolve; });
+    const { tools, calls } = fixture({ root: tree.root, terminal: () => true, enabled: () => on,
+      confirm: () => { opened(); return new Promise((resolve) => { answer = resolve; }); } });
+    let pending;
+    try {
+      const client = await session(tools);
+      pending = callTool(client.url, client.auth, "exec_command", { cmd: "echo approved" });
+      await shown;
+      if (change === "session ended") tools.forgetSession("ao-1"); else on = false;
+      answer(true);
+      const result = await pending;
+      assert.equal(result.isError, true, "the stale call is refused");
+      assert.equal(calls.filter((call) => call.body?.tool === "exec_command").length, 0,
+        "an approval cannot revive a retired session or disabled tool");
+    } finally {
+      answer?.(false);
+      await pending?.catch(() => undefined);
+      await tools.close();
+      tree.cleanup();
+    }
+  });
+});
+
+test("a retired session's queued approval never opens or blocks another chat", async () => {
+  const tree = tempTree();
+  let answer;
+  let opened;
+  const shown = new Promise((resolve) => { opened = resolve; });
+  const { tools, calls, confirmations, asked } = fixture({ root: tree.root, terminal: () => true,
+    confirm: () => {
+      if (confirmations.length === 1) { opened(); return new Promise((resolve) => { answer = resolve; }); }
+      return true;
+    } });
+  let first;
+  let second;
+  try {
+    const a = await session(tools, { id: "ao-a" });
+    const b = await session(tools, { id: "ao-b" });
+    first = callTool(a.url, a.auth, "exec_command", { cmd: "echo first" });
+    await shown;
+    second = callTool(b.url, b.auth, "exec_command", { cmd: "echo retired" });
+    for (let turn = 0; !asked.includes("ao-b") && turn < 100; turn += 1) await new Promise(setImmediate);
+    assert.ok(asked.includes("ao-b"), "the second chat reached the approval queue");
+    tools.forgetSession("ao-b");
+    answer(true);
+    assert.equal((await first).isError, false);
+    assert.equal((await second).isError, true);
+    assert.equal(confirmations.length, 1, "the retired chat never displays a stale approval");
+    assert.deepEqual(calls.filter((call) => call.body?.tool === "exec_command").map((call) => call.body.arguments.cmd), ["echo first"]);
+  } finally {
+    answer?.(false);
+    await Promise.allSettled([first, second].filter(Boolean));
+    await tools.close();
+    tree.cleanup();
+  }
+});
+
+test("stopping a turn cancels its approval while the same chat keeps working", async () => {
+  const tree = tempTree();
+  let opened;
+  let unanswered;
+  const shown = new Promise((resolve) => { opened = resolve; });
+  const { tools, calls, confirmations } = fixture({ root: tree.root, terminal: () => true,
+    confirm: () => { opened(); return new Promise((resolve) => { unanswered = resolve; }); } });
+  let pending;
+  let deadline;
+  try {
+    const client = await session(tools);
+    pending = callTool(client.url, client.auth, "exec_command", { cmd: "echo cancelled" });
+    await shown;
+    tools.cancelSessionCalls("ao-1");
+    const result = await Promise.race([pending, new Promise((_, reject) => {
+      deadline = setTimeout(() => reject(new Error("the stopped turn kept its approval open")), 1000);
+    })]);
+    assert.equal(result.isError, true);
+    assert.equal(confirmations[0].signal.aborted, true, "the native dialog receives cancellation");
+    assert.equal(calls.filter((call) => call.body?.tool === "exec_command").length, 0);
+    assert.equal((await callTool(client.url, client.auth, "read_file", { path: "src/a.txt" })).isError, false,
+      "the retained session's credential still works for the next turn");
+  } finally {
+    clearTimeout(deadline);
+    unanswered?.(false);
+    await pending?.catch(() => undefined);
+    await tools.close();
+    tree.cleanup();
+  }
+});
+
+test("a stopped turn cannot resume a tool call after workspace discovery finishes", async () => {
+  const tree = tempTree();
+  let finishLookup;
+  let lookupStarted;
+  const started = new Promise((resolve) => { lookupStarted = resolve; });
+  const { tools, calls } = fixture({ workspaces: () => { lookupStarted(); return new Promise((resolve) => { finishLookup = resolve; }); } });
+  let pending;
+  try {
+    const client = await session(tools);
+    pending = callTool(client.url, client.auth, "read_file", { path: "src/a.txt" });
+    await started;
+    tools.cancelSessionCalls("ao-1");
+    finishLookup({ root: tree.root });
+    assert.equal((await pending).isError, true);
+    assert.equal(calls.length, 0, "workspace discovery cannot revive a cancelled request");
+  } finally {
+    finishLookup?.({ root: tree.root });
+    await pending?.catch(() => undefined);
+    await tools.close();
+    tree.cleanup();
+  }
+});
 
 test("a resumed session gets a fresh credential; the old one works until the new one is used", async () => {
   const { tools } = fixture();
@@ -446,6 +563,297 @@ function fakeSandbox({ installed = true } = {}) {
     owns: (id) => running.has(id),
   };
 }
+
+
+test("ended chats reap agent commands while ordinary credential release retains pane ownership", async (t) => {
+  for (const ended of [true, false]) await t.test(ended ? "semantic end" : "credential release", async () => {
+    const tree = tempTree();
+    const sandbox = fakeSandbox();
+    const { tools } = fixture({ root: tree.root, terminal: () => true, sandbox });
+    try {
+      const client = await session(tools, { approvalMode: "bypass-permissions" });
+      await callTool(client.url, client.auth, "exec_command", { cmd: "echo owned", yield_time_ms: 0 });
+      if (ended) tools.forgetSession("ao-1"); else client.lease.release();
+      await new Promise(setImmediate);
+      assert.deepEqual(sandbox.killed, ended ? ["sbx-1"] : [], "only a semantic end stops owned children");
+      const [listing] = await tools.processes(["ao-1"], "ws1");
+      assert.equal(listing.commands[0]?.id, "sbx-1", "the pane retains the command independently of its credential");
+      assert.equal(listing.commands[0].status, ended ? "killed" : "running");
+      if (!ended) await tools.processStop({ sessionId: "ao-1", workspaceId: "ws1", commandId: "sbx-1" });
+    } finally { await tools.close(); tree.cleanup(); }
+  });
+});
+
+test("sandbox commands are owned before yielding and survive credential renewal", async (t) => {
+  for (const change of ["end", "renew", "renew then end"]) await t.test(change, async () => {
+    const tree = tempTree();
+    const sandbox = fakeSandbox();
+    let waiting, resume;
+    const started = new Promise((resolve) => { waiting = resolve; });
+    sandbox.wait = () => { waiting(); return new Promise((resolve) => { resume = resolve; }); };
+    const { tools } = fixture({ root: tree.root, terminal: () => true, sandbox });
+    let pending;
+    try {
+      const client = await session(tools, { approvalMode: "bypass-permissions" });
+      pending = callTool(client.url, client.auth, "exec_command", { cmd: "echo pending", yield_time_ms: 0 });
+      await started;
+      if (change.startsWith("renew")) {
+        const [{ url, headers }] = (await tools.renew("ao-1")).servers;
+        await listed(url, { authorization: headers.Authorization });
+      }
+      if (change !== "renew") tools.forgetSession("ao-1");
+      await new Promise(setImmediate);
+      assert.deepEqual(sandbox.killed, change === "renew" ? [] : ["sbx-1"], "end sees the command even while its first result is pending");
+      resume();
+      await pending;
+      const [listing] = await tools.processes(["ao-1"], "ws1");
+      assert.equal(listing.commands[0]?.id, "sbx-1", "late results update the shared session owner");
+      assert.equal(listing.commands[0].status, change === "renew" ? "running" : "killed");
+    } finally { resume?.(); await pending?.catch(() => undefined); await tools.close(); tree.cleanup(); }
+  });
+});
+
+test("late headless command results follow session ownership across end and renewal", async (t) => {
+  for (const change of ["end", "renew", "renew then end"]) await t.test(change, async () => {
+    const tree = tempTree();
+    let started, complete;
+    const sent = new Promise((resolve) => { started = resolve; });
+    const { tools, calls } = fixture({ root: tree.root, terminal: () => true, results: {
+      exec_command: () => { started(); return new Promise((resolve) => { complete = resolve; }); },
+      read_output: { state: "completed", result: { ok: true, content: "", status: "running" } },
+      kill_command: (body) => ({ state: "completed", result: body.arguments.approval_token
+        ? { ok: true, command_id: "late-headless", status: "killed" }
+        : { ok: false, error: { code: "APPROVAL_REQUIRED", details: { request_id: "cleanup-approval" } } } }),
+      request_permissions: { state: "completed", result: { ok: true, approval_token: "cleanup-token" } },
+    } });
+    let pending;
+    try {
+      const client = await session(tools, { approvalMode: "bypass-permissions" });
+      pending = callTool(client.url, client.auth, "exec_command", { cmd: "echo late" });
+      await sent;
+      if (change.startsWith("renew")) {
+        const [{ url, headers }] = (await tools.renew("ao-1")).servers;
+        await listed(url, { authorization: headers.Authorization });
+      }
+      if (change !== "renew") tools.forgetSession("ao-1");
+      complete({ state: "completed", result: { ok: true, command_id: "late-headless", status: "running" } });
+      await pending;
+      await new Promise(setImmediate);
+      const [listing] = await tools.processes(["ao-1"], "ws1");
+      assert.equal(listing.commands[0]?.id, "late-headless");
+      assert.equal(listing.commands[0].status, change === "renew" ? "running" : "killed");
+      const kills = calls.filter((call) => call.body?.tool === "kill_command");
+      assert.equal(kills.length, change === "renew" ? 0 : 2, "cleanup can satisfy the existing policy for exactly its owned command");
+      if (change !== "renew") {
+        const grant = calls.find((call) => call.body?.tool === "request_permissions").body;
+        assert.match(grant.arguments.reason, /ended.*owned command/i);
+        assert.doesNotMatch(grant.arguments.reason, /user.*Terminal pane/i, "automatic cleanup never invents a pane click");
+        assert.ok(kills.every((call) => call.body.root === path.resolve(tree.root)));
+      }
+    } finally {
+      complete?.({ state: "completed", result: { ok: true, command_id: "late-headless", status: "running" } });
+      await pending?.catch(() => undefined); await tools.close(); tree.cleanup();
+    }
+  });
+});
+
+test("command retention prunes completed output without losing live sandbox handles", async () => {
+  const tree = tempTree();
+  const sandbox = fakeSandbox();
+  const { tools } = fixture({ root: tree.root, terminal: () => true, sandbox });
+  try {
+    const client = await session(tools, { approvalMode: "bypass-permissions" });
+    for (let i = 0; i < 40; i += 1) await callTool(client.url, client.auth, "exec_command", { cmd: "echo " + i, yield_time_ms: 0 });
+    await callTool(client.url, client.auth, "kill_command", { command_id: "sbx-1" });
+    for (let i = 0; i < 2; i += 1) await callTool(client.url, client.auth, "exec_command", { cmd: "echo more", yield_time_ms: 0 });
+    const [listing] = await tools.processes(["ao-1"], "ws1");
+    assert.equal(listing.commands.length, 41, "all live handles remain reachable even above the completed-output limit");
+    assert.ok(!listing.commands.some((command) => command.id === "sbx-1"), "completed output is pruned first");
+    assert.ok(listing.commands.some((command) => command.id === "sbx-2"));
+    assert.equal((await callTool(client.url, client.auth, "write_stdin", { command_id: "sbx-2", chars: "own", yield_time_ms: 0 })).isError, false);
+    tools.forgetSession("ao-1");
+    await new Promise(setImmediate);
+    assert.equal(new Set(sandbox.killed).size, 42, "every owned live handle can still be reaped");
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("the user's pane terminal survives chat end and remains manually controllable", async () => {
+  const tree = tempTree();
+  let ended = false;
+  const { tools, calls } = fixture({ root: tree.root, terminal: () => true, workspaces: () => ended ? { ended: true } : { root: tree.root }, results: {
+    exec_command: { state: "completed", result: { ok: true, command_id: "user-terminal", status: "running" } },
+    read_output: { state: "completed", result: { ok: true, content: "own shell", status: "running" } },
+    kill_command: { state: "completed", result: { ok: true, status: "killed" } },
+  } });
+  try {
+    await session(tools);
+    await tools.terminalStart({ sessionId: "ao-1", workspaceId: "ws1" });
+    ended = true;
+    tools.forgetSession("ao-1");
+    await new Promise(setImmediate);
+    assert.equal(calls.filter((call) => call.body?.tool === "kill_command").length, 0, "user terminals are never automatically killed");
+    const [listing] = await tools.processes(["ao-1"], "ws1");
+    assert.equal(listing.commands[0]?.user, true);
+    assert.equal((await tools.processOutput({ sessionId: "ao-1", workspaceId: "ws1", commandId: "user-terminal" })).content, "own shell");
+    await tools.processInput({ sessionId: "ao-1", workspaceId: "ws1", commandId: "user-terminal", text: "exit\n" });
+    assert.equal((await tools.processStop({ sessionId: "ao-1", workspaceId: "ws1", commandId: "user-terminal" })).status, "killed");
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("subagent tools reject ended parents without requiring a ready worktree", async () => {
+  let ended = false;
+  const called = [];
+  const { tools } = fixture({ workspaces: () => ended ? { ended: true } : { ready: false },
+    subagents: { enabled: () => true, call: async (...args) => { called.push(args); return { content: [{ type: "text", text: "accepted" }], isError: false }; } } });
+  try {
+    const client = await session(tools);
+    assert.equal((await callTool(client.url, client.auth, "subagent_start", { task: "ready later" })).isError, false);
+    ended = true;
+    const refused = await callTool(client.url, client.auth, "subagent_start", { task: "after end" });
+    assert.equal(refused.isError, true);
+    assert.match(refused.content[0].text, /session has ended/);
+    assert.equal(called.length, 1);
+    assert.equal((await post(client.url, { jsonrpc: "2.0", id: 9001, method: "tools/list" }, client.auth)).status, 401);
+  } finally { await tools.close(); }
+});
+
+
+test("subagent parent validation also accepts synchronous workspace resolvers", async () => {
+  let ended = false, called = 0;
+  const tools = createChatAgentTools({ logger: { info() {}, warn() {} },
+    sessionWorkspace: () => ended ? { ended: true } : { ready: false },
+    requestHeadless: async () => ({ tools: [] }),
+    subagents: { enabled: () => true, call: async () => { called++; return { content: [], isError: false }; } } });
+  try {
+    const client = await session(tools);
+    assert.equal((await callTool(client.url, client.auth, "subagent_start", { task: "first" })).isError, false);
+    ended = true;
+    assert.equal((await callTool(client.url, client.auth, "subagent_start", { task: "late" })).isError, true);
+    assert.equal(called, 1);
+  } finally { await tools.close(); }
+});
+
+test("completed pane owners are bounded while live and user terminals stay reachable", async () => {
+  const tree = tempTree();
+  const sandbox = fakeSandbox();
+  sandbox.wait = async (id) => { if (id !== "sbx-1") await sandbox.kill(id); };
+  const { tools } = fixture({ root: tree.root, terminal: () => true, sandbox, results: {
+    exec_command: { state: "completed", result: { ok: true, command_id: "user-shell", status: "running" } },
+    read_output: { state: "completed", result: { ok: true, content: "user", status: "running" } },
+  } });
+  try {
+    const user = await session(tools, { id: "user-owner" });
+    await tools.terminalStart({ sessionId: "user-owner", workspaceId: "ws1" });
+    user.lease.release();
+    const live = await session(tools, { id: "live-owner", approvalMode: "bypass-permissions" });
+    await callTool(live.url, live.auth, "exec_command", { cmd: "echo live", yield_time_ms: 0 });
+    live.lease.release();
+    for (let i = 0; i < 66; i++) {
+      const client = await session(tools, { id: "completed-" + i, approvalMode: "bypass-permissions" });
+      await callTool(client.url, client.auth, "exec_command", { cmd: "echo done", yield_time_ms: 0 });
+      tools.forgetSession("completed-" + i);
+    }
+    await assert.rejects(tools.processOutput({ sessionId: "completed-0", workspaceId: "ws1", commandId: "sbx-2" }), /not one of this chat/,
+      "the oldest completed owner is pruned after 64 pane owners");
+    assert.equal((await tools.processOutput({ sessionId: "live-owner", workspaceId: "ws1", commandId: "sbx-1" })).status, "running");
+    assert.equal((await tools.processOutput({ sessionId: "user-owner", workspaceId: "ws1", commandId: "user-shell" })).content, "user");
+    tools.forgetSession("live-owner");
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+
+test("failed output reads retain live ownership unless headless confirms SESSION_NOT_FOUND", async (t) => {
+  for (const failure of ["transport", "policy", "not found"]) await t.test(failure, async () => {
+    const tree = tempTree();
+    const { tools, calls } = fixture({ root: tree.root, terminal: () => true, results: {
+      exec_command: { state: "completed", result: { ok: true, command_id: "still-owned", status: "running" } },
+      read_output: failure === "transport" ? new Error("HTTP 502 upstream unavailable")
+        : { state: "completed", result: { ok: false, error: { code: failure === "not found" ? "SESSION_NOT_FOUND" : "PERMISSION_DENIED", message: "output read refused" } } },
+      kill_command: { state: "completed", result: { ok: true, status: "killed" } },
+    } });
+    try {
+      const client = await session(tools, { approvalMode: "bypass-permissions" });
+      await callTool(client.url, client.auth, "exec_command", { cmd: "echo live" });
+      const [listing] = await tools.processes(["ao-1"], "ws1");
+      assert.equal(listing.commands[0].status, failure === "not found" ? "gone" : "running");
+      if (failure !== "not found") await assert.rejects(tools.processOutput({ sessionId: "ao-1", workspaceId: "ws1", commandId: "still-owned" }),
+        /HTTP 502|output read refused/, "the user gets the actual read failure without losing the process handle");
+      tools.forgetSession("ao-1");
+      await new Promise(setImmediate);
+      assert.equal(calls.filter((call) => call.body?.tool === "kill_command").length, failure === "not found" ? 0 : 1,
+        "uncertain output never skips owned child cleanup");
+    } finally { await tools.close(); tree.cleanup(); }
+  });
+});
+
+
+test("restored credential aliases share late command ownership before and after another renewal", async (t) => {
+  for (const end of [false, true]) await t.test(end ? "renew then semantic end" : "ordinary renewal", async () => {
+    const tree = tempTree();
+    const statePath = path.join(tree.base, "chat-agent-tools.json");
+    const first = fixture({ root: tree.root, terminal: () => true, statePath }).tools;
+    let tools, pending, complete, sent;
+    const started = new Promise(resolve => { sent = resolve; });
+    try {
+      const old = await session(first, { approvalMode: "bypass-permissions" });
+      await first.renew("ao-1"); // Both credentials remain valid and are persisted before restart.
+      await first.close();
+      const saved = JSON.parse(fs.readFileSync(statePath, "utf8"));
+      assert.equal(saved.sessions.length, 2);
+      const restored = fixture({ root: tree.root, terminal: () => true, statePath, results: {
+        exec_command: () => { sent(); return new Promise(resolve => { complete = resolve; }); },
+        read_output: { state: "completed", result: { ok: true, status: "running", content: "" } },
+        kill_command: { state: "completed", result: { ok: true, status: "killed" } },
+      } });
+      tools = restored.tools;
+      await tools.listen();
+      assert.equal(tools.servicePort(), Number(new URL(old.url).port), "restoration must actually reuse the saved server address");
+      pending = callTool(old.url, old.auth, "exec_command", { cmd: "echo late restored owner" });
+      await started;
+      const [{ url, headers }] = (await tools.renew("ao-1")).servers;
+      await listed(url, { authorization: headers.Authorization });
+      if (end) tools.forgetSession("ao-1");
+      complete({ state: "completed", result: { ok: true, command_id: "restored-late", status: "running" } });
+      await pending;
+      await new Promise(setImmediate);
+      const [listing] = await tools.processes(["ao-1"], "ws1");
+      assert.equal(listing.commands[0]?.id, "restored-late", "the first restored alias must share the canonical owner");
+      assert.equal(listing.commands[0].status, end ? "killed" : "running");
+      assert.equal(restored.calls.filter(call => call.body?.tool === "kill_command").length, end ? 1 : 0);
+    } finally {
+      complete?.({ state: "completed", result: { ok: true, command_id: "restored-late", status: "running" } });
+      await pending?.catch(() => undefined); await tools?.close(); await first.close(); tree.cleanup();
+    }
+  });
+});
+
+test("each chat owns its sandbox handles even when teammates share the worktree", async () => {
+  const tree = tempTree();
+  const sandbox = fakeSandbox();
+  const { tools, calls } = fixture({ root: tree.root, terminal: () => true, sandbox });
+  try {
+    const a = await session(tools, { id: "owner-a", approvalMode: "bypass-permissions" });
+    const b = await session(tools, { id: "owner-b", approvalMode: "bypass-permissions" });
+    const started = await callTool(a.url, a.auth, "exec_command", { cmd: "echo owner", yield_time_ms: 0 });
+    const id = started.structuredContent.command_id;
+    for (const [name, args] of [
+      ["read_output", { output_ref: `command:${id}:stdout` }],
+      ["write_stdin", { command_id: id, chars: "foreign", yield_time_ms: 0 }],
+      ["write_stdin", { session_id: id, chars: "foreign alias", yield_time_ms: 0 }],
+      ["kill_command", { command_id: id }],
+      ["kill_session", { session_id: id }],
+    ]) {
+      const refused = await callTool(b.url, b.auth, name, args);
+      assert.equal(refused.isError, true, name + " must refuse another chat's command");
+    }
+    assert.deepEqual(sandbox.written, []);
+    assert.deepEqual(sandbox.killed, []);
+    assert.equal(calls.filter((call) => call.body).length, 0, "foreign sandbox handles never fall back to headless");
+    assert.equal((await callTool(a.url, a.auth, "read_output", { output_ref: `command:${id}:stdout` })).isError, false);
+    assert.equal((await callTool(a.url, a.auth, "write_stdin", { command_id: id, chars: "own", yield_time_ms: 0 })).isError, false);
+    assert.equal((await callTool(a.url, a.auth, "kill_command", { command_id: id })).isError, false);
+  } finally { await tools.close(); tree.cleanup(); }
+});
 
 test("Claude Code on Approve for me: the reviewed command runs in Codex's sandbox in the worktree with no second dialog here", async () => {
   const tree = tempTree();

@@ -178,7 +178,7 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
   const view = (run) => ({
     subagent_id: run.id, agent: run.agentId, name: run.agentName, state: run.state, task: run.task.slice(0, 200),
     elapsed_seconds: Math.round(((run.endedAt ?? now()) - run.startedAt) / 1000),
-    ...(run.report ? { report: run.report } : {}), ...(run.error ? { error: run.error } : {}),
+    ...(run.report ? { report: run.report } : {}), ...(run.error ? { error: run.error } : {}), ...(run.stopping ? { stopping: true } : {}),
   });
   const active = () => [...runs.values()].filter((run) => ACTIVE.has(run.state));
 
@@ -200,7 +200,7 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
 
   function finish(run, state, fields = {}) {
     if (!ACTIVE.has(run.state)) return;
-    Object.assign(run, { state, endedAt: now(), ...fields });
+    Object.assign(run, { state, stopping: false, endedAt: now(), ...fields });
     logger?.info?.("subagents.finished", { agent: run.agentId, state, seconds: Math.round((run.endedAt - run.startedAt) / 1000) });
     if (read().settings.releaseWhenDone) {
       // The session, worktree and conversation stay for inspection; only its agent process goes.
@@ -212,14 +212,20 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
   async function answer(run, approvals) {
     const service = harness();
     for (const approval of approvals) {
+      if (!ACTIVE.has(run.state) || run.stopping) return;
       const id = approval?.approval_id;
-      if (!id || answered.has(id)) continue;
-      answered.add(id);
+      if (!id) continue;
+      const key = JSON.stringify([run.id, id]);
+      if (answered.has(key)) continue;
+      answered.add(key);
       if (answered.size > 2000) answered.delete(answered.values().next().value);
       try {
         if (approval.kind === "question") {
           const reply = recommendedAnswer(approval);
-          await service.resolveInput(run.id, id, reply.action, reply.content).catch(() => service.resolveInput(run.id, id, "decline"));
+          await service.resolveInput(run.id, id, reply.action, reply.content).catch(error => {
+            if (!ACTIVE.has(run.state) || run.stopping) throw error;
+            return service.resolveInput(run.id, id, "decline");
+          });
           continue;
         }
         const decisions = Array.isArray(approval.decisions) ? approval.decisions : [];
@@ -236,45 +242,64 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
           decision = decisions.find((item) => item.kind === "allow_once");
         }
         if (decision) await service.resolveApproval(run.id, id, decision.id);
+        else answered.delete(key);
       } catch (error) {
+        answered.delete(key);
         logger?.warn?.("subagents.answer_failed", { agent: run.agentId, message: String(error?.message ?? error).slice(0, 200) });
       }
     }
   }
 
+  const settled = (observation) => observation?.exited === true || (TERMINAL_TURN.has(observation?.turnState)
+    && !["working", "running", "starting"].includes(observation?.status));
+
   async function check(run) {
+    if (!ACTIVE.has(run.state)) return;
     const service = harness();
-    // The time limit holds while AO is away too: checked only with AO up, a run whose backend
-    // stopped stayed "running" for good, kept its chat's place and was polled every 2 s forever.
-    if (now() - run.startedAt > read().settings.timeoutMinutes * 60_000) {
-      await service?.interrupt?.(run.id)?.catch?.(() => undefined);
-      finish(run, "timed_out", { error: `Stopped after ${read().settings.timeoutMinutes} minutes (the Subagents page's time limit)` });
+    if (!run.stopping && now() - run.startedAt > read().settings.timeoutMinutes * 60_000) {
+      run.stopState = "timed_out";
+      run.error = `Stopped after ${read().settings.timeoutMinutes} minutes (the Subagents page's time limit); awaiting confirmed settlement`;
+      await stop(run.id).catch(() => undefined);
+      return;
+    }
+    if (run.stopping && !run.stopAcknowledged && !run.stopPromise) {
+      await stop(run.id).catch(() => undefined);
       return;
     }
     if (!service) return;
     let observed;
     try { observed = await service.observe(run.id); }
     catch (error) {
+      if (!ACTIVE.has(run.state) || run.stopping) return;
       run.misses = (run.misses ?? 0) + 1;
-      // A session AO no longer knows (deleted, or its daemon lost it) ends the run; a passing failure is retried.
-      if (run.misses >= 5) finish(run, "failed", { error: `The subagent's session cannot be read: ${String(error?.message ?? error).slice(0, 300)}` });
+      // A read failure does not prove the agent stopped. Retain capacity while cancellation settles.
+      if (run.misses >= 5) {
+        run.stopState = "failed";
+        run.error = `The subagent's session cannot be read: ${String(error?.message ?? error).slice(0, 300)}; awaiting confirmed settlement`;
+        await stop(run.id).catch(() => undefined);
+      }
+      return;
+    }
+    if (!ACTIVE.has(run.state)) return;
+    if (run.stopping) {
+      if (settled(observed)) finish(run, run.stopState ?? "stopped", run.stopState ? {} : { error: "" });
       return;
     }
     run.misses = 0;
-    if (Array.isArray(observed?.approvals) && observed.approvals.length) await answer(run, observed.approvals);
     const state = observed?.turnState;
     if (run.state === "starting" && state && state !== "queued") run.state = "running";
-    // A session AO ended (killed, or its agent died) can leave its turn reading "running": that run
-    // would otherwise hold its place until the time limit (up to four hours). A chat card ends on it too.
     if (observed?.exited && !TERMINAL_TURN.has(state)) {
-      finish(run, run.stopping ? "stopped" : "failed", run.stopping ? {} : { error: "The subagent's session ended before it finished" });
+      finish(run, "failed", { error: "The subagent's session ended before it finished" });
       return;
     }
-    if (!TERMINAL_TURN.has(state)) return;
-    const report = String(observed.answer || "").slice(0, MAX_REPORT);
-    if (state === "completed") finish(run, "completed", { report: report || "(The subagent finished without a written report.)" });
-    else if (state === "interrupted" && run.stopping) finish(run, "stopped", report ? { report } : {});
-    else finish(run, "failed", { error: String(observed.error || `The subagent's turn ended (${state})`).slice(0, 1000), ...(report ? { report } : {}) });
+    if (TERMINAL_TURN.has(state)) {
+      if (!settled(observed)) return;
+      const report = String(observed.answer || "").slice(0, MAX_REPORT);
+      if (state === "completed") finish(run, "completed", { report: report || "(The subagent finished without a written report.)" });
+      else finish(run, "failed", { error: String(observed.error || `The subagent's turn ended (${state})`).slice(0, 1000), ...(report ? { report } : {}) });
+      return;
+    }
+    if (Array.isArray(observed?.approvals) && observed.approvals.length) await answer(run, observed.approvals);
   }
 
   async function poll() {
@@ -350,10 +375,25 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     const run = runs.get(id);
     if (!run || (parent !== null && run.parent !== parent)) throw new Error("No such subagent");
     if (!ACTIVE.has(run.state)) return run;
+    if (run.stopPromise) return run.stopPromise;
     run.stopping = true;
-    await harness()?.interrupt?.(run.id)?.catch?.(() => undefined);
-    finish(run, "stopped");
-    return run;
+    run.stopPromise = Promise.resolve().then(async () => {
+      const service = harness();
+      if (typeof service?.interrupt !== "function") throw new Error("Agent Orchestrator is not running; the subagent's stop was not confirmed");
+      if (!run.stopAcknowledged) {
+        await service.interrupt(run.id);
+        run.stopAcknowledged = true;
+      }
+      if (!ACTIVE.has(run.state)) return run;
+      const observed = await service.observe(run.id);
+      if (!settled(observed)) throw new Error("Stop requested; the subagent is still working or its settlement is unconfirmed");
+      finish(run, run.stopState ?? "stopped", run.stopState ? {} : { error: "" });
+      return run;
+    }).catch(error => {
+      if (ACTIVE.has(run.state) && !run.stopState) run.error = String(error?.message ?? error).slice(0, 500);
+      throw error;
+    }).finally(() => { run.stopPromise = null; });
+    return run.stopPromise;
   }
 
   /** One subagent tool call from the chat session `parent` (an AO session id) in `workspaceId`. */

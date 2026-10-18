@@ -91,7 +91,13 @@ app.whenReady().then(async()=>{
   assert.equal(parking.contentView.children.length,1);
   log("NATIVE_PREVIEW_ALL_PASS",{tools:10,approvals,sessions:2});
 
+  let permitLate;
+  const pendingOpen=previews.call("pending-owner","preview_open",{url},{permit:()=>new Promise(resolve=>{permitLate=resolve})});
+  assert.equal(typeof permitLate,"function");
   window.destroy();assert.equal(parking.isDestroyed(),true);assert.equal(previews.state("native-session"),null);
+  permitLate(true);assert.equal((await pendingOpen).isError,true);assert.equal(previews.state("pending-owner"),null);
+  assert.equal(BaseWindow.getAllWindows().length,0,"a late approval cannot recreate the closed native owner");
+  log("NATIVE_CANCELLED_OPEN_PASS");
   window=new BrowserWindow({show:false,width:1280,height:900,webPreferences:{sandbox:true,contextIsolation:true,nodeIntegration:false}});
   await window.loadURL("data:text/html,<title>Reopened chat verification</title>");
   await call("preview_open",{url});await call("preview_screenshot");
