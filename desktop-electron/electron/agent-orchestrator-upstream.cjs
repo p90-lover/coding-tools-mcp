@@ -895,7 +895,19 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return pastTurnTimeline(id, turnId);
     },
     async interrupt(id) {
-      await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/interrupt`, {}).catch(() => undefined);
+      const interrupt = () => internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/interrupt`, {});
+      await interrupt().catch(async (error) => {
+        // A chat created in the background (spawn's async) whose agent is still starting has no
+        // controller, so nothing to interrupt; AO would send its queued prompt once the agent is up,
+        // and the stopped card would leave it working unseen. Its start is cancelled instead. One
+        // that came up meanwhile is interrupted.
+        if (!/CHAT_CONTROLLER_NOT_READY/.test(String(error?.message))) return;
+        const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`).catch(() => null);
+        if (record?.session?.provisionState === "provisioning") {
+          await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/kill`, {}).catch(() => undefined);
+          agentTools?.forgetSession?.(id);
+        } else await interrupt().catch(() => undefined);
+      });
     },
     // A standalone AO terminal running one program (e.g. the Antigravity CLI) with
     // proxy-only environment additions; AO rejects any other variable.

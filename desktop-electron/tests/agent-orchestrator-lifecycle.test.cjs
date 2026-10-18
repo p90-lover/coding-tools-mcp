@@ -777,3 +777,32 @@ test("a chat started in the background whose agent failed to come up is resumed 
     assert.equal(resumed.length, 1, "a failure that is not about time is not retried");
   } finally { await h.controller.stop(); }
 });
+
+test("stopping a chat whose agent is still starting cancels the start, so its queued prompt never runs unseen", async () => {
+  const posted = [];
+  let provisionState = "provisioning";
+  const h = createHarness({
+    getWorkspaces: async () => [], missionCall: async () => ({ ok: true }),
+    workspaceBoard: { bind: async () => ({ projectId: "project-fixture" }) },
+    api: async (endpoint, options) => {
+      if (options?.method === "POST") posted.push(endpoint.pathname);
+      if (endpoint.pathname.endsWith("/conversation/interrupt")) {
+        // AO has no chat controller until the agent is up: nothing to interrupt yet.
+        return provisionState === "ready" ? { ok: true }
+          : { $status: 409, body: { error: "conflict", code: "CHAT_CONTROLLER_NOT_READY", message: "the agent controller for this session is not running" } };
+      }
+      if (/^\/api\/v1\/sessions\/[^/]+$/.test(endpoint.pathname)) return { session: { id: "s1", mode: "chat", status: "spawning", provisionState } };
+      if (endpoint.pathname.endsWith("/kill")) return { ok: true };
+    },
+  });
+  try {
+    await h.controller.start();
+    await h.controller.harness.interrupt("s1");
+    assert.deepEqual(posted, ["/api/v1/sessions/s1/conversation/interrupt", "/api/v1/sessions/s1/kill"],
+      "the background start is cancelled: AO would send the queued prompt once the agent is up");
+    posted.length = 0;
+    provisionState = "ready";
+    await h.controller.harness.interrupt("s1");
+    assert.deepEqual(posted, ["/api/v1/sessions/s1/conversation/interrupt"], "a running agent's turn is only interrupted");
+  } finally { await h.controller.stop(); }
+});
