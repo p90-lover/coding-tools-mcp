@@ -14,7 +14,10 @@ export type AoModelCapabilities = {
   contextLimit?: number; effortReason?: string; contextReason?: string;
 };
 /** `unavailable`: models CPA lists but cannot serve now, with why (e.g. their plugin's account is disabled in CPA). */
-export type AoModelCatalog = { models: string[]; capabilities?: Record<string, AoModelCapabilities>; unavailable?: Record<string, string> };
+/** `held`: listed models CPA is not listing right now (kept from memory), with why; they still run.
+ *  `stale`: CPA could not be read, so the list is the remembered one. */
+export type AoModelCatalog = { models: string[]; capabilities?: Record<string, AoModelCapabilities>; unavailable?: Record<string, string>;
+  held?: Record<string, string>; stale?: boolean };
 export type AoModelLoader = (harness: string) => Promise<string[] | AoModelCatalog>;
 export const emptyRoleSettings = (): RoleSettings => ({ name: "", specialty: "", instructions: "", expected_output: "", working_directory: "", revision: 0 });
 

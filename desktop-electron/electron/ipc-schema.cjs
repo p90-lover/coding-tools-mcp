@@ -755,6 +755,23 @@ const CONTRACTS = Object.freeze({
   }),
 });
 
+// Anything that could carry a credential keeps the main process's error to itself.
+const CREDENTIAL_TEXT = /authori[sz]ation|bearer|api[_ -]?key|access[_ -]?token|refresh[_ -]?token|secret|password|cookie|\bsk-[A-Za-z0-9]|\beyJ[A-Za-z0-9_-]{8,}/i;
+/**
+ * The main process's own error message, without Electron's "Error invoking remote method 'x':
+ * Error:" wrapper. "apps.call failed" alone left a failed Stop (and every other refused action)
+ * with no reason; a message that could carry a credential is still dropped.
+ */
+function transportReason(error) {
+  const text = String(error?.message || "")
+    .replace(/^Error invoking remote method '[^']*':\s*/, "")
+    .replace(/^(?:[A-Za-z]*Error:\s*)+/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text || CREDENTIAL_TEXT.test(text)) return "";
+  return text.length > 300 ? `${text.slice(0, 299)}…` : text;
+}
+
 async function invokeContract(ipcRenderer, name, payload = {}) {
   const contract = CONTRACTS[name];
   if (!contract) throw codedError("IPC_CONTRACT_UNKNOWN", name);
@@ -774,8 +791,9 @@ async function invokeContract(ipcRenderer, name, payload = {}) {
   let response;
   try {
     response = await ipcRenderer.invoke(contract.channel, requestSnapshot);
-  } catch {
-    throw codedError("IPC_TRANSPORT_FAILED", `${name} failed`);
+  } catch (error) {
+    const reason = transportReason(error);
+    throw codedError("IPC_TRANSPORT_FAILED", reason ? `${name} failed: ${reason}` : `${name} failed`);
   }
   const responseSnapshot = snapshotJsonPayload(
     response,
