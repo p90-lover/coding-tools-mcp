@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { KeyboardEvent, ReactNode } from "react";
-import { Icon } from "../icons";
+import { Caret, Icon } from "../icons";
 import {
   capabilityText, contextText, harnessLabel, parseTokens, rememberCpaProviders, routeTuning,
   NATIVE_HARNESS, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, WEB_ROUTE, WEB_TIERS, isWebModel, modelLabel, modelShortLabel, nativePermission, webTier, workerRoute, withTuning,
@@ -74,7 +74,7 @@ function ChipMenu({ label, ariaLabel, title, disabled, className = "", popupClas
   return <div className="ao-composer-picker" ref={popup.root} onKeyDown={popup.onKeyDown}>
     <button type="button" className={`ao-composer-chip ${className}`.trim()} ref={popup.trigger} disabled={disabled} aria-expanded={popup.open}
       aria-haspopup="dialog" aria-label={ariaLabel} title={title} onClick={() => { if (!popup.open) onOpen?.(); popup.setOpen(value => !value); }}>
-      {label}<span aria-hidden="true">⌄</span>
+      {label}<Caret />
     </button>
     {popup.open ? <section ref={popup.panel} role="dialog" aria-label={heading} className={`ao-composer-popover ${popupClass}`}>
       <header><h3>{heading}</h3>

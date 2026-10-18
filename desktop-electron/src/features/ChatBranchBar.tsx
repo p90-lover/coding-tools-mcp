@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { getCodingToolsClient } from "../api/client";
-import { Icon } from "../icons";
+import { Caret, Icon } from "../icons";
 import { useComposerPopover } from "./AgentOrchestratorComposerControls";
 
 type Branch = { name: string; updatedAt: string | null; upstream: string | null; worktree: string | null; current: boolean; chat: boolean; default?: boolean };
@@ -89,7 +89,7 @@ export function ChatBranchBar({ workspaceId, sessionId, inline = false }: { work
         aria-label={`Branch: ${inUse}`} title={data.chatBranch && data.chatBranch !== data.current
           ? `This chat works on ${data.chatBranch}; the project folder is on ${data.current}` : `On ${inUse}`}
         onClick={() => popup.setOpen((value) => !value)}>
-        <Icon name="git" width="14" height="14" /><span>{inUse}</span><span aria-hidden="true">⌄</span>
+        <Icon name="git" width="14" height="14" /><span>{inUse}</span><Caret />
       </button>
       {popup.open ? <section ref={popup.panel} role="dialog" aria-label="Branches" className="ao-composer-popover cx-branch-popup">
         <input className="ao-model-search" type="search" aria-label="Search branches" placeholder="Search branches…" value={search}

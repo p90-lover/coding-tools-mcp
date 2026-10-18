@@ -1,3 +1,4 @@
+import { Caret } from "../icons";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   PROVIDER_CATALOG,
@@ -1360,7 +1361,7 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
                       <strong>{text(language, "Paseo / Anneal task routing", "Paseo／Anneal 任務路由")}</strong>
                       <small>{text(language, "Advanced execution settings", "進階執行設定")}</small>
                     </span>
-                    <span aria-hidden="true">⌄</span>
+                    <Caret />
                   </summary>
                   <div className="provider-editor-grid provider-routing-grid">
                     <label>
