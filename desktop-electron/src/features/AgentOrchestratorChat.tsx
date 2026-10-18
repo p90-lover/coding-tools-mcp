@@ -532,6 +532,10 @@ export function AgentOrchestratorChat({
   // Each chat keeps its own unsent draft, as Codex does (the new-chat composer is "" here): opening
   // another chat puts this one's draft aside and brings that chat's back.
   const draftOwner = useRef(selectedTaskId);
+  const composing = useRef({ taskId: selectedTaskId, draft, attachments });
+  composing.current = { taskId: selectedTaskId, draft, attachments };
+  const alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   useEffect(() => {
     if (draftOwner.current === selectedTaskId) return;
     if (draft) CHAT_DRAFTS.set(draftOwner.current, draft); else CHAT_DRAFTS.delete(draftOwner.current);
@@ -587,6 +591,8 @@ export function AgentOrchestratorChat({
 
   /** Sends a message the way the composer does: into this chat, or as a new chat. */
   const deliver = async (message: string, goal?: string) => {
+    const owner = composing.current;
+    const current = () => alive.current && composing.current.taskId === owner.taskId && composing.current.draft === owner.draft && composing.current.attachments === owner.attachments;
     setSending(true);
     try {
       // A steer the turn outran (it ended first) is sent as an ordinary follow-up instead; a goal is never steered.
@@ -596,19 +602,24 @@ export function AgentOrchestratorChat({
         // steering would cancel that request, so the message waits for the turn like a queued one.
         // Or its turn had hung and was stopped: the message goes as the next turn once it settles.
         setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what: "Message", message }));
-        setDraft(""); setAttachments([]); setAttachNote("");
-        say(steered === "restart" ? "Restarting" : "Queued", steered === "restart"
-          ? "The agent had stopped responding, so its turn was stopped; your message is sent as the next turn."
-          : steered === "starting" ? "The agent is still starting; your message is sent when its first turn finishes."
-          : "The agent is waiting for your answer to its request; your message is sent when the turn finishes.");
+        if (current()) {
+          setDraft(""); setAttachments([]); setAttachNote("");
+          say(steered === "restart" ? "Restarting" : "Queued", steered === "restart"
+            ? "The agent had stopped responding, so its turn was stopped; your message is sent as the next turn."
+            : steered === "starting" ? "The agent is still starting; your message is sent when its first turn finishes."
+            : "The agent is waiting for your answer to its request; your message is sent when the turn finishes.");
+        }
         return true;
       }
       // A rewound chat's first message takes the earlier messages along ahead of it, as context.
       const first = !selectedTaskId && carried?.length ? [...carried, message].join("\n\n").slice(-8192) : message;
       if (!steered) await send(selectedTaskId ? { taskId: selectedTaskId, message, ...(goal ? { goal } : {}) }
         : { title: title.trim() || undefined, message: first, ...(goal ? { goal } : {}) });
-      setDraft(""); setTitle(""); setAttachments([]); setAttachNote(""); setAtBottom(true);
-      if (!selectedTaskId) setCarried(null);
+      if (CHAT_DRAFTS.get(owner.taskId) === owner.draft) CHAT_DRAFTS.delete(owner.taskId);
+      if (current()) {
+        setDraft(""); setTitle(""); setAttachments([]); setAttachNote(""); setAtBottom(true);
+        if (!selectedTaskId) setCarried(null);
+      }
       return true;
     } catch {
       // The surface already shows the error; keep the message so it can be sent again.
@@ -664,8 +675,13 @@ export function AgentOrchestratorChat({
     if (!task || !next || !accepts || busy || sending || sentWhileFree.current || !windowFocused) return;
     sentWhileFree.current = true;
     setQueue(task, rest);
+    const owner = composing.current;
     void deliver(next.message, next.goal).then((sent) => {
-      if (sent) { if (!rest.length) setCard(null); return; }
+      if (sent) { if (alive.current && composing.current.taskId === task && !rest.length) setCard(null); return; }
+      if (!alive.current || composing.current.taskId !== task || composing.current.draft !== owner.draft || composing.current.attachments !== owner.attachments) {
+        setQueue(task, [next, ...queueOf(task)]);
+        return;
+      }
       // Nothing is lost: a plain message goes back into the composer to send again.
       if (next.what === "Message") setDraft(next.message);
       say(next.what, next.what === "Message" ? "The queued message couldn't be sent; it's back in the composer." : "The queued message couldn't be sent; run the command again.");
@@ -993,7 +1009,7 @@ export function AgentOrchestratorChat({
                 <div className="cx-card-actions"><button className="button-primary" type="button" disabled={busy} onClick={() => retryStart(latest.id)}>Retry failed step</button></div>
               </div>
             ) : null}
-            {approvals.map(approval => <AgentOrchestratorApproval key={approval.approval_id} approval={approval} busy={busy} approve={approve} />)}
+            {approvals.map(approval => <AgentOrchestratorApproval key={JSON.stringify([approval.nodeId, approval.approval_id])} approval={approval} busy={busy} approve={approve} />)}
           </div>
           {!atBottom ? <button type="button" className="cx-to-bottom" aria-label="Scroll to the latest message"
             onClick={() => { setAtBottom(true); scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" }); }}>↓</button> : null}

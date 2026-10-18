@@ -184,6 +184,7 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
   const previews = new Map(); // key -> preview
   let shown = null; // { key, bounds }
   let sequence = 0;
+  let ownerGeneration = 0;
 
   const blocked = () => {
     try { return (blockedPorts() || []).map(Number).filter((port) => Number.isInteger(port) && port > 0); } catch { return []; }
@@ -542,8 +543,10 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
      * One preview tool call for the agent of `key`. `permit(origin)` decides whether this chat may
      * open an origin it has not opened before: true, or the refusal (an MCP result) to return.
      */
-    async call(key, name, args = {}, { permit = async () => true } = {}) {
+    async call(key, name, args = {}, { permit = async () => true, signal } = {}) {
       if (!PREVIEW_TOOLS.has(name)) return failure(`Unknown tool: ${name}`);
+      const generation = ownerGeneration;
+      if (signal?.aborted) return failure("This chat's preview request was cancelled.");
       try {
         if (name === "preview_open") {
           const allowed = target(args.url);
@@ -553,6 +556,7 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
             const answer = await permit(allowed.origin);
             if (answer !== true) return answer;
           }
+          if (signal?.aborted || generation !== ownerGeneration) return failure("This chat's preview request ended before the address was approved.");
           preview = previews.get(key) ?? create(key);
           preview.usedAt = now();
           place(preview);
@@ -629,7 +633,7 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
       return { ok: !answer.isError };
     },
     close,
-    closeAll() { for (const key of [...previews.keys()]) close(key); },
+    closeAll() { ownerGeneration += 1; for (const key of [...previews.keys()]) close(key); },
     /** Re-places the shown preview after the window is resized. */
     relayout() { for (const preview of previews.values()) place(preview); },
   });
@@ -648,9 +652,13 @@ function createNativeChatPreviews({ BaseWindow, WebContentsView, mainWindow, pla
   };
   previews = createChatPreviews({
     ...options,
-    createView: (partition) => new WebContentsView({
-      webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: false, backgroundThrottling: false },
-    }),
+    createView: (partition) => {
+      const window = mainWindow();
+      if (!window || window.isDestroyed()) throw new PreviewError("The preview's window has closed.");
+      return new WebContentsView({
+        webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: false, backgroundThrottling: false },
+      });
+    },
     attachView: (view, visible) => {
       const window = mainWindow();
       if (!window || window.isDestroyed()) return;

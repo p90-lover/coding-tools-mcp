@@ -392,6 +392,10 @@ impl ServiceState {
         root: Option<&str>,
         kind: RootKind,
     ) -> Result<Arc<tools::ToolContext>, String> {
+        let mut contexts = self
+            .contexts
+            .lock()
+            .map_err(|_| "context cache unavailable")?;
         let profile = self
             .core
             .with_data(|store| {
@@ -401,6 +405,61 @@ impl ServiceState {
                 })
             })
             .map_err(text_error)?;
+        // Session stores and plans belong to the workspace scope, not to display metadata.
+        let fingerprint = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(&profile.path, &profile.auth)).map_err(text_error)?
+            )
+        );
+        let belongs = |key: &String| {
+            key == workspace_id
+                || key
+                    .strip_prefix(workspace_id)
+                    .is_some_and(|suffix| suffix.starts_with('\n'))
+        };
+        let retired: Vec<_> = contexts
+            .iter()
+            .filter(|(key, entry)| belongs(key) && entry.fingerprint != fingerprint)
+            .map(|(key, entry)| (key.clone(), entry.context.clone()))
+            .collect();
+        tools::live_policy::retire_contexts(
+            &retired
+                .iter()
+                .map(|(_, context)| context.clone())
+                .collect::<Vec<_>>(),
+            || Ok(()),
+        )
+        .map_err(text_error)?;
+        for (key, _) in retired {
+            contexts.remove(&key);
+        }
+        let policy = tools::PolicySettings::from_runtime(&profile.runtime);
+        let tool_profile = tools::registry::normalize_tool_profile(&profile.runtime.tool_profile);
+        let changed: Vec<_> = contexts
+            .iter()
+            .filter(|(key, entry)| {
+                belongs(key)
+                    && (entry.context.policy != policy
+                        || entry.context.tool_profile != tool_profile)
+            })
+            .map(|(key, entry)| (key.clone(), entry.context.clone()))
+            .collect();
+        if !changed.is_empty() {
+            tools::live_policy::commit_updates(
+                changed
+                    .iter()
+                    .map(|(_, context)| (context.clone(), policy.clone(), tool_profile.to_string()))
+                    .collect(),
+                || Ok(()),
+            )
+            .map_err(text_error)?;
+            for (key, context) in changed {
+                if let Some(entry) = contexts.get_mut(&key) {
+                    entry.context = Arc::new(context.for_request().map_err(text_error)?);
+                }
+            }
+        }
         let root = root
             .map(|root| match kind {
                 RootKind::Worktree => session_root(
@@ -411,19 +470,10 @@ impl ServiceState {
                 RootKind::ProjectFolder => project_folder_root(Path::new(&profile.path), root),
             })
             .transpose()?;
-        let mut bytes = serde_json::to_vec(&profile).map_err(text_error)?;
         let key = match &root {
-            Some(root) => {
-                bytes.extend_from_slice(root.to_string_lossy().as_bytes());
-                format!("{workspace_id}\n{}", root.to_string_lossy())
-            }
+            Some(root) => format!("{workspace_id}\n{}", root.to_string_lossy()),
             None => workspace_id.to_string(),
         };
-        let fingerprint = format!("{:x}", Sha256::digest(bytes));
-        let mut contexts = self
-            .contexts
-            .lock()
-            .map_err(|_| "context cache unavailable")?;
         if let Some(entry) = contexts.get_mut(&key) {
             if entry.fingerprint == fingerprint {
                 entry.used = std::time::Instant::now();
@@ -436,12 +486,15 @@ impl ServiceState {
             // a running command or kept output would leave later read_output, write_stdin and
             // kill_command calls unable to find it while the process runs on. With none idle the
             // cache stays over its size until commands finish and their output expires.
+            // A policy refresh replaces the outer Arc; admitted calls still pin its shared
+            // session store before their blocking closure starts a command.
             while contexts.keys().filter(|other| rooted(other)).count() >= MAX_SESSION_CONTEXTS {
                 let Some(oldest) = contexts
                     .iter()
                     .filter(|(other, entry)| {
                         rooted(other)
                             && Arc::strong_count(&entry.context) == 1
+                            && Arc::strong_count(&entry.context.sessions) == 1
                             && entry.context.sessions.is_idle()
                     })
                     .min_by_key(|(_, entry)| entry.used)
@@ -2630,15 +2683,34 @@ async fn workspace_remove(
             "Confirm removing the project in Coding Tools",
         );
     }
-    let core = state.core.clone();
-    let workspace_id = body.workspace_id.clone();
-    match tokio::task::spawn_blocking(move || apply_workspace_remove(&core, &body)).await {
-        Ok(Ok(value)) => {
-            if let Ok(mut contexts) = state.contexts.lock() {
-                contexts.remove(&workspace_id);
-            }
-            Json(value).into_response()
+    match tokio::task::spawn_blocking(move || {
+        let mut contexts = state
+            .contexts
+            .lock()
+            .map_err(|_| "context cache unavailable")?;
+        let prefix = format!("{}\n", body.workspace_id);
+        let keys: Vec<_> = contexts
+            .keys()
+            .filter(|key| *key == &body.workspace_id || key.starts_with(&prefix))
+            .cloned()
+            .collect();
+        let retiring: Vec<_> = keys
+            .iter()
+            .map(|key| contexts[key].context.clone())
+            .collect();
+        let value = tools::live_policy::retire_contexts(&retiring, || {
+            apply_workspace_remove(&state.core, &body)
+                .map_err(coding_tools_core::error::AppError::Message)
+        })
+        .map_err(text_error)?;
+        for key in keys {
+            contexts.remove(&key);
         }
+        Ok::<_, String>(value)
+    })
+    .await
+    {
+        Ok(Ok(value)) => Json(value).into_response(),
         Ok(Err(error)) => json_error(StatusCode::BAD_REQUEST, "WORKSPACE_REMOVE_FAILED", error),
         Err(_) => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -3128,6 +3200,491 @@ mod session_root_tests {
             .await
             .unwrap();
         (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    fn context_lifecycle_fixture(root: &Path) -> ServiceState {
+        let data = serde_json::from_value(json!({
+            "profiles": [{
+                "id": "ws-1", "name": "Context lifecycle", "path": root.to_string_lossy(),
+                "tunnel": {}, "auth": {"type": "bearer"},
+                "runtime": {"tool_profile": "advanced", "approval_mode": "on-request"}, "actions": {}
+            }]
+        })).unwrap();
+        let (shutdown_tx, _) = tokio::sync::watch::channel(None);
+        ServiceState {
+            lifecycle: Lifecycle::new(4),
+            auth: ControlAuth::generate(),
+            local_ui_token: None,
+            core: Arc::new(CoreState::from_data(data).unwrap()),
+            contexts: Arc::new(Mutex::new(HashMap::new())),
+            ao_hubs: Arc::new(Mutex::new(HashMap::new())),
+            ao_home_root: root.join("ao-homes"),
+            ao_worktrees_root: None,
+            operations: Arc::new(Mutex::new(OperationStore::default())),
+            shutdown_tx,
+            drain_timeout: Duration::from_secs(1),
+        }
+    }
+
+    #[test]
+    fn context_lifecycle_metadata_keeps_running_command_output_and_plan() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("project");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("wait.py"),
+            "import time\nprint('metadata-command-ready', flush=True)\ntime.sleep(10)\n",
+        )
+        .unwrap();
+        let state = context_lifecycle_fixture(&root);
+        let before = state
+            .context_at(
+                "ws-1",
+                Some(&root.to_string_lossy()),
+                RootKind::ProjectFolder,
+            )
+            .unwrap();
+        let plan = tools::call_tool(
+            &before,
+            "update_plan",
+            &json!({"plan":[{"step":"keep this plan","status":"in_progress"}]}),
+        );
+        assert_eq!(plan["ok"], true, "{plan}");
+        let command = if cfg!(windows) {
+            "python -u wait.py"
+        } else {
+            "python3 -u wait.py"
+        };
+        let started = tools::call_tool(
+            &before,
+            "exec_command",
+            &json!({"cmd":command,"yield_time_ms":100,"timeout_ms":5000}),
+        );
+        assert_eq!(started["ok"], true, "{started}");
+        let id = started["command_id"].as_str().unwrap();
+        let args = json!({"output_ref":format!("command:{id}:stdout"),"offset":0,"limit":1024});
+        let until = std::time::Instant::now() + Duration::from_secs(4);
+        loop {
+            let output = tools::call_tool(&before, "read_output", &args);
+            if output["content"]
+                .as_str()
+                .unwrap_or("")
+                .contains("metadata-command-ready")
+            {
+                break;
+            }
+            assert!(std::time::Instant::now() < until, "{output}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        state
+            .core
+            .with_data(|store| {
+                let mut profile = store.get("ws-1").unwrap().clone();
+                profile.name = "Renamed project".into();
+                profile.tunnel.public_url = "https://fixture.invalid".into();
+                store.update(profile)
+            })
+            .unwrap();
+        let after = state
+            .context_at(
+                "ws-1",
+                Some(&root.to_string_lossy()),
+                RootKind::ProjectFolder,
+            )
+            .unwrap();
+        let output = tools::call_tool(&after, "read_output", &args);
+        let retained_plan = tools::call_tool(&after, "get_plan", &json!({}));
+        // Keep cleanup independent of the cache regression so a failing test owns no child.
+        let killed = tools::call_tool(
+            &before,
+            "kill_command",
+            &json!({"command_id":id,"wait_ms":2000}),
+        );
+        assert_eq!(killed["ok"], true, "{killed}");
+        assert!(
+            Arc::ptr_eq(&before, &after),
+            "metadata edit replaced the live context"
+        );
+        assert_eq!(output["ok"], true, "{output}");
+        assert!(
+            output["content"]
+                .as_str()
+                .unwrap()
+                .contains("metadata-command-ready"),
+            "{output}"
+        );
+        assert_eq!(retained_plan["plan"], plan["plan"], "{retained_plan}");
+    }
+
+    #[test]
+    fn context_lifecycle_applies_policy_and_retires_changed_root() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("project");
+        let moved = base.path().join("moved");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&moved).unwrap();
+        let state = context_lifecycle_fixture(&root);
+        let before = state
+            .context_at(
+                "ws-1",
+                Some(&root.to_string_lossy()),
+                RootKind::ProjectFolder,
+            )
+            .unwrap();
+        let old_snapshot = before.for_request().unwrap();
+        state
+            .core
+            .with_data(|store| {
+                let mut profile = store.get("ws-1").unwrap().clone();
+                profile.runtime.permission_mode = "read-only".into();
+                profile.runtime.tool_profile = "read-only".into();
+                store.update(profile)
+            })
+            .unwrap();
+        let restricted = state
+            .context_at(
+                "ws-1",
+                Some(&root.to_string_lossy()),
+                RootKind::ProjectFolder,
+            )
+            .unwrap();
+        assert_eq!(
+            restricted.for_request().unwrap().permission_mode,
+            "read-only"
+        );
+        assert!(
+            Arc::ptr_eq(&before.sessions, &restricted.sessions),
+            "policy refresh lost command handles"
+        );
+        assert!(
+            old_snapshot.policy_execution_guard().is_err(),
+            "old snapshot still authorized writes"
+        );
+        let denied = tools::call_tool(
+            &before,
+            "apply_patch",
+            &json!({"patch":"*** Begin Patch\n*** Add File: denied.txt\n+no\n*** End Patch\n"}),
+        );
+        assert_eq!(denied["ok"], false, "{denied}");
+        assert!(!root.join("denied.txt").exists());
+        state
+            .core
+            .with_data(|store| {
+                let mut profile = store.get("ws-1").unwrap().clone();
+                profile.path = moved.to_string_lossy().into_owned();
+                store.update(profile)
+            })
+            .unwrap();
+        assert!(state
+            .context_at(
+                "ws-1",
+                Some(&root.to_string_lossy()),
+                RootKind::ProjectFolder
+            )
+            .is_err());
+        assert!(
+            state.contexts.lock().unwrap().is_empty(),
+            "changed-root context was retained"
+        );
+        let replacement = state.context("ws-1").unwrap();
+        assert_eq!(replacement.workspace.root(), moved.canonicalize().unwrap());
+        assert!(!Arc::ptr_eq(&before.sessions, &replacement.sessions));
+        assert_eq!(
+            replacement.for_request().unwrap().permission_mode,
+            "read-only"
+        );
+    }
+
+    #[test]
+    fn context_lifecycle_changed_root_retires_writable_snapshots() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("project");
+        let moved = base.path().join("moved");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&moved).unwrap();
+        let state = context_lifecycle_fixture(&root);
+        let before = state
+            .context_at(
+                "ws-1",
+                Some(&root.to_string_lossy()),
+                RootKind::ProjectFolder,
+            )
+            .unwrap();
+        let captured = before.for_request().unwrap();
+        assert_eq!(captured.permission_mode, "workspace-write");
+        state
+            .core
+            .with_data(|store| {
+                let mut profile = store.get("ws-1").unwrap().clone();
+                profile.path = moved.to_string_lossy().into_owned();
+                store.update(profile)
+            })
+            .unwrap();
+        let replacement = state.context("ws-1").unwrap();
+        assert_eq!(replacement.workspace.root(), moved.canonicalize().unwrap());
+        let old_guard_denied = captured.policy_execution_guard().is_err();
+        assert!(captured.current_policy_revision().is_err());
+        assert!(before.for_request().is_err());
+        let late_patch = tools::call_tool(
+            &before,
+            "apply_patch",
+            &json!({
+                "patch":"*** Begin Patch\n*** Add File: stale.txt\n+stale\n*** End Patch\n"
+            }),
+        );
+        let late_command = tools::call_tool(
+            &before,
+            "exec_command",
+            &json!({"cmd":"echo stale-context"}),
+        );
+        assert!(
+            old_guard_denied,
+            "retired writable snapshot still valid; patch={late_patch}; command={late_command}"
+        );
+        assert_eq!(late_patch["ok"], false, "{late_patch}");
+        assert_eq!(late_command["ok"], false, "{late_command}");
+        assert!(!root.join("stale.txt").exists());
+    }
+
+    #[test]
+    fn context_lifecycle_removal_retires_rooted_commands() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("project");
+        let unrelated_root = base.path().join("unrelated");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&unrelated_root).unwrap();
+        fs::write(root.join("wait.py"), "import time\ntime.sleep(10)\n").unwrap();
+        let mut state = context_lifecycle_fixture(&root);
+        state.local_ui_token = Some("fixture-local-ui".into());
+        let base_context = state.context("ws-1").unwrap();
+        let rooted = state
+            .context_at(
+                "ws-1",
+                Some(&root.to_string_lossy()),
+                RootKind::ProjectFolder,
+            )
+            .unwrap();
+        let unrelated = context_lifecycle_fixture(&unrelated_root)
+            .context("ws-1")
+            .unwrap();
+        state.contexts.lock().unwrap().insert(
+            "ws-10".into(),
+            ContextEntry {
+                fingerprint: "unrelated".into(),
+                context: unrelated.clone(),
+                used: std::time::Instant::now(),
+            },
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {}", state.auth.token).parse().unwrap(),
+        );
+        headers.insert(
+            "x-coding-tools-local-ui",
+            "fixture-local-ui".parse().unwrap(),
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let snapshot = rooted.for_request().unwrap();
+        let fence = snapshot.policy_execution_guard().unwrap();
+        let busy = runtime.block_on(workspace_remove(
+            State(state.clone()),
+            headers.clone(),
+            Json(WorkspaceRemoveRequest {
+                workspace_id: "ws-1".into(),
+                confirm: true,
+            }),
+        ));
+        assert_eq!(busy.status(), StatusCode::BAD_REQUEST);
+        assert!(state
+            .core
+            .with_data(|store| Ok(store.get("ws-1").is_some()))
+            .unwrap());
+        assert!(
+            base_context.for_request().is_ok(),
+            "busy change partially retired another context"
+        );
+        drop(fence);
+        let failed = tools::live_policy::retire_contexts(&[rooted.clone()], || {
+            Err::<(), _>(coding_tools_core::error::AppError::Message(
+                "fixture save failed".into(),
+            ))
+        });
+        assert!(failed.is_err());
+        assert!(
+            rooted.for_request().is_ok(),
+            "failed save retired the live context"
+        );
+        let command = if cfg!(windows) {
+            "python -u wait.py"
+        } else {
+            "python3 -u wait.py"
+        };
+        let started = tools::call_tool(
+            &rooted,
+            "exec_command",
+            &json!({
+                "cmd":command,"yield_time_ms":100,"timeout_ms":5000
+            }),
+        );
+        assert_eq!(started["ok"], true, "{started}");
+        let id = started["command_id"].as_str().unwrap();
+        let session = rooted.sessions.get(id).unwrap();
+        let response = runtime.block_on(workspace_remove(
+            State(state.clone()),
+            headers,
+            Json(WorkspaceRemoveRequest {
+                workspace_id: "ws-1".into(),
+                confirm: true,
+            }),
+        ));
+        let remaining: Vec<_> = state.contexts.lock().unwrap().keys().cloned().collect();
+        let old_base_denied = base_context.for_request().is_err();
+        let old_root_denied = rooted.for_request().is_err();
+        let until = std::time::Instant::now() + Duration::from_secs(2);
+        while session.snapshot(0)["status"] != "exited" && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let terminal_state = session.snapshot(0);
+        // Cleanup must still work when this regression fails against the old implementation.
+        tools::session::kill_command(&rooted.sessions, &json!({"command_id":id,"wait_ms":2000}))
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            remaining,
+            ["ws-10"],
+            "removed project retained a rooted context or removed an unrelated one"
+        );
+        assert!(
+            unrelated.for_request().is_ok(),
+            "another project's context was retired"
+        );
+        assert!(
+            old_base_denied && old_root_denied,
+            "removed project still admitted requests"
+        );
+        assert_eq!(terminal_state["status"], "exited", "{terminal_state}");
+        assert_eq!(
+            terminal_state["termination_reason"], "permission_changed",
+            "{terminal_state}"
+        );
+        assert!(
+            root.join("wait.py").exists(),
+            "project removal deleted project files"
+        );
+    }
+
+    #[test]
+    fn context_lifecycle_policy_refresh_keeps_admitted_call_under_cache_pressure() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("project");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("echo.py"),
+            "print(\"admitted-cache-command\", flush=True)\n",
+        )
+        .unwrap();
+        let state = context_lifecycle_fixture(&root);
+        // tool_call holds this Arc before its spawn_blocking closure starts.
+        let admitted = state
+            .context_at(
+                "ws-1",
+                Some(&root.to_string_lossy()),
+                RootKind::ProjectFolder,
+            )
+            .unwrap();
+        let mut last = root.clone();
+        for index in 1..MAX_SESSION_CONTEXTS {
+            last = root.join(format!("idle-{index}"));
+            fs::create_dir_all(&last).unwrap();
+            drop(
+                state
+                    .context_at(
+                        "ws-1",
+                        Some(&last.to_string_lossy()),
+                        RootKind::ProjectFolder,
+                    )
+                    .unwrap(),
+            );
+        }
+        state
+            .core
+            .with_data(|store| {
+                let mut profile = store.get("ws-1").unwrap().clone();
+                profile.runtime.workspace_local_entries = !admitted.policy.workspace_local_entries;
+                store.update(profile)
+            })
+            .unwrap();
+        drop(
+            state
+                .context_at(
+                    "ws-1",
+                    Some(&last.to_string_lossy()),
+                    RootKind::ProjectFolder,
+                )
+                .unwrap(),
+        );
+        let pressure = root.join("cache-pressure");
+        fs::create_dir_all(&pressure).unwrap();
+        drop(
+            state
+                .context_at(
+                    "ws-1",
+                    Some(&pressure.to_string_lossy()),
+                    RootKind::ProjectFolder,
+                )
+                .unwrap(),
+        );
+        let command = if cfg!(windows) {
+            "python -u echo.py"
+        } else {
+            "python3 -u echo.py"
+        };
+        let started = tools::dispatch::call_tool_mcp(
+            &admitted,
+            "exec_command",
+            &json!({
+                "cmd":command,"yield_time_ms":1000,"timeout_ms":3000
+            }),
+        );
+        assert_eq!(started["ok"], true, "{started}");
+        let id = started["command_id"].as_str().unwrap();
+        let current = state
+            .context_at(
+                "ws-1",
+                Some(&root.to_string_lossy()),
+                RootKind::ProjectFolder,
+            )
+            .unwrap();
+        let output = tools::dispatch::call_tool_mcp(
+            &current,
+            "read_output",
+            &json!({
+                "output_ref":format!("command:{id}:stdout"),"offset":0,"limit":1024
+            }),
+        );
+        let same_sessions = Arc::ptr_eq(&admitted.sessions, &current.sessions);
+        tools::session::kill_command(&admitted.sessions, &json!({"command_id":id,"wait_ms":2000}))
+            .unwrap();
+        assert_eq!(
+            current.policy.workspace_local_entries,
+            !admitted.policy.workspace_local_entries
+        );
+        assert_eq!(
+            output["ok"], true,
+            "admitted call lost its cached command store: {output}"
+        );
+        assert!(
+            output["content"]
+                .as_str()
+                .unwrap_or("")
+                .contains("admitted-cache-command"),
+            "{output}"
+        );
+        assert!(
+            same_sessions,
+            "policy refresh and cache pressure replaced the admitted call's session store"
+        );
     }
 
     #[tokio::test]

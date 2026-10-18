@@ -664,3 +664,149 @@ test("a retried card shows its earlier reply until the new attempt writes, and a
   assert.equal(turns[0].steps[0].text, "The reply");
   assert.ok(chat.chatMarkdown("Chat", turns).includes("Error: Native turn returned no verifiable final answer\n\nThe reply"));
 });
+
+
+// Replay the real async callback bodies with delayed replies so navigation and cleanup can race them.
+function rendererCallback(file, name, globals) {
+  const text = fs.readFileSync(path.resolve(__dirname, "../src/features", file), "utf8");
+  const tree = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let body;
+  const visit = node => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(tree) === name) body ??= node.initializer;
+    if (name.startsWith("effect:") && ts.isCallExpression(node) && node.expression.getText(tree) === "useEffect"
+      && node.arguments[0]?.getText(tree).includes(name.slice(7))) body ??= node.arguments[0];
+    ts.forEachChild(node, visit);
+  };
+  visit(tree); assert.ok(body, name);
+  const exports = {};
+  vm.runInNewContext(ts.transpileModule("exports.callback = " + body.getText(tree), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText, { exports, ...globals });
+  return exports.callback;
+}
+const delayedReply = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
+
+test("late chat creation never overwrites another project, another chat, or an unmounted surface", async () => {
+  for (const stage of ["start", "refresh", "unmount"]) {
+    const started = delayedReply(), refreshed = delayedReply();
+    const selection = { current: { workspaceId: "a", taskId: "", runId: "" } }, mounted = { current: true };
+    const state = { missions: [], board: { tasks: [] }, chatTaskId: "", selectedRunId: "", notices: {}, autoStatus: "idle" };
+    const set = key => value => { state[key] = typeof value === "function" ? value(state[key]) : value; };
+    const send = rendererCallback("AgentOrchestratorSurface.tsx", "sendChat", {
+      busy: "", workspaceId: "a", selection, mounted, boardWorkspace: { current: "a" }, board: { tasks: [] },
+      composerMode: "single", singleRoute: { model: "fixture" }, savedTeams: [], composerTeamId: "",
+      run: async (_name, action) => action(), aoChatExecution: () => ({}), executableArg: () => ({}),
+      moduleCall: async () => started.promise, rememberChatRoute() {}, startNotice: () => "",
+      loadBoard: async () => stage === "refresh" ? refreshed.promise : undefined, loadMissions: async () => {},
+      setMissions: set("missions"), setBoard: set("board"), setPendingChat: set("pendingChat"),
+      setChatTaskId: set("chatTaskId"), setSelectedRunId: set("selectedRunId"),
+      setChatNotices: set("notices"), setAutoStatus: set("autoStatus"), setError() {},
+    });
+    const sending = send({ message: "Project A request" });
+    const result = { taskId: "task-a", runId: "run-a", run: { id: "run-a", workspace_id: "a", project_id: "task-a" } };
+    if (stage === "refresh") { started.resolve(result); await new Promise(setImmediate); }
+    selection.current = { workspaceId: "b", taskId: "task-b", runId: "run-b" };
+    if (stage === "unmount") mounted.current = false;
+    state.missions = [{ id: "run-b", workspace_id: "b" }]; state.board = { tasks: [{ id: "task-b" }] };
+    state.chatTaskId = "task-b"; state.selectedRunId = "run-b";
+    if (stage !== "refresh") started.resolve(result); else refreshed.resolve();
+    await sending;
+    assert.equal(state.chatTaskId, "task-b", stage); assert.equal(state.selectedRunId, "run-b", stage);
+    assert.deepEqual(state.board.tasks, [{ id: "task-b" }], stage);
+    assert.deepEqual(state.missions, [{ id: "run-b", workspace_id: "b" }], stage);
+  }
+});
+
+test("send completion preserves the next chat's draft and edits typed during the pending send", async () => {
+  for (const taskId of ["task-b", "task-a"]) {
+    const reply = delayedReply(), attachments = [], composing = { current: { taskId: "task-a", draft: "sent text", attachments } };
+    const state = { draft: "sent text" }, set = key => value => { state[key] = value; };
+    const deliver = rendererCallback("AgentOrchestratorChat.tsx", "deliver", {
+      selectedTaskId: "task-a", draft: "sent text", attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(),
+      setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: () => reply.promise,
+      setDraft: set("draft"), setTitle() {}, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, setCarried() {},
+    });
+    const sending = deliver("sent text");
+    state.draft = "new unsent text"; composing.current = { taskId, draft: state.draft, attachments };
+    reply.resolve(); assert.equal(await sending, true);
+    assert.equal(state.draft, "new unsent text", taskId);
+  }
+});
+
+test("approval callbacks refuse a request displayed by a previous run and still send the current request", async () => {
+  const calls = [], approval = { nodeId: "planner", approval_id: "req" };
+  const selection = { current: { workspaceId: "b", taskId: "task-b", runId: "run-b" } };
+  const approvalScope = { current: { workspaceId: "a", runId: "run-a" } };
+  const approve = rendererCallback("AgentOrchestratorSurface.tsx", "approve", {
+    workspaceId: "b", selectedRun: { id: "run-b" }, selection, approvalScope, mounted: { current: true },
+    shownApprovals: [approval], pendingApprovals: [approval],
+    run: async (_name, action) => action(), moduleCall: async (_operation, args) => { calls.push(args); return { cancelled: true }; }, setPendingApprovals() {},
+  });
+  approve(approval, true); await new Promise(setImmediate); assert.equal(calls.length, 0, "old run is not dispatched");
+  approvalScope.current = { workspaceId: "b", runId: "run-b" };
+  approve(approval, true); await new Promise(setImmediate); assert.equal(calls.length, 1);
+  assert.equal(calls[0].runId, "run-b"); assert.equal(calls[0].approvalId, "req");
+});
+
+test("a temporary status failure does not permanently suppress orphan-run recovery", async () => {
+  const calls = [], settledRuns = { current: new Set() };
+  const settle = rendererCallback("AgentOrchestratorSurface.tsx", "effect:settledRuns.current.add(key)", {
+    workspaceId: "a", mounted: { current: true }, missions: [{ id: "r", workspace_id: "a", nodes: [{ id: "n", state: "running" }] }],
+    settledRuns, selection: { current: { workspaceId: "a" } },
+    moduleCall: async operation => { calls.push(operation); if (calls.length === 1) throw new Error("temporary failure"); return { driven: true }; },
+    loadMissions: async () => {}, setTimeout,
+  });
+  settle(); await new Promise(setImmediate); settle(); await new Promise(setImmediate);
+  assert.deepEqual(calls, ["run_status", "run_status"]);
+});
+
+test("an old terminal read cannot advance a newly selected command's output cursor", async () => {
+  const old = delayedReply(), offsets = { current: { stdout: 0, stderr: 0 } };
+  const read = rendererCallback("ChatWorkbench.tsx", "effect:offsets.current = { stdout: 0", {
+    selected: "old", sessionId: "session", workspaceId: "a", selectedAgentShell: false, offsets,
+    pinned: { current: false }, setOutput() {}, TAIL_BYTES: 1000, MAX_OUTPUT_CHARS: 10000, OUTPUT_POLL_MS: 1000,
+    window: { setInterval: () => 1, clearInterval() {} }, plain: value => value,
+    paneCall: async (_operation, args) => args.stream === "stdout" && args.offset === Number.MAX_SAFE_INTEGER
+      ? old.promise : { nextOffset: 10000, content: "" },
+  });
+  const cleanup = read(); cleanup(); offsets.current = { stdout: 0, stderr: 0 };
+  old.resolve({ nextOffset: 10000 }); await new Promise(setImmediate);
+  assert.deepEqual(offsets.current, { stdout: 0, stderr: 0 });
+});
+
+test("late start, restart, retry and pause replies cannot change another selected run", async () => {
+  for (const name of ["startRun", "restartRun", "controlRun", "restartChatRun", "retryChatStart"]) {
+    for (const keepSelection of [false, true]) {
+      const reply = delayedReply(), done = delayedReply(), calls = [], state = { selected: "run-a", status: "idle" };
+      let matching = true;
+      const callback = rendererCallback("AgentOrchestratorSurface.tsx", name, {
+        selectedRun: { id: "run-a" }, workspaceId: "a", currentRun: () => matching,
+        run: async (_name, action) => { await action(); done.resolve(); },
+        moduleCall: async (operation, args) => { calls.push([operation, args]); return reply.promise; }, executableArg: () => ({}), loadMissions: async () => {},
+        composerMode: "single", singleRoute: { model: "default" }, missions: [], routeIdentity: value => value,
+        setSelectedRunId: value => { state.selected = value; }, setAutoStatus: value => { state.status = value; },
+        setAdvanceNotice() {}, setError() {}, setChatNotices() {}, startNotice: () => "",
+      });
+      callback(name === "controlRun" ? "pause" : "run-a");
+      matching = keepSelection; if (!matching) state.selected = "run-b";
+      reply.resolve({ runId: "replacement-a", status: "running" }); await done.promise;
+      assert.equal(calls.length, 1); assert.equal(calls[0][1].runId, "run-a", "the authorized original request still runs");
+      assert.deepEqual(state, keepSelection
+        ? { selected: name === "restartRun" || name === "restartChatRun" ? "replacement-a" : "run-a", status: name === "controlRun" ? "paused" : "running" }
+        : { selected: "run-b", status: "idle" }, name);
+    }
+  }
+});
+
+test("a queued message survives an unmount while its delivery fails", async () => {
+  const reply = delayedReply(), next = { what: "Message", message: "queued text" }, queues = new Map([["task-a", [next]]]);
+  const alive = { current: true }, attachments = [];
+  const flush = rendererCallback("AgentOrchestratorChat.tsx", "effect:void deliver(next.message", {
+    selectedTaskId: "task-a", queueOf: task => queues.get(task) || [], setQueue: (task, value) => queues.set(task, value),
+    accepts: true, busy: false, sending: false, sentWhileFree: { current: false }, windowFocused: true, alive,
+    composing: { current: { taskId: "task-a", draft: "", attachments } }, deliver: () => reply.promise,
+    setCard() {}, setDraft() { throw new Error("unmounted composer"); }, say() {},
+  });
+  flush(); alive.current = false; reply.resolve(false); await new Promise(setImmediate);
+  assert.deepEqual(plain(queues.get("task-a")), [next]);
+});

@@ -74,6 +74,25 @@ function previews({ page, blocked = [4000] } = {}) {
   return { service, views, attached, placements };
 }
 
+test("an approval finishing after cancellation or owner teardown cannot create a preview", async (t) => {
+  for (const end of ["cancel", "owner closed"]) await t.test(end, async () => {
+    const { service, views } = previews();
+    const controller = new AbortController();
+    let answer;
+    const pending = service.call("pending", "preview_open", { url: "http://localhost:5173/" }, {
+      signal: controller.signal, permit: () => new Promise((resolve) => { answer = resolve; }),
+    });
+    try {
+      assert.equal(typeof answer, "function", "waiting for the address approval");
+      if (end === "cancel") controller.abort(); else service.closeAll();
+      answer(true);
+      assert.equal((await pending).isError, true);
+      assert.equal(views.length, 0, "no native view is created after its owner ended");
+      assert.equal(service.state("pending"), null);
+    } finally { service.closeAll(); }
+  });
+});
+
 test("a preview opens only http(s) pages on this machine, never the app's own service ports", () => {
   assert.deepEqual(previewTarget("http://localhost:5173/app"), { url: "http://localhost:5173/app", origin: "http://localhost:5173" });
   for (const ok of ["http://127.0.0.1:3000", "https://localhost:8443/", "http://[::1]:8080/", "http://app.localhost:5173/", "http://127.1.2.3:9000"]) {

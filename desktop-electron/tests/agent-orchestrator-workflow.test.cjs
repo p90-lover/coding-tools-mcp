@@ -1514,7 +1514,7 @@ test("relinking or removing a working card stops its turn; an idle card is just 
     const route = { harness_id: "codex-native", model: "gemini-3.8-flash-high" };
     const requestHeadless = async (endpoint, body) => {
       calls.push(endpoint);
-      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [{ id: "w2", state, route }] }] };
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", revision: 3, nodes: [{ id: "w2", state, route }] }] };
       if (endpoint === "/api/v1/ao/update") return { ok: true, run: { id: "run-1", workspace_id: "ws-1", nodes: [{ id: "w2", state: "pending", route }] } };
       if (endpoint === "/api/v1/ao/harness/disconnect") { assert.equal(body.node_id, "w2"); return { ok: true }; }
       throw new Error(`unexpected ${endpoint}`);
@@ -2230,7 +2230,7 @@ test("the models CPA listed are remembered across restarts, and a send on one CP
   const workflow = make();
   const listed = await workflow.call("models", {});
   assert.deepEqual(listed.models, ["gemini-3.8-flash-high", "cline-pass/deepseek-v4.1-flash"]);
-  assert.deepEqual(listed.capabilities["cline-pass/deepseek-v4.1-flash"].efforts, [], "a plugin model still takes no effort suffix");
+  assert.deepEqual(listed.capabilities["cline-pass/deepseek-v4.1-flash"].efforts, ["none", "low", "high", "max"], "Cline DeepSeek keeps its supported efforts after a restart");
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/cline-pass/deepseek-v4.1-flash",
     permission_profile: ":ao-default" };
   const sent = await workflow.call("chat_send", { workspaceId: "ws", message: "hi", executionMode: "single", singleRoute: route }).catch(error => ({ error }));
@@ -3004,7 +3004,7 @@ test("a message sent to a hung turn stops it and goes as the next turn instead o
   let lastActivityAt = 1_000_000, timeline = [];
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 4 * 60_000,
     aoHarness: {
-      observe: async () => ({ turnId: "t1", turnState: "running", lastActivityAt, timeline, approvals: [] }),
+      observe: async () => ({ turnId: "t1", turnState: interrupted.length ? "interrupted" : "running", status: interrupted.length ? "ready" : "working", lastActivityAt, timeline, approvals: [] }),
       steer: async (id, text) => { steered.push([id, text]); return { steered: true }; },
       interrupt: async id => { interrupted.push(id); },
     } });
@@ -3033,7 +3033,7 @@ test("a turn that has only been retrying its model request for minutes is restar
     { kind: "system", status: "running", text: "Retrying Claude, attempt 7 of 10. API error 503. Trying again in 30s." }];
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 4 * 60_000,
     aoHarness: {
-      observe: async () => ({ turnId: "t1", turnState: "running", lastActivityAt: 1_000_000, timeline, approvals: [] }),
+      observe: async () => ({ turnId: "t1", turnState: interrupted.length ? "interrupted" : "running", status: interrupted.length ? "ready" : "working", lastActivityAt: 1_000_000, timeline, approvals: [] }),
       steer: async (id, text) => { steered.push([id, text]); return { steered: true }; },
       interrupt: async id => { interrupted.push(id); },
     } });
@@ -3912,6 +3912,392 @@ test("each launch logs where its time went", async () => {
   for (const field of ["prepareMs", "launchMs", "totalMs"]) assert.ok(Number.isFinite(timing[field]) && timing[field] >= 0, field);
 });
 
+
+
+test("a delayed Stop cannot interrupt a newer run that reused the stopped session", async (t) => {
+  for (const scenario of ["existing workflow", "fresh workflow after transfer", "observed different turn before receipt"]) await t.test(scenario, async () => {
+    const restart = scenario !== "existing workflow", unsavedReceipt = scenario === "observed different turn before receipt";
+    const route = { harness_id: "ao:claude-code", model: "fixture" };
+    const old = { id: "old", workspace_id: "ws", project_id: "task", execution_mode: "single", revision: 1, nodes: [
+      { id: "one", state: "running", route, receipt: { thread_id: "shared", status: "submitted" } }] };
+    if (unsavedReceipt) old.nodes[0].receipt.turn_id = "turn-a";
+    const missions = [old], interrupted = [];
+    let turn = "turn-a", working = true, workflow;
+    const options = {
+      requestHeadless: async (endpoint, body) => {
+        if (endpoint.endsWith("/read")) return { ok: true, runs: structuredClone(body.run_id ? missions.filter(run => run.id === body.run_id) : missions) };
+        if (endpoint.endsWith("/control")) { old.cancelled = true; old.nodes[0].state = "cancelled"; old.nodes[0].receipt.status = "held"; old.updated_at = Date.now(); return { ok: true, run: structuredClone(old) }; }
+        throw new Error("unexpected " + endpoint);
+      },
+      aoHarness: { interrupt: async () => { interrupted.push(turn); working = false; },
+        observe: async () => ({ turnId: turn, turnState: working ? "running" : "interrupted", status: working ? "working" : "ready" }) },
+    };
+    try {
+      workflow = createAgentOrchestratorWorkflow(options);
+      await workflow.call("control_run", { workspaceId: "ws", runId: "old", action: "stop" });
+      assert.deepEqual(interrupted, ["turn-a"], "the initial Stop must still interrupt the engine's newly cancelled receipt");
+      missions.push({ id: "new", workspace_id: "ws", project_id: "task", revision: 1, nodes: [
+        { id: "one", state: unsavedReceipt ? "reserved" : "running", route,
+          ...(unsavedReceipt ? {} : { receipt: { thread_id: "shared", turn_id: "turn-b", status: "submitted" } }) }] });
+      turn = "turn-b"; working = true;
+      if (restart) { workflow.dispose(); workflow = createAgentOrchestratorWorkflow(options); }
+      await workflow.call("control_run", { workspaceId: "ws", runId: "old", action: "stop" });
+      assert.deepEqual(interrupted, ["turn-a"], "an old cancelled receipt does not own the follow-up's live turn");
+      assert.equal(working, true);
+    } finally { workflow?.dispose(); }
+  });
+});
+
+test("Stop respects session transfer before the newer dispatch receipt is saved", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const old = { id: "old", workspace_id: "ws", revision: 1, nodes: [
+    { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "shared", status: "submitted" } }] };
+  const next = { id: "new", workspace_id: "ws", revision: 1, execution_mode: "single", nodes: [
+    { id: "one", role: "planner", state: "pending", parents: [], route }] };
+  const missions = [old], interrupted = [];
+  let submitted, release, pending, turn = "turn-a", working = true;
+  const submitting = new Promise(resolve => { submitted = resolve; });
+  const hold = new Promise(resolve => { release = resolve; });
+  const workflow = createAgentOrchestratorWorkflow({
+    confirm: async () => true,
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: structuredClone(body.run_id ? missions.filter(run => run.id === body.run_id) : missions) };
+      if (endpoint.endsWith("/control")) { old.cancelled = true; old.nodes[0].state = "cancelled"; return { ok: true, run: structuredClone(old) }; }
+      if (endpoint.endsWith("/external/reserve")) { next.nodes[0].state = "reserved"; return { ok: true, request_key: "k", prompt: "follow-up" }; }
+      if (endpoint.endsWith("/external/submitted")) { submitted(); await hold; next.nodes[0].state = "running"; next.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run: structuredClone(next) }; }
+      throw new Error("unexpected " + endpoint);
+    },
+    aoHarness: { spawn: async () => { turn = "turn-b"; working = true; return "shared"; },
+      interrupt: async () => { interrupted.push(turn); working = false; },
+      observe: async () => ({ turnId: turn, turnState: working ? "running" : "interrupted", status: working ? "working" : "ready" }) },
+  });
+  try {
+    await workflow.call("control_run", { workspaceId: "ws", runId: "old", action: "stop" });
+    missions.push(next);
+    pending = workflow.call("advance", { workspaceId: "ws", runId: "new" });
+    await submitting;
+    await workflow.call("control_run", { workspaceId: "ws", runId: "old", action: "stop" });
+    assert.deepEqual(interrupted, ["turn-a"], "dispatch has already transferred the shared session despite its pending submitted request");
+    assert.equal(working, true);
+  } finally { release(); await pending?.catch(() => undefined); workflow.dispose(); }
+});
+
+
+test("a continued chat waits for an owned Stop's observation and claims its session before sending", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  const old = { id: "old", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1, cancelled: true, nodes: [
+    { id: "one", role: "planner", parents: [], state: "cancelled", route, receipt: { thread_id: "shared", turn_id: "turn-a", status: "held" } }] };
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Fixture", description: "first", state: "in_progress", clauses: [] }], runs: [old] });
+  let observationStarted, releaseObservation, reserveStarted, sendStarted, releaseSend, submittedStarted, releaseSubmitted, next, stop, sendCount = 0, turn = "turn-a";
+  const observing = new Promise(resolve => { observationStarted = resolve; }), observation = new Promise(resolve => { releaseObservation = resolve; });
+  const reserving = new Promise(resolve => { reserveStarted = resolve; }), sending = new Promise(resolve => { sendStarted = resolve; });
+  const sendGate = new Promise(resolve => { releaseSend = resolve; }), submitting = new Promise(resolve => { submittedStarted = resolve; });
+  const submittedGate = new Promise(resolve => { releaseSubmitted = resolve; }), interrupted = [];
+  let firstObservation = true;
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath, resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    requestHeadless: async (endpoint, body, options) => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: structuredClone(body.run_id ? world.runs.filter(run => run.id === body.run_id) : world.runs),
+        worker_capacity: next ? { [next.id]: 1 } : {}, team: { id: "team-1", revision: 7 } };
+      if (endpoint.endsWith("/control")) return { ok: true, run: structuredClone(old) };
+      if (endpoint.endsWith("/update") && body.change.operation === "create_from_team") {
+        next = { id: body.change.run_id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1,
+          grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "one", role: "planner", parents: [], state: "pending", route }] };
+        world.runs.push(next); return { ok: true, run: structuredClone(next) };
+      }
+      if (endpoint.endsWith("/grant")) return { ok: true, run: structuredClone(next), grant: next.grant };
+      if (endpoint.endsWith("/external/reserve")) { next.nodes[0].state = "reserved"; reserveStarted(); return { ok: true, request_key: "k", prompt: "follow-up" }; }
+      if (endpoint.endsWith("/external/submitted")) {
+        submittedStarted(); await submittedGate; next.nodes[0].state = "running"; next.nodes[0].receipt = { thread_id: body.session_id };
+        return { ok: true, run: structuredClone(next) };
+      }
+      return world.requestHeadless(endpoint, body, options);
+    },
+    aoHarness: { continuable: async () => true,
+      send: async () => { sendCount++; turn = "turn-b"; sendStarted(); await sendGate; return { turnId: "turn-b" }; },
+      spawn: async () => { throw new Error("a continuation must reuse its session"); },
+      interrupt: async () => { interrupted.push(turn); },
+      observe: async () => {
+        if (firstObservation) { firstObservation = false; observationStarted(); await observation; }
+        return { turnId: turn, turnState: turn === "turn-a" ? "interrupted" : "running", status: turn === "turn-a" ? "ready" : "working", approvals: [] };
+      } },
+  });
+  try {
+    stop = workflow.call("control_run", { workspaceId: "ws-1", runId: "old", action: "stop" });
+    await observing;
+    await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "follow-up", executionMode: "single", singleRoute: route, deferStart: true });
+    await reserving; await new Promise(setImmediate);
+    assert.equal(sendCount, 0, "the continued turn waits while Stop's preflight observation yields");
+    releaseObservation(); await stop; await sending;
+    delete old.nodes[0].receipt.turn_id;
+    await workflow.call("control_run", { workspaceId: "ws-1", runId: "old", action: "stop" });
+    assert.deepEqual(interrupted, ["turn-a"], "the next run owns the session before its send returns");
+    releaseSend(); await submitting;
+    await workflow.call("control_run", { workspaceId: "ws-1", runId: "old", action: "stop" });
+    assert.deepEqual(interrupted, ["turn-a"], "ownership also holds before submitted is saved");
+  } finally {
+    releaseObservation(); releaseSend(); releaseSubmitted(); await stop?.catch(() => undefined);
+    if (next) next.nodes[0].state = "finished";
+    for (let attempt = 0; next && attempt < 100; attempt++) {
+      if ((await workflow.call("run_status", { workspaceId: "ws-1", runId: next.id })).status !== "running") break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    workflow.dispose();
+  }
+});
+
+test("known stale or malformed graph revisions are rejected before interrupting the working agent", async (t) => {
+  for (const revision of [2, "3", undefined, -1, 3.5]) await t.test(String(revision), async () => {
+    const route = { harness_id: "ao:claude-code", model: "fixture" };
+    const mission = { id: "run", workspace_id: "ws", revision: 3, cancelled: false, nodes: [
+      { id: "one", state: "running", route, receipt: { thread_id: "session" } }] };
+    let interrupts = 0, updates = 0;
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless: async (endpoint, body) => {
+        if (endpoint.endsWith("/read")) return { ok: true, runs: [structuredClone(mission)] };
+        if (endpoint.endsWith("/update")) { updates++; if (body.change.expected_revision !== mission.revision) throw new Error("AO run revision changed"); return { ok: true, run: structuredClone(mission) }; }
+        throw new Error("unexpected " + endpoint);
+      },
+      aoHarness: { interrupt: async () => { interrupts++; }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
+    });
+    try {
+      await assert.rejects(workflow.call("update_run", { workspaceId: "ws", change: { operation: "graph", run_id: "run", expected_revision: revision,
+        change: { operation: "set_parents", node_id: "one", parents: [] } } }), /revision/i);
+      assert.equal(interrupts, 0, "a graph edit already known to be invalid must not stop its agent");
+      assert.equal(updates, 0);
+    } finally { workflow.dispose(); }
+  });
+});
+
+test("a revision changing during cancellation is not silently rebased", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, nodes: [
+    { id: "one", state: "running", route, receipt: { thread_id: "session" } }] };
+  const revisions = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [structuredClone(mission)] };
+      if (endpoint.endsWith("/update")) { revisions.push(body.change.expected_revision); throw new Error("AO run revision changed"); }
+      throw new Error("unexpected " + endpoint);
+    },
+    aoHarness: { interrupt: async () => { mission.revision = 4; }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
+  });
+  try {
+    await assert.rejects(workflow.call("update_run", { workspaceId: "ws", change: { operation: "graph", run_id: "run", expected_revision: 3,
+      change: { operation: "remove_node", node_id: "one" } } }), /revision changed/);
+    assert.deepEqual(revisions, [3], "native CAS receives the original revision and rejects concurrent edits");
+  } finally { workflow.dispose(); }
+});
+
+test("team Stop and graph replacement require observed settlement after an interrupt ACK", async (t) => {
+  for (const action of ["stop", "rewire"]) await t.test(action, async () => {
+    const route = { harness_id: "ao:claude-code", model: "fixture" };
+    const mission = { id: "run", workspace_id: "ws", revision: 3, nodes: [{ id: "one", state: "running", role: "planner", parents: [], route,
+      receipt: { thread_id: "s1", status: "submitted" } }] };
+    let reads = 0, remainingBusy = Infinity, updates = 0;
+    const interrupted = [];
+    const workflow = createAgentOrchestratorWorkflow({
+      setTimer: (callback, ms) => ms === 250 ? setImmediate(callback) : setTimeout(callback, ms),
+      requestHeadless: async endpoint => {
+        if (endpoint.endsWith("/read")) return { ok: true, runs: [structuredClone(mission)] };
+        if (endpoint.endsWith("/control")) { mission.cancelled = true; mission.nodes[0].state = "cancelled"; return { ok: true, run: structuredClone(mission) }; }
+        if (endpoint.endsWith("/update")) { updates++; mission.nodes[0].state = "pending"; return { ok: true, run: structuredClone(mission) }; }
+        throw new Error("unexpected " + endpoint);
+      },
+      aoHarness: { interrupt: async id => { interrupted.push(id); },
+        observe: async () => { reads++; return { turnState: "interrupted", status: remainingBusy-- > 0 ? "working" : "ready" }; } },
+    });
+    const invoke = () => action === "stop"
+      ? workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" })
+      : workflow.call("update_run", { workspaceId: "ws", change: { operation: "graph", run_id: "run", expected_revision: 3, change: { operation: "set_parents", node_id: "one", parents: [] } } });
+    try {
+      await assert.rejects(invoke(), /still working|settlement.*unconfirmed/i, "ACK alone is insufficient");
+      assert.equal(reads, 8, "settlement checks are bounded");
+      assert.equal(updates, 0, "a live attempt cannot be replaced");
+      assert.deepEqual(interrupted, ["s1"]);
+      remainingBusy = 2; reads = 0;
+      assert.equal((await invoke()).ok, true);
+      assert.equal(reads, 3, "success waits until the terminal turn's busy status clears");
+      assert.equal(updates, action === "rewire" ? 1 : 0);
+    } finally { workflow.dispose(); }
+  });
+});
+
+test("a stalled steer does not report a restart while its acknowledged cancellation is still working", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const world = chatWorld({ tasks: [{ id: "task", title: "Fixture", description: "read", state: "in_progress", clauses: [] }],
+    runs: [{ id: "run", project_id: "task", cancelled: false, nodes: [
+      { id: "one", role: "planner", state: "running", route, receipt: { thread_id: "s1" } }] }] });
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 4 * 60_000,
+    setTimer: (callback, ms) => ms === 250 ? setImmediate(callback) : setTimeout(callback, ms),
+    aoHarness: { observe: async () => ({ turnState: "running", status: "working", lastActivityAt: 1_000_000, approvals: [] }),
+      interrupt: async () => {} } });
+  try {
+    await assert.rejects(workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task", message: "continue" }), /still working|settlement.*unconfirmed/i);
+    assert.equal(world.edits.length, 0);
+  } finally { workflow.dispose(); }
+});
+
+test("an abandoned launch cannot claim its agent stopped from an interrupt ACK", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const mission = { id: "run", workspace_id: "ws", revision: 1, cancelled: false, execution_mode: "single",
+    nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+  const workflow = createAgentOrchestratorWorkflow({
+    setTimer: (callback, ms) => ms === 250 ? setImmediate(callback) : setTimeout(callback, ms),
+    requestHeadless: async endpoint => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [structuredClone(mission)] };
+      if (endpoint.endsWith("/external/reserve")) { mission.nodes[0].state = "reserved"; return { ok: true, request_key: "k", prompt: "read" }; }
+      if (endpoint.endsWith("/external/submitted")) throw new Error("node no longer reserved");
+      throw new Error("unexpected " + endpoint);
+    },
+    confirm: async () => true,
+    aoHarness: { spawn: async () => { mission.cancelled = true; mission.nodes[0].state = "cancelled"; return "late-session"; },
+      interrupt: async () => {}, observe: async () => ({ turnState: "running", status: "working" }) },
+  });
+  try { await assert.rejects(workflow.call("advance", { workspaceId: "ws", runId: "run" }), /still working|settlement.*unconfirmed/i); }
+  finally { workflow.dispose(); }
+});
+
+test("Stop interrupts external receipts after the engine has marked their nodes cancelled", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const mission = { id: "run", workspace_id: "ws", nodes: [
+    { id: "one", state: "running", route, receipt: { thread_id: "s1", status: "submitted" } },
+    { id: "two", state: "reserved", route, receipt: { thread_id: "s2", status: "submitted" } },
+    { id: "done", state: "finished", route, receipt: { thread_id: "s3", status: "completed" } },
+  ] };
+  const interrupted = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async endpoint => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [structuredClone(mission)] };
+      if (endpoint.endsWith("/control")) {
+        mission.cancelled = true;
+        for (const node of mission.nodes) if (node.state !== "finished") { node.state = "cancelled"; node.receipt.status = "held"; }
+        return { ok: true, run: structuredClone(mission) };
+      }
+      throw new Error("unexpected " + endpoint);
+    },
+    aoHarness: { interrupt: async id => { interrupted.push(id); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
+  });
+  try {
+    assert.equal((await workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" })).ok, true);
+    assert.deepEqual(interrupted, ["s1", "s2"], "the Rust stopped transition must not hide owned sessions from cancellation");
+  } finally { workflow.dispose(); }
+});
+
+test("Stop attempts every owned agent and reports an unconfirmed interrupt", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const mission = { id: "run", workspace_id: "ws", nodes: ["s1", "s2"].map(id => ({
+    id, state: "running", route, receipt: { thread_id: id },
+  })) };
+  const interrupted = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async endpoint => {
+      if (endpoint.endsWith("/control")) throw new Error("native control unavailable");
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [structuredClone(mission)] };
+      throw new Error("unexpected " + endpoint);
+    },
+    aoHarness: { interrupt: async id => { interrupted.push(id); if (id === "s1") throw new Error("fixture stop unavailable"); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
+  });
+  try {
+    await assert.rejects(workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" }), /fixture stop unavailable/);
+    assert.deepEqual(interrupted, ["s1", "s2"]);
+  } finally { workflow.dispose(); }
+});
+
+test("a working external card is not rewired when its interrupt fails", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, nodes: [{ id: "one", state: "running", route, receipt: { thread_id: "s1" } }] };
+  let updates = 0;
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async endpoint => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [structuredClone(mission)] };
+      if (endpoint.endsWith("/update")) { updates++; mission.nodes[0].state = "pending"; return { ok: true, run: structuredClone(mission) }; }
+      throw new Error("unexpected " + endpoint);
+    },
+    aoHarness: { interrupt: async () => { throw new Error("fixture stop unavailable"); } },
+  });
+  try {
+    await assert.rejects(workflow.call("update_run", { workspaceId: "ws", change: { operation: "graph", run_id: "run", expected_revision: 3,
+      change: { operation: "set_parents", node_id: "one", parents: [] } } }), /fixture stop unavailable/);
+    assert.equal(updates, 0);
+    assert.equal(mission.nodes[0].state, "running");
+  } finally { workflow.dispose(); }
+});
+
+test("a stalled steer never reports a restart when interruption failed", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const world = chatWorld({ tasks: [{ id: "task", title: "Fixture", description: "read", state: "in_progress", clauses: [] }],
+    runs: [{ id: "run", project_id: "task", cancelled: false, nodes: [
+      { id: "one", role: "planner", state: "running", route, receipt: { thread_id: "s1" } }] }] });
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 4 * 60_000,
+    aoHarness: { observe: async () => ({ turnState: "running", lastActivityAt: 1_000_000, approvals: [] }),
+      interrupt: async () => { throw new Error("fixture stop unavailable"); } } });
+  try {
+    await assert.rejects(workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task", message: "continue" }), /fixture stop unavailable/);
+    assert.equal(world.edits.length, 0);
+  } finally { workflow.dispose(); }
+});
+
+test("a late abandoned launch reports cancellation failure instead of claiming its agent stopped", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const mission = { id: "run", workspace_id: "ws", revision: 1, cancelled: false, execution_mode: "single",
+    nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async endpoint => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [structuredClone(mission)] };
+      if (endpoint.endsWith("/external/reserve")) { mission.nodes[0].state = "reserved"; return { ok: true, request_key: "k", prompt: "read" }; }
+      if (endpoint.endsWith("/external/submitted")) throw new Error("node no longer reserved");
+      throw new Error("unexpected " + endpoint);
+    },
+    confirm: async () => true,
+    aoHarness: { spawn: async () => { mission.cancelled = true; mission.nodes[0].state = "cancelled"; return "late-session"; },
+      interrupt: async () => { throw new Error("fixture stop unavailable"); } },
+  });
+  try {
+    await assert.rejects(workflow.call("advance", { workspaceId: "ws", runId: "run" }), /fixture stop unavailable/);
+  } finally { workflow.dispose(); }
+});
+
+test("a local Stop cancels a late submitted session even when native cancellation was unavailable", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const mission = { id: "run", workspace_id: "ws", revision: 1, cancelled: false, execution_mode: "single",
+    grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+  let releaseSpawn, spawnStarted, submitted;
+  const spawned = new Promise(resolve => { spawnStarted = resolve; });
+  const session = new Promise(resolve => { releaseSpawn = resolve; });
+  const saved = new Promise(resolve => { submitted = resolve; });
+  const interrupted = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [structuredClone(mission)], worker_capacity: { run: 1 } };
+      if (endpoint.endsWith("/grant")) return { ok: true, run: structuredClone(mission), grant: mission.grant };
+      if (endpoint.endsWith("/control")) throw new Error("native control unavailable");
+      if (endpoint.endsWith("/external/reserve")) { mission.nodes[0].state = "reserved"; return { ok: true, request_key: "k", prompt: "read" }; }
+      if (endpoint.endsWith("/external/submitted")) {
+        mission.nodes[0].state = "running"; mission.nodes[0].receipt = { thread_id: body.session_id }; submitted();
+        return { ok: true, run: structuredClone(mission) };
+      }
+      return { ok: true, run: structuredClone(mission) };
+    },
+    aoHarness: { spawn: async () => { spawnStarted(); return session; }, interrupt: async id => { interrupted.push(id); },
+      observe: async () => ({ status: "idle", turnState: "interrupted" }) },
+  });
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    await spawned;
+    await workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" });
+    releaseSpawn("late-session");
+    await saved;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(interrupted, ["late-session"]);
+  } finally {
+    releaseSpawn("late-session"); await new Promise(resolve => setImmediate(resolve)); workflow.dispose();
+  }
+});
+
 test("Stop interrupts the run's working agents even when the service refuses the stop", async () => {
   const interrupted = [];
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "sonnet", permission_profile: ":ao-default" };
@@ -3925,7 +4311,7 @@ test("Stop interrupts the run's working agents even when the service refuses the
       if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], teams: [], worker_capacity: {} };
       return { ok: true };
     },
-    aoHarness: { interrupt: async id => { interrupted.push(id); } },
+    aoHarness: { interrupt: async id => { interrupted.push(id); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
     confirm: async () => true,
   });
   const stopped = await workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" });

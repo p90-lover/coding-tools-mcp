@@ -535,9 +535,11 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [advanceNotice, setAdvanceNotice] = useState("");
   const [autoStatus, setAutoStatus] = useState("idle");
   const [pendingApprovals, setPendingApprovals] = useState<AoApproval[]>([]);
+  const approvalScope = useRef({ workspaceId: "", runId: "" });
+  const pendingApprovalsHere = approvalScope.current.workspaceId === workspaceId && approvalScope.current.runId === selectedRunId ? pendingApprovals : [];
   // Which folders this project's worktrees share or farm, for the install note on approval cards.
   const [dependencyLinks, setDependencyLinks] = useState<{ workspaceId: string; at: number; links: DependencyLinks } | null>(null);
-  const wantsDependencyLinks = Boolean(workspaceId) && pendingApprovals.some((approval) => Boolean(approval.command));
+  const wantsDependencyLinks = Boolean(workspaceId) && pendingApprovalsHere.some((approval) => Boolean(approval.command));
   useEffect(() => {
     if (!wantsDependencyLinks) return;
     if (dependencyLinks?.workspaceId === workspaceId && Date.now() - dependencyLinks.at < 60_000) return;
@@ -548,7 +550,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     }).catch(() => undefined);
     return () => { live = false; };
   }, [wantsDependencyLinks, workspaceId, pendingApprovals.length]);
-  const shownApprovals = pendingApprovals.map((approval) => {
+  const shownApprovals = pendingApprovalsHere.map((approval) => {
     const note = dependencyInstallNote(approval.command, dependencyLinks?.workspaceId === workspaceId ? dependencyLinks.links : null);
     return note ? { ...approval, dependencyNote: note } : approval;
   });
@@ -564,6 +566,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
 
   const selection = useRef({ workspaceId, taskId: chatTaskId ?? "", runId: selectedRunId });
   selection.current = { workspaceId, taskId: chatTaskId ?? "", runId: selectedRunId };
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const [taskLifecycle, setTaskLifecycle] = useState<TaskLifecycleView[]>([]);
   const [configStatus, setConfigStatus] = useState("");
   const [scheduleNow,setScheduleNow] = useState(Date.now);
@@ -694,22 +698,24 @@ export function AgentOrchestratorSurface({ language, setError }: {
       settledRuns.current.add(key);
       void (async () => {
         const status = await moduleCall("run_status", { workspaceId, runId: mission.id });
+        if (!mounted.current || selection.current.workspaceId !== workspaceId) { settledRuns.current.delete(key); return; }
         if (status.driven !== false) return;
         let nodes = running;
         for (;;) {
           for (const node of nodes) await moduleCall("observe", { workspaceId, runId: mission.id, nodeId: node.id }).catch(() => undefined);
+          if (!mounted.current || selection.current.workspaceId !== workspaceId) { settledRuns.current.delete(key); return; }
           const after = await moduleCall("runs", { workspaceId, runId: mission.id }).catch(() => null);
           const still = (after?.runs as AoMission[] | undefined)?.find((run) => run.id === mission.id);
           nodes = still && !still.cancelled ? still.nodes.filter((node) => node.state === "running" && node.route?.harness_id?.startsWith("ao:")) : [];
           // Done once nothing is left running here, another project is open, or a loop took the run over.
-          if (!nodes.length || selection.current.workspaceId !== workspaceId
+          if (!nodes.length || !mounted.current || selection.current.workspaceId !== workspaceId
             || (await moduleCall("run_status", { workspaceId, runId: mission.id }).catch(() => null))?.driven !== false) break;
           await new Promise((resolve) => setTimeout(resolve, 5000));
         }
         // Left for another project with the card still running: watch it again when it is back.
-        if (nodes.length && selection.current.workspaceId !== workspaceId) settledRuns.current.delete(key);
-        if (selection.current.workspaceId === workspaceId) await loadMissions(workspaceId);
-      })().catch(() => undefined);
+        if (nodes.length && (!mounted.current || selection.current.workspaceId !== workspaceId)) settledRuns.current.delete(key);
+        if (mounted.current && selection.current.workspaceId === workspaceId) await loadMissions(workspaceId);
+      })().catch(() => { settledRuns.current.delete(key); });
     }
   }, [missions, workspaceId]);
 
@@ -912,6 +918,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
   }, [workspaceId]);
 
   const selectedRun = missions.find((mission) => mission.id === selectedRunId);
+  const currentRun = () => mounted.current && selection.current.workspaceId === workspaceId && selection.current.runId === selectedRunId;
   const savedMissionTeam = savedTeams.find(item => item.id === selectedRun?.team?.id) ?? team;
   const missionTeam = missionTeamId ? savedTeams.find(item => item.id === missionTeamId) ?? null : team;
   const inspectedNode = selectedRun?.nodes.find(node => node.id === inspectedId);
@@ -1162,7 +1169,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const activeNodeIds = JSON.stringify(selectedRun?.nodes.filter(node => ["reserved", "running"].includes(node.state)).map(node => node.id) ?? []);
   useEffect(() => {
     const ids = JSON.parse(activeNodeIds) as string[];
-    if (!workspaceId || !selectedRunId || !ids.length) { setPendingApprovals([]); return; }
+    setPendingApprovals([]);
+    approvalScope.current = { workspaceId, runId: selectedRunId };
+    if (!workspaceId || !selectedRunId || !ids.length) return;
     let live = true;
     let reading = false;
     const refresh = async () => {
@@ -1172,7 +1181,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
         const results = await Promise.all(ids.map(async nodeId => ({
           nodeId, result: await moduleCall(["running", "paused"].includes(autoStatus) ? "harness_status" : "observe", { workspaceId, runId: selectedRunId, nodeId }),
         })));
-        if (!live) return;
+        if (!live || selection.current.workspaceId !== workspaceId || selection.current.runId !== selectedRunId) return;
         const approvals: AoApproval[] = [];
         let newest: AoMission | undefined;
         for (const { nodeId, result } of results) {
@@ -1315,7 +1324,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const startRun = () => void run("start-run", async () => {
     if (!selectedRun) return;
     const result = await moduleCall("start_run", { workspaceId, runId: selectedRun.id, ...executableArg() });
-    if (result.cancelled) return;
+    if (result.cancelled || !currentRun()) return;
     setAutoStatus(typeof result.status === "string" ? result.status : "running");
     setAdvanceNotice("Running; tool approvals still need you");
     await loadMissions(workspaceId);
@@ -1325,7 +1334,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const restartRun = () => void run("restart-run", async () => {
     if (!selectedRun) return;
     const result = await moduleCall("restart_run", { workspaceId, runId: selectedRun.id, ...executableArg() });
-    if (result.cancelled) return;
+    if (result.cancelled || !currentRun()) return;
     if (typeof result.runId === "string") setSelectedRunId(result.runId);
     if (result.status === "failed" && typeof result.detail === "string") setError(result.detail);
     setAutoStatus(typeof result.status === "string" ? result.status : "running");
@@ -1334,7 +1343,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
 
   const controlRun = (action: "pause" | "resume" | "stop") => void run(action, async () => {
     if (!selectedRun) return;
-    await moduleCall("control_run", { workspaceId, runId: selectedRun.id, action, ...executableArg() });
+    const result = await moduleCall("control_run", { workspaceId, runId: selectedRun.id, action, ...executableArg() });
+    if (result.cancelled || !currentRun()) return;
     setAutoStatus(action === "pause" ? "paused" : action === "resume" ? "running" : "held");
     await loadMissions(workspaceId);
   });
@@ -1342,6 +1352,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const sendChat = (input: { taskId?: string; title?: string; message: string; goal?: string }) => new Promise<void>((resolve, reject) => {
     // run() skips its action while another one is in flight; never leave the chat waiting on it.
     if (busy) { reject(new Error("Another action is still running")); return; }
+    const owner = selection.current;
+    const current = () => mounted.current && selection.current.workspaceId === workspaceId && selection.current.taskId === owner.taskId;
     void run("chat", async () => {
       try {
         if (!workspaceId) throw new Error("Add a workspace first");
@@ -1354,8 +1366,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
           ...(input.taskId ? { taskId: input.taskId } : input.title ? { title: input.title } : {}),
           ...execution, ...executableArg(), ...(input.goal ? { goal: input.goal } : {}) });
         if (result.cancelled) throw new Error("Message start cancelled; no new attempt confirmed.");
+        if (!current()) { resolve(); return; }
         if (composerMode === "single") rememberChatRoute(singleRoute);
         await Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]);
+        if (!current()) { resolve(); return; }
         const taskId = String(result.taskId);
         if (result.run) {
           const created = result.run as AoMission;
@@ -1374,7 +1388,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
         setAutoStatus(startNotice(result) ? "idle" : typeof result.status === "string" ? result.status : "running");
         resolve();
         void Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]).catch(cause => setError(cause instanceof Error ? cause.message : String(cause)));
-      } catch (cause) { if (!input.taskId) setPendingChat(null); reject(cause); throw cause; }
+      } catch (cause) { if (current() && !input.taskId) setPendingChat(null); reject(cause); throw cause; }
     });
   });
   // Steering goes straight to the running agent, outside run()'s one-action-at-a-time lock: it must
@@ -1417,7 +1431,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
       const picked = composerMode === "single" && singleRoute.model && singleRoute.model !== "default" ? singleRoute : null;
       if (card && picked && JSON.stringify(routeIdentity(card.route)) !== JSON.stringify(routeIdentity(picked))) {
         const result = await moduleCall("restart_run", { workspaceId, runId, ...executableArg(), singleRoute: { ...picked } as unknown as JsonObject });
-        if (result.cancelled) return;
+        if (result.cancelled || !currentRun()) return;
         if (typeof result.runId === "string") setSelectedRunId(result.runId);
         setChatNotices((current) => ({ ...current, [taskId]: startNotice(result) }));
         setAutoStatus(startNotice(result) ? "idle" : typeof result.status === "string" ? result.status : "running");
@@ -1428,10 +1442,11 @@ export function AgentOrchestratorSurface({ language, setError }: {
         await moduleCall("control_run", { workspaceId, runId, action: "retry", ...executableArg() });
       }
       const result = await moduleCall("start_run", { workspaceId, runId, ...executableArg() });
+      if (result.cancelled || !currentRun()) return;
       setChatNotices((current) => ({ ...current, [taskId]: startNotice(result) }));
       setAutoStatus(startNotice(result) ? "idle" : typeof result.status === "string" ? result.status : "running");
     } catch (cause) {
-      setChatNotices((current) => ({ ...current, [taskId]: cause instanceof Error ? cause.message : String(cause) }));
+      if (currentRun()) setChatNotices((current) => ({ ...current, [taskId]: cause instanceof Error ? cause.message : String(cause) }));
     }
     await loadMissions(workspaceId);
   });
@@ -1565,7 +1580,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     // Retry and Restart run on the model picked now, as the next message would.
     const result = await moduleCall("restart_run", { workspaceId, runId, ...executableArg(),
       ...(composerMode === "single" && singleRoute.model && singleRoute.model !== "default" ? { singleRoute: { ...singleRoute } as unknown as JsonObject } : {}) });
-    if (result.cancelled) return;
+    if (result.cancelled || !currentRun()) return;
     if (typeof result.runId === "string") setSelectedRunId(result.runId);
     if (result.status === "failed" && typeof result.detail === "string") setError(result.detail);
     setAutoStatus(typeof result.status === "string" ? result.status : "running");
@@ -1577,17 +1592,24 @@ export function AgentOrchestratorSurface({ language, setError }: {
     await loadMissions(workspaceId);
   });
 
-  const approve = (approval: AoApproval, reply: ApprovalReply) => void run("approval", async () => {
-    if (!selectedRun) return;
-    const result = await moduleCall("approve_harness", { workspaceId, runId: selectedRun.id,
-      nodeId: approval.nodeId, approvalId: approval.approval_id,
-      ...(typeof reply === "boolean" ? { allow: reply }
-        // The person's answer to a question the AO agent asked.
-        : approval.kind === "question" && approval.source === "ao" ? { answer: reply as JsonObject }
-        : typeof (reply as { decisionId?: unknown }).decisionId === "string" ? { decisionId: (reply as { decisionId: string }).decisionId }
-          : { response: reply as JsonObject, threadId: approval.thread_id!, turnId: approval.turn_id! }) });
-    if (!result.cancelled) setPendingApprovals((current) => current.filter((item) => item.approval_id !== approval.approval_id));
-  });
+  const approve = (approval: AoApproval, reply: ApprovalReply) => {
+    const owner = approvalScope.current;
+    if (!mounted.current || owner.workspaceId !== workspaceId || owner.runId !== selectedRun?.id
+      || selection.current.workspaceId !== owner.workspaceId || selection.current.runId !== owner.runId
+      || !shownApprovals.some(item => item.nodeId === approval.nodeId && item.approval_id === approval.approval_id)) return;
+    void run("approval", async () => {
+      const result = await moduleCall("approve_harness", { workspaceId: owner.workspaceId, runId: owner.runId,
+        nodeId: approval.nodeId, approvalId: approval.approval_id,
+        ...(typeof reply === "boolean" ? { allow: reply }
+          // The person's answer to a question the AO agent asked.
+          : approval.kind === "question" && approval.source === "ao" ? { answer: reply as JsonObject }
+          : typeof (reply as { decisionId?: unknown }).decisionId === "string" ? { decisionId: (reply as { decisionId: string }).decisionId }
+            : { response: reply as JsonObject, threadId: approval.thread_id!, turnId: approval.turn_id! }) });
+      if (!result.cancelled && mounted.current && selection.current.workspaceId === owner.workspaceId && selection.current.runId === owner.runId) {
+        setPendingApprovals((current) => current.filter((item) => item.nodeId !== approval.nodeId || item.approval_id !== approval.approval_id));
+      }
+    });
+  };
 
   const finished = !selectedRun || selectedRun.nodes.every(node => node.state === "finished" || (node.role === "retry" && node.state === "pending"));
   const canStart = Boolean(selectedRun) && !selectedRun!.cancelled && !finished && !["starting", "running"].includes(autoStatus) && !busy;
@@ -1954,7 +1976,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
               onUnlink={unlink} canUnlink={(nodeId, parentId) => Boolean(aoUnlinkChange(selectedRun, nodeId, parentId))}
               onRemove={removeCard} canRemove={(nodeId) => Boolean(aoRemoveChange(selectedRun, nodeId))}>
               {pendingApprovals.length ? <aside className="ao-approvals ao-canvas-overlay" aria-label="AO tool approvals">
-                {shownApprovals.map(approval => <AgentOrchestratorApproval key={approval.approval_id} approval={approval} busy={Boolean(busy)} approve={approve} />)}
+                {shownApprovals.map(approval => <AgentOrchestratorApproval key={JSON.stringify([approval.nodeId, approval.approval_id])} approval={approval} busy={Boolean(busy)} approve={approve} />)}
               </aside> : null}
               <button type="button" className="ao-fab ao-canvas-overlay" title="Add worker"
                 disabled={selectedRun.cancelled || selectedRun.nodes.length >= 24 || selectedRun.nodes.some((node) => node.role === "reviewer" && node.state !== "pending") || Boolean(busy)}
