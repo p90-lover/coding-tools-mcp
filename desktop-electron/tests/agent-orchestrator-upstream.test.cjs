@@ -453,6 +453,15 @@ test("a turn that only retries its model request shows no new sign of life, so a
   assert.equal((await upstream.observe("s")).lastActivityAt, Date.parse(at(1.5)), "the last real step, not the retry notices after it");
 });
 
+test("exitAgent requires the selected agent's acknowledged exited state", async () => {
+  for (const outcome of [{ ok: false }, { ok: true }, { ok: true, session: { id: "s", status: "working" } }, { ok: true, session: { id: "other", status: "exited" } }]) {
+    const upstream = observeHarness({ internalApi: async () => outcome });
+    await assert.rejects(upstream.exitAgent("s"), /shutdown is unconfirmed/);
+  }
+  const upstream = observeHarness({ internalApi: async () => ({ ok: true, session: { id: "s", status: "exited" } }) });
+  assert.equal((await upstream.exitAgent("s")).ok, true);
+});
+
 test("an idle agent is found by its last turn, released with exit-agent, and resumed when its chat continues", async () => {
   const vm = require("node:vm");
   const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
@@ -485,7 +494,7 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
       if (endpoint === "/api/v1/sessions") return { sessions };
       const id = endpoint.split("/")[4];
       if (endpoint.endsWith("/conversation?limit=1")) return { turns: turns[id] ?? [] };
-      if (endpoint.endsWith("/exit-agent")) return { ok: true };
+      if (endpoint.endsWith("/exit-agent")) return { ok: true, session: { id, status: "exited" } };
       if (endpoint.endsWith("/resume-agent")) { if (!resumeOk) throw new Error("resume failed"); status = "idle"; return { ok: true }; }
       return { session: { id, mode: "chat", status } };
     },

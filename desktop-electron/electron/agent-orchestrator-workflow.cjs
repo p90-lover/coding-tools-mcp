@@ -1007,7 +1007,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         const mission = latest?.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
         const card = mission?.nodes.find(entry => entry.id === node.id);
         if (!mission?.cancelled && card && card.state === "reserved") return false;
-        await harnessService().interrupt(session).catch(() => undefined);
+        if (mission?.cancelled) await harnessService().exitAgent(session);
+        else await harnessService().interrupt(session).catch(() => undefined);
         return true;
       };
       let saved;
@@ -1649,9 +1650,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       result = await requestHeadless("/api/v1/ao/control", { workspace_id: id, run_id: run, action, ...(nodeId ? { node_id: clean(nodeId, 80) } : {}), confirm: true }, { localConfirmation: true });
       if (result?.ok !== true || result.run?.workspace_id !== id) throw new Error("Mission control needs a fresh status check");
     } catch (error) {
-      // Stop always stops. When the service refuses or cannot be reached (a run it changed
-      // meanwhile, a restart), the run's working agents are still interrupted and this app stops
-      // driving it; Stop failed with "apps.call failed" and the agent kept going.
+      // A failed control request must still stop driving this run and end its saved agents.
       if (action !== "stop") throw error;
       const saved = await runs({ workspaceId: id, runId: run }).catch(() => null);
       const mission = saved?.runs.find(entry => entry.id === run && entry.workspace_id === id);
@@ -1666,10 +1665,24 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         await cancelSchedule({workspaceId:id,taskId:result.run.project_id,intentId:life.schedule.id})
           .catch(error => logger?.warn?.("ao.stop.schedule_cancel_failed", { run, error: String(error?.message || error).slice(0, 200) }));
       }
-      for (const node of result.run.nodes ?? []) {
-        if (externalAgent(node) && node.state === "running" && node.receipt?.thread_id) {
-          await harnessService().interrupt(node.receipt.thread_id).catch(() => undefined);
+      const current = backgroundRuns.get(runKey(id, run));
+      if (current) current.stopped = true;
+      // The service has already marked the cards cancelled; their receipts still own the agents.
+      const sessions = [...new Set((result.run.nodes ?? []).filter(externalAgent).map(node => node.receipt?.thread_id).filter(Boolean))];
+      const outcomes = await Promise.allSettled(sessions.flatMap(session => [
+        Promise.resolve().then(() => harnessService().exitAgent(session)).then(outcome => {
+          if (outcome?.ok !== true) throw new Error(`Agent ${session} shutdown is unconfirmed`);
+        }),
+        Promise.resolve().then(() => subagents?.stopParent(session)),
+      ]));
+      const failures = outcomes.filter(outcome => outcome.status === "rejected").map(outcome => String(outcome.reason?.message || outcome.reason));
+      if (failures.length) {
+        if (current) {
+          current.status = "failed";
+          current.detail = `Stop incomplete: ${failures.join("; ")}`;
+          reportRun(id, run, current, null, "error");
         }
+        throw new Error(`Stop incomplete: ${failures.join("; ")}`);
       }
     }
     const current = backgroundRuns.get(runKey(id, run));

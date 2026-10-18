@@ -23,7 +23,7 @@ function world({ settings = {}, agents = null, now = () => 1_000_000, aoUp = () 
     resolveApproval: async (id, approvalId, decision) => { resolved.push([id, approvalId, decision]); },
     resolveInput: async (id, approvalId, action, content) => { inputs.push([id, approvalId, action, content]); },
     interrupt: async (id) => { interrupted.push(id); },
-    exitAgent: async (id) => { released.push(id); },
+    exitAgent: async (id) => { released.push(id); return { ok: true }; },
   };
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }) });
   const service = createSubagents({
@@ -36,6 +36,46 @@ function world({ settings = {}, agents = null, now = () => 1_000_000, aoUp = () 
   return { service, harness, sessions, spawned, resolved, inputs, interrupted, released, dir,
     cleanup: () => { service.dispose(); fs.rmSync(dir, { recursive: true, force: true }); } };
 }
+
+test("stopping a parent exits only its own children even with releaseWhenDone disabled", async () => {
+  const w = world({ settings: { releaseWhenDone: false } });
+  try {
+    const one = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read one" }));
+    const other = parse(await w.service.call("chat-2", "ws-1", "subagent_start", { agent: "explorer", task: "Read two" }));
+    await w.service.stopParent("chat-1");
+    assert.deepEqual(w.released, [one.subagent_id]);
+    assert.equal(w.service.runs().find(run => run.subagent_id === one.subagent_id).state, "stopped");
+    assert.equal(w.service.runs().find(run => run.subagent_id === other.subagent_id).state, "starting");
+  } finally { w.cleanup(); }
+});
+
+test("a parent stop waits for its pending launch and ends the returned child", async () => {
+  const w = world({ settings: { releaseWhenDone: false } });
+  let finishLaunch;
+  w.harness.spawn = () => new Promise(resolve => { finishLaunch = resolve; });
+  try {
+    const starting = w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read one" });
+    const stopping = w.service.stopParent("chat-1");
+    finishLaunch("late-child");
+    await Promise.all([starting, stopping]);
+    assert.deepEqual(w.released, ["late-child"]);
+    assert.equal(w.service.runs()[0].state, "stopped");
+  } finally { w.cleanup(); }
+});
+
+test("a parent stop traverses completed children and reports a descendant exit refusal", async () => {
+  const w = world({ settings: { releaseWhenDone: false } });
+  try {
+    const child = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read one" }));
+    w.sessions.set(child.subagent_id, { turnState: "completed", answer: "Done" });
+    await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: child.subagent_id, wait_seconds: 0 });
+    const grandchild = parse(await w.service.call(child.subagent_id, "ws-1", "subagent_start", { agent: "explorer", task: "Read two" }));
+    w.harness.exitAgent = async id => { w.released.push(id); return { ok: false }; };
+    await assert.rejects(w.service.stopParent("chat-1"), /shutdown is unconfirmed/);
+    assert.deepEqual(w.released, [grandchild.subagent_id]);
+    assert.equal(w.service.runs().find(run => run.subagent_id === grandchild.subagent_id).state, "starting");
+  } finally { w.cleanup(); }
+});
 
 test("the saved settings and subagents are validated and kept", () => {
   const w = world();

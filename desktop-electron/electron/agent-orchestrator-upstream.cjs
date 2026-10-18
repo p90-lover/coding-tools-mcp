@@ -834,7 +834,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
      * provider conversation; continuable() resumes it on the next message.
      */
     async exitAgent(id) {
-      await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/exit-agent`, {});
+      let outcome;
+      try { outcome = await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/exit-agent`, {}); }
+      catch (error) {
+        if (!/\bAGENT_EXITED\b/.test(String(error?.message))) throw error;
+        outcome = { ok: true, ...await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`) };
+      }
+      if (outcome?.ok !== true || outcome.session?.id !== id || outcome.session?.status !== "exited") {
+        throw new Error(`Agent ${id} shutdown is unconfirmed`);
+      }
       return { ok: true };
     },
     /**

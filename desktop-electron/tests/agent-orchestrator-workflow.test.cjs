@@ -3223,7 +3223,7 @@ test("a card stopped while its agent launched also stops that agent once its ses
     aoHarness: {
       // The user stops the card while AO is still launching its agent.
       spawn: async () => { mission.cancelled = true; mission.nodes[0].state = "cancelled"; return "late-session"; },
-      interrupt: async (id) => { interrupted.push(id); },
+      exitAgent: async (id) => { interrupted.push(id); return { ok: true }; },
       observe: async () => ({ status: "idle", turnState: "completed" }),
     },
   });
@@ -3912,7 +3912,43 @@ test("each launch logs where its time went", async () => {
   for (const field of ["prepareMs", "launchMs", "totalMs"]) assert.ok(Number.isFinite(timing[field]) && timing[field] >= 0, field);
 });
 
-test("Stop interrupts the run's working agents even when the service refuses the stop", async () => {
+test("Stop exits every session in its run after the service marks its cards cancelled", async () => {
+  const exited = [], children = [];
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", model: "sonnet" };
+  const mission = { id: "run", workspace_id: "ws", nodes: [
+    { id: "one", state: "cancelled", route, receipt: { thread_id: "session-1" } },
+    { id: "two", state: "finished", route, receipt: { thread_id: "session-2" } },
+    { id: "native", state: "cancelled", route: { harness_id: "native-codex" } },
+  ] };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async endpoint => ({ ok: true, ...(endpoint.endsWith("/control") ? { run: mission } : { runs: [mission, { id: "other", workspace_id: "ws", nodes: [{ route, receipt: { thread_id: "unrelated" } }] }] }) }),
+    aoHarness: { exitAgent: async id => { exited.push(id); return { ok: true }; } },
+    subagents: { stopParent: async id => { children.push(id); } },
+  });
+  try {
+    assert.equal((await workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" })).ok, true);
+    assert.deepEqual(exited.sort(), ["session-1", "session-2"]);
+    assert.deepEqual(children.sort(), exited);
+  } finally { workflow.dispose(); }
+});
+
+test("Stop reports failed shutdown and still exits the other sessions and descendants", async () => {
+  const exited = [], children = [];
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", model: "sonnet" };
+  const mission = { id: "run", workspace_id: "ws", nodes: ["one", "two"].map(id => ({ id, state: "cancelled", route, receipt: { thread_id: id } })) };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async () => ({ ok: true, run: mission }),
+    aoHarness: { exitAgent: async id => { exited.push(id); if (id === "one") throw new Error("host still running"); return { ok: true }; } },
+    subagents: { stopParent: async id => { children.push(id); if (id === "two") throw new Error("child still running"); } },
+  });
+  try {
+    await assert.rejects(workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" }), /host still running|child still running/);
+    assert.deepEqual(exited.sort(), ["one", "two"]);
+    assert.deepEqual(children.sort(), ["one", "two"]);
+  } finally { workflow.dispose(); }
+});
+
+test("Stop exits the run's agents even when the service refuses the stop", async () => {
   const interrupted = [];
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "sonnet", permission_profile: ":ao-default" };
   const mission = { id: "run", workspace_id: "ws", project_id: "task", revision: 3, nodes: [
@@ -3925,12 +3961,12 @@ test("Stop interrupts the run's working agents even when the service refuses the
       if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], teams: [], worker_capacity: {} };
       return { ok: true };
     },
-    aoHarness: { interrupt: async id => { interrupted.push(id); } },
+    aoHarness: { exitAgent: async id => { interrupted.push(id); return { ok: true }; } },
     confirm: async () => true,
   });
   const stopped = await workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" });
   assert.equal(stopped.ok, true);
-  assert.deepEqual(interrupted, ["session-1"], "only the working agent is interrupted");
+  assert.deepEqual(interrupted, ["session-1", "session-2"], "all agents owned by this run exit");
   // Other controls still report the refusal.
   await assert.rejects(workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "pause" }), /revision changed/);
   // A run the service does not know either is not pretended stopped.
