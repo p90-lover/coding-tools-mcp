@@ -8,7 +8,7 @@ const { spawnSync } = require("node:child_process");
 
 const { isAppMainProcess } = require("../scripts/patch-portable.cjs");
 
-test("a portable patch rejects mixed release resources before creating target staging", () => {
+test("a portable patch checks the launcher archive version before creating target staging", async () => {
   const scratch = path.join(__dirname, "..", "..", "aiTemp");
   fs.mkdirSync(scratch, { recursive: true });
   const root = fs.mkdtempSync(path.join(scratch, "portable-identity-"));
@@ -20,9 +20,14 @@ test("a portable patch rejects mixed release resources before creating target st
       fs.writeFileSync(path.join(folder, "Coding Tools.exe"), "fixture");
       fs.writeFileSync(path.join(folder, "resources", "app.asar"), "unchanged fixture");
     }
+    const archiveSource = path.join(root, "archive-source");
+    fs.mkdirSync(archiveSource);
+    fs.writeFileSync(path.join(archiveSource, "package.json"), JSON.stringify({ version: "0.7.0-rc.23" }));
+    const asar = require(require.resolve("@electron/asar", { paths: [path.join(__dirname, "..")] }));
+    await asar.createPackage(archiveSource, path.join(source, "resources", "app.asar"));
     fs.mkdirSync(path.join(source, "resources", "coding-tools"));
     fs.writeFileSync(path.join(source, "resources", "coding-tools", "package-manifest.json"),
-      JSON.stringify({ product: { version: "0.7.0-rc.23" } }));
+      JSON.stringify({ product: { version: "0.7.0-rc.22" } }));
     fs.mkdirSync(path.join(source, "resources", "runtime"));
     fs.writeFileSync(path.join(source, "resources", "runtime", "manifest.json"),
       JSON.stringify({ schemaVersion: 2, appVersion: "0.7.0-rc.22" }));

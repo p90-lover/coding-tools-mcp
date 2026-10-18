@@ -92,8 +92,9 @@ async function main() {
   const from = values.build ? buildUnpacked() : path.resolve(values.from);
   if (!fs.existsSync(path.join(from, "resources", "app.asar"))) throw new Error(`${from} is not an unpacked build`);
 
-  const version = readJson(path.join(from, "resources", "coding-tools", "package-manifest.json"))?.product?.version;
-  if (typeof version !== "string" || !version) throw new Error("The source build has no package version; rebuild package resources first");
+  const asar = require(require.resolve("@electron/asar", { paths: [root] }));
+  const version = JSON.parse(asar.extractFile(path.join(from, "resources", "app.asar"), "package.json")).version;
+  if (typeof version !== "string" || !version) throw new Error("The source launcher archive has no package version");
   validateRuntimeBundle(path.join(from, "resources", "runtime"), { version, platform: "win32", arch: "x64" });
 
   const updateRoot = path.join(target, STAGE_DIRECTORY);
