@@ -210,3 +210,20 @@ test("an agent's new page brings the Preview pane forward, even over the Termina
   assert.equal(workbench.startsNewChat(["ao-2"], polled), true, "another chat starts over");
   assert.equal(workbench.startsNewChat(["ao-1", "ao-3"], polled), false, "an agent joining the same chat does not");
 });
+
+test("the Subagents page's model picker lists the AO agent's own models, never WebGPT (Native Codex only)", async () => {
+  const read = [];
+  const loadModels = async (harness) => {
+    read.push(harness);
+    return harness === roles.NATIVE_HARNESS ? ["chatgpt-web/high", "gpt-pool"] : { models: ["cpa/m1", "cpa/chatgpt-web/pro"], capabilities: { "cpa/m1": { efforts: ["high"] } } };
+  };
+  const card = await roles.pickerModels("ao:claude-code", loadModels);
+  assert.deepEqual([...card.models], ["cpa/m1", "cpa/chatgpt-web/pro", "chatgpt-web/high"], "a card's picker still offers WebGPT (it moves the card to Native Codex)");
+  read.length = 0;
+  const subagent = await roles.pickerModels("ao:claude-code", loadModels, true);
+  assert.deepEqual([...subagent.models], ["cpa/m1"], "a subagent saved on one would be refused on Save");
+  assert.deepEqual([...subagent.capabilities["cpa/m1"].efforts], ["high"]);
+  assert.deepEqual(read, ["ao:claude-code"], "Native Codex's catalog is not read for it");
+  const page = fs.readFileSync(path.resolve(__dirname, "../src/features/SubagentsSurface.tsx"), "utf8");
+  assert.equal(page.match(/<HarnessPicker\b[^>]*\bagentsOnly\b/g)?.length, 2, "both pickers on the page (default model and each subagent's)");
+});

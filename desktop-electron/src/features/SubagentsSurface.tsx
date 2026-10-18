@@ -169,7 +169,7 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
           <div className="setting-row-text"><strong>Default model</strong><p>Used by every subagent without a model of its own.</p></div>
           {settings.defaultRoute
             ? <div className="subagents-picker">
-              <HarnessPicker route={pickerRoute(settings.defaultRoute)} harnesses={harnesses} loadModels={loadModels} hidePermissionNote
+              <HarnessPicker route={pickerRoute(settings.defaultRoute)} harnesses={harnesses} loadModels={loadModels} hidePermissionNote agentsOnly
                 onChange={route => setSettings({ defaultRoute: subagentRoute(route) })} />
               <button type="button" className="subagents-link" onClick={() => setSettings({ defaultRoute: null })}>Clear default model</button>
             </div>
@@ -201,7 +201,7 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
             <label className="subagents-inline"><input type="checkbox" checked={!agent.route}
               onChange={event => setAgent(index, { route: event.target.checked ? null : subagentRoute(pickerRoute(settings.defaultRoute)) })} />
               Use the default model{!agent.route && settings.defaultRoute ? <small> ({settings.defaultRoute.model.replace(/^cpa\//, "")})</small> : null}</label>
-            {agent.route ? <div className="subagents-picker"><HarnessPicker route={pickerRoute(agent.route)} harnesses={harnesses} loadModels={loadModels} hidePermissionNote
+            {agent.route ? <div className="subagents-picker"><HarnessPicker route={pickerRoute(agent.route)} harnesses={harnesses} loadModels={loadModels} hidePermissionNote agentsOnly
               onChange={route => setAgent(index, { route: subagentRoute(route) })} /></div> : null}
           </div>
         </article>)}
