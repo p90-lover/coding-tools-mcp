@@ -157,7 +157,7 @@ export function NetworkProxySurface({
   const profiles = snapshot?.proxyProfiles.filter((profile) => !profile.archivedAt) ?? [];
   const selected = profiles.find((profile) => profile.id === selectedId);
   const providers = useMemo(
-    () => [...new Set((snapshot?.accounts ?? []).filter((account) => !account.archivedAt).map((account) => account.providerId))],
+    () => [...new Set(["cpa", ...(snapshot?.accounts ?? []).filter((account) => !account.archivedAt).map((account) => account.providerId)])],
     [snapshot],
   );
 
@@ -429,7 +429,7 @@ export function NetworkProxySurface({
             || (cpa?.managedInstall.state !== "installed"
               ? localText(language, "Install CPA first", "請先安裝 CPA", "请先安装 CPA", "先に CPA をインストール")
               : cpaConfigured
-                ? (globalEnabled ? globalProfile?.name ?? "—" : policyModeLabel(language, "direct"))
+                ? (profiles.find((profile) => profile.id === cpa?.outboundProxy?.profileId)?.name ?? policyModeLabel(language, "direct"))
                 : localText(language, "Restart to apply the saved route", "重新啟動以套用已儲存路由", "重启以应用已保存路由", "再起動して保存済みの経路を適用"))}</dd></div>
         </dl>
         <div className="proxy-route-actions">
