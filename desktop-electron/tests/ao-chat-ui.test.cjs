@@ -35,6 +35,24 @@ const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "../icons": { 
   "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => {} },
   "./ChatThreadList": load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu }) });
 
+test("unavailable model dots provide a text reason and harness labels omit only sign in", () => {
+  const dot = renderToStaticMarkup(React.createElement(roles.ModelStatusDot, { reason: "No connected account" }));
+  assert.match(dot, /role="img"/);
+  assert.match(dot, /aria-label="Not available: No connected account"/);
+  assert.equal(renderToStaticMarkup(React.createElement(roles.ModelStatusDot, {})), "");
+  const html = renderToStaticMarkup(React.createElement(roles.HarnessPicker, {
+    route: { harness_id: "ao:claude-code", model: "", permission_profile: ":ao-default" },
+    harnesses: [
+      { id: "ao:claude-code", label: "Claude Code", runnable: true, installed: true, authStatus: "unauthorized" },
+      { id: "ao:missing", label: "Missing", runnable: false, installed: false },
+      { id: "ao:terminal", label: "Terminal", runnable: true, installed: true, chat: false },
+    ], loadModels: async () => [], onChange() {},
+  }));
+  assert.doesNotMatch(html, /sign in/);
+  assert.match(html, /not installed/);
+  assert.match(html, / · terminal/);
+});
+
 test("opening a working role shows live step and output, not a final-result placeholder", () => {
   const team = roles.defaultTeam("workspace", roles.workerRoute(roles.DEFAULT_WORKER_HARNESS, roles.DEFAULT_WORKER_MODEL));
   const node = { ...team.nodes[1], state: "running" };

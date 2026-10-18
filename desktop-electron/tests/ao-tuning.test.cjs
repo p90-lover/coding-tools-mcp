@@ -21,19 +21,64 @@ async function picker(current, catalog) {
     useState: initial => { const index = cursor++; if (!(index in states)) states[index] = typeof initial === "function" ? initial() : initial;
       return [states[index], next => { states[index] = typeof next === "function" ? next(states[index]) : next; }]; },
     useEffect: effect => effects.push(effect),
+    useRef: initial => ({ current: initial }),
   } : name === "react/jsx-runtime" ? { jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }) } : {} });
   const changes = [];
   let selectedRoute = current;
   const render = () => { cursor = 0; effects = []; return editor.HarnessPicker({
-    route: selectedRoute, harnesses: [], loadModels: async harness => harness === "codex-native" ? ["chatgpt-web/high"] : catalog,
+    route: selectedRoute, harnesses: [], loadModels: async harness => { if (catalog instanceof Error) throw catalog; return harness === "codex-native" ? ["chatgpt-web/high"] : catalog; },
     onChange: value => changes.push(plain(value)),
   }); };
   render(); effects.forEach(effect => effect());
   await new Promise(resolve => setImmediate(resolve));
   const tree = render();
   const field = name => walk(tree).find(item => item.type === "label" && item.props.children?.[0] === name)?.props.children[1];
-  return { editor, tree, field, changes, selectRoute(next) { selectedRoute = next; return render(); } };
+  return { editor, tree, field, changes, render, selectRoute(next) { selectedRoute = next; return render(); },
+    openModels() { walk(render()).find(item => item.props?.["aria-label"] === "Choose model").props.onClick(); return render(); } };
 }
+
+test("model pickers retain unavailable IDs and WebGPT metadata without claiming they are served", async () => {
+  const p = await picker(route(), []);
+  const catalog = await p.editor.pickerModels("ao:claude-code", async harness => harness === "codex-native" ? {
+    models: ["chatgpt-web/high", "pool-only"], capabilities: { "chatgpt-web/high": { efforts: ["high"] } },
+    unavailable: { "chatgpt-web/pro": "No ChatGPT account offers Pro", "pool-only": "Not a web tier" },
+  } : { models: ["cpa/available"], unavailable: { "cpa/paused": "No connected account offers this model" } });
+  assert.deepEqual(plain(catalog.models), ["cpa/available", "chatgpt-web/high", "chatgpt-web/pro", "cpa/paused"]);
+  assert.equal(catalog.unavailable["chatgpt-web/pro"], "No ChatGPT account offers Pro");
+  assert.equal(catalog.capabilities["chatgpt-web/high"].efforts[0], "high");
+  assert.equal(catalog.unavailable["pool-only"], undefined);
+  const agents = await p.editor.pickerModels("ao:claude-code", async () => catalog, true);
+  assert.deepEqual(plain(agents.models), ["cpa/available", "cpa/paused"]);
+  assert.equal(agents.unavailable["chatgpt-web/pro"], undefined);
+});
+
+test("known offering gaps show before model names and remain selectable without changing permissions", async () => {
+  const current = { ...route("ao:claude-code", "cpa/paused"), native_permission_profile: ":read-only", approval_policy: "on-request" };
+  const p = await picker(current, { models: ["cpa/available"], unavailable: { "cpa/paused": "No connected account offers this model" } });
+  const dot = walk(p.tree).find(item => item.type === p.editor.ModelStatusDot);
+  assert.equal(dot.props.reason, "No connected account offers this model");
+  const open = p.openModels();
+  const paused = walk(open).find(item => item.props?.role === "radio" && item.props.title.startsWith("cpa/paused"));
+  assert.equal(paused.props.disabled, false);
+  assert.equal(walk(paused).find(item => item.type === p.editor.ModelStatusDot).props.reason, dot.props.reason);
+  const available = walk(open).find(item => item.props?.role === "radio" && item.props.title.startsWith("cpa/available"));
+  assert.equal(walk(available).find(item => item.type === p.editor.ModelStatusDot).props.reason, undefined);
+  available.props.onClick();
+  assert.equal(p.changes[0].model, "cpa/available");
+  assert.equal(p.changes[0].native_permission_profile, ":read-only");
+  assert.equal(p.changes[0].approval_policy, "on-request");
+  assert.equal(walk(p.render()).find(item => item.props?.["aria-label"] === "Choose model").props["aria-expanded"], false);
+});
+
+test("empty successful catalogs flag saved models; failed catalogs leave availability unknown", async () => {
+  const empty = await picker(route(), []);
+  assert.match(walk(empty.tree).find(item => item.type === empty.editor.ModelStatusDot).props.reason, /current catalog/);
+  const failed = await picker(route(), new Error("Catalog network timeout"));
+  assert.equal(walk(failed.tree).find(item => item.type === failed.editor.ModelStatusDot).props.reason, undefined);
+  assert.match(JSON.stringify(failed.openModels()), /Catalog network timeout/);
+  const available = await picker(route(), ["cpa/gpt"]);
+  assert.equal(walk(available.tree).find(item => item.type === available.editor.ModelStatusDot).props.reason, undefined);
+});
 
 test("AO model capabilities enable only advertised effort and a real context control", async () => {
   const p = await picker({ ...route(), effort: "high", context_window: 65536 }, {
@@ -74,8 +119,7 @@ test("legacy catalogs stay usable without inventing AO tuning support or erasing
   assert.equal(p.field("Reasoning effort").props.disabled, true);
   assert.equal(p.field("Reasoning effort").props.value, "high");
   assert.equal(p.field("Context window").props.disabled, true);
-  const model = walk(p.tree).find(item => item.type === "select" && item.props.value === "cpa/gpt");
-  model.props.onChange({ target: { value: "cpa/next" } });
+  walk(p.openModels()).find(item => item.props?.role === "radio" && item.props.title.startsWith("cpa/next")).props.onClick();
   assert.equal(p.changes[0].effort, undefined, "a new model starts on its own effort");
   assert.equal(p.changes[0].context_window, 32768);
 });
@@ -192,6 +236,6 @@ test("a window carried to a new model is fitted to the range that model takes", 
   // The editor's model list passes its catalog.
   const p = await picker({ ...route(), context_window: 1_000_000 }, { models: ["cpa/gpt", "cpa/small"],
     capabilities: { "cpa/gpt": { efforts: [], contextWindow: { min: 4096, max: 1_000_000 } }, "cpa/small": caps["cpa/small"] } });
-  walk(p.tree).find(item => item.type === "select" && item.props.value === "cpa/gpt").props.onChange({ target: { value: "cpa/small" } });
+  walk(p.openModels()).find(item => item.props?.role === "radio" && item.props.title.startsWith("cpa/small")).props.onClick();
   assert.equal(p.changes.at(-1).context_window, 262144);
 });

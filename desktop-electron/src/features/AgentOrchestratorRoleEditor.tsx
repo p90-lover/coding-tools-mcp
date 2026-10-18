@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import type { AoMission, AoNode } from "./AgentOrchestratorSurface";
 import { chatWorkingDetail, type ChatActivity } from "./ao-chat";
 
@@ -336,11 +336,55 @@ export function defaultTeam(workspaceId: string, worker: AoRoute): AoTeam {
  * Subagents page, whose subagents run on AO agents only) lists the harness's own models alone.
  */
 export async function pickerModels(harness: string, loadModels: AoModelLoader, agentsOnly = false): Promise<AoModelCatalog> {
-  const web = harness === NATIVE_HARNESS || agentsOnly ? Promise.resolve([] as string[])
-    : loadModels(NATIVE_HARNESS).then(items => (Array.isArray(items) ? items : items.models).filter(isWebModel), () => [] as string[]);
+  const catalogOf = (items: string[] | AoModelCatalog): AoModelCatalog => Array.isArray(items) ? { models: items } : items;
+  const web = harness === NATIVE_HARNESS || agentsOnly ? Promise.resolve({ models: [] } as AoModelCatalog)
+    : loadModels(NATIVE_HARNESS).then(items => {
+      const catalog = catalogOf(items);
+      return { models: catalog.models.filter(isWebModel),
+        capabilities: Object.fromEntries(Object.entries(catalog.capabilities ?? {}).filter(([id]) => isWebModel(id))),
+        unavailable: Object.fromEntries(Object.entries(catalog.unavailable ?? {}).filter(([id]) => isWebModel(id))) };
+    }, () => ({ models: [] } as AoModelCatalog));
   const [items, webItems] = await Promise.all([loadModels(harness), web]);
-  const catalog = Array.isArray(items) ? { models: items } : items;
-  return { ...catalog, models: [...new Set([...catalog.models, ...webItems])].filter(model => !agentsOnly || !isWebModel(model)) };
+  const catalog = catalogOf(items);
+  const unavailable = { ...webItems.unavailable, ...catalog.unavailable };
+  return { models: [...new Set([...catalog.models, ...webItems.models, ...Object.keys(unavailable)])].filter(model => !agentsOnly || !isWebModel(model)),
+    capabilities: { ...webItems.capabilities, ...catalog.capabilities },
+    unavailable: Object.fromEntries(Object.entries(unavailable).filter(([id]) => !agentsOnly || !isWebModel(id))) };
+}
+
+/** Shared keyboard/outside-click behavior for the three independent composer popovers. */
+export function useComposerPopover() {
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const panel = useRef<HTMLElement>(null);
+  const close = () => { setOpen(false); trigger.current?.focus(); };
+  useEffect(() => {
+    if (!open) return;
+    panel.current?.querySelector<HTMLElement>("input:not(:disabled), button:not(:disabled), select:not(:disabled)")?.focus();
+    const outside = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false); };
+    document.addEventListener("pointerdown", outside);
+    return () => document.removeEventListener("pointerdown", outside);
+  }, [open]);
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (!open) return;
+    if (event.key === "Enter" && (event.target as HTMLElement).tagName === "INPUT") event.preventDefault();
+    if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); }
+    if (event.key === "Tab") {
+      const controls = Array.from(panel.current?.querySelectorAll<HTMLElement>("input:not(:disabled), button:not(:disabled), select:not(:disabled), [tabindex='0']") ?? []);
+      if (!controls.length) return;
+      const first = controls[0], last = controls[controls.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    }
+  };
+  return { open, setOpen, root, trigger, panel, close, onKeyDown };
+}
+
+
+/** A known offering gap is visible in color and accessible text, including without motion. */
+export function ModelStatusDot({ reason }: { reason?: string }) {
+  return reason ? <span className="ao-model-status" role="img" aria-label={`Not available: ${reason}`} title={reason} /> : null;
 }
 
 /** Harness + model pickers shared by the inspector, New mission and Add worker sheets. */
@@ -352,13 +396,16 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
   const [models, setModels] = useState<string[] | null>(null);
   const [capabilities, setCapabilities] = useState<{ harness: string; models: Record<string, AoModelCapabilities> } | null>(null);
   const [notice, setNotice] = useState("");
+  const [gaps, setGaps] = useState<Record<string, string>>({});
+  const popup = useComposerPopover();
   const harness = route.harness_id;
   useEffect(() => {
     let live = true;
-    setModels(null); setCapabilities(null); setNotice("");
+    setModels(null); setCapabilities(null); setGaps({}); setNotice("");
     pickerModels(harness, loadModels, agentsOnly).then(catalog => {
       if (!live) return;
       setModels(catalog.models);
+      setGaps(catalog.unavailable ?? {});
       setCapabilities({ harness, models: catalog.capabilities ?? {} });
       rememberCpaProviders(catalog.capabilities);
     })
@@ -374,7 +421,11 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
   const capability = capabilities?.harness === harness ? capabilities.models[route.model] : undefined;
   // A saved model the harness no longer lists: nothing about it can be verified, so say why
   // instead of offering only a disabled "unverified" effort.
-  const missing = !native && models !== null && models.length > 0 && Boolean(route.model) && route.model !== AGENT_DEFAULT_MODEL && !models.includes(route.model);
+  const catalogReady = capabilities?.harness === harness && !notice;
+  const baseModel = route.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
+  const missing = Boolean(catalogReady && route.model && route.model !== AGENT_DEFAULT_MODEL && !models?.includes(route.model) && !models?.includes(baseModel));
+  const modelGap = (model: string) => catalogReady ? gaps[model] : undefined;
+  const selectedGap = modelGap(route.model) || modelGap(baseModel) || (missing ? "This model is not in this harness’s current catalog." : undefined);
   const { efforts, nativeMax, context, fullLimit, presets } = routeTuning(route, capability);
   // Only WebGPT has Native Codex's own efforts; a CPA model there shows what CPA advertised, as on an agent.
   const webEffort = native && isWebModel(route.model);
@@ -409,21 +460,43 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
     }}>
       {!known ? <option value={harness}>{harnessLabel(harness, harnesses)}</option> : null}
       {harnesses.map(item => <option key={item.id} value={item.id} disabled={!item.runnable}>
-        {item.label}{!item.runnable ? " · not installed" : item.authStatus === "unauthorized" ? " · sign in" : item.chat === false ? " · terminal" : ""}
+        {item.label}{!item.runnable ? " · not installed" : item.chat === false ? " · terminal" : ""}
       </option>)}
     </select></label>
-    {!hideModel && (models?.length ?? 0) > 6 ? <label>Find a model<input type="search" aria-label="Search models" placeholder="Search models…"
-      value={query} onChange={event => setQuery(event.target.value)} /></label> : null}
-    {!hideModel ? <label>Model<select value={route.model} disabled={disabled || models === null} onChange={event => onChange(withTuning(workerRoute(route.harness_id, event.target.value, nativePermission(route)), route, listed))}>
-      {!route.model || route.model === AGENT_DEFAULT_MODEL
-        ? <option value={route.model} disabled>Choose a model{route.model ? " (\"default\" is not allowed)" : ""}</option>
-        : models && !models.includes(route.model) ? <option value={route.model}>{route.model} (no longer listed)</option> : null}
-      {models === null ? <option value={route.model}>{route.model || "Loading"}</option> : null}
-      {shown.map(model => <option key={model} value={model}>
-        {modelLabel(model, native && !isWebModel(model))}{harness !== NATIVE_HARNESS && isWebModel(model) ? " · switches to Native Codex"
-          : capabilities?.harness === harness && capabilityText(capabilities.models[model], native && isWebModel(model)) ? ` · ${capabilityText(capabilities.models[model], native && isWebModel(model))}` : ""}
-      </option>)}
-    </select></label> : null}
+    {!hideModel ? <div className="ao-model-field ao-composer-picker" ref={popup.root} onKeyDown={popup.onKeyDown}>
+      <span>Model</span>
+      <button type="button" ref={popup.trigger} className="ao-model-trigger" disabled={disabled || models === null}
+        aria-label="Choose model" aria-haspopup="dialog" aria-expanded={popup.open}
+        title={selectedGap || (notice ? `Model availability could not be checked: ${notice}` : undefined)}
+        onClick={() => popup.setOpen(value => !value)}>
+        <ModelStatusDot reason={selectedGap} />{modelLabel(route.model, native && !isWebModel(route.model)) || (models === null ? "Loading models…" : "Choose a model")}
+        <span aria-hidden="true">▾</span>
+      </button>
+      {popup.open ? <section ref={popup.panel} className="ao-composer-popover ao-model-popup" role="dialog" aria-label="Model">
+        <header><h3>Model</h3><button type="button" aria-label="Close selector" className="ao-popover-close" onClick={popup.close}>×</button></header>
+        <input type="search" className="ao-model-search" aria-label="Search models" placeholder="Search models…" value={query} onChange={event => setQuery(event.target.value)} />
+        <div className="ao-model-options" role="radiogroup" aria-label="Models" onKeyDown={event => {
+          if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+          const options = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button[role="radio"]:not(:disabled)'));
+          if (!options.length) return;
+          const index = options.indexOf(document.activeElement as HTMLButtonElement);
+          const next = event.key === "Home" ? 0 : event.key === "End" ? options.length - 1
+            : (index + (event.key === "ArrowDown" ? 1 : options.length - 1)) % options.length;
+          event.preventDefault(); options[next].focus();
+        }}>
+          {[...new Set([...(route.model && route.model !== AGENT_DEFAULT_MODEL ? [route.model] : []), ...shown])].map(model => {
+            const reason = model === route.model ? selectedGap : modelGap(model);
+            const detail = harness !== NATIVE_HARNESS && isWebModel(model) ? "Switches to Native Codex" : capabilityText(listed?.[model], native && isWebModel(model));
+            return <button key={model} type="button" role="radio" aria-checked={route.model === model} className="ao-picker-option" disabled={disabled}
+              title={[model, reason, detail].filter(Boolean).join("\n")} onClick={() => {
+                onChange(withTuning(workerRoute(harness, model, nativePermission(route)), route, listed)); popup.close();
+              }}><span className="ao-option-radio" aria-hidden="true" /><span><ModelStatusDot reason={reason} />{modelLabel(model, native && !isWebModel(model))}
+                {reason || detail ? <small>{reason || detail}</small> : null}</span></button>;
+          })}
+          {notice ? <p role="status">{notice}</p> : !shown.length && !route.model ? <p role="status">No matching models.</p> : null}
+        </div>
+      </section> : null}
+    </div> : null}
     {!hidePermissionNote ? harness === NATIVE_HARNESS ? <p className="ao-hint">Saved native permission: {nativePermission(route) || "Unknown"}. Change permissions explicitly in the chat composer menu; runtime capabilities are authoritative.</p>
       : <p className="ao-hint">WebGPT runs only on Native Codex: choosing a WebGPT model switches to it, and any other model runs here. Native permissions are retained but unavailable on this adapter.</p> : null}
     <fieldset className="ao-route-tuning"><legend>Model tuning</legend>

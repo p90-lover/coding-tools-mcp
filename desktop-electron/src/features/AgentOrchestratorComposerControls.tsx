@@ -1,17 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import type { KeyboardEvent, ReactNode } from "react";
+import type { ReactNode } from "react";
 import { Caret, Icon } from "../icons";
 import {
-  capabilityText, contextText, harnessLabel, parseTokens, rememberCpaProviders, routeTuning,
+  capabilityText, contextText, harnessLabel, parseTokens, pickerModels, rememberCpaProviders, routeTuning, ModelStatusDot, useComposerPopover,
   NATIVE_HARNESS, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, WEB_ROUTE, WEB_TIERS, isWebModel, modelLabel, modelShortLabel, nativePermission, webTier, workerRoute, withTuning,
-  type AoHarness, type AoModelCapabilities, type AoModelCatalog, type AoModelLoader, type AoRoute, type AoTeam,
+  type AoHarness, type AoModelCapabilities, type AoModelLoader, type AoRoute, type AoTeam,
 } from "./AgentOrchestratorRoleEditor";
 import { HarnessLogo } from "./HarnessLogo";
 
-/** A loader may return a plain id list or a catalog with capabilities; the list needs only ids. */
-const modelIds = (items: string[] | AoModelCatalog) => Array.isArray(items) ? items : items.models;
-const modelCaps = (items: string[] | AoModelCatalog) => Array.isArray(items) ? {} : items.capabilities ?? {};
-const modelGaps = (items: string[] | AoModelCatalog) => Array.isArray(items) ? {} : items.unavailable ?? {};
 /** The effort word Codex dims after the model name ("High", "Extra high"). */
 const effortWord = (effort?: string) => !effort ? "" : effort === "xhigh" ? "Extra high" : effort[0].toUpperCase() + effort.slice(1);
 /** The effort a model id carries itself ("gemini-3.8-flash-high", "gpt-oss-120b-medium", "…(high)"). */
@@ -37,34 +33,7 @@ export type ComposerControlsProps = {
   permissions: ReactNode; busy: boolean;
 };
 
-/** Shared keyboard/outside-click behavior for the three independent composer popovers. */
-export function useComposerPopover() {
-  const [open, setOpen] = useState(false);
-  const root = useRef<HTMLDivElement>(null);
-  const trigger = useRef<HTMLButtonElement>(null);
-  const panel = useRef<HTMLElement>(null);
-  const close = () => { setOpen(false); trigger.current?.focus(); };
-  useEffect(() => {
-    if (!open) return;
-    panel.current?.querySelector<HTMLElement>("input:not(:disabled), button:not(:disabled), select:not(:disabled)")?.focus();
-    const outside = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false); };
-    document.addEventListener("pointerdown", outside);
-    return () => document.removeEventListener("pointerdown", outside);
-  }, [open]);
-  const onKeyDown = (event: KeyboardEvent) => {
-    if (!open) return;
-    if (event.key === "Enter" && (event.target as HTMLElement).tagName === "INPUT") event.preventDefault();
-    if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); }
-    if (event.key === "Tab") {
-      const controls = Array.from(panel.current?.querySelectorAll<HTMLElement>("input:not(:disabled), button:not(:disabled), select:not(:disabled), [tabindex='0']") ?? []);
-      if (!controls.length) return;
-      const first = controls[0], last = controls[controls.length - 1];
-      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
-    }
-  };
-  return { open, setOpen, root, trigger, panel, close, onKeyDown };
-}
+export { useComposerPopover } from "./AgentOrchestratorRoleEditor";
 
 /** One composer chip and the menu it opens: the chip shows what is picked, the menu the choices. */
 function ChipMenu({ label, ariaLabel, title, disabled, className = "", popupClass, heading, onOpen, children }: {
@@ -99,9 +68,10 @@ export function AgentOrchestratorComposerControls({
   const [search, setSearch] = useState("");
   const [models, setModels] = useState<string[] | null>(null);
   const [caps, setCaps] = useState<Record<string, AoModelCapabilities>>({});
-  // Why a listed-but-unserved model is not offered (its plugin's account is disabled in CPA, say).
+  // Why a model cannot currently be served (its plugin’s account is disabled in CPA, say).
   const [gaps, setGaps] = useState<Record<string, string>>({});
   const [error, setError] = useState("");
+  const [catalogReady, setCatalogReady] = useState(false);
   const [contextDraft, setContextDraft] = useState("");
   useEffect(() => { setSearch(""); }, [mode]);
   // The harness's catalog is read whenever the composer shows a single model, not only when its
@@ -119,17 +89,14 @@ export function AgentOrchestratorComposerControls({
     let live = true;
     const key = `${mode}|${route.harness_id}`;
     if (shown.current !== key) { shown.current = key; setModels(null); setCaps({}); }
-    setError("");
-    const none: AoModelCatalog = { models: [] };
-    // Native Codex lists WebGPT and the CPA pool itself; other harnesses add the WebGPT models.
-    const web = route.harness_id === NATIVE_HARNESS ? Promise.resolve(none)
-      : loadModels(NATIVE_HARNESS).then(items => modelIds(items).filter(isWebModel), () => none);
-    void Promise.all([loadModels(route.harness_id), web]).then(([catalog, webCatalog]) => {
+    setError(""); setGaps({}); setCatalogReady(false);
+    void pickerModels(route.harness_id, loadModels).then(catalog => {
       if (!live) return;
-      const loaded = { ...modelCaps(webCatalog), ...modelCaps(catalog) };
-      setModels([...new Set([...modelIds(catalog), ...modelIds(webCatalog)])]);
+      const loaded = catalog.capabilities ?? {};
+      setModels(catalog.models);
+      setCatalogReady(true);
       setCaps(loaded);
-      setGaps({ ...modelGaps(webCatalog), ...modelGaps(catalog) });
+      setGaps(catalog.unavailable ?? {});
       rememberCpaProviders(loaded);
       const current = latest.current;
       if (current.harness_id !== route.harness_id || current.model !== route.model) return;
@@ -145,7 +112,7 @@ export function AgentOrchestratorComposerControls({
       const start = defaultWindow(current, capability);
       if (start) next.context_window = start; else delete next.context_window;
       if (next.context_window !== current.context_window) onRouteChange(next);
-    }).catch(cause => { if (live) { setModels([]); setError(cause instanceof Error ? cause.message : String(cause)); } });
+    }).catch(cause => { if (live) { setModels([]); setGaps({}); setError(cause instanceof Error ? cause.message : String(cause)); } });
     return () => { live = false; };
   }, [mode, route.harness_id, loadModels, reload]);
   const selectedTeam = teams.find(team => team.id === teamId);
@@ -153,7 +120,7 @@ export function AgentOrchestratorComposerControls({
   const viaPool = (model: string) => route.harness_id === NATIVE_HARNESS && !isWebModel(model);
   const query = search.toLowerCase();
   // Search reads the id, the full label and the short name, so shortening never hides a model.
-  const matching = (models ?? []).filter(model => model !== "default" && [model, modelLabel(model, viaPool(model)), modelShortLabel(model, viaPool(model)).name]
+  const matching = [...new Set([...(route.model && route.model !== "default" ? [route.model] : []), ...(models ?? [])])].filter(model => model !== "default" && [model, modelLabel(model, viaPool(model)), modelShortLabel(model, viaPool(model)).name]
     .some(text => text.toLowerCase().includes(query)));
   // Rows sit under their provider ("Claude · CPA"), in the order the catalog first lists each one.
   const groups = new Map<string, string[]>();
@@ -182,7 +149,8 @@ export function AgentOrchestratorComposerControls({
   // A picked model the harness no longer offers (CPA dropped cline-pass/deepseek-v4.1-flash when
   // Cline stopped serving it) must not look as if it would run; the send is refused up front too.
   const baseModel = route.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
-  const unlisted = Boolean(route.model) && models !== null && models.length > 0 && !models.includes(route.model) && !models.includes(baseModel);
+  const unlisted = catalogReady && !error && Boolean(route.model) && models !== null && !models.includes(route.model) && !models.includes(baseModel);
+  const selectedGap = catalogReady && !error && models !== null ? gaps[route.model] || gaps[baseModel] || (unlisted ? "This model is not in this harness’s current catalog." : undefined) : undefined;
   const modelName = modelLabel(route.model, route.provider_id === "cliproxyapi-antigravity") || "Choose model";
   // The chip shows the model's name only; who serves it is in the menu's groups and the tooltip.
   const chipModel = modelShortLabel(route.model, route.provider_id === "cliproxyapi-antigravity");
@@ -224,16 +192,15 @@ export function AgentOrchestratorComposerControls({
             close();
           }}>
             <span className="ao-harness-option"><HarnessLogo harnessId={item.id} label={item.label} size={18} /><strong>{item.label}</strong></span>
-            {!item.runnable ? <small>not installed</small> : item.authStatus === "unauthorized" ? <small>sign in</small> : item.chat === false ? <small>terminal</small> : null}
+            {!item.runnable ? <small>not installed</small> : item.chat === false ? <small>terminal</small> : null}
           </Option>)}
           {!harnesses.length ? <p role="status">No agents found yet.</p> : null}
         </div>}
       </ChipMenu>
-      <ChipMenu heading="Model" popupClass="ao-model-popup" ariaLabel="Choose model" disabled={busy} className={unlisted ? "is-warning" : ""}
+      <ChipMenu heading="Model" popupClass="ao-model-popup" ariaLabel="Choose model" disabled={busy} className={selectedGap ? "is-warning" : ""}
         onOpen={() => setReload(value => value + 1)}
-        title={unlisted ? `${modelName} is not offered right now: ${gaps[route.model] ?? gaps[baseModel] ?? "choose another model"}` : route.model ? modelName : undefined}
-        label={<span>{route.model ? chipModel.name : modelName}
-          {unlisted ? <span className="ao-chip-unavailable"> · not available</span> : null}</span>}>
+        title={selectedGap ? `${modelName}: ${selectedGap}` : error ? `Model availability could not be checked: ${error}` : route.model ? modelName : undefined}
+        label={<span><ModelStatusDot reason={selectedGap} />{route.model ? chipModel.name : modelName}</span>}>
         {(close) => <>
           <input className="ao-model-search" type="search" aria-label="Search models" placeholder="Search models…" value={search} onChange={event => setSearch(event.target.value)} />
           <div className="ao-model-options" role="radiogroup" aria-label="Available models">
@@ -241,16 +208,19 @@ export function AgentOrchestratorComposerControls({
               {group ? <h4 aria-hidden="true">{group}</h4> : null}
               {items.map(model => {
                 const full = capabilityText(caps[model], route.harness_id === NATIVE_HARNESS && isWebModel(model));
+                const reason = catalogReady && !error ? gaps[model] || (model === route.model ? selectedGap : undefined) : undefined;
                 // Rows name the model only: its efforts and window are in the tooltip and in the
                 // effort and window chips once picked. "Paused" stays visible: it decides whether it runs.
                 return <Option key={model} picked={route.model === model} disabled={busy}
-                  title={[modelLabel(model, viaPool(model)), model, full].filter(Boolean).join("\n")}
+                  title={[modelLabel(model, viaPool(model)), model, full, reason].filter(Boolean).join("\n")}
                   onPick={() => { pickModel(model); close(); }}>
-                  {modelShortLabel(model, viaPool(model)).name}
+                  <ModelStatusDot reason={reason} />{modelShortLabel(model, viaPool(model)).name}
+                  {reason ? <small>{reason}</small> : null}
                 </Option>;
               })}
             </div>)}
-            {models !== null && !matching.length ? <p role="status">{error || "No matching models available from this runtime."}</p> : null}
+            {!catalogReady && !error && models !== null ? <p role="status">Refreshing models…</p> : null}
+            {error ? <p role="status">{error}</p> : models !== null && !matching.length ? <p role="status">No matching models available from this runtime.</p> : null}
           </div>
         </>}
       </ChipMenu>

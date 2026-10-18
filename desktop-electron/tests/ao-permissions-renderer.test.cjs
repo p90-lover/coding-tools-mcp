@@ -47,8 +47,8 @@ const node = (id, harness = "codex-native", profile = "managed/custom") => ({ id
 // options are Option elements (role="radio" once rendered).
 const menuNamed = (tree, heading) => elements(tree, item => typeof item.type === "function" && item.type.name === "ChipMenu" && item.props.heading === heading)[0];
 const optionsIn = (menu, close = () => {}) => elements(menu.props.children(close), item => typeof item.type === "function" && item.type.name === "Option");
-// Composer state order: search, models, caps, error, contextDraft.
-const composerState = (models, caps = {}, search = "") => [search, models, caps, "", ""];
+// Composer state order: search, models, caps, gaps, error, catalogReady, contextDraft.
+const composerState = (models, caps = {}, search = "", gaps = {}, error = "", ready = models !== null) => [search, models, caps, gaps, error, ready, ""];
 
 test("composer mode clicks show only the corresponding real selector without sending", () => {
   const view = renderer("AgentOrchestratorComposerControls.tsx");
@@ -454,12 +454,39 @@ test("a picked model the harness no longer offers is marked not available", () =
   const props = { mode: "single", onModeChange() {}, route, onRouteChange() {}, harnesses: [], loadModels: async () => [], teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false };
   let model = menuNamed(view.render("AgentOrchestratorComposerControls", props, composerState(["cpa/cline-pass/deepseek-v4-flash"])), "Model");
   assert.equal(model.props.className, "is-warning");
-  assert.match(text(model.props.label), /not available/);
-  assert.match(model.props.title, /not offered right now/);
+  const dot = elements(model.props.label, item => item.type?.name === "ModelStatusDot")[0];
+  assert.match(dot.props.reason, /current catalog/);
+  assert.match(model.props.title, /current catalog/);
   model = menuNamed(view.render("AgentOrchestratorComposerControls", { ...props, route: { ...route, model: "cpa/cline-pass/deepseek-v4-flash(high)" } }, composerState(["cpa/cline-pass/deepseek-v4-flash"])), "Model");
   assert.equal(model.props.className, "", "an effort suffix still matches its listed model");
   model = menuNamed(view.render("AgentOrchestratorComposerControls", props, composerState(null)), "Model");
   assert.equal(model.props.className, "", "nothing is flagged before the list loads");
+});
+
+test("composer rows retain offering gaps while loading and network failures remain unknown", async () => {
+  const view = renderer("AgentOrchestratorComposerControls.tsx", { persistentRefs: true });
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/paused", permission_profile: ":ao-default" };
+  const props = { mode: "single", onModeChange() {}, route, onRouteChange() {}, harnesses: [], loadModels: async () => { throw new Error("Catalog network timeout"); }, teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false };
+  const reason = "No connected account offers this model";
+  const dotReason = menu => elements(menu.props.label, item => item.type?.name === "ModelStatusDot")[0]?.props.reason;
+  let model = menuNamed(view.render("AgentOrchestratorComposerControls", props, composerState(["cpa/available", "cpa/paused"], {}, "", { "cpa/paused": reason })), "Model");
+  assert.equal(dotReason(model), reason);
+  const rows = optionsIn(model);
+  assert.equal(rows.length, 2, "unavailable models are retained beside connected choices");
+  assert.match(rows.find(row => text(row.props.children).includes("Paused")).props.title, /No connected account/);
+  view.effects.at(-1)();
+  model = menuNamed(view.render("AgentOrchestratorComposerControls", props), "Model");
+  assert.equal(dotReason(model), undefined, "a pending refresh cannot infer an account gap");
+  await new Promise(resolve => setImmediate(resolve));
+  model = menuNamed(view.render("AgentOrchestratorComposerControls", props), "Model");
+  assert.equal(dotReason(model), undefined, "a failed catalog leaves availability unknown");
+  assert.match(model.props.title, /Catalog network timeout/);
+  model.props.onOpen();
+  view.render("AgentOrchestratorComposerControls", props);
+  view.effects.at(-1)();
+  model = menuNamed(view.render("AgentOrchestratorComposerControls", props), "Model");
+  assert.equal(dotReason(model), undefined, "retrying an empty failed catalog never flashes an unavailable dot");
+  await new Promise(resolve => setImmediate(resolve));
 });
 
 /** Renders the composer on `route`, lets its catalog load, and returns the route changes it made. */

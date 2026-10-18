@@ -430,7 +430,16 @@
 .ao-workflow .ao-composer-controls .ao-composer-picker + .ao-composer-picker { margin-left: -2px; }
 .ao-workflow .ao-composer-chip:disabled { cursor: default; opacity: .55; }
 .ao-workflow .ao-composer-chip.is-warning { border-color: color-mix(in srgb, var(--ao-amber, #c98a12) 55%, var(--ao-line)); }
-.ao-workflow .ao-chip-unavailable { color: var(--ao-amber, #b7791f); }
+.ao-workflow .ao-model-status { display: inline-block; vertical-align: middle; width: 7px; height: 7px; margin-right: 7px; border-radius: 50%; background: #dc2626; animation: ao-model-blink 1.5s ease-in-out infinite; }
+@keyframes ao-model-blink { 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { .ao-workflow .ao-model-status { animation: none; } }
+.ao-workflow .ao-model-field { display: grid; gap: 7px; font-size: 12px; color: inherit; }
+.ao-workflow .ao-model-trigger { display: flex; align-items: center; width: 100%; min-height: 34px; padding: 7px 9px; border: 1px solid var(--ao-line); border-radius: 6px; color: inherit; background: var(--color-background-primary, #fff); font: inherit; text-align: left; cursor: pointer; overflow-wrap: anywhere; }
+.ao-workflow .ao-model-trigger > span:last-child { margin-left: auto; padding-left: 8px; }
+.ao-workflow .ao-model-trigger .ao-model-status { flex: 0 0 7px; }
+.ao-workflow .ao-model-field > .ao-composer-popover { top: calc(100% + 6px); bottom: auto; }
+.ao-workflow .ao-model-trigger:focus-visible, .ao-workflow .ao-picker-option:focus-visible { outline: 2px solid #1677ff; outline-offset: 2px; }
+.ao-workflow .ao-model-trigger:disabled { opacity: .55; cursor: default; }
 .ao-workflow .ao-harness-logo { display: inline-grid; flex: none; place-items: center; line-height: 0; }
 .ao-workflow .ao-harness-option { display: inline-flex; align-items: center; gap: 8px; }
 .ao-workflow .ao-tuning-popup { width: min(260px, calc(100vw - 40px)); }
@@ -497,6 +506,7 @@
   .ao-workflow .ao-composer-controls { gap: 7px; }
   .ao-workflow .ao-composer-chip { max-width: 200px; }
   .ao-workflow .ao-composer-popover { position: fixed; left: max(12px, env(safe-area-inset-left)); right: 12px; bottom: 110px; width: auto; max-height: calc(100vh - 160px); }
+  .ao-workflow .ao-model-field > .ao-composer-popover { top: auto; bottom: 110px; }
 }
 @media (max-width: 440px) {
   .ao-workflow > .ao-chat-list { display: none; }
