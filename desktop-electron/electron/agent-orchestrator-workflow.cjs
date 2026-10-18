@@ -2565,7 +2565,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (waiting?.approvals?.length || waiting?.needsInput) {
       return { ok: true, steered: false, waiting: true, reason: "The agent is waiting for your answer to its request; your message is sent after it" };
     }
-    const result = await harnessService().steer(card.receipt.thread_id, text, `steer-${randomUUID()}`);
+    // A chat's session is created in the background (spawn's async): its card runs, with the session,
+    // while the agent is still starting, and AO has no controller to steer yet. The message waits
+    // for the turn like a queued one instead of failing.
+    const result = await harnessService().steer(card.receipt.thread_id, text, `steer-${randomUUID()}`).catch((error) => {
+      if (/CHAT_CONTROLLER_NOT_READY/.test(String(error?.message))) return { steered: false, starting: true };
+      throw error;
+    });
+    if (result.starting) {
+      return { ok: true, steered: false, waiting: true, reason: "The agent is still starting; your message is sent after its turn" };
+    }
     if (!result.steered) return { ok: true, steered: false, reason: "The agent's turn already ended" };
     const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
     const note = async () => {

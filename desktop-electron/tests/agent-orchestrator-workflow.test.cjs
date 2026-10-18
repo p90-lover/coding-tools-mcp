@@ -2928,6 +2928,22 @@ test("steering hands the message to the running AO agent and notes it in the cha
   assert.equal(world.edits.length, 1, "nothing is noted for an undelivered steer");
 });
 
+test("a message typed while the chat's agent is still starting waits for its turn instead of failing", async () => {
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  // spawn's async: the card runs with its session as soon as AO recorded it; the agent starts behind it.
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, aoHarness: {
+    observe: async () => ({ status: "spawning", turnId: "t1", turnState: "queued", approvals: [] }),
+    steer: async () => { throw new Error("the agent controller for this session is not running (CHAT_CONTROLLER_NOT_READY)"); },
+  } });
+  const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "use pnpm, not npm" });
+  assert.equal(result.steered, false);
+  assert.equal(result.waiting, true, "the chat queues it and sends it when the turn ends");
+  assert.equal(world.edits.length, 0, "nothing is noted for an undelivered steer");
+});
+
 test("a run waiting on input reports it steadily, not on and off with each observation tick", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
   const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) },
