@@ -116,7 +116,11 @@ const CHAT_DESCRIPTIONS = Object.freeze({
   exec_command: "Run a shell command in this chat's Terminal pane (the user's terminal/backend terminal for this chat), "
     + "starting in the worktree. Use it for dev servers, backends, installs, builds and tests, and whenever the user asks to "
     + "run something in the terminal or sandbox. A long-running process (a dev server) keeps running: pass a short "
-    + "yield_time_ms, then use read_output to see more of its output and write_stdin to type into it.",
+    + "yield_time_ms, then use read_output to see more of its output and write_stdin to type into it. Keep the server "
+    + "command in the foreground; this tool manages its lifetime. Do not detach it with Start-Process, Start-Job, nohup "
+    + "or a background shell. Open its localhost URL with preview_open so the user sees it in this chat. "
+    + "On Windows this tool runs cmd.exe: use set for environment variables. For PowerShell syntax, explicitly run "
+    + "powershell.exe -NoProfile -Command followed by a quoted PowerShell command; do not send $env: syntax directly.",
   read_output: "Read more output from a command started with exec_command (it keeps running in the chat's Terminal pane).",
   write_stdin: "Type input into a command started with exec_command that is waiting for it.",
   kill_command: "Stop a command started with exec_command (for example a dev server you no longer need).",
@@ -688,7 +692,8 @@ function paneRulesFor(groups) {
     rules.push("The chat's Terminal pane (what the user calls the terminal, the backend terminal or the sandbox terminal) "
       + "runs commands started with this server's exec_command. Start dev servers, backends and anything else that keeps "
       + "running, and anything the user asks to run in the terminal or sandbox, with exec_command: they run there, the user "
-      + "watches their output, and you read more with read_output and type into them with write_stdin. Your own shell tool "
+      + "watches their output, and you read more with read_output and type into them with write_stdin. Keep a server command "
+      + "in the foreground with a short yield_time_ms; do not detach it into another shell or process. Your own shell tool "
       + "still works for quick one-off commands. When the user asks what is running in the terminal, read_output the commands you started.");
   }
   if (groups.includes("desktop")) {

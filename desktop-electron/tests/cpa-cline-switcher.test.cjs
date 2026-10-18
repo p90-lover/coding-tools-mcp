@@ -4,10 +4,11 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const { createHash } = require("node:crypto");
-const { runtimeConfiguration } = require("../electron/cpa-managed.cjs");
+const { runtimeConfiguration, installBundledCommandCodePlugin } = require("../electron/cpa-managed.cjs");
+const os = require("node:os");
 const root = path.resolve(__dirname, "../..");
 const source = path.join(root, "desktop-electron/vendor/cpa-plugins/cline-pass-switcher");
-test("the full switcher and MIT notice are pinned, and its native CPA binary matches the bundle", () => {
+test("the full switcher and MIT notice are pinned, and its native CPA binary matches the bundle", (t) => {
   assert.ok(fs.existsSync(path.join(source, "upstream/server.js")), "missing pinned switcher server");
   assert.ok(fs.existsSync(path.join(source, "upstream/public/index.html")), "missing full switcher console");
   assert.match(fs.readFileSync(path.join(source, "upstream/LICENSE"), "utf8"), /MIT License/);
@@ -18,6 +19,13 @@ test("the full switcher and MIT notice are pinned, and its native CPA binary mat
   const asset = bundle.cline.platforms["win32/x64"];
   const dll = fs.readFileSync(path.join(root, "desktop-electron/vendor/bundled/cpa-plugins", asset.path));
   assert.equal(createHash("sha256").update(dll).digest("hex"), asset.sha256);
+  if (process.platform === "win32" && process.arch === "x64") {
+    const state = fs.mkdtempSync(path.join(os.tmpdir(), "cline-plugin-install-"));
+    t.after(() => fs.rmSync(state, { recursive: true, force: true }));
+    const installed = installBundledCommandCodePlugin(state).find(file => path.basename(file) === path.basename(asset.path));
+    assert.ok(installed, "the managed loader accepts the rebuilt Cline plugin");
+    assert.equal(createHash("sha256").update(fs.readFileSync(installed)).digest("hex"), asset.sha256);
+  }
 });
 
 test("managed console boots with CPA's marker and maps only its own API requests", async () => {

@@ -456,6 +456,12 @@ test("Claude Code on Approve for me: the reviewed command runs in Codex's sandbo
     const init = await post(url, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, auth);
     assert.match(init.body.result.instructions, /Codex's Windows sandbox/);
     assert.match(init.body.result.instructions, /reviewed before it runs/);
+    const listed = await post(url, { jsonrpc: "2.0", id: 2, method: "tools/list" }, auth);
+    const description = listed.body.result.tools.find(tool => tool.name === "exec_command").description;
+    assert.match(description, /cmd\.exe/);
+    assert.match(description, /powershell\.exe/);
+    assert.match(description, /foreground/);
+    assert.match(description, /preview_open/);
     assert.doesNotMatch(init.body.result.instructions, /NOT confined|No confirmation/);
 
     const ran = await callTool(url, auth, "exec_command", { cmd: 'npm run dev -- --host "127.0.0.1"', workdir: "src" });

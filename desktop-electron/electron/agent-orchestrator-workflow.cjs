@@ -603,10 +603,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   // "commandcode-go/…(high)" a 503 auth_unavailable): its models get no suffix and offer no
   // reasoning level. A plugin model is known by its namespace, or by the provider CPA names for it.
   const PLUGIN_NAMESPACES = new Set(["cline-pass", ...PLUGIN_PROVIDERS]);
+  // Cline's plugin decodes these suffixes into the provider's request body.
+  const CLINE_EFFORTS = new Map([["cline-pass/deepseek-v4.1-flash", ["none", "low", "high", "max"]]]);
   // Ids the last catalog read named a plugin as provider of, for launches that have only the id.
   let pluginModels = new Set();
   const verbatimModel = (id, provider) => {
     const base = id.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
+    if (CLINE_EFFORTS.has(base)) return false;
     const slash = base.indexOf("/");
     return slash > 0 && PLUGIN_NAMESPACES.has(base.slice(0, slash).toLowerCase())
       || typeof provider === "string" && PLUGIN_PROVIDERS.has(provider.trim().toLowerCase()) || pluginModels.has(base);
@@ -840,7 +843,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       const provider = [entry.provider, entry.owned_by, entry.ownedBy].find(value => typeof value === "string" && value.trim());
       const verbatim = verbatimModel(id, provider) || verbatimModel(id, owners?.get(id));
       if (verbatim) plugins.add(id);
-      const efforts = verbatim ? [] : reportedEfforts(entry.supported_reasoning_levels ?? entry.thinking?.levels);
+      const efforts = CLINE_EFFORTS.get(id) ?? (verbatim ? [] : reportedEfforts(entry.supported_reasoning_levels ?? entry.thinking?.levels));
       // context_window is the default the client starts with; max_context_window is how far the
       // model goes (Luna: 272K by default, up to 1M).
       // CPA gives every model of its provider plugins (cline-pass/…, commandcode-go/…) the same stock
