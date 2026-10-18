@@ -363,6 +363,30 @@ test("observe lists the agent's parked tool requests with AO's offered decisions
 // Seen live: AO's ACP approval for the app's exec_command had no toolName (subjectKind "mcp_tool",
 // toolKind "other"); the name was only the summary. The input was dropped, so "Approve for me"'s
 // reviewer saw no command, answered "ask", and the chat waited on the person for a bare `cd`.
+test("approval input bounds explicitly identify truncation without expanding reviewer payloads", async () => {
+  const inputs = [
+    { command: "python -c \"" + "x".repeat(1491) + "\"" },
+    { command: "x".repeat(4001) },
+    { cmd: "x".repeat(2000) },
+    { path: "x".repeat(1001) },
+  ];
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {
+      turns: [{ id: "t", state: "running" }], messages: [],
+      activities: inputs.map((input, index) => ({ activityKind: "approval", status: "pending", requestId: "req-" + index,
+        summary: index === 2 ? "mcp__coding-tools__exec_command" : "PowerShell",
+        detail: { input, decisions: [{ id: "allow", kind: "allow_once" }] } })),
+    } : { session: { id: "s", mode: "chat", status: "working" } },
+  });
+  const approvals = (await upstream.observe("s")).approvals;
+  assert.equal(approvals[0].command, inputs[0].command, "a complete native script keeps every character");
+  assert.equal(approvals[0].reviewTruncated, undefined);
+  assert.equal(approvals[1].command.length, 4000);
+  assert.equal(approvals[2].toolInput.length, 1500);
+  assert.equal(approvals[3].path.length, 1000);
+  assert.ok(approvals.slice(1).every(approval => approval.reviewTruncated === true));
+});
+
 test("an MCP tool approval named only by its summary keeps its input for the reviewer", async () => {
   const upstream = observeHarness({
     internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {

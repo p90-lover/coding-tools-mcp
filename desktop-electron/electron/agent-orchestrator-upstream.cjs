@@ -478,11 +478,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // summary (seen live: subjectKind "mcp_tool", toolKind "other"). Without it the input was
         // dropped, so the reviewer saw an exec_command with no command and answered "ask".
         const toolName = String(detail.toolName || activity.summary || "");
-        const toolInput = /^mcp__/.test(toolName) && Object.keys(input).length ? utf8Prefix(JSON.stringify(input), 1500) : "";
+        const rawToolInput = /^mcp__/.test(toolName) && Object.keys(input).length ? JSON.stringify(input) : "";
+        const toolInput = utf8Prefix(rawToolInput, 1500);
+        const reviewTruncated = Buffer.byteLength(command, "utf8") > 4000 || Buffer.byteLength(rawToolInput, "utf8") > 1500
+          || Buffer.byteLength(path, "utf8") > 1000 || Buffer.byteLength(String(input.description ?? ""), "utf8") > 500;
         return {
           approval_id: activity.requestId.slice(0, 200), source: "ao", kind: plan ? "plan" : command ? "command" : "permission",
           ...(plan ? { plan } : {}),
           ...(toolInput ? { toolInput } : {}),
+          ...(reviewTruncated ? { reviewTruncated: true } : {}),
           ...(typeof activity.createdAt === "string" ? { since: activity.createdAt } : {}),
           ...(command ? { command: utf8Prefix(command, 4000) } : {}), ...(path ? { path: utf8Prefix(path, 1000) } : {}),
           ...(typeof input.description === "string" ? { reason: utf8Prefix(input.description, 500) } : {}),
