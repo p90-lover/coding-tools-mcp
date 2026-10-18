@@ -513,6 +513,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   }
   /** A chat start that failed only for time (the persistent host's startup window, a deadline). */
   const TRANSIENT_CHAT_START = /persistent (ACP )?host|timed out|timeout|deadline exceeded|context canceled/i;
+  const provisionRetried = new Set(); // sessions whose failed background start was resumed once
   const CHAT_RETRY_PAUSE_MS = 2000;
   /** The longest prefix of `text` that is at most `maxBytes` of UTF-8 (AO limits prompts in bytes). */
   function utf8Prefix(text, maxBytes) {
@@ -658,6 +659,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // A CPA model runs through the local gateway; AO adds the key from its own environment.
         ...(gateway?.provider === "cpa" && typeof gateway.model === "string" ? { gateway: { provider: "cpa", model: gateway.model.slice(0, 256) } } : {}),
         ...(mcpServers.length ? { mcpServers } : {}),
+        // A chat answers as soon as AO has recorded it; its worktree and agent start behind it and
+        // the prompt is sent once the agent is up (provisionState; observe() reads it). Waiting for
+        // the whole start took 20 s before the chat showed anything. A pre-warmed one stays
+        // synchronous: it is "ready" only once its agent is.
+        ...(mode === "chat" && !warm ? { async: true } : {}),
         displayName: String(name || "AO worker").slice(0, 100),
       });
       let data;
@@ -706,6 +712,20 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         .map(message => message.text).join("\n\n").trim();
       const status = session?.session?.status;
       const timeline = turnTimeline(conversation, turn?.id, turnOver);
+      // A chat started in the background (spawn's async) whose agent failed to come up: one that
+      // failed only for time is resumed once (AO keeps the queued prompt, so it is never sent twice);
+      // otherwise the turn fails with AO's reason.
+      if (session?.session?.provisionState === "failed") {
+        const reason = String(session.session.provisionError || "The agent could not start").slice(0, 500);
+        if (TRANSIENT_CHAT_START.test(reason) && !provisionRetried.has(id)) {
+          provisionRetried.add(id);
+          if (provisionRetried.size > 500) provisionRetried.delete(provisionRetried.values().next().value);
+          const resumed = await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/resume-agent`, {}).then(() => true, () => false);
+          if (resumed) return { status, turnId: turn?.id, turnState: "queued", needsInput: false, exited: false, answer: "", liveOutput: "", timeline, approvals: [] };
+        }
+        return { status, turnId: turn?.id, turnState: "failed", error: `The agent could not start: ${reason}`,
+          needsInput: false, exited: false, answer: "", liveOutput: "", timeline, approvals: [] };
+      }
       // A chat turn whose host process is gone (e.g. killed with the app during an update) stays
       // "running" in AO forever. Settle it through AO's own interrupt path so the card can retry.
       // The reason is reported again for a turn already settled that way (a display-only read may
