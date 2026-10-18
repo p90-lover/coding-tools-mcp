@@ -434,3 +434,18 @@ test("an update request that goes quiet times out instead of hanging", async () 
     update.setUpdateSleepForTests((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 });
+
+test("an update download given up partway closes the app's network response instead of leaving it open", async () => {
+  const update = require("../electron/update.cjs");
+  let cancelled = 0;
+  // Metadata that grows past its size limit: the read stops there; the response must not stay open.
+  update.useNativeUpdateTransport(async () => new Response(new ReadableStream({
+    pull(controller) { controller.enqueue(new TextEncoder().encode("0123456789")); },
+    cancel() { cancelled += 1; },
+  }), { status: 200 }));
+  try {
+    await assert.rejects(update.downloadText("https://api.github.com/x", 25), /size limit/);
+    for (let tries = 0; tries < 50 && !cancelled; tries++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(cancelled, 1, "the body is cancelled, so the request ends");
+  } finally { update.useNativeUpdateTransport(null); }
+});

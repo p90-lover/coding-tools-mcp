@@ -513,7 +513,10 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   }
   /** A chat start that failed only for time (the persistent host's startup window, a deadline). */
   const TRANSIENT_CHAT_START = /persistent (ACP )?host|timed out|timeout|deadline exceeded|context canceled/i;
-  const provisionRetried = new Set(); // sessions whose failed background start was resumed once
+  // Sessions whose failed background start was resumed once: id -> { resumed: Promise<boolean>,
+  // after: the observe() read count when AO answered the resume }.
+  const provisionRetried = new Map();
+  let observeReads = 0;
   const CHAT_RETRY_PAUSE_MS = 2000;
   /** The longest prefix of `text` that is at most `maxBytes` of UTF-8 (AO limits prompts in bytes). */
   function utf8Prefix(text, maxBytes) {
@@ -690,6 +693,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return created;
     },
     async observe(id, expectedTurn) {
+      const read = ++observeReads;
       const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`);
       if (record?.session?.mode === "tui") return observeTui(id, record.session.status, record.session.activity);
       const [session, conversation] = [record, await conversationTail(id)];
@@ -719,11 +723,19 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       // otherwise the turn fails with AO's reason.
       if (session?.session?.provisionState === "failed") {
         const reason = String(session.session.provisionError || "The agent could not start").slice(0, 500);
-        if (TRANSIENT_CHAT_START.test(reason) && !provisionRetried.has(id)) {
-          provisionRetried.add(id);
-          if (provisionRetried.size > 500) provisionRetried.delete(provisionRetried.values().next().value);
-          const resumed = await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/resume-agent`, {}).then(() => true, () => false);
-          if (resumed) return { status, turnId: turn?.id, turnState: "queued", needsInput: false, exited: false, answer: "", liveOutput: "", timeline, approvals: [] };
+        let retry = provisionRetried.get(id);
+        if (!retry && TRANSIENT_CHAT_START.test(reason)) {
+          retry = { after: Infinity };
+          retry.resumed = internalApi("POST", `/api/v1/sessions/${sessionId(id)}/resume-agent`, {}).then(() => true, () => false)
+            .then((resumed) => { retry.after = observeReads; return resumed; });
+          provisionRetried.set(id, retry);
+          if (provisionRetried.size > 500) provisionRetried.delete(provisionRetried.keys().next().value);
+        }
+        // The run loop and the chat's activity poll observe the same card: a read taken before AO
+        // answered the resume saw the failure being resumed, not the resumed start failing again,
+        // and failed the card while its agent was coming up.
+        if (retry && read <= retry.after && await retry.resumed) {
+          return { status, turnId: turn?.id, turnState: "queued", needsInput: false, exited: false, answer: "", liveOutput: "", timeline, approvals: [] };
         }
         return { status, turnId: turn?.id, turnState: "failed", error: `The agent could not start: ${reason}`,
           needsInput: false, exited: false, answer: "", liveOutput: "", timeline, approvals: [] };
@@ -904,7 +916,19 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return pastTurnTimeline(id, turnId);
     },
     async interrupt(id) {
-      await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/interrupt`, {}).catch(() => undefined);
+      const interrupt = () => internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/interrupt`, {});
+      await interrupt().catch(async (error) => {
+        // A chat created in the background (spawn's async) whose agent is still starting has no
+        // controller, so nothing to interrupt; AO would send its queued prompt once the agent is up,
+        // and the stopped card would leave it working unseen. Its start is cancelled instead. One
+        // that came up meanwhile is interrupted.
+        if (!/CHAT_CONTROLLER_NOT_READY/.test(String(error?.message))) return;
+        const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`).catch(() => null);
+        if (record?.session?.provisionState === "provisioning") {
+          await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/kill`, {}).catch(() => undefined);
+          agentTools?.forgetSession?.(id);
+        } else await interrupt().catch(() => undefined);
+      });
     },
     // A standalone AO terminal running one program (e.g. the Antigravity CLI) with
     // proxy-only environment additions; AO rejects any other variable.
