@@ -186,3 +186,6 @@
 @media (prefers-reduced-motion: reduce) {
   .subagents-page *, .subagents-page *::before, .subagents-page *::after { animation: none !important; transition: none !important; }
 }
+
+.subagents-load-error { padding: 18px; margin-bottom: 20px; border: 1px solid #e3cf9e; border-radius: 10px; background: #fff9eb; color: #835a13; font-size: 14px; }
+.subagents-load-error p { margin: 6px 0 14px; overflow-wrap: anywhere; }

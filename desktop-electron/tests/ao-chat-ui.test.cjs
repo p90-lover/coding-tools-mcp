@@ -244,3 +244,17 @@ test("edits on the Subagents page survive leaving the page and coming back befor
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/SubagentsSurface.tsx"), "utf8");
   assert.match(source, /setDraft\(current => keptDraft\(current, previous, config\)\)/, "the page's reload goes through it");
 });
+test("a delayed subagent save keeps newer edits and only accepts server normalization for an untouched draft", () => {
+  const page = load("SubagentsSurface.tsx", { "./AgentOrchestratorSurface": {}, "./AgentOrchestratorRoleEditor": roles });
+  const submitted = { settings: { enabled: true, maxConcurrent: 3 }, agents: [{ id: "explorer", name: "Scout", enabled: true, route: null }] };
+  const normalized = { ...submitted, agents: [{ ...submitted.agents[0], name: "Scout (saved)" }] };
+  const edited = { ...submitted, agents: [{ ...submitted.agents[0], name: "Newer edit" }] };
+  assert.equal(page.keptDraft(edited, submitted, normalized), edited, "completion of an earlier save never drops a newer edit");
+  assert.deepEqual(page.keptDraft(structuredClone(submitted), submitted, normalized), normalized, "an unchanged draft accepts the saved response");
+  const removed = { ...submitted, agents: [] };
+  assert.equal(page.keptDraft(removed, submitted, normalized), removed, "an agent removed during saving stays removed in the draft");
+  const changedSettings = { ...submitted, settings: { ...submitted.settings, maxConcurrent: 5 } };
+  assert.equal(page.keptDraft(changedSettings, submitted, normalized), changedSettings, "settings edited during saving stay unsaved");
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/SubagentsSurface.tsx"), "utf8");
+  assert.match(source, /setDraft\(current => keptDraft\(current, submitted, config\)\)/, "the save completion uses the same preservation policy as reloads");
+});

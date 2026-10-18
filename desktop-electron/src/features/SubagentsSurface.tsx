@@ -58,6 +58,9 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
   const [available, setAvailable] = useState(true);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const configRequest = useRef(0);
+  const saveInFlight = useRef(false);
   const [view, setView] = useState<"agents" | "activity" | "settings">("agents");
   const [expandedAgent, setExpandedAgent] = useState<string | null>("explorer");
   const focusNewAgent = useRef<string | null>(null);
@@ -70,18 +73,29 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
   // The saved config the draft was last compared with; the page stays mounted between visits.
   const savedRef = useRef<SubagentConfig | null>(null);
   const load = useCallback(async () => {
-    const result = await moduleCall("subagents_config");
-    setAvailable(result.available !== false);
-    if (result.settings && Array.isArray(result.agents)) {
-      const config = { settings: result.settings as SubagentSettings, agents: result.agents as Subagent[] };
-      const previous = savedRef.current;
-      savedRef.current = config;
-      setSaved(config); setDraft(current => keptDraft(current, previous, config));
+    // A refresh must not overwrite a save, including when returning to this page mid-save.
+    if (saveInFlight.current) return;
+    const request = ++configRequest.current;
+    setLoadError(null);
+    try {
+      const result = await moduleCall("subagents_config");
+      if (request !== configRequest.current) return;
+      setAvailable(result.available !== false);
+      if (result.settings && Array.isArray(result.agents)) {
+        const config = { settings: result.settings as SubagentSettings, agents: result.agents as Subagent[] };
+        const previous = savedRef.current;
+        savedRef.current = config;
+        setSaved(config); setDraft(current => keptDraft(current, previous, config));
+      } else if (result.available !== false) {
+        throw new Error("Subagent configuration is incomplete. Try loading it again.");
+      }
+    } catch (cause) {
+      if (request === configRequest.current) setLoadError(cause instanceof Error ? cause.message : String(cause));
     }
   }, []);
   useEffect(() => {
     if (!active) return;
-    void load().catch(cause => setError(cause instanceof Error ? cause.message : String(cause)));
+    void load();
     void listAllWorkspaces().then(items => setWorkspaceId(current => items.some(item => item.id === current) ? current : items[0]?.id ?? "")).catch(() => undefined);
     // Subagents run on AO agents only: Native Codex (and its WebGPT models) is left out.
     return watchHarnesses(list => setHarnesses(list.filter(item => item.id !== NATIVE_HARNESS)));
@@ -130,22 +144,29 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
   const removeAgent = (index: number) => setDraft(current => current && { ...current, agents: current.agents.filter((_, at) => at !== index) });
 
   const save = async () => {
-    if (!draft) return;
-    setBusy(true); setNotice("");
+    if (!draft || saveInFlight.current) return;
+    const submitted = draft;
+    saveInFlight.current = true;
+    ++configRequest.current; // Ignore configuration reads begun before this write.
+    setBusy(true); setNotice(""); setLoadError(null);
     try {
       const result = await moduleCall("subagents_save", { settings: draft.settings as unknown as JsonObject, agents: draft.agents as unknown as JsonObject[] } as unknown as JsonObject);
       const config = { settings: result.settings as SubagentSettings, agents: result.agents as Subagent[] };
       savedRef.current = config;
-      setSaved(config); setDraft(structuredClone(config)); setNotice("Saved. New chats get these subagents; open chats pick them up on their next agent start.");
+      setSaved(config); setDraft(current => keptDraft(current, submitted, config)); setNotice("Saved. New chats get these subagents; open chats pick them up on their next agent start.");
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
-    finally { setBusy(false); }
+    finally { saveInFlight.current = false; setBusy(false); }
   };
   const stop = (id: string) => void moduleCall("subagents_stop", { subagentId: id })
     .then(() => moduleCall("subagents_runs")).then(result => setRuns(Array.isArray(result.runs) ? result.runs as SubagentRun[] : []))
     .catch(cause => setError(cause instanceof Error ? cause.message : String(cause)));
 
   if (!available) return <div className="subagents-page"><p className="subagents-empty">Subagents need the Agent Orchestrator, which is not available in this build.</p></div>;
-  if (!draft) return <div className="subagents-page"><p className="subagents-empty">Loading…</p></div>;
+  if (!draft) return <div className="subagents-page ao-workflow"><div className="subagents-scroll">
+    {loadError ? <div className="subagents-load-error" role="alert"><strong>Could not load subagents</strong><p>{loadError}</p>
+      <button type="button" className="subagents-secondary" onClick={() => void load()}>Try again</button></div>
+      : <p className="subagents-empty" role="status">Loading…</p>}
+  </div></div>;
   const { settings, agents } = draft;
   const missingModel = agents.some(agent => agent.enabled && !agent.route) && !settings.defaultRoute;
 
@@ -162,6 +183,8 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
         </div>
       </header>
       {notice ? <p className="subagents-notice" role="status">{notice}</p> : null}
+      {loadError ? <div className="subagents-load-error" role="alert"><p>{loadError}</p>
+        <button type="button" className="subagents-secondary" onClick={() => void load()}>Try again</button></div> : null}
 
       <div className="subagents-overview" aria-label="Team overview">
         <div className="subagents-counts"><span>{agents.length} {agents.length === 1 ? "agent" : "agents"}</span><span>{agents.filter(agent => agent.enabled).length} enabled</span><span>{runs.filter(run => ["starting", "running"].includes(run.state)).length} running</span></div>
