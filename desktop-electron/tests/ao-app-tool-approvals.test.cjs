@@ -39,3 +39,12 @@ test("the safety rules block what is never answered for the person", () => {
   assert.equal(blockedRequest("rm -rf /"), true);
   assert.equal(blockedRequest("powershell -Command Invoke-WebRequest http://127.0.0.1:8000"), false);
 });
+
+test("the safety rules read a tool's JSON arguments as the command they carry", () => {
+  // A tool's arguments arrive as JSON (the card's toolInput, the app's own workspace approvals), where
+  // a newline is "\n": "cd app\ngit push" hid git push from the rules' word boundary.
+  assert.equal(blockedRequest(JSON.stringify({ cmd: "cd app\ngit push origin main" })), true);
+  assert.equal(blockedRequest(`permission · mcp__coding-tools__exec_command · input ${JSON.stringify({ cmd: "echo ok\r\ngit push --force" })}`), true);
+  assert.equal(blockedRequest(JSON.stringify({ cmd: "echo ok\tgit push" })), true);
+  assert.equal(blockedRequest(JSON.stringify({ cmd: "npm test\ngit status" })), false);
+});

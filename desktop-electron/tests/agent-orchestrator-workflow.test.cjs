@@ -2762,6 +2762,70 @@ test("Approve for me is reviewed by codex-auto-review first, the card's model wh
   assert.match(down.detail, /could not answer/, "and the request says why it is waiting for them");
 });
 
+test("Approve for me's 20 s answer never allows what the safety rules or the reviewer would not", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
+  // Each has waited far longer than the 20 s after which nobody answering lets the agent go on.
+  const since = "2000-01-01T00:00:00.000Z";
+  const requests = [
+    // Longer than the rules and the reviewer read: git push sits past the cut.
+    { approval_id: "long", source: "ao", kind: "command", tool: "Bash", command: `echo ${"x".repeat(1600)} && git push origin main`, since, decisions },
+    // An MCP tool's arguments arrive as JSON, where the newline before git push reads "\n".
+    { approval_id: "json", source: "ao", kind: "permission", tool: "mcp__coding-tools__exec_command",
+      toolInput: JSON.stringify({ cmd: "cd app\ngit push origin main" }), since, decisions },
+    // Nothing blocks it and the reviewer passed it to the person: answered for them.
+    { approval_id: "plain", source: "ao", kind: "permission", tool: "Write", path: "C:/elsewhere/plain", since, decisions },
+    // The reviewer is still deciding this one (its budget is longer than the 20 s).
+    { approval_id: "slow", source: "ao", kind: "permission", tool: "Write", path: "C:/elsewhere/slow", since, decisions },
+  ];
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+    { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const resolved = [];
+  let releaseSlow;
+  const slowVerdict = new Promise(resolve => { releaseSlow = resolve; });
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) };
+      const prompt = JSON.parse(init.body).messages[0].content;
+      const action = prompt.includes("elsewhere/slow") ? await slowVerdict : "ask";
+      return { ok: true, json: async () => ({ choices: [{ message: { content: `{"action":"${action}","reason":"fixture"}` } }] }) };
+    },
+    requestHeadless: async endpoint => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+      return { ok: true, run: mission };
+    },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running",
+        approvals: requests.filter(request => !resolved.some(([id]) => id === request.approval_id)) }),
+      resolveApproval: async (_session, requestId, decisionId) => { resolved.push([requestId, decisionId]); return { ok: true }; },
+    },
+    confirm: async () => true,
+  });
+  const answered = () => Object.fromEntries(resolved);
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 300 && resolved.length < 3; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.deepEqual(answered(), { long: "no", json: "no", plain: "yes" },
+      "a command cut off before the rules saw all of it, and git push in JSON, are denied; the plain request goes ahead");
+    releaseSlow("deny");
+    for (let tries = 0; tries < 300 && !answered().slow; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(answered().slow, "no", "the reviewer still on a request answers it; nobody allowed it meanwhile");
+    assert.equal(resolved.filter(([id]) => id === "slow").length, 1);
+  } finally {
+    releaseSlow("deny");
+    mission.nodes[0].state = "finished";
+    for (let tries = 0; tries < 100; tries++) {
+      if ((await workflow.call("run_status", { workspaceId: "ws", runId: "run" })).status !== "running") break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  }
+});
+
 test("the person's answer to an AO agent's question goes back through AO's input endpoint, without a dialog", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };

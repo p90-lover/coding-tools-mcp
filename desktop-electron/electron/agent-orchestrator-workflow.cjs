@@ -1591,6 +1591,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     /\bRemove-Item\b[^\n]*-Recurse[^\n]*([a-z]:\\|~|\$HOME)/i, /\bdel\s+\/[sq]\b|\brd\s+\/s\b/i,
     /\bshutdown\b|\breg\s+delete\b|\bbcdedit\b|\bdiskpart\b/i,
   ];
+  const JSON_ESCAPES = { n: "\n", r: "\r", t: "\t", b: "\b", f: "\f" };
+  /**
+   * Whether the safety rules block a request. A tool's arguments arrive as JSON (an MCP tool's
+   * toolInput, the app's own approvals), where "cd app\ngit push" reads "cd app\\ngit push" and
+   * the escape hid git push from the rules' word boundaries; so does a quote before ".env". The
+   * text is checked as given and with its escapes read back and its quotes as separators.
+   */
+  function hardDenied(text) {
+    const value = String(text ?? "");
+    const read = value.replace(/\\(?:u([0-9a-fA-F]{4})|([^u]))/g,
+      (_, hex, char) => (hex ? String.fromCharCode(Number.parseInt(hex, 16)) : JSON_ESCAPES[char] ?? char)).replace(/"/g, " ");
+    return HARD_DENY.some((pattern) => pattern.test(value) || pattern.test(read));
+  }
   // Routine project commands "Approve for me" runs without asking, as Codex's auto-review does:
   // installing from the project's lockfile, running the project's own scripts, type checks and
   // linters, read-only git and version probes. Decided here, before the model reviewer, so the
@@ -1797,7 +1810,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           ? { action: "allow", reason: routineAppCommand(approval) }
           : incomplete
           ? { action: "ask", reason: "Inspect the complete native command and requested permission scope yourself" }
-          : HARD_DENY.some((pattern) => pattern.test(request))
+          : hardDenied(request)
             ? { action: "deny", reason: "Blocked by the command approver's safety rules" }
               // A shell line counts only from the agent's own shell tool; the app's exec_command
               // (an MCP tool with a command) keeps going to the reviewer and the app's confirm.
@@ -1820,14 +1833,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           if (!decision) note = `Reviewer suggests ${advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
           else if (await harnessService().resolveApproval(approval.thread_id, approval.approval_id, decision).then(() => true, () => false)) {
             note = `Reviewer ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
-          } else approverAdvice.set(approval.approval_id, { action: "ask", reason: `The reviewer's answer could not be sent (${advice.action}: ${advice.reason}); check it yourself` });
+          } else approverAdvice.set(approval.approval_id, { action: "ask", unsent: advice.action, reason: `The reviewer's answer could not be sent (${advice.action}: ${advice.reason}); check it yourself` });
         } else if (approver.settings?.auto_decide === true && advice.action !== "ask") {
           const sent = await requestHeadless("/api/v1/ao/harness/approval", {
             workspace_id: workspaceId, run_id: runId, node_id: active[index].id, approval_id: approval.approval_id,
             allow: advice.action === "allow", confirm: false, approver_reason: advice.reason || advice.action, approver_request: request,
           }).then(() => true, () => false);
           if (sent) note = `Command approver ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
-          else approverAdvice.set(approval.approval_id, { action: "ask", reason: `The command approver's answer could not be sent (${advice.action}: ${advice.reason}); check it yourself` });
+          else approverAdvice.set(approval.approval_id, { action: "ask", unsent: advice.action, reason: `The command approver's answer could not be sent (${advice.action}: ${advice.reason}); check it yourself` });
         } else {
           note = `Command approver suggests ${advice.action === "ask" ? "checking it yourself" : advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
         }
@@ -1870,7 +1883,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     return (decisions.find((decision) => decision.kind === "allow_once") ?? decisions[0])?.id ?? null;
   }
-  async function autoAnswerStale(workspaceId, runId, waiting) {
+  /**
+   * What a command or tool request nobody answered gets: "wait" while the card's reviewer is still
+   * on it or is sending its own answer (its review may take longer than AUTO_ANSWER_MS), "deny"
+   * when the safety rules block it, the reviewer said deny, or it is too long for the rules and the
+   * reviewer to read whole (its blocked part may sit past the cut), otherwise "allow".
+   */
+  function autoVerdict(mission, node, approval) {
+    const advice = approverAdvice.get(approval.approval_id);
+    if (cardApprover(mission, node)?.settings?.auto_decide === true && (!advice || advice.action !== "ask")) return "wait";
+    const request = describeRequest(approval);
+    if (hardDenied(request) || advice?.action === "deny" || advice?.unsent === "deny") return "deny";
+    if (advice?.action === "allow") return "allow";
+    return request.length >= 1500 || JSON.stringify(approval.permissions ?? {}).length > 800 ? "deny" : "allow";
+  }
+  async function autoAnswerStale(workspaceId, runId, waiting, mission) {
     const at = now();
     const live = new Set();
     let note = null;
@@ -1884,6 +1911,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const since = Date.parse(approval.since ?? "");
         const opened = Math.min(pendingSeen.get(id), Number.isFinite(since) ? since : Infinity);
         if (at - opened < AUTO_ANSWER_MS) continue;
+        const verdict = ["question", "plan"].includes(approval.kind) ? null : autoVerdict(mission, node, approval);
+        if (verdict === "wait") continue;
         autoAnswered.add(id);
         if (autoAnswered.size > 500) autoAnswered.delete(autoAnswered.values().next().value);
         try {
@@ -1893,20 +1922,20 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
               .catch(() => harnessService().resolveInput(approval.thread_id, id, "decline"));
             note = "Nobody answered the agent's question in 20 seconds, so it got the recommended answer";
           } else if (approval.source === "ao") {
-            const blocked = approval.kind !== "plan" && HARD_DENY.some((pattern) => pattern.test(describeRequest(approval)));
+            const blocked = verdict === "deny";
             const decision = approval.kind === "plan" ? planDecision(approval, node) : aoDecision(approval, !blocked);
             if (!decision) continue;
             await harnessService().resolveApproval(approval.thread_id, id, decision);
-            note = blocked ? "Denied after 20 seconds: blocked by the command approver's safety rules"
+            note = blocked ? "Denied after 20 seconds: blocked by the command approver's safety rules or reviewer"
               : approval.kind === "plan" ? "Nobody answered in 20 seconds, so the plan was accepted" : "Nobody answered in 20 seconds, so the request was allowed once";
           } else if (approval.kind === "command") {
             const request = describeRequest(approval);
-            const allow = !HARD_DENY.some((pattern) => pattern.test(request));
+            const allow = verdict === "allow";
             await requestHeadless("/api/v1/ao/harness/approval", {
               workspace_id: workspaceId, run_id: runId, node_id: node.id, approval_id: id, allow, confirm: false,
-              approver_reason: allow ? "Nobody answered within 20 seconds" : "Blocked by the command approver's safety rules", approver_request: request,
+              approver_reason: allow ? "Nobody answered within 20 seconds" : "Blocked by the command approver's safety rules or reviewer", approver_request: request,
             });
-            note = allow ? "Nobody answered in 20 seconds, so the command was allowed once" : "Denied after 20 seconds: blocked by the command approver's safety rules";
+            note = allow ? "Nobody answered in 20 seconds, so the command was allowed once" : "Denied after 20 seconds: blocked by the command approver's safety rules or reviewer";
           }
           logger?.info?.("ao.auto_answered", { kind: approval.kind, tool: String(approval.tool ?? "").slice(0, 80) });
         } catch (error) {
@@ -2155,7 +2184,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         }
         if (waiting.length && !state.autoAnswering) {
           state.autoAnswering = true;
-          void autoAnswerStale(workspaceId, runId, waiting)
+          void autoAnswerStale(workspaceId, runId, waiting, mission)
             .then(note => { if (note) state.detail = note; }, () => undefined)
             .finally(() => { state.autoAnswering = false; });
         }
@@ -3189,7 +3218,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
   // goalAfterRun runs on its own when a run settles (reportRun); it is exposed for tests and recovery.
   /** Whether the command approver's safety rules block this request text whatever anyone answers. */
-  const blockedRequest = (text) => HARD_DENY.some((pattern) => pattern.test(String(text ?? "")));
+  const blockedRequest = (text) => hardDenied(text);
   return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, routineCommand, routineAppTool, routineAppCommand, blockedRequest, recommendedAnswer });
 }
 
