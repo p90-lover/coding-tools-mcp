@@ -148,7 +148,9 @@ function guardedBody(webBody, guard) {
   const out = new Transform({ transform(chunk, _encoding, done) { guard.arm(idle); done(null, chunk); } });
   function idle() { out.destroy(new Error("Update request timed out")); source.destroy(); }
   source.once("error", (error) => out.destroy(error));
-  out.once("close", () => guard.stop());
+  // A reader that gives up (metadata over its size limit, a pack whose file cannot be written)
+  // closes `out` only; pipe() leaves the source paused with the app's request still open.
+  out.once("close", () => { guard.stop(); source.destroy(); });
   guard.arm(idle);
   return source.pipe(out);
 }
