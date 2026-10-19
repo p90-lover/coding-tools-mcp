@@ -1621,7 +1621,19 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     return requestApi(spec.method, endpoint, body);
   }
 
-  return { call, start, stop, show, hide, snapshot, harness, survivingChatHosts };
+  /**
+   * The folder AO keeps `ao` in for its own sessions (agentlaunch/pin.go: runtime/ao-path/ and the
+   * first 16 bytes of the daemon path's SHA-256). The app's exec_command runs outside those
+   * sessions, so `ao` was "not recognized" there; the sandbox puts this folder on its PATH. Null
+   * until AO has made it.
+   */
+  function aoShimFolder() {
+    const executable = path.resolve(resourceRoot, process.platform === "win32" ? "ao-daemon.exe" : "ao-daemon");
+    const folder = path.join(dataRoot, "runtime", "ao-path", crypto.createHash("sha256").update(executable).digest("hex").slice(0, 32));
+    return fs.existsSync(path.join(folder, process.platform === "win32" ? "ao.cmd" : "ao")) ? folder : null;
+  }
+
+  return { call, start, stop, show, hide, snapshot, harness, survivingChatHosts, aoShimFolder };
 }
 
 /**

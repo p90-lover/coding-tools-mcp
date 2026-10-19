@@ -63,6 +63,23 @@ test("a command runs under codex sandbox, unelevated, with the worktree and cach
   } finally { cleanup(); }
 });
 
+test("AO's `ao` folder goes first on a command's PATH, and a broken provider changes nothing", async () => {
+  // Seen live: an agent's `ao` command through the app's terminal was "not recognized"; AO puts its
+  // shim folder only on its own sessions' PATH.
+  const shim = path.resolve("C:/ao/runtime/ao-path/12a8f4aa");
+  const { sandbox, spawned, cleanup } = runner({ extraPath: () => [shim, "relative/ignored", null] });
+  const broken = runner({ extraPath: () => { throw new Error("AO not started"); } });
+  try {
+    sandbox.start({ cmd: "ao status", cwd: "G:/work", writable: "G:/work" });
+    const pathValue = spawned[0].options.env.PATH;
+    assert.ok(pathValue.startsWith(`${shim}${process.platform === "win32" ? ";" : ":"}`), pathValue);
+    assert.ok(pathValue.includes("C:/bin"), "the inherited PATH stays after it");
+    assert.ok(!pathValue.includes("relative/ignored"), "only absolute folders");
+    broken.sandbox.start({ cmd: "echo ok", cwd: "G:/work", writable: "G:/work" });
+    assert.equal(broken.spawned[0].options.env.PATH, "C:/bin");
+  } finally { cleanup(); broken.cleanup(); }
+});
+
 test("a command in the worktree itself starts there without a folder change, and % in a folder survives cmd", async () => {
   const { sandbox, spawned, cleanup } = runner();
   try {

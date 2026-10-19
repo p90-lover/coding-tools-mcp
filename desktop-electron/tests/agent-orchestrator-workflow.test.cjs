@@ -1935,6 +1935,9 @@ test("the reviewer sees the local script a command runs, never a file outside it
     assert.deepEqual(reviewScriptExcerpts(request(`powershell -File ${path.join(base, "outside.ps1")}`)), [], "an absolute path outside it");
     assert.deepEqual(reviewScriptExcerpts(request("node missing.js")), [], "a file that does not exist");
     assert.deepEqual(reviewScriptExcerpts({ command: "bash run.sh" }), [], "no working folder, nothing read");
+    // A request that names no folder runs in the agent's session folder, so its script is read there.
+    const bare = { kind: "permission", tool: "mcp__coding-tools__exec_command", toolInput: JSON.stringify({ cmd: "powershell -File start-nova.ps1" }) };
+    assert.deepEqual(reviewScriptExcerpts(bare, folder).map((script) => script.file), ["start-nova.ps1"]);
   } finally {
     fs.rmSync(base, { recursive: true, force: true });
   }
@@ -2880,6 +2883,52 @@ test("Approve for me is reviewed by codex-auto-review first, the card's model wh
   const down = await review(["codex-auto-review", "test-model"]);
   assert.deepEqual(down.resolved, [], "nothing is answered for the person when no reviewer answers");
   assert.match(down.detail, /could not answer/, "and the request says why it is waiting for them");
+});
+
+test("the reviewer is told the agent's workspace folder, so a path inside it is not judged outside", async () => {
+  // Seen live: three parallel `cmd /c dir /b "G:\...\<project subfolder>"` calls; two were denied and
+  // the same command was allowed on retry. The prompt named only the workspace's id.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
+  async function promptFor(sessionWorkspace) {
+    const request = { approval_id: "dir", source: "ao", kind: "permission", tool: "mcp__coding-tools__exec_command",
+      toolInput: JSON.stringify({ cmd: 'cmd /c dir /b "G:\\Projects\\app\\docs"' }), summary: "exec_command", decisions };
+    const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+      { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+    const prompts = [], resolved = [], looked = [];
+    const workflow = createAgentOrchestratorWorkflow({
+      findCodexExecutable: () => process.execPath,
+      resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+      cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+      fetchImpl: async (url, init) => {
+        if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
+        prompts.push(JSON.parse(init.body).messages[0].content);
+        return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"allow","reason":"inside the workspace"}' } }] }) };
+      },
+      requestHeadless: async (endpoint) => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+      aoHarness: {
+        observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: resolved.length ? [] : [request] }),
+        resolveApproval: async (session, requestId, decisionId) => { resolved.push(decisionId); return { ok: true }; },
+        sessionWorkspace: sessionWorkspace && (async (...args) => { looked.push(args); return sessionWorkspace(); }),
+      },
+      confirm: async () => true,
+    });
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 200 && !resolved.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    mission.nodes[0].state = "finished";
+    return { prompt: prompts[0] ?? "", resolved, looked };
+  }
+  const folderMode = await promptFor(() => ({ root: "G:\\Projects\\app", projectFolder: "G:\\Projects\\app" }));
+  assert.deepEqual(folderMode.looked, [["session-1", "ws"]], "the folder of the session that asked, in this workspace");
+  assert.match(folderMode.prompt, /Workspace folder: G:\\Projects\\app\. Paths inside this folder, and relative paths, are inside the workspace/);
+  assert.deepEqual(folderMode.resolved, ["yes"]);
+  const worktree = await promptFor(() => ({ root: "C:\\Users\\me\\.ao\\worktrees\\one" }));
+  assert.match(worktree.prompt, /Workspace folder: C:\\Users\\me\\\.ao\\worktrees\\one\./, "a worktree session names its worktree");
+  // AO not answering never holds the review up: the prompt just has no folder line.
+  const unknown = await promptFor(() => { throw new Error("AO is restarting"); });
+  assert.doesNotMatch(unknown.prompt, /Workspace folder:/);
+  assert.deepEqual(unknown.resolved, ["yes"]);
 });
 
 test("Approve for me's 20 s answer never allows what the safety rules or the reviewer would not", async () => {
