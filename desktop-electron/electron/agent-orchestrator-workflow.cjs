@@ -251,6 +251,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   const dispatching = new Set();
   // runId -> { session, text }: a single-model follow-up that continues its chat's live AO session.
   const continuations = new Map();
+  // What a retried chat's own session is told: its last turn ended early, and it should go on.
+  const RETRY_CONTINUE_TEXT = "Your previous turn was interrupted before it finished (the app restarted or the step failed). "
+    + "Continue the same task from where you left off; do not start over or repeat work that is already done.";
   // runId -> { workspaceId, taskId }: a follow-up whose agent may start fresh; a fresh start gets
   // the earlier replies (chatHandoff), a continued session already has them.
   const handoffs = new Map();
@@ -1772,6 +1775,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       logger?.warn?.("ao.stop.control_failed", { run, error: String(error?.message || error).slice(0, 200) });
       result = { ok: true, run: mission ?? { id: run, workspace_id: id, nodes: [] }, notice: "Future work stopped here; the saved mission cancellation could not be confirmed" };
     }
+    // A retried single-model chat continues its agent's own session, which already holds the
+    // conversation and what it read and ran: launching a fresh one began the task again from
+    // nothing. The retry moved the card's receipt into its history; a session that is gone or
+    // refuses the message still falls back to a fresh start (dispatchExternal).
+    if ((action === "retry" || action === "retry_auto") && result.run?.execution_mode === "single") {
+      const card = result.run.nodes?.[0];
+      const session = card?.state === "pending" && externalAgent(card) ? card.history?.at(-1)?.thread_id : null;
+      if (typeof session === "string" && session && !continuations.has(run)) {
+        continuations.set(run, { session, text: RETRY_CONTINUE_TEXT });
+        if (continuations.size > 200) continuations.delete(continuations.keys().next().value);
+      }
+    }
     if (action === "stop") {
       const saved = await runs({workspaceId:id}).catch(() => null);
       const life = saved ? taskLifecycle(saved,result.run.project_id) : {};
@@ -2516,6 +2531,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       reportRun(workspaceId, runId, state, null, state.stopped ? null : "error");
     } finally { state.driving = false; }
   }
+  /** Whether a run's background grant can start nothing more: every turn started, or its hour over. */
+  function grantSpent(grant) {
+    return Boolean(grant) && (grant.turns_started >= grant.max_turns || Date.now() >= grant.expires_at_ms);
+  }
+
   async function startRun(input = {}) {
     if (!input || typeof input !== "object" || Array.isArray(input)
       || Object.keys(input).some((key) => !["workspaceId", "runId", "executable"].includes(key))) {
@@ -2536,8 +2556,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const saved = await runs({ workspaceId: id, runId: run });
       let mission = saved.runs.find((entry) => entry.id === run && entry.workspace_id === id);
       if (mission?.paused) throw new Error("Resume this paused mission from its local controls");
-      // Starting a run whose card is held (and nothing still running) is an explicit retry.
-      if (mission && !mission.cancelled && mission.nodes.some((node) => node.state === "held" && (node.role !== "worker" || !mission.grant))
+      // A grant whose turns are all started or whose hour is over cannot start anything more: a chat
+      // resumed on it after restarts and retries stopped with "no turns left" and needed a new
+      // message. Starting such a run asks for a fresh grant instead, as a first start does.
+      const spent = grantSpent(mission?.grant);
+      // Starting a run whose card is held (and nothing still running) is an explicit retry; so is a
+      // single chat's failed card once its grant is spent.
+      if (mission && !mission.cancelled && mission.nodes.some((node) => (node.state === "held" && (node.role !== "worker" || !mission.grant || spent))
+          || (spent && mission.execution_mode === "single" && node.state === "failed"))
         && !mission.nodes.some((node) => ["running", "reserved"].includes(node.state))) {
         await controlRun({ workspaceId: id, runId: run, action: "retry" });
         const again = await runs({ workspaceId: id, runId: run });
@@ -2548,7 +2574,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         throw new Error("AO run has an active or unresolved card; inspect it before starting");
       }
       if (missionSettled(mission)) throw new Error("AO run is already finished");
-      const resuming = mission.nodes.some((node) => node.state === "running") || Boolean(mission.grant && mission.nodes.some(node => ["held", "failed"].includes(node.state)));
+      const resuming = mission.nodes.some((node) => node.state === "running")
+        || Boolean(mission.grant && !grantSpent(mission.grant) && mission.nodes.some(node => ["held", "failed"].includes(node.state)));
       const readyWebRole = mission.nodes.find(node => node.state === "pending"
         && node.route?.provider_id === "chatgpt-web"
         && (node.parents ?? []).every(parent => mission.nodes.some(entry => entry.id === parent && entry.state === "finished")));

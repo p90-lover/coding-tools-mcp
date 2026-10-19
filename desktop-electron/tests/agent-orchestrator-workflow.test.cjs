@@ -3029,6 +3029,55 @@ async function followUpContinues(previousState) {
   assert.match(world.edits[0].description, /Follow-up \([^)]+ UTC\):\nnow run the tests$/, "the chat still records the follow-up");
 }
 
+test("retrying a chat whose grant is spent gets a fresh grant and continues the agent's own session", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  // The turn that the app restart cut short: the card failed, and its grant has no turns left.
+  const run = { id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 3, cancelled: false,
+    grant: { executable_sha256: "a".repeat(64), max_turns: 1, turns_started: 1, granted_at_ms: Date.now() - 1000, expires_at_ms: Date.now() + 3_600_000 },
+    nodes: [{ id: "one", role: "planner", state: "failed", parents: [], route, history: [],
+      receipt: { thread_id: "sess-1", error: "controller ended before the turn completed" } }] };
+  const calls = [], spawned = [], sent = [];
+  const request = async (endpoint, body) => {
+    calls.push(endpoint === "/api/v1/ao/control" ? `control:${body.action}` : endpoint);
+    if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [run], worker_capacity: { r1: 1 } };
+    if (endpoint === "/api/v1/ao/control") {
+      const card = run.nodes[0];
+      card.history = [...card.history, card.receipt];
+      card.receipt = null;
+      card.state = "pending";
+      return { ok: true, run };
+    }
+    if (endpoint === "/api/v1/ao/grant") {
+      run.grant = { ...run.grant, max_turns: 3, turns_started: 0 };
+      return { ok: true, run, grant: run.grant };
+    }
+    if (endpoint === "/api/v1/ao/external/reserve") { run.nodes[0].state = "reserved"; return { ok: true, request_key: "key-1", prompt: "the task" }; }
+    if (endpoint === "/api/v1/ao/external/submitted") { run.nodes[0].state = "running"; run.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run }; }
+    if (endpoint === "/api/v1/ao/external/terminal") { run.nodes[0].state = "finished"; return { ok: true, run }; }
+    if (endpoint === "/api/v1/tools/call") return { operation: { state: "completed", result: { ok: true, revision: 1, workspace_id: "ws-1", steps: [], task: { id: "task-1", title: "T", description: "d" } } } };
+    throw new Error(`unexpected ${endpoint}`);
+  };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: request, findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    aoHarness: {
+      spawn: async input => { spawned.push(input); return "new-session"; },
+      continuable: async id => id === "sess-1",
+      send: async (id, text, key) => { sent.push([id, text, key]); return { turnId: "turn-2", state: "running" }; },
+      observe: async (_id, expected) => ({ status: "idle", turnId: expected, turnState: "completed", answer: "done" }),
+    },
+  });
+  const started = await workflow.call("start_run", { workspaceId: "ws-1", runId: "r1" });
+  assert.equal(started.status, "running", "no \"no turns left\" refusal");
+  for (let tries = 0; tries < 200 && !sent.length && !spawned.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.ok(calls.indexOf("control:retry") >= 0 && calls.indexOf("control:retry") < calls.indexOf("/api/v1/ao/grant"),
+    "the failed card is requeued, then a fresh grant is asked for");
+  assert.equal(spawned.length, 0, "no fresh session that starts the task over");
+  assert.equal(sent[0]?.[0], "sess-1", "the agent's own session continues");
+  assert.match(sent[0]?.[1] ?? "", /interrupted before it finished.*Continue the same task/s);
+});
+
 test("a single-model follow-up continues the chat's live AO session with just the new message", () => followUpContinues("finished"));
 test("a follow-up after a held turn (a hung turn the user's message stopped) continues its session too", () => followUpContinues("held"));
 

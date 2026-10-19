@@ -288,3 +288,29 @@ test("a turn's stats read CPA Helper's records for its model since it started, w
   assert.equal(urls.length, 1, "read again only after a few seconds");
   assert.deepEqual(await usage.turnStats({ model: "", from: NOW }), { ok: true, available: false });
 });
+
+test("a long turn's stats read every page of records instead of stopping at the first 500", async () => {
+  const record = (index) => ({ id: index, latency_ms: 1000, ttft_ms: 200, input_tokens: 10, output_tokens: 80 });
+  const statsFor = async (paged) => {
+    const pages = [];
+    const usage = createCpaUsage({
+      now: () => NOW,
+      getConnection: () => ({ baseUrl: "http://127.0.0.1:8317", managementKey: KEY }),
+      fetchImpl: async (url) => {
+        const page = Number(new URL(String(url)).searchParams.get("page"));
+        pages.push(page);
+        // 1,203 records: two full pages and a short one. A helper without paging returns page one each time.
+        const first = paged ? (page - 1) * 500 : 0;
+        const items = Array.from({ length: Math.max(0, Math.min(500, 1203 - first)) }, (_, offset) => record(first + offset));
+        return { ok: true, status: 200, json: async () => ({ items }) };
+      },
+    });
+    return { stats: await usage.turnStats({ model: "cpa/cline-pass/deepseek-v4.1-flash", from: NOW - 5000 }), pages };
+  };
+  const paged = await statsFor(true);
+  assert.equal(paged.stats.steps, 1203, "not capped at 500");
+  assert.deepEqual(paged.pages, [1, 2, 3], "stops at the short page");
+  const unpaged = await statsFor(false);
+  assert.equal(unpaged.stats.steps, 500, "a helper that ignores page is counted once, not twice");
+  assert.deepEqual(unpaged.pages, [1, 2]);
+});
