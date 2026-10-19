@@ -3063,6 +3063,14 @@ async function start() {
     const aoPulse = createChangePulse((payload) => send("launcher:ao-changed", payload));
     const stopAoWatch = agentOrchestratorUpstream.harness.watch((change) => aoPulse.session(change.sessionId));
     aoChangeWatch = () => { stopAoWatch(); aoPulse.stop(); };
+    // Chats whose agents outlived the last app run reattach now, not when the AO panel first
+    // opens: until AO is back, a permission request they raised meanwhile waits unanswered.
+    const upstreamAtLaunch = agentOrchestratorUpstream;
+    void upstreamAtLaunch.survivingChatHosts().then((count) => {
+      if (count === 0 || agentOrchestratorUpstream !== upstreamAtLaunch) return undefined;
+      logger.info("ao.surviving_chats", { count });
+      return upstreamAtLaunch.start();
+    }).catch((error) => logger.warn("ao.surviving_chats_failed", { detail: String(error?.message ?? error).slice(0, 300) }));
     missionWorkflowRuntime?.dispose();
     const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
       // Stop agents that sat idle for a while; their chats resume them on the next message.

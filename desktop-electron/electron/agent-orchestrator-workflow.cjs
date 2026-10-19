@@ -1343,7 +1343,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
 
   // What each working card is doing now, for the chat and the cards: when it started, its
   // current step and when anything was last heard. Read-only; it never advances the run.
-  function publicText(value, limit = 4096) {
+  function publicText(value, limit = 4096, keepEnd = false) {
     let text = String(value ?? "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
       .replace(/Bearer\s+\S+|sk-[A-Za-z0-9_-]+/gi, "[redacted]")
       .replace(/((?:api[_-]?key|access[_-]?token|authorization)\s*[:=]\s*)[^\s,;]+/gi, "$1[redacted]");
@@ -1351,7 +1351,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       const key = cpaConnection?.().proxyApiKey;
       if (typeof key === "string" && key.length >= 8) text = text.replaceAll(key, "[redacted]");
     } catch { /* No CPA connection is needed for read-only output. */ }
-    return text.slice(0, limit);
+    return keepEnd ? text.slice(-limit) : text.slice(0, limit);
   }
 
   /**
@@ -1362,7 +1362,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   function publicTimeline(items) {
     return (Array.isArray(items) ? items : []).slice(-40).map(item => ({
       id: publicText(item.id, 80), kind: publicText(item.kind, 32), status: publicText(item.status, 32),
-      text: publicText(item.text, item.kind === "message" || item.kind === "reasoning" ? 4096 : 400),
+      // Live text keeps what the upstream read kept: the whole streaming answer, the newest thought.
+      text: item.kind === "message" && item.status === "running" ? publicText(item.text, 32 * 1024)
+        : item.kind === "reasoning" && item.status === "running" ? publicText(item.text, 4096, true)
+        : publicText(item.text, item.kind === "message" || item.kind === "reasoning" ? 4096 : 400),
       ...(item.label ? { label: publicText(item.label, 40) } : {}),
       ...(item.description ? { description: publicText(item.description, 200) } : {}),
       ...(item.input ? { input: publicText(item.input, 1000) } : {}),

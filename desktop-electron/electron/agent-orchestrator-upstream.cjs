@@ -27,6 +27,7 @@ const API_OPERATIONS = Object.freeze({
 
 // How much of an edit's diff a chat timeline item carries (it is polled with every working card).
 const EDIT_DIFF_BYTES = 6000;
+const DAEMON_LOG_BYTES = 8 * 1024 * 1024;
 
 /**
  * Lines one text change added and removed, as a "+56 −26" count and a short diff: the lines the
@@ -134,6 +135,34 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   let state = "stopped";
   let error = null;
   let logTail = "";
+  /**
+   * AO's output on disk, beside its data. Only ao.db outlived a daemon before, and it records that
+   * a controller ended, not why, so a turn lost across a restart could not be traced. Rotates once
+   * at DAEMON_LOG_BYTES; a log that cannot be written never stops AO.
+   */
+  function openDaemonLog(pid) {
+    const file = path.join(dataRoot, "logs", "ao-daemon.log");
+    let stream = null;
+    let written = 0;
+    const open = () => {
+      try {
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        try { written = fs.statSync(file).size; } catch { written = 0; }
+        if (written >= DAEMON_LOG_BYTES) { fs.renameSync(file, `${file}.1`); written = 0; }
+        stream = fs.createWriteStream(file, { flags: "a" });
+        stream.on("error", () => { stream = null; });
+      } catch { stream = null; }
+    };
+    const write = (data) => {
+      if (!stream) return;
+      written += Buffer.byteLength(data);
+      stream.write(data);
+      if (written >= DAEMON_LOG_BYTES) { stream.end(); open(); }
+    };
+    open();
+    write(`--- ao-daemon pid ${pid} started at ${new Date().toISOString()}\n`);
+    return { write, close: () => { stream?.end(); stream = null; } };
+  }
   let missionSelection = null;
   let originalPath = "/";
 
@@ -283,6 +312,30 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       socket.once("error", error => settle(error?.code === "ECONNREFUSED"));
     });
   }
+  /**
+   * How many chat hosts outlived the last app run: their recorded loopback address still accepts
+   * a connection. Their agents keep working while AO is down, but a permission request or a turn
+   * end waits for AO to reattach, and AO otherwise starts only when its panel is first shown.
+   */
+  async function survivingChatHosts() {
+    let ids;
+    try { ids = fs.readdirSync(path.join(dataRoot, "chat-hosts")); } catch { return 0; }
+    const answers = await Promise.all(ids.map(id => {
+      let address;
+      try { address = JSON.parse(fs.readFileSync(path.join(dataRoot, "chat-hosts", id, "host.json"), "utf8")).address; }
+      catch { return false; }
+      const match = /^127\.0\.0\.1:(\d{1,5})$/.exec(String(address));
+      if (!match) return false;
+      return new Promise(resolve => {
+        const socket = net.connect({ host: "127.0.0.1", port: Number(match[1]) });
+        const settle = alive => { socket.destroy(); resolve(alive); };
+        socket.setTimeout(1500, () => settle(false));
+        socket.once("connect", () => settle(true));
+        socket.once("error", () => settle(false));
+      });
+    }));
+    return answers.filter(Boolean).length;
+  }
   // continuable() checks in flight, by session (see there).
   const continuing = new Map();
   /**
@@ -302,6 +355,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       }
     }
   }
+  // Only the one message still streaming gets this budget; finished items keep 4 KB so the
+  // 40-item frame the chat polls every second stays small.
+  const LIVE_MESSAGE_BYTES = 32 * 1024;
   /**
    * The current turn as a Codex-style transcript: assistant messages, reasoning and tool calls
    * in AO sequence order. Bounded to the newest 40 items so a long turn stays a small IPC frame;
@@ -313,7 +369,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       ...(Array.isArray(conversation?.messages) ? conversation.messages : [])
         .filter(message => message.turnId === turnId && message.role === "assistant" && typeof message.text === "string" && message.text.trim())
         .map(message => ({ id: String(message.id), sequence: Number(message.sequence) || 0, kind: "message",
-          status: message.streaming && !turnOver ? "running" : "completed", text: utf8Prefix(message.text.trim(), 4096) })),
+          // The answer being written is read as it streams: a 4 KB cut froze it until the turn ended.
+          status: message.streaming && !turnOver ? "running" : "completed",
+          text: utf8Prefix(message.text.trim(), message.streaming && !turnOver ? LIVE_MESSAGE_BYTES : 4096) })),
       ...(Array.isArray(conversation?.activities) ? conversation.activities : [])
         .filter(activity => activity.turnId === turnId && typeof activity.activityKind === "string")
         .map(activity => activity.activityKind === "system" && activity.detail?.event === "steer" && typeof activity.detail.text === "string"
@@ -435,7 +493,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     // The model's reasoning summary: AO streams it into the activity's text (detail.text); its
     // summary is only the word "Reasoning".
     if (activity.activityKind === "reasoning") {
-      return { ...base, kind: "reasoning", text: utf8Prefix(typeof detail.text === "string" ? detail.text.trim() : "", 4096) };
+      const text = typeof detail.text === "string" ? detail.text.trim() : "";
+      // While the model thinks, its newest thought is the progress to show; once done, the opening.
+      return { ...base, kind: "reasoning", text: base.status === "running" ? utf8Suffix(text, 4096) : utf8Prefix(text, 4096) };
     }
     // A request nobody answered: AO marks it resolved by the provider when its 30-minute wait runs
     // out, or when the turn ends first. The agent then only says it was "blocked by permissions",
@@ -553,6 +613,18 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     const last = value.charCodeAt(end - 1);
     if (end > 0 && last >= 0xd800 && last <= 0xdbff) end -= 1;
     return value.slice(0, end);
+  }
+  /** The longest suffix of `text` that is at most `maxBytes` of UTF-8: the newest part of live text. */
+  function utf8Suffix(text, maxBytes) {
+    const value = String(text);
+    if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+    let start = Math.max(0, value.length - maxBytes);
+    while (start < value.length && Buffer.byteLength(value.slice(start), "utf8") > maxBytes) start += Math.max(1, Math.floor((value.length - start) * 0.05));
+    while (start > 0 && Buffer.byteLength(value.slice(start - 1), "utf8") <= maxBytes) start -= 1;
+    // Never start on the second half of a surrogate pair.
+    const first = value.charCodeAt(start);
+    if (start < value.length && first >= 0xdc00 && first <= 0xdfff) start += 1;
+    return value.slice(start);
   }
 
   // Mission-owned AO calls. The run grant already covers them, so no extra dialog.
@@ -1209,11 +1281,17 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         logTail = "";
         // A new daemon may know its projects differently; workspaces bind again.
         forgetProject();
+        const daemonLog = openDaemonLog(currentChild.pid);
         for (const output of [child.stdout, child.stderr]) output.on("data", (chunk) => {
           logTail = (logTail + chunk.toString()).slice(-16384);
+          daemonLog.write(chunk);
         });
         child.once("error", (cause) => { if (child === currentChild && startupGeneration === lifecycleGeneration) { error = cause.message; state = "error"; } });
-        child.once("exit", (code) => { if (child === currentChild && startupGeneration === lifecycleGeneration) { state = "error"; error = `AO exited (${code})`; } });
+        child.once("exit", (code) => {
+          daemonLog.write(`--- ao-daemon pid ${currentChild.pid} exited (${code}) at ${new Date().toISOString()}\n`);
+          daemonLog.close();
+          if (child === currentChild && startupGeneration === lifecycleGeneration) { state = "error"; error = `AO exited (${code})`; }
+        });
         const deadline = Date.now() + 30000;
         while (Date.now() < deadline) {
           checkStartup();
@@ -1543,7 +1621,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     return requestApi(spec.method, endpoint, body);
   }
 
-  return { call, start, stop, show, hide, snapshot, harness };
+  return { call, start, stop, show, hide, snapshot, harness, survivingChatHosts };
 }
 
 /**
