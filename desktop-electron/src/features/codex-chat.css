@@ -382,11 +382,11 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
    line ("Explored · read_output ×7 · 3 thoughts"), messages and edits stay in full. */
 .cx-live.is-compact { gap: 4px; padding-left: 0; border-left: 0; }
 .cx-live-item.kind-group { display: block; }
-.cx-group-head { display: flex; align-items: center; gap: 7px; max-width: 100%; padding: 3px 6px 3px 2px; border: 0; border-radius: 6px; background: transparent;
+.cx-activity-head { display: flex; align-items: center; gap: 7px; max-width: 100%; padding: 3px 6px 3px 2px; border: 0; border-radius: 6px; background: transparent;
   color: var(--ao-muted); font: inherit; font-size: 13px; text-align: left; cursor: pointer; transition: background .12s ease, color .12s ease; }
-.cx-group-head:hover { background: var(--cx-hover); color: var(--color-text-primary); }
-.cx-group-head svg { flex: none; transition: transform .15s ease; }
-.cx-group-head svg.is-open { transform: rotate(90deg); }
+.cx-activity-head:hover { background: var(--cx-hover); color: var(--color-text-primary); }
+.cx-activity-head svg { flex: none; transition: transform .15s ease; }
+.cx-activity-head svg.is-open { transform: rotate(90deg); }
 .cx-group-verb { flex: none; color: var(--color-text-primary); font-weight: 500; }
 .cx-group-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cx-group .cx-live { margin: 2px 0 4px 7px; }

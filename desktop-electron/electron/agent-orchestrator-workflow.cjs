@@ -286,6 +286,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   // Opening chats warms agents too; keep only the newest few so browsing does not pile them up.
   const WARM_MAX = 2;
   const warm = new Map(); // key -> { promise, session?, timer }
+  const rewarmTimers = new Set(); // the re-warm after a launch that used a warm session
   // AO starts one session at a time per project (it holds the project's lock for the whole start),
   // and a warm start is a full one: trying three models queued three 30-60 s starts in front of the
   // chat's real launch, which took three minutes. So a project has at most one warm start in flight
@@ -338,6 +339,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   }
   async function chatPrewarmRoute(workspaceId, route, plain) {
     const node = { route, settings: { name: WARM_NAME } };
+    // A disposed backend (a hot update replaced it) never warms: its AO harness would start a
+    // second daemon on the same data folder that nothing owns.
+    if (idleStopped) return { ok: true, warmed: false, reason: "The backend was replaced" };
     if (!externalAgent(node)) return { ok: true, warmed: false, reason: "Only AO agents are pre-warmed" };
     // Until the tool server (started with the app) listens, its identity is "pending": a session
     // warmed under that key would never match the launch that comes for it.
@@ -384,7 +388,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       if (warm.get(key) !== entry) return session;
       // Unused for a while: end it rather than keep an idle agent around.
       entry.timer = setTimeout(() => {
-        if (warm.get(key) !== entry) return;
+        if (idleStopped || warm.get(key) !== entry) return;
         warm.delete(key);
         warmLog("expired", { model: entry.route.model });
         void harnessService().kill?.(session).catch(() => undefined);
@@ -737,14 +741,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     if (agentModelsCache.size > 50) agentModelsCache.delete(agentModelsCache.keys().next().value);
     return entry.promise;
   }
-  let cpaCatalogCache = null; // { at, promise }
+  let cpaCatalogCache = null; // { at, ttl, promise }
+  // The remembered list served while CPA cannot be read (or a failed read) is kept only briefly: a
+  // hung CPA costs each read its full timeout, and one send reads the list once per team role.
+  const CPA_CATALOG_RETRY_MS = 15_000;
   function cachedCpaCatalog() {
     const at = now();
-    if (cpaCatalogCache && at - cpaCatalogCache.at < CPA_CATALOG_TTL_MS) return cpaCatalogCache.promise;
-    const entry = { at, promise: fetchCpaCatalog() };
-    const forget = () => { if (cpaCatalogCache === entry) cpaCatalogCache = null; };
-    // The remembered list served while CPA cannot be read is not kept: the next read asks CPA again.
-    entry.promise.then(catalog => { if (catalog?.stale) forget(); }, forget);
+    if (cpaCatalogCache && at - cpaCatalogCache.at < cpaCatalogCache.ttl) return cpaCatalogCache.promise;
+    const entry = { at, ttl: CPA_CATALOG_TTL_MS, promise: fetchCpaCatalog() };
+    const brief = () => { entry.at = now(); entry.ttl = CPA_CATALOG_RETRY_MS; };
+    entry.promise.then(catalog => { if (catalog?.stale) brief(); }, brief);
     cpaCatalogCache = entry;
     return entry.promise;
   }
@@ -764,7 +770,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       if (saved && typeof saved === "object" && !Array.isArray(saved)) {
         for (const [id, entry] of Object.entries(saved).slice(0, MAX_LISTED_MODELS)) {
           if (id && id.length <= 128 && Number.isFinite(entry?.seen) && entry.capability && typeof entry.capability === "object") {
-            kept[id] = { seen: entry.seen, capability: entry.capability, ...(entry.plugin ? { plugin: true } : {}) };
+            // A date ahead of the clock (it was once set wrong) would never expire or refresh.
+            kept[id] = { seen: Math.min(entry.seen, now()), capability: entry.capability, ...(entry.plugin ? { plugin: true } : {}) };
           }
         }
       }
@@ -983,6 +990,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
           if (sessionOwners.size > 500) sessionOwners.delete(sessionOwners.keys().next().value);
           sent = await harnessService().send(continued.session, continued.text, reserved.request_key).catch(() => null);
         }
+        // A follow-up that should have continued the chat's session starts a fresh one: logged, so
+        // "it forgot everything" can be traced to it.
+        if (continued && !sent?.turnId) logger?.warn?.("ao.continuation_lost", { reason: sent ? "send_refused" : "session_gone" });
         // A fresh start of a follow-up (another model or setting, or a session that is gone) begins
         // with what the earlier agents replied; the first card to start takes it.
         const handoff = handoffs.get(runId);
@@ -1012,8 +1022,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         } else session = await harnessService().spawn({ ...launch, prompt });
         // The next chat on this route finds a session waiting too, started once this turn is under
         // way rather than beside its first model call.
-        if (warmed) {
-          const timer = setTimer(() => { void chatPrewarmRoute(workspaceId, node.route, plain).catch(() => undefined); }, REWARM_DELAY_MS);
+        if (warmed && !idleStopped) {
+          const timer = setTimer(() => { rewarmTimers.delete(timer); void chatPrewarmRoute(workspaceId, node.route, plain).catch(() => undefined); }, REWARM_DELAY_MS);
+          rewarmTimers.add(timer);
           timer?.unref?.();
         }
       } catch (error) { failure = error; } finally {
@@ -2642,13 +2653,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   /** A team run with cards still to reserve: an edit of its task now would refuse them. */
   const grantAtRisk = (run) => run.execution_mode !== "single" && !run.cancelled && !runSettled(run)
     && (run.nodes ?? []).some(node => node.state === "pending");
+  // A disposed backend drops a waiting edit rather than restart AO through its stopped harness.
+  const taskIdleTimers = new Set();
   function whenTaskIdle(workspaceId, taskId, apply, started = now()) {
     void (async () => {
+      if (idleStopped) return;
       const saved = await runs({ workspaceId }).catch(() => null);
+      if (idleStopped) return;
       const open = saved?.runs.some(run => run.project_id === taskId && grantAtRisk(run));
       if (!open) return apply();
-      if (idleStopped || now() - started > TASK_IDLE_LIMIT_MS) return;
-      const timer = setTimer(() => whenTaskIdle(workspaceId, taskId, apply, started), TASK_IDLE_POLL_MS);
+      if (now() - started > TASK_IDLE_LIMIT_MS) return;
+      const timer = setTimer(() => { taskIdleTimers.delete(timer); whenTaskIdle(workspaceId, taskId, apply, started); }, TASK_IDLE_POLL_MS);
+      taskIdleTimers.add(timer);
       timer?.unref?.();
     })().catch(error => logger?.warn?.("ao.task_edit_deferred_failed", { message: String(error?.message || error).slice(0, 200) }));
   }
@@ -3478,6 +3494,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     toolsWaits.clear();
     for (const timer of scheduleTimers.values()) clearTimer(timer);
     scheduleTimers.clear();
+    // Warm sessions' expiry, re-warms and deferred task edits all reach AO through this backend's
+    // harness, which would start a stopped daemon again.
+    for (const entry of warm.values()) if (entry.timer) clearTimeout(entry.timer);
+    warm.clear();
+    warmDeferred.clear();
+    for (const timer of rewarmTimers) clearTimer(timer);
+    rewarmTimers.clear();
+    for (const timer of taskIdleTimers) clearTimer(timer);
+    taskIdleTimers.clear();
   }
 
   async function call(operation, args = {}) {

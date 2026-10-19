@@ -163,8 +163,12 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId }: {
   const [active, setActive] = useState(() => tabs[0].id);
   const tabsNow = useRef(tabs);
   tabsNow.current = tabs;
-  // A kind asked for from outside (the header button, the agent opening a page) comes forward.
+  const activeNow = useRef(active);
+  activeNow.current = active;
+  // A kind asked for from outside (the header button, the agent opening a page) comes forward; the
+  // shown tab already being that kind (one of two new tabs, say) stays as it is.
   useEffect(() => {
+    if (tabsNow.current.find((item) => item.id === activeNow.current)?.kind === tab) return;
     const existing = tabsNow.current.find((item) => item.kind === tab);
     if (existing) { setActive(existing.id); return; }
     const added = newTab(tab);
@@ -198,7 +202,7 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId }: {
       onTab(next.kind);
     }
   };
-  const addTab = () => { const added = newTab("new"); setTabs((list) => [...list, added]); setActive(added.id); };
+  const addTab = () => { const added = newTab("new"); setTabs((list) => [...list, added]); setActive(added.id); onTab("new"); };
 
   // The panel's width is dragged from its left edge, as the cards panel's is, and kept per viewer.
   const [width, setWidth] = useState<number | null>(() => {

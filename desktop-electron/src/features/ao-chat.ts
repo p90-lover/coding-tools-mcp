@@ -93,7 +93,8 @@ export function tidyTimeline(items: ChatLiveItem[]): ChatLiveItem[] {
     const last = out.at(-1);
     if (last && (item.kind === "tool" || item.kind === "command") && last.kind === item.kind && last.label === item.label
       && last.text === item.text && (last.description ?? "") === (item.description ?? "")) {
-      out[out.length - 1] = { ...item, count: (last.count ?? 1) + 1 };
+      // The row keeps the first call's id: it keys the row (and its group), so one the user opened stays open.
+      out[out.length - 1] = { ...item, id: last.id, count: (last.count ?? 1) + 1 };
       continue;
     }
     out.push(item);

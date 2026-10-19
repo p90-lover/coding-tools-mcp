@@ -840,7 +840,7 @@ test("send completion preserves the next chat's draft and edits typed during the
     const reply = delayedReply(), attachments = [], composing = { current: { taskId: "task-a", draft: "sent text", attachments } };
     const state = { draft: "sent text" }, set = key => value => { state[key] = value; };
     const deliver = rendererCallback("AgentOrchestratorChat.tsx", "deliver", {
-      selectedTaskId: "task-a", draft: "sent text", attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(),
+      selectedTaskId: "task-a", draft: "sent text", attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(),
       setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: () => reply.promise,
       setDraft: set("draft"), setTitle() {}, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, setCarried() {},
     });
@@ -944,7 +944,7 @@ test("a turn's activity drops answered approvals, counts a call made again and a
     { id: "11", kind: "edit", status: "completed", text: "a.ts", files: [] },
   ];
   const tidy = chat.tidyTimeline(items);
-  assert.deepEqual([...tidy.map((item) => item.id)], ["1", "6", "7", "8", "9", "10", "11"], "answered approvals drop; a denied or timed-out one stays");
+  assert.deepEqual([...tidy.map((item) => item.id)], ["1", "2", "7", "8", "9", "10", "11"], "answered approvals drop; a denied or timed-out one stays; a repeated call keeps its first id");
   assert.equal(tidy[1].count, 3, "three read_output calls are one row");
   assert.equal(tidy[1].status, "running", "the row keeps the latest call's state");
   const segments = chat.groupTimeline(tidy);

@@ -3332,6 +3332,12 @@ test("a new chat's first message runs in the session pre-warmed for its model, a
   for (let tries = 0; tries < 50 && spawned.length < 2; tries++) await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(spawned.length, 2, "the next chat on this route finds one waiting too");
   assert.equal(spawned[1].prompt, "");
+  // A backend a hot update replaced warms nothing more: its harness would start a second AO daemon.
+  workflow.dispose();
+  rewarms[0]();
+  assert.equal((await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: { ...route, model: "cpa/other" } })).warmed, false);
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(spawned.length, 2, "nothing is spawned after dispose");
 });
 
 test("a pre-warmed session is used only by a launch that attaches the same app tools", async () => {
@@ -3907,7 +3913,7 @@ test("Approve for me: the chat's preview tools and routine commands through the 
   assert.equal(exec({ cmd: "npm ci" }, "mcp__coding-tools__write_stdin"), null);
   assert.equal(workflow.routineAppCommand({ tool: "mcp__coding-tools__exec_command", toolInput: '{"cmd":"npm ci"' }), null, "a cut-off argument list is never read");
 });
-test("CPA's catalog is read once a minute, and a failed read is not kept", async () => {
+test("CPA's catalog is read once a minute, and a failed read is kept only for 15 s", async () => {
   let clock = 1_000_000, reads = 0, fail = false;
   const workflow = createAgentOrchestratorWorkflow({
     now: () => clock,
@@ -3925,9 +3931,14 @@ test("CPA's catalog is read once a minute, and a failed read is not kept", async
   assert.equal(kept.stale, true);
   assert.match(kept.held["gpt-5.5"], /CPA could not be read just now/);
   fail = false;
-  const before = reads;
+  // A hung CPA must not cost every read its timeout: the remembered list answers for a moment.
+  let before = reads;
+  await workflow.call("models", {});
+  assert.equal(reads, before, "reads right after a failure reuse it");
+  clock += 15_001;
+  before = reads;
   const fresh = await workflow.call("models", {});
-  assert.ok(reads > before, "the remembered list was not cached");
+  assert.ok(reads > before, "the remembered list is kept only briefly");
   assert.equal(fresh.stale, undefined);
   // With nothing remembered, a failed read is still an error.
   fail = true;

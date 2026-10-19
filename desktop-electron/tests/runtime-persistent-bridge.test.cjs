@@ -69,7 +69,28 @@ test("adoption refuses a live foreign owner, a version mismatch, or a non-persis
   writeOwnership(root, { ownerPid: daemon.pid, daemonPid: daemon.pid });
   const liveOwner = supervisorFor(root).supervisor;
   liveOwner.proxyHealthPayload = async () => health;
+  // A real foreign launcher: the app's main process, not a child of this one.
+  liveOwner.processInfo = () => ({ parentPid: 2 ** 22 - 5, executablePath: "Coding Tools.exe", commandLine: '"Coding Tools.exe"' });
   assert.equal(await liveOwner.adoptRunningDaemon(config), false, "another launcher still owns it");
+
+  // Windows reused the quit owner's PID for this app's own NetworkService child (seen live): that
+  // is not another launcher, and the bridge is adopted.
+  const reused = supervisorFor(root).supervisor;
+  reused.proxyHealthPayload = async () => health;
+  reused.processInfo = () => ({ parentPid: process.pid, executablePath: "Coding Tools.exe",
+    commandLine: '"Coding Tools.exe" --type=utility --utility-sub-type=network.mojom.NetworkService' });
+  assert.equal(await reused.adoptRunningDaemon(config), true, "a reused PID is not an owner");
+  await reused.detach("test-restart");
+  writeOwnership(root, { ownerPid: daemon.pid, daemonPid: daemon.pid });
+  for (const commandLine of ['"Coding Tools.exe" C:\\x\\browser-helper.cjs', '"Coding Tools.exe" --type=renderer']) {
+    const helper = supervisorFor(root).supervisor;
+    helper.proxyHealthPayload = async () => health;
+    helper.processInfo = () => ({ parentPid: 2 ** 22 - 5, executablePath: "Coding Tools.exe", commandLine });
+    assert.equal(helper.launcherOwnerRunning(daemon.pid), false, commandLine);
+  }
+  const unknown = supervisorFor(root).supervisor;
+  unknown.processInfo = () => null;
+  assert.equal(unknown.launcherOwnerRunning(daemon.pid), true, "an uninspectable live PID stays an owner");
 
   writeOwnership(root, { ownerPid: 2 ** 22 - 3, daemonPid: daemon.pid });
   const oldBridge = supervisorFor(root).supervisor;
