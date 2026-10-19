@@ -616,6 +616,7 @@ test("AO granted run dispatches parallel workers after focus loss and finishes e
   const calls = [];
   let focused = true;
   const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
     requestHeadless: async (endpoint, body, options) => {
       calls.push({ endpoint, body, options });
       if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [structuredClone(run)], worker_capacity: { "run-1": 2 - nodes.filter(node => node.role === "worker" && node.state === "running").length } };
@@ -687,6 +688,7 @@ test("AO granted run dispatches parallel workers after focus loss and finishes e
 test("AO restart sees a reserved turn as held and never resubmits it", async () => {
   const calls = [];
   const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
     requestHeadless: async (endpoint) => {
       calls.push(endpoint);
       if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{
@@ -721,6 +723,7 @@ test("AO explicit resume observes an existing granted turn without a new grant o
     grant: { executable_sha256: "a".repeat(64) } };
   const calls = [];
   const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
     requestHeadless: async (endpoint) => {
       calls.push(endpoint);
       if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [structuredClone(run)], worker_capacity: { "run-1": 3 } };
@@ -755,6 +758,7 @@ test("AO background waits for an explicit tool decision without approving it", a
   let toolAnswered = false;
   const calls = [];
   const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
     requestHeadless: async (endpoint, body) => {
       calls.push(endpoint);
       if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [structuredClone(run)], worker_capacity: { "run-1": 3 } };
@@ -809,6 +813,7 @@ test("AO background runs report progress, approval waits and errors to the MCP e
   let toolAnswered = false;
   const reports = [];
   const make = (overrides = {}) => createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
     requestHeadless: async (endpoint) => {
       if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [structuredClone(run)], worker_capacity: { "run-1": 3 }, ...overrides.read };
       if (endpoint === "/api/v1/ao/grant") return { ok: true, run: structuredClone(run), grant: { executable_sha256: "a".repeat(64) } };
@@ -1292,6 +1297,7 @@ function failedWorkerReviewWorld({ active = false, queued = false, blocked = fal
     grant: { executable_sha256: "a".repeat(64) } };
   const world = { nodes, failed, reviewer, run, calls: [], reads: 0, observed: 0, released: !active, confirmations: 0 };
   world.workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
     webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
     requestHeadless: async (endpoint, body, options) => {
       world.calls.push({ endpoint, body, options });
@@ -1542,6 +1548,7 @@ function retryRoleWorld(failureCount, failure = "socket disconnected") {
   ] };
   const world = { run, workerAttempts: 0, retryAttempts: 0, controls: [], grants: 0, clock: 1 };
   world.workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
     webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
     requestHeadless: async (endpoint, body, options) => {
       if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [structuredClone(run)], worker_capacity: { policy: 1 - run.nodes.filter(node => node.role === "worker" && node.state === "running").length } };
@@ -1740,6 +1747,7 @@ test("runtime recovery launches ready siblings before a slow worker observation"
   let release;
   const stalled = new Promise(resolve => { release = resolve; });
   const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
     webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
     requestHeadless: async (endpoint, body) => {
       if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [structuredClone(run)], worker_capacity: { wave: 2 - run.nodes.filter(node => node.role === "worker" && node.state === "running").length } };
@@ -2282,6 +2290,7 @@ test("a chat on a model CPA no longer offers is refused before a task or run is 
   const catalog = { data: [{ id: "gemini-3.8-flash-high", context_window: 1000000 }] };
   const writes = [];
   const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
     fetchImpl: async url => String(url).includes("/v1/models") ? { ok: true, json: async () => catalog } : { ok: false, status: 404, json: async () => ({}) },
     requestHeadless: async (endpoint, body) => {
@@ -2505,6 +2514,7 @@ test("AO connects every ready worker's harness together so slow Codex starts do 
   let connecting = 0;
   let peakConnecting = 0;
   const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
     requestHeadless: async (endpoint, body) => {
       if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [structuredClone(run)], worker_capacity: { "run-1": 2 - nodes.filter(node => node.role === "worker" && node.state === "running").length } };
       if (endpoint === "/api/v1/ao/grant") return { ok: true, run: structuredClone(run), grant: { executable_sha256: "a".repeat(64) } };
@@ -2554,6 +2564,7 @@ test("a start blocked on the browser returns its reason instead of a generic tra
     nodes: [{ id: "planner", role: "planner", state: "pending", parents: [], route: web }] };
   let ready = { authenticated: true, ready: false };
   const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
     requestHeadless: async (endpoint) => {
       if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [structuredClone(run)], worker_capacity: { "run-1": 1 } };
       throw new Error(`Unexpected endpoint ${endpoint}`);
