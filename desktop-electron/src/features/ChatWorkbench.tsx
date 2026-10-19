@@ -68,7 +68,9 @@ export function startsNewChat(sessionIds: string[], polled: Set<string>): boolea
  * through the app's exec_command or the agent's own shell tool (source "agent"). Each page and command opens it
  * once; closing the panel is respected until the agent does something new (see autoOpenTab).
  */
-export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen: (tab: WorkbenchTab) => void, workspaceId?: string) {
+export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen: (tab: WorkbenchTab) => void, workspaceId?: string): LivePage | null {
+  // The page an agent's browser shows now, if any: the chat offers it back when the panel is hidden.
+  const [livePage, setLivePage] = useState<LivePage | null>(null);
   const seen = useRef(new Set<string>());
   const polled = useRef(new Set<string>());
   // The latest panel state and callback, read by the poll without restarting it: a restart on each
@@ -79,6 +81,7 @@ export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen
   onOpenNow.current = onOpen;
   const key = sessionIds.join(",");
   useEffect(() => {
+    setLivePage(null);
     if (!sessionIds.length) return undefined;
     let live = true;
     const tick = async () => {
@@ -88,6 +91,12 @@ export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen
           paneCall("chat_preview_state", { sessionIds }), paneCall("chat_processes", { sessionIds, ...(workspaceId ? { workspaceId } : {}) }),
         ]);
         if (!live) return;
+        const shown = Object.entries((previews.previews as Record<string, PreviewState> | undefined) ?? {})
+          .find(([, state]) => state.url && state.url !== "about:blank");
+        setLivePage((current) => {
+          const next = shown ? { sessionId: shown[0], url: shown[1].url, title: shown[1].title } : null;
+          return current?.url === next?.url && current?.title === next?.title && current?.sessionId === next?.sessionId ? current : next;
+        });
         const pages = Object.entries((previews.previews as Record<string, PreviewState> | undefined) ?? {})
           .filter(([, state]) => state.url && state.url !== "about:blank").map(([id, state]) => `page:${id}:${new URL(state.url).origin}`);
         const commands = ((processes.sessions as { commands: Command[] }[] | undefined) ?? [])
@@ -108,7 +117,11 @@ export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen
     return () => { live = false; window.clearInterval(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
+  return livePage;
 }
+
+/** A page a chat agent's browser has open (its preview keeps running while the panel is hidden). */
+export type LivePage = { sessionId: string; url: string; title: string };
 
 const PREVIEW_POLL_MS = 1500;
 const COMMANDS_POLL_MS = 2000;
@@ -177,7 +190,13 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId }: {
     const rest = tabs.filter((item) => item.id !== id);
     if (!rest.length) { onClose(); return; }
     setTabs(rest);
-    if (id === active) setActive(rest[Math.max(0, index - 1)].id);
+    if (id === active) {
+      const next = rest[Math.max(0, index - 1)];
+      setActive(next.id);
+      // The chat's state follows, or asking for the closed kind again (the browser chip, the
+      // header button) found it "already shown" and did nothing.
+      onTab(next.kind);
+    }
   };
   const addTab = () => { const added = newTab("new"); setTabs((list) => [...list, added]); setActive(added.id); };
 
@@ -210,7 +229,9 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId }: {
         {tabs.map((item) => <div key={item.id} className={`cx-workbench-tab${item.id === current?.id ? " is-active" : ""}`}>
           <button type="button" role="tab" aria-selected={item.id === current?.id} onClick={() => { setActive(item.id); onTab(item.kind); }}>
             {TAB_TITLES[item.kind]}</button>
-          <button type="button" className="cx-workbench-tab-close" aria-label={`Close ${TAB_TITLES[item.kind]}`} onClick={() => close(item.id)}>×</button>
+          <button type="button" className="cx-workbench-tab-close" aria-label={`Close ${TAB_TITLES[item.kind]}`}
+            title={item.kind === "preview" ? "Hide the browser: it keeps running for the agent, and the Browser chip in the chat header brings it back" : `Close ${TAB_TITLES[item.kind]}`}
+            onClick={() => close(item.id)}>×</button>
         </div>)}
         <button type="button" className="cx-icon-button cx-workbench-add" aria-label="New tab" title="New tab" onClick={addTab}>
           <Icon name="plus" width="14" height="14" /></button>
@@ -218,7 +239,7 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId }: {
       {sessions.length > 1 ? <select className="cx-workbench-agent" aria-label="Agent" value={sessionId} onChange={(event) => setSessionId(event.target.value)}>
         {sessions.map((session) => <option key={session.id} value={session.id}>{session.label}</option>)}
       </select> : null}
-      <button type="button" className="cx-icon-button" aria-label="Hide side panel" onClick={onClose}>
+      <button type="button" className="cx-icon-button" aria-label="Hide side panel" title="Hide the panel: the agent's browser and commands keep running" onClick={onClose}>
         <Icon name="close" width="14" height="14" /></button>
     </header>
     {!sessionId

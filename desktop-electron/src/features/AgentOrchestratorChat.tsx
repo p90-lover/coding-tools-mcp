@@ -540,7 +540,7 @@ export function AgentOrchestratorChat({
   const [workbench, setWorkbench] = useState<WorkbenchTab | null>(null);
   const agentSessions = useMemo(() => chatAgentSessions(chatRuns), [chatRuns]);
   const agentSessionIds = useMemo(() => agentSessions.map((session) => session.id), [agentSessions]);
-  useWorkbenchAutoOpen(selectedTaskId ? agentSessionIds : [], workbench !== null, (tab) => setWorkbench(tab), projectId);
+  const livePage = useWorkbenchAutoOpen(selectedTaskId ? agentSessionIds : [], workbench !== null, (tab) => setWorkbench(tab), projectId);
   useEffect(() => { setWorkbench(null); }, [selectedTaskId]);
   // Following new output jumps, even under a theme's smooth scrolling: an animated follow lags the
   // stream and flashes the ↓ button. Only that button scrolls smoothly.
@@ -1020,6 +1020,11 @@ export function AgentOrchestratorChat({
           {chat ? <span className={`cx-status status-${chat.status}`}>{STATUS_LABEL[chat.status]}</span> : null}
           <span className="cx-head-spacer" />
           {headerExtra}
+          {/* The agent's browser keeps running when its tab or the panel is closed: this brings it back. */}
+          {selectedTaskId && livePage && workbench !== "preview" ? <button type="button" className="cx-browser-chip"
+            title={`The agent's browser is still open: ${livePage.url}\nShow it`} onClick={() => setWorkbench("preview")}>
+            <span className="cx-browser-dot" aria-hidden="true" /><Icon name="browser" width="13" height="13" />
+            <span>{livePage.title || (() => { try { return new URL(livePage.url).host; } catch { return livePage.url; } })()}</span></button> : null}
           {selectedTaskId ? <button type="button" className="cx-icon-button cx-compact-toggle" aria-pressed={compactActivity}
             title={compactActivity ? "Compact activity: tool calls and thinking fold into one line (click to show every step)" : "Every step shown (click to compact)"}
             aria-label="Compact activity" onClick={toggleCompact}>

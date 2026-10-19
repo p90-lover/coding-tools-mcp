@@ -22,6 +22,8 @@ const text = (item) => item === null || item === undefined || typeof item === "b
 const node = (id, role, state, extra = {}) => ({ id, role, state, x: 0, ...extra });
 const run = (id, taskId, nodes, extra = {}) => ({ id, project_id: taskId, cancelled: false, nodes, ...extra });
 
+// The page the agent's browser has open, as useWorkbenchAutoOpen reports it (null: none).
+let openPage = null;
 function mount(props) {
   const states = []; let cursor = 0;
   const react = {
@@ -42,7 +44,7 @@ function mount(props) {
     : name === "./ao-chat" ? chat : name === "./codex-prompts" ? prompts : name === "../icons" ? { Icon: "Icon" } : name === "./ChatMarkdown" ? { ChatMarkdown: "Markdown" }
       : name === "./ChatMenu" ? { ChatMenu: "ChatMenu", ChatGlyph: "Glyph", FloatingLayer: "FloatingLayer" } : name === "./AgentOrchestratorComposerControls" ? { AgentOrchestratorComposerControls: "Controls" }
         : name === "./AgentOrchestratorApproval" ? { AgentOrchestratorApproval: "Approval" }
-          : name === "./ChatWorkbench" ? { ChatWorkbench: "Workbench", useWorkbenchAutoOpen: () => {} } : {},
+          : name === "./ChatWorkbench" ? { ChatWorkbench: "Workbench", useWorkbenchAutoOpen: () => openPage } : {},
   { window: { setTimeout: () => 0, setInterval: () => 0, clearInterval() {}, confirm: () => true }, document: { querySelector: () => null }, navigator: {} });
   return { render: (next = {}) => { cursor = 0; return module.AgentOrchestratorChat({ ...props, ...next }); } };
 }
@@ -583,4 +585,20 @@ test("approval cards from different team members retain separate React identitie
   const cards = walk(mount(props).render()).filter(item => item.type === "Approval");
   assert.equal(cards.length, 2);
   assert.equal(new Set(cards.map(item => item.key)).size, 2);
+});
+
+test("a hidden agent browser is offered back from the chat header, and opens the side panel on it", () => {
+  openPage = { sessionId: "s1", url: "http://127.0.0.1:8000/register", title: "Auto Register" };
+  try {
+    const { props } = base({ selectedTaskId: "t", working: true,
+      runs: [run("r1", "t", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/m" }, receipt: { thread_id: "s1" } })], { execution_mode: "single" })] });
+    const view = mount(props);
+    const chip = walk(view.render()).find((element) => element.props?.className === "cx-browser-chip");
+    assert.ok(chip, "the chip shows while the browser is hidden");
+    assert.match(text(chip), /Auto Register/);
+    chip.props.onClick();
+    const after = walk(view.render());
+    assert.ok(after.some((element) => element.type === "Workbench" && element.props.tab === "preview"), "the panel opens on the browser");
+    assert.ok(!after.some((element) => element.props?.className === "cx-browser-chip"), "no chip while it shows");
+  } finally { openPage = null; }
 });

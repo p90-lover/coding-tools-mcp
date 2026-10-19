@@ -801,3 +801,12 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-delete-confirm .cx-primary-button { background: var(--ao-red); color: #fff; }
 .cx-delete-confirm .cx-primary-button:disabled { opacity: .4; cursor: default; }
 .cx-delete-confirm .cx-delete-reason { margin-top: 6px; color: var(--ao-muted); }
+
+/* The agent's browser, hidden but still running: a chip in the chat header shows it again. */
+.cx-browser-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 220px; height: 26px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 13px;
+  background: var(--color-bg-primary); color: var(--color-text-primary); font: inherit; font-size: 12px; cursor: pointer; animation: cx-turn-stats-in .25s ease-out;
+  transition: border-color .15s ease, background .15s ease; }
+.cx-browser-chip:hover { border-color: color-mix(in srgb, var(--ao-blue, #2f6fdd) 45%, var(--ao-line)); background: var(--cx-hover); }
+.cx-browser-chip > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cx-browser-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--ao-green, #2e9d5b); animation: cx-pulse 1.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .cx-browser-chip, .cx-browser-dot { animation: none; } }
