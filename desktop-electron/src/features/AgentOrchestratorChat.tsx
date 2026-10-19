@@ -31,6 +31,8 @@ const INLINE_ATTACHMENT_BYTES = 200 * 1024;
 const CHAT_QUEUES = new Map<string, QueuedChatMessage[]>();
 /** Each chat's unsent draft (task id → text; "" is the new-chat composer), kept while another chat is open. */
 const CHAT_DRAFTS = new Map<string, string>();
+/** Each chat's unsent attachments, kept alongside its draft so a file never rides into another chat. */
+const CHAT_ATTACHMENTS = new Map<string, ChatAttachment[]>();
 /** The cards panel's dragged width (px), kept on this computer. */
 const CARDS_WIDTH_KEY = "coding-tools:ao:cards-panel-width";
 
@@ -201,7 +203,7 @@ function ActivityGroup({ items, live }: { items: ChatLiveItem[]; live: boolean }
   const [open, setOpen] = useState(false);
   const latest = items[items.length - 1];
   return <div className={`cx-group${live ? " is-live" : ""}`}>
-    <button type="button" className="cx-group-head" aria-expanded={open} onClick={() => setOpen(!open)}>
+    <button type="button" className="cx-activity-head" aria-expanded={open} onClick={() => setOpen(!open)}>
       <Icon name="chevron" width="11" height="11" className={open ? "is-open" : undefined} />
       <span className={`cx-group-verb${live ? " cx-shimmer" : ""}`}>{live ? "Working" : "Explored"}</span>
       <span className="cx-group-text">{activitySummary(items)}</span>
@@ -226,18 +228,23 @@ function LiveTimeline({ items, live = false }: { items: ChatLiveItem[]; live?: b
 /**
  * Each card's work (step key → its turn's timeline), kept for the app's lifetime: the live timeline
  * is copied in while the card works, so its thinking and tool calls stay when the answer lands, and
- * a card finished before is read back from AO once, when its work is first opened.
+ * a card finished before is read back from AO once, when its work is first opened. A copy taken
+ * while the card worked is read back once more when it finishes: the last poll can miss the final
+ * items, or leave a row on "Running…".
  */
 const CHAT_WORK = new Map<string, ChatLiveItem[]>();
+const CHAT_WORK_LIVE = new Set<string>();
 type LoadWork = (runId: string, nodeId: string) => Promise<ChatLiveItem[]>;
 
 function useStepWork(step: ChatStep, runId: string, wanted: boolean, loadWork?: LoadWork): ChatLiveItem[] | null {
   const live = step.working?.timeline;
   const [, setLoaded] = useState(0);
-  if (live?.length) CHAT_WORK.set(step.key, live);
+  if (live?.length) { CHAT_WORK.set(step.key, live); CHAT_WORK_LIVE.add(step.key); }
   const known = CHAT_WORK.get(step.key) ?? null;
+  const settled = !step.working;
   useEffect(() => {
-    if (!wanted || known || !step.hasWork || !loadWork) return;
+    if (!wanted || !step.hasWork || !loadWork || (known && !(settled && CHAT_WORK_LIVE.has(step.key)))) return;
+    CHAT_WORK_LIVE.delete(step.key);
     let current = true;
     void loadWork(runId, step.nodeId).then((items) => {
       if (!items.length) return;
@@ -245,7 +252,7 @@ function useStepWork(step: ChatStep, runId: string, wanted: boolean, loadWork?: 
       if (current) setLoaded((count) => count + 1);
     }).catch(() => undefined);
     return () => { current = false; };
-  }, [wanted, known, step.hasWork, step.key, step.nodeId, runId, loadWork]);
+  }, [wanted, known, settled, step.hasWork, step.key, step.nodeId, runId, loadWork]);
   return known;
 }
 
@@ -548,12 +555,18 @@ export function AgentOrchestratorChat({
   // A running step grows without a new turn or step (each tool call, each streamed line): the
   // thread follows any growth of its content while it is read at the bottom.
   const column = useRef<HTMLDivElement>(null);
+  // A click in the thread (opening "Worked", a group, a tool's output) grows it too, but that is the
+  // user reading: the view stays on what they opened and following stops if it left the bottom.
   const following = useRef(atBottom);
   following.current = atBottom;
+  const clicked = useRef(false);
   useEffect(() => {
     const box = scroller.current, content = column.current;
     if (!box || !content || typeof ResizeObserver === "undefined") return undefined;
-    const observer = new ResizeObserver(() => { if (following.current) box.scrollTop = box.scrollHeight; });
+    const observer = new ResizeObserver(() => {
+      if (clicked.current) { clicked.current = false; setAtBottom(box.scrollHeight - box.scrollTop - box.clientHeight < 48); return; }
+      if (following.current) box.scrollTop = box.scrollHeight;
+    });
     observer.observe(content);
     return () => observer.disconnect();
   }, [selectedTaskId]);
@@ -602,8 +615,12 @@ export function AgentOrchestratorChat({
   useEffect(() => {
     if (draftOwner.current === selectedTaskId) return;
     if (draft) CHAT_DRAFTS.set(draftOwner.current, draft); else CHAT_DRAFTS.delete(draftOwner.current);
+    if (attachments.length) CHAT_ATTACHMENTS.set(draftOwner.current, attachments); else CHAT_ATTACHMENTS.delete(draftOwner.current);
     setDraft(CHAT_DRAFTS.get(selectedTaskId) ?? "");
+    setAttachments(CHAT_ATTACHMENTS.get(selectedTaskId) ?? []);
+    setAttachNote("");
     CHAT_DRAFTS.delete(selectedTaskId);
+    CHAT_ATTACHMENTS.delete(selectedTaskId);
     draftOwner.current = selectedTaskId;
   }, [selectedTaskId]);
   // Messages a rewound chat carries as context ahead of its first message; the composer holds only
@@ -648,12 +665,18 @@ export function AgentOrchestratorChat({
   const [card, setCard] = useState<ChatCommandCard | null>(null);
   // Edit goal: the objective being edited, or null.
   const [goalEditing, setGoalEditing] = useState<string | null>(null);
+  // Another chat's card or goal edit never shows over this one (its queue says so itself, below).
+  useEffect(() => { setCard(null); setGoalEditing(null); }, [selectedTaskId]);
   const say = (title: string, text: string, quote?: string) => setCard({ title, text, ...(quote ? { quote } : {}) });
 
-  /** Sends a message the way the composer does: into this chat, or as a new chat. */
-  const deliver = async (message: string, goal?: string) => {
+  /**
+   * Sends a message the way the composer does: into this chat, or as a new chat. A queued message
+   * sent in the background (fromComposer false) leaves whatever the user is typing alone.
+   */
+  const deliver = async (message: string, goal?: string, fromComposer = true) => {
     const owner = composing.current;
-    const current = () => alive.current && composing.current.taskId === owner.taskId && composing.current.draft === owner.draft && composing.current.attachments === owner.attachments;
+    const here = () => alive.current && composing.current.taskId === owner.taskId;
+    const current = () => fromComposer && here() && composing.current.draft === owner.draft && composing.current.attachments === owner.attachments;
     setSending(true);
     try {
       // A steer the turn outran (it ended first) is sent as an ordinary follow-up instead; a goal is never steered.
@@ -663,8 +686,8 @@ export function AgentOrchestratorChat({
         // steering would cancel that request, so the message waits for the turn like a queued one.
         // Or its turn had hung and was stopped: the message goes as the next turn once it settles.
         setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what: "Message", message }));
-        if (current()) {
-          setDraft(""); setAttachments([]); setAttachNote("");
+        if (current()) { setDraft(""); setAttachments([]); setAttachNote(""); }
+        if (here()) {
           say(steered === "restart" ? "Restarting" : "Queued", steered === "restart"
             ? "The agent had stopped responding, so its turn was stopped; your message is sent as the next turn."
             : steered === "starting" ? "The agent is still starting; your message is steered in once it can take it."
@@ -676,11 +699,13 @@ export function AgentOrchestratorChat({
       const first = !selectedTaskId && carried?.length ? [...carried, message].join("\n\n").slice(-8192) : message;
       if (!steered) await send(selectedTaskId ? { taskId: selectedTaskId, message, ...(goal ? { goal } : {}) }
         : { title: title.trim() || undefined, message: first, ...(goal ? { goal } : {}) });
-      if (CHAT_DRAFTS.get(owner.taskId) === owner.draft) CHAT_DRAFTS.delete(owner.taskId);
+      if (fromComposer && CHAT_DRAFTS.get(owner.taskId) === owner.draft) CHAT_DRAFTS.delete(owner.taskId);
+      if (fromComposer && CHAT_ATTACHMENTS.get(owner.taskId) === owner.attachments) CHAT_ATTACHMENTS.delete(owner.taskId);
       if (current()) {
-        setDraft(""); setTitle(""); setAttachments([]); setAttachNote(""); setAtBottom(true);
+        setDraft(""); setTitle(""); setAttachments([]); setAttachNote("");
         if (!selectedTaskId) setCarried(null);
       }
+      if (here()) setAtBottom(true);
       return true;
     } catch {
       // The surface already shows the error; keep the message so it can be sent again.
@@ -737,29 +762,38 @@ export function AgentOrchestratorChat({
     sentWhileFree.current = true;
     setQueue(task, rest);
     const owner = composing.current;
-    void deliver(next.message, next.goal).then((sent) => {
+    void deliver(next.message, next.goal, false).then((sent) => {
       if (sent) { if (alive.current && composing.current.taskId === task && !rest.length) setCard(null); return; }
       if (!alive.current || composing.current.taskId !== task || composing.current.draft !== owner.draft || composing.current.attachments !== owner.attachments) {
         setQueue(task, [next, ...queueOf(task)]);
         return;
       }
-      // Nothing is lost: a plain message goes back into the composer to send again.
-      if (next.what === "Message") setDraft(next.message);
+      // Nothing is lost: a plain message goes back into the composer to send again, after anything
+      // already typed there.
+      if (next.what === "Message") setDraft((typed) => (typed.trim() ? `${typed}\n\n${next.message}` : next.message));
       say(next.what, next.what === "Message" ? "The queued message couldn't be sent; it's back in the composer." : "The queued message couldn't be sent; run the command again.");
     });
   }, [queueVersion, selectedTaskId, accepts, busy, sending, windowFocused]);
   // In steer mode a queued message (the agent was waiting on a request, or still starting) is
   // steered in as soon as the agent can take it, not held until the whole turn ends. A steer that
   // still finds it waiting comes back to the queue; the backend waits up to half a minute each time.
+  // A steer that fails outright is not retried: the message waits for the turn to end instead.
   const steeringQueue = useRef(false);
+  const steerFailed = useRef(false);
+  useEffect(() => { steerFailed.current = false; }, [accepts, steering, selectedTaskId]);
   useEffect(() => {
     const task = selectedTaskId, [next, ...rest] = queueOf(task);
     if (!task || !next || accepts || !steering || awaitingAnswer || next.goal || next.what !== "Message"
-      || busy || sending || steeringQueue.current || !windowFocused) return;
+      || busy || sending || steeringQueue.current || steerFailed.current || !windowFocused) return;
     steeringQueue.current = true;
     setQueue(task, rest);
-    void deliver(next.message).then((sent) => { if (!sent) setQueue(task, [next, ...queueOf(task)]); })
-      .finally(() => { steeringQueue.current = false; });
+    void deliver(next.message, undefined, false).then((sent) => {
+      const here = alive.current && composing.current.taskId === task;
+      if (sent) { if (here && !queueOf(task).length) setCard(null); return; }
+      steerFailed.current = true;
+      setQueue(task, [next, ...queueOf(task)]);
+      if (here) say("Queued", "The message couldn't be steered in; it's sent when the current turn finishes.", next.message);
+    }).finally(() => { steeringQueue.current = false; });
   }, [queueVersion, selectedTaskId, accepts, steering, awaitingAnswer, busy, sending, windowFocused]);
   /**
    * Sends a command's message now when the chat is free, steers it into the working agent when it
@@ -1073,7 +1107,11 @@ export function AgentOrchestratorChat({
 
         <div className="cx-scroll" ref={scroller}
           onScroll={(event) => { const box = event.currentTarget; setAtBottom(box.scrollHeight - box.scrollTop - box.clientHeight < 48); }}>
-          <div className="cx-column" ref={column}>
+          <div className="cx-column" ref={column} onClickCapture={() => {
+            // Only the growth a click causes (in its next frame or so) counts as the user's.
+            clicked.current = true;
+            requestAnimationFrame(() => requestAnimationFrame(() => { clicked.current = false; }));
+          }}>
             {!turns.length ? <div className="cx-empty">
               {selectedTaskId ? <p>Loading…</p> : <>
                 <span className="cx-empty-glyph" aria-hidden="true"><ChatGlyph name="codex" size={40} /></span>

@@ -26,8 +26,9 @@ export function ChatTurnStats({ model, from, rounds, running }: {
 }) {
   const [stats, setStats] = useState<TurnStats | null>(null);
   const viaCpa = Boolean(model?.startsWith("cpa/"));
+  // A new turn (or model) starts blank; the turn ending keeps its numbers while the last read settles them.
+  useEffect(() => { setStats(null); }, [model, from]);
   useEffect(() => {
-    setStats(null);
     if (!viaCpa || !from) return undefined;
     let live = true;
     const read = () => void getCodingToolsClient().apps.call({ moduleId: "agent-orchestrator", operation: "chat_turn_stats", arguments: { model: model ?? "", from } })
