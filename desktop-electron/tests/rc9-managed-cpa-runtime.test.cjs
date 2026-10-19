@@ -22,6 +22,61 @@ function requireFile(relativePath) {
   return target;
 }
 
+test("managed CPA keeps saved user settings and extra plugin registrations while replacing owned bindings", () => {
+  const { runtimeConfiguration } = require("../electron/cpa-managed.cjs");
+  const yaml = globalThis.Bun?.YAML ?? require("js-yaml");
+  const state = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "cpa-config-preserve-"));
+  try {
+    fs.writeFileSync(path.join(state, "config.yaml"), JSON.stringify({
+      host: "0.0.0.0", port: 9999, "auth-dir": "/old/auth", "api-keys": ["old-key"],
+      "proxy-url": "http://old.invalid", "remote-management": { "allow-remote": true, "secret-key": "old-secret" },
+      "disable-cooling": true, "request-retry": 8, debug: true,
+      "claude-api-key": [{ "api-key": "provider-fixture", "base-url": "https://provider.example" }],
+      oauth: { "auth-dir": "/old/oauth", providers: { custom: { enabled: true } } },
+      plugins: { enabled: false, dir: "/old/plugins", configs: {
+        "cline-pass-switcher": { enabled: false, "data-dir": "/old/cline" },
+        "codex-review-account-selector": { enabled: true, strategy: "saved-user-setting" },
+      } },
+    }));
+    const output = runtimeConfiguration(state, "m".repeat(36), "p".repeat(36));
+    const config = (yaml.parse ?? yaml.load)(output);
+    assert.equal(config.host, "127.0.0.1");
+    assert.equal(config.port, 8317);
+    assert.equal(config["auth-dir"], path.join(state, "auth"));
+    assert.deepEqual(config["api-keys"], ["p".repeat(36)]);
+    assert.equal(config["remote-management"]["allow-remote"], false);
+    assert.equal(config["remote-management"]["secret-key"], "m".repeat(36));
+    assert.equal(config["proxy-url"] ?? "", "", "a stale saved proxy cannot replace the managed route");
+    assert.equal(config.plugins.enabled, true);
+    assert.equal(config.plugins.dir, path.join(state, "plugins"));
+    assert.equal(config.plugins.configs["cline-pass-switcher"].enabled, true);
+    assert.equal(config.plugins.configs["cline-pass-switcher"]["data-dir"], path.join(state, "cline-pass-switcher-data"));
+    assert.deepEqual(config.plugins.configs["codex-review-account-selector"], { enabled: true, strategy: "saved-user-setting" });
+    assert.equal(config["disable-cooling"], true);
+    assert.equal(config["request-retry"], 8);
+    assert.equal(config.debug, true);
+    assert.equal(config["claude-api-key"][0]["api-key"], "provider-fixture");
+    assert.equal(config.oauth["auth-dir"], path.join(state, "auth"));
+    assert.equal(config.oauth.providers.custom.enabled, true);
+  } finally { fs.rmSync(state, { recursive: true, force: true }); }
+});
+
+test("invalid saved CPA YAML is refused without replacing it or exposing its source", () => {
+  const { runtimeConfiguration } = require("../electron/cpa-managed.cjs");
+  const state = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "cpa-config-invalid-"));
+  try {
+    const target = path.join(state, "config.yaml");
+    for (const source of ["api-keys: [PRIVATE_FIXTURE_SECRET", "- item", "plugins:\n  configs: []", "oauth: []"]) {
+      fs.writeFileSync(target, source);
+      assert.throws(() => runtimeConfiguration(state, "m".repeat(36), "p".repeat(36)), error => {
+        assert.equal(error.message, "Saved CPA configuration is invalid; it was not replaced");
+        return true;
+      });
+      assert.equal(fs.readFileSync(target, "utf8"), source);
+    }
+  } finally { fs.rmSync(state, { recursive: true, force: true }); }
+});
+
 test("CPA is the fifth app-managed component and external service", () => {
   const managed = read("desktop-electron/electron/managed-components.cjs");
   const external = read("desktop-electron/electron/external-services.cjs");
