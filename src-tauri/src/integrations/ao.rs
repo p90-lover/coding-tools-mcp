@@ -2348,6 +2348,7 @@ pub fn record_terminal(
 
 /// External controllers supply the owned session's observed root. Typed checks intentionally
 /// support only the registered workspace; a worktree/unknown root never falls back to primary.
+#[allow(clippy::too_many_arguments)]
 pub fn record_terminal_at_workspace(
     data: &mut AppData,
     workspace_id: &str,
