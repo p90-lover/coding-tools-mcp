@@ -1431,7 +1431,7 @@ function createManagedComponentController({
   }
 
   /** Adopt a healthy persistent component left running by an earlier launcher. */
-  async function adoptPersistedComponent(manifest, active) {
+  async function adoptPersistedComponent(manifest, active, dependencyFingerprint) {
     if (!persistentIds.has(manifest.id)) return false;
     const record = readPersistedRecord(manifest.id);
     if (!record) return false;
@@ -1439,6 +1439,7 @@ function createManagedComponentController({
       clearPersistedRecord(manifest.id);
       return false;
     }
+    if (manifest.id === "cpa" && record.dependencyFingerprint !== dependencyFingerprint) return false;
     // A component from another version, or one that no longer answers, is replaced.
     if (record.version !== manifest.version || !await probeHealth(manifest.id)) return false;
     const primaryId = persistentPrimaryId(manifest);
@@ -1501,10 +1502,14 @@ function createManagedComponentController({
       return project(id);
     }
 
+    // Capture the bundled plugin revision before spawn; later file changes are not what this process loaded.
+    const dependencyFingerprint = id === "cpa" && persistentIds.has(id)
+      ? sha256File(path.join(context.adapterRoot, "..", "vendor", "bundled", "cpa-plugins", "BUNDLE.json"))
+      : undefined;
     const active = new Map();
     processes.set(id, active);
     try {
-      if (await adoptPersistedComponent(manifest, active)) {
+      if (await adoptPersistedComponent(manifest, active, dependencyFingerprint)) {
         setOperation(id, { state: "installed", step: null, error: null });
         return project(id);
       }
@@ -1530,6 +1535,7 @@ function createManagedComponentController({
         if (persistent && Number.isInteger(child.pid)) {
           writePrivateFileAtomic(persistedRecordPath(id), `${JSON.stringify({
             pid: child.pid, version: manifest.version, startedAt: now(),
+            ...(dependencyFingerprint ? { dependencyFingerprint } : {}),
           })}\n`);
         }
         attachProcessLogging(manifest, processEntry, child);

@@ -112,12 +112,12 @@ function mockChild(pid = 8100) {
   return child;
 }
 
-function controllerFixture({ fetchImpl, allowNetworkInstall = true, ...overrides } = {}) {
+function controllerFixture({ fetchImpl, allowNetworkInstall = true, createController = createManagedComponentController, ...overrides } = {}) {
   const payload = Buffer.from("managed-component-fixture-v1", "utf8");
   const manifestRoot = manifestFixture(payload);
   const dataRoot = temporaryDirectory("coding-tools-managed-data");
   const children = [];
-  const controller = createManagedComponentController({
+  const controller = createController({
     manifestRoot,
     dataRoot,
     allowNetworkInstall,
@@ -760,6 +760,66 @@ test("a persistent CPA runs detached, survives a keep-running dispose, and is ad
   await second.startComponent("cpa");
   assert.equal(spawnedAgain, 0, "a healthy CPA of the same version is adopted, not restarted");
   assert.equal(survivor.exitCode, null);
+});
+
+test("a persistent CPA captures its plugin bundle before spawn and replaces an outdated bundle", async (t) => {
+  const { spawn } = require("node:child_process");
+  const { createRequire, wrap } = require("node:module");
+  const vm = require("node:vm");
+  const scratch = temporaryDirectory("coding-tools-cpa-dependency");
+  t.after(() => fs.rmSync(scratch, { recursive: true, force: true }));
+  const adapterRoot = path.join(scratch, "electron");
+  const bundle = path.join(scratch, "vendor", "bundled", "cpa-plugins", "BUNDLE.json");
+  writeJson(bundle, { cline: { sha256: "old-plugin" } });
+  const expected = crypto.createHash("sha256").update(fs.readFileSync(bundle)).digest("hex");
+  const sourcePath = require.resolve("../electron/managed-components.cjs");
+  const loaded = { exports: {} };
+  vm.runInThisContext(wrap(fs.readFileSync(sourcePath, "utf8")), { filename: sourcePath })(
+    loaded.exports, createRequire(sourcePath), loaded, sourcePath, adapterRoot);
+  const createController = loaded.exports.createManagedComponentController;
+  const survivor = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  t.after(() => { if (survivor.exitCode === null) survivor.kill(); });
+  const first = controllerFixture({
+    createController, persistentComponents: ["cpa"], healthProbe: async () => true,
+    spawnProcess: () => {
+      writeJson(bundle, { cline: { sha256: "new-plugin" } });
+      const child = mockChild(survivor.pid);
+      child.unref = () => {};
+      return child;
+    },
+  });
+  await first.controller.startComponent("cpa");
+  const recordPath = path.join(first.dataRoot, "state", "cpa.process.json");
+  assert.equal(JSON.parse(fs.readFileSync(recordPath)).dependencyFingerprint, expected,
+    "the record describes the bundle at launch, not bytes changed during spawn");
+  first.controller.dispose({ keepPersistent: true });
+  let spawned = 0;
+  const second = controllerFixture({
+    createController, dataRoot: first.dataRoot, persistentComponents: ["cpa"], healthProbe: async () => true,
+    spawnProcess: () => { spawned += 1; const child = mockChild(9999); child.unref = () => {}; return child; },
+  }).controller;
+  t.after(() => second.dispose({ keepPersistent: true }));
+  await second.startComponent("cpa");
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(spawned, 1, "the same CPA version with old plugins is replaced");
+  assert.notEqual(survivor.exitCode === null && survivor.signalCode === null, true);
+});
+
+test("a persistent CPA with no plugin fingerprint is replaced even at the current version", async (t) => {
+  const { spawn } = require("node:child_process");
+  const stale = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  t.after(() => { if (stale.exitCode === null) stale.kill(); });
+  let spawned = 0;
+  const { controller, dataRoot } = controllerFixture({
+    persistentComponents: ["cpa"], healthProbe: async () => true,
+    spawnProcess: () => { spawned += 1; const child = mockChild(9999); child.unref = () => {}; return child; },
+  });
+  t.after(() => controller.dispose({ keepPersistent: true }));
+  writeJson(path.join(dataRoot, "state", "cpa.process.json"), { pid: stale.pid, version: "1.0.0" });
+  await controller.startComponent("cpa");
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(spawned, 1);
+  assert.notEqual(stale.exitCode === null && stale.signalCode === null, true);
 });
 
 test("a persistent CPA from an older version is stopped and replaced instead of adopted", async (t) => {
