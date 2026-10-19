@@ -12,10 +12,15 @@ const CLINE_RESOURCE_PREFIX = "/v0/resource/plugins/cline-pass-switcher/";
 const CLINE_API_PREFIX = "/v0/management/cline-pass-switcher/";
 // The user's own Codex Auto Review plugin: its page signs in with the management key (kept only in
 // the page's memory) to list CPA's Codex accounts and save the one that serves codex-auto-review.
-// It gets its own plugin routes and a read-only account list, nothing else.
-const AUTO_REVIEW_RESOURCE_PREFIX = "/v0/resource/plugins/codex-auto-review/";
-const AUTO_REVIEW_API_PREFIX = "/v0/management/codex-auto-review/";
+// It gets its own plugin routes and a read-only account list, nothing else. The installed plugin
+// registers as "codex-review-account-selector"; the earlier name is kept for older builds. With
+// only the earlier name here, its page never got the key and asked the user to paste it.
+const AUTO_REVIEW_PLUGIN_IDS = ["codex-review-account-selector", "codex-auto-review"];
 const ACCOUNT_LIST_PATH = "/v0/management/auth-files";
+/** The Codex Auto Review plugin id whose page this path is, or null. */
+function autoReviewPluginOf(pathname) {
+  return AUTO_REVIEW_PLUGIN_IDS.find((id) => pathname.startsWith(`/v0/resource/plugins/${id}/`)) ?? null;
+}
 
 // localStorage entries seeded into the managed CPA origin. Values carry only the
 // opaque session marker; the real key is swapped in by the main-process header hook.
@@ -64,7 +69,7 @@ function installCpaPanelSession({ webContents, webFrameMain, getConnection, logg
     try {
       const location = new URL(frame.url);
       return isManagedPanel(frame.parent) && location.origin === origin
-        && location.pathname.startsWith(AUTO_REVIEW_RESOURCE_PREFIX) && !location.username && !location.password;
+        && Boolean(autoReviewPluginOf(location.pathname)) && !location.username && !location.password;
     } catch {
       return false;
     }
@@ -79,8 +84,9 @@ function installCpaPanelSession({ webContents, webFrameMain, getConnection, logg
       const location = new URL(frame.url);
       const target = new URL(url);
       if (isAutoReviewPage(frame)) {
+        // Only the page's own plugin's routes: one plugin's page never reaches the other's.
         return target.origin === origin && !target.username && !target.password
-          && (target.pathname.startsWith(AUTO_REVIEW_API_PREFIX)
+          && (target.pathname.startsWith(`/v0/management/${autoReviewPluginOf(location.pathname)}/`)
             || (String(method).toUpperCase() === "GET" && target.pathname === ACCOUNT_LIST_PATH));
       }
       return isManagedPanel(frame.parent)
