@@ -10,6 +10,12 @@ const CPA_HELPER_RESOURCE_PREFIX = "/v0/resource/plugins/cpa-helper/";
 const CPA_HELPER_API_PREFIX = "/v0/management/cpa-helper/";
 const CLINE_RESOURCE_PREFIX = "/v0/resource/plugins/cline-pass-switcher/";
 const CLINE_API_PREFIX = "/v0/management/cline-pass-switcher/";
+// The user's own Codex Auto Review plugin: its page signs in with the management key (kept only in
+// the page's memory) to list CPA's Codex accounts and save the one that serves codex-auto-review.
+// It gets its own plugin routes and a read-only account list, nothing else.
+const AUTO_REVIEW_RESOURCE_PREFIX = "/v0/resource/plugins/codex-auto-review/";
+const AUTO_REVIEW_API_PREFIX = "/v0/management/codex-auto-review/";
+const ACCOUNT_LIST_PATH = "/v0/management/auth-files";
 
 // localStorage entries seeded into the managed CPA origin. Values carry only the
 // opaque session marker; the real key is swapped in by the main-process header hook.
@@ -52,13 +58,31 @@ function installCpaPanelSession({ webContents, webFrameMain, getConnection, logg
     }
   }
 
+  /** Whether this frame is the Codex Auto Review plugin's page, a direct child iframe of the panel. */
+  function isAutoReviewPage(frame) {
+    if (!frame || frame.isDestroyed() || webContents.isDestroyed()) return false;
+    try {
+      const location = new URL(frame.url);
+      return isManagedPanel(frame.parent) && location.origin === origin
+        && location.pathname.startsWith(AUTO_REVIEW_RESOURCE_PREFIX) && !location.username && !location.password;
+    } catch {
+      return false;
+    }
+  }
+
   // CPA Helper's page is a direct child iframe of the managed panel and may only
-  // exchange its marker on its own plugin API routes.
-  function isCpaHelperRequest(frame, url) {
+  // exchange its marker on its own plugin API routes. Codex Auto Review's page may also read the
+  // account list (GET only).
+  function isCpaHelperRequest(frame, url, method = "GET") {
     if (!frame || frame.isDestroyed() || webContents.isDestroyed()) return false;
     try {
       const location = new URL(frame.url);
       const target = new URL(url);
+      if (isAutoReviewPage(frame)) {
+        return target.origin === origin && !target.username && !target.password
+          && (target.pathname.startsWith(AUTO_REVIEW_API_PREFIX)
+            || (String(method).toUpperCase() === "GET" && target.pathname === ACCOUNT_LIST_PATH));
+      }
       return isManagedPanel(frame.parent)
         && location.origin === origin
         && (location.pathname.startsWith(CPA_HELPER_RESOURCE_PREFIX) || location.pathname.startsWith(CLINE_RESOURCE_PREFIX))
@@ -90,7 +114,7 @@ function installCpaPanelSession({ webContents, webFrameMain, getConnection, logg
       });
     }
     if (details.webContentsId !== webContents.id
-      || !(isManagedPanel(details.frame) || isCpaHelperRequest(details.frame, details.url))) {
+      || !(isManagedPanel(details.frame) || isCpaHelperRequest(details.frame, details.url, details.method))) {
       callback({ requestHeaders: headers });
       return;
     }
@@ -141,10 +165,65 @@ function installCpaPanelSession({ webContents, webFrameMain, getConnection, logg
     }
   }
 
+  // Codex Auto Review keeps the key only in its page's memory, so no storage can carry it: its
+  // sign-in form is filled with the marker, which the header hook above swaps for the key on that
+  // plugin's own routes. Only an input the page labels as the management key is filled.
+  async function signInAutoReview(_event, isMainFrame, processId, routingId) {
+    if (isMainFrame) return;
+    const frame = webFrameMain.fromId(processId, routingId);
+    if (!isAutoReviewPage(frame) || pendingFrames.has(frame)) return;
+    pendingFrames.add(frame);
+    try {
+      const result = await frame.executeJavaScript(autoReviewSignInScript(sessionMarker));
+      if (result === "signed-in") logger?.info?.("cpa.auto_review_signed_in", { credentialInRenderer: false });
+    } catch {
+      logger?.warn?.("cpa.auto_review_sign_in_failed", { retry: "reopen-plugin-page" });
+    } finally {
+      pendingFrames.delete(frame);
+    }
+  }
+
   webContents.on("did-frame-finish-load", seedPanelSession);
+  webContents.on("did-frame-finish-load", signInAutoReview);
   webContents.once("destroyed", () => {
     browserSession.webRequest.onBeforeSendHeaders({ urls: [`${origin}/v0/management/*`] }, null);
   });
 }
 
-module.exports = { installCpaPanelSession, panelStorageEntries, CPA_HELPER_KEY_STORE };
+/**
+ * The page script that signs Codex Auto Review's page in with the marker: it waits up to 5 s for
+ * the input the page labels as the management key, fills it as typing would and presses the
+ * sign-in button beside it. "filled" when it already held a value, "no-form" when none showed.
+ */
+function autoReviewSignInScript(marker) {
+  return `(async () => {
+    const marker = ${JSON.stringify(marker)};
+    const labelled = (el) => {
+      const own = [el.name, el.id, el.placeholder, el.getAttribute('aria-label'), ...(el.labels ? [...el.labels].map((l) => l.textContent) : [])].join(' ');
+      if (/management/i.test(own) && /key/i.test(own)) return true;
+      for (let node = el.parentElement, depth = 0; node && depth < 3; node = node.parentElement, depth += 1) {
+        if (/management\\s*key/i.test((node.textContent || '').slice(0, 400))) return true;
+      }
+      return false;
+    };
+    for (let attempt = 0; attempt < 25; attempt += 1) {
+      const field = [...document.querySelectorAll('input')].find((el) => !el.disabled && !['hidden', 'checkbox', 'radio'].includes(el.type) && labelled(el));
+      if (field) {
+        if (field.value) return 'filled';
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(field, marker);
+        field.dispatchEvent(new Event('input', { bubbles: true }));
+        field.dispatchEvent(new Event('change', { bubbles: true }));
+        let button = null;
+        for (let scope = field.parentElement, depth = 0; scope && !button && depth < 5; scope = scope.parentElement, depth += 1) {
+          button = [...scope.querySelectorAll('button')].find((b) => !b.disabled && /sign\\s*in|log\\s*in/i.test(b.textContent || ''));
+        }
+        if (button) button.click(); else if (field.form) field.form.requestSubmit();
+        return 'signed-in';
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    return 'no-form';
+  })()`;
+}
+
+module.exports = { installCpaPanelSession, panelStorageEntries, autoReviewSignInScript, CPA_HELPER_KEY_STORE };

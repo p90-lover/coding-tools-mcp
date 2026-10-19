@@ -289,3 +289,25 @@ test("non-loopback origins are rejected and destroying the host removes the requ
   assert.equal(f.calls.at(-1).listener, null);
   assert.deepEqual(f.calls.at(-1).filter, { urls: [`${ORIGIN}/v0/management/*`] });
 });
+
+test("Codex Auto Review's page gets the key on its own routes and a read-only account list, nothing else", async () => {
+  const f = fixture();
+  f.install();
+  await f.webContents.listeners("did-frame-finish-load")[0]({}, false, 5, 9);
+  const marker = f.sessionStorage.getItem("coding-tools-cpa-session");
+  const frame = { url: `${ORIGIN}/v0/resource/plugins/codex-auto-review/index.html`,
+    top: f.mainFrame, parent: f.frame, isDestroyed: () => false };
+  const requestHeaders = { Authorization: `Bearer ${marker}` };
+  const swapped = { requestHeaders: { Authorization: `Bearer ${SECRET}` } };
+  assert.deepEqual(await f.request({ frame, url: `${ORIGIN}/v0/management/codex-auto-review/account`, method: "POST", requestHeaders }), swapped);
+  assert.deepEqual(await f.request({ frame, url: `${ORIGIN}/v0/management/auth-files`, method: "GET", requestHeaders }), swapped);
+  for (const [url, method] of [[`${ORIGIN}/v0/management/auth-files`, "POST"], [`${ORIGIN}/v0/management/auth-files/download?name=a.json`, "GET"],
+    [`${ORIGIN}/v0/management/config`, "GET"], [`${ORIGIN}/v0/management/cpa-helper/usage`, "GET"],
+    [`${ORIGIN}/v0/management/codex-auto-review-evil/x`, "GET"]]) {
+    assert.deepEqual(await f.request({ frame, url, method, requestHeaders }), { requestHeaders }, `${method} ${url}`);
+  }
+  // Another plugin's page gets none of it.
+  const other = { ...frame, url: `${ORIGIN}/v0/resource/plugins/other/index.html` };
+  assert.deepEqual(await f.request({ frame: other, url: `${ORIGIN}/v0/management/auth-files`, method: "GET", requestHeaders }), { requestHeaders });
+  assert.equal(JSON.stringify(f.logs).includes(SECRET), false);
+});
