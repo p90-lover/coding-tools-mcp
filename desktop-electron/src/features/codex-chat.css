@@ -557,30 +557,45 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
   color: var(--ao-red, #c0392b); font-size: 11px; }
 /* The page itself is a native view the app draws over this slot. */
 .cx-preview-slot { flex: 1 1 auto; min-height: 0; margin: 0 10px 10px; border: 1px solid var(--ao-line); border-radius: 8px; background: #fff; }
-.cx-terminal { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
-.cx-terminal-list { flex: 0 0 auto; max-height: 30%; margin: 0; padding: 0 8px 6px; overflow: auto; list-style: none; }
-.cx-terminal-list button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 5px 8px; border: 0; border-radius: 6px; background: transparent;
-  color: var(--color-text-primary); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
-.cx-terminal-list button[aria-pressed="true"], .cx-terminal-list button:hover { background: color-mix(in srgb, var(--ao-line) 55%, transparent); }
-.cx-terminal-list code { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cx-terminal-list small { flex: 0 0 auto; color: var(--ao-muted); }
+.cx-terminal { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; min-height: 0; gap: 6px; padding-bottom: 10px; }
+/* What runs now leads; the agent's finished tool calls fold away below it (they are in the chat). */
+.cx-terminal-bar { display: flex; align-items: center; gap: 8px; padding: 2px 12px 0; }
+.cx-terminal-bar strong { color: var(--color-text-primary); font-size: 13px; font-weight: 600; }
+.cx-terminal-idle { margin: 0 12px; padding: 12px 14px; border: 1px dashed var(--ao-line); border-radius: 8px; color: var(--ao-muted); font-size: 13px; line-height: 1.55; }
+.cx-terminal-list { flex: 0 0 auto; max-height: 28%; margin: 0; padding: 0 8px; overflow: auto; list-style: none; }
+.cx-terminal-list.is-history { max-height: 180px; }
+.cx-terminal-list button { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 32px; padding: 6px 10px; border: 0; border-radius: 6px; background: transparent;
+  color: var(--color-text-primary); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.cx-terminal-list button[aria-pressed="true"] { background: color-mix(in srgb, var(--ao-blue, #2f6fed) 12%, transparent); box-shadow: inset 2px 0 0 var(--ao-blue, #2f6fed); }
+.cx-terminal-list button:hover { background: color-mix(in srgb, var(--ao-line) 55%, transparent); }
+.cx-terminal-list code { flex: 1 1 auto; min-width: 0; overflow: hidden; font: 12.5px/1.4 ui-monospace, "Cascadia Mono", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.cx-terminal-list.is-history code { color: var(--ao-muted); }
+.cx-terminal-list small { flex: 0 0 auto; color: var(--ao-muted); font-size: 12px; }
+.cx-terminal-history { padding: 0 8px; }
+.cx-terminal-history-toggle { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent;
+  color: var(--ao-muted); font: inherit; font-size: 12.5px; cursor: pointer; }
+.cx-terminal-history-toggle:hover { background: var(--cx-hover); color: var(--color-text-primary); }
+.cx-terminal-history-toggle[aria-expanded="false"] svg { transform: rotate(-90deg); }
 /* A command the agent ran with its own shell tool: listed read-only beside the app's. */
-.cx-terminal-source { flex: 0 0 auto; padding: 1px 6px; border: 1px solid var(--ao-line); border-radius: 8px; color: var(--ao-muted);
-  font-size: 10px; line-height: 14px; white-space: nowrap; }
-.cx-terminal-dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: var(--ao-muted); }
+.cx-terminal-source { flex: 0 0 auto; padding: 1px 7px; border: 1px solid var(--ao-line); border-radius: 8px; color: var(--ao-muted);
+  font-size: 11px; line-height: 16px; white-space: nowrap; }
+.cx-terminal-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--ao-muted); }
 .cx-terminal-dot.is-running { background: var(--ao-green, #2e9d5b); animation: cx-pulse 1.6s ease-in-out infinite; }
 .cx-terminal-dot.is-ok { background: var(--ao-green, #2e9d5b); }
 .cx-terminal-dot.is-failed { background: var(--ao-red, #c0392b); }
-.cx-terminal-head { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-top: 1px solid var(--ao-line); }
-.cx-terminal-head code { flex: 1 1 auto; min-width: 0; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.cx-terminal-status { flex: 0 0 auto; color: var(--ao-muted); font-size: 11px; white-space: nowrap; }
-.cx-terminal-stop { height: 24px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 6px; background: var(--color-bg-primary);
-  color: var(--color-text-primary); font: inherit; font-size: 12px; cursor: pointer; }
-.cx-terminal-output { flex: 1 1 auto; min-height: 0; margin: 0 10px; padding: 10px 12px; overflow: auto; border-radius: 8px; background: #111418; color: #d7dde4;
-  font: 12px/1.45 ui-monospace, "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
-.cx-terminal-input { padding: 8px 10px 10px; }
-.cx-terminal-input input { box-sizing: border-box; width: 100%; height: 28px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 6px;
-  background: var(--color-bg-primary); color: var(--color-text-primary); font: 12px ui-monospace, "Cascadia Mono", Consolas, monospace; }
+.cx-terminal-head { display: flex; align-items: center; gap: 10px; margin: 0 10px; padding: 8px 12px; border: 1px solid var(--ao-line); border-bottom: 0;
+  border-radius: 8px 8px 0 0; background: color-mix(in srgb, var(--ao-line) 30%, var(--color-bg-primary)); }
+.cx-terminal-title { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; }
+.cx-terminal-title code { overflow: hidden; color: var(--color-text-primary); font: 600 13px/1.4 ui-monospace, "Cascadia Mono", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.cx-terminal-title small { overflow: hidden; color: var(--ao-muted); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.cx-terminal-status { flex: 0 0 auto; color: var(--ao-muted); font-size: 12px; white-space: nowrap; }
+.cx-terminal-stop { height: 26px; padding: 0 12px; border: 1px solid color-mix(in srgb, var(--ao-red, #c0392b) 45%, var(--ao-line)); border-radius: 6px; background: var(--color-bg-primary);
+  color: var(--ao-red, #c0392b); font: inherit; font-size: 12.5px; cursor: pointer; }
+.cx-terminal-output { flex: 1 1 auto; min-height: 120px; margin: 0 10px; padding: 12px 14px; overflow: auto; border-radius: 0 0 8px 8px; background: #111418; color: #e6ebf0;
+  font: 13px/1.55 ui-monospace, "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
+.cx-terminal-input { padding: 0 10px; }
+.cx-terminal-input input { box-sizing: border-box; width: 100%; height: 32px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 6px;
+  background: var(--color-bg-primary); color: var(--color-text-primary); font: 13px ui-monospace, "Cascadia Mono", Consolas, monospace; }
 
 @keyframes cx-pulse { 50% { opacity: .35; } }
 @keyframes cx-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
