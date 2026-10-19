@@ -1,7 +1,7 @@
 // Controlled draft: polling and autosave responses cannot reset newer edits.
 import type { AoNode } from "./AgentOrchestratorSurface";
 import {
-  DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, emptyRoleSettings, workerRoute,
+  DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, emptyRoleSettings, starterSettings, workerRoute,
   type AoHarness, type AoModelLoader, type AoTeam, type RoleSettings,
 } from "./AgentOrchestratorRoleEditor";
 
@@ -118,7 +118,7 @@ export function AgentOrchestratorTeam({ team, harnesses, loadModels, change, sta
       const node: AoNode = {
         id: crypto.randomUUID(), task_id: "", role, state: "pending", parents: [planner.id],
         x: current.nodes.length, y: role === "worker" ? 1 : role === "approver" ? 0 : 2, route,
-        settings: { ...emptyRoleSettings(), name, specialty },
+        settings: starterSettings(role, name, specialty),
       };
       return { ...current, nodes: [...current.nodes, node] };
     });

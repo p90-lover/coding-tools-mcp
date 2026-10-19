@@ -91,7 +91,7 @@ test("the team page has a left palette of roles and preset workers, and an expli
   assert.match(source, /<aside className="ao-teams-palette" aria-label="Add roles">/);
   for (const role of ["worker", "approver", "sub_reviewer", "retry"]) assert.ok(source.includes(`add("${role}")`), role);
   for (const preset of ["Frontend", "Backend", "Tester", "Researcher", "Security auditor", "Docs writer", "DevOps"]) assert.match(source, new RegExp(`roleName: "${preset}"`));
-  assert.match(source, /role_name: preset\.roleName, specialty: preset\.specialty/, "a preset worker carries its role name and specialty");
+  assert.match(source, /starterSettings\(role, preset\.roleName, preset\.specialty, preset\.roleName\)/, "a preset worker carries its role name, specialty and starter instructions");
   assert.match(source, /\{saving \? "Saving…" : dirty \? "Save team" : "Saved"\}/);
 });
 

@@ -15,7 +15,7 @@ import { GOAL_SUMMARY, chatArchived, chatList, chatMarkdown, chatMessagesFromDes
 import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { createLatestConfigQueue } from "./ao-config";
 import {
-  AGENT_DEFAULT_MODEL, AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, defaultTeam, emptyRoleSettings,
+  AGENT_DEFAULT_MODEL, AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, defaultTeam, emptyRoleSettings, starterSettings,
   cardMeta, harnessLabel, modelLabel, modelShortLabel, teamForMission, workerRoute, type AoHarness, type AoModelCatalog, type AoModelLoader, type AoRoute, type AoTeam, type RoleSettings,
 } from "./AgentOrchestratorRoleEditor";
 import "./agent-orchestrator.css";
@@ -1352,7 +1352,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     const planner = selectedRun.nodes.find((node) => node.role === "planner");
     if (!planner) return;
     const node = { id: crypto.randomUUID(), task_id: runTaskId, role: "worker", state: "pending",
-      settings: { ...emptyRoleSettings(), name: workerName.trim() || "Worker", specialty: workerSpecialty },
+      settings: starterSettings("worker", workerName.trim() || "Worker", workerSpecialty),
       parents: workerParentId ? [planner.id, workerParentId] : [planner.id],
       x: selectedRun.nodes.length, y: 1, route: workerRouteDraft };
     const result = await moduleCall("update_run", { workspaceId, change: { operation: "graph", run_id: selectedRun.id,
