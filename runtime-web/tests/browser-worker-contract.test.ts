@@ -1367,13 +1367,18 @@ test("current app mention chips are verified exactly and excluded from attached 
   await expect(worker.connectorIsSelected(composer)).rejects.toThrow("duplicate");
 });
 
-test("repeated connector verification reuses its selected pill before clearing the composer", async () => {
+for (const saved of [false, true]) test(`repeated connector verification reuses its selected pill before clearing the composer (saved=${saved})`, async () => {
   let fillCalls = 0;
+  let personalizationProbes = 0;
   const selectedComposer = {
     fill: async () => { fillCalls += 1; },
   };
   const page = {
-    getByRole: personalizedTemporaryChatRole,
+    url: () => saved ? "https://chatgpt.com/" : "https://chatgpt.com/?temporary-chat=true",
+    getByRole: (...args: Parameters<typeof personalizedTemporaryChatRole>) => {
+      personalizationProbes += 1;
+      return personalizedTemporaryChatRole(...args);
+    },
     getByText: () => ({ exactConnectorLabel: true }),
     locator: () => ({ filter: () => ({}) }),
   };
@@ -1389,7 +1394,11 @@ test("repeated connector verification reuses its selected pill before clearing t
   }, page, async checkpoint => { checkpoints.push(checkpoint); })).resolves.toBe(selectedComposer);
 
   expect(fillCalls).toBe(0);
-  expect(checkpoints).toEqual(["personalization-already-enabled", "connector-already-selected"]);
+  // A saved chat has no per-conversation personalization switch; the selection is the proof.
+  expect(checkpoints).toEqual(saved
+    ? ["connector-already-selected"]
+    : ["personalization-already-enabled", "connector-already-selected"]);
+  expect(personalizationProbes > 0).toBe(!saved);
 });
 
 test("connector selection retriggers the complete mention after a fresh-page hydration miss", async () => {
@@ -1497,6 +1506,7 @@ test("connector verification preserves the host-refreshed catalog evidence", asy
   };
   const selectedComposer = { selected: true };
   const page = {
+    url: () => "https://chatgpt.com/?temporary-chat=true",
     getByRole: personalizedTemporaryChatRole,
     reload: async () => { calls.push("reload"); },
     getByText: () => ({ exactConnectorLabel: true }),
@@ -1534,7 +1544,7 @@ test("connector verification preserves the host-refreshed catalog evidence", asy
   const fixture = {
     config: { appName: "Codex Native2", browserDiagnosticsPath: diagnosticsRoot },
     ensurePage: async () => page,
-    prepareTemporaryChatSurface: async () => {
+    prepareChatSurface: async () => {
       prepared += 1;
       calls.push(`prepare:${prepared}`);
     },
@@ -1594,7 +1604,7 @@ for (const captureScreenshots of [false, true]) test(`connector failure persists
     await expect(verifyConnectorExclusive.call({
       config: { appName: "Codex Native2", browserDiagnosticsPath: diagnosticsRoot },
       ensurePage: async () => page,
-      prepareTemporaryChatSurface: async (_page: unknown, capture: (checkpoint: string) => Promise<void>) => {
+      prepareChatSurface: async (_page: unknown, capture: (checkpoint: string) => Promise<void>) => {
         await capture("composer-ready");
       },
       selectConnector: async (_page: unknown, capture: (checkpoint: string) => Promise<void>) => {
@@ -1631,7 +1641,7 @@ for (const captureScreenshots of [false, true]) test(`connector failure persists
   }
 });
 
-test("successful connector verification clears the proven selection before releasing the page", async () => {
+for (const useSavedChats of [false, true]) test(`connector verification prepares the task-turn chat mode (${useSavedChats}) and clears its selection`, async () => {
   const diagnosticsRoot = mkdtempSync(join(tmpdir(), "cgw-connector-verification-success-"));
   const calls: string[] = [];
   const page = {
@@ -1647,10 +1657,10 @@ test("successful connector verification clears the proven selection before relea
 
   try {
     const result = await verifyConnectorExclusive.call({
-      config: { appName: "Codex Native2 DEV", browserDiagnosticsPath: diagnosticsRoot },
+      config: { appName: "Codex Native2 DEV", browserDiagnosticsPath: diagnosticsRoot, useSavedChats },
       ensurePage: async () => page,
-      prepareTemporaryChatSurface: async (_page: unknown, capture: (checkpoint: string) => Promise<void>) => {
-        calls.push("prepare");
+      prepareChatSurface: async (_page: unknown, capture: (checkpoint: string) => Promise<void>, saved: boolean) => {
+        calls.push(`prepare:${saved}`);
         await capture("composer-ready");
       },
       selectConnector: async (_page: unknown, capture: (checkpoint: string) => Promise<void>) => {
@@ -1661,7 +1671,7 @@ test("successful connector verification clears the proven selection before relea
     }, "verify_success_contract");
 
     expect(result).toBe("Codex Native2 DEV");
-    expect(calls).toEqual(["prepare", "select", "clear"]);
+    expect(calls).toEqual([`prepare:${useSavedChats}`, "select", "clear"]);
     const [traceDirectory] = readdirSync(diagnosticsRoot);
     const checkpoints = readdirSync(join(diagnosticsRoot, traceDirectory!))
       .filter(name => name.endsWith(".json"))
@@ -1901,6 +1911,7 @@ test("an aborted connector proof clears its mention before the preflight release
     evaluate: async () => { calls.push("cleanup-read"); return ""; },
   };
   const page = {
+    url: () => "https://chatgpt.com/?temporary-chat=true",
     getByRole: () => absent,
     getByText: () => ({ exactConnectorLabel: true }),
     locator: (selector: string) => {
@@ -1955,6 +1966,7 @@ test("a lost connector mention cannot be used as evidence to change personalizat
     evaluate: async () => ({ text: "", focused: false }),
   };
   const page = {
+    url: () => "https://chatgpt.com/?temporary-chat=true",
     getByRole: () => absent,
     getByText: () => ({}),
     locator: (selector: string) => {

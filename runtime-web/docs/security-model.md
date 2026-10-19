@@ -100,15 +100,23 @@ external browser.
 ### Cross-turn data leakage
 
 Browser turns use at most five independent task-bound tabs in one private login partition. Every
-outer Codex task owns an exact launcher surface lease and retains its Temporary Chat only across
+outer Codex task owns an exact launcher surface lease and retains its ChatGPT conversation only across
 sequential messages in the same model/effort/compaction epoch; chats are never reused across tasks.
 Closing a running tab destroys its page and terminates that turn. The five-tab limit bounds parallel
 account traffic. Tool calls remain in the same ChatGPT response. The
 bounded local continuation cache is private, expires, and exists only to implement Codex
 `previous_response_id` replay. Full-mode context compaction accepts a checkpoint only through its
 one-shot MCP control capability in the exact retained source chat. If that chat no longer exists, a
-fresh tool-free Temporary Chat receives the canonical Codex history; the bridge never parses ordinary
+fresh tool-free chat receives the canonical Codex history; the bridge never parses ordinary
 assistant prose as a structured handoff.
+
+Task conversations are saved in ChatGPT history by default, because ChatGPT refuses connectors in
+Temporary Chat. **Save chats in ChatGPT** can be turned off to use Temporary Chat (without the app's
+tools); an existing off setting is preserved when updating. Saved chats may use ChatGPT memory and
+custom instructions. Connector verification follows the selected chat mode; account inspection and
+the smoke test still use an empty Temporary Chat. A retained saved-chat tab shows the account's
+history sidebar, so the launcher pins the exact `/c/<id>` conversation a turn ended on and drops
+the retention, instead of typing a continuation, if the tab now shows any other conversation.
 
 ## Network exposure
 

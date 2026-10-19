@@ -657,6 +657,7 @@ function applyReadyRuntimeAfterBridge({ logger, stateStore, bridgeRouteChanged =
     coreSetupComplete: true,
     mcpRuntimeInstalled: config.mode === "full",
     experimentalBiggerContext: config.experimentalBiggerContext === true,
+    useSavedChats: config.useSavedChats !== false,
     zeroRiskProEnabled: config.zeroRiskProEnabled === true,
     ...(bridgeRouteChanged ? {
       codexCatalogVerified: false,
@@ -2342,6 +2343,17 @@ function registerIpc({ logger, stateStore }) {
     if (!IS_DEV_PROFILE) startCatalogVerificationMonitor({ logger, stateStore });
     return state;
   });
+  handle("launcher:use-saved-chats", async (_event, enabled) => {
+    if (browserHost.activeTraceId || browserHost.currentOperation()) {
+      throw new Error("Finish or cancel active ChatGPT turns before changing saved chats");
+    }
+    // Retained tabs of the other chat kind are released on their next reuse (browser-host checks
+    // the kind), so the setting needs no Codex restart.
+    const result = await runtimeHost.setUseSavedChats(enabled === true);
+    const state = stateStore.update({ useSavedChats: result.enabled });
+    send("launcher:state-changed", state);
+    return state;
+  });
   handle("launcher:zero-risk-pro", async (_event, enabled) => {
     const browserOperation = browserHost.currentOperation();
     if (browserHost.activeTraceId || browserOperation) {
@@ -3316,6 +3328,15 @@ async function start() {
     },
     showWindow: showMainWindow,
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
+    // The runtime config decides the chat kind its turns open; the host must agree with it. An
+    // unreadable config falls back to the synced launcher state rather than failing the turn.
+    getUseSavedChats: () => {
+      try {
+        return runtimeHost.runtimeConfigSnapshot().config?.useSavedChats !== false;
+      } catch {
+        return stateStore.read().useSavedChats !== false;
+      }
+    },
   });
   setProviderBrowserHost(() => browserHost);
   registerIpc({ logger, stateStore });
@@ -3406,6 +3427,7 @@ async function start() {
       codexRestartRequired: false,
       autoStart: false,
       experimentalBiggerContext: config?.experimentalBiggerContext === true,
+      useSavedChats: config?.useSavedChats !== false,
       zeroRiskProEnabled: config?.zeroRiskProEnabled === true,
     });
     send("launcher:state-changed", state);
@@ -3459,11 +3481,13 @@ async function start() {
     const configuredRuntime = runtimeHost.runtimeConfigSnapshot();
     if (configuredRuntime.configured) {
       const enabled = configuredRuntime.config?.experimentalBiggerContext === true;
+      const useSavedChats = configuredRuntime.config?.useSavedChats !== false;
       const zeroRiskProEnabled = configuredRuntime.config?.zeroRiskProEnabled === true;
       const saved = stateStore.read();
       if (saved.experimentalBiggerContext !== enabled
+        || saved.useSavedChats !== useSavedChats
         || saved.zeroRiskProEnabled !== zeroRiskProEnabled) {
-        const state = stateStore.update({ experimentalBiggerContext: enabled, zeroRiskProEnabled });
+        const state = stateStore.update({ experimentalBiggerContext: enabled, useSavedChats, zeroRiskProEnabled });
         send("launcher:state-changed", state);
       }
     }
@@ -3494,6 +3518,7 @@ async function start() {
         codexRestartRequired: true,
         mcpRuntimeInstalled: config.mode === "full",
         experimentalBiggerContext: config.experimentalBiggerContext === true,
+        useSavedChats: config.useSavedChats !== false,
         zeroRiskProEnabled: config.zeroRiskProEnabled === true,
         ...(config.mode === "browser-only" ? { mcpSetupComplete: false, mcpGuideStep: 0 } : {}),
       };

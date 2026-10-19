@@ -2110,6 +2110,17 @@ function SettingsSurface({
       setBusy(false);
     }
   };
+  const setUseSavedChats = async (enabled: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      updateState(await api!.setUseSavedChats(enabled));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
   const setInteractionMode = async (mode: BrowserInteractionMode) => {
     setBusy(true);
     setError(null);
@@ -2291,6 +2302,13 @@ function SettingsSurface({
               || snapshot.state.browserInteractionMode === "manual"
               || snapshot.state.coreSetupComplete !== true}
             onChange={(checked) => void setBiggerContext(checked)}
+          />
+        </SettingRow>
+        <SettingRow body={copy.savedChatsBody} label={copy.savedChats}>
+          <Switch
+            checked={snapshot.state.useSavedChats !== false}
+            disabled={busy || snapshot.state.coreSetupComplete !== true}
+            onChange={(checked) => void setUseSavedChats(checked)}
           />
         </SettingRow>
         <SettingRow body={copy.chooseLanguageHint} label={copy.language}>

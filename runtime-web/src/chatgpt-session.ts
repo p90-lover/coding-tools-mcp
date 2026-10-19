@@ -1,7 +1,16 @@
 import type { Locator, Page } from "playwright-core";
 import type { ChatGptWebAccountCapabilities } from "./chatgpt-web-models";
+import { parseChatGptEffortTicks, type ChatGptEffortSnapshot } from "./chatgpt-account-capabilities";
 
 export const CHATGPT_TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
+export const CHATGPT_SAVED_CHAT_URL = "https://chatgpt.com/";
+/** A saved conversation's own page; only these may be continued by a retained turn. */
+export const CHATGPT_SAVED_CONVERSATION_PATH = /^\/c\/[0-9a-f-]{36}$/;
+
+/** ChatGPT refuses connectors in Temporary Chat, so task turns default to a saved new chat. */
+export function chatGptNewChatUrl(useSavedChats: boolean): string {
+  return useSavedChats ? CHATGPT_SAVED_CHAT_URL : CHATGPT_TEMPORARY_CHAT_URL;
+}
 export const CHATGPT_COMPOSER_SELECTOR = [
   '[data-testid="prompt-textarea"]',
   "#prompt-textarea",
@@ -158,6 +167,22 @@ export function parseChatGptEffortSliderState(
   return { min, max, value };
 }
 
+/**
+ * Which slider positions the account may choose, read without moving the slider. Only the ticks
+ * carry both data-locked and data-selected (the slider root has data-locked too); a locked tick
+ * is an upsell, not a choice. Undefined when the ticks do not match the ARIA range exactly.
+ */
+export async function readChatGptEffortSnapshot(
+  sliderContainer: Locator,
+  state: ChatGptEffortSliderState,
+): Promise<ChatGptEffortSnapshot | undefined> {
+  const locks = await sliderContainer.evaluate(container => Array.from(
+    container.querySelectorAll("[data-locked][data-selected]"),
+    tick => tick.getAttribute("data-locked"),
+  ));
+  return parseChatGptEffortTicks(locks, state.max - state.min + 1);
+}
+
 async function anyVisible(locator: Locator): Promise<boolean> {
   const count = await locator.count();
   for (let index = 0; index < count; index += 1) {
@@ -183,9 +208,53 @@ export async function assertTemporaryChatPage(page: Page): Promise<void> {
   }
 }
 
+/**
+ * A turn must start on an empty new chat of the configured kind. The saved-chat home has no
+ * temporary-chat parameter at all; any /c/ path is an existing (possibly the user's) conversation.
+ */
+export async function assertNewChatPage(page: Page, useSavedChats: boolean): Promise<void> {
+  const url = new URL(page.url());
+  const temporaryParam = url.searchParams.get("temporary-chat");
+  if (url.origin !== new URL(CHATGPT_SAVED_CHAT_URL).origin || url.pathname !== "/"
+    || (useSavedChats ? temporaryParam !== null : temporaryParam !== "true")) {
+    throw new Error(`ChatGPT left the new ${useSavedChats ? "saved" : "Temporary"} Chat surface (${page.url()})`);
+  }
+}
+
+/** The /c/<uuid> path of a saved conversation page, or undefined for any other page. */
+export function chatGptSavedConversationPath(pageUrl: string): string | undefined {
+  try {
+    const url = new URL(pageUrl);
+    if (url.origin !== new URL(CHATGPT_SAVED_CHAT_URL).origin) return undefined;
+    return CHATGPT_SAVED_CONVERSATION_PATH.test(url.pathname) ? url.pathname : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether a retained turn may type into this page. A saved task chat lives on /c/<uuid> without
+ * the temporary flag; a Temporary Chat keeps the flag, and losing it means the page now shows one
+ * of the user's own saved conversations. The launcher separately pins the exact /c/ path.
+ */
+export function chatGptRetainedConversationPage(pageUrl: string, useSavedChats: boolean): boolean {
+  let url: URL;
+  try { url = new URL(pageUrl); } catch { return false; }
+  if (url.origin !== new URL(CHATGPT_SAVED_CHAT_URL).origin) return false;
+  const temporary = url.searchParams.get("temporary-chat") === "true";
+  return useSavedChats
+    ? !url.searchParams.has("temporary-chat") && CHATGPT_SAVED_CONVERSATION_PATH.test(url.pathname)
+    : temporary;
+}
+
 export async function detectChatGptAccountCapabilities(
   page: Page,
-  options: { selectorTimeoutMs?: number; stableAbsenceMs?: number } = {},
+  options: {
+    selectorTimeoutMs?: number;
+    stableAbsenceMs?: number;
+    /** Receives the slider's tick reading; a failed reading never fails the probe. */
+    onEffortSnapshot?: (snapshot: ChatGptEffortSnapshot) => void;
+  } = {},
 ): Promise<ChatGptWebAccountCapabilities> {
   const composers = page.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true });
   const composer = composers.last();
@@ -238,6 +307,14 @@ export async function detectChatGptAccountCapabilities(
         "ChatGPT model controls are unavailable. Reload ChatGPT and run Repair again.",
         { cause: new Error("ChatGPT effort slider exposed an invalid ARIA range") },
       );
+    }
+    if (options.onEffortSnapshot) {
+      try {
+        const snapshot = await readChatGptEffortSnapshot(sliderContainer, state);
+        if (snapshot) options.onEffortSnapshot(snapshot);
+      } catch {
+        // The tick reading only refreshes the model-list hint; the probe's own answer stands.
+      }
     }
     const lockedAccess = await menu.getByText("Locked, opens access options", { exact: true }).count();
     return { solAvailable: true, proAvailable: state.max - state.min + 1 >= 5 && lockedAccess === 0 };

@@ -350,6 +350,10 @@ function validateConfig(config, descriptorPath, platform = process.platform, lau
     && typeof config.experimentalBiggerContext !== "boolean") {
     throw new Error("Runtime configuration has an invalid experimentalBiggerContext");
   }
+  // Absent means saved chats (configs written before the setting); only a boolean is valid.
+  if (config.useSavedChats !== undefined && typeof config.useSavedChats !== "boolean") {
+    throw new Error("Runtime configuration has an invalid useSavedChats");
+  }
   if (config.stallTimeoutSec !== undefined
     && (!Number.isFinite(config.stallTimeoutSec) || config.stallTimeoutSec <= 0)) {
     throw new Error("Runtime configuration has an invalid stallTimeoutSec");

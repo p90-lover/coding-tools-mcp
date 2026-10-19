@@ -110,6 +110,32 @@ test("setup browser-interaction flags are explicit and mutually exclusive", asyn
     });
     expect(profileConflict.exitCode).toBe(1);
     expect(profileConflict.stderr).toContain("Choose at most one Zero Risk model profile");
+
+    const chatModeConflict = await runCli([
+      "setup",
+      "--browser-only",
+      "--saved-chats",
+      "--temporary-chats",
+      "--acknowledge-unofficial",
+    ], {
+      ...process.env,
+      CODEX_HOME: join(root, "codex"),
+      CODEX_CHATGPT_WEB_HOME: join(root, "app"),
+    });
+    expect(chatModeConflict.exitCode).toBe(1);
+    expect(chatModeConflict.stderr).toContain("Choose at most one chat mode: --saved-chats or --temporary-chats");
+
+    // A single chat-mode flag is consumed; setup then stops at its own port validation.
+    for (const flag of ["--saved-chats", "--temporary-chats"]) {
+      const single = await runCli(["setup", "--browser-only", flag, "--port", "0", "--acknowledge-unofficial"], {
+        ...process.env,
+        CODEX_HOME: join(root, "codex"),
+        CODEX_CHATGPT_WEB_HOME: join(root, "app"),
+      });
+      expect(single.exitCode).toBe(1);
+      expect(single.stderr).toContain("--port must be an integer from 1 to 65535");
+      expect(single.stderr).not.toContain("Unknown arguments");
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

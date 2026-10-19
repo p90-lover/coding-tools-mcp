@@ -11,6 +11,7 @@ import {
   detectChatGptAccountCapabilities,
 } from "./chatgpt-session";
 import type { ChatGptWebAccountCapabilities } from "./chatgpt-web-models";
+import { recordChatGptEffortSnapshot } from "./chatgpt-account-capabilities";
 
 export interface BrowserLoginResult {
   storageStatePath: string;
@@ -168,7 +169,11 @@ async function inspectStoredState(
       await verifierPage.getByRole("textbox", { name: "Chat with ChatGPT" }).waitFor({ state: "visible", timeout: 60_000 });
       await assertAuthenticatedChatGptPage(verifierPage);
       await assertTemporaryChatPage(verifierPage);
-      return { ...await detectChatGptAccountCapabilities(verifierPage), url: verifierPage.url() };
+      // Sign-in refreshes the model-list hint as well as the setup booleans.
+      const capabilities = await detectChatGptAccountCapabilities(verifierPage, {
+        onEffortSnapshot: snapshot => { recordChatGptEffortSnapshot(snapshot); },
+      });
+      return { ...capabilities, url: verifierPage.url() };
     } finally {
       await verifierContext.close();
     }

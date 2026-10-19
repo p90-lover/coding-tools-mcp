@@ -290,6 +290,40 @@ test("Bigger Context updates the isolated DEV config without installing a Codex 
   });
 });
 
+test("Save chats in ChatGPT reruns setup with only its chat-mode flag added", async () => {
+  const fixture = hostFor({ mode: "full", appName: CURRENT_CONNECTOR_NAME, autoApproveToolCalls: true });
+  const off = await fixture.host.setUseSavedChats(false);
+  assert.equal(off.enabled, false);
+  assert.deepEqual(fixture.invocation(), {
+    name: "use-saved-chats",
+    args: [
+      "setup",
+      "--full",
+      "--browser-host-descriptor",
+      "/runtime/launcher-browser.json",
+      "--automatic-browser-interaction",
+      "--replace-codex-route",
+      "--acknowledge-unofficial",
+      "--restart-service",
+      "--temporary-chats",
+      "--auto-approve-tool-calls",
+    ],
+  });
+  assert.equal((await fixture.host.setUseSavedChats(true)).enabled, true);
+  assert.equal(fixture.invocation().args.includes("--saved-chats"), true);
+  assert.equal(fixture.invocation().args.includes("--temporary-chats"), false);
+
+  const dev = devHostFor({ mode: "browser-only" });
+  await dev.host.setUseSavedChats(true);
+  assert.deepEqual(dev.invocation().args, [
+    "dev", "setup", "--browser-only", "--browser-host-descriptor", "/dev/runtime/launcher-browser.json",
+    "--automatic-browser-interaction", "--acknowledge-unofficial", "--saved-chats",
+  ]);
+
+  await assert.rejects(fixture.host.setUseSavedChats("yes"), /must be a boolean/);
+  await assert.rejects(hostFor(null).host.setUseSavedChats(true), /Initialize the runtime/);
+});
+
 test("Zero Risk Pro transaction installs or removes only its explicit model profile", async () => {
   const config = {
     mode: "full",

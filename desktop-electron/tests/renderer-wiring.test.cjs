@@ -239,6 +239,21 @@ test("DEV launcher exposes its profile and supervises only its Full-mode MCP run
   assert.doesNotMatch(electronMain, /IS_DEV_PROFILE && key === "experimentalBiggerContext"/);
 });
 
+test("Save chats in ChatGPT is one settings toggle wired through the runtime setup", () => {
+  assert.match(appSource, /label=\{copy\.savedChats\}[\s\S]*?checked=\{snapshot\.state\.useSavedChats !== false\}[\s\S]*?onChange=\{\(checked\) => void setUseSavedChats\(checked\)\}/);
+  assert.match(appSource, /updateState\(await api!\.setUseSavedChats\(enabled\)\)/);
+  assert.match(preloadSource, /setUseSavedChats:[\s\S]*?launcher:use-saved-chats/);
+  assert.match(electronMain, /handle\("launcher:use-saved-chats"[\s\S]*?runtimeHost\.setUseSavedChats\(enabled === true\)/);
+  // The host follows the runtime's own setting, which is on unless explicitly turned off.
+  assert.match(electronMain, /getUseSavedChats:[\s\S]*?config\?\.useSavedChats !== false/);
+  // English, Simplified Chinese and Japanese; Traditional Chinese overrides live in its locale file.
+  assert.equal(i18nSource.match(/^ {2}savedChatsBody: "/gm)?.length, 3);
+  const zhTw = fs.readFileSync(path.join(launcherRoot, "src", "i18n", "locales", "zh-TW.ts"), "utf8");
+  assert.match(zhTw, /^ {2}savedChatsBody: "/m);
+  // The hint must say where the chats go and why Temporary Chat is not the default.
+  assert.match(i18nSource, /savedChatsBody: "[^"]*ChatGPT history[^"]*memory and custom instructions[^"]*Temporary Chat[^"]*tools/);
+});
+
 test("macOS passkey sign-in is additive to the unchanged embedded login action", () => {
   assert.match(appSource, /onAction=\{openLogin\}/);
   assert.match(appSource, /<BrowserSurface[\s\S]*?operation=\{operation\}[\s\S]*?platform=\{snapshot\.platform\}/);

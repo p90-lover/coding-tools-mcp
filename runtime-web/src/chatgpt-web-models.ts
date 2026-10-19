@@ -371,8 +371,14 @@ export function isChatGptWebModelSlug(modelId: string): boolean {
   return modelId.startsWith(CHATGPT_WEB_MODEL_PREFIX);
 }
 
+/**
+ * The model list Codex sees. `detectedTiers` is a fresh reading of ChatGPT's effort slider by
+ * index (Instant, Medium, High, Extra High, Pro; see chatgpt-account-capabilities); without one
+ * the list stays the static one below.
+ */
 export function availableChatGptWebModelRoutes(
   capabilities: ChatGptWebAccountCapabilities,
+  detectedTiers?: readonly boolean[],
 ): readonly ChatGptWebModelRoute[] {
   if (capabilities.browserInteractionMode === "manual") {
     if (capabilities.experimentalBiggerContext) {
@@ -383,8 +389,15 @@ export function availableChatGptWebModelRoutes(
       : [CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE];
   }
   if (!capabilities.solAvailable) return CHATGPT_WEB_LUNA_MODEL_ROUTES;
-  // Every Sol tier is listed; one the account lacks runs at the nearest lower tier instead
-  // (see requireChatGptWebModelRoute), so the list never hides a tier behind a stale capability.
+  // A fresh slider reading lists only the tiers the account can pick today. The routes keep their
+  // ids, and a hidden tier that Codex still has selected keeps running at the nearest lower tier
+  // (requireChatGptWebModelRoute). A reading that hides even Instant is not trusted.
+  const detected = detectedTiers
+    ? CHATGPT_WEB_MODEL_ROUTES.filter((_route, index) => detectedTiers[index] === true)
+    : [];
+  if (detected.length > 0 && detectedTiers?.[0] === true) return detected;
+  // Without one every Sol tier is listed; one the account lacks runs at the nearest lower tier
+  // instead, so the list never hides a tier behind a stale setup capability.
   return CHATGPT_WEB_MODEL_ROUTES;
 }
 

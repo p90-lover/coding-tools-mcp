@@ -442,6 +442,7 @@ export async function modelsRequest(
   fetchUpstream?: NativeFetch,
   contextOverride?: () => CodexModelContextOverride | undefined,
   onFailure?: (failure: ModelCatalogFailure) => void,
+  detectedTiers?: () => readonly boolean[] | undefined,
 ): Promise<Response> {
   let upstream: Response;
   let sent = false;
@@ -460,7 +461,7 @@ export async function modelsRequest(
   }
   let catalog: Record<string, unknown>;
   try {
-    catalog = augmentNativeModelCatalog(await upstream.json(), config, contextOverride?.());
+    catalog = augmentNativeModelCatalog(await upstream.json(), config, contextOverride?.(), detectedTiers?.());
   } catch (error) {
     onFailure?.(modelCatalogFailure("catalog", error));
     return formatErrorResponse(502, "invalid_response_error", error instanceof Error ? error.message : String(error));
@@ -842,7 +843,12 @@ export async function compactRequest(
 
 export function startServer(
   config: AppConfig,
-  dependencies: { fetchUpstream?: NativeFetch; adapterFactory?: ChatGptWebAdapterFactory } = {},
+  dependencies: {
+    fetchUpstream?: NativeFetch;
+    adapterFactory?: ChatGptWebAdapterFactory;
+    /** Fresh effort-slider reading, read per model-list request; absent keeps the static list. */
+    detectedTiers?: () => readonly boolean[] | undefined;
+  } = {},
 ): ReturnType<typeof Bun.serve> {
   if (config.purpose === "dev-harness") {
     throw new Error("DEV harness configuration cannot start a Responses listener");
@@ -1034,7 +1040,7 @@ export function startServer(
           );
         }
         try {
-          return routerWebModelsResponse(config);
+          return routerWebModelsResponse(config, dependencies.detectedTiers?.());
         } catch (error) {
           return formatErrorResponse(
             500,
@@ -1107,6 +1113,7 @@ export function startServer(
             dependencies.fetchUpstream,
             readCodexModelContextOverride,
             value => { failure = value; },
+            dependencies.detectedTiers,
           );
           if (response.ok) {
             successfulModelCatalogRequests += 1;

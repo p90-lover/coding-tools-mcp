@@ -157,6 +157,8 @@ export function augmentNativeModelCatalog(
   value: unknown,
   config: AppConfig,
   contextOverride?: CodexModelContextOverride,
+  /** Fresh effort-slider reading (freshChatGptEffortTiers); request handlers pass it per request. */
+  detectedTiers?: readonly boolean[],
 ): JsonObject {
   const catalog = object(value, "native Codex models response");
   if (!Array.isArray(catalog.models)) {
@@ -191,7 +193,7 @@ export function augmentNativeModelCatalog(
       }
     }
   }
-  const webModels = availableChatGptWebModelRoutes(config)
+  const webModels = availableChatGptWebModelRoutes(config, detectedTiers)
     .map(route => buildChatGptWebModel(template, route, config));
   return {
     ...structuredClone(catalog),

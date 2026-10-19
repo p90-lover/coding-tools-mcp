@@ -19,6 +19,8 @@ interface RunMessage {
     browserDiagnosticsPath?: string;
     turnTimeoutMs: number;
     autoApproveToolCalls: boolean;
+    /** Absent from an older daemon: the worker then falls back to its saved-chat default. */
+    useSavedChats?: boolean;
   };
   turn: {
     traceId: string;
@@ -42,6 +44,8 @@ interface VerifyMessage {
   config: {
     appName: string;
     browserHostDescriptorPath: string;
+    /** Connector verification follows the task-turn chat mode; inspect and smoke ignore it. */
+    useSavedChats?: boolean;
   };
 }
 
@@ -177,6 +181,9 @@ async function run(message: RunMessage): Promise<void> {
   if (message.turn.externalProgress !== undefined && typeof message.turn.externalProgress !== "boolean") {
     throw new Error("Browser helper external progress flag is invalid");
   }
+  if (message.config.useSavedChats !== undefined && typeof message.config.useSavedChats !== "boolean") {
+    throw new Error("Browser helper saved-chat flag is invalid");
+  }
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web",
     baseUrl: "https://chatgpt.com",
@@ -187,6 +194,7 @@ async function run(message: RunMessage): Promise<void> {
       browserDiagnosticsPath: message.config.browserDiagnosticsPath,
       turnTimeoutMs: message.config.turnTimeoutMs,
       autoApproveToolCalls: message.config.autoApproveToolCalls,
+      ...(message.config.useSavedChats !== undefined ? { useSavedChats: message.config.useSavedChats } : {}),
     },
   };
   const abortController = new AbortController();
@@ -350,13 +358,18 @@ function maintenanceWorker(message: MaintenanceMessage): ChatGptBrowserWorker {
   }
   const appName = message.config.appName?.trim();
   const browserHostDescriptorPath = message.config.browserHostDescriptorPath?.trim();
-  if (!appName || appName.length > 80 || !browserHostDescriptorPath) {
+  const useSavedChats = message.config.useSavedChats;
+  if (!appName || appName.length > 80 || !browserHostDescriptorPath
+    || (useSavedChats !== undefined && typeof useSavedChats !== "boolean")) {
     throw new Error("Browser helper maintenance config is invalid");
   }
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web",
     baseUrl: "https://chatgpt.com",
-    chatgptWeb: { appName, browserHost: "launcher", browserHostDescriptorPath },
+    chatgptWeb: {
+      appName, browserHost: "launcher", browserHostDescriptorPath,
+      ...(useSavedChats !== undefined ? { useSavedChats } : {}),
+    },
   };
   return ChatGptBrowserWorker.forProvider(provider);
 }

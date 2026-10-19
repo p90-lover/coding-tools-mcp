@@ -26,6 +26,8 @@ const {
 } = require("./browser-state.cjs");
 
 const TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
+const SAVED_CHAT_URL = "https://chatgpt.com/";
+const SAVED_CONVERSATION_PATH = /^\/c\/[0-9a-f-]{36}$/;
 const CHATGPT_ORIGIN = "https://chatgpt.com";
 const IDLE_BROWSER_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
 const PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS = 10_000;
@@ -243,6 +245,51 @@ function isAbortedNavigationError(error) {
   return error instanceof Error && /\bERR_ABORTED\b/.test(error.message);
 }
 
+function useSavedChatsFor(host) {
+  return host.getUseSavedChats?.() !== false;
+}
+
+/** The empty new chat a task turn starts on; Temporary Chat only when saved chats are off. */
+function newChatUrlFor(host) {
+  return useSavedChatsFor(host) ? SAVED_CHAT_URL : TEMPORARY_CHAT_URL;
+}
+
+/**
+ * Where a completed turn left its retained tab. A saved task chat must sit on its own
+ * /c/<uuid> page; a Temporary Chat keeps its flag (on /c/<uuid> or, in some builds, the home).
+ * Null means the page holds no conversation this turn owns, so it must not be continued: the
+ * tab shows the user's history sidebar and could now be one of the user's own chats.
+ */
+function retainedConversationLocation(value, useSavedChats) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return null;
+  }
+  if (parsed.origin !== CHATGPT_ORIGIN) return null;
+  const temporary = parsed.searchParams.get("temporary-chat") === "true";
+  if (useSavedChats) {
+    return !parsed.searchParams.has("temporary-chat") && SAVED_CONVERSATION_PATH.test(parsed.pathname)
+      ? parsed.pathname
+      : null;
+  }
+  if (!temporary) return null;
+  if (SAVED_CONVERSATION_PATH.test(parsed.pathname)) return `${parsed.pathname}?temporary-chat=true`;
+  return parsed.pathname === "/" ? "/?temporary-chat=true" : null;
+}
+
+function isNewChatUrl(value, useSavedChats) {
+  if (!useSavedChats) return isTemporaryChatUrl(value);
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  return parsed.origin === CHATGPT_ORIGIN && parsed.pathname === "/" && !parsed.searchParams.has("temporary-chat");
+}
+
 function isTemporaryChatUrl(value) {
   let parsed;
   try {
@@ -392,6 +439,8 @@ class BrowserHost {
     showWindow = () => {},
     clipboardApi = clipboard,
     getBrowserInteractionMode = () => "automatic",
+    // Task chats are saved by default: ChatGPT refuses connectors in Temporary Chat.
+    getUseSavedChats = () => true,
   }) {
     if (typeof getConnectorName !== "function") {
       throw new Error("Browser host connector-name resolver is unavailable");
@@ -419,6 +468,7 @@ class BrowserHost {
     this.showWindow = showWindow;
     this.clipboard = clipboardApi;
     this.getBrowserInteractionMode = getBrowserInteractionMode;
+    this.getUseSavedChats = getUseSavedChats;
     this.runBrowserHelperOperation = runBrowserHelperOperation;
     this.verifyConnectorWithBrowserHelper = verifyConnectorWithBrowserHelper;
     this.surfaceId = randomBytes(24).toString("base64url");
@@ -779,7 +829,7 @@ class BrowserHost {
       ordinal,
       label: `ChatGPT ${ordinal}`,
       pageTitle: "ChatGPT",
-      url: TEMPORARY_CHAT_URL,
+      url: newChatUrlFor(this),
       loading: true,
       message: "Paste the copied prompt, add any images yourself because Zero Risk cannot transfer them, choose a model and effort, then press Sent",
       interactionMode: "manual",
@@ -825,7 +875,8 @@ class BrowserHost {
     }
     if (this.turnTabs.get(tab.id) !== tab || contents.isDestroyed()) return;
     try {
-      await contents.loadURL(TEMPORARY_CHAT_URL);
+      // The user mentions the connector here too, so Zero Risk follows "Save chats in ChatGPT".
+      await contents.loadURL(newChatUrlFor(this));
     } catch (error) {
       if (this.turnTabs.get(tab.id) !== tab || contents.isDestroyed()) return;
       if (isAbortedNavigationError(error)) {
@@ -1383,13 +1434,15 @@ class BrowserHost {
     });
   }
 
-  async refreshChatGptHomeDocument() {
+  async refreshChatGptHomeDocument(useSavedChats = false) {
     // A navigation from the idle host already creates a fresh ChatGPT document. Reload only an
-    // existing Temporary Chat document so the helper observes one authoritative SPA bootstrap.
-    if (isTemporaryChatUrl(this.view.webContents.getURL())) {
+    // existing new-chat document of the requested kind so the helper observes one authoritative
+    // SPA bootstrap (and, for verification, the same kind of chat the task turns use).
+    const targetUrl = useSavedChats ? SAVED_CHAT_URL : TEMPORARY_CHAT_URL;
+    if (isNewChatUrl(this.view.webContents.getURL(), useSavedChats)) {
       await this.hardRefreshHome();
     } else {
-      await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
+      await this.view.webContents.loadURL(targetUrl);
     }
     await this.waitForAuthenticated(60_000);
   }
@@ -2489,7 +2542,7 @@ class BrowserHost {
     if (this.userCancelledTurnOwners.has(traceId)) {
       throw new BrowserTurnCancelledError(traceId);
     }
-    const sameTrace = [...this.turnTabs.values()].find((tab) => tab.traceId === traceId);
+    let sameTrace = [...this.turnTabs.values()].find((tab) => tab.traceId === traceId);
     if (sameTrace && sameTrace.interactionMode !== "automatic") {
       throw new Error(`Browser turn ${traceId} already belongs to Zero Risk interaction`);
     }
@@ -2507,7 +2560,18 @@ class BrowserHost {
     if (retainedMatches.length > 1) {
       throw new Error(`ChatGPT retained conversation ${conversationKey} owns multiple browser tabs`);
     }
-    const exactRetained = retainedMatches[0];
+    let exactRetained = retainedMatches[0];
+    // A retained tab stays a live ChatGPT page with the history sidebar, so the user may have
+    // opened another conversation in it. Continuing there would type into the user's own chat:
+    // release the tab instead, which takes the existing retained_conversation_unavailable path.
+    if (exactRetained && !exactRetained.view.webContents.isDestroyed()
+      && retainedConversationLocation(exactRetained.view.webContents.getURL(), useSavedChatsFor(this))
+        !== exactRetained.retainedLocation) {
+      this.logger.warn("browser.retained_conversation_moved", { tabId: exactRetained.id, traceId });
+      this.removeTurnTab(exactRetained, false);
+      if (sameTrace === exactRetained) sameTrace = undefined;
+      exactRetained = undefined;
+    }
     if (sameTrace?.status === "ready" && sameTrace !== exactRetained) {
       throw new Error(`ChatGPT browser turn ${traceId} is retained under different conversation metadata`);
     }
@@ -2600,10 +2664,19 @@ class BrowserHost {
     if (status === "completed") {
       this.logger.info("browser.tab_completed", { tabId: tab.id, traceId });
     }
+    const retainedLocation = status === "completed" && retain && !tab.view.webContents.isDestroyed()
+      ? retainedConversationLocation(tab.view.webContents.getURL(), useSavedChatsFor(this))
+      : null;
+    if (status === "completed" && retain && !retainedLocation) {
+      this.logger.warn("browser.tab_retention_refused", { tabId: tab.id, traceId, reason: "no owned conversation page" });
+    }
     if (status === "completed"
       && retain
+      && retainedLocation
       && tab.conversationKey
       && (!tab.connectorIdentity || connectorBound)) {
+      // Pin the exact conversation: the next turn types into this tab only while it still shows it.
+      tab.retainedLocation = retainedLocation;
       tab.connectorBound = connectorBound === true;
       tab.lastHeartbeatAt = Date.now();
       if (hideAfterTurn && !this.activeTraceId) this.hide();
@@ -2959,6 +3032,9 @@ class BrowserHost {
           temporary: actualUrl.origin === expectedUrl.origin
             && actualUrl.pathname === expectedUrl.pathname
             && actualUrl.searchParams.get("temporary-chat") === "true",
+          savedHome: actualUrl.origin === expectedUrl.origin
+            && actualUrl.pathname === "/"
+            && !actualUrl.searchParams.has("temporary-chat"),
           readyState: document.readyState,
         };
       };
@@ -2993,8 +3069,11 @@ class BrowserHost {
       sessionAuthenticated: false,
       readyState: "unknown",
     }));
+    // Connector verification refreshes onto the saved-chat home when saved chats are on; its
+    // composer proves the session as well as the Temporary Chat one does.
+    const onNewChat = (surface) => surface.temporary || surface.savedHome === true;
     let result = await probe(this.view.webContents);
-    if (!(result.composer && result.temporary && result.sessionAuthenticated)
+    if (!(result.composer && onNewChat(result) && result.sessionAuthenticated)
       && this.authView
       && !this.authView.webContents.isDestroyed()) {
       const authResult = await probe(this.authView.webContents);
@@ -3014,7 +3093,7 @@ class BrowserHost {
       url = this.view.webContents.getURL();
       result = await probe(this.view.webContents);
     }
-    if (result.composer && result.temporary && result.sessionAuthenticated) {
+    if (result.composer && onNewChat(result) && result.sessionAuthenticated) {
       if (this.authView && !this.authView.webContents.isDestroyed()) {
         this.closeAuthView(this.authView, true, false);
       }
@@ -3100,12 +3179,14 @@ class BrowserHost {
     requireAutomaticBrowserInspection(this, "ChatGPT connector verification");
     const connectorName = validateConnectorName(appName);
     this.setState({ status: "testing", message: "Checking ChatGPT connector" });
-    await this.refreshChatGptHomeDocument();
+    const useSavedChats = useSavedChatsFor(this);
+    await this.refreshChatGptHomeDocument(useSavedChats);
     try {
       const result = await this.verifyConnectorWithBrowserHelper({
         helper: this.helper,
         descriptorPath: this.descriptorPath,
         appName: connectorName,
+        useSavedChats,
         logger: this.logger,
       });
       this.logger.info("connector.verified", { appName: connectorName });

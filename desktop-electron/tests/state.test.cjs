@@ -28,6 +28,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       showBrowserDuringTurns: true,
       browserInteractionMode: "automatic",
       experimentalBiggerContext: false,
+      useSavedChats: true,
       zeroRiskProEnabled: false,
       browserSmokePassed: false,
       browserSmokeVersion: null,
@@ -56,6 +57,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       showBrowserDuringTurns: true,
       browserInteractionMode: "automatic",
       experimentalBiggerContext: false,
+      useSavedChats: true,
       zeroRiskProEnabled: false,
       browserSmokePassed: true,
       browserSmokeVersion: "0.2.0",
@@ -123,6 +125,7 @@ test("persisted sidebar corruption is repaired without changing the rest of laun
       showBrowserDuringTurns: true,
       browserInteractionMode: "automatic",
       experimentalBiggerContext: false,
+      useSavedChats: true,
       zeroRiskProEnabled: false,
       browserSmokePassed: false,
       browserSmokeVersion: null,
@@ -177,6 +180,24 @@ test("browser interaction defaults to Automatic and preserves a completed onboar
     assert.equal(createStateStore(file).read().browserInteractionMode, "manual");
     fs.writeFileSync(file, JSON.stringify({ version: 1, browserInteractionMode: "unsafe" }));
     assert.equal(createStateStore(file).read().browserInteractionMode, "automatic");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("saved chats default on for new and older state and keep an explicit opt-out", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-saved-chat-state-"));
+  const file = path.join(root, "state.json");
+  try {
+    assert.equal(createStateStore(file).read().useSavedChats, true);
+    // State written before the setting existed migrates to saved chats.
+    fs.writeFileSync(file, JSON.stringify({ version: 1, onboardingComplete: true }));
+    const store = createStateStore(file);
+    assert.equal(store.read().useSavedChats, true);
+    store.update({ useSavedChats: false });
+    assert.equal(createStateStore(file).read().useSavedChats, false);
+    fs.writeFileSync(file, JSON.stringify({ version: 1, useSavedChats: "no" }));
+    assert.equal(createStateStore(file).read().useSavedChats, true);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

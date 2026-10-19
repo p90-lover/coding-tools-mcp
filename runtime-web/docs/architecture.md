@@ -21,10 +21,15 @@ launcher-owned codex-chatgpt-web daemon
 
 ### `browser-only`
 
-- Exposes Instant (`chatgpt-web/light`), Medium, High, and Extra High; each model advertises exactly one
-  immutable Codex effort matching its ChatGPT browser mode. `chatgpt-web/pro` is appended only when
-  the authenticated account exposes Pro.
-- Sends the complete Codex context and image attachments to a fresh ChatGPT Temporary Chat.
+- Exposes Instant (`chatgpt-web/light`), Medium, High, Extra High and Pro; each model advertises
+  exactly one immutable Codex effort matching its ChatGPT browser mode. Every Sol turn reads the
+  effort slider's ticks in passing (never stepping it) and so do setup and sign-in; the result lives
+  in `runtime/chatgpt-account-capabilities.json` for 24 hours. While it is fresh, `/v1/models`,
+  `/router/v1/models` and `catalog ao-web` list only the tiers whose ticks are unlocked; otherwise
+  the static list stays. Ids never change, and a hidden tier still selected in Codex runs at the
+  nearest lower tier.
+- Sends the complete Codex context and image attachments to a fresh ChatGPT chat (saved in ChatGPT
+  history by default; Temporary Chat when **Save chats in ChatGPT** is off).
 - Never starts the broker, tunnel, or MCP server.
 - Emits a nonfatal Codex commentary warning that local tools are unavailable for the selected model.
 
@@ -86,7 +91,7 @@ tabs. Each task/model/effort/compaction epoch owns one exact `WebContentsView` l
 native messages reuse that surface, while each message receives a fresh turn-bound MCP token and
 keeps all of its MCP tool rounds inside one ChatGPT response. Compaction asks the same retained Web
 agent for a one-shot structured checkpoint, waits for the response and physical helper cleanup,
-then closes the old surface. The next epoch gets a new Temporary Chat. Model messages never copy
+then closes the old surface. The next epoch gets a new browser chat. Model messages never copy
 state between tabs. Tabs share only the local login
 partition and keep independent documents and lifecycles. Closing a running tab destroys its page
 and terminates that browser turn. A sixth concurrent turn fails explicitly; the cap avoids excessive
@@ -133,6 +138,17 @@ Top-level `model_context_window` raises only the proxied native rows' advertised
 Codex to apply its own configured context override without clamping. Routed ChatGPT Web models
 retain their measured adapter-owned limits.
 
+**Save chats in ChatGPT** (`setup --saved-chats`, on by default; `--temporary-chats` opts out)
+uses ordinary saved conversations for task turns in Automatic and Zero Risk modes, because ChatGPT
+refuses connectors in Temporary Chat ("... is unavailable in this temporary chat"; the adapter
+reports that refusal with this setting as the fix). Configurations written before the setting are
+treated as on; an explicit off is kept. Connector verification uses the same mode as task turns,
+while account inspection and the smoke test still use an empty Temporary Chat. The personalization
+preflight runs only on a Temporary Chat; in a saved chat the exact connector selection is the proof.
+Saved history does not authorize continuing an arbitrary conversation: a retained tab is reused only
+while it still shows the exact `/c/<id>` page its last turn ended on. ChatGPT memory and custom
+instructions may apply to saved conversations.
+
 Bigger Context partitions complete ordered records against each message's available token and
 composer budgets. Inert stages carry text; the final message also carries all retained attachments,
 the execution contract and any output schema. Their reserves are deducted before partitioning,
@@ -145,8 +161,8 @@ environment. Zero Risk always advertises a fixed three-times compaction interval
 Bigger Context multipart transport. At that boundary its active ChatGPT response receives the
 checkpoint instruction as an MCP result, returns the compacted context through its bound completion
 control, and ends. The old manual chat is retired; the next compacted Codex request owns a fresh
-Temporary Chat and its locally compiled prompt is copied to the clipboard. A missing Automatic
-retained source falls back to a dedicated read-only Temporary Chat built from canonical Codex
+browser chat and its locally compiled prompt is copied to the clipboard. A missing Automatic
+retained source falls back to a dedicated read-only browser chat built from canonical Codex
 history; a missing Zero Risk source uses the same explicit manual checkpoint contract. An invalid or
 ambiguous handoff still fails explicitly. Browser-only mode
 uses the same read-only summarization path, then returns the native replacement-history shape expected
