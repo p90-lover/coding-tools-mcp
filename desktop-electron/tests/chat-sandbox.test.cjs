@@ -52,12 +52,27 @@ test("a command runs under codex sandbox, unelevated, with the worktree and cach
     assert.deepEqual(args.slice(9, 13), ["--", "cmd.exe", "/d", "/c"]);
     assert.ok(!args.join(" ").includes("elevated'") || args.includes("windows.sandbox='unelevated'"), "never the elevated mode");
     assert.ok(script.endsWith('echo "a b" && echo second\r\n'), "the command reaches cmd.exe through a script, quotes intact");
-    assert.equal(options.cwd, "G:/work/src");
+    // Codex's sandbox hangs unless it starts in a writable root, so the script moves to the subfolder.
+    assert.equal(options.cwd, "G:/work");
+    assert.ok(script.includes(`cd /d "${path.resolve("G:/work/src")}" || exit /b 1\r\necho "a b"`), "the script enters the requested folder first");
     assert.equal(options.env.HOME, "C:/u");
     assert.equal(options.env.PATH, "C:/bin");
     for (const name of ["OPENAI_API_KEY", "CODING_TOOLS_TOKEN", "NODE_OPTIONS", "GITHUB_TOKEN"]) {
       assert.equal(options.env[name], undefined, `${name} stays out of the command's environment`);
     }
+  } finally { cleanup(); }
+});
+
+test("a command in the worktree itself starts there without a folder change, and % in a folder survives cmd", async () => {
+  const { sandbox, spawned, cleanup } = runner();
+  try {
+    sandbox.start({ cmd: "echo here", cwd: "G:/work", writable: "G:/work" });
+    sandbox.start({ cmd: "echo there", cwd: "G:/work/50%off", writable: "G:/work" });
+    const [root, odd] = spawned;
+    assert.equal(root.options.cwd, "G:/work");
+    assert.ok(!root.script.includes("cd /d"), "no folder change when it already starts there");
+    assert.equal(odd.options.cwd, "G:/work");
+    assert.ok(odd.script.includes(`cd /d "${path.resolve("G:/work/50%off").replace("%", "%%")}"`), "% is doubled for cmd");
   } finally { cleanup(); }
 });
 
