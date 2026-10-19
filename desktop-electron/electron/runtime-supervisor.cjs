@@ -727,7 +727,7 @@ class RuntimeSupervisor {
     try { state = this.readState(); } catch { return false; }
     if (!state || runtimeOwnershipPredatesCurrentBoot(state)) return false;
     if (!Number.isInteger(state.daemonPid) || !processRunning(state.daemonPid)) return false;
-    if (state.ownerPid !== process.pid && processRunning(state.ownerPid)) return false;
+    if (state.ownerPid !== process.pid && this.launcherOwnerRunning(state.ownerPid)) return false;
     const health = await this.proxyHealthPayload(config);
     if (health?.service !== "codex-chatgpt-web"
       || health?.mode !== config.mode
@@ -2006,6 +2006,22 @@ class RuntimeSupervisor {
     });
   }
 
+  /**
+   * Whether the recorded owner is still a running launcher. Windows reuses PIDs: a quit launcher's
+   * PID came back as this app's own NetworkService child, and the launcher then never started the
+   * bridge ("Another launcher process still owns the runtime"). A process this launcher started, a
+   * Chromium child (--type=) or a script run (the bridge's browser helper) is never a launcher.
+   * A process that cannot be inspected keeps the cautious answer.
+   */
+  launcherOwnerRunning(pid) {
+    if (!Number.isInteger(pid) || pid < 1 || pid === process.pid || !processRunning(pid)) return false;
+    const info = this.processInfo(pid);
+    if (!info) return true;
+    if (info.parentPid === process.pid) return false;
+    const command = String(info.commandLine || "");
+    return !/--type=/.test(command) && !/\.[cm]?js\b/i.test(command);
+  }
+
   // True only for this install's own runtime (its bun.exe serving its app/cli.js) whose launcher
   // is gone. A live parent, another executable or another entrypoint is never ours to stop.
   isOwnOrphanedBridge(pid) {
@@ -2088,7 +2104,7 @@ class RuntimeSupervisor {
       this.clearState();
       return true;
     }
-    if (state.ownerPid !== process.pid && processRunning(state.ownerPid)) {
+    if (state.ownerPid !== process.pid && this.launcherOwnerRunning(state.ownerPid)) {
       throw new Error(`Another launcher process still owns the runtime (pid ${state.ownerPid})`);
     }
 
