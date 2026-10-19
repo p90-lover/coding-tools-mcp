@@ -606,7 +606,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   // reasoning level. A plugin model is known by its namespace, or by the provider CPA names for it.
   const PLUGIN_NAMESPACES = new Set(["cline-pass", ...PLUGIN_PROVIDERS]);
   // Cline's plugin decodes these suffixes into the provider's request body.
-  const CLINE_EFFORTS = new Map([["cline-pass/deepseek-v4.1-flash", ["none", "low", "high", "max"]]]);
+  // DeepSeek V4.1 Flash and its dated builds ("…-flash-1017"), as the plugin's modelEfforts.
+  const CLINE_EFFORT_MODELS = [[/^cline-pass\/deepseek-v4\.1-flash(?:-\d{4,8})?$/, ["none", "low", "high", "max"]]];
+  const CLINE_EFFORTS = { get: id => CLINE_EFFORT_MODELS.find(([pattern]) => pattern.test(String(id)))?.[1], has: id => Boolean(CLINE_EFFORTS.get(id)) };
   // Ids the last catalog read named a plugin as provider of, for launches that have only the id.
   let pluginModels = new Set();
   const verbatimModel = (id, provider) => {

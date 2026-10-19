@@ -4352,3 +4352,18 @@ test("a steer typed while a request waits for its answer reaches the agent once 
   assert.equal(unanswered.waiting, true);
   assert.deepEqual(steered, [], "a request still waiting is never cancelled by a steer");
 });
+
+test("a dated DeepSeek V4.1 Flash build from Cline Pass takes the same effort levels as the model itself", async () => {
+  const workflow = createAgentOrchestratorWorkflow({
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ data: [
+      { id: "cline-pass/deepseek-v4.1-flash", owned_by: "cline" },
+      { id: "cline-pass/deepseek-v4.1-flash-1017", owned_by: "cline" },
+      { id: "cline-pass/kimi-k3", owned_by: "cline" },
+    ] }) }),
+  });
+  const { capabilities } = await workflow.call("models", {});
+  assert.deepEqual(capabilities["cline-pass/deepseek-v4.1-flash-1017"].efforts, ["none", "low", "high", "max"]);
+  assert.deepEqual(capabilities["cline-pass/deepseek-v4.1-flash"].efforts, ["none", "low", "high", "max"]);
+  assert.deepEqual(capabilities["cline-pass/kimi-k3"].efforts, [], "another Cline model still passes its name unchanged");
+});
