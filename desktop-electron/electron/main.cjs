@@ -131,8 +131,9 @@ app.setName(LAUNCHER_PROFILE.displayName);
 if (process.platform === "win32") {
   app.setAppUserModelId(IS_DEV_PROFILE ? "dev.codexwebgpt.launcher.dev" : "dev.codexwebgpt.launcher");
 }
-const launcherUserData = LAUNCHER_PROFILE.userData;
-fs.mkdirSync(launcherUserData, { recursive: true, mode: 0o700 });
+fs.mkdirSync(LAUNCHER_PROFILE.userData, { recursive: true, mode: 0o700 });
+// Native child processes must use the physical profile path across Windows junctions.
+const launcherUserData = fs.realpathSync.native(LAUNCHER_PROFILE.userData);
 if (process.platform !== "win32") fs.chmodSync(launcherUserData, 0o700);
 app.setPath("userData", launcherUserData);
 app.setAppLogsPath(path.join(launcherUserData, "logs"));

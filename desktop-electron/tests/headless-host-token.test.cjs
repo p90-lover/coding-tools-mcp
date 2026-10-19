@@ -33,11 +33,97 @@ server.listen(0, "127.0.0.1", () => {
 });
 `;
 
+const startupFixtureRoot = path.resolve(__dirname, "../../aiTemp/headless-host-tests");
+
+function startupFixture(t, source) {
+  fs.mkdirSync(startupFixtureRoot, { recursive: true });
+  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(startupFixtureRoot, "headless-startup-")));
+  const binaryRoot = path.join(base, "bundle"), binaryDir = path.join(binaryRoot, "coding-tools");
+  fs.mkdirSync(binaryDir, { recursive: true });
+  fs.writeFileSync(path.join(binaryDir, "package.json"), JSON.stringify({ type: "commonjs" }));
+  const binary = path.join(binaryDir, `coding-tools-headless${process.platform === "win32" ? ".exe" : ""}`);
+  try { fs.linkSync(process.execPath, binary); } catch { fs.copyFileSync(process.execPath, binary); }
+  fs.writeFileSync(path.join(binaryDir, "serve"), source);
+  const saved = process.env.CODING_TOOLS_HEADLESS_BINARY;
+  delete process.env.CODING_TOOLS_HEADLESS_BINARY;
+  t.after(() => {
+    if (saved === undefined) delete process.env.CODING_TOOLS_HEADLESS_BINARY;
+    else process.env.CODING_TOOLS_HEADLESS_BINARY = saved;
+    fs.rmSync(base, { recursive: true, force: true });
+  });
+  return { base, binaryRoot };
+}
+
+test("startup resolves a junction profile before passing private paths to the service", async (t) => {
+  const { base, binaryRoot } = startupFixture(t, FAKE_SERVICE);
+  const physical = path.join(base, "physical-profile"), alias = path.join(base, "profile-alias");
+  fs.mkdirSync(physical);
+  fs.symlinkSync(physical, alias, process.platform === "win32" ? "junction" : "dir");
+  const logger = { info() {}, warn() {}, error() {} };
+  const host = new HeadlessHost({ app: { getPath: () => alias, isPackaged: false }, logger, sourceRoot: base, binaryRoot });
+  try {
+    const control = await host.ensureStarted();
+    const root = fs.realpathSync.native(path.join(physical, "headless"));
+    assert.ok(control.descriptorPath.startsWith(root + path.sep));
+    assert.ok(control.tokenPath.startsWith(root + path.sep));
+    const descriptor = JSON.parse(fs.readFileSync(control.descriptorPath, "utf8"));
+    assert.equal(descriptor.app_data_dir, root);
+    assert.equal((await host.request("/api/v1/anything")).ok, true);
+  } finally { await host.shutdown("junction-test"); }
+});
+
+test("a failed startup reports bounded sanitized stderr without exposing control credentials", async (t) => {
+  const secret = "S".repeat(64);
+  const source = `process.stdin.once("data", data => {
+  const ui = data.toString().trim();
+  const detail = "x".repeat(20000) + "\\nHEADLESS_START_FAILED The file exists. (os error 80) control_token=${secret} ui_token=" + ui + " Authorization: Bearer " + ui;
+  process.stderr.write(detail, () => process.exit(1));
+});`;
+  const { base, binaryRoot } = startupFixture(t, source);
+  const messages = [];
+  const logger = { info() {}, warn: (...args) => messages.push(args), error: (...args) => messages.push(args) };
+  const host = new HeadlessHost({ app: { getPath: () => path.join(base, "profile"), isPackaged: false }, logger, sourceRoot: base, binaryRoot });
+  try {
+    await assert.rejects(host.ensureStarted(), error => {
+      assert.match(error.message, /HEADLESS_START_FAILED.*The file exists.*os error 80/);
+      assert.ok(error.message.length <= 600, "diagnostics stay bounded");
+      assert.match(error.message, /ui_token=\[redacted\]/);
+      assert.doesNotMatch(error.message, new RegExp(secret));
+      assert.doesNotMatch(error.message, /Bearer [A-Za-z0-9_-]{32,}/);
+      return true;
+    });
+    assert.doesNotMatch(JSON.stringify(messages), new RegExp(secret));
+  } finally { await host.shutdown("startup-error-test"); }
+});
+
+test("physical profile paths still refuse symbolic-link control files", (t) => {
+  fs.mkdirSync(startupFixtureRoot, { recursive: true });
+  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(startupFixtureRoot, "headless-control-links-")));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const token = "A".repeat(43), tokenFile = path.join(base, "token.txt"), tokenLink = path.join(base, "token-link.txt");
+  const descriptorFile = path.join(base, "control.json"), descriptorLink = path.join(base, "control-link.json");
+  fs.writeFileSync(tokenFile, token);
+  const descriptor = { schema: 1, protocol_version: 1, status: "ready", pid: process.pid, app_data_dir: base,
+    endpoint: "http://127.0.0.1:12345/", token_file: tokenLink, token_sha256: require("node:crypto").createHash("sha256").update(token).digest("hex") };
+  fs.writeFileSync(descriptorFile, JSON.stringify(descriptor));
+  try {
+    fs.symlinkSync(tokenFile, tokenLink, "file");
+    fs.symlinkSync(descriptorFile, descriptorLink, "file");
+  } catch (error) {
+    if (["EPERM", "EACCES", "ENOSYS"].includes(error.code)) { t.skip("file symbolic links are unavailable to this test process"); return; }
+    throw error;
+  }
+  const host = new HeadlessHost({ app: null, logger: null, sourceRoot: base });
+  assert.throws(() => host.readDescriptor(descriptorLink, base, process.pid), /regular non-linked file/);
+  assert.throws(() => host.readToken(descriptor, tokenLink, base), /regular non-linked file/);
+});
+
 test("the headless control token is kept in memory only: its file is deleted once the app has read it", async (t) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "headless-token-"));
   const binaryRoot = path.join(base, "bundle");
   const binaryDir = path.join(binaryRoot, "coding-tools");
   fs.mkdirSync(binaryDir, { recursive: true });
+  fs.writeFileSync(path.join(binaryDir, "package.json"), JSON.stringify({ type: "commonjs" }));
   const binary = path.join(binaryDir, `coding-tools-headless${process.platform === "win32" ? ".exe" : ""}`);
   try {
     fs.linkSync(process.execPath, binary);

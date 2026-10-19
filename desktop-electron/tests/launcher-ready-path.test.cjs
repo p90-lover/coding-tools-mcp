@@ -124,6 +124,48 @@ test("keep-ui-responsive skip still completes full IPC after paint", () => {
   assert.equal(registrar.markFull(), false);
 });
 
+
+test("launcher startup resolves a linked userData root before setting every app path", (t) => {
+  const vm = require("node:vm");
+  const fixtureRoot = path.join(desktopRoot, "..", "aiTemp", "portable-profile-tests");
+  fs.mkdirSync(fixtureRoot, { recursive: true });
+  const directory = fs.mkdtempSync(path.join(fixtureRoot, "startup-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const physical = path.join(directory, "physical");
+  const alias = path.join(directory, "profile-link");
+  fs.mkdirSync(physical);
+  fs.writeFileSync(path.join(physical, "saved-state.json"), "preserve-user-state");
+  fs.symlinkSync(physical, alias, process.platform === "win32" ? "junction" : "dir");
+
+  const configuredPaths = {};
+  let diagnosticPath;
+  const main = read("electron/main.cjs");
+  const startup = main.slice(
+    main.indexOf("\nprocess.env.CODEX_CHATGPT_WEB_HOME ="),
+    main.indexOf("\nlet mainWindow ="),
+  );
+  assert.ok(startup.length > 0, "execute the actual main-process profile setup");
+  vm.runInNewContext(startup, {
+    fs,
+    path,
+    process: { env: {}, platform: process.platform },
+    CORE_HOME: path.join(directory, "core"),
+    LAUNCHER_PROFILE: { userData: alias, codexHome: path.join(directory, "codex"), displayName: "Test" },
+    IS_DEV_PROFILE: false,
+    app: {
+      setName() {},
+      setAppUserModelId() {},
+      setPath(name, value) { configuredPaths[name] = value; },
+      setAppLogsPath(value) { configuredPaths.logs = value; },
+    },
+    installProcessDiagnosticGuards({ filePath }) { diagnosticPath = filePath; },
+  });
+  assert.equal(configuredPaths.userData, fs.realpathSync.native(physical));
+  assert.equal(configuredPaths.logs, path.join(configuredPaths.userData, "logs"));
+  assert.equal(diagnosticPath, path.join(configuredPaths.logs, "process-stream-errors.log"));
+  assert.equal(fs.readFileSync(path.join(physical, "saved-state.json"), "utf8"), "preserve-user-state");
+});
+
 test("critical IPC is registered before the renderer file is loaded", () => {
   const main = read("electron/main.cjs");
   const preload = read("electron/preload.cjs");
