@@ -31,8 +31,11 @@ function invalidRequest(message: string): Response {
   });
 }
 
-export function routerWebModelCatalog(config: AppConfig): RouterWebModelCatalog {
-  const data = availableChatGptWebModelRoutes(config).map(route => ({
+export function routerWebModelCatalog(
+  config: AppConfig,
+  detectedTiers?: readonly boolean[],
+): RouterWebModelCatalog {
+  const data = availableChatGptWebModelRoutes(config, detectedTiers).map(route => ({
     id: route.slug,
     object: "model" as const,
     owned_by: "coding-tools-web" as const,
@@ -40,8 +43,8 @@ export function routerWebModelCatalog(config: AppConfig): RouterWebModelCatalog 
   return { object: "list", data };
 }
 
-export function routerWebModelsResponse(config: AppConfig): Response {
-  return Response.json(routerWebModelCatalog(config), {
+export function routerWebModelsResponse(config: AppConfig, detectedTiers?: readonly boolean[]): Response {
+  return Response.json(routerWebModelCatalog(config, detectedTiers), {
     status: 200,
     headers: {
       "cache-control": "no-store",

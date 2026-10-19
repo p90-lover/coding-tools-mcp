@@ -1147,6 +1147,39 @@ class RuntimeHost {
     return { ...result, mode, enabled: enabled === true };
   }
 
+  async setUseSavedChats(enabled) {
+    if (typeof enabled !== "boolean") throw new Error("Saved chat preference must be a boolean");
+    const current = this.runtimeConfigSnapshot();
+    if (!current.configured) {
+      throw new Error("Initialize the runtime before changing saved chats");
+    }
+    const mode = current.mode;
+    const chatFlag = enabled ? "--saved-chats" : "--temporary-chats";
+    const development = this.launcherProfile === "development";
+    const args = [
+      ...(development ? ["dev", "setup"] : ["setup"]),
+      mode === "full" ? "--full" : "--browser-only",
+      "--browser-host-descriptor",
+      this.browserDescriptorPath,
+      ...this.browserInteractionArgs(),
+      ...(development ? [] : this.codexRouteArgs()),
+      "--acknowledge-unofficial",
+      ...(development ? [] : ["--restart-service"]),
+      chatFlag,
+    ];
+    if (current.config?.autoApproveToolCalls === true) args.push("--auto-approve-tool-calls");
+    // The chat kind changes no model or route, so Codex needs no restart; the daemon picks it up.
+    const options = {
+      message: enabled ? "Saving task chats in ChatGPT" : "Restoring Temporary Chat",
+      successMessage: enabled ? "Task chats are saved in ChatGPT" : "Temporary Chat restored",
+      timeoutMs: CORE_SETUP_TIMEOUT_MS,
+    };
+    const result = development
+      ? await this.runDevSetup("use-saved-chats", args, options)
+      : await this.runSetup("use-saved-chats", args, options);
+    return { ...result, mode, enabled };
+  }
+
   async setZeroRiskPro(enabled) {
     const current = this.runtimeConfigSnapshot();
     if (!current.configured) {

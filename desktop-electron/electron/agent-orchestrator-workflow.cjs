@@ -141,20 +141,34 @@ const GATEWAY_AGENTS = new Set(["claude-code", "codex", "opencode"]);
 const CPA_ONLY_AGENTS = new Set(["claude-code", "opencode"]);
 const webModel = (model) => WEB_TIERS.includes(model) || LUNA_TIERS.includes(model);
 
+const webTierName = (model) => {
+  // "light" is what ChatGPT's effort picker calls Instant (the runtime's own name for it too).
+  const slug = model.slice("chatgpt-web/".length);
+  return slug === "light" ? "Instant" : slug.split("-").map((part) => part[0].toUpperCase() + part.slice(1)).join(" ");
+};
+
 // The runtime's `catalog ao-web` returns one WebGPT row: High, or Luna on a Luna-only (Free/Go)
 // account that has no Sol tiers. Any tier reuses that row under its own slug; the bridge picks
-// the ChatGPT mode from the slug, not from this entry.
+// the ChatGPT mode from the slug, not from this entry. Its `available` list holds the WebGPT rows
+// the account's effort picker last offered; a tier outside it still runs (at the nearest lower
+// tier, in the bridge), and its name says so. `available` never reaches Codex.
 function aoWebCatalogForModel(catalog, model) {
   if (!/^chatgpt-web\/[a-z-]{1,32}$/.test(model)) throw new Error("AO WebGPT model is invalid");
   const template = Array.isArray(catalog?.models) && catalog.models.length === 1 ? catalog.models[0] : null;
   if (typeof template?.slug !== "string" || !/^chatgpt-web\/[a-z-]{1,32}$/.test(template.slug)) {
     throw new Error("AO WebGPT catalog is unavailable");
   }
-  if (template.slug === model) return catalog;
-  // "light" is what ChatGPT's effort picker calls Instant (the runtime's own name for it too).
-  const slug = model.slice("chatgpt-web/".length);
-  const tier = slug === "light" ? "Instant" : slug.split("-").map((part) => part[0].toUpperCase() + part.slice(1)).join(" ");
-  return { models: [{ ...template, slug: model, display_name: `ChatGPT Web — ${tier}` }] };
+  const available = Array.isArray(catalog.available) ? catalog.available.filter((slug) => typeof slug === "string") : null;
+  const tierIndex = WEB_TIERS.indexOf(model);
+  const runsAs = available && tierIndex > 0 && !available.includes(model)
+    ? WEB_TIERS.slice(0, tierIndex).reverse().find((tier) => available.includes(tier))
+    : undefined;
+  if (template.slug === model && !runsAs) return { models: catalog.models };
+  const tier = webTierName(model);
+  const display_name = runsAs
+    ? `ChatGPT Web — ${tier} (not offered by this account; runs as ${webTierName(runsAs)})`
+    : `ChatGPT Web — ${tier}`;
+  return { models: [{ ...template, slug: model, display_name }] };
 }
 
 function delayToMilliseconds(value, unit) {

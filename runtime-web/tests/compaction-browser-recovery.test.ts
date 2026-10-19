@@ -24,7 +24,7 @@ test.each([[true, false, true], [false, false, true], [true, true, true], [true,
       if (name === "send" || name.endsWith("_send")) sendBudgets.push(timeout);
       return action(new AbortController().signal);
     },
-    prepareTemporaryChatSurface: async () => {},
+    prepareChatSurface: async () => {},
     selectModelAndEffort: async (_page: unknown, model: string, effort: string) => {
       actions.push(`effort:${effort}`);
       return resolveChatGptWebModelMode(model, effort, capabilities);

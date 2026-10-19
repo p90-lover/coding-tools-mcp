@@ -25,6 +25,7 @@ import { formatDoctorReport, runDoctor } from "./doctor";
 import { runChatGptMcpMain } from "./adapters/chatgpt-web/mcp-main";
 import { runCommand } from "./process";
 import { augmentNativeModelCatalog } from "./model-catalog";
+import { freshChatGptEffortTiers } from "./chatgpt-account-capabilities";
 import { startServer } from "./server";
 import { assertServiceIdle, cancelActiveTurns, getServiceStatus, installService, interruptActiveTurn, restartService, startService, stopService, uninstallService } from "./service";
 import { existingFullSetupCredentials, preflightSetup, setup, type SetupOptions } from "./setup";
@@ -82,6 +83,8 @@ Setup options:
   --auto-approve-tool-calls    Opt in to per-call browser clicks on "Allow once" prompts
   --bigger-context             Enable experimental adaptive 1/2/3-message context
   --standard-context           Disable experimental multi-message context
+  --saved-chats                Keep task conversations in ChatGPT history (default)
+  --temporary-chats            Use Temporary Chat for task conversations (connectors may be refused)
   --acknowledge-unofficial     Accept the one-time unofficial-browser-automation notice
 
 Global:
@@ -306,6 +309,12 @@ async function setupCommand(args: string[]): Promise<void> {
     throw new Error("Choose at most one context mode: --bigger-context or --standard-context");
   }
   if (biggerContext || standardContext) options.experimentalBiggerContext = biggerContext;
+  const savedChats = takeFlag(args, "--saved-chats");
+  const temporaryChats = takeFlag(args, "--temporary-chats");
+  if (savedChats && temporaryChats) {
+    throw new Error("Choose at most one chat mode: --saved-chats or --temporary-chats");
+  }
+  if (savedChats || temporaryChats) options.useSavedChats = savedChats;
   const zeroRiskPro = takeFlag(args, "--zero-risk-pro");
   const zeroRiskDefault = takeFlag(args, "--zero-risk-default");
   if (zeroRiskPro && zeroRiskDefault) {
@@ -580,13 +589,20 @@ async function main(): Promise<void> {
       timeout: 15_000, maxBuffer: 8 * 1024 * 1024,
     });
     if (bundled.status !== 0) throw new Error("Selected Codex bundled catalog is unavailable");
-    const catalog = augmentNativeModelCatalog(JSON.parse(bundled.stdout), loadConfig());
+    const catalog = augmentNativeModelCatalog(
+      JSON.parse(bundled.stdout), loadConfig(), undefined, freshChatGptEffortTiers(),
+    );
     // A Luna-only (Free/Go) account lists no Sol tiers; its Luna row is then the AO template.
     const entries = catalog.models as Array<{ slug?: string }>;
     const model = entries.find((entry) => entry.slug === "chatgpt-web/high")
       ?? entries.find((entry) => entry.slug === "chatgpt-web/luna");
     if (!model) throw new Error("Selected Codex has no AO WebGPT model template");
-    stdout.write(`${JSON.stringify({ models: [model] })}\n`);
+    // `available` lists the WebGPT rows Codex itself is offered, so AO can say which tiers the
+    // account has; AO strips it before the catalog reaches Codex.
+    const available = entries
+      .map((entry) => entry.slug)
+      .filter((slug): slug is string => typeof slug === "string" && slug.startsWith("chatgpt-web/"));
+    stdout.write(`${JSON.stringify({ models: [model], available })}\n`);
   }
   else if (command === "subagents") await subagentsCommand(args);
   else if (command === "browser") {
@@ -609,7 +625,8 @@ async function main(): Promise<void> {
   } else if (command === "serve") {
     assertNoArgs(args);
     const config = loadConfig();
-    const server = startServer(config);
+    // Each model-list request reads the latest effort-slider reading the browser turns recorded.
+    const server = startServer(config, { detectedTiers: () => freshChatGptEffortTiers() });
     stdout.write(`codex-chatgpt-web ${VERSION} listening on http://${config.host}:${server.port}/v1 (${config.mode})\n`);
     await new Promise<void>(() => {});
   } else if (command === "dev") await runDevCommand(args);

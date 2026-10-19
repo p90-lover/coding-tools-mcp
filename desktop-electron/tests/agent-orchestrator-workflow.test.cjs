@@ -421,6 +421,24 @@ test("AO WebGPT catalog serves Luna from a Luna-only account's template and rena
   assert.throws(() => aoWebCatalogForModel({ models: [high, luna] }, "chatgpt-web/luna"), /unavailable/);
 });
 
+test("AO WebGPT catalog names a tier the account no longer offers and keeps `available` from Codex", () => {
+  const { aoWebCatalogForModel } = require("../electron/agent-orchestrator-workflow.cjs");
+  const high = { slug: "chatgpt-web/high", display_name: "ChatGPT Web — High" };
+  // A Plus account whose effort picker locks Extra High and Pro.
+  const plus = { models: [high], available: ["chatgpt-web/light", "chatgpt-web/medium", "chatgpt-web/high"] };
+  assert.deepEqual(aoWebCatalogForModel(plus, "chatgpt-web/high"), { models: [high] });
+  assert.deepEqual(aoWebCatalogForModel(plus, "chatgpt-web/medium").models[0].display_name, "ChatGPT Web — Medium");
+  assert.deepEqual(aoWebCatalogForModel(plus, "chatgpt-web/pro").models[0],
+    { ...high, slug: "chatgpt-web/pro", display_name: "ChatGPT Web — Pro (not offered by this account; runs as High)" });
+  assert.equal(aoWebCatalogForModel(plus, "chatgpt-web/extra-high").models[0].display_name,
+    "ChatGPT Web — Extra High (not offered by this account; runs as High)");
+  // Without a detection the names stay as before; nothing extra reaches Codex either way.
+  assert.equal(aoWebCatalogForModel({ models: [high] }, "chatgpt-web/pro").models[0].display_name, "ChatGPT Web — Pro");
+  for (const model of ["chatgpt-web/high", "chatgpt-web/pro"]) {
+    assert.equal(Object.hasOwn(aoWebCatalogForModel(plus, model), "available"), false);
+  }
+});
+
 test("the desktop main process builds the AO WebGPT catalog through the shared tier helper", () => {
   const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
   assert.match(main, /aoWebCatalogForModel\(JSON\.parse\(result\.stdout\), model\)/);

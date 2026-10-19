@@ -17,6 +17,8 @@ const DEFAULT_STATE = Object.freeze({
   showBrowserDuringTurns: true,
   browserInteractionMode: "automatic",
   experimentalBiggerContext: false,
+  // ChatGPT refuses connectors in Temporary Chat, so task chats are saved unless turned off.
+  useSavedChats: true,
   zeroRiskProEnabled: false,
   browserSmokePassed: false,
   browserSmokeVersion: null,
@@ -50,6 +52,9 @@ function readState(filePath) {
       "keepRunningOnClose",
       "showBrowserDuringTurns",
       "experimentalBiggerContext",
+      // Absent (state written before the setting existed) or invalid means on; an explicit
+      // false is the user's own choice and is kept.
+      "useSavedChats",
       "zeroRiskProEnabled",
       "browserSmokePassed",
       "sidebarOpen",

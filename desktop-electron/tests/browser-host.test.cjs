@@ -25,6 +25,7 @@ const {
   navigationOriginForLog,
 } = require("../electron/browser-host.cjs");
 const { BrowserHost: StandaloneBrowserHost } = require("../../runtime-web/launcher/electron/browser-host.cjs");
+const SAVED_CONVERSATION_ID = "0f8e2a5c-6b1d-4c3e-9a7b-1d2e3f4a5b6c";
 
 test("manual prompt handoff keeps ordinary turns at thirty seconds and compaction at two minutes", () => {
   assert.equal(MANUAL_SUBMIT_TIMEOUT_MS, 30_000);
@@ -137,7 +138,7 @@ test("primary browser bootstrap fails closed on navigation, renderer, and timeou
   }
 });
 
-function manualTabNavigationFixture(remoteError) {
+function manualTabNavigationFixture(remoteError, useSavedChats = true) {
   const calls = [];
   const logs = [];
   const terminal = [];
@@ -162,6 +163,7 @@ function manualTabNavigationFixture(remoteError) {
   };
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
     getBrowserInteractionMode: () => "manual",
+    getUseSavedChats: () => useSavedChats,
     turnTabs: new Map([[tab.id, tab]]),
     logger: {
       info: (event, detail) => logs.push(["info", event, detail]),
@@ -173,16 +175,20 @@ function manualTabNavigationFixture(remoteError) {
   return { calls, fixture, logs, tab, terminal };
 }
 
-test("manual edit retry survives Electron superseding the ChatGPT navigation", async () => {
+for (const useSavedChats of [true, false]) test(`manual edit retry survives Electron superseding the ChatGPT navigation (saved=${useSavedChats})`, async () => {
+  const target = useSavedChats ? "https://chatgpt.com/" : "https://chatgpt.com/?temporary-chat=true";
   const observed = manualTabNavigationFixture(
-    new Error("ERR_ABORTED (-3) loading 'https://chatgpt.com/?temporary-chat=true'"),
+    new Error(`ERR_ABORTED (-3) loading '${target}'`),
+    useSavedChats,
   );
 
   await observed.fixture.initializeManualTurnTab(observed.tab);
 
+  // The Zero Risk tab opens the same kind of chat as Automatic turns: the user mentions the
+  // connector there too, and Temporary Chat refuses it.
   assert.deepEqual(observed.calls, [
     ["load", IDLE_BROWSER_URL],
-    ["load", "https://chatgpt.com/?temporary-chat=true"],
+    ["load", target],
   ]);
   assert.equal(observed.fixture.turnTabs.has(observed.tab.id), true);
   assert.deepEqual(observed.terminal, []);
@@ -1430,7 +1436,7 @@ test("browser helper operations fail closed when the configured connector name i
   assert.equal(helperCalls, 0);
 });
 
-test("connector verification is effort-independent and works while the browser surface is hidden", async () => {
+for (const useSavedChats of [true, false]) test(`connector verification uses the task-turn chat mode (saved=${useSavedChats}) without effort or a visible surface`, async () => {
   const calls = [];
   const fixture = {
     helper: { executable: "/runtime/electron", script: "/runtime/browser-helper.cjs" },
@@ -1438,7 +1444,8 @@ test("connector verification is effort-independent and works while the browser s
     logger: { info: (event, detail) => calls.push(["log", event, detail]) },
     setState: (patch) => calls.push(["state", patch]),
     show: () => calls.push(["show"]),
-    refreshChatGptHomeDocument: async () => calls.push(["refresh"]),
+    getUseSavedChats: () => useSavedChats,
+    refreshChatGptHomeDocument: async (saved) => calls.push(["refresh", saved]),
     selectHighEffort: async () => {
       throw new Error("connector verification must not select an effort");
     },
@@ -1455,15 +1462,47 @@ test("connector verification is effort-independent and works while the browser s
   assert.deepEqual(
     calls.filter(([type]) => ["refresh", "helper"].includes(type)),
     [
-      ["refresh"],
+      ["refresh", useSavedChats],
       ["helper", {
         helper: fixture.helper,
         descriptorPath: fixture.descriptorPath,
         appName: "Codex Native2",
+        useSavedChats,
         logger: fixture.logger,
       }],
     ],
   );
+});
+
+for (const useSavedChats of [true, false]) test(`verification refresh opens and authenticates the selected new chat (saved=${useSavedChats})`, async () => {
+  const target = useSavedChats ? "https://chatgpt.com/" : "https://chatgpt.com/?temporary-chat=true";
+  const other = useSavedChats ? "https://chatgpt.com/?temporary-chat=true" : "https://chatgpt.com/";
+  for (const initial of [target, other, "https://chatgpt.com/c/0f8e2a5c-6b1d-4c3e-9a7b-1d2e3f4a5b6c", IDLE_BROWSER_URL]) {
+    const calls = [];
+    let currentUrl = initial;
+    const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+      state: { authenticated: false },
+      turnTabs: new Map(),
+      setState(patch) { Object.assign(this.state, patch); },
+      snapshot() { return { ...this.state }; },
+      logger: { info() {}, warn() {} },
+      view: { webContents: {
+        isDestroyed: () => false,
+        getURL: () => currentUrl,
+        loadURL: async (url) => { currentUrl = url; calls.push(["navigate", url]); },
+        executeJavaScript: async () => {
+          calls.push(["authenticate"]);
+          // The page's own probe: a saved-chat home is no Temporary Chat but is a new chat.
+          return { sessionAuthenticated: true, composer: true, temporary: !useSavedChats,
+            savedHome: useSavedChats, url: currentUrl, readyState: "complete" };
+        },
+      } },
+      hardRefreshHome: async () => calls.push(["refresh"]),
+    });
+    await fixture.refreshChatGptHomeDocument(useSavedChats);
+    assert.deepEqual(calls, [initial === target ? ["refresh"] : ["navigate", target], ["authenticate"]]);
+    assert.equal(fixture.state.authenticated, true);
+  }
 });
 
 test("connector verification records the helper failure in launcher diagnostics", async () => {
@@ -2158,9 +2197,12 @@ test("a later provider round reuses only its exact connector-bound conversation"
     loading: false,
     message: "Task completed",
     bootstrapReady: true,
+    retainedLocation: `/c/${SAVED_CONVERSATION_ID}`,
     view: {
       webContents: {
         isDestroyed: () => false,
+        // Saved-chat history may add query state; the conversation path is what is pinned.
+        getURL: () => `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}?model=auto`,
         setBackgroundThrottling: (enabled) => throttling.push(enabled),
       },
     },
@@ -2202,6 +2244,88 @@ test("a later provider round reuses only its exact connector-bound conversation"
   assert.equal(fixture.selectedTabId, tab.id);
   assert.deepEqual(throttling, [false]);
   assert.deepEqual(events, ["visible", "published", "descriptor", "browser.tab_reused"]);
+});
+
+for (const [useSavedChats, retainedLocation, nowAt] of [
+  // The user opened one of their own saved chats in the retained tab's history sidebar.
+  [true, `/c/${SAVED_CONVERSATION_ID}`, "https://chatgpt.com/c/11111111-2222-4333-8444-555555555555"],
+  [true, `/c/${SAVED_CONVERSATION_ID}`, "https://chatgpt.com/"],
+  [true, `/c/${SAVED_CONVERSATION_ID}`, "https://chatgpt.com/g/g-project/project"],
+  // A Temporary Chat tab that lost its flag now shows a saved conversation.
+  [false, "/?temporary-chat=true", `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}`],
+  // The setting changed since the turn was retained.
+  [true, "/?temporary-chat=true", "https://chatgpt.com/?temporary-chat=true"],
+  // A tab retained before this pin existed has no recorded conversation.
+  [true, undefined, `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}`],
+]) test(`a retained tab that left its conversation is released, never typed into (${nowAt}, saved=${useSavedChats})`, async () => {
+  const conversationKey = "f".repeat(64);
+  const removed = [];
+  const retained = {
+    id: "retained-moved", surfaceId: "surface-moved", traceId: "trace_previous", conversationKey,
+    connectorIdentity: "Codex Native2", connectorBound: true, interactionMode: "automatic", status: "ready",
+    retainedLocation,
+    view: { webContents: { isDestroyed: () => false, getURL: () => nowAt, setBackgroundThrottling() {} } },
+  };
+  const warnings = [];
+  const fixture = (created) => Object.assign(Object.create(BrowserHost.prototype), {
+    manualOperation: null,
+    turnTabs: new Map([[retained.id, retained]]),
+    userCancelledTurnOwners: new Map(),
+    getUseSavedChats: () => useSavedChats,
+    removeTurnTab(tab, abortRunning) { removed.push([tab.id, abortRunning]); this.turnTabs.delete(tab.id); },
+    createTurnTab: async () => created,
+    writeDescriptor() {}, syncViewVisibility() {}, publishState() {},
+    snapshot: () => ({ tabs: [] }),
+    logger: { info() {}, warn: (event) => warnings.push(event) },
+  });
+
+  // An ordinary follow-up starts over in a fresh chat with the full context.
+  const lease = await BrowserHost.prototype.beginTurn.call(
+    fixture({ id: "fresh", surfaceId: "surface-fresh" }), "trace_next", false, 222, conversationKey, "Codex Native2",
+  );
+  assert.deepEqual(lease, { surfaceId: "surface-fresh", tabId: "fresh", reused: false, connectorBound: false });
+  assert.deepEqual(removed, [["retained-moved", false]]);
+  assert.deepEqual(warnings, ["browser.retained_conversation_moved"]);
+
+  // A turn that can only continue (compaction) takes the existing unavailable path.
+  removed.length = 0;
+  await assert.rejects(
+    BrowserHost.prototype.beginTurn.call(
+      fixture(null), "trace_compact", false, 222, conversationKey, "Codex Native2", true,
+    ),
+    (error) => error.code === "retained_conversation_unavailable",
+  );
+  assert.deepEqual(removed, [["retained-moved", false]]);
+});
+
+for (const [useSavedChats, endedAt, expected] of [
+  [true, `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}`, `/c/${SAVED_CONVERSATION_ID}`],
+  [false, `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}?temporary-chat=true`, `/c/${SAVED_CONVERSATION_ID}?temporary-chat=true`],
+  [false, "https://chatgpt.com/?temporary-chat=true", "/?temporary-chat=true"],
+  // No owned conversation page: the tab is released instead of retained.
+  [true, "https://chatgpt.com/", null],
+  [true, `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}?temporary-chat=true`, null],
+  [false, `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}`, null],
+]) test(`a completed turn pins the conversation it ended on (${endedAt}, saved=${useSavedChats})`, async () => {
+  const removed = [];
+  const tab = {
+    id: "ending", traceId: "trace_end", helperPid: 7, conversationKey: "e".repeat(64),
+    connectorIdentity: "Codex Native2", status: "running",
+    view: { webContents: { isDestroyed: () => false, getURL: () => endedAt, setBackgroundThrottling() {} } },
+  };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    turnTabs: new Map([[tab.id, tab]]),
+    userCancelledTurnOwners: new Map(),
+    closedTurnOwners: new Map(),
+    getUseSavedChats: () => useSavedChats,
+    syncPowerSaveBlocker() {}, hide() {}, writeDescriptor() {}, publishState() {},
+    snapshot: () => ({ tabs: [] }),
+    removeTurnTab(candidate) { removed.push(candidate.id); },
+    logger: { info() {}, warn() {} },
+  });
+  await BrowserHost.prototype.endTurn.call(fixture, "trace_end", 7, "completed", false, undefined, true, true);
+  assert.equal(tab.retainedLocation, expected ?? undefined);
+  assert.deepEqual(removed, expected ? [] : ["ending"]);
 });
 
 test("a retained conversation is not reused for a different connector identity", async () => {
@@ -2649,6 +2773,7 @@ test("a completed keyed turn is retained for thirty minutes and preserves its ac
     loading: true,
     view: { webContents: {
       isDestroyed: () => false,
+      getURL: () => `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}`,
       setBackgroundThrottling: (enabled) => throttling.push(enabled),
     } },
   };
@@ -2723,6 +2848,7 @@ test("a completed connector turn without binding is released instead of retained
     loading: true,
     view: { webContents: {
       isDestroyed: () => false,
+      getURL: () => `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}`,
       setBackgroundThrottling() {},
       close: () => { closed = true; },
     } },

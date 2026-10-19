@@ -260,7 +260,7 @@ export interface CodexProviderConfig {
   modelDefaultReasoningEfforts?: Record<string, string>;
   noReasoningModels?: string[];
   chatgptWeb?: {
-    /** ChatGPT custom connector attached to tool-capable temporary chats. */
+    /** ChatGPT custom connector attached to tool-capable task chats. */
     appName?: string;
     /** Whether ChatGPT DOM interaction is automatic or explicitly driven by the user. */
     browserInteractionMode?: "automatic" | "manual";
@@ -303,5 +303,10 @@ export interface CodexProviderConfig {
     autoApproveToolCalls?: boolean;
     /** DEV-only experimental transport: adapt one context across one, two, or three ChatGPT messages. */
     experimentalBiggerContext?: boolean;
+    /**
+     * Run task turns in ordinary saved ChatGPT conversations. ChatGPT refuses connectors in
+     * Temporary Chat, so absent means on; false restores Temporary Chat.
+     */
+    useSavedChats?: boolean;
   };
 }
