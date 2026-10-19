@@ -13,7 +13,7 @@ import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuSta
 import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, chatAcceptsMessage, chatDuration, chatList, chatMessageWithAttachments, chatRunOpen,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
-  type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
+  chatStatsSpan, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
   activitySummary, groupTimeline, tidyTimeline,
 } from "./ao-chat";
 
@@ -24,6 +24,9 @@ const STATUS_LABEL: Record<ChatStatus, string> = {
 };
 /** Text files up to this size are attached inline when their path is unknown. */
 const INLINE_ATTACHMENT_BYTES = 200 * 1024;
+/** An image attachment's thumbnail URL, where the page can make one. */
+const previewOf = (file: File): string | undefined => (typeof URL !== "undefined" && URL.createObjectURL ? URL.createObjectURL(file) : undefined);
+const freePreview = (url: string | undefined) => { if (url && typeof URL !== "undefined") URL.revokeObjectURL?.(url); };
 /**
  * Each chat's queued messages (task id → queue), kept for the app's lifetime outside the chat view so
  * they survive the view closing (another page, the board) and switching chats.
@@ -376,7 +379,7 @@ function GoalGlyph({ name }: { name: "target" | "trash" | "play" | "pause" | "ex
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
-  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject, projectBranch: branch, steer,
+  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject, projectBranch: branch, steer,
   pendingMessage, pendingTitle, pendingCreation = false, commands, loadWork,
 }: {
   /** A finished card's thinking and tool calls, read back from its AO session (turn_timeline). */
@@ -427,6 +430,10 @@ export function AgentOrchestratorChat({
   onSettings?: () => void;
   /** The path of a dropped or picked file, when the app can tell. */
   filePath?: (file: File) => string;
+  /** Saves a path-less attachment (a pasted screenshot) where the agent can open it; its path. */
+  saveAttachment?: (input: { name: string; type: string; bytes: Uint8Array }) => Promise<{ path: string }>;
+  /** Shows an attached file in the system file manager. */
+  revealFile?: (path: string) => void;
   /** A new chat's starting draft ("Continue in project"); taken once, then onSeedUsed clears it. */
   seed?: { key: string; title: string; text: string; context?: string[] };
   onSeedUsed?: () => void;
@@ -541,6 +548,8 @@ export function AgentOrchestratorChat({
     () => chatTurns(chatRuns, descriptions[selectedTaskId] ?? pendingMessage, { describe: describeNode, activity, now, modelName }),
     [chatRuns, descriptions, selectedTaskId, describeNode, activity, now, pendingMessage, modelName],
   );
+  // The stats line counts the latest turn and the unfinished attempts before it (chatStatsSpan).
+  const statsSpan = useMemo(() => chatStatsSpan(turns, chatRuns), [turns, chatRuns]);
   const stepCount = turns.reduce((total, turn) => total + turn.steps.length + (turn.final ? 1 : 0), 0);
   // The side panel beside the thread (ChatWorkbench: preview, changes, files, terminal) for the
   // chat's AO agents; it opens by itself when an agent first opens a page or starts a command.
@@ -959,16 +968,35 @@ export function AgentOrchestratorChat({
     const added: ChatAttachment[] = [];
     const notes: string[] = [];
     for (const file of Array.from(files)) {
-      const path = filePath?.(file) || "";
       const image = file.type.startsWith("image/");
-      if (path) { added.push({ name: file.name, path, image }); continue; }
-      if (image) { notes.push(`${file.name}: images need their file path, which isn't available here`); continue; }
+      const preview = image ? previewOf(file) : undefined;
+      let path = filePath?.(file) || "";
+      // A pasted screenshot or clipboard file has no path: saved for the agent to open, as Claude
+      // Code does. A small text file without one still goes inline.
+      if (!path && saveAttachment && (image || file.size > INLINE_ATTACHMENT_BYTES || !file.type.startsWith("text/"))) {
+        try {
+          path = (await saveAttachment({ name: file.name || (image ? "pasted-image" : "pasted"), type: file.type, bytes: new Uint8Array(await file.arrayBuffer()) })).path;
+        } catch (cause) {
+          freePreview(preview);
+          notes.push(`${file.name || "Pasted file"}: ${cause instanceof Error ? cause.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, "") : String(cause)}`);
+          continue;
+        }
+      }
+      if (path) { added.push({ name: file.name || fileName(path), path, image, ...(preview ? { preview } : {}) }); continue; }
+      if (image) { freePreview(preview); notes.push(`${file.name}: images need their file path, which isn't available here`); continue; }
       if (file.size > INLINE_ATTACHMENT_BYTES) { notes.push(`${file.name}: too large to attach inline (over 200 KB)`); continue; }
       added.push({ name: file.name, text: await file.text() });
     }
     if (added.length) setAttachments((current) => [...current, ...added].slice(0, 8));
     setAttachNote(notes.join("; "));
   };
+  // Thumbnails are object URLs: freed when their card leaves the chat box (removed or sent).
+  const shownPreviews = useRef(new Set<string>());
+  useEffect(() => {
+    const now = new Set(attachments.map((item) => item.preview).filter((url): url is string => Boolean(url)));
+    for (const url of shownPreviews.current) if (!now.has(url)) freePreview(url);
+    shownPreviews.current = now;
+  }, [attachments]);
 
   const headerMenu = (): ChatMenuItem[] => [
     ...(thread && chat ? [
@@ -1257,9 +1285,16 @@ export function AgentOrchestratorChat({
             </span>
           </div> : null}
           {attachments.length || attachNote ? <div className="cx-attachments">
-            {attachments.map((item, index) => <span key={`${item.name}:${index}`} className="cx-attachment" title={item.path || `${item.name} (inline)`}>
-              {item.image ? "🖼" : "📄"} {item.name}
-              <button type="button" aria-label={`Remove ${item.name}`} onClick={() => setAttachments((current) => current.filter((_, at) => at !== index))}>×</button>
+            {/* As Claude Code shows them: an image as its thumbnail, a file as its name; where it lives
+                is on hover, and a click shows it in its folder. */}
+            {attachments.map((item, index) => <span key={`${item.name}:${index}`} className={`cx-attachment${item.preview ? " is-image" : ""}`}>
+              <button type="button" className="cx-attachment-open" disabled={!item.path || !revealFile}
+                title={item.path ? `${item.path}${revealFile ? "\nClick to show it in its folder" : ""}` : `${item.name} (sent inline)`}
+                onClick={() => { if (item.path) revealFile?.(item.path); }}>
+                {item.preview ? <img src={item.preview} alt={item.name} /> : <span aria-hidden="true">{item.image ? "🖼" : "📄"}</span>}
+                <span className="cx-attachment-name">{item.name}</span>
+              </button>
+              <button type="button" className="cx-attachment-remove" aria-label={`Remove ${item.name}`} onClick={() => setAttachments((current) => current.filter((_, at) => at !== index))}>×</button>
             </span>)}
             {attachNote ? <span className="cx-attach-note" role="status">{attachNote}</span> : null}
           </div> : null}
@@ -1302,7 +1337,7 @@ export function AgentOrchestratorChat({
           </div>
         </form>
         {selectedTaskId ? <ChatTurnStats model={agentSessions[0]?.model} rounds={turns.filter((turn) => turn.runId).length}
-          from={[...turns].reverse().find((turn) => turn.runId && turn.startedAtMs)?.startedAtMs} running={runOpen} /> : null}
+          from={statsSpan.from} models={statsSpan.models} running={runOpen} /> : null}
       </section>
       {showStructure && structure ? <aside className="cx-structure" aria-label="Cards" style={cardsWidth ? { flexBasis: cardsWidth } : undefined}>
         <div className="cx-structure-resize" role="separator" aria-orientation="vertical" aria-label="Resize the cards panel" tabIndex={0}

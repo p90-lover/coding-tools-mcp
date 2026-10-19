@@ -1951,6 +1951,14 @@ export function AgentOrchestratorSurface({ language, setError }: {
                 onPickProject={(id, carried) => { setChatSeed({ key: crypto.randomUUID(), workspaceId: id, title: carried.title, text: carried.text }); chooseWorkspace(id); }}
                 onAddProject={addProjectFromFolder}
                 filePath={(file) => window.codexWebLauncher?.filePath?.(file) ?? ""}
+                saveAttachment={async (input) => {
+                  const save = window.codexWebLauncher?.saveAttachment;
+                  if (!save) throw new Error("Pasted files can be attached in the desktop app");
+                  return save(input);
+                }}
+                revealFile={(file) => {
+                  void window.codexWebLauncher?.revealFile?.(file).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
+                }}
                 structure={selectedRun && chatTaskId && selectedRun.project_id === chatTaskId ? <AgentOrchestratorCanvas key={`chat-${selectedRun.id}`}
                   nodes={visibleNodes} levels={aoLevels(selectedRun).map(level => level.filter(node => visibleNodes.includes(node)))}
                   selectedId="" busy={Boolean(busy)} describe={describeNode}

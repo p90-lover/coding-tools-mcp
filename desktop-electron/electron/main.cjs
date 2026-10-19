@@ -53,6 +53,7 @@ const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs")
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createGuiUpdateController, guiShellHash } = require("./gui-update.cjs");
 const { combineUpdateControllers, createAppUpdateController, createAutoInstaller, sweepUpdateLeftovers, waitForUpdateApply } = require("./app-update.cjs");
+const { saveChatAttachment } = require("./chat-attachments.cjs");
 const { useNativeUpdateTransport } = require("./update.cjs");
 const {
   providerNetworkReady,
@@ -1555,6 +1556,24 @@ function registerIpc({ logger, stateStore }) {
     if (!fs.statSync(resolved, { throwIfNoEntry: false })?.isDirectory()) throw new Error("This folder no longer exists");
     const failure = await shell.openPath(resolved);
     if (failure) throw new Error(failure);
+    return true;
+  });
+
+  // A chat attachment with no path of its own (a pasted screenshot): saved for the agent to open by
+  // path (chat-attachments.cjs). Only from the focused window.
+  handle("launcher:save-attachment", async (event, input) => {
+    assertFocusedMainWindow(event, false);
+    return { path: await saveChatAttachment(path.join(app.getPath("userData"), "chat-attachments"), input) };
+  });
+
+  // Shows an attached file in the system file manager (its card in the chat box). Only an existing
+  // file is accepted, and it is only selected in its folder, never opened or run.
+  handle("launcher:reveal-file", async (event, file) => {
+    assertFocusedMainWindow(event, false);
+    if (typeof file !== "string" || file.length > 4096 || !path.isAbsolute(file)) throw new Error("Choose an absolute file path");
+    const resolved = path.resolve(file);
+    if (!fs.statSync(resolved, { throwIfNoEntry: false })?.isFile()) throw new Error("This file no longer exists");
+    shell.showItemInFolder(resolved);
     return true;
   });
 

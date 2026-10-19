@@ -912,4 +912,9 @@ test("the context meter keeps its reading through a steer's zero snapshot, and d
   assert.equal(at(90000).contextUsed, 90000, "a smaller drop is real (a tool result trimmed)");
   assert.equal(at(5000, "2026-10-19T12:00:00Z").contextUsed, 5000, "a compaction really empties it");
   assert.equal(steadyContext(readings, "s2", { contextUsed: 0, contextWindow: 200000 }, null).contextUsed, 0, "another session starts on its own");
+  // Seen live: after a steer the panel read In 0 · Out 0 · Cached 0 · Total 0 beside a $6.40 cost.
+  steadyContext(readings, "s3", { contextUsed: 300000, contextWindow: 400000, inputTokens: 13_000_000, outputTokens: 100_000, cachedTokens: 12_000_000, totalTokens: 13_100_000, cost: 6.4 }, null);
+  const snapshot = steadyContext(readings, "s3", { contextUsed: 0, contextWindow: 400000, inputTokens: 0, outputTokens: 0, cachedTokens: 0, totalTokens: 0, cost: 6.41 }, null);
+  assert.deepEqual([snapshot.contextUsed, snapshot.inputTokens, snapshot.outputTokens, snapshot.cachedTokens, snapshot.totalTokens, snapshot.cost],
+    [300000, 13_000_000, 100_000, 12_000_000, 13_100_000, 6.41], "the zeroed counts keep the last reading's; what it does report (cost) comes through");
 });

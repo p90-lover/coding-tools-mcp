@@ -13,6 +13,23 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 const node = (id, role, state, extra = {}) => ({ id, role, state, x: 0, ...extra });
 const run = (id, taskId, nodes, extra = {}) => ({ id, project_id: taskId, cancelled: false, nodes, ...extra });
 
+test("the stats line counts the latest turn and the failed or stopped attempts right before it, on every model they used", () => {
+  // Seen live: a message stopped on deepseek-v4.1-flash and sent again on -1017 showed only the new run's time.
+  const card = (state, model, started) => node("p", "planner", state, { route: { harness_id: "ao:claude-code", model }, receipt: { started_at_ms: started } });
+  const runs = [
+    run("r1", "t", [card("finished", "cpa/glm", 100)], { execution_mode: "single" }),
+    run("r2", "t", [card("failed", "cpa/cline-pass/deepseek-v4.1-flash", 200)], { execution_mode: "single" }),
+    run("r3", "t", [card("running", "cpa/cline-pass/deepseek-v4.1-flash-1017", 300)], { execution_mode: "single" }),
+  ];
+  const turns = chat.chatTurns(runs, "first\n\nFollow-up (x):\nsecond\n\nFollow-up (y):\nthird");
+  const span = plain(chat.chatStatsSpan(turns, runs));
+  assert.equal(span.from, 200, "counted from the failed attempt, not the finished turn before it");
+  assert.deepEqual(span.models.sort(), ["cpa/cline-pass/deepseek-v4.1-flash", "cpa/cline-pass/deepseek-v4.1-flash-1017"]);
+  const settled = [runs[0], run("r4", "t", [card("running", "cpa/glm", 400)], { execution_mode: "single" })];
+  assert.equal(chat.chatStatsSpan(chat.chatTurns(settled, "a\n\nFollow-up (x):\nb"), settled).from, 400, "after a finished turn, only the new one");
+  assert.deepEqual(plain(chat.chatStatsSpan([], [])), { models: [] });
+});
+
 test("only a single chat interrupted by an app restart resumes by itself, and only within its attempt budget", () => {
   const restarted = { error: "The agent's process ended before it finished (the app restarted); retry this card." };
   const single = (card, extra = {}) => run("r", "t", [card], { execution_mode: "single", ...extra });

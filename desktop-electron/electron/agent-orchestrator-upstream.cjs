@@ -575,8 +575,38 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   // shows it over the agent's own report (Claude Code over ACP says 200K for any unknown model).
   // In memory and bounded: after a restart the meter falls back to the card's explicit window.
   const launchWindows = new Map();
-  // Each session's last good context reading (steadyContext), bounded like launchWindows.
-  const contextReadings = new Map();
+  // Each session's last good context reading (steadyContext), bounded like launchWindows. Kept on
+  // disk too: after an app restart (an update) the first steer's zero snapshot had nothing to fall
+  // back on, and the meter showed an empty context for a long chat.
+  // Loaded on the meter's first read.
+  let contextReadings = null;
+  let readingsSaved = "";
+  let readingsTimer = null;
+  const readingsFile = () => path.join(dataRoot, "coding-tools-context-readings.json");
+  const readings = () => {
+    if (contextReadings) return contextReadings;
+    let saved = [];
+    try {
+      const parsed = JSON.parse(fs.readFileSync(readingsFile(), "utf8"));
+      if (Array.isArray(parsed)) saved = parsed.filter((entry) => Array.isArray(entry) && typeof entry[0] === "string"
+        && entry[1] && typeof entry[1] === "object" && entry[1].usage && typeof entry[1].usage === "object").slice(-64);
+    } catch { /* no readings yet */ }
+    contextReadings = new Map(saved);
+    readingsSaved = JSON.stringify(saved);
+    return contextReadings;
+  };
+  const saveReadings = () => {
+    if (readingsTimer) return;
+    readingsTimer = setTimeout(() => {
+      readingsTimer = null;
+      const next = JSON.stringify([...readings()]);
+      if (next === readingsSaved) return;
+      readingsSaved = next;
+      fs.promises.mkdir(dataRoot, { recursive: true, mode: 0o700 })
+        .then(() => fs.promises.writeFile(readingsFile(), next, { mode: 0o600 })).catch(() => undefined);
+    }, 5_000);
+    readingsTimer.unref?.();
+  };
   function rememberLaunchWindow(id, tokens) {
     if (!Number.isSafeInteger(tokens) || tokens <= 0) return;
     launchWindows.delete(id);
@@ -1404,7 +1434,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         if (!conversation || typeof conversation !== "object") return;
         const reported = conversation.usage && typeof conversation.usage === "object" ? conversation.usage : null;
         const compactedAt = typeof conversation.compactedAt === "string" ? conversation.compactedAt : null;
-        const usage = steadyContext(contextReadings, id, reported, compactedAt);
+        const usage = steadyContext(readings(), id, reported, compactedAt);
+        saveReadings();
         const limits = conversation.rateLimits && typeof conversation.rateLimits === "object" ? conversation.rateLimits : null;
         sessions[id] = {
           controller: typeof conversation.controller === "string" ? conversation.controller : null,
@@ -1452,7 +1483,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     // The line under the chat box: the latest turn's model requests through CPA (cpa-usage.cjs).
     if (operation === "chat_turn_stats") {
       if (!cpaUsage?.turnStats) return { ok: true, available: false };
-      return cpaUsage.turnStats({ model: typeof args.model === "string" ? args.model : "", from: Number(args.from) });
+      return cpaUsage.turnStats({ model: typeof args.model === "string" ? args.model : "",
+        models: Array.isArray(args.models) ? args.models.filter((value) => typeof value === "string").slice(0, 4) : [], from: Number(args.from) });
     }
     // A chat's Terminal and Preview panes: the user's view of each card's agent session, through
     // the agent tools server that started its commands and owns its preview (chat-agent-tools.cjs).
@@ -1527,7 +1559,13 @@ function steadyContext(readings, id, usage, compactedAt) {
   const used = Number(usage?.contextUsed), before = Number(previous?.usage?.contextUsed);
   if (usage && previous && previous.compactedAt === compactedAt && Number.isFinite(before) && before > 0
     && (!Number.isFinite(used) || used < before / 4)) {
-    return { ...usage, contextUsed: before, contextWindow: usage.contextWindow || previous.usage.contextWindow };
+    const held = { ...usage, contextUsed: before, contextWindow: usage.contextWindow || previous.usage.contextWindow };
+    // The same snapshot zeroes the token counts too (the meter read In 0 · Out 0 · Total 0 beside a
+    // $6.40 cost): a count it reports as nothing keeps the last reading's.
+    for (const key of ["inputTokens", "outputTokens", "cachedTokens", "totalTokens"]) {
+      if (!(Number(held[key]) > 0) && Number(previous.usage[key]) > 0) held[key] = previous.usage[key];
+    }
+    return held;
   }
   if (usage && Number.isFinite(used) && used > 0) {
     readings.delete(id);

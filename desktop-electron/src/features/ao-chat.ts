@@ -576,6 +576,24 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
   return step;
 }
 
+/**
+ * What the line under the chat box counts: the latest turn, and before it every turn that ended
+ * without finishing (failed, stopped, held). A message whose attempt failed and was sent again,
+ * often on another model, kept only the new attempt's time and tokens. `from` is when the earliest
+ * of those started; `models` are the models they ran on, newest first.
+ */
+export function chatStatsSpan(turns: ChatTurn[], runs: ChatRun[]): { from?: number; models: string[] } {
+  const started = turns.filter((turn) => turn.runId && turn.startedAtMs);
+  const latest = started.at(-1);
+  if (!latest) return { models: [] };
+  const span = [latest];
+  for (let index = started.length - 2; index >= 0 && started[index].status !== "done"; index -= 1) span.push(started[index]);
+  const byId = new Map(runs.map((run) => [run.id, run]));
+  const models = [...new Set(span.flatMap((turn) => (byId.get(turn.runId)?.nodes ?? []).map((node) => node.route?.model ?? ""))
+    .filter((model) => model.startsWith("cpa/")))];
+  return { from: Math.min(...span.map((turn) => turn.startedAtMs!)), models };
+}
+
 /** The conversation as Codex turns, oldest first, plus a just-sent message whose run is not visible yet. */
 export function chatTurns(runs: ChatRun[], description: string | undefined, options: ChatOptions = {}): ChatTurn[] {
   const said = chatMessagesFromDescription(description);
@@ -759,7 +777,11 @@ export function chatSlashCommand(draft: string): string | null {
   return name && CHAT_SLASH_COMMANDS.some((command) => command.name === name) ? name : null;
 }
 
-export type ChatAttachment = { name: string; path?: string; text?: string; image?: boolean };
+export type ChatAttachment = {
+  name: string; path?: string; text?: string; image?: boolean;
+  /** The chat box's thumbnail (an object URL of the file); never sent. */
+  preview?: string;
+};
 
 /** Attachments appended to the message: a file path agents read themselves, or a small text file inline. */
 export function chatMessageWithAttachments(message: string, attachments: ChatAttachment[]): string {
