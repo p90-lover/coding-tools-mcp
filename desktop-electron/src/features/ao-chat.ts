@@ -576,6 +576,38 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
   return step;
 }
 
+/** A DeepSeek model, whose turns show as DeepSeek Harness (dsh) shows them. */
+export const isDeepSeekModel = (model?: string | null) => /deepseek/i.test(model ?? "");
+
+const READ_TOOL = /^(read|view|cat|list|ls|open|file)/i;
+const SEARCH_TOOL = /^(grep|glob|search|find|rg)/i;
+/** One work item's kind as DeepSeek Harness groups them. */
+function dshCategory(item: ChatLiveItem): "read" | "search" | "run" | "edit" | "think" | "tool" {
+  if (item.kind === "reasoning") return "think";
+  if (item.kind === "command") return "run";
+  if (item.kind === "edit") return "edit";
+  const name = (item.label || item.text || "").replace(/^mcp__[\w-]+__/, "");
+  return SEARCH_TOOL.test(name) ? "search" : READ_TOOL.test(name) ? "read" : "tool";
+}
+const DSH_DONE = { read: "read files", search: "searched code", run: "ran commands", edit: "edited files", think: "thought", tool: "used tools" } as const;
+const DSH_NOW = { read: "Reading files", search: "Searching code", run: "Running commands", edit: "Editing files", think: "Thinking", tool: "Using tools" } as const;
+
+/**
+ * A group's heading as DeepSeek Harness words it: while live, what the latest step is doing
+ * ("Running commands"); once done, the kinds of work it did, at most three and no counts ("Read
+ * files, searched code and ran commands"). Thinking alone reads "Thought".
+ */
+export function dshActivityTitle(items: ChatLiveItem[], live: boolean): string {
+  if (!items.length) return live ? "Working" : "Worked";
+  if (live) return DSH_NOW[dshCategory(items[items.length - 1])];
+  const kinds = [...new Set(items.map(dshCategory))];
+  const work = kinds.filter((kind) => kind !== "think");
+  const words = (work.length ? work : kinds).map((kind) => DSH_DONE[kind]);
+  const shown = words.slice(0, 3);
+  const text = shown.length > 1 ? `${shown.slice(0, -1).join(", ")} and ${shown[shown.length - 1]}` : shown[0];
+  return `${text[0].toUpperCase()}${text.slice(1)}${words.length > 3 ? ", etc." : ""}`;
+}
+
 /** The chat pet's mood (ChatPet.tsx). */
 export type PetMood = "idle" | "working" | "ask" | "done" | "error";
 

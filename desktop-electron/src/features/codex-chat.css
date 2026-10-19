@@ -871,3 +871,21 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-overview-usage b { overflow: hidden; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .cx-overview-usage small { color: var(--ao-muted); font-size: 11.5px; }
 @media (prefers-reduced-motion: reduce) { .cx-overview-tasks i { animation: none; } }
+/* DeepSeek models show as DeepSeek Harness does (DshStyle): quiet 13px rows "Bash · cmd", a blue
+   "Deep diving for 12s ···" while running, and two stats pills. */
+.cx-turn.is-dsh { --cx-dsh-row: rgb(129 133 140); --cx-dsh-row-hover: rgb(97 102 107); --cx-dsh-blue: rgb(65 118 230); }
+:root[data-theme="dark"] .cx-turn.is-dsh, .ao-workflow[data-theme="dark"] .cx-turn.is-dsh { --cx-dsh-row: rgb(173 178 184); --cx-dsh-row-hover: rgb(207 211 214); }
+.cx-turn.is-dsh .cx-live-item { font-size: 13px; color: var(--cx-dsh-row); }
+.cx-turn.is-dsh .cx-live-item:hover { color: var(--cx-dsh-row-hover); }
+.cx-turn.is-dsh .cx-live-label + .cx-live-text::before { content: "·"; margin: 0 6px 0 2px; opacity: .7; }
+.cx-turn.is-dsh .cx-tool-dot { display: none; }
+.cx-turn.is-dsh .cx-diff-count { font-family: var(--claude-mono, ui-monospace, monospace); font-size: 11px; }
+.cx-turn.is-dsh .cx-diff-count .is-add, .cx-turn.is-dsh .cx-diff-count .is-del { color: inherit; }
+.cx-turn.is-dsh .cx-tool:hover .cx-diff-count .is-add, .cx-turn.is-dsh details[open] .cx-diff-count .is-add { color: var(--ao-green, #2e9d5b); }
+.cx-turn.is-dsh .cx-tool:hover .cx-diff-count .is-del, .cx-turn.is-dsh details[open] .cx-diff-count .is-del { color: var(--ao-red, #c0392b); }
+.cx-turn.is-dsh .cx-dsh-diving { color: var(--cx-dsh-blue); font-size: 12px; }
+.cx-turn.is-dsh .cx-group .cx-live { max-height: min(400px, 50vh); overflow-y: auto;
+  mask-image: linear-gradient(transparent, #000 24px, #000 calc(100% - 24px), transparent); }
+.cx-turn-stats.is-dsh { gap: 6px; }
+.cx-turn-stats.is-dsh span { padding: 2px 9px; border: 1px solid var(--ao-line); border-radius: 999px; }
+.cx-turn-stats.is-dsh span::before { content: none; }

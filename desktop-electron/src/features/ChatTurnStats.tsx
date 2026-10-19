@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { getCodingToolsClient } from "../api/client";
-import { tokensShort } from "./ao-chat";
+import { isDeepSeekModel, tokensShort } from "./ao-chat";
 
 // The line under the chat box, as DeepSeek Harness shows one: the chat's rounds, then the latest
 // turn's model requests through CPA (chat_turn_stats, read from CPA Helper's request log): how many
@@ -46,6 +46,20 @@ export function ChatTurnStats({ model, models = [], from, rounds, running }: {
 
   if (!rounds) return null;
   const has = stats?.available && stats.steps;
+  // A DeepSeek model's chat shows DeepSeek Harness's two pills: "4 turns 17 steps · 38 tok/s" and
+  // "123K tok · Cache hit 97%"; the time and per-direction numbers are on hover.
+  if (isDeepSeekModel(model)) {
+    const pills: { key: string; text: string; title: string }[] = [{ key: "pace",
+      text: `${rounds} ${rounds === 1 ? "turn" : "turns"}${has ? ` ${stats.steps} ${stats.steps === 1 ? "step" : "steps"}${stats.tokensPerSecond ? ` · ${stats.tokensPerSecond} tok/s` : ""}` : ""}`,
+      title: has ? `LLM time ${seconds(stats.latencyMs ?? 0)}${stats.ttftMs ? ` · first token ${seconds(stats.ttftMs)}` : ""}${stats.failed ? ` · ${stats.failed} failed` : ""}` : "Messages in this chat" }];
+    if (has) {
+      pills.push({ key: "tokens", text: `${tokensShort((stats.inputTokens ?? 0) + (stats.outputTokens ?? 0))} tok${stats.cacheHit !== null && stats.cacheHit !== undefined ? ` · Cache hit ${Math.round(stats.cacheHit * 100)}%` : ""}`,
+        title: `In ${tokensShort(stats.inputTokens)} · out ${tokensShort(stats.outputTokens)}` });
+    }
+    return <p className={`cx-turn-stats is-dsh${running ? " is-running" : ""}`} aria-label="Latest turn">
+      {pills.map((pill) => <span key={pill.key} title={pill.title}>{pill.text}</span>)}
+    </p>;
+  }
   const parts: { key: string; text: string; title: string }[] = [
     { key: "rounds", text: `${rounds} ${rounds === 1 ? "round" : "rounds"}${has ? ` · ${stats.steps} ${stats.steps === 1 ? "step" : "steps"}` : ""}`,
       title: has ? `Messages in this chat · model requests in the latest turn and any failed or stopped attempts before it${stats.failed ? ` (${stats.failed} failed)` : ""}` : "Messages in this chat" },
