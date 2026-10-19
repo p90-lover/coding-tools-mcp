@@ -11,7 +11,7 @@ import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "
 import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
-import { GOAL_SUMMARY, chatArchived, chatList, chatMarkdown, chatMessagesFromDescription, chatTurns, dependencyInstallNote, goalElapsed, resumableAfterRestart, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
+import { GOAL_SUMMARY, chatArchived, chatList, chatMarkdown, chatMessagesFromDescription, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
 import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { createLatestConfigQueue } from "./ao-config";
 import {
@@ -699,19 +699,24 @@ export function AgentOrchestratorSurface({ language, setError }: {
     for (const mission of missions) {
       const running = mission.nodes.filter((node) => node.state === "running");
       const key = `${workspaceId}:${mission.id}`;
-      if (mission.workspace_id !== workspaceId || mission.cancelled || !running.length || settledRuns.current.has(key)) continue;
+      // A run with work left but nothing running (its next cards never started) is just as orphaned.
+      if (mission.workspace_id !== workspaceId || mission.cancelled || settledRuns.current.has(key)
+        || (!running.length && !restartResume(mission))) continue;
       settledRuns.current.add(key);
       void (async () => {
         const status = await moduleCall("run_status", { workspaceId, runId: mission.id });
         if (!mounted.current || selection.current.workspaceId !== workspaceId) { settledRuns.current.delete(key); return; }
-        if (status.driven !== false) return;
+        // A loop in this app session drives it (or is starting it).
+        if (status.driven !== false || ["starting", "running"].includes(String(status.status))) return;
         let nodes = running;
-        let still: AoMission | undefined;
+        let still: AoMission | undefined = mission;
         for (;;) {
           for (const node of nodes) await moduleCall("observe", { workspaceId, runId: mission.id, nodeId: node.id }).catch(() => undefined);
           if (!mounted.current || selection.current.workspaceId !== workspaceId) { settledRuns.current.delete(key); return; }
           const after = await moduleCall("runs", { workspaceId, runId: mission.id }).catch(() => null);
           still = (after?.runs as AoMission[] | undefined)?.find((run) => run.id === mission.id);
+          // Resumable now: its loop takes over the cards still running and starts the next ones.
+          if (still && !resumedRuns.current.has(key) && restartResume(still)) break;
           nodes = still && !still.cancelled ? still.nodes.filter((node) => node.state === "running" && node.route?.harness_id?.startsWith("ao:")) : [];
           // Done once nothing is left running here, another project is open, or a loop took the run over.
           if (!nodes.length || !mounted.current || selection.current.workspaceId !== workspaceId
@@ -720,13 +725,13 @@ export function AgentOrchestratorSurface({ language, setError }: {
         }
         // Left for another project with the card still running: watch it again when it is back.
         if (nodes.length && (!mounted.current || selection.current.workspaceId !== workspaceId)) settledRuns.current.delete(key);
-        // A chat whose step failed only because the app restarted (an update closes AO with it)
-        // picks up where it was, the way "Retry failed step" does; a new background grant still
-        // asks in this window.
-        if (mounted.current && selection.current.workspaceId === workspaceId && still && !resumedRuns.current.has(key)
-          && resumableAfterRestart(still)) {
+        // A chat the app restart interrupted picks up where it was, the way "Retry failed step"
+        // does, and one with work left continues; teams too. A new background grant still asks in
+        // this window.
+        const resume = still && !resumedRuns.current.has(key) ? restartResume(still) : null;
+        if (mounted.current && selection.current.workspaceId === workspaceId && resume) {
           resumedRuns.current.add(key);
-          await moduleCall("control_run", { workspaceId, runId: mission.id, action: "retry", ...executableArg() });
+          if (resume === "retry") await moduleCall("control_run", { workspaceId, runId: mission.id, action: "retry", ...executableArg() });
           await moduleCall("start_run", { workspaceId, runId: mission.id, ...executableArg() });
         }
         if (mounted.current && selection.current.workspaceId === workspaceId) await loadMissions(workspaceId);
