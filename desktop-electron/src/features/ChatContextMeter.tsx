@@ -149,7 +149,7 @@ function ContextBar({ segments, scale, estimated }: { segments: Segment[]; scale
   </div>;
 }
 
-export function ChatContextMeter({ sessionId, agentLabel, model, launchedWindow, nextWindow, canCompact, onCompact }: {
+export function ChatContextMeter({ sessionId, agentLabel, model, launchedWindow, nextWindow, canCompact, onCompact, onFraction }: {
   sessionId?: string;
   agentLabel?: string;
   /** The session's route model; a "cpa/…" model served by CPA's Codex accounts shows their limits. */
@@ -160,6 +160,8 @@ export function ChatContextMeter({ sessionId, agentLabel, model, launchedWindow,
   nextWindow?: number;
   canCompact: boolean;
   onCompact: () => void;
+  /** The share of the window in use as the ring shows it, for the chat's pet (null when unknown). */
+  onFraction?: (fraction: number | null) => void;
 }) {
   const [snapshot, setSnapshot] = useState<ChatContextSnapshot | null>(null);
   const [quota, setQuota] = useState<CpaQuota | null>(null);
@@ -259,6 +261,7 @@ export function ChatContextMeter({ sessionId, agentLabel, model, launchedWindow,
   // A window changed in the model menu applies from the next run; say so at once.
   const pendingWindow = nextWindow && nextWindow !== (usage?.contextWindow ?? launched) ? nextWindow : null;
   const fraction = contextFraction(usage);
+  useEffect(() => { onFraction?.(fraction); }, [fraction, onFraction]);
   const radius = (RING - 4) / 2;
   const circumference = 2 * Math.PI * radius;
   const label = !sessionId ? "No agent has started in this chat yet"
@@ -305,25 +308,31 @@ export function ChatContextMeter({ sessionId, agentLabel, model, launchedWindow,
             <strong>Context</strong>
             {agentLabel ? <small title={[agentLabel, snapshot?.controller].filter(Boolean).join(" · ")}>{modelName(model) || agentLabel}</small> : null}
           </div>
-          {snapshot?.controller ? <span className={`cx-ctx-state is-${/busy|running|working/i.test(snapshot.controller) ? "busy" : "idle"}`}>{snapshot.controller}</span> : null}
+          {/* The agent's own controller word ("Busy", "Ready") reads as plain Working or Idle; the word is on hover. */}
+          {snapshot?.controller ? (() => {
+            const busy = /busy|running|working/i.test(snapshot.controller);
+            return <span className={`cx-ctx-state is-${busy ? "busy" : "idle"}`} title={snapshot.controller}>{busy ? "Working" : "Idle"}</span>;
+          })() : null}
         </header>
         {!sessionId || !usage ? <p className="cx-ctx-empty">{!sessionId ? "No agent yet" : "Waiting for the agent's first reply"}</p> : <>
           <div className="cx-ctx-hero">
             <b className={`is-${tone(fraction)}`}>{fraction === null ? tokensShort(usage.contextUsed) : `${Math.round(fraction * 100)}%`}</b>
-            <span>{fraction === null ? "tokens in context" : <>{tokensShort(usage.contextUsed)} <em>of</em> {tokensShort(usage.contextWindow)}</>}</span>
+            <span>{fraction === null ? "tokens in context" : <>{tokensShort(usage.contextUsed)} <em>of</em> {tokensShort(usage.contextWindow)} used</>}</span>
           </div>
           {scale ? <ContextBar scale={scale} estimated={estimated}
             segments={breakdown ? breakdown.categories.map((category) => ({ id: category.id, label: SHORT_CATEGORY[category.id] ?? category.label, tokens: category.tokens }))
               : [{ id: "used", label: "Used", tokens: usage.contextUsed ?? 0 }]} /> : null}
-          {overridden || pendingWindow ? <p className="cx-ctx-meta">
-            {overridden ? <span title={`The agent's own report says ${tokensShort(reported?.contextWindow ?? null)}`}>Launched at {tokensShort(launched!)}</span> : null}
-            {pendingWindow ? <span className="is-pending">Next run {tokensShort(pendingWindow)}</span> : null}
-          </p> : null}
-          <div className="cx-ctx-stats">
-            {[["In", usage.inputTokens], ["Out", usage.outputTokens], ["Cached", usage.cachedTokens], ["Total", usage.totalTokens]].map(([name, value]) =>
-              <div key={name as string}><b>{tokensShort(value as number | null)}</b><span>{name}</span></div>)}
-            {usage.cost !== null ? <div><b>{usage.currency && usage.currency !== "USD" ? `${usage.cost.toFixed(2)} ${usage.currency}` : `$${usage.cost.toFixed(2)}`}</b><span>Cost</span></div> : null}
-          </div>
+          {pendingWindow ? <p className="cx-ctx-meta"><span className="is-pending">Next run {tokensShort(pendingWindow)}</span></p> : null}
+          {/* The conversation's spend as a short list, the cached share beside the input it saved:
+              five equal tiles left each number too narrow to read. */}
+          <dl className="cx-ctx-spend">
+            <dt>Input</dt>
+            <dd title={usage.totalTokens !== null ? `Total ${tokensShort(usage.totalTokens)} tokens` : undefined}>{tokensShort(usage.inputTokens)}
+              {usage.cachedTokens ? <small> · {tokensShort(usage.cachedTokens)} cached</small> : null}</dd>
+            <dt>Output</dt><dd>{tokensShort(usage.outputTokens)}</dd>
+            {usage.cost !== null ? <><dt>Cost so far</dt>
+              <dd className="is-cost">{usage.currency && usage.currency !== "USD" ? `${usage.cost.toFixed(2)} ${usage.currency}` : `$${usage.cost.toFixed(2)}`}</dd></> : null}
+          </dl>
         </>}
         {limitRows.length ? <section className="cx-ctx-section">
           <h4>Limits{limits?.planLabel || snapshot?.planLabel ? <small>{limits?.planLabel || snapshot?.planLabel}</small> : null}</h4>
@@ -367,7 +376,8 @@ export function ChatContextMeter({ sessionId, agentLabel, model, launchedWindow,
             {server.name}</li>)}</ul>
         </section> : null}
         <footer className="cx-ctx-foot">
-          <span title={snapshot?.compactedAt ? new Date(snapshot.compactedAt).toLocaleString() : undefined}>{snapshot?.compactedAt ? `Compacted ${agoLabel(Date.parse(snapshot.compactedAt), false)}` : "Never compacted"}</span>
+          <span title={snapshot?.compactedAt ? new Date(snapshot.compactedAt).toLocaleString() : undefined}>{snapshot?.compactedAt ? `Compacted ${agoLabel(Date.parse(snapshot.compactedAt), false)}` : "Never compacted"}
+            {overridden ? <span title={`The agent's own report says ${tokensShort(reported?.contextWindow ?? null)}`}> · launched at {tokensShort(launched!)}</span> : null}</span>
           <button type="button" disabled={!canCompact} title={canCompact ? "Summarize the history to free context (/compact)" : "Compact works once the chat is not running"}
             onClick={() => { setOpen(null); onCompact(); }}>Compact</button>
         </footer>

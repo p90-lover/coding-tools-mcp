@@ -25,6 +25,7 @@ const meter = load("ChatContextMeter.tsx", { "./ao-chat": chat, "./ChatMenu": me
   "../api/client": client, "./cpa-usage": load("cpa-usage.ts", { "../api/client": client }) });
 const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null, Caret: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
   "./ChatContextMeter": meter,
+  "./ChatPet": load("ChatPet.tsx", { "./ao-chat": chat }),
   "./ChatTurnStats": load("ChatTurnStats.tsx", { "./ao-chat": chat, "../api/client": client }),
   "./codex-prompts": load("codex-prompts.ts"),
   // The branch bar reads git asynchronously and renders nothing until then, as here; composer

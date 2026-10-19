@@ -576,6 +576,19 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
   return step;
 }
 
+/** The chat pet's mood (ChatPet.tsx). */
+export type PetMood = "idle" | "working" | "ask" | "done" | "error";
+
+/** The pet's mood from the chat: a waiting request first, then a running turn, then how the last one ended. */
+export function petMood({ asking, running, lastStatus, lastFailed }: {
+  asking: boolean; running: boolean; lastStatus?: string; lastFailed?: boolean;
+}): PetMood {
+  if (asking) return "ask";
+  if (running) return "working";
+  if (lastFailed || lastStatus === "attention") return "error";
+  return lastStatus === "done" ? "done" : "idle";
+}
+
 /**
  * What the line under the chat box counts: the latest turn, and before it every turn that ended
  * without finishing (failed, stopped, held). A message whose attempt failed and was sent again,

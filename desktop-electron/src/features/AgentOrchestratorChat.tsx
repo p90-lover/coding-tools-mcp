@@ -7,13 +7,14 @@ import { ChatMarkdown } from "./ChatMarkdown";
 import { ChatWorkbench, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
 import { ChatBranchBar } from "./ChatBranchBar";
 import { ChatContextMeter } from "./ChatContextMeter";
+import { ChatPet } from "./ChatPet";
 import { ChatTurnStats } from "./ChatTurnStats";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, chatAcceptsMessage, chatDuration, chatList, chatMessageWithAttachments, chatRunOpen,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
-  chatStatsSpan, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
+  chatStatsSpan, petMood, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
   activitySummary, groupTimeline, tidyTimeline,
 } from "./ao-chat";
 
@@ -38,6 +39,8 @@ const CHAT_DRAFTS = new Map<string, string>();
 const CHAT_ATTACHMENTS = new Map<string, ChatAttachment[]>();
 /** The cards panel's dragged width (px), kept on this computer. */
 const CARDS_WIDTH_KEY = "coding-tools:ao:cards-panel-width";
+/** Whether the chat's pet is shown ("off" hides it), kept on this computer. */
+const PET_KEY = "coding-tools:ao:pet";
 
 /** Thread actions the chat header, its ⋯ menu and its slash commands share with the thread list. */
 export type ChatThreadActions = {
@@ -585,6 +588,14 @@ export function AgentOrchestratorChat({
     try { localStorage.setItem(COMPACT_ACTIVITY_KEY, current ? "off" : "on"); } catch { /* applies now regardless */ }
     return !current;
   });
+  // Bit, the chat's pet (ChatPet), shown unless turned off from the header menu or its own right-click.
+  const [petOn, setPetOn] = useState(() => { try { return localStorage.getItem(PET_KEY) !== "off"; } catch { return true; } });
+  const togglePet = () => setPetOn((current) => {
+    try { localStorage.setItem(PET_KEY, current ? "off" : "on"); } catch { /* applies now regardless */ }
+    return !current;
+  });
+  // The context ring's reading, which the pet's belly follows.
+  const [contextShare, setContextShare] = useState<number | null>(null);
   // The cards panel can be dragged wider for more board room; the width is kept per viewer.
   const [cardsWidth, setCardsWidth] = useState<number | null>(() => {
     try { const value = Number(localStorage.getItem(CARDS_WIDTH_KEY)); return Number.isFinite(value) && value >= 280 ? value : null; } catch { return null; }
@@ -1007,6 +1018,7 @@ export function AgentOrchestratorChat({
     ] as ChatMenuItem[] : []),
     ...(steer ? [{ label: "Steer while working", checked: steerOn, run: toggleSteer } as ChatMenuItem] : []),
     { label: "Compact activity", checked: compactActivity, run: toggleCompact } as ChatMenuItem,
+    { label: "Show pet", checked: petOn, run: togglePet } as ChatMenuItem,
     { label: workMode === "single" ? "Show work details" : "Show workers' activity", checked: showWork, run: toggleWork } as ChatMenuItem,
     { kind: "separator" },
     latest && chat?.status === "paused" && onResume ? { label: "Resume mission", run: onResume }
@@ -1271,6 +1283,12 @@ export function AgentOrchestratorChat({
         <form className="cx-composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}
           onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
           onDrop={(event) => { if (event.dataTransfer.files.length) { event.preventDefault(); void addFiles(event.dataTransfer.files); } }}>
+          {petOn && selectedTaskId ? (() => {
+            const last = [...turns].reverse().find((turn) => turn.runId);
+            return <ChatPet context={contextShare} onHide={togglePet}
+              mood={petMood({ asking: awaitingAnswer, running: runOpen && anyWorking, lastStatus: last?.status,
+                lastFailed: Boolean(last && !runOpen && [...last.steps, ...(last.final ? [last.final] : [])].some((step) => step.state === "failed" || step.state === "held")) })} />;
+          })() : null}
           {slash.length ? <ul className="cx-slash" role="listbox" aria-label="Commands">
             {slash.map((command, index) => <li key={command.name} role="option" aria-selected={index === slashIndex % slash.length}>
               <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => pick(command.name)}>
@@ -1326,7 +1344,7 @@ export function AgentOrchestratorChat({
             <span className="cx-head-spacer" />
             {selectedTaskId ? <ChatContextMeter sessionId={agentSessions[0]?.id} agentLabel={agentSessions[0]?.label} model={agentSessions[0]?.model}
               launchedWindow={agentSessions[0]?.contextWindow} nextWindow={composer?.route?.context_window}
-              canCompact={Boolean(commands && accepts)} onCompact={() => void runCommand("compact")} /> : null}
+              canCompact={Boolean(commands && accepts)} onCompact={() => void runCommand("compact")} onFraction={setContextShare} /> : null}
             <button type="button" className="cx-icon-button cx-mic" aria-label="Voice input" title="Voice input isn't available yet" disabled>
               <ChatGlyph name="mic" size={16} /></button>
             {latest && runOpen && stop && !accepts && !((steering || queueing) && canSend)
