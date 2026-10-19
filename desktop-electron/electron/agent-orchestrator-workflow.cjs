@@ -997,8 +997,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         // with what the earlier agents replied; the first card to start takes it.
         const handoff = handoffs.get(runId);
         handoffs.delete(runId);
+        const handoffRoom = PROMPT_BYTES - utf8Bytes(reserved.prompt);
         const prompt = !sent?.turnId && handoff
-          ? (await chatHandoff(handoff.workspaceId, handoff.taskId, runId).catch(() => "")) + reserved.prompt : reserved.prompt;
+          ? (await chatHandoff(handoff.workspaceId, handoff.taskId, runId, handoffRoom).catch(() => "")) + reserved.prompt : reserved.prompt;
         // Otherwise a pre-warmed session for exactly this route takes the first prompt as its first
         // turn: it already has its worktree and a running agent, so nothing is launched now.
         const warmed = sent?.turnId ? null : await takeWarm(workspaceId, node.route, plain);
@@ -3089,8 +3090,20 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // A chat switched to another model, agent or setting starts a fresh session, which got only the
   // chat's task text: the person's messages, never what the earlier agents said or found. It now
   // also gets their replies, in order, or a handoff summary of them when they are too long.
-  const HANDOFF_MAX_CHARS = 24_000;
-  async function chatHandoff(workspaceId, taskId, runId) {
+  // AO keeps the first 16 KiB of UTF-8 of a prompt (upstream spawn), with room for its own
+  // instruction: the handoff goes in front of the chat's prompt, so it gets only what the prompt
+  // leaves, and the person's latest request is never the part that is cut.
+  const PROMPT_BYTES = 16_384 - 1_024;
+  const HANDOFF_MIN_BYTES = 1_024;
+  const utf8Bytes = text => Buffer.byteLength(text, "utf8");
+  /** The end of a text within a UTF-8 byte budget, never splitting a character. */
+  const utf8Tail = (text, bytes) => {
+    const chars = Array.from(text);
+    let used = 0, start = chars.length;
+    while (start > 0 && used + utf8Bytes(chars[start - 1]) <= bytes) used += utf8Bytes(chars[--start]);
+    return chars.slice(start).join("");
+  };
+  async function chatHandoff(workspaceId, taskId, runId, maxBytes) {
     const saved = await runs({ workspaceId });
     const earlier = chatEdits.visible(workspaceId, saved.runs.filter(run => run.project_id === taskId && run.id !== runId));
     const replies = [];
@@ -3102,14 +3115,22 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         replies.push(`--- Reply ${replies.length + 1} (${who}):\n${answer}`);
       }
     }
-    if (!replies.length) return "";
+    if (!replies.length || maxBytes < HANDOFF_MIN_BYTES) return "";
     const head = "Earlier in this chat, other agents answered the messages below. Their replies, in order, so you can continue from where they left off:\n\n";
+    const end = "\n\n--- End of earlier replies.\n\n";
     const transcript = replies.join("\n\n");
-    if (transcript.length <= HANDOFF_MAX_CHARS) return `${head}${transcript}\n\n--- End of earlier replies.\n\n`;
+    const whole = `${head}${transcript}${end}`;
+    if (utf8Bytes(whole) <= maxBytes) return whole;
     const summary = await handoffSummary(transcript).catch(() => "");
-    if (summary) return `Earlier in this chat, other agents worked on the messages below. A handoff summary of their replies:\n\n${summary}\n\n--- End of summary.\n\n`;
+    if (summary) {
+      const summaryHead = "Earlier in this chat, other agents worked on the messages below. A handoff summary of their replies:\n\n";
+      const summaryEnd = "\n\n--- End of summary.\n\n";
+      const room = maxBytes - utf8Bytes(summaryHead + summaryEnd);
+      if (room >= HANDOFF_MIN_BYTES / 2) return `${summaryHead}${utf8Bytes(summary) <= room ? summary : utf8Tail(summary, room)}${summaryEnd}`;
+    }
     // No model answered: the newest replies, which matter most for going on.
-    return `${head}[earlier replies cut]\n${transcript.slice(-HANDOFF_MAX_CHARS)}\n\n--- End of earlier replies.\n\n`;
+    const cut = `${head}[earlier replies cut]\n`;
+    return `${cut}${utf8Tail(transcript, maxBytes - utf8Bytes(cut + end))}${end}`;
   }
 
   // /compact: a chat's context is its task text (every follow-up is appended to it, up to 8,192

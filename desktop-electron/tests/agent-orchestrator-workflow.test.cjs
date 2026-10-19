@@ -3116,14 +3116,14 @@ test("a follow-up after a permission change starts a fresh session; a refused se
   assert.equal(refused.spawned.length, 1, "a refused follow-up starts a fresh session instead of failing the card");
 });
 
-test("a chat switched to another model starts it with what the earlier agent replied", async () => {
-  // Seen live: switching the chat's model started a fresh agent that knew only the user's messages.
+/** The first prompt a chat's fresh session gets after switching from glm-5.3-flash to gemini, given the earlier reply. */
+async function switchedPrompt(earlierAnswer) {
   const before = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/cline-pass/glm-5.3-flash", permission_profile: ":ao-default" };
   const after = { ...before, model: "cpa/gemini-3.8-flash-high" };
   const task = { id: "task-1", title: "Fix auth", description: "find the auth bug", state: "in_progress", clauses: [] };
   const previous = { id: "r1", project_id: "task-1", execution_mode: "single", cancelled: false,
     nodes: [{ id: "one", role: "planner", state: "finished", parents: [], route: before, settings: { name: "Single assistant" },
-      receipt: { thread_id: "sess-1", answer: "The bug is in auth.ts line 42: the token expiry is compared in seconds." } }] };
+      receipt: { thread_id: "sess-1", answer: earlierAnswer } }] };
   const world = chatWorld({ tasks: [task], runs: [previous] });
   const created = new Map();
   const spawned = [];
@@ -3154,9 +3154,24 @@ test("a chat switched to another model starts it with what the earlier agent rep
   await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "now fix it", executionMode: "single", singleRoute: after });
   for (let tries = 0; tries < 200 && !spawned.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(spawned.length, 1, "another model starts a fresh session");
-  assert.match(spawned[0].prompt, /auth\.ts line 42/, "the earlier reply goes with it");
-  assert.match(spawned[0].prompt, /Single assistant · cline-pass\/glm-5\.3-flash/, "and says which agent gave it");
-  assert.ok(spawned[0].prompt.endsWith("full prompt"), "the chat's own prompt follows the earlier replies");
+  return spawned[0].prompt;
+}
+
+test("a chat switched to another model starts it with what the earlier agent replied", async () => {
+  // Seen live: switching the chat's model started a fresh agent that knew only the user's messages.
+  const prompt = await switchedPrompt("The bug is in auth.ts line 42: the token expiry is compared in seconds.");
+  assert.match(prompt, /auth\.ts line 42/, "the earlier reply goes with it");
+  assert.match(prompt, /Single assistant · cline-pass\/glm-5\.3-flash/, "and says which agent gave it");
+  assert.ok(prompt.endsWith("full prompt"), "the chat's own prompt follows the earlier replies");
+});
+
+test("a long handoff never pushes the chat's own prompt past AO's 16 KiB prompt limit", async () => {
+  // AO keeps the first 16 KiB of a prompt: a handoff in front of it must leave the request whole.
+  const long = "前".repeat(9_000) + " the newest finding: retry the login flow.";
+  const prompt = await switchedPrompt(long);
+  assert.ok(Buffer.byteLength(prompt, "utf8") <= 16_384, "fits AO's prompt limit");
+  assert.ok(prompt.endsWith("full prompt"), "the person's latest request survives whole");
+  assert.match(prompt, /retry the login flow/, "with no summary model, the newest part of the earlier replies is kept");
 });
 
 test("reading an AO card's status never records its result, and team steering goes to the orchestrator", async () => {
