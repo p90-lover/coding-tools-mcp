@@ -559,7 +559,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   async function internalApi(method, endpoint, body) {
     await start();
     const result = await requestApi(method, endpoint, body === undefined ? undefined : JSON.stringify(body));
-    if (!result.ok) throw new Error(aoErrorMessage(result));
+    if (!result.ok) {
+      const error = new Error(aoErrorMessage(result));
+      error.status = result.status;
+      const code = result.data?.code ?? result.data?.error?.code;
+      if (typeof code === "string" && /^[A-Z0-9_]{1,80}$/.test(code)) error.code = code;
+      throw error;
+    }
     return result.data;
   }
   const agentId = (value) => {
@@ -810,20 +816,53 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       // started a fresh session beside the agent coming back. Callers share the first check.
       const key = sessionId(id);
       if (!continuing.has(key)) continuing.set(key, (async () => {
-        const record = await internalApi("GET", `/api/v1/sessions/${key}`).catch(() => null);
-        const status = record?.session?.status;
-        if (!record?.session || record.session.mode === "tui" || record.session.isTerminated || ["terminated", "killed", "errored"].includes(status)) return false;
-        if (status === "exited") {
-          // An agent released while idle (exitAgent) keeps its session, worktree and conversation:
-          // bring it back (a few seconds) rather than start over and replay the whole chat.
-          // AO holds a chat's tool servers only while its daemon runs: one resumed after a restart
-          // came back without the app's tools. Fresh ones for the session go with the resume.
+        const uncertain = cause => Object.assign(new Error("The existing agent's restoration could not be confirmed; retry this chat without starting a replacement"),
+          { code: "AO_SESSION_RESTORE_UNCONFIRMED", cause });
+        const read = async () => {
+          try {
+            const record = await internalApi("GET", `/api/v1/sessions/${key}`);
+            if (!record?.session) throw uncertain();
+            return record.session;
+          } catch (error) { if (error.status === 404 && error.code === "SESSION_NOT_FOUND") return null; throw uncertain(error); }
+        };
+        const invalid = session => !session || session.mode === "tui" || session.isTerminated
+          || ["terminated", "killed", "errored"].includes(session.status) || session.provisionState === "failed";
+        let session = await read();
+        if (invalid(session)) return false;
+        if (session.id !== key) throw uncertain();
+        if (session.status === "exited") {
+          // Startup may already own restoration. A conflict is not readiness: wait for this
+          // exact session's observable live state, without issuing a second resume or new launch.
           const renewed = await Promise.resolve().then(() => agentTools?.renew?.(key)).catch(() => null);
-          const resume = body => internalApi("POST", `/api/v1/sessions/${key}/resume-agent`, body).catch(() => null);
-          let resumed = await resume(renewed?.servers?.length ? { mcpServers: renewed.servers } : {});
-          // An AO from before resume took servers refuses the field; resume as before then.
-          if (resumed?.ok !== true && renewed?.servers?.length) resumed = await resume({});
-          if (resumed?.ok !== true) return false;
+          let body = renewed?.servers?.length ? { mcpServers: renewed.servers } : {};
+          try {
+            let resumed;
+            try { resumed = await internalApi("POST", `/api/v1/sessions/${key}/resume-agent`, body); }
+            catch (error) {
+              // Only the known old-schema rejection may retry without the optional servers.
+              if (!body.mcpServers || !/unknown field [\\"']?mcpServers/.test(String(error?.message))) throw error;
+              resumed = await internalApi("POST", `/api/v1/sessions/${key}/resume-agent`, {});
+            }
+            if (resumed?.ok !== true) throw uncertain();
+          } catch (error) {
+            if (["SESSION_NOT_RESTORABLE", "SESSION_TERMINATED", "SESSION_NOT_FOUND"].includes(error.code)) return false;
+            if (error.status !== 409 || error.code !== "AGENT_RESUME_IN_PROGRESS") throw uncertain(error);
+          }
+          const deadline = Date.now() + 30000;
+          for (let attempt = 0; attempt < 150 && Date.now() < deadline; attempt++) {
+            session = await read();
+            if (invalid(session)) return false;
+            if (session.id !== key) throw uncertain();
+            // Status is a display value: an idle live agent may show its pull request state.
+            const activity = session.activity?.state;
+            const live = activity == null
+              ? ["idle", "working", "needs_input", "pr_open", "draft", "ci_failed", "review_pending", "changes_requested", "approved", "mergeable", "merged"].includes(session.status)
+              : ["idle", "active", "waiting_input", "blocked"].includes(activity);
+            if (live && (!session.statusReadiness || session.statusReadiness === "ready") && session.provisionState !== "provisioning"
+              && !(await chatHostGone(key))) return true;
+            await new Promise(resolve => setTimeout(resolve, 200));
+          }
+          throw uncertain();
         }
         return !(await chatHostGone(key));
       })().finally(() => continuing.delete(key)));
@@ -834,6 +873,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
      * provider conversation; continuable() resumes it on the next message.
      */
     async exitAgent(id) {
+      agentTools?.cancelSessionCalls?.(id);
       let outcome;
       try { outcome = await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/exit-agent`, {}); }
       catch (error) {
@@ -889,6 +929,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     },
     /** Ends a session and its agent (a pre-warmed one nobody used). */
     async kill(id) {
+      agentTools?.cancelSessionCalls?.(id);
       await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/kill`, {});
       agentTools?.forgetSession?.(id);
       return { ok: true };
@@ -962,18 +1003,21 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return pastTurnTimeline(id, turnId);
     },
     async interrupt(id) {
-      const interrupt = () => internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/interrupt`, {});
+      agentTools?.cancelSessionCalls?.(id);
+      const interrupt = () => internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/interrupt`, {}).catch(error => {
+        if (!/CHAT_NO_ACTIVE_TURN/.test(String(error?.message))) throw error;
+      });
       await interrupt().catch(async (error) => {
         // A chat created in the background (spawn's async) whose agent is still starting has no
         // controller, so nothing to interrupt; AO would send its queued prompt once the agent is up,
         // and the stopped card would leave it working unseen. Its start is cancelled instead. One
         // that came up meanwhile is interrupted.
-        if (!/CHAT_CONTROLLER_NOT_READY/.test(String(error?.message))) return;
-        const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`).catch(() => null);
+        if (!/CHAT_CONTROLLER_NOT_READY/.test(String(error?.message))) throw error;
+        const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`);
         if (record?.session?.provisionState === "provisioning") {
-          await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/kill`, {}).catch(() => undefined);
+          await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/kill`, {});
           agentTools?.forgetSession?.(id);
-        } else await interrupt().catch(() => undefined);
+        } else await interrupt();
       });
     },
     // A standalone AO terminal running one program (e.g. the Antigravity CLI) with

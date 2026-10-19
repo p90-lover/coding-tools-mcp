@@ -55,14 +55,14 @@ function observeHarness(context) {
   const vm = require("node:vm");
   const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
   const start = source.indexOf("    async observe(id");
-  const end = source.indexOf("    async interrupt(id)", start);
+  const end = source.indexOf("    // A standalone AO terminal", start);
   const method = source.slice(start, end).trim().replace(/,$/, "");
   const helpers = source.slice(source.indexOf("  async function chatHostGone"), source.indexOf("  // Mission-owned AO calls."));
   const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
   const states = source.match(/const TERMINAL_TURN_STATES = .*;/)[0];
   return vm.runInNewContext(states + helpers + identity + "({" + method + "})", {
     Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"),
-    observeTui: async () => { throw new Error("not a TUI fixture"); }, ...context,
+    agentTools: null, setTimeout, observeTui: async () => { throw new Error("not a TUI fixture"); }, ...context,
   });
 }
 
@@ -488,7 +488,7 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
   let resumeOk = true;
   let status = "exited";
   const upstream = vm.runInNewContext(states + helpers + identity + "({" + methods + "})", {
-    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), Date, Math, Number, Promise,
+    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), Date, Math, Number, Promise, agentTools: null,
     internalApi: async (method, endpoint) => {
       calls.push([method, endpoint]);
       if (endpoint === "/api/v1/sessions") return { sessions };
@@ -506,7 +506,7 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
   assert.equal(await upstream.continuable("old"), true, "a released agent is resumed for the next message");
   assert.ok(calls.some(([method, endpoint]) => method === "POST" && endpoint === "/api/v1/sessions/old/resume-agent"));
   status = "exited"; resumeOk = false;
-  assert.equal(await upstream.continuable("old"), false, "a failed resume falls back to a fresh session");
+  await assert.rejects(upstream.continuable("old"), error => error.code === "AO_SESSION_RESTORE_UNCONFIRMED", "an uncertain resume cannot replace the retained conversation");
 });
 
 test("a resumed chat gets the app's tools again, and an AO that refuses them still resumes it", async () => {
@@ -806,11 +806,69 @@ test("a finished turn's work is read back from AO, paging back until it reaches 
   assert.equal((await upstream.timeline("s", "")).length, 0, "no turn, nothing to read");
 });
 
+for (const method of ["interrupt", "exitAgent", "kill"]) {
+  test(method + " cancels pending tool calls before contacting AO without revoking the retained lease", async () => {
+    const calls = [];
+    const upstream = observeHarness({
+      agentTools: { cancelSessionCalls: id => { calls.push(["cancel-pending", id]); },
+        forgetSession: id => { calls.push(["forget", id]); } },
+      internalApi: async (verb, endpoint) => { calls.push([verb, endpoint]); throw new Error("fixture transport unavailable"); },
+    });
+    await assert.rejects(upstream[method]("s"), /fixture transport unavailable/);
+    assert.deepEqual(calls.slice(0, 1), [["cancel-pending", "s"]], "pending approvals expire before the stop request awaits transport");
+    assert.equal(calls.some(([kind]) => kind === "forget"), false, "an unconfirmed stop keeps the resumable credential");
+  });
+}
+
+test("interrupt propagates transport, status-read, kill and retry failures", async () => {
+  for (const stage of ["transport", "status", "kill", "retry"]) {
+    let interrupts = 0, forgotten = 0;
+    const upstream = observeHarness({
+      agentTools: { forgetSession: () => { forgotten++; } },
+      internalApi: async (_method, endpoint) => {
+        if (endpoint.endsWith("/interrupt")) {
+          interrupts++;
+          if (stage === "transport" || interrupts > 1) throw new Error("temporary transport failure");
+          throw new Error("CHAT_CONTROLLER_NOT_READY");
+        }
+        if (endpoint.endsWith("/kill")) throw new Error("temporary kill failure");
+        if (stage === "status") throw new Error("temporary status failure");
+        return { session: { provisionState: stage === "kill" ? "provisioning" : "ready" } };
+      },
+    });
+    await assert.rejects(upstream.interrupt("s"), /temporary/, stage);
+    assert.equal(forgotten, 0, "do not revoke tools while cancellation is unconfirmed");
+  }
+});
+
+test("interrupt is idempotent for an ended turn and cancels a queued start only after the kill is acknowledged", async () => {
+  let forgotten = 0;
+  const calls = [];
+  const ended = observeHarness({ internalApi: async () => { throw new Error("CHAT_NO_ACTIVE_TURN"); } });
+  await ended.interrupt("s");
+  const queued = observeHarness({
+    agentTools: { forgetSession: id => { assert.equal(id, "s"); forgotten++; } },
+    internalApi: async (method, endpoint) => {
+      calls.push([method, endpoint]);
+      if (endpoint.endsWith("/interrupt")) throw new Error("CHAT_CONTROLLER_NOT_READY");
+      if (method === "GET") return { session: { provisionState: "provisioning" } };
+      return { ok: true };
+    },
+  });
+  await queued.interrupt("s");
+  assert.equal(forgotten, 1);
+  assert.deepEqual(calls.map(([, endpoint]) => endpoint), [
+    "/api/v1/sessions/s/conversation/interrupt", "/api/v1/sessions/s", "/api/v1/sessions/s/kill",
+  ]);
+});
+
 test("a send binds its workspace in AO once, not for every catalog read and the launch", async () => {
   const vm = require("node:vm");
   const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
   const start = source.indexOf("  async function projectFor");
-  const block = source.slice(start, source.indexOf("  /**\n   * The app's own tools for one chat session", start));
+  const end = source.indexOf("  async function chatTools", start);
+  assert.ok(start >= 0 && end > start, "project binding helpers are present");
+  const block = source.slice(start, end);
   const binds = [];
   let failing = false;
   const upstream = vm.runInNewContext(block + "({ projectFor, forgetProject })", {
@@ -834,4 +892,111 @@ test("a send binds its workspace in AO once, not for every catalog read and the 
   await assert.rejects(upstream.projectFor("ws-2"), /git is busy/);
   failing = false;
   assert.equal(await upstream.projectFor("ws-2"), "project-ws-2", "a failed binding is not kept");
+});
+
+test("a daemon-owned resume conflict waits for readiness and concurrent callers never send early", async () => {
+  let status = "exited", resumes = 0, sends = 0, ticks = [];
+  const upstream = observeHarness({
+    setTimeout: callback => { ticks.push(callback); },
+    internalApi: async (method, endpoint) => {
+      if (method === "POST") {
+        resumes++;
+        throw Object.assign(new Error("The agent is already being resumed"), { status: 409, code: "AGENT_RESUME_IN_PROGRESS" });
+      }
+      return { session: { id: "owned", mode: "chat", status, provisionState: "ready" } };
+    },
+  });
+  let settled = false;
+  const prewarm = upstream.continuable("owned");
+  const send = upstream.continuable("owned").then(ready => { if (ready) sends++; return ready; });
+  const both = Promise.all([prewarm, send]).finally(() => { settled = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(resumes, 1, "the daemon already owns restoration; do not submit another resume");
+  assert.equal(settled, false, "a conflict alone cannot authorize sending");
+  assert.equal(sends, 0);
+  status = "idle";
+  for (const tick of ticks.splice(0)) tick();
+  assert.deepEqual(await both, [true, true]);
+  assert.equal(sends, 1);
+});
+
+test("resume waits distinguish terminal failure from timeout and transport uncertainty", async () => {
+  for (const scenario of ["terminal", "timeout", "transport"]) {
+    let reads = 0, resumes = 0, clock = 0;
+    const upstream = observeHarness({
+      Date: { now: () => clock },
+      setTimeout: callback => { clock += 1000; setImmediate(callback); },
+      internalApi: async method => {
+        if (method === "POST") {
+          resumes++;
+          throw Object.assign(new Error("restoring"), { status: 409, code: "AGENT_RESUME_IN_PROGRESS" });
+        }
+        reads++;
+        if (reads > 1 && scenario === "transport") throw new Error("read unavailable");
+        return { session: { id: "owned", mode: "chat", status: reads > 1 && scenario === "terminal" ? "terminated" : "exited", provisionState: "ready" } };
+      },
+    });
+    if (scenario === "terminal") assert.equal(await upstream.continuable("owned"), false);
+    else await assert.rejects(upstream.continuable("owned"), error => error.code === "AO_SESSION_RESTORE_UNCONFIRMED");
+    assert.equal(resumes, 1);
+    assert.ok(reads <= 152, "readiness polling is bounded");
+  }
+});
+
+test("only the structured resume-in-progress conflict enters the readiness wait", async () => {
+  for (const error of [
+    Object.assign(new Error("The agent is already being resumed"), { status: 403, code: "AGENT_RESUME_IN_PROGRESS" }),
+    Object.assign(new Error("The agent is already being resumed"), { status: 409, code: "OTHER_CONFLICT" }),
+  ]) {
+    let reads = 0;
+    const upstream = observeHarness({ internalApi: async method => {
+      if (method === "POST") throw error;
+      reads++; return { session: { id: "owned", mode: "chat", status: "exited" } };
+    } });
+    await assert.rejects(upstream.continuable("owned"), cause => cause.code === "AO_SESSION_RESTORE_UNCONFIRMED");
+    assert.equal(reads, 1, "message text never impersonates the structured conflict");
+  }
+});
+
+test("internal AO errors retain bounded structured status and code without changing their message", async () => {
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("  async function internalApi(");
+  const end = source.indexOf("  const agentId =", start);
+  for (const data of [
+    { code: "AGENT_RESUME_IN_PROGRESS", message: "restoring" },
+    { error: { code: "AGENT_RESUME_IN_PROGRESS", message: "restoring" } },
+  ]) {
+    const api = require("node:vm").runInNewContext(source.slice(start, end) + "; internalApi", {
+      start: async () => {}, requestApi: async () => ({ ok: false, status: 409, data }),
+      aoErrorMessage: () => "original unchanged message",
+    });
+    await assert.rejects(api("POST", "/api/v1/sessions/owned/resume-agent", {}), error =>
+      error.status === 409 && error.code === "AGENT_RESUME_IN_PROGRESS" && error.message === "original unchanged message");
+  }
+});
+
+test("resumed chats use live activity rather than PR-derived display status for readiness", async () => {
+  const net = require("node:net");
+  const root = fs.mkdtempSync(path.join(__dirname, "../../aiTemp/resume-host-"));
+  const server = net.createServer(socket => socket.end());
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  fs.mkdirSync(path.join(root, "chat-hosts", "owned"), { recursive: true });
+  fs.writeFileSync(path.join(root, "chat-hosts", "owned", "host.json"), JSON.stringify({ address: "127.0.0.1:" + server.address().port }));
+  try {
+    for (const display of ["pr_open", "draft", "ci_failed", "review_pending", "changes_requested", "approved", "mergeable", "merged"]) {
+      for (const hasActivity of [true, false]) {
+        let restored = false, clock = 0;
+        const upstream = observeHarness({
+          dataRoot: root, Date: { now: () => clock },
+          setTimeout: callback => { clock += 1000; setImmediate(callback); },
+          internalApi: async method => {
+            if (method === "POST") { restored = true; return { ok: true }; }
+            return { session: { id: "owned", mode: "chat", status: restored ? display : "exited", provisionState: "ready",
+              ...(hasActivity ? { activity: { state: restored ? "idle" : "exited" } } : {}) } };
+          },
+        });
+        assert.equal(await upstream.continuable("owned"), true, display + " with a live host preserves the chat");
+      }
+    }
+  } finally { await new Promise(resolve => server.close(resolve)); fs.rmSync(root, { recursive: true, force: true }); }
 });

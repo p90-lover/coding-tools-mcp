@@ -400,6 +400,17 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     warmLog("started", { model: entry.route.model, waiting: warm.size });
     return { ok: true, warmed: true, starting: true };
   }
+  async function continuableSession(session) {
+    for (;;) {
+      while (sessionStops.has(session)) await sessionStops.get(session);
+      const usable = await harnessService().continuable?.(session).catch(error => {
+        if (error?.code === "AO_SESSION_RESTORE_UNCONFIRMED") throw error;
+        return false;
+      });
+      // A Stop may have started during the readiness check and can still exit this host.
+      if (!sessionStops.has(session)) return usable;
+    }
+  }
   /** Hands the ready warm session for this route to a launch, or null. */
   async function takeWarm(workspaceId, route, plain) {
     const key = warmKey(workspaceId, route, plain);
@@ -420,7 +431,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     warm.delete(key);
     clearTimeout(entry.timer);
     const session = await entry.promise.catch(() => null);
-    const usable = Boolean(session) && await harnessService().continuable?.(session).catch(() => false);
+    const usable = Boolean(session) && await continuableSession(session);
     warmLog(usable ? "taken" : "unusable", { model: entry.route.model, ready: Boolean(entry.session), ageMs: now() - entry.started });
     return usable ? session : null;
   }
@@ -472,7 +483,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       // the launch on a busy machine, and the launch timed out while the spare one came up.
       if (previous && !previous.cancelled && !runSettled(previous)) return { ok: true, warmed: false, reason: "The chat's run is starting" };
       const live = freshSessionRequired(id, task) ? null : continuationCard(previous, executionMode, singleRoute);
-      if (live && await harnessService().continuable?.(live.receipt.thread_id).catch(() => false)) {
+      if (live && await continuableSession(live.receipt.thread_id)) {
         return { ok: true, warmed: false, continues: true };
       }
       return chatPrewarmRoute(id, singleRoute, true);
@@ -484,6 +495,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   }
   // AO session -> the turn its latest follow-up started, so the previous turn is not read as its answer.
   const expectedTurns = new Map();
+  const sessionOwners = new Map(); // AO session -> the run that most recently dispatched it
+  const sessionStops = new Map(); // Only in-flight stop promises; reused sessions wait for settlement.
   const nodeKey = (workspaceId, runId, nodeId) => JSON.stringify([workspaceId, runId, nodeId]);
   // nodeKey -> { at, pending }: the run loop's latest view of an AO card's parked tool requests.
   const pendingFrames = new Map();
@@ -967,14 +980,23 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         // A single-model follow-up continues the chat's live session as its next turn: no new
         // session, worktree or replayed prompt, and the agent keeps what it already read and ran.
         const continued = continuations.get(runId);
-        continuations.delete(runId);
         // A session that is gone, or refuses the message, falls back to a fresh start.
-        const sent = continued && await harnessService().continuable?.(continued.session).catch(() => false)
-          ? await harnessService().send(continued.session, continued.text, reserved.request_key).catch(() => null) : null;
+        let sent = null;
+        if (continued && await continuableSession(continued.session)) {
+          sessionOwners.set(continued.session, runKey(workspaceId, runId));
+          if (sessionOwners.size > 500) sessionOwners.delete(sessionOwners.keys().next().value);
+          sent = await harnessService().send(continued.session, continued.text, reserved.request_key).catch(() => null);
+        }
         // Otherwise a pre-warmed session for exactly this route takes the first prompt as its first
         // turn: it already has its worktree and a running agent, so nothing is launched now.
+        continuations.delete(runId);
         const warmed = sent?.turnId ? null : await takeWarm(workspaceId, node.route, plain);
-        const first = warmed ? await harnessService().send(warmed, reserved.prompt, reserved.request_key).catch(() => null) : null;
+        let first = null;
+        if (warmed) {
+          sessionOwners.set(warmed, runKey(workspaceId, runId));
+          if (sessionOwners.size > 500) sessionOwners.delete(sessionOwners.keys().next().value);
+          first = await harnessService().send(warmed, reserved.prompt, reserved.request_key).catch(() => null);
+        }
         if (warmed && !first?.turnId) {
           warmLog("send_failed", { model: node.route.model });
           void harnessService().kill?.(warmed).catch(() => undefined);
@@ -996,6 +1018,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         const left = (launching.get(workspaceId) ?? 1) - 1;
         if (left > 0) launching.set(workspaceId, left); else launching.delete(workspaceId);
       }
+      if (session) {
+        sessionOwners.set(session, runKey(workspaceId, runId));
+        if (sessionOwners.size > 500) sessionOwners.delete(sessionOwners.keys().next().value);
+      }
       const done = now();
       logger?.info?.("ao.launch_timing", { agent: externalAgent(node), via: launchedVia, ok: !failure,
         prepareMs: (launchStarted ?? done) - dispatchStarted, launchMs: launchStarted === null ? 0 : done - launchStarted, totalMs: done - dispatchStarted });
@@ -1006,9 +1032,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         const latest = await runs({ workspaceId, runId }).catch(() => null);
         const mission = latest?.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
         const card = mission?.nodes.find(entry => entry.id === node.id);
-        if (!mission?.cancelled && card && card.state === "reserved") return false;
-        if (mission?.cancelled) await harnessService().exitAgent(session);
-        else await harnessService().interrupt(session).catch(() => undefined);
+        if (!mission?.cancelled && card && card.state === "reserved" && !backgroundRuns.get(runKey(workspaceId, runId))?.stopped) return false;
+        await stopExternalTurn(session, mission?.cancelled || backgroundRuns.get(runKey(workspaceId, runId))?.stopped
+          ? { owner: runKey(workspaceId, runId), releaseAgent: true } : null);
         return true;
       };
       let saved;
@@ -1027,6 +1053,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       if (saved?.ok !== true) {
         if (await stopIfAbandoned()) throw new Error("The card was stopped while it launched; its agent was stopped too");
         throw new Error("AO harness session outcome is unknown");
+      }
+      if (backgroundRuns.get(runKey(workspaceId, runId))?.stopped && await stopIfAbandoned()) {
+        throw new Error("The card was stopped while it launched; its agent was stopped too");
       }
       return { ok: true, run: saved.run, session_id: session };
     } finally { dispatching.delete(key); }
@@ -1101,7 +1130,14 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     let before;
     if (touched) {
       const saved = await runs({ workspaceId: id, runId: clean(change.run_id, 80) });
-      before = saved.runs.find((run) => run.id === change.run_id)?.nodes?.find((node) => node.id === touched);
+      const mission = saved.runs.find((run) => run.id === change.run_id && run.workspace_id === id);
+      if (!mission || mission.cancelled || !Number.isSafeInteger(change.expected_revision) || change.expected_revision < 0
+          || change.expected_revision !== mission.revision) throw new Error("AO run revision changed or graph revision is invalid; refresh before retrying");
+      before = mission.nodes?.find((node) => node.id === touched);
+      // Keep the running attempt reachable if its cancellation fails.
+      if (before && ["running", "reserved"].includes(before.state) && externalAgent(before) && before.receipt?.thread_id) {
+        await stopExternalTurn(before.receipt.thread_id);
+      }
     }
     const response = await requestHeadless("/api/v1/ao/update", {
       workspace_id: id, change, confirm: true,
@@ -1112,9 +1148,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     if (before && ["running", "reserved"].includes(before.state)) {
       const after = response.run.nodes?.find((node) => node.id === touched);
       if (!after || after.state === "pending") {
-        if (externalAgent(before) && before.receipt?.thread_id) {
-          await harnessService().interrupt(before.receipt.thread_id).catch(() => undefined);
-        } else {
+        if (!externalAgent(before)) {
           await requestHeadless("/api/v1/ao/harness/disconnect", {
             workspace_id: id, run_id: change.run_id, node_id: touched, confirm: true,
           }, { localConfirmation: true }).catch(() => undefined);
@@ -1645,44 +1679,65 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function controlRun({ workspaceId, runId, action, executable, nodeId } = {}) {
     if (!["pause", "resume", "stop", "retry", "retry_auto", "review_failures"].includes(action)) throw new Error("Choose a mission control");
     const id = clean(workspaceId, 128), run = clean(runId, 80);
+    const stopping = action === "stop" ? backgroundRuns.get(runKey(id, run)) : null;
+    if (stopping) {
+      stopping.stopped = true;
+      stopping.status = "held";
+      stopping.detail = "Stopping owned agents";
+      reportRun(id, run, stopping, null);
+    }
+    const beforeStop = action === "stop" ? await runs({ workspaceId: id, runId: run }).catch(() => null) : null;
+    const stopTargets = (beforeStop?.runs?.find(entry => entry.id === run && entry.workspace_id === id)?.nodes ?? [])
+      .filter(node => externalAgent(node) && node.receipt?.thread_id)
+      .map(node => ({ nodeId: node.id, sessionId: node.receipt.thread_id,
+        requestKey: node.receipt.request_key ?? node.request_key, turnId: node.receipt.turn_id,
+        completed: node.state === "finished" || node.receipt.status === "completed" }));
     let result;
     try {
       result = await requestHeadless("/api/v1/ao/control", { workspace_id: id, run_id: run, action, ...(nodeId ? { node_id: clean(nodeId, 80) } : {}), confirm: true }, { localConfirmation: true });
       if (result?.ok !== true || result.run?.workspace_id !== id) throw new Error("Mission control needs a fresh status check");
     } catch (error) {
-      // A failed control request must still stop driving this run and end its saved agents.
+      // Stop the local loop and known owned agents even when saved mission cancellation
+      // cannot be confirmed; report that uncertainty instead of claiming the saved state changed.
       if (action !== "stop") throw error;
       const saved = await runs({ workspaceId: id, runId: run }).catch(() => null);
       const mission = saved?.runs.find(entry => entry.id === run && entry.workspace_id === id);
       if (!mission && !backgroundRuns.has(runKey(id, run))) throw error;
       logger?.warn?.("ao.stop.control_failed", { run, error: String(error?.message || error).slice(0, 200) });
-      result = { ok: true, run: mission ?? { id: run, workspace_id: id, nodes: [] }, notice: "Stopped here; the run's saved state updates on the next status check" };
+      result = { ok: true, run: mission ?? { id: run, workspace_id: id, nodes: [] }, notice: "Future work stopped here; the saved mission cancellation could not be confirmed" };
     }
     if (action === "stop") {
-      const saved = result.run.project_id ? await runs({workspaceId:id}).catch(() => null) : null;
+      const saved = await runs({workspaceId:id}).catch(() => null);
       const life = saved ? taskLifecycle(saved,result.run.project_id) : {};
       if (life.schedule?.run_id === run && !["cancelled","missed"].includes(life.schedule.state)) {
         await cancelSchedule({workspaceId:id,taskId:result.run.project_id,intentId:life.schedule.id})
           .catch(error => logger?.warn?.("ao.stop.schedule_cancel_failed", { run, error: String(error?.message || error).slice(0, 200) }));
       }
-      const current = backgroundRuns.get(runKey(id, run));
-      if (current) current.stopped = true;
-      // The service has already marked the cards cancelled; their receipts still own the agents.
-      const sessions = [...new Set((result.run.nodes ?? []).filter(externalAgent).map(node => node.receipt?.thread_id).filter(Boolean))];
-      const outcomes = await Promise.allSettled(sessions.flatMap(session => [
-        Promise.resolve().then(() => harnessService().exitAgent(session)).then(outcome => {
-          if (outcome?.ok !== true) throw new Error(`Agent ${session} shutdown is unconfirmed`);
-        }),
-        Promise.resolve().then(() => subagents?.stopParent(session)),
-      ]));
-      const failures = outcomes.filter(outcome => outcome.status === "rejected").map(outcome => String(outcome.reason?.message || outcome.reason));
-      if (failures.length) {
-        if (current) {
-          current.status = "failed";
-          current.detail = `Stop incomplete: ${failures.join("; ")}`;
-          reportRun(id, run, current, null, "error");
+      // Cancellation preserves receipts; capture their exact attempt before sending any shutdown.
+      if (!beforeStop && (result.run.nodes ?? []).some(node => externalAgent(node) && node.receipt?.thread_id)) {
+        throw new Error("Owned session snapshot is unavailable; shutdown is unconfirmed");
+      }
+      const owner = runKey(id, run), sessions = new Map();
+      const position = saved?.runs.findIndex(entry => entry.id === run && entry.workspace_id === id) ?? -1;
+      if (stopTargets.length && position < 0) throw new Error("Owned session ownership view is unavailable; shutdown is unconfirmed");
+      const newer = position >= 0 ? saved.runs.slice(position + 1) : [];
+      for (const target of stopTargets) {
+        const node = saved.runs[position].nodes?.find(node => node.id === target.nodeId);
+        if (node?.receipt?.thread_id !== target.sessionId || (node.receipt.request_key ?? node.request_key) !== target.requestKey) {
+          throw new Error("Owned session identity changed while stopping; refresh before retrying");
         }
-        throw new Error(`Stop incomplete: ${failures.join("; ")}`);
+        if (sessionOwners.has(target.sessionId) && sessionOwners.get(target.sessionId) !== owner) continue;
+        // An old completed or held receipt never regains a continued session.
+        if (newer.some(entry => entry.nodes?.some(card => card.receipt?.thread_id === target.sessionId))) continue;
+        sessions.set(target.sessionId, target);
+      }
+      const stopped = await Promise.allSettled([...sessions].map(([session, target]) =>
+        stopExternalTurn(session, { owner, turnId: target.turnId, releaseAgent: true, completed: target.completed })));
+      const failure = stopped.find(result => result.status === "rejected");
+      if (failure) {
+        const message = "Agent stop could not be confirmed: " + publicText(failure.reason?.message || failure.reason, 200);
+        if (stopping) { stopping.detail = message; reportRun(id, run, stopping, null); }
+        throw new Error(message);
       }
     }
     const current = backgroundRuns.get(runKey(id, run));
@@ -1692,7 +1747,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     } else if (current && !["retry", "retry_auto", "review_failures"].includes(action)) {
       current.status = action === "pause" ? "paused" : "held";
       current.stopped = action === "stop";
-      current.detail = action === "pause" ? "Paused; already-sent turns may finish" : "Stopped by you";
+      current.detail = action === "pause" ? "Paused; already-sent turns may finish" : result.notice ?? "Stopped by you";
       reportRun(id, run, current, null);
     }
     return result;
@@ -2718,7 +2773,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // A notice (a provider retry's "Retrying Claude, attempt 7 of 10" stays "running") is no tool.
     const toolRunning = Array.isArray(waiting?.timeline) && waiting.timeline.some(item => item?.status === "running" && !["message", "system"].includes(item.kind));
     if (idle > (toolRunning ? STEER_STALL_TOOL_MS : STEER_STALL_MS)) {
-      await harnessService().interrupt(card.receipt.thread_id).catch(() => undefined);
+      await stopExternalTurn(card.receipt.thread_id);
       logger?.info?.("ao.steer_restarted_stalled_turn", { idleSeconds: Math.round(idle / 1000) });
       return { ok: true, steered: false, waiting: true, restarted: true,
         reason: `The agent had shown nothing for ${Math.round(idle / 60_000)} minutes, so its turn was stopped; your message is sent as the next turn` };
@@ -3054,7 +3109,54 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const characters = Array.from(text);
     return characters.length <= 8000 ? text : characters.slice(0, 7970).join("") + "\n[visible work truncated]";
   }
-  // New replacement/hide paths require proof. The older manual control keeps its own behavior.
+  /** Interrupt acknowledges a signal; only an exited or settled, non-working turn releases ownership. */
+  async function stopExternalTurn(session, ownership = null) {
+    for (;;) {
+      const pending = sessionStops.get(session);
+      if (!pending) break;
+      await pending;
+      if (!ownership?.releaseAgent || pending.releasesAgent) return;
+      // Another waiter may have installed the host-release upgrade while this one resumed.
+    }
+    const job = Promise.resolve().then(async () => {
+      const service = harnessService();
+      const owns = () => !ownership || !sessionOwners.has(session) || sessionOwners.get(session) === ownership.owner;
+      if (!owns()) return;
+      let alreadyExited = false;
+      if (ownership?.turnId || ownership?.releaseAgent) {
+        const current = await service.observe(session);
+        if ((ownership?.turnId && current?.turnId && current.turnId !== ownership.turnId) || !owns()) return;
+        alreadyExited = current?.exited === true;
+      }
+      if (!ownership?.completed && !alreadyExited) {
+        await service.interrupt(session);
+        let stopped = false;
+        for (let attempt = 0; attempt < 8; attempt++) {
+          const observation = await service.observe(session);
+          if (observation?.exited === true || (["completed", "failed", "interrupted", "cancelled"].includes(observation?.turnState)
+            && !["working", "running", "starting"].includes(observation?.status))) { stopped = true; break; }
+          if (attempt < 7) await new Promise(resolve => setTimer(resolve, 250));
+        }
+        if (!stopped) throw new Error("Owned turn is still working; stop needs attention, no replacement was started");
+      }
+      if (ownership?.releaseAgent && owns()) {
+        const outcomes = await Promise.allSettled([
+          Promise.resolve().then(() => service.exitAgent(session)).then(outcome => {
+            if (outcome?.ok !== true) throw new Error(`Agent ${session} shutdown is unconfirmed`);
+          }),
+          Promise.resolve().then(() => subagents?.stopParent(session)),
+        ]);
+        const failures = outcomes.filter(outcome => outcome.status === "rejected").map(outcome => String(outcome.reason?.message || outcome.reason));
+        if (failures.length) throw new Error(failures.join("; "));
+      }
+    });
+    job.releasesAgent = ownership?.releaseAgent === true;
+    sessionStops.set(session, job);
+    try { return await job; }
+    finally { if (sessionStops.get(session) === job) sessionStops.delete(session); }
+  }
+
+  // Replacement and hide paths retain proof for every owned external turn.
   async function stopOwned(workspaceId, mission) {
     const state = backgroundRuns.get(runKey(workspaceId, mission.id));
     if (state) { state.stopped = true; state.status = "held"; }
@@ -3076,18 +3178,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         || result.run.nodes.some(node => ["running", "reserved"].includes(node.state))) {
       throw new Error("Owned native stop was not acknowledged; no replacement was started");
     }
-    for (const node of external) {
-      await harnessService().interrupt(node.receipt.thread_id);
-      let stopped = false;
-      for (let attempt = 0; attempt < 8; attempt++) {
-        const observation = await harnessService().observe(node.receipt.thread_id);
-        stopped = observation.exited === true || (["completed", "failed", "interrupted", "cancelled"].includes(observation.turnState)
-          && !["working", "running", "starting"].includes(observation.status));
-        if (stopped) break;
-        await delay(250);
-      }
-      if (!stopped) throw new Error("Owned turn is still working; stop needs attention, no replacement was started");
-    }
+    for (const node of external) await stopExternalTurn(node.receipt.thread_id);
     return result.run;
   }
   async function resolveStoppedIntents(workspaceId,taskId,saved) {
@@ -3321,6 +3412,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
   function dispose() {
     schedulerDisposed = true;
+    sessionOwners.clear();
     idleStopped = true;
     if (idleTimer) clearTimer(idleTimer);
     for (const timer of toolsWaits.values()) clearTimer(timer);

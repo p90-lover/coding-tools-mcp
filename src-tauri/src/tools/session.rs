@@ -614,7 +614,8 @@ pub fn read_output(store: &SessionStore, args: &Value) -> Result<Value, Workspac
     }
     let session = store.get(command_id)?;
     tauri::async_runtime::block_on(session.refresh_status());
-    if session.has_exited() {
+    let exited = session.has_exited();
+    if exited {
         tauri::async_runtime::block_on(async {
             session.wait_for_readers().await;
             session.finalize_owner().await;
@@ -649,11 +650,7 @@ pub fn read_output(store: &SessionStore, args: &Value) -> Result<Value, Workspac
 
     // Whether the command still runs, so a reader following its output knows when it ended
     // without sending it anything.
-    let status = if session.has_exited() {
-        "exited"
-    } else {
-        "running"
-    };
+    let status = if exited { "exited" } else { "running" };
     let exit_code = *session.exit_code.lock().expect("exit_code lock");
     let termination_reason = session
         .termination_reason

@@ -35,7 +35,7 @@ function mount(props) {
     memo: (component) => component,
   };
   // Function components render inline, so their output (work lines, steps, actions) is visible.
-  const jsx = (type, props) => typeof type === "function" ? type(props || {}) : ({ type, props: props || {} });
+  const jsx = (type, props, key) => typeof type === "function" ? type(props || {}) : ({ type, props: props || {}, key });
   const module = transpile("AgentOrchestratorChat.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
     : name === "./ao-chat" ? chat : name === "./codex-prompts" ? prompts : name === "../icons" ? { Icon: "Icon" } : name === "./ChatMarkdown" ? { ChatMarkdown: "Markdown" }
       : name === "./ChatMenu" ? { ChatMenu: "ChatMenu", ChatGlyph: "Glyph", FloatingLayer: "FloatingLayer" } : name === "./AgentOrchestratorComposerControls" ? { AgentOrchestratorComposerControls: "Controls" }
@@ -566,4 +566,13 @@ test("a single model's thinking and tool calls stay folded under its answer once
   const older = mount(base({ selectedTaskId: "t",
     runs: [run("r0", "t", [node("w", "planner", "finished", { route, receipt: { thread_id: "s0", answer: "Done before." } })], { execution_mode: "single" })] }).props).render();
   assert.match(text(walk(older).find((element) => element.props?.className === "cx-work-head")), /^Worked/, "a card from before this session can still show its work");
+});
+test("approval cards from different team members retain separate React identities", () => {
+  const { props } = base({ selectedTaskId: "t", approvals: [
+    { nodeId: "planner", approval_id: "request-1" },
+    { nodeId: "worker", approval_id: "request-1" },
+  ] });
+  const cards = walk(mount(props).render()).filter(item => item.type === "Approval");
+  assert.equal(cards.length, 2);
+  assert.equal(new Set(cards.map(item => item.key)).size, 2);
 });

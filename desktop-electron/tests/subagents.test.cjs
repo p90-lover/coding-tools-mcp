@@ -22,7 +22,7 @@ function world({ settings = {}, agents = null, now = () => 1_000_000, aoUp = () 
     observe: async (id) => ({ turnId: "t1", ...sessions.get(id) }),
     resolveApproval: async (id, approvalId, decision) => { resolved.push([id, approvalId, decision]); },
     resolveInput: async (id, approvalId, action, content) => { inputs.push([id, approvalId, action, content]); },
-    interrupt: async (id) => { interrupted.push(id); },
+    interrupt: async (id) => { interrupted.push(id); sessions.set(id, { turnState: "interrupted", status: "ready", approvals: [] }); },
     exitAgent: async (id) => { released.push(id); return { ok: true }; },
   };
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }) });
@@ -88,6 +88,44 @@ test("a parent stop waits for its pending launch and ends the returned child", a
     assert.deepEqual(w.released, ["late-child"]);
     assert.equal(w.service.runs()[0].state, "stopped");
   } finally { w.cleanup(); }
+});
+
+test("automatic release and concurrent parent stops share one pending process shutdown", async () => {
+  for (const releaseWhenDone of [false, true]) {
+    const w = world({ settings: { releaseWhenDone } });
+    let acknowledge;
+    w.harness.exitAgent = id => { w.released.push(id); return new Promise(resolve => { acknowledge = resolve; }); };
+    try {
+      const child = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read one" }));
+      w.sessions.set(child.subagent_id, { turnState: "completed", answer: "Finished report" });
+      await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: child.subagent_id, wait_seconds: 0 });
+      const one = w.service.stopParent("chat-1"), two = w.service.stopParent("chat-1");
+      await Promise.resolve(); await Promise.resolve();
+      assert.deepEqual(w.released, [child.subagent_id], "only one shutdown is submitted before its acknowledgment");
+      acknowledge({ ok: true });
+      await Promise.all([one, two]);
+      assert.equal(w.service.runs()[0].report, "Finished report");
+    } finally { acknowledge?.({ ok: true }); w.cleanup(); }
+  }
+});
+
+test("a parent stop releases completed child processes once while retaining their reports", async () => {
+  for (const releaseWhenDone of [false, true]) {
+    const w = world({ settings: { releaseWhenDone } });
+    try {
+      const child = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read one" }));
+      w.sessions.set(child.subagent_id, { turnState: "completed", answer: "Verified report" });
+      await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: child.subagent_id, wait_seconds: 0 });
+      await Promise.resolve(); await Promise.resolve();
+      assert.deepEqual(w.released, releaseWhenDone ? [child.subagent_id] : [], "completion alone follows the configured release setting");
+      await w.service.stopParent("chat-1");
+      await w.service.stopParent("chat-1");
+      assert.deepEqual(w.released, [child.subagent_id], "an explicit parent stop releases an idle child once");
+      const saved = w.service.runs().find(run => run.subagent_id === child.subagent_id);
+      assert.equal(saved.state, "completed", "process shutdown preserves the finished result");
+      assert.equal(saved.report, "Verified report");
+    } finally { w.cleanup(); }
+  }
 });
 
 test("a parent stop traverses completed children and reports a descendant exit refusal", async () => {
@@ -203,6 +241,205 @@ test("limits: running at once, per chat, and the time limit", async () => {
   } finally { w.cleanup(); }
 });
 
+test("a failed approval answer retries on a fresh pending observation and confirmed answers stay deduplicated", async () => {
+  const w = world();
+  try {
+    const id = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "read" })).subagent_id;
+    const resolve = w.harness.resolveApproval;
+    let attempts = 0;
+    w.harness.resolveApproval = async (...args) => { if (++attempts === 1) throw new Error("temporary transport failure"); return resolve(...args); };
+    w.sessions.set(id, { turnState: "running", approvals: [{ approval_id: "same-request", kind: "command", command: "npm test",
+      decisions: [{ id: "allow", kind: "allow_once" }] }] });
+    for (let poll = 0; poll < 3; poll++) await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 });
+    assert.equal(attempts, 2, "retry the failed send, then keep the acknowledged answer");
+    assert.deepEqual(w.resolved, [[id, "same-request", "allow"]]);
+  } finally { w.cleanup(); }
+});
+
+test("a question retries after both answer and fallback failed", async () => {
+  const w = world();
+  try {
+    const id = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "read" })).subagent_id;
+    const resolve = w.harness.resolveInput;
+    let failing = true, attempts = 0;
+    w.harness.resolveInput = async (...args) => { attempts++; if (failing) throw new Error("temporary transport failure"); return resolve(...args); };
+    w.sessions.set(id, { turnState: "running", approvals: [{ approval_id: "question-1", kind: "question", fields: [] }] });
+    await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 });
+    failing = false;
+    await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 });
+    assert.equal(attempts, 3);
+    assert.equal(w.inputs.length, 1);
+  } finally { w.cleanup(); }
+});
+
+test("a question fallback cannot be sent after its subagent was stopped", async () => {
+  const w = world({ settings: { releaseWhenDone: false } });
+  let rejectAnswer, answerStarted, pending;
+  const answer = new Promise((_resolve, reject) => { rejectAnswer = reject; });
+  const entered = new Promise(resolve => { answerStarted = resolve; });
+  let attempts = 0;
+  try {
+    const id = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "read" })).subagent_id;
+    const resolve = w.harness.resolveInput;
+    w.harness.resolveInput = async (...args) => { if (++attempts === 1) { answerStarted(); return answer; } return resolve(...args); };
+    w.sessions.set(id, { turnState: "running", approvals: [{ approval_id: "q", kind: "question", fields: [] }] });
+    pending = w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 });
+    await entered;
+    await w.service.call("chat-1", "ws-1", "subagent_stop", { subagent_id: id });
+    rejectAnswer(new Error("answer transport ended with the stop"));
+    await pending;
+    assert.equal(attempts, 1, "do not send the fallback decline after Stop");
+    assert.deepEqual(w.inputs, []);
+  } finally {
+    rejectAnswer(new Error("fixture cleanup"));
+    await pending;
+    w.cleanup();
+  }
+});
+
+test("approval deduplication is scoped to the subagent session", async () => {
+  const w = world();
+  try {
+    const ids = [];
+    for (const parent of ["chat-1", "chat-2"]) {
+      const id = parse(await w.service.call(parent, "ws-1", "subagent_start", { agent: "explorer", task: "read" })).subagent_id;
+      ids.push(id);
+      w.sessions.set(id, { turnState: "running", approvals: [{ approval_id: "request-1", kind: "command", command: "npm test",
+        decisions: [{ id: "allow", kind: "allow_once" }] }] });
+      await w.service.call(parent, "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 });
+    }
+    assert.deepEqual(w.resolved, ids.map(id => [id, "request-1", "allow"]));
+  } finally { w.cleanup(); }
+});
+
+
+
+test("an unacknowledged Stop retries after transport recovery without permitting new work", async () => {
+  const w = world({ settings: { maxConcurrent: 1, releaseWhenDone: false } });
+  let attempts = 0;
+  try {
+    const id = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "read" })).subagent_id;
+    const approval = { approval_id: "blocked-while-stopping", kind: "command", command: "npm test", decisions: [{ id: "allow", kind: "allow_once" }] };
+    w.sessions.set(id, { turnState: "running", status: "working", approvals: [approval] });
+    w.harness.interrupt = async () => { if (++attempts === 1) throw new Error("temporary interrupt transport failure"); };
+    assert.equal((await w.service.call("chat-1", "ws-1", "subagent_stop", { subagent_id: id })).isError, true);
+    for (let i = 0; i < 3; i++) await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 });
+    assert.equal(attempts, 2, "the failed signal is retried, while its acknowledged retry is not repeatedly sent");
+    assert.deepEqual(w.resolved, []);
+    assert.equal((await w.service.call("chat-2", "ws-1", "subagent_start", { agent: "explorer", task: "overlap" })).isError, true);
+    w.sessions.set(id, { turnState: "interrupted", status: "ready", approvals: [] });
+    assert.equal(parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 })).state, "stopped");
+  } finally { w.cleanup(); }
+});
+
+test("an interrupt ACK keeps capacity and suppresses approvals until terminal observation", async () => {
+  const w = world({ settings: { maxConcurrent: 1, releaseWhenDone: false } });
+  try {
+    const id = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "read" })).subagent_id;
+    const approval = { approval_id: "pending-after-stop", kind: "command", command: "npm test", decisions: [{ id: "allow", kind: "allow_once" }] };
+    w.sessions.set(id, { turnState: "running", status: "working", approvals: [approval] });
+    w.harness.interrupt = async () => { w.interrupted.push(id); }; // The HTTP 204 acknowledges only cancellation.
+    const stop = await w.service.call("chat-1", "ws-1", "subagent_stop", { subagent_id: id });
+    assert.equal(stop.isError, true, "Stop must describe its unconfirmed settlement");
+    assert.equal((await w.service.call("chat-2", "ws-1", "subagent_start", { agent: "explorer", task: "overlap" })).isError, true);
+    await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 });
+    assert.deepEqual(w.resolved, [], "pending cancellation never resumes automatic approvals");
+    w.sessions.set(id, { turnState: "interrupted", status: "working", approvals: [approval] });
+    await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 });
+    assert.equal((await w.service.call("chat-2", "ws-1", "subagent_start", { agent: "explorer", task: "still overlap" })).isError, true,
+      "a terminal turn alone cannot free a busy agent");
+    w.sessions.set(id, { turnState: "interrupted", status: "ready", approvals: [] });
+    const done = parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 }));
+    assert.equal(done.state, "stopped");
+    assert.equal((await w.service.call("chat-2", "ws-1", "subagent_start", { agent: "explorer", task: "next" })).isError, false);
+  } finally { w.cleanup(); }
+});
+
+test("repeated unreadable observations keep the uncertain agent's capacity until it settles", async () => {
+  const w = world({ settings: { maxConcurrent: 1, releaseWhenDone: false } });
+  try {
+    const id = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "read" })).subagent_id;
+    w.harness.observe = async () => { throw new Error("temporary status transport failure"); };
+    w.harness.interrupt = async () => { w.interrupted.push(id); };
+    for (let i = 0; i < 5; i++) await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 });
+    assert.equal((await w.service.call("chat-2", "ws-1", "subagent_start", { agent: "explorer", task: "overlap" })).isError, true,
+      "five read failures are no evidence of a terminated agent");
+    assert.deepEqual(w.released, []);
+    w.harness.observe = async () => ({ turnState: "interrupted", status: "ready", approvals: [] });
+    const done = parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 }));
+    assert.equal(done.state, "failed");
+    assert.match(done.error, /session cannot be read/);
+    assert.equal((await w.service.call("chat-2", "ws-1", "subagent_start", { agent: "explorer", task: "next" })).isError, false);
+  } finally { w.cleanup(); }
+});
+
+test("normal completion also retains capacity while the session remains busy", async () => {
+  const w = world({ settings: { maxConcurrent: 1, releaseWhenDone: false } });
+  try {
+    const id = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "read" })).subagent_id;
+    w.sessions.set(id, { turnState: "completed", status: "working", answer: "done", approvals: [] });
+    await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 });
+    assert.equal((await w.service.call("chat-2", "ws-1", "subagent_start", { agent: "explorer", task: "overlap" })).isError, true);
+    w.sessions.set(id, { turnState: "completed", status: "ready", answer: "done", approvals: [] });
+    assert.equal(parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 })).state, "completed");
+    assert.equal((await w.service.call("chat-2", "ws-1", "subagent_start", { agent: "explorer", task: "next" })).isError, false);
+  } finally { w.cleanup(); }
+});
+
+test("a failed or unavailable interrupt keeps the subagent running and its slot reserved", async () => {
+  for (const unavailable of [false, true]) {
+    let up = true;
+    const w = world({ settings: { maxConcurrent: 1, releaseWhenDone: false }, aoUp: () => up });
+    try {
+      const id = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "read" })).subagent_id;
+      w.sessions.set(id, { turnState: "running", approvals: [] });
+      await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 });
+      if (unavailable) up = false;
+      else w.harness.interrupt = async () => { throw new Error("temporary transport failure"); };
+      const stop = await w.service.call("chat-1", "ws-1", "subagent_stop", { subagent_id: id });
+      assert.equal(stop.isError, true);
+      assert.equal(w.service.runs()[0].state, "running");
+      assert.equal((await w.service.call("chat-2", "ws-1", "subagent_start", { agent: "explorer", task: "another" })).isError, true);
+      assert.deepEqual(w.released, [], "a failed stop must not release the live agent");
+    } finally { up = true; w.cleanup(); }
+  }
+});
+
+test("concurrent stops share the interrupt and a late observation cannot approve work after stopping starts", async () => {
+  const w = world({ settings: { maxConcurrent: 1, releaseWhenDone: false } });
+  let releaseObservation, observationStarted, releaseInterrupt, interruptStarted;
+  const observation = new Promise(resolve => { releaseObservation = resolve; });
+  const observed = new Promise(resolve => { observationStarted = resolve; });
+  const interrupt = new Promise(resolve => { releaseInterrupt = resolve; });
+  const interruptEntered = new Promise(resolve => { interruptStarted = resolve; });
+  let pending, first, second, attempts = 0;
+  try {
+    const id = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "read" })).subagent_id;
+    w.harness.observe = async () => { observationStarted(); return observation; };
+    w.harness.interrupt = async () => { attempts++; interruptStarted(); await interrupt; };
+    pending = w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 });
+    await observed;
+    first = w.service.call("chat-1", "ws-1", "subagent_stop", { subagent_id: id });
+    second = w.service.call("chat-1", "ws-1", "subagent_stop", { subagent_id: id });
+    await interruptEntered;
+    assert.equal((await w.service.call("chat-2", "ws-1", "subagent_start", { agent: "explorer", task: "another" })).isError, true);
+    releaseObservation({ turnState: "running", approvals: [{ approval_id: "late", kind: "command", command: "npm test",
+      decisions: [{ id: "allow", kind: "allow_once" }] }] });
+    await pending;
+    assert.deepEqual(w.resolved, [], "a stale poll cannot answer another request after Stop");
+    assert.equal(attempts, 1, "both callers await the same stop");
+    w.harness.observe = async () => ({ turnState: "interrupted", status: "ready", approvals: [] });
+    releaseInterrupt();
+    assert.equal(parse(await first).state, "stopped");
+    assert.equal(parse(await second).state, "stopped");
+    assert.equal((await w.service.call("chat-2", "ws-1", "subagent_start", { agent: "explorer", task: "another" })).isError, false);
+  } finally {
+    releaseObservation({ turnState: "interrupted", approvals: [] }); releaseInterrupt();
+    await Promise.allSettled([pending, first, second].filter(Boolean));
+    w.cleanup();
+  }
+});
+
 test("a subagent with no model, a disabled one, or subagents turned off cannot start", async () => {
   const w = world({ settings: { defaultRoute: null }, agents: [{ name: "Solo", route: null }, { name: "Off", enabled: false, route: ROUTE }] });
   try {
@@ -282,10 +519,10 @@ test("a subagent's request too long to check whole, or hiding a blocked command 
   } finally { w.cleanup(); }
 });
 
-test("a subagent still ends at its time limit while AO is not running, and the poller then stops", async () => {
+test("a timed-out subagent keeps its capacity and poller until AO confirms settlement", async () => {
   let clock = 1_000_000, up = true;
   const timers = [];
-  const w = world({ settings: { timeoutMinutes: 5 }, now: () => clock, aoUp: () => up,
+  const w = world({ settings: { timeoutMinutes: 5, maxConcurrent: 1 }, now: () => clock, aoUp: () => up,
     setTimer: (callback, ms) => { const timer = { callback, ms, unref() {} }; timers.push(timer); return timer; } });
   try {
     const { subagent_id: id } = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "x" }));
@@ -295,8 +532,17 @@ test("a subagent still ends at its time limit while AO is not running, and the p
     clock += 6 * 60_000;
     const tick = async () => { const timer = polls().at(-1); timers.splice(timers.indexOf(timer), 1); timer.callback(); await new Promise((resolve) => setImmediate(resolve)); };
     await tick();
-    assert.equal(w.service.runs().find((run) => run.subagent_id === id).state, "timed_out", "the time limit holds without AO");
-    assert.equal(polls().length, 0, "nothing left to poll: no timer is set again");
+    const pending = w.service.runs().find((run) => run.subagent_id === id);
+    assert.match(pending.error, /Stopped after 5 minutes/);
+    assert.equal((await w.service.call("chat-2", "ws-1", "subagent_start", { agent: "explorer", task: "overlap" })).isError, true,
+      "the time limit requests cancellation; an offline backend cannot confirm that it ended");
+    assert.equal(polls().length, 1, "the uncertain agent keeps being observed");
+    up = true;
+    w.sessions.set(id, { turnState: "running", status: "working", approvals: [] });
+    await tick();
+    assert.deepEqual(w.interrupted, [id], "recovery retries cancellation instead of passively waiting forever");
+    assert.equal(w.service.runs().find((run) => run.subagent_id === id).state, "timed_out");
+    assert.equal(polls().length, 0, "confirmed settlement ends polling");
   } finally { w.cleanup(); }
 });
 
@@ -345,4 +591,28 @@ test("starts made at the same moment cannot pass the per-chat or running-at-once
     w.harness.spawn = spawn;
     assert.equal(parse(await w.service.call("chat-6", "ws-1", "subagent_start", { agent: "explorer", task: "z" })).state, "starting");
   } finally { w.cleanup(); }
+});
+
+test("a settled turn keeps stopping state and capacity until host shutdown is acknowledged", async () => {
+  const timers = [];
+  const w = world({ settings: { releaseWhenDone: false, maxConcurrent: 1 },
+    setTimer: callback => { timers.push(callback); return { unref() {} }; } });
+  let acknowledge, started;
+  const hostStarted = new Promise(resolve => { started = resolve; });
+  w.harness.exitAgent = () => { started(); return new Promise(resolve => { acknowledge = resolve; }); };
+  try {
+    const id = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "read" })).subagent_id;
+    const stopping = w.service.stopParent("chat-1");
+    stopping.catch(() => undefined);
+    await hostStarted;
+    timers.shift()();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(w.service.runs()[0].stopping, true);
+    assert.notEqual(w.service.runs()[0].state, "stopped", "polling cannot finish an unacknowledged host exit");
+    assert.equal((await w.service.call("chat-2", "ws-1", "subagent_start", { agent: "explorer", task: "overlap" })).isError, true);
+    acknowledge({ ok: false });
+    await assert.rejects(stopping, /shutdown is unconfirmed/);
+    assert.notEqual(w.service.runs()[0].state, "stopped");
+    assert.match(w.service.runs()[0].error, /shutdown is unconfirmed/);
+  } finally { acknowledge?.({ ok: false }); w.cleanup(); }
 });

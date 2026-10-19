@@ -109,6 +109,57 @@ fn zero_wait_delivers_stdin_and_completed_clock_stops() {
 }
 
 #[test]
+fn repeated_natural_completion_releases_the_next_command_immediately() {
+    let (ctx, _) = fixture();
+    for round in 0..8 {
+        let launched = call_tool(
+            &ctx,
+            "exec_command",
+            &json!({"cmd":py(&format!("-c \"print('natural-{round}')\"")),"yield_time_ms":0,"timeout_ms":5000}),
+        );
+        assert_eq!(launched["ok"], true, "{launched}");
+        let id = launched["command_id"].as_str().unwrap();
+        let output_ref = format!("command:{id}:stdout");
+        let until = Instant::now() + Duration::from_secs(10);
+        let completed = loop {
+            let output = call_tool(
+                &ctx,
+                "read_output",
+                &json!({"output_ref":output_ref,"offset":0,"limit":1024}),
+            );
+            assert_eq!(output["ok"], true, "{output}");
+            if output["status"] == "exited" {
+                break output;
+            }
+            assert!(
+                Instant::now() < until,
+                "natural command did not exit: {output}"
+            );
+            thread::yield_now();
+        };
+        // No sleep, retry, or extra poll between the terminal observation and admission.
+        let next = call_tool(
+            &ctx,
+            "exec_command",
+            &json!({"cmd":py("-V"),"yield_time_ms":1000,"timeout_ms":5000}),
+        );
+        assert_eq!(
+            next["ok"], true,
+            "round {round}: natural completion must release its project write lease: {next}"
+        );
+        assert!(
+            completed["content"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("natural-{round}")),
+            "{completed}"
+        );
+        let next = wait(&ctx, next["command_id"].as_str().unwrap());
+        assert_eq!(next["command_ok"], true, "{next}");
+    }
+}
+
+#[test]
 fn output_cursor_survives_rollover_and_kill_retains_evidence() {
     let (ctx, _) = fixture();
     fs::write(ctx.workspace.root().join("aiTemp/output.py"), "import sys,time\nsys.stdout.buffer.write(b'x'*1100000+b'END')\nsys.stdout.flush()\ntime.sleep(30)\n").unwrap();
