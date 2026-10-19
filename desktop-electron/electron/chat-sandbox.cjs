@@ -181,8 +181,14 @@ function createSandboxRunner({
     const id = `sbx-${crypto.randomBytes(9).toString("base64url").replace(/[^A-Za-z0-9]/g, "x")}`;
     fs.mkdirSync(scriptDir, { recursive: true });
     const script = path.join(scriptDir, `${id}.cmd`);
+    // Codex's unelevated sandbox never starts a command whose working folder is not exactly one of
+    // its writable roots (even `echo` hangs), so it starts in the worktree and the script moves to
+    // `cwd`. `%` is doubled because cmd expands it inside a script, even within quotes.
+    const home = writable || cwd;
+    const enter = cwd && path.resolve(cwd) !== path.resolve(home)
+      ? `cd /d "${path.resolve(cwd).replace(/%/g, "%%")}" || exit /b 1\r\n` : "";
     // UTF-8 code page, so non-ASCII paths and output survive; the command exactly as written.
-    fs.writeFileSync(script, `@echo off\r\nchcp 65001 >nul\r\n${cmd.replace(/\r?\n/g, "\r\n")}\r\n`, "utf8");
+    fs.writeFileSync(script, `@echo off\r\nchcp 65001 >nul\r\n${enter}${cmd.replace(/\r?\n/g, "\r\n")}\r\n`, "utf8");
     const writableRoots = [...new Set([writable, ...roots()].filter(Boolean))];
     const args = [
       "sandbox",
@@ -192,7 +198,7 @@ function createSandboxRunner({
       "-c", `sandbox_workspace_write.writable_roots=[${writableRoots.map(tomlPath).join(",")}]`,
       "--", "cmd.exe", "/d", "/c", script,
     ];
-    const child = spawnProcess(found.codex, args, { cwd, env: childEnv(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawnProcess(found.codex, args, { cwd: home, env: childEnv(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
     const record = {
       id, cmd, cwd, startedAt: now(), status: "running", exitCode: null, child, script, stdinOpen: true,
       streams: { stdout: { chunks: [], size: 0, total: 0 }, stderr: { chunks: [], size: 0, total: 0 } },
