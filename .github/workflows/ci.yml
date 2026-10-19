@@ -96,6 +96,11 @@ jobs:
       - name: Headless bridge tests
         run: cargo test --manifest-path rust-core/coding-tools-headless/Cargo.toml --locked
 
+      - name: Install controller test dependencies
+        env:
+          NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+        run: npm ci
+
       - name: Chat harness controller regressions
         run: node --test desktop-electron/tests/agent-orchestrator-upstream.test.cjs desktop-electron/tests/agent-orchestrator-workflow.test.cjs desktop-electron/tests/agent-orchestrator-metrics.test.cjs
 
