@@ -512,6 +512,29 @@ export type ChatTurn = {
   startedAtMs?: number;
 };
 
+/** The error the main process gives a card whose turn ended only because the app restarted. */
+export const RESTART_INTERRUPTED = /process ended before it finished \(the app restarted\)/;
+
+type ResumeCandidate = {
+  cancelled: boolean; paused?: boolean; execution_mode?: string;
+  nodes: { state: string; receipt?: { error?: string | null } | null; history?: unknown[] }[];
+};
+
+/**
+ * Whether a chat picks up by itself after an app restart: its step failed only because the app
+ * (and AO with it) restarted mid-turn, so nothing about the work itself went wrong.
+ */
+export function resumableAfterRestart(mission: ResumeCandidate): boolean {
+  // A chat stopped or paused on purpose stays that way.
+  if (mission.cancelled || mission.paused) return false;
+  // Only a single chat resumes by itself: resuming a team is a bigger step, left to its own controls.
+  if (mission.execution_mode !== "single") return false;
+  const card = mission.nodes[0];
+  // Within the attempt budget, so an agent that brings the app down each time is not restarted forever.
+  return Boolean(card) && ["held", "failed"].includes(card.state)
+    && RESTART_INTERRUPTED.test(String(card.receipt?.error || "")) && (card.history?.length ?? 0) < 2;
+}
+
 /**
  * A working card's turn so far. AO harness cards report a timeline; Native Codex cards (WebGPT and
  * the CPA pool) report only the reply streamed so far (`output`), which the chat used to drop, so a

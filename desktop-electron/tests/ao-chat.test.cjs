@@ -13,6 +13,17 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 const node = (id, role, state, extra = {}) => ({ id, role, state, x: 0, ...extra });
 const run = (id, taskId, nodes, extra = {}) => ({ id, project_id: taskId, cancelled: false, nodes, ...extra });
 
+test("only a single chat interrupted by an app restart resumes by itself, and only within its attempt budget", () => {
+  const restarted = { error: "The agent's process ended before it finished (the app restarted); retry this card." };
+  const single = (card, extra = {}) => run("r", "t", [card], { execution_mode: "single", ...extra });
+  assert.equal(chat.resumableAfterRestart(single(node("p", "planner", "held", { receipt: restarted }))), true);
+  assert.equal(chat.resumableAfterRestart(single(node("p", "planner", "held", { receipt: { error: "API Error: 503" } }))), false, "a real failure waits");
+  assert.equal(chat.resumableAfterRestart(single(node("p", "planner", "held", { receipt: restarted }), { cancelled: true })), false, "a stopped chat stays stopped");
+  assert.equal(chat.resumableAfterRestart(single(node("p", "planner", "held", { receipt: restarted }), { paused: true })), false);
+  assert.equal(chat.resumableAfterRestart(single(node("p", "planner", "held", { receipt: restarted, history: [{}, {}] }))), false, "attempts used up");
+  assert.equal(chat.resumableAfterRestart(run("r", "t", [node("p", "planner", "held", { receipt: restarted })], { execution_mode: "team" })), false, "a team uses its own controls");
+});
+
 test("archived and deleted task metadata hides chats without losing explicit history or scheduled status", () => {
   const runs=[run("r1","a",[node("p","planner","pending")]),run("r2","b",[]),run("r3","c",[])];
   const tasks=[{id:"a",title:"A"},{id:"b",title:"B",state:"archived"},{id:"c",title:"C"}];

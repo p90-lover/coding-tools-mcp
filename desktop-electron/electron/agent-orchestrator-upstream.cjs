@@ -771,7 +771,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       // keeps its live host and stays a plain interruption.
       const settling = turn && !TERMINAL_TURN_STATES.has(turn.state);
       const settled = turn?.state === "interrupted" && !turn.errorMessage;
-      if ((settling || settled) && await chatHostGone(id)) {
+      // AO's daemon closes with the app too (an update does): starting again, it fails every turn
+      // its old controller left running. Nothing about the step itself failed, so it is reported
+      // the same way and the card can be resumed. (AO's wording: storage/sqlite/queries/
+      // conversations.sql, SettleOrphanedConversationTurns.)
+      const reconciled = turn?.state === "failed" && turn.errorMessage === "controller ended before the turn completed";
+      if (reconciled || ((settling || settled) && await chatHostGone(id))) {
         if (settling) await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/interrupt`, {}).catch(() => undefined);
         return {
           status, turnId: turn.id, turnState: "interrupted",

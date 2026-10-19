@@ -1226,7 +1226,7 @@ export function AgentOrchestratorChat({
             {attachNote ? <span className="cx-attach-note" role="status">{attachNote}</span> : null}
           </div> : null}
           <textarea ref={input} aria-label="Message" maxLength={8192} rows={1} value={draft}
-            placeholder={steering ? "Steer the agent — sent to it right away" : awaitingAnswer && queueing ? "Answer the request above first — a message now is sent after it"
+            placeholder={steering ? "" : awaitingAnswer && queueing ? "Answer the request above first — a message now is sent after it"
               : queueing ? "Running — a message now is sent when it finishes" : !accepts ? "Running — you can send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : "Do anything"}
             onChange={(event) => { setDraft(event.target.value); setSlashIndex(0); }}
             onPaste={(event) => { if (event.clipboardData.files.length) { event.preventDefault(); void addFiles(event.clipboardData.files); } }}

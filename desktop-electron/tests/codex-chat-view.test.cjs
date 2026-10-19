@@ -269,7 +269,7 @@ test("while the agent works, a typed message steers it at once; Esc on an empty 
     steer: async (input) => { steered.push(input); return true; } });
   const view = mount(props);
   const textarea = () => walk(view.render()).find((element) => element.type === "textarea");
-  assert.equal(textarea().props.placeholder, "Steer the agent — sent to it right away");
+  assert.equal(textarea().props.placeholder, "", "steering shows no hint");
   textarea().props.onChange({ target: { value: "use pnpm" } });
   const button = walk(view.render()).find((element) => element.props?.["aria-label"] === "Steer the agent");
   assert.ok(button && !button.props.disabled, "with a message typed, Send steers instead of showing Stop");
@@ -343,7 +343,7 @@ test("after an app restart a running AO card is still steered, though the page i
     steer: async (input) => { steered.push(input); return true; } });
   const view = mount(props);
   const textarea = () => walk(view.render()).find((element) => element.type === "textarea");
-  assert.equal(textarea().props.placeholder, "Steer the agent — sent to it right away");
+  assert.equal(textarea().props.placeholder, "", "steering shows no hint");
   textarea().props.onChange({ target: { value: "have you done it?" } });
   await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
   assert.deepEqual(JSON.parse(JSON.stringify(steered)), [{ taskId: "t", message: "have you done it?" }]);
@@ -478,7 +478,7 @@ test("while the agent waits on a request, a typed message is still steered: the 
   const textarea = () => walk(view.render()).find((element) => element.type === "textarea");
   // With "Approve for me" every tool call waits a moment; a message typed then used to wait for the
   // whole turn. The steer now waits on the backend until the request is answered (chat_steer).
-  assert.equal(textarea().props.placeholder, "Steer the agent — sent to it right away");
+  assert.equal(textarea().props.placeholder, "", "steering shows no hint");
   textarea().props.onChange({ target: { value: "yes, go ahead" } });
   await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
   assert.deepEqual(steered.map((input) => input.message), ["yes, go ahead"]);

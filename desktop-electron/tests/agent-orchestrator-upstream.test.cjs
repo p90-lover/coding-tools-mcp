@@ -159,6 +159,20 @@ test("observe shows the reply of a turn that ended while AO still flagged it as 
   assert.equal(JSON.stringify(observed.timeline.map((item) => item.status)), '["completed"]');
 });
 
+test("a turn AO failed because its controller died with the app reads as a restart interruption", async () => {
+  // Seen live after an in-app update: AO's daemon closed with the app and, starting again, failed
+  // the running turn as "controller ended before the turn completed"; the chat could not resume it.
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {
+      turns: [{ id: "t", state: "failed", errorMessage: "controller ended before the turn completed" }],
+      messages: [{ id: "m0", role: "user", turnId: "t", sequence: 1, text: "the prompt" }],
+    } : { session: { id: "s", mode: "chat", status: "idle" } },
+  });
+  const observed = await upstream.observe("s");
+  assert.equal(observed.turnState, "interrupted");
+  assert.match(observed.error, /process ended before it finished \(the app restarted\)/);
+});
+
 test("observe returns the current turn's reasoning, tool calls and messages in order", async () => {
   const upstream = observeHarness({
     internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {

@@ -3116,6 +3116,49 @@ test("a follow-up after a permission change starts a fresh session; a refused se
   assert.equal(refused.spawned.length, 1, "a refused follow-up starts a fresh session instead of failing the card");
 });
 
+test("a chat switched to another model starts it with what the earlier agent replied", async () => {
+  // Seen live: switching the chat's model started a fresh agent that knew only the user's messages.
+  const before = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/cline-pass/glm-5.3-flash", permission_profile: ":ao-default" };
+  const after = { ...before, model: "cpa/gemini-3.8-flash-high" };
+  const task = { id: "task-1", title: "Fix auth", description: "find the auth bug", state: "in_progress", clauses: [] };
+  const previous = { id: "r1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "finished", parents: [], route: before, settings: { name: "Single assistant" },
+      receipt: { thread_id: "sess-1", answer: "The bug is in auth.ts line 42: the token expiry is compared in seconds." } }] };
+  const world = chatWorld({ tasks: [task], runs: [previous] });
+  const created = new Map();
+  const spawned = [];
+  const request = async (endpoint, body, options) => {
+    if (endpoint === "/api/v1/ao/read" && body.run_id) {
+      const run = created.get(body.run_id) ?? { id: body.run_id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1,
+        grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route: after }] };
+      created.set(body.run_id, run);
+      return { ok: true, runs: [run], worker_capacity: { [body.run_id]: 1 } };
+    }
+    const latest = [...created.values()].at(-1);
+    if (endpoint === "/api/v1/ao/grant") return { ok: true, run: latest, grant: { executable_sha256: "a".repeat(64) } };
+    if (endpoint === "/api/v1/ao/external/reserve") { latest.nodes[0].state = "reserved"; return { ok: true, request_key: "key-1", prompt: "full prompt" }; }
+    if (endpoint === "/api/v1/ao/external/submitted") { latest.nodes[0].state = "running"; latest.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run: latest }; }
+    if (endpoint === "/api/v1/ao/external/terminal") { latest.nodes[0].state = "finished"; return { ok: true, run: latest }; }
+    return world.requestHeadless(endpoint, body, options);
+  };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: request, findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    aoHarness: {
+      spawn: async input => { spawned.push(input); return "fresh-session"; },
+      continuable: async () => true,
+      send: async () => { throw new Error("must not continue another model's session"); },
+      observe: async (id, expected) => ({ status: "idle", turnId: expected ?? "t1", turnState: "completed", answer: "ok" }),
+    },
+  });
+  await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "now fix it", executionMode: "single", singleRoute: after });
+  for (let tries = 0; tries < 200 && !spawned.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(spawned.length, 1, "another model starts a fresh session");
+  assert.match(spawned[0].prompt, /auth\.ts line 42/, "the earlier reply goes with it");
+  assert.match(spawned[0].prompt, /Single assistant · cline-pass\/glm-5\.3-flash/, "and says which agent gave it");
+  assert.ok(spawned[0].prompt.endsWith("full prompt"), "the chat's own prompt follows the earlier replies");
+});
+
 test("reading an AO card's status never records its result, and team steering goes to the orchestrator", async () => {
   const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
   const mission = { id: "run", workspace_id: "ws", revision: 1, execution_mode: "team", nodes: [
@@ -4351,6 +4394,33 @@ test("a steer typed while a request waits for its answer reaches the agent once 
   assert.equal(unanswered.steered, false);
   assert.equal(unanswered.waiting, true);
   assert.deepEqual(steered, [], "a request still waiting is never cancelled by a steer");
+});
+
+test("typing while the agent asks declines its request and the message reaches the agent at once", async () => {
+  // Seen live: an "Approval needed" card held the typed message, which looked like it could not be sent.
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  let clock = 1_000_000, declined = false;
+  const steered = [], resolved = [];
+  const pending = [{ approval_id: "a1", kind: "tool", source: "ao", tool: "mcp__coding-tools__exec_command",
+    decisions: [{ id: "yes", kind: "allow_once" }, { id: "no", kind: "reject_once" }] }];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: world.requestHeadless, now: () => clock,
+    setTimer: (resolve, ms) => { clock += ms; resolve(); return 0; },
+    aoHarness: {
+      observe: async () => ({ turnId: "t1", turnState: "running", status: "working", lastActivityAt: clock, timeline: [], approvals: declined ? [] : pending }),
+      resolveApproval: async (session, approval, decision) => { resolved.push([session, approval, decision]); declined = true; },
+      steer: async (session, text) => { steered.push([session, text]); return { steered: true }; },
+    },
+  });
+  const started = clock;
+  const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "use the API instead" });
+  assert.equal(result.steered, true);
+  assert.deepEqual(resolved, [["sess-1", "a1", "no"]], "declined with the agent's reject answer, never allowed");
+  assert.deepEqual(steered, [["sess-1", "use the API instead"]]);
+  assert.ok(clock - started < 30_000, "the message is not held for the answer wait");
 });
 
 test("a dated DeepSeek V4.1 Flash build from Cline Pass takes the same effort levels as the model itself", async () => {
