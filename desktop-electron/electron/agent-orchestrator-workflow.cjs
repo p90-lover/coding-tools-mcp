@@ -157,6 +157,43 @@ function aoWebCatalogForModel(catalog, model) {
   return { models: [{ ...template, slug: model, display_name: `ChatGPT Web — ${tier}` }] };
 }
 
+const REVIEW_SCRIPT = /[^\s"'`;|&<>()]+\.(?:ps1|psm1|py|sh|bash|bat|cmd|js|cjs|mjs|ts)\b/gi;
+const REVIEW_SCRIPT_BYTES = 4000;
+/**
+ * The local scripts a tool request runs, read for the command reviewer. It saw only the command
+ * line, so "run start-nova.ps1" came back "ask" every time and the person had to answer. Only
+ * files whose real path is inside the request's working folder are read (a command cannot point
+ * the reviewer at files elsewhere), at most two, the first 4 KB of each.
+ */
+function reviewScriptExcerpts(approval) {
+  let input = {};
+  try { input = typeof approval?.toolInput === "string" ? JSON.parse(approval.toolInput) : (approval?.toolInput ?? {}); } catch {}
+  const folder = [approval?.cwd, input?.workdir, input?.cwd, input?.project_root].find((value) => typeof value === "string" && path.isAbsolute(value));
+  if (!folder) return [];
+  let root;
+  try { root = fs.realpathSync.native(folder); } catch { return []; }
+  const text = [approval?.command, input?.cmd, input?.command].filter((value) => typeof value === "string").join(" ");
+  const excerpts = [];
+  for (const token of [...new Set(text.match(REVIEW_SCRIPT) ?? [])]) {
+    if (excerpts.length >= 2) break;
+    let real;
+    try { real = fs.realpathSync.native(path.resolve(root, token)); } catch { continue; }
+    const relative = path.relative(root, real);
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) continue;
+    try {
+      const stat = fs.statSync(real);
+      if (!stat.isFile()) continue;
+      const handle = fs.openSync(real, "r");
+      try {
+        const buffer = Buffer.alloc(Math.min(stat.size, REVIEW_SCRIPT_BYTES));
+        const read = fs.readSync(handle, buffer, 0, buffer.length, 0);
+        excerpts.push({ file: relative, text: buffer.subarray(0, read).toString("utf8"), truncated: stat.size > REVIEW_SCRIPT_BYTES });
+      } finally { fs.closeSync(handle); }
+    } catch {}
+  }
+  return excerpts;
+}
+
 function delayToMilliseconds(value, unit) {
   const multiplier = {seconds:1000,minutes:60000,hours:3600000}[unit];
   const ms = value * multiplier;
@@ -1075,7 +1112,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   }
 
   const TERMINAL_TURNS = new Set(["completed", "failed", "interrupted", "cancelled", "recovered"]);
-  async function observeExternal(workspaceId, runId, node) {
+  async function observeExternal(workspaceId, runId, node, mission = null) {
     const session = node.receipt?.thread_id;
     if (node.state === "reserved" && !dispatching.has(nodeKey(workspaceId, runId, node.id))) {
       // The launch was lost before AO returned a session; hold it rather than replay.
@@ -1090,9 +1127,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     if (!terminal) {
       // The agent's parked tool requests, answerable from the chat or by the reviewer.
       const pending = aoPending(node, session, observed);
-      pendingFrames.set(nodeKey(workspaceId, runId, node.id), { at: Date.now(), pending });
+      pendingFrames.set(nodeKey(workspaceId, runId, node.id), { at: Date.now(), pending, mission, node });
       if (pendingFrames.size > 500) pendingFrames.delete(pendingFrames.keys().next().value);
-      return { ok: true, pending_approvals: withAdvice(pending), needs_input: observed.needsInput && !pending.length, session_id: session };
+      return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: observed.needsInput && !pending.length, session_id: session };
     }
     const completed = observed.turnState === "completed";
     const result = await requestHeadless("/api/v1/ao/external/terminal", {
@@ -1221,17 +1258,22 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       // run loop's latest frame while it is fresh instead of asking AO again.
       const key = nodeKey(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80));
       const frame = pendingFrames.get(key);
-      if (frame && Date.now() - frame.at < 1500) return { ok: true, status: { connected: true, pending_approvals: withAdvice(frame.pending) } };
+      if (frame && Date.now() - frame.at < 1500) {
+        return { ok: true, status: { connected: true, pending_approvals: withAdvice(frame.pending, frame.mission ? frame : null) } };
+      }
       const found = await savedNode(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80)).catch(() => null);
       if (found && externalAgent(found.node)) {
         const session = found.node.receipt?.thread_id;
         const observed = found.node.state === "running" && session
           ? await harnessService().observe(session, expectedTurns.get(session)).catch(() => ({})) : {};
-        return { ok: true, status: { connected: true, pending_approvals: withAdvice(aoPending(found.node, session, observed)) } };
+        return { ok: true, status: { connected: true, pending_approvals: withAdvice(aoPending(found.node, session, observed), found) } };
       }
     }
-    return response.status?.pending_approvals
-      ? { ...response, status: { ...response.status, pending_approvals: withAdvice(response.status.pending_approvals) } } : response;
+    if (!response.status?.pending_approvals) return response;
+    // Only a card with a request waiting is looked up, to tell which ones its reviewer answers.
+    const card = response.status.pending_approvals.length
+      ? await savedNode(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80)).catch(() => null) : null;
+    return { ...response, status: { ...response.status, pending_approvals: withAdvice(response.status.pending_approvals, card) } };
   }
 
   // AO probes every agent CLI to build its catalog, which takes seconds; the permission menu reads
@@ -1523,13 +1565,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
 
   async function observe({ workspaceId, runId, nodeId } = {}) {
     const found = await savedNode(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80));
-    if (externalAgent(found.node)) return observeExternal(workspaceId, runId, found.node);
+    if (externalAgent(found.node)) return observeExternal(workspaceId, runId, found.node, found.mission);
     const response = await requestHeadless("/api/v1/ao/harness/observe", {
       workspace_id: clean(workspaceId, 128), run_id: clean(runId, 80),
       node_id: clean(nodeId, 80),
     });
     if (response?.ok !== true) throw new Error("AO result is unavailable; inspect the run before retrying");
-    return response.pending_approvals ? { ...response, pending_approvals: withAdvice(response.pending_approvals) } : response;
+    return response.pending_approvals ? { ...response, pending_approvals: withAdvice(response.pending_approvals, found) } : response;
   }
 
   async function approveAoHarness({ workspaceId, runId, nodeId, approvalId, allow, response, threadId, turnId, decisionId, answer } = {}) {
@@ -1888,7 +1930,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const aoDecision = (approval, allow) => (approval.decisions || [])
     .find((decision) => decision.kind === (allow ? "allow_once" : "reject_once"))?.id
     ?? (allow ? null : (approval.decisions || []).find((decision) => decision.kind === "reject_always")?.id) ?? null;
-  const withAdvice = (approvals) => Array.isArray(approvals)
+  const withAdvice = (approvals, card = null) => Array.isArray(approvals)
     ? approvals.map((item) => {
       // Modern native commands carry escalation scope separately from item/permissions requests.
       const request = item?.request;
@@ -1896,8 +1938,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         && (Object.hasOwn(request, "additionalPermissions") || Object.hasOwn(request, "networkApprovalContext"))
         ? { ...item, permissions: { additionalPermissions: request.additionalPermissions ?? null,
           networkApprovalContext: request.networkApprovalContext ?? null } } : item;
-      return approverAdvice.has(item?.approval_id)
+      const advised = approverAdvice.has(item?.approval_id)
         ? { ...scoped, recommendation: approverAdvice.get(item.approval_id) } : scoped;
+      // "Approve for me": a request the reviewer is still checking, or has answered and is sending,
+      // is not the person's to answer. The chat popped it up as a question anyway, and the person
+      // waited on (or raced) the reviewer; it now shows as being reviewed instead.
+      return card?.mission && card?.node && !approvalNeedsPerson(card.mission, card.node, item)
+        ? { ...advised, awaiting_review: true } : advised;
     })
     : approvals;
   const describeRequest = (approval) => [approval.kind, approval.tool, approval.command, approval.path, approval.toolInput && `input ${approval.toolInput}`,
@@ -1932,13 +1979,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const candidates = up.length ? up : all;
     if (!candidates.length) throw new Error("CPA has no model for the command approver");
     const deadline = now() + REVIEW_BUDGET_MS;
+    const scripts = reviewScriptExcerpts(approval);
     const prompt = [
       "You are the command approver for an orchestrated coding mission. A worker asks to run a tool request.",
       `Workspace: ${mission.workspace_id}. Approver rules: ${String(approver.settings?.instructions || "none").slice(0, 1500)}`,
       `Request: ${describeRequest(approval)}`,
       approval.permissions ? `Permissions: ${JSON.stringify(approval.permissions).slice(0, 800)}` : "",
+      ...scripts.map((script) => `Local script ${script.file} (from the request's working folder${script.truncated ? ", first 4 KB" : ""}):\n${script.text}`),
       'Answer with JSON only: {"action":"allow"|"deny"|"ask","reason":"<one sentence for the user>"}.',
       "allow: clearly safe and needed for the task. deny: destructive, outside the workspace, secret-touching or unrelated. ask: anything unclear.",
+      scripts.length ? "Judge a command that runs a local script by the script's contents shown above." : "",
     ].filter(Boolean).join("\n");
     let failure = null;
     for (const model of candidates) {
@@ -3603,4 +3653,4 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, routineCommand, routineAppTool, routineAppCommand, blockedRequest, recommendedAnswer, subagentLaunchArgs });
 }
 
-module.exports = { createAgentOrchestratorWorkflow, delayToMilliseconds, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
+module.exports = { createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

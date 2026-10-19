@@ -6,6 +6,8 @@ export type AoApproval = {
   thread_id?: string; turn_id?: string; item_id?: string; request?: Record<string, unknown>;
   permissions?: Record<string, unknown>; seconds_remaining?: number;
   recommendation?: { action: "allow" | "deny" | "ask"; reason: string };
+  /** "Approve for me": the reviewer is checking it, or has answered and is sending its answer. */
+  awaiting_review?: boolean;
   /** An AO agent's parked tool request (e.g. Claude Code's Bash): its tool name and AO's summary. */
   source?: "ao"; tool?: string; summary?: string;
   /** The decisions the AO agent offered; `plan` is the plan of an ExitPlanMode request. */

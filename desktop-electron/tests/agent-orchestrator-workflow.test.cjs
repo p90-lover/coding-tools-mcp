@@ -5,7 +5,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-const { createAgentOrchestratorWorkflow, resolveAoNativeConnection } = require("../electron/agent-orchestrator-workflow.cjs");
+const { createAgentOrchestratorWorkflow, resolveAoNativeConnection, reviewScriptExcerpts } = require("../electron/agent-orchestrator-workflow.cjs");
 const { createCodingToolsAppsHost } = require("../../app-handler/host.cjs");
 const { invokeContract } = require("../electron/ipc-schema.cjs");
 
@@ -1895,13 +1895,67 @@ test("AO typed native replies preserve exact payload and thread/turn scope after
   }
 });
 
+test("the reviewer sees the local script a command runs, never a file outside its folder", () => {
+  // Seen live: "Command approver suggests ask: Please confirm what start-nova.ps1 does" because the
+  // reviewer only had the command line.
+  const os = require("node:os");
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "review-scripts-"));
+  const folder = path.join(base, "project");
+  fs.mkdirSync(path.join(folder, "tools"), { recursive: true });
+  fs.writeFileSync(path.join(folder, "start-nova.ps1"), "Start-Process node -ArgumentList 'server.js'\n");
+  fs.writeFileSync(path.join(folder, "tools", "big.py"), "x = 1\n".repeat(2000));
+  fs.writeFileSync(path.join(base, "outside.ps1"), "SECRET\n");
+  try {
+    const request = (cmd) => ({ kind: "permission", tool: "mcp__coding-tools__exec_command", toolInput: JSON.stringify({ cmd, workdir: folder }) });
+    const found = reviewScriptExcerpts(request("powershell.exe -NoProfile -ExecutionPolicy Bypass -File start-nova.ps1"));
+    assert.deepEqual(found.map((script) => script.file), ["start-nova.ps1"]);
+    assert.match(found[0].text, /Start-Process node/);
+    const big = reviewScriptExcerpts(request("python tools/big.py"))[0];
+    assert.equal(big.truncated, true);
+    assert.equal(big.text.length, 4000);
+    assert.deepEqual(reviewScriptExcerpts(request("powershell -File ..\\outside.ps1")), [], "outside the working folder");
+    assert.deepEqual(reviewScriptExcerpts(request(`powershell -File ${path.join(base, "outside.ps1")}`)), [], "an absolute path outside it");
+    assert.deepEqual(reviewScriptExcerpts(request("node missing.js")), [], "a file that does not exist");
+    assert.deepEqual(reviewScriptExcerpts({ command: "bash run.sh" }), [], "no working folder, nothing read");
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("a request the reviewer answers is marked as being reviewed, not shown to the person", async () => {
+  // Seen live: with "Approve for me" every tool request popped up as a question while the reviewer
+  // was still checking it, so the person waited on (or raced) the reviewer.
+  const pending = [{ approval_id: "cmd", kind: "command", command: "node -e \"console.log(6*7)\"" },
+    { approval_id: "ask", kind: "question", reason: "Which branch?" }];
+  const run = (approverState) => ({ id: "run", workspace_id: "ws", cancelled: false, nodes: [
+    { id: "approver", role: "approver", state: approverState, receipt: { verdict: "APPROVED" }, settings: { auto_decide: true } },
+    { id: "worker", role: "worker", state: "running", route: { harness_id: "codex-native", model: "chatgpt-web/high" } }] });
+  let saved = run("finished");
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint) => {
+      if (endpoint.endsWith("/harness/status")) return { ok: true, status: { connected: true, pending_approvals: structuredClone(pending) } };
+      if (endpoint.endsWith("/ao/read")) return { ok: true, runs: [structuredClone(saved)] };
+      return { ok: true };
+    },
+  });
+  const status = async () => (await workflow.call("harness_status", { workspaceId: "ws", runId: "run", nodeId: "worker" })).status.pending_approvals;
+  const reviewed = await status();
+  assert.equal(reviewed.find((item) => item.approval_id === "cmd").awaiting_review, true, "the reviewer is on it");
+  assert.equal(reviewed.find((item) => item.approval_id === "ask").awaiting_review, undefined, "a question is the person's");
+  // With no reviewer answering for the person, every request is theirs.
+  saved = run("running");
+  assert.equal((await status()).some((item) => item.awaiting_review), false);
+});
+
 test("AO typed approval cancelled in the local confirmation never forwards", async () => {
   let sent = 0;
   const workflow = createAgentOrchestratorWorkflow({
     requestHeadless: async (endpoint) => {
       if (endpoint.endsWith("/status")) return { ok: true, status: { pending_approvals: [
         { approval_id: "a", method: "mcpServer/elicitation/request", thread_id: "t", turn_id: "v", kind: "mcp_url" }] } };
-      sent++; return { ok: true, result: { ok: true } };
+      // Only a forwarded answer counts; reading the run to find the card is not one.
+      if (endpoint.endsWith("/approval")) sent++;
+      return { ok: true, result: { ok: true } };
     },
     confirm: async () => false,
   });
