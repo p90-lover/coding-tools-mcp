@@ -826,6 +826,8 @@ struct AoExternalSubmittedRequest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AoExternalTerminalRequest {
+    #[serde(default)]
+    observed_workspace_root: Option<String>,
     workspace_id: String,
     run_id: String,
     node_id: String,
@@ -5183,7 +5185,7 @@ async fn ao_external_terminal(
     );
     let saved = tokio::task::spawn_blocking(move || {
         coding_tools_core::data::DataStore::update_file(|data| {
-            integrations::ao::record_terminal(
+            integrations::ao::record_terminal_at_workspace(
                 data,
                 &body.workspace_id,
                 &body.run_id,
@@ -5193,6 +5195,7 @@ async fn ao_external_terminal(
                 body.answer.as_deref(),
                 body.completed,
                 body.failure.as_deref(),
+                body.observed_workspace_root.as_deref(),
             )
         })
         .map_err(text_error)

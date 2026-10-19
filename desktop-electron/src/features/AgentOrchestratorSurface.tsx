@@ -6,6 +6,7 @@ import type { Language } from "../types";
 import { AgentOrchestratorOriginalSurface } from "./AgentOrchestratorOriginalSurface";
 import { AgentOrchestratorCanvas, type CanvasNode } from "./AgentOrchestratorCanvas";
 import { AgentOrchestratorChat } from "./AgentOrchestratorChat";
+import { AgentOrchestratorRunEvidence, type RunMetrics } from "./AgentOrchestratorRunEvidence";
 import { ChatThreadList, type ThreadWorkspace } from "./ChatThreadList";
 import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "./ProjectEditDialog";
 import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
@@ -30,7 +31,9 @@ type PlanTask = {
   clauseProgress: { done: number; total: number };
 };
 type Board = { revision: number; steps: string[]; tasks: PlanTask[]; task?: PlanTask };
-export type AoReceipt = { status: string; answer?: string; error?: string; verdict?: string; thread_id?: string; turn_id?: string; request_key?: string; settings?: RoleSettings; route?: { model: string }; started_at_ms?: number };
+export type AcceptanceEvidence = { kind: "artifact_sha256"; path: string; expected_sha256: string; observed_sha256?: string; planner_request_key: string; worker_request_key: string; verified_at_ms: number; passed: boolean; error?: string };
+export type AoAssignment = { task: string; acceptance: string; skip_reason?: string; checks?: { kind: "artifact_sha256"; path: string; sha256: string }[]; planner_request_key?: string };
+export type AoReceipt = { acceptance_workspace_root?: string; acceptance_evidence?: AcceptanceEvidence[]; status: string; answer?: string; error?: string; verdict?: string; thread_id?: string; turn_id?: string; request_key?: string; settings?: RoleSettings; route?: { model: string }; started_at_ms?: number };
 export type AoNode = {
   id: string; task_id: string; role: "planner" | "approver" | "worker" | "review_split" | "sub_reviewer" | "reviewer" | "retry";
   parents: string[]; x: number; y: number; positioned?: boolean; state: string;
@@ -40,9 +43,9 @@ export type AoNode = {
   receipt?: AoReceipt;
   history?: AoReceipt[];
 };
-export type AoMission = { id: string; project_id: string; workspace_id: string; revision: number; cancelled: boolean; paused?: boolean; solo?: boolean; nodes: AoNode[]; team?: AoTeam; worker_limit?: number; execution_mode?: "single" | "team" };
+export type AoMission = { assignments?: Record<string, AoAssignment>; id: string; project_id: string; workspace_id: string; revision: number; cancelled: boolean; paused?: boolean; solo?: boolean; nodes: AoNode[]; team?: AoTeam; worker_limit?: number; execution_mode?: "single" | "team" };
 
-type Sheet = "" | "mission" | "worker" | "settings" | "team" | "schedule";
+type Sheet = "" | "mission" | "worker" | "settings" | "team" | "schedule" | "evidence";
 
 const words = {
   en: { title: "Agent Orchestrator", workspace: "Workspace", mission: "Mission", newMission: "New mission", canvas: "Mission tab", overview: "Overview board", history: "Inactive cards shown for this mission",
@@ -534,6 +537,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const executableArg = (): JsonObject => (executable.trim() ? { executable: executable.trim() } : {});
   const [advanceNotice, setAdvanceNotice] = useState("");
   const [autoStatus, setAutoStatus] = useState("idle");
+  const [metricsState, setMetricsState] = useState<{ workspaceId: string; runId: string; value: RunMetrics | null } | null>(null);
   const [pendingApprovals, setPendingApprovals] = useState<AoApproval[]>([]);
   const approvalScope = useRef({ workspaceId: "", runId: "" });
   const pendingApprovalsHere = approvalScope.current.workspaceId === workspaceId && approvalScope.current.runId === selectedRunId ? pendingApprovals : [];
@@ -1151,6 +1155,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
         const nextStatus = typeof status.status === "string" ? status.status : "idle";
         setAutoStatus(nextStatus);
         setAdvanceNotice(typeof status.detail === "string" ? status.detail : "");
+        const metrics = status.metrics as unknown as RunMetrics | null;
+        setMetricsState({ workspaceId, runId: selectedRunId, value: metrics?.version === 1 ? metrics : null });
         if (nextStatus !== "idle") {
           const current = await moduleCall("runs", { workspaceId, runId: selectedRunId });
           if (live && Array.isArray(current.runs)) {
@@ -1783,6 +1789,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
           <ToolButton icon="refresh" label="Restart mission" disabled={!selectedRun || autoStatus === "running" || Boolean(busy)} onClick={restartRun} />
         </div> : null}
         <div className="ao-head-tools" aria-label="Project controls">
+          {selectedRun ? <button type="button" className="button-secondary" onClick={() => setSheet("evidence")}>Run evidence</button> : null}
           <ToolButton icon="plus" label={copy.newMission} disabled={!board || Boolean(busy)} pressed={sheet === "mission"}
             onClick={() => openSheet("mission")} />
           <button type="button" className="button-secondary" disabled={Boolean(busy) || !workspaceId} onClick={openTeam}>Team</button>
@@ -1792,6 +1799,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
       </header> : null}
 
       <div className="ao-stage" ref={stageRef}>
+        {sheet === "evidence" && selectedRun ? <FloatingSheet stage={stageRef} title="Run evidence" onClose={closeSheet}>
+          <AgentOrchestratorRunEvidence run={selectedRun} metrics={metricsState?.workspaceId === workspaceId && metricsState.runId === selectedRun.id ? metricsState.value : null} />
+        </FloatingSheet> : null}
         {sheet === "schedule" && scheduleTarget ? <FloatingSheet stage={stageRef} title="One-time delayed start" onClose={closeSheet}>
           <form className="ao-sheet" onSubmit={event=>{event.preventDefault();submitSchedule();}}>
             <label>Start after<input type="number" min={1} step={1} value={startDelay} onChange={event=>setStartDelay(Number(event.target.value))} /></label>
@@ -1930,7 +1940,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
                   onRemove={removeCard} canRemove={(nodeId) => Boolean(aoRemoveChange(selectedRun, nodeId))} /> : undefined}
                 busy={Boolean(busy)} loadDescription={loadDescription} send={sendChat} steer={steerChat} commands={chatCommands}
                 // A new chat's team sits in the header, as Codex keeps the page free of setting bars.
-                headerExtra={chatTaskId === "" && savedTeams.length ? <label className="cx-head-team" title="Uses these role blocks for this chat">
+                headerExtra={selectedRun && selectedRun.project_id === chatTaskId ? <button type="button" className="button-secondary" onClick={() => setSheet("evidence")}>Run evidence</button> : chatTaskId === "" && savedTeams.length ? <label className="cx-head-team" title="Uses these role blocks for this chat">
                   <span>Team</span>
                   <select aria-label="New chat team" disabled={Boolean(busy)} value={missionTeamId || team?.id || ""} onChange={event => setMissionTeamId(event.target.value)}>
                     {savedTeams.map(item => <option key={item.id} value={item.id}>{item.name}{item.id === team?.id ? " · Default" : ""}</option>)}

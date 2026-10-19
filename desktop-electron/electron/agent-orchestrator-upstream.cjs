@@ -285,6 +285,64 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   }
   // continuable() checks in flight, by session (see there).
   const continuing = new Map();
+  // Shared owned reads; only live tails are retained, never terminal results.
+  const observationFrames = new Map();
+  const OBSERVATION_RECONCILE_MS = 1500;
+  function invalidateObservations(id, hard = false, healingObservation = null) {
+    for (const entry of observationFrames.values()) {
+      if (entry.id !== id) continue;
+      entry.conversation = null; entry.revision += 1;
+      if (hard && entry !== healingObservation) { entry.epoch += 1; entry.pending = null; }
+    }
+  }
+  async function sharedObservation(id, expectedTurn, read) {
+    const owned = sessionId(id);
+    await start();
+    const generation = lifecycleGeneration;
+    const key = JSON.stringify([owned, expectedTurn || null, generation]);
+    let entry = observationFrames.get(key);
+    if (!entry) {
+      if (observationFrames.size >= 256) {
+        const idle = [...observationFrames].find(([, value]) => !value.pending);
+        if (!idle) throw new Error("AO observation capacity reached; retry this read");
+        observationFrames.delete(idle[0]);
+      }
+      entry = { id: owned, epoch: 0, revision: 0, pending: null, conversation: null };
+      observationFrames.set(key, entry);
+    }
+    if (entry.pending) return entry.pending;
+    const epoch = entry.epoch;
+    const pending = read(entry).then(value => {
+      if (generation !== lifecycleGeneration || epoch !== entry.epoch) {
+        throw new Error("AO observation changed while reading; refresh before using its result");
+      }
+      return value;
+    }).catch(error => { entry.conversation = null; throw error; })
+      .finally(() => { if (entry.pending === pending) entry.pending = null; });
+    entry.pending = pending;
+    return entry.pending;
+  }
+  async function observationConversation(id, record, expectedTurn, entry) {
+    const session = record?.session;
+    const marker = JSON.stringify([session?.status, session?.activity, session?.provisionState, session?.provisionError]);
+    const cached = entry.conversation;
+    if (session?.status === "working" && cached?.marker === marker
+      && Date.now() - cached.at < OBSERVATION_RECONCILE_MS) return cached.value;
+    const revision = entry.revision;
+    const value = await conversationTail(id);
+    const turns = Array.isArray(value?.turns) ? value.turns : [];
+    const turn = expectedTurn ? turns.find(item => item.id === expectedTurn) : turns[turns.length - 1];
+    entry.conversation = null;
+    if (revision === entry.revision && session?.status === "working" && session.provisionState !== "failed"
+      && turn && !TERMINAL_TURN_STATES.has(turn.state) && Buffer.byteLength(JSON.stringify(value)) <= 128 * 1024) {
+      // At most 32 bounded tails (~4 MiB), regardless of how many sessions were observed.
+      const retained = [...observationFrames.values()].filter(value => value.conversation);
+      if (retained.length >= 32) retained[0].conversation = null;
+      entry.conversation = { value, marker, at: Date.now() };
+    }
+    return value;
+  }
+
   /**
    * The newest items of a session's conversation. AO counts messages and tool activities alike,
    * and a tool's output can be tens of KB (an MCP browser tool's page dumps), so 100 items reached
@@ -556,11 +614,19 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   }
 
   // Mission-owned AO calls. The run grant already covers them, so no extra dialog.
-  async function internalApi(method, endpoint, body) {
+  async function internalApi(method, endpoint, body, healingObservation = null) {
     await start();
-    const result = await requestApi(method, endpoint, body === undefined ? undefined : JSON.stringify(body));
-    if (!result.ok) throw new Error(aoErrorMessage(result));
-    return result.data;
+    const changed = method !== "GET" && /^\/api\/v1\/sessions\/([a-zA-Z0-9_-]{1,128})(?:\/|$)/.exec(endpoint);
+    // Resume keeps the same queued turn, including observe()'s automatic provision retry.
+    const hard = !endpoint.endsWith("/resume-agent");
+    if (changed) invalidateObservations(changed[1], hard, healingObservation);
+    try {
+      const result = await requestApi(method, endpoint, body === undefined ? undefined : JSON.stringify(body));
+      if (!result.ok) throw new Error(aoErrorMessage(result));
+      return result.data;
+    } finally {
+      if (changed) invalidateObservations(changed[1], hard, healingObservation);
+    }
   }
   const agentId = (value) => {
     if (typeof value !== "string" || !/^[a-z0-9-]{1,40}$/.test(value)) throw new Error("Choose a valid AO harness");
@@ -631,7 +697,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   const sessionEvents = createAoSessionEvents({ port: async () => { if (state !== "ready") throw new Error("AO is not running"); return daemonPort; }, logger });
   const harness = Object.freeze({
     /** Live AO session changes ({ sessionId, type, conversation }) pushed by the daemon; returns unsubscribe. */
-    watch(listener) { return sessionEvents.subscribe(listener); },
+    watch(listener) {
+      return sessionEvents.subscribe(change => { invalidateObservations(change.sessionId); listener(change); });
+    },
     async catalog() {
       const [inventory, settings] = await Promise.all([agentInventory(), internalApi("GET", "/api/v1/settings")]);
       const proven = new Set((inventory?.installed ?? []).map(item => item?.id));
@@ -717,10 +785,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return created;
     },
     async observe(id, expectedTurn) {
+      return sharedObservation(id, expectedTurn, async entry => {
       const read = ++observeReads;
       const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`);
       if (record?.session?.mode === "tui") return observeTui(id, record.session.status, record.session.activity);
-      const [session, conversation] = [record, await conversationTail(id)];
+      const session = record, conversation = await observationConversation(id, record, expectedTurn, entry);
       const turns = Array.isArray(conversation?.turns) ? conversation.turns : [];
       // A follow-up sent into a live session is pinned to its own turn: until AO shows it, the
       // previous, completed turn must not be read as this card's answer.
@@ -772,7 +841,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       const settling = turn && !TERMINAL_TURN_STATES.has(turn.state);
       const settled = turn?.state === "interrupted" && !turn.errorMessage;
       if ((settling || settled) && await chatHostGone(id)) {
-        if (settling) await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/interrupt`, {}).catch(() => undefined);
+        invalidateObservations(id);
+        // This read settles its own confirmed-dead host; concurrent external mutations still fence it.
+        if (settling) await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/interrupt`, {}, entry).catch(() => undefined);
         return {
           status, turnId: turn.id, turnState: "interrupted",
           error: "The agent's process ended before it finished (the app restarted); retry this card.",
@@ -798,6 +869,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // A question the agent asked waits like an approval: the chat shows it and the card needs you.
         approvals: [...pendingApprovals(conversation), ...pendingInputs(conversation)],
       };
+      });
     },
     /**
      * Whether a chat session can take another turn: it exists, runs as a chat, and its host is up.

@@ -1271,11 +1271,21 @@ pub fn queue_rework(
     ) {
         next.nodes[gate].receipt.as_mut().unwrap().error = Some(format!("Rework held: {error}"));
     } else if replan {
-        for node in next
-            .nodes
-            .iter_mut()
-            .filter(|node| matches!(node.role, Role::Planner | Role::Approver))
-        {
+        // A skipped card has no attempt to preserve. Make it eligible for the replacement
+        // plan, which may keep the skip or activate the worker after approval.
+        let skipped: std::collections::HashSet<_> = next
+            .assignments
+            .iter()
+            .filter(|(_, assignment)| assignment.skip_reason.is_some())
+            .map(|(id, _)| id.clone())
+            .collect();
+        for node in next.nodes.iter_mut().filter(|node| {
+            matches!(node.role, Role::Planner | Role::Approver)
+                || (skipped.contains(&node.id)
+                    && node.state == State::Finished
+                    && node.receipt.is_none()
+                    && node.request_key.is_none())
+        }) {
             if requeue(node, next.team.as_ref()) {
                 next.grant = None;
             }
@@ -1285,7 +1295,7 @@ pub fn queue_rework(
         if next
             .nodes
             .iter()
-            .filter(|node| node.role == Role::Worker)
+            .filter(|node| node.role == Role::Worker && !ao::worker_skipped(&next, &node.id))
             .any(|node| {
                 node.state != State::Finished
                     || node.receipt.as_ref().is_none_or(|receipt| {
@@ -1299,9 +1309,19 @@ pub fn queue_rework(
         // A looping team hands the review back to the orchestrator, which re-plans every worker
         // (or ends the mission); otherwise only the workers the reviewer named are redone.
         let to_orchestrator = review_loops(&next);
+        let skipped: std::collections::HashSet<_> = next
+            .assignments
+            .iter()
+            .filter(|(_, assignment)| assignment.skip_reason.is_some())
+            .map(|(id, _)| id.clone())
+            .collect();
         for node in &mut next.nodes {
             let redo = match node.role {
-                Role::Worker => to_orchestrator || targets.is_empty() || targets.contains(&node.id),
+                Role::Worker => {
+                    to_orchestrator
+                        || (!skipped.contains(&node.id)
+                            && (targets.is_empty() || targets.contains(&node.id)))
+                }
                 Role::ReviewSplit | Role::SubReviewer | Role::Reviewer => true,
                 Role::Planner | Role::Approver => to_orchestrator,
                 Role::Retry => false,

@@ -699,7 +699,11 @@ test("AO restart sees a reserved turn as held and never resubmits it", async () 
     confirm: async () => { throw new Error("Do not request another grant for a reserved turn"); },
   });
   const input = { workspaceId: "ws-1", runId: "run-1", executable: "C:\\codex.exe" };
-  assert.deepEqual(await workflow.call("run_status", input), { ok: true, status: "held", driven: false },
+  const status = await workflow.call("run_status", input);
+  assert.equal(status.metrics?.version, 1);
+  assert.equal(status.metrics?.timing_basis, "coordinator_observations");
+  assert.equal(status.metrics?.observed_wall_ms, 0);
+  assert.deepEqual({ ok: status.ok, status: status.status, driven: status.driven }, { ok: true, status: "held", driven: false },
     "after a restart nothing drives the run; the chat settles its cards by observing them");
   await assert.rejects(workflow.call("start_run", input), /active or unresolved card/i);
   assert.deepEqual(calls, ["/api/v1/ao/read", "/api/v1/ao/read"]);
@@ -1633,6 +1637,42 @@ test("runtime recovery dormant Retry does not block successful completion", asyn
   assert.equal(world.retryAttempts, 0);
   assert.equal(world.run.nodes[2].state, "pending");
   assert.equal((await world.workflow.call("run_status", input)).status, "finished");
+});
+
+
+test("activity and result readers share simultaneous run snapshots but never retain them across polls", async () => {
+  let reads = 0, release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const seen = [];
+  const mission = { id: "shared", workspace_id: "ws", nodes: ["one", "two", "three"].map(id => ({
+    id, state: "running", route: { harness_id: "ao:codex" }, receipt: { request_key: id + "-attempt", thread_id: id, turn_id: id + "-turn" },
+  })) };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async endpoint => {
+      assert.equal(endpoint, "/api/v1/ao/read");
+      reads++;
+      if (reads === 1) await gate;
+      return { ok: true, runs: [structuredClone(mission)] };
+    },
+    aoHarness: { observe: async (session, expected) => {
+      seen.push([session, expected]);
+      return { turnId: session + "-turn", turnState: "running", liveOutput: session };
+    } },
+  });
+  const input = { workspaceId: "ws", runId: "shared" };
+  const initial = [
+    workflow.call("activity", input),
+    workflow.call("observe", { ...input, nodeId: "one" }),
+    workflow.call("observe", { ...input, nodeId: "two" }),
+  ];
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reads, 1, "all simultaneous readers share the same in-flight snapshot");
+  release(); await Promise.all(initial);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reads, 2, "working-card final ownership checks share a fresh batch");
+  assert.ok(seen.every(([session, expected]) => expected === session + "-turn"), "driver and UI pin the same owned turn");
+  await workflow.call("observe", { ...input, nodeId: "one" });
+  assert.equal(reads, 3, "a subsequent poll reads authority again");
 });
 
 
@@ -3041,6 +3081,90 @@ test("a turn that has only been retrying its model request for minutes is restar
   assert.equal(result.restarted, true, "four minutes of retries only is a hang");
   assert.deepEqual(interrupted, ["sess-1"]);
   assert.equal(steered.length, 0);
+});
+
+test("automatic reviewer waits count as approval time without notifying the person", { timeout: 5000 }, async () => {
+  const route = { harness_id: "codex-native", provider_id: "cliproxyapi-antigravity", model: "test-model", permission_profile: ":read-only" };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, grant: { executable_sha256: "a".repeat(64) }, nodes: [
+    { id: "approver", role: "approver", state: "finished", parents: [], route, receipt: { verdict: "APPROVED" }, settings: { auto_decide: true } },
+    { id: "worker", role: "worker", state: "running", parents: ["approver"], route },
+  ] };
+  const pending = [{ approval_id: "review", kind: "command", tool: "Bash", command: "custom-check --verify",
+    request: { availableDecisions: ["accept", "decline"] } }];
+  let clock = 1000, releaseReview, resolveMeasured, deadline, done = false, advanced = false;
+  const gate = new Promise(resolve => { releaseReview = resolve; });
+  const measured = new Promise(resolve => { resolveMeasured = resolve; });
+  const attention = [], frames = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async url => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) };
+      await gate;
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"ask","reason":"fixture ended"}' } }] }) };
+    },
+    requestHeadless: async endpoint => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+      if (endpoint.endsWith("/observe")) return { ok: true, pending_approvals: done ? [] : pending };
+      throw new Error("Unexpected endpoint " + endpoint);
+    },
+    onRunState: update => {
+      frames.push({ status: update.status, detail: update.detail, attention: update.attention, metrics: update.metrics });
+      if (done || update.status !== "running" || !update.detail?.includes("reviewer is checking")) return;
+      attention.push(update.attention);
+      if (!advanced) { advanced = true; clock += 1000; }
+      if (update.metrics?.approval_wait_ms >= 1000) resolveMeasured(update.metrics);
+    },
+  });
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    const metrics = await Promise.race([measured, new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error("automatic reviewer wait was not measured: " + JSON.stringify(frames))), 3500); })]);
+    assert.equal(metrics.approval_wait_ms, 1000);
+    assert.ok(attention.length >= 2);
+    assert.ok(attention.every(value => value == null), "automatic waits remain separate from human notifications");
+  } finally {
+    clearTimeout(deadline); done = true; releaseReview();
+    mission.nodes[1].state = "finished";
+    for (let tries = 0; tries < 100; tries++) {
+      if ((await workflow.call("run_status", { workspaceId: "ws", runId: "run" })).status !== "running") break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    workflow.dispose();
+  }
+});
+
+test("typed external artifact checks forward only authoritative session workspace metadata", async () => {
+  for (const scenario of ["folder", "worktree", "unknown", "plain"]) {
+    const root = require("node:path").resolve(scenario === "worktree" ? "aiTemp/worktree-fixture" : ".");
+    const node = { id: "worker", role: "worker", state: "running", route: { harness_id: "ao:codex" },
+      receipt: { request_key: "attempt", thread_id: "session", turn_id: "turn" } };
+    const mission = { id: "run", workspace_id: "ws", nodes: [node], assignments: {
+      worker: { checks: scenario === "plain" ? [] : [{ kind: "artifact_sha256", path: "result", sha256: "a".repeat(64) }] },
+    } };
+    let recorded, lookups = 0;
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless: async (endpoint, body) => {
+        if (endpoint.endsWith("/read")) return { ok: true, runs: [mission] };
+        assert.equal(endpoint, "/api/v1/ao/external/terminal");
+        recorded = body; return { ok: true, run: mission };
+      },
+      aoHarness: {
+        observe: async () => ({ turnId: "turn", turnState: "completed", answer: "done" }),
+        sessionWorkspace: async (session, workspaceId) => {
+          lookups++; assert.equal(session, "session"); assert.equal(workspaceId, "ws");
+          return scenario === "unknown" ? { ready: false } : { root };
+        },
+      },
+    });
+    await workflow.call("observe", { workspaceId: "ws", runId: "run", nodeId: "worker" });
+    assert.equal(lookups, scenario === "plain" ? 0 : 1, scenario);
+    assert.equal(recorded.observed_workspace_root, ["folder", "worktree"].includes(scenario) ? root : undefined, scenario);
+    assert.equal(recorded.session_id, "session");
+    assert.equal(recorded.turn_id, "turn");
+    workflow.dispose();
+  }
 });
 
 test("a run waiting on input reports it steadily, not on and off with each observation tick", async () => {

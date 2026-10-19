@@ -6,6 +6,7 @@ const path = require("node:path");
 const { DEFAULT_GOAL_ROUNDS, goalPrompt, goalVerdict, closingAnswers, cleanObjective, createGoalStore } = require("./chat-goals.cjs");
 const { chatDescriptionWithout, createChatEditStore } = require("./chat-edits.cjs");
 const { normalizedAuthFile } = require("./cpa-oauth-adapter.cjs");
+const { createRunMetrics } = require("./agent-orchestrator-metrics.cjs");
 
 function clean(value, limit, required = true) {
   if (typeof value !== "string") throw new Error("Expected text");
@@ -184,15 +185,18 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       : "The Codex CLI was not found; install it with npm install -g @openai/codex, or choose a codex.exe in AO settings");
   }
   const backgroundRuns = new Map();
+  const runMetrics = createRunMetrics({ now });
   // Background-run observations for MCP event incidents (stall, held, approval waits).
   // An observer failure must never affect the run it watches.
-  function reportRun(workspaceId, runId, state, mission, attention = null) {
+  function reportRun(workspaceId, runId, state, mission, attention = null, approvalNodeIds = []) {
+    let metrics = null;
+    try { metrics = runMetrics.observe({ workspaceId, runId, mission, status: state.status, attention, approvalNodeIds }); } catch { /* observational only */ }
     // A settled round of a chat with a goal decides what the goal does next.
     if (["finished", "failed", "held"].includes(state.status)) void goalAfterRun(workspaceId, runId, state.status, attention).catch(() => undefined);
     if (!onRunState) return;
     try {
       onRunState({
-        workspaceId, runId, status: state.status, detail: state.detail, stopped: state.stopped === true, attention,
+        workspaceId, runId, status: state.status, detail: state.detail, stopped: state.stopped === true, attention, metrics,
         ...(mission ? { fingerprint: (mission.nodes ?? []).map((node) => `${node.id}:${node.state}`).join(",") } : {}),
       });
     } catch { /* observational only */ }
@@ -1052,7 +1056,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   }
 
   const TERMINAL_TURNS = new Set(["completed", "failed", "interrupted", "cancelled", "recovered"]);
-  async function observeExternal(workspaceId, runId, node) {
+  async function observeExternal(workspaceId, runId, node, mission) {
     const session = node.receipt?.thread_id;
     if (node.state === "reserved" && !dispatching.has(nodeKey(workspaceId, runId, node.id))) {
       // The launch was lost before AO returned a session; hold it rather than replay.
@@ -1062,7 +1066,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       return { ok: true, run: held?.run, pending_approvals: [] };
     }
     if (node.state !== "running" || !session) return { ok: true, pending_approvals: [] };
-    const observed = await harnessService().observe(session, expectedTurns.get(session));
+    const observed = await harnessService().observe(session, expectedTurns.get(session) || node.receipt?.turn_id);
     const terminal = TERMINAL_TURNS.has(observed.turnState) || observed.exited;
     if (!terminal) {
       // The agent's parked tool requests, answerable from the chat or by the reviewer.
@@ -1072,7 +1076,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       return { ok: true, pending_approvals: withAdvice(pending), needs_input: observed.needsInput && !pending.length, session_id: session };
     }
     const completed = observed.turnState === "completed";
+    let observedWorkspaceRoot;
+    if (completed && node.role === "worker" && mission?.assignments?.[node.id]?.checks?.length) {
+      try {
+        const scope = await harnessService().sessionWorkspace?.(session, workspaceId);
+        if (!scope?.ended && scope?.ready !== false && typeof scope?.root === "string" && scope.root.length <= 4096
+          && !scope.root.includes("\0") && path.isAbsolute(scope.root)) observedWorkspaceRoot = scope.root;
+      } catch { /* Missing authority is rejected by the typed acceptance gate. */ }
+    }
     const result = await requestHeadless("/api/v1/ao/external/terminal", {
+      ...(observedWorkspaceRoot ? { observed_workspace_root: observedWorkspaceRoot } : {}),
       workspace_id: workspaceId, run_id: runId, node_id: node.id, session_id: session,
       ...(observed.turnId ? { turn_id: observed.turnId } : {}),
       ...(observed.answer ? { answer: observed.answer } : {}),
@@ -1083,8 +1096,21 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     return { ...result, pending_approvals: [] };
   }
 
+  // Share only simultaneous reads; every later observation obtains a fresh authoritative run.
+  const observationRuns = new Map();
+  function observationRun(workspaceId, runId) {
+    const key = runKey(workspaceId, runId);
+    if (observationRuns.has(key)) return observationRuns.get(key);
+    if (observationRuns.size >= 256) return runs({ workspaceId, runId });
+    const pending = runs({ workspaceId, runId }).finally(() => {
+      if (observationRuns.get(key) === pending) observationRuns.delete(key);
+    });
+    observationRuns.set(key, pending);
+    return pending;
+  }
+
   async function savedNode(workspaceId, runId, nodeId) {
-    const saved = await runs({ workspaceId, runId });
+    const saved = await observationRun(workspaceId, runId);
     const mission = saved.runs.find((entry) => entry.id === runId && entry.workspace_id === workspaceId);
     return { mission, node: mission?.nodes?.find((entry) => entry.id === nodeId) };
   }
@@ -1203,7 +1229,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       if (found && externalAgent(found.node)) {
         const session = found.node.receipt?.thread_id;
         const observed = found.node.state === "running" && session
-          ? await harnessService().observe(session, expectedTurns.get(session)).catch(() => ({})) : {};
+          ? await harnessService().observe(session, expectedTurns.get(session) || found.node.receipt?.turn_id).catch(() => ({})) : {};
         return { ok: true, status: { connected: true, pending_approvals: withAdvice(aoPending(found.node, session, observed)) } };
       }
     }
@@ -1313,7 +1339,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
 
   async function activity({ workspaceId, runId } = {}) {
     const id = clean(workspaceId, 128), run = clean(runId, 80);
-    const saved = await runs({ workspaceId: id, runId: run });
+    const saved = await observationRun(id, run);
     const mission = saved.runs.find(entry => entry.id === run && entry.workspace_id === id);
     if (!mission) throw new Error("AO run not found");
     const working = mission.nodes.filter(node => ["reserved", "running"].includes(node.state));
@@ -1349,7 +1375,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
               const session = node.receipt?.thread_id;
               if (!session) frame = { ...base, activity: "launching" };
               else {
-                const observed = await harnessService().observe(session);
+                const observed = await harnessService().observe(session, expectedTurns.get(session) || node.receipt?.turn_id);
                 const currentTurn = !node.receipt?.turn_id || observed.turnId === node.receipt.turn_id;
                 frame = { ...base, turn_started: Boolean(observed.turnId),
                   activity: observed.needsInput ? "waiting for input" : observed.exited ? "exited" : publicText(observed.turnState || "working", 40),
@@ -1500,7 +1526,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
 
   async function observe({ workspaceId, runId, nodeId } = {}) {
     const found = await savedNode(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80));
-    if (externalAgent(found.node)) return observeExternal(workspaceId, runId, found.node);
+    if (externalAgent(found.node)) return observeExternal(workspaceId, runId, found.node, found.mission);
     const response = await requestHeadless("/api/v1/ao/harness/observe", {
       workspace_id: clean(workspaceId, 128), run_id: clean(runId, 80),
       node_id: clean(nodeId, 80),
@@ -1657,13 +1683,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const current = backgroundRuns.get(runKey(id, run));
     // `driven`: this app session's loop is observing the run right now. A card a previous session
     // left "running" is only ever settled by an observe, so callers need to tell the two apart.
-    if (current) return { ok: true, status: current.status, driven: current.driving === true, ...(current.detail ? { detail: current.detail } : {}) };
+    if (current) return { ok: true, status: current.status, driven: current.driving === true, metrics: runMetrics.snapshot({ workspaceId: id, runId: run }), ...(current.detail ? { detail: current.detail } : {}) };
     const saved = await runs({ workspaceId: id, runId: run });
     const mission = saved.runs.find((entry) => entry.id === run && entry.workspace_id === id);
     if (!mission) throw new Error("AO run unavailable");
     const status = mission.paused && !mission.cancelled ? "paused" : mission.cancelled || mission.nodes.some((node) => ["held", "cancelled", "archived", "reserved", "running"].includes(node.state))
       ? "held" : mission.nodes.every((node) => node.state === "finished") ? "finished" : "idle";
-    return { ok: true, status, driven: false };
+    const metrics = runMetrics.observe({ workspaceId: id, runId: run, mission, status });
+    return { ok: true, status, driven: false, metrics };
   }
 
   async function controlRun({ workspaceId, runId, action, executable, nodeId } = {}) {
@@ -2383,7 +2410,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           }
           if (helped?.changed) continue;
         }
-        reportRun(workspaceId, runId, state, mission, attention);
+        reportRun(workspaceId, runId, state, mission, attention, waiting.map(mark => mark.node.id));
         if (missionSettled(mission)) {
           const failed = mission.nodes.some(node => node.state === "failed");
           state.status = failed ? "failed" : mission.cancelled ? "held" : "finished";
@@ -2434,6 +2461,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     const state = { status: "starting", starting: true, detail: "Awaiting local approval", recoveryDecisions: existing?.recoveryDecisions };
     backgroundRuns.set(key, state);
+    runMetrics.observe({ workspaceId: id, runId: run, status: "starting" });
     try {
       const saved = await runs({ workspaceId: id, runId: run });
       let mission = saved.runs.find((entry) => entry.id === run && entry.workspace_id === id);

@@ -60,11 +60,170 @@ function observeHarness(context) {
   const helpers = source.slice(source.indexOf("  async function chatHostGone"), source.indexOf("  // Mission-owned AO calls."));
   const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
   const states = source.match(/const TERMINAL_TURN_STATES = .*;/)[0];
-  return vm.runInNewContext(states + helpers + identity + "({" + method + "})", {
+  const api = context.requestApi ? source.slice(source.indexOf("  async function internalApi("), source.indexOf("  const agentId =")) : "";
+  return vm.runInNewContext(states + helpers + identity + api + "({" + method + ", invalidateObservations, changeGeneration() { lifecycleGeneration += 1; }})", {
     Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"),
-    agentTools: null, observeTui: async () => { throw new Error("not a TUI fixture"); }, ...context,
+    agentTools: null, start: async () => {}, lifecycleGeneration: 0,
+    observeTui: async () => { throw new Error("not a TUI fixture"); }, ...context,
   });
 }
+
+
+function observationWorld() {
+  let clock = 1000;
+  const current = { status: "working", turn: "t1", state: "running", text: "live", error: null, gate: null };
+  const calls = [];
+  const upstream = observeHarness({
+    Date: class extends Date { static now() { return clock; } },
+    aoErrorMessage: result => result.data.message,
+    requestApi: async (method, endpoint) => {
+      calls.push(method + " " + endpoint);
+      if (method !== "GET") {
+        if (endpoint.endsWith("/messages")) { current.turn = "t2"; current.state = "running"; return { ok: true, data: { turnId: "t2" } }; }
+        return { ok: true, data: { ok: true } };
+      }
+      if (current.gate) await current.gate;
+      if (current.error) { const error = current.error; current.error = null; throw error; }
+      const data = endpoint.includes("/conversation?")
+        ? { turns: [{ id: current.turn, state: current.state }], messages: [{ role: "assistant", turnId: current.turn, text: current.text, streaming: current.state === "running" }] }
+        : { session: { id: "s", mode: "chat", status: current.status } };
+      return { ok: true, data: JSON.parse(JSON.stringify(data)) };
+    },
+  });
+  return { upstream, current, calls, advance: ms => { clock += ms; }, tails: () => calls.filter(call => call.includes("/conversation?")).length };
+}
+
+test("dead-host recovery returns its failure while preserving external mutation and generation fences", async t => {
+  const base = path.resolve(__dirname, "../../aiTemp/dead-host-observation-tests");
+  fs.mkdirSync(base, { recursive: true });
+  const dataRoot = fs.mkdtempSync(path.join(base, "run-"));
+  const socket = require("node:net").createServer();
+  await new Promise(resolve => socket.listen(0, "127.0.0.1", resolve));
+  const port = socket.address().port;
+  await new Promise(resolve => socket.close(resolve));
+  fs.mkdirSync(path.join(dataRoot, "chat-hosts", "s"), { recursive: true });
+  fs.writeFileSync(path.join(dataRoot, "chat-hosts", "s", "host.json"), JSON.stringify({ address: "127.0.0.1:" + port }));
+  try {
+    for (const scenario of ["failed interrupt", "concurrent send", "generation change"]) {
+      await t.test(scenario, async () => {
+        let release, entered, interrupts = 0;
+        const healing = new Promise(resolve => { entered = resolve; });
+        const gate = new Promise(resolve => { release = resolve; });
+        const upstream = observeHarness({
+          dataRoot, aoErrorMessage: result => result.data.message,
+          requestApi: async (method, endpoint) => {
+            if (method === "GET") return { ok: true, data: endpoint.includes("/conversation?")
+              ? { turns: [{ id: "t1", state: "running" }], messages: [] }
+              : { session: { id: "s", mode: "chat", status: "working" } } };
+            if (endpoint.endsWith("/interrupt")) {
+              interrupts++; entered();
+              if (scenario === "failed interrupt") throw new Error("interrupt unavailable");
+              await gate;
+            }
+            return { ok: true, data: endpoint.endsWith("/messages") ? { turnId: "t2" } : { ok: true } };
+          },
+        });
+        if (scenario === "failed interrupt") {
+          for (let attempt = 0; attempt < 2; attempt++) {
+            const observed = await upstream.observe("s", "t1");
+            assert.equal(observed.turnState, "interrupted");
+            assert.match(observed.error, /process ended/);
+          }
+          assert.equal(interrupts, 2, "a failed recovery request must not leave every read rejected forever");
+        } else {
+          const rejected = assert.rejects(upstream.observe("s", "t1"), /observation changed/);
+          await healing;
+          if (scenario === "concurrent send") await upstream.send("s", "next turn");
+          else upstream.changeGeneration();
+          release();
+          await rejected;
+        }
+      });
+    }
+  } finally { fs.rmSync(dataRoot, { recursive: true, force: true }); }
+});
+
+test("owned observations share in-flight IO and unchanged live tails, with bounded reconciliation", async () => {
+  const world = observationWorld();
+  let release;
+  world.current.gate = new Promise(resolve => { release = resolve; });
+  const reads = [world.upstream.observe("s", "t1"), world.upstream.observe("s", "t1")];
+  await new Promise(resolve => setImmediate(resolve));
+  release(); world.current.gate = null;
+  assert.deepEqual((await Promise.all(reads)).map(value => value.liveOutput), ["live", "live"]);
+  assert.equal(world.tails(), 1);
+  assert.equal(world.calls.filter(call => call === "GET /api/v1/sessions/s").length, 1);
+  world.current.text = "changed without an event";
+  assert.equal((await world.upstream.observe("s", "t1")).liveOutput, "live");
+  assert.equal(world.tails(), 1);
+  assert.equal(world.calls.filter(call => call === "GET /api/v1/sessions/s").length, 2, "session status is authoritative on each poll");
+  world.advance(1501);
+  assert.equal((await world.upstream.observe("s", "t1")).liveOutput, "changed without an event");
+  assert.equal(world.tails(), 2, "missed events/reconnects reconcile within the fallback interval");
+});
+
+test("CDC changes refresh streaming rows and final or unknown statuses force authoritative tails", async () => {
+  const world = observationWorld();
+  await world.upstream.observe("s", "t1");
+  world.current.text = "new streaming text";
+  world.upstream.invalidateObservations("s");
+  assert.equal((await world.upstream.observe("s", "t1")).liveOutput, "new streaming text");
+  world.current.status = "idle"; world.current.state = "completed"; world.current.text = "exact final answer";
+  const final = await world.upstream.observe("s", "t1");
+  assert.equal(final.turnState, "completed");
+  assert.equal(final.answer, "exact final answer");
+  assert.equal(world.tails(), 3);
+  await world.upstream.observe("s", "t1");
+  assert.equal(world.tails(), 4, "terminal results are never replayed from cache");
+  world.current.status = "unknown"; world.current.state = "running";
+  await world.upstream.observe("s", "t1");
+  await world.upstream.observe("s", "t1");
+  assert.equal(world.tails(), 6);
+});
+
+test("sends, interrupts, exits and generation changes invalidate owned observations", async () => {
+  const world = observationWorld();
+  await world.upstream.observe("s", "t1");
+  await world.upstream.send("s", "follow-up", "client-2");
+  assert.equal((await world.upstream.observe("s", "t2")).turnId, "t2");
+  await world.upstream.interrupt("s");
+  await world.upstream.observe("s", "t2");
+  await world.upstream.exitAgent("s");
+  await world.upstream.observe("s", "t2");
+  world.upstream.changeGeneration();
+  await world.upstream.observe("s", "t2");
+  assert.equal(world.tails(), 5);
+});
+
+test("a read cannot certify a result across a send or daemon generation change", async () => {
+  for (const mutation of ["send", "generation"]) {
+    const world = observationWorld();
+    let release;
+    world.current.gate = new Promise(resolve => { release = resolve; });
+    const rejected = assert.rejects(world.upstream.observe("s", "t1"), /observation changed/);
+    await new Promise(resolve => setImmediate(resolve));
+    if (mutation === "send") await world.upstream.send("s", "follow-up");
+    else world.upstream.changeGeneration();
+    world.current.gate = null; release();
+    await rejected;
+    assert.equal((await world.upstream.observe("s", world.current.turn)).turnId, world.current.turn);
+  }
+});
+
+test("failed reads discard retained tails and oversized tails are never retained", async () => {
+  const world = observationWorld();
+  await world.upstream.observe("s", "t1");
+  world.current.error = new Error("transport lost");
+  await assert.rejects(world.upstream.observe("s", "t1"), /transport lost/);
+  world.current.text = "after reconnect";
+  assert.equal((await world.upstream.observe("s", "t1")).liveOutput, "after reconnect");
+  assert.equal(world.tails(), 2);
+  world.upstream.invalidateObservations("s");
+  world.current.text = "x".repeat(140000);
+  await world.upstream.observe("s", "t1");
+  await world.upstream.observe("s", "t1");
+  assert.equal(world.tails(), 4);
+});
 
 test("a session's project folder is named for its tools only for the chat's own folder-mode project", async () => {
   const vm = require("node:vm");
@@ -138,6 +297,7 @@ test("actual upstream observe exposes bounded current streaming output separatel
   assert.ok(Buffer.byteLength(observed.liveOutput, "utf8") <= 4096);
   assert.doesNotMatch(observed.liveOutput, /OTHER_TURN_SECRET|user message/);
   turn = "new-turn";
+  upstream.invalidateObservations("owned-session"); // AO publishes a conversation CDC change.
   const current = await upstream.observe("owned-session");
   assert.equal(current.liveOutput, "", "old turn output is not current output");
   await assert.rejects(upstream.observe("bad/session"), /valid AO session ID/);

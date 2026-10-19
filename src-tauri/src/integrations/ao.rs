@@ -7,6 +7,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+#[path = "ao_acceptance.rs"]
+mod acceptance;
+pub use acceptance::{AcceptanceCheck, AcceptanceEvidence};
+#[cfg(test)]
+#[path = "ao_harness_tests.rs"]
+mod harness_tests;
+
 fn fail(message: &str) -> AppError {
     AppError::Message(message.into())
 }
@@ -179,6 +186,12 @@ pub struct Receipt {
     /// When the card was reserved (Unix ms), so every view can show how long it has been running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at_ms: Option<u64>,
+    /// Host-read observations, bound to the current plan and worker attempts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acceptance_evidence: Vec<AcceptanceEvidence>,
+    /// Canonical registered root confirmed for this owned attempt's host observations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance_workspace_root: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -274,12 +287,27 @@ pub struct ReviewPart {
     pub check: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Assignment {
     pub task: String,
     #[serde(default)]
     pub acceptance: String,
+    /// Explicit planner choice. Omission never silently skips a worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<AcceptanceCheck>,
+    /// Filled by the controller, never accepted from the planner's JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner_request_key: Option<String>,
+}
+
+/// Skipped cards stay visible but consume no turn or completed-worker evidence.
+pub(super) fn worker_skipped(run: &Run, id: &str) -> bool {
+    run.assignments
+        .get(id)
+        .is_some_and(|assignment| assignment.skip_reason.is_some())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -512,6 +540,33 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
                     .answer
                     .as_ref()
                     .is_some_and(|answer| answer.len() > MAX_ANSWER_BYTES)
+                || receipt
+                    .acceptance_workspace_root
+                    .as_deref()
+                    .is_some_and(|root| {
+                        root.len() > 4_096
+                            || root.chars().any(char::is_control)
+                            || !std::path::Path::new(root).is_absolute()
+                    })
+                || receipt.acceptance_evidence.len() > acceptance::MAX_CHECKS
+                || receipt.acceptance_evidence.iter().any(|evidence| {
+                    evidence.kind != "artifact_sha256"
+                        || evidence.worker_request_key != receipt.request_key
+                        || !text(&evidence.planner_request_key, 128)
+                        || !(AcceptanceCheck::ArtifactSha256 {
+                            path: evidence.path.clone(),
+                            sha256: evidence.expected_sha256.clone(),
+                        })
+                        .valid()
+                        || evidence
+                            .observed_sha256
+                            .as_deref()
+                            .is_some_and(|hash| !sha256_text(hash))
+                        || evidence
+                            .error
+                            .as_deref()
+                            .is_some_and(|error| !text(error, 512))
+                })
                 || receipt.verdict.as_deref().is_some_and(|verdict| {
                     !matches!(
                         verdict,
@@ -1033,17 +1088,30 @@ fn assignment_valid(item: &Assignment) -> bool {
             .chars()
             .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
     };
-    !item.task.trim().is_empty()
+    let skipped = item.skip_reason.as_deref().is_some_and(|reason| {
+        text(reason, 512)
+            && item.task.is_empty()
+            && item.acceptance.is_empty()
+            && item.checks.is_empty()
+            && item.planner_request_key.is_none()
+    });
+    (skipped || (item.skip_reason.is_none() && !item.task.trim().is_empty()))
         && item.task.len() <= 4_000
         && item.acceptance.len() <= 2_000
         && clean(&item.task)
         && clean(&item.acceptance)
+        && item.checks.len() <= acceptance::MAX_CHECKS
+        && item.checks.iter().all(AcceptanceCheck::valid)
+        && item
+            .planner_request_key
+            .as_deref()
+            .is_none_or(|key| text(key, 128))
 }
 
 /// The worker cards the planner splits the mission across, and the answer format it must use.
 fn planner_roster(run: &Run) -> String {
     let mut roster =
-        String::from("\nWorker cards (assign each one a distinct part; use the card id):\n");
+        String::from("\nWorker cards (choose the smallest sufficient team; use each card id):\n");
     for worker in run.nodes.iter().filter(|node| node.role == Role::Worker) {
         let name = if worker.settings.name.is_empty() {
             "Worker"
@@ -1073,7 +1141,8 @@ fn planner_roster(run: &Run) -> String {
     }
     roster.push_str(&format!("\nEnd your answer with exactly one of these blocks.\n\
 If you answered the whole mission yourself (simple):\n{SOLO_FENCE}\n{{\"difficulty\":\"simple\",\"reason\":\"why no workers are needed\"}}\n```\n\
-If the workers are needed, give every worker card its own part:\n\
+If workers are needed, choose the smallest sufficient team. Give each needed card a task, and every unused card an explicit {{\"worker\":\"<card id>\",\"skip_reason\":\"why this worker is unnecessary\"}} entry. Include at least one task; retain required dependencies, approval and review stages.\n\
+Optional checks on an assigned task may use {{\"kind\":\"artifact_sha256\",\"path\":\"relative/file\",\"sha256\":\"<known expected lowercase SHA256>\"}} in a checks list (at most 8 files of 1 MiB each). These prove expected bytes, not test correctness or semantic quality. Use only when expected bytes are known in advance, never invent a hash as evidence that tests passed.\n\
 {ASSIGNMENTS_FENCE}\n[{{\"worker\":\"<card id>\",\"task\":\"what this worker must do\",\"acceptance\":\"how to tell it is done\"}}]\n```\n"));
     roster
 }
@@ -1129,9 +1198,14 @@ pub(crate) fn parse_assignments(
     #[derive(Deserialize)]
     struct Planned {
         worker: String,
+        #[serde(default)]
         task: String,
         #[serde(default)]
         acceptance: String,
+        #[serde(default)]
+        skip_reason: Option<String>,
+        #[serde(default)]
+        checks: Vec<AcceptanceCheck>,
     }
     let (_, body) = labelled_block(answer, "assignments")
         .ok_or("The plan has no ```assignments block for the worker cards")?;
@@ -1154,6 +1228,9 @@ pub(crate) fn parse_assignments(
         let assignment = Assignment {
             task: item.task.trim().to_owned(),
             acceptance: item.acceptance.trim().to_owned(),
+            skip_reason: item.skip_reason.map(|reason| reason.trim().to_owned()),
+            checks: item.checks,
+            planner_request_key: None,
         };
         if !assignment_valid(&assignment) {
             return Err("A planned assignment is empty or too long");
@@ -1162,8 +1239,55 @@ pub(crate) fn parse_assignments(
             return Err("The plan assigns the same worker twice");
         }
     }
-    if assignments.is_empty() {
+    if assignments.values().all(|item| item.skip_reason.is_some()) {
         return Err("The plan assigned no work to the worker cards");
+    }
+    if assignments.values().any(|item| item.skip_reason.is_some()) {
+        if run
+            .nodes
+            .iter()
+            .any(|node| node.role == Role::Worker && !assignments.contains_key(&node.id))
+        {
+            return Err("An adaptive plan must explicitly assign or skip every worker");
+        }
+        let skipped: HashSet<_> = assignments
+            .iter()
+            .filter(|(_, item)| item.skip_reason.is_some())
+            .map(|(id, _)| id.as_str())
+            .collect();
+        for worker in run
+            .nodes
+            .iter()
+            .filter(|node| skipped.contains(node.id.as_str()))
+        {
+            if worker.state != State::Pending
+                || worker.receipt.is_some()
+                || worker.request_key.is_some()
+            {
+                return Err("A worker with an existing attempt cannot be skipped by a new plan");
+            }
+            if worker.clause_id.is_some() {
+                return Err("A worker assigned an explicit task clause cannot be skipped");
+            }
+        }
+        for node in run.nodes.iter().filter(|node| {
+            matches!(node.role, Role::Worker | Role::Approver | Role::Retry)
+                && !skipped.contains(node.id.as_str())
+        }) {
+            let mut pending = node.parents.clone();
+            let mut visited = HashSet::new();
+            while let Some(parent) = pending.pop() {
+                if !visited.insert(parent.clone()) {
+                    continue;
+                }
+                if skipped.contains(parent.as_str()) {
+                    return Err("A selected worker or control role depends on a skipped worker");
+                }
+                if let Some(ancestor) = run.nodes.iter().find(|node| node.id == parent) {
+                    pending.extend(ancestor.parents.iter().cloned());
+                }
+            }
+        }
     }
     Ok(assignments)
 }
@@ -1241,12 +1365,26 @@ fn assignment_summary(run: &Run) -> String {
     }
     let mut summary = String::from("\nWhat each worker was asked to do:\n");
     for (worker_id, item) in &run.assignments {
+        if let Some(reason) = &item.skip_reason {
+            summary.push_str(&format!(
+                "- {}: skipped by planner: {}\n",
+                card_name(run, worker_id),
+                clip(reason, 512)
+            ));
+            continue;
+        }
         summary.push_str(&format!(
             "- {}: {} / done when: {}\n",
             card_name(run, worker_id),
             clip(&item.task, 600),
             clip(&item.acceptance, 300)
         ));
+        if !item.checks.is_empty() {
+            summary.push_str(&format!(
+                "  {} required host artifact checks; these prove bytes only.\n",
+                item.checks.len()
+            ));
+        }
     }
     summary
 }
@@ -1254,7 +1392,7 @@ fn assignment_summary(run: &Run) -> String {
 /// The sub-reviewers the split pass assigns, and the answer format it must use.
 fn review_split_roster(run: &Run) -> String {
     let mut roster = String::from(
-        "\nSub-reviewer cards (give each a part; together they must cover every worker):\n",
+        "\nSub-reviewer cards (give each a part; together they must cover every selected worker):\n",
     );
     for sub in run
         .nodes
@@ -1280,7 +1418,7 @@ fn review_split_roster(run: &Run) -> String {
     roster.push_str(
         &run.nodes
             .iter()
-            .filter(|node| node.role == Role::Worker)
+            .filter(|node| node.role == Role::Worker && !worker_skipped(run, &node.id))
             .map(|node| format!("`{}`", node.id))
             .collect::<Vec<_>>()
             .join(", "),
@@ -1296,7 +1434,9 @@ fn sub_review_part(run: &Run, sub_id: &str) -> String {
         .nodes
         .iter()
         .filter(|node| {
-            node.role == Role::Worker && part.is_none_or(|part| part.workers.contains(&node.id))
+            node.role == Role::Worker
+                && !worker_skipped(run, &node.id)
+                && part.is_none_or(|part| part.workers.contains(&node.id))
         })
         .collect();
     let mut text = String::from("\nYour part of the review:\n");
@@ -1346,7 +1486,9 @@ pub(crate) fn parse_review_parts(
     let card = |wanted: &str, role: Role| {
         run.nodes
             .iter()
-            .filter(|node| node.role == role)
+            .filter(|node| {
+                node.role == role && !(role == Role::Worker && worker_skipped(run, &node.id))
+            })
             .find(|node| {
                 node.id == wanted
                     || (!node.settings.name.is_empty()
@@ -1387,11 +1529,9 @@ pub(crate) fn parse_review_parts(
         .values()
         .flat_map(|part| part.workers.iter())
         .collect();
-    if run
-        .nodes
-        .iter()
-        .any(|node| node.role == Role::Worker && !covered.contains(&node.id))
-    {
+    if run.nodes.iter().any(|node| {
+        node.role == Role::Worker && !worker_skipped(run, &node.id) && !covered.contains(&node.id)
+    }) {
         return Err("The review split leaves a worker unchecked");
     }
     Ok(parts)
@@ -1420,7 +1560,7 @@ pub(crate) fn parse_rework_targets(answer: &str, run: &Run) -> Vec<String> {
         if let Some(worker) = run
             .nodes
             .iter()
-            .filter(|node| node.role == Role::Worker)
+            .filter(|node| node.role == Role::Worker && !worker_skipped(run, &node.id))
             .find(|node| {
                 node.id == wanted
                     || (!node.settings.name.is_empty()
@@ -1466,14 +1606,14 @@ pub fn prompt_for_node(data: &AppData, run: &Run, node_id: &str) -> AppResult<St
     let responsibility = match node.role {
         Role::Planner => "First judge how difficult the mission is. If you can complete it fully and reliably yourself in this one turn with your own access \
 (a question, an explanation, a short lookup or a small read-only check), do so: give the complete final answer and end with the solo block described below. \
-Otherwise plan the mission and split it across the worker cards listed below; Coding Tools runs every worker on its own harness and model. \
+Otherwise plan the mission and split it across the worker cards listed below; Coding Tools runs selected workers on their configured harness and model. \
 Do not use your own sub-agent, spawn or delegation tools. When you plan, do not do the workers' work yourself, and do not simulate worker results or the reviewer's approval.",
         Role::Approver => "You are the command approver. Before any worker starts, check the plan and every assignment for commands that delete or overwrite data, \
 force-push, install software, reach outside the workspace or the network, or handle secrets; also check for missing steps and unclear acceptance. \
 Do not change the plan or do the work yourself.",
         Role::Worker => "Perform only your assigned work and report evidence. Do not speak for the orchestrator or approve your own work.",
         Role::Retry => "Inspect the failed worker evidence and recommend a bounded recovery decision. Do not execute code, change credentials, rotate accounts, widen permissions, or restart healthy siblings. Return JSON only: {\"action\":\"retry\"|\"wait\"|\"give_up\",\"reason\":\"one short sentence\"}. The controller enforces at most two automatic retries per worker.",
-        Role::ReviewSplit => "You are the main reviewer. First split the review of the finished work across the sub-reviewers listed below so that every worker's output is checked. \
+        Role::ReviewSplit => "You are the main reviewer. First split the review of the finished work across the sub-reviewers listed below so that every selected worker\'s output is checked. \
 Do not review the work yourself yet and do not edit anything.",
         Role::SubReviewer => "You are a sub-reviewer. Check only your part of the finished work against what each worker was asked to do. Do not edit the implementation.",
         Role::Reviewer => "You are the main reviewer. Confirm the finished work, using the sub-reviewers' findings when there are any, then decide the next step. \
@@ -1558,6 +1698,38 @@ give the final answer yourself and end with the solo block.\n",
         Role::SubReviewer => prompt.push_str(&sub_review_part(run, &node.id)),
         Role::Approver | Role::ReviewSplit | Role::Reviewer | Role::Retry => prompt.push_str(&assignment_summary(run)),
     }
+    if node.role == Role::Worker {
+        if let Some(item) = run
+            .assignments
+            .get(&node.id)
+            .filter(|item| !item.checks.is_empty())
+        {
+            prompt.push_str(&format!(
+                "\nRequired host artifact checks (bytes only, not proof of test correctness): {}\n",
+                serde_json::to_string(&item.checks)?
+            ));
+        }
+    }
+    let evidence_start = prompt.len();
+    if node.role == Role::Reviewer {
+        // Keep identities and failed check indexes, rather than repeating every path/hash.
+        // This shares the existing parent-context budget even with 24 workers x 8 checks.
+        let evidence: Vec<_> = run.nodes.iter()
+            .filter(|worker| worker.role == Role::Worker && !worker_skipped(run, &worker.id))
+            .filter_map(|worker| worker.receipt.as_ref()
+                .filter(|receipt| !receipt.acceptance_evidence.is_empty())
+                .map(|receipt| serde_json::json!({
+                    "worker": worker.id,
+                    "checks": receipt.acceptance_evidence.len(),
+                    "passed": receipt.acceptance_evidence.iter().filter(|item| item.passed).count(),
+                    "failed_check_indexes": receipt.acceptance_evidence.iter().enumerate()
+                        .filter(|(_, item)| !item.passed).map(|(index, _)| index).collect::<Vec<_>>()
+                }))).collect();
+        if !evidence.is_empty() {
+            prompt.push_str(&format!("\nHost artifact evidence (bytes only): {}\nThe controller rechecks current files before approval. Check indexes are zero-based in the worker's assignment; full paths and hashes remain in mission receipts. Parent excerpts may be truncated to share this context budget.\n", serde_json::to_string(&evidence)?));
+        }
+    }
+    let evidence_bytes = prompt.len() - evidence_start;
     if node.role == Role::ReviewSplit {
         prompt.push_str(&review_split_roster(run));
     }
@@ -1570,14 +1742,26 @@ give the final answer yourself and end with the solo block.\n",
         prompt.push_str("\nWorker retries are exhausted. Decide the next safe step from the failures and partial work. You cannot approve failed or unverified work. Do not approve missing work as delivered. Do not restore credentials, widen permissions, or treat a suggested retry as authorization. The user must approve any further recovery action.\n");
     }
     // Earlier outputs share one budget so the whole prompt stays within a native turn.
-    let per_parent = ((if failure_review { 5_000 } else { 11_000 }) / node.parents.len().max(1))
-        .max(if failure_review { 600 } else { 1_200 });
+    let parent_budget = (if failure_review {
+        5_000usize
+    } else {
+        11_000usize
+    })
+    .saturating_sub(evidence_bytes);
+    let per_parent = if evidence_bytes == 0 {
+        (parent_budget / node.parents.len().max(1)).max(if failure_review { 600 } else { 1_200 })
+    } else {
+        parent_budget / node.parents.len().max(1)
+    };
     for parent_id in &node.parents {
         let parent = run
             .nodes
             .iter()
             .find(|parent| &parent.id == parent_id)
             .ok_or_else(|| fail("AO parent not found"))?;
+        if parent.role == Role::Worker && worker_skipped(run, &parent.id) {
+            continue; // Explicitly skipped work has no receipt and is never labelled completed.
+        }
         if failure_review && parent.role == Role::Worker && parent.state != State::Finished {
             continue; // Failure evidence is above, never labelled as a completed parent.
         }
@@ -1759,8 +1943,29 @@ fn remove_node(run: &mut Run, node_id: &str) -> AppResult<()> {
     let Some(task) = run.assignments.remove(node_id) else {
         return Ok(());
     };
+    if task.skip_reason.is_some() {
+        return Ok(()); // An unused card contributes no work or acceptance obligations.
+    }
     let merged = match run.assignments.remove(&target) {
         Some(mut own) => {
+            if own.checks.len() + task.checks.len() > acceptance::MAX_CHECKS {
+                return Err(fail(
+                    "Combined worker acceptance checks exceed the mission limit; replan first",
+                ));
+            }
+            if !own.checks.is_empty()
+                && !task.checks.is_empty()
+                && own.planner_request_key != task.planner_request_key
+            {
+                return Err(fail(
+                    "Transferred acceptance checks belong to different plans; replan first",
+                ));
+            }
+            own.skip_reason = None;
+            if own.planner_request_key.is_none() {
+                own.planner_request_key = task.planner_request_key.clone();
+            }
+            own.checks.extend(task.checks.iter().cloned());
             own.task = format!(
                 "{}
 
@@ -2028,6 +2233,8 @@ pub fn reserve(
         route: node.route.clone(),
         approvals: Vec::new(),
         started_at_ms: Some(grant_now_ms.unwrap_or_else(unix_now_ms)),
+        acceptance_evidence: Vec::new(),
+        acceptance_workspace_root: None,
     });
     if grant_now_ms.is_some() {
         run.grant.as_mut().unwrap().turns_started += 1;
@@ -2125,6 +2332,39 @@ pub fn record_terminal(
     completed: bool,
     failure: Option<&str>,
 ) -> AppResult<Run> {
+    record_terminal_at_workspace(
+        data,
+        workspace_id,
+        run_id,
+        node_id,
+        thread_id,
+        turn_id,
+        answer,
+        completed,
+        failure,
+        None,
+    )
+}
+
+/// External controllers supply the owned session's observed root. Typed checks intentionally
+/// support only the registered workspace; a worktree/unknown root never falls back to primary.
+pub fn record_terminal_at_workspace(
+    data: &mut AppData,
+    workspace_id: &str,
+    run_id: &str,
+    node_id: &str,
+    thread_id: &str,
+    turn_id: Option<&str>,
+    answer: Option<&str>,
+    completed: bool,
+    failure: Option<&str>,
+    observed_workspace_root: Option<&str>,
+) -> AppResult<Run> {
+    let workspace_root = data
+        .profiles
+        .iter()
+        .find(|profile| profile.id == workspace_id)
+        .map(|profile| std::path::PathBuf::from(&profile.path));
     let run = data
         .ao_runs
         .iter_mut()
@@ -2170,6 +2410,50 @@ pub fn record_terminal(
         return Ok(run.clone());
     }
     let failure_review = review_failures_ready(run, node_id);
+    let typed_worker = run.nodes.iter().find(|node| {
+        node.id == node_id
+            && node.role == Role::Worker
+            && completed
+            && run
+                .assignments
+                .get(&node.id)
+                .is_some_and(|assignment| !assignment.checks.is_empty())
+    });
+    let checked_root = typed_worker.map(|worker| {
+        acceptance::workspace_for_attempt(
+            workspace_root.as_deref(),
+            worker,
+            observed_workspace_root,
+        )
+    });
+    let observation = match (typed_worker, checked_root.as_ref()) {
+        (Some(worker), Some(Ok(root))) => {
+            acceptance::observe_worker(Some(root.as_path()), run, worker)
+        }
+        (_, Some(Err(error))) => Err(*error),
+        _ => Ok(Vec::new()),
+    };
+    let confirmed_root = checked_root
+        .as_ref()
+        .and_then(|root| root.as_ref().ok())
+        .map(|root| root.to_string_lossy().into_owned());
+    let acceptance_failure = observation
+        .as_ref()
+        .err()
+        .copied()
+        .or_else(|| {
+            observation
+                .as_ref()
+                .ok()
+                .filter(|items| items.iter().any(|item| !item.passed))
+                .map(|_| "Required host acceptance evidence failed")
+        })
+        .or_else(|| {
+            run.nodes
+                .iter()
+                .find(|node| node.id == node_id && node.role == Role::Reviewer)
+                .and_then(|_| acceptance::review_failure(workspace_root.as_deref(), run))
+        });
     let node = run
         .nodes
         .iter_mut()
@@ -2194,11 +2478,16 @@ pub fn record_terminal(
     };
     // Gates finish only on approval; a sub-reviewer finishes on either finding.
     let verdict_ok = match node.role {
-        Role::Reviewer => verdict == Some("APPROVED") && !failure_review,
+        Role::Reviewer => {
+            verdict == Some("APPROVED") && !failure_review && acceptance_failure.is_none()
+        }
         Role::Approver => verdict == Some("APPROVED"),
         Role::SubReviewer => verdict.is_some(),
-        _ => true,
+        _ => acceptance_failure.is_none(),
     };
+    let completed_request_key = receipt.request_key.clone();
+    receipt.acceptance_evidence = observation.unwrap_or_default();
+    receipt.acceptance_workspace_root = confirmed_root;
     receipt.turn_id = turn_id
         .filter(|id| text(id, 128) && !id.contains('/'))
         .map(str::to_owned);
@@ -2216,7 +2505,27 @@ pub fn record_terminal(
         node.state = State::Finished;
         let solo = matches!(plan, Some(Ok(Split::Solo)));
         match plan {
-            Some(Ok(Split::Plan(assignments))) => run.assignments = assignments,
+            Some(Ok(Split::Plan(mut assignments))) => {
+                for assignment in assignments
+                    .values_mut()
+                    .filter(|item| !item.checks.is_empty())
+                {
+                    assignment.planner_request_key = Some(completed_request_key.clone());
+                }
+                let skipped: BTreeSet<_> = assignments
+                    .iter()
+                    .filter(|(_, item)| item.skip_reason.is_some())
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                run.assignments = assignments;
+                for worker in run
+                    .nodes
+                    .iter_mut()
+                    .filter(|worker| skipped.contains(&worker.id))
+                {
+                    worker.state = State::Finished;
+                }
+            }
             Some(Ok(Split::Review(parts))) => run.review_parts = parts,
             _ => {}
         }
@@ -2240,7 +2549,9 @@ pub fn record_terminal(
     } else {
         if answer.is_some_and(|value| !value.trim().is_empty()) {
             receipt.answer = answer.map(kept_answer);
-            receipt.verdict = if failure_review && node.role == Role::Reviewer {
+            receipt.verdict = if node.role == Role::Reviewer
+                && (failure_review || (acceptance_failure.is_some() && verdict == Some("APPROVED")))
+            {
                 Some("CHANGES_REQUIRED".into())
             } else {
                 verdict.map(str::to_owned)
@@ -2253,6 +2564,7 @@ pub fn record_terminal(
         };
         let mut error = failure
             .filter(|value| !value.trim().is_empty())
+            .or(acceptance_failure)
             .or(plan_error)
             .unwrap_or_else(|| {
                 if failure_review && verdict == Some("APPROVED") {
@@ -2484,6 +2796,7 @@ mod tests {
             Assignment {
                 task: "x".into(),
                 acceptance: String::new(),
+                ..Assignment::default()
             },
         );
         assert!(validate(None, &run).is_err());
@@ -3975,6 +4288,7 @@ mod tests {
             Assignment {
                 task: "Fix the parser".into(),
                 acceptance: "tests pass".into(),
+                ..Assignment::default()
             },
         );
         data.ao_runs[0].assignments.insert(
@@ -3982,6 +4296,7 @@ mod tests {
             Assignment {
                 task: "Update the docs".into(),
                 acceptance: String::new(),
+                ..Assignment::default()
             },
         );
         let revision = data.ao_runs[0].revision;
@@ -4025,6 +4340,7 @@ mod tests {
             Assignment {
                 task: "Fix the parser".into(),
                 acceptance: String::new(),
+                ..Assignment::default()
             },
         );
         // w2 is mid-turn on a native thread.
@@ -4048,6 +4364,8 @@ mod tests {
                 route: w2.route.clone(),
                 approvals: vec![],
                 started_at_ms: None,
+                acceptance_evidence: Vec::new(),
+                acceptance_workspace_root: None,
             });
         }
         let revision = data.ao_runs[0].revision;

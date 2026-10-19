@@ -89,6 +89,16 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Headless bridge tests
+        run: cargo test --manifest-path rust-core/coding-tools-headless/Cargo.toml --locked
+
+      - name: Chat harness controller regressions
+        run: node --test desktop-electron/tests/agent-orchestrator-upstream.test.cjs desktop-electron/tests/agent-orchestrator-workflow.test.cjs desktop-electron/tests/agent-orchestrator-metrics.test.cjs
+
   rust-macos:
     name: Rust macOS — test and clippy
     runs-on: macos-14
