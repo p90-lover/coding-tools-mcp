@@ -157,6 +157,43 @@ function aoWebCatalogForModel(catalog, model) {
   return { models: [{ ...template, slug: model, display_name: `ChatGPT Web — ${tier}` }] };
 }
 
+const REVIEW_SCRIPT = /[^\s"'`;|&<>()]+\.(?:ps1|psm1|py|sh|bash|bat|cmd|js|cjs|mjs|ts)\b/gi;
+const REVIEW_SCRIPT_BYTES = 4000;
+/**
+ * The local scripts a tool request runs, read for the command reviewer. It saw only the command
+ * line, so "run start-nova.ps1" came back "ask" every time and the person had to answer. Only
+ * files whose real path is inside the request's working folder are read (a command cannot point
+ * the reviewer at files elsewhere), at most two, the first 4 KB of each.
+ */
+function reviewScriptExcerpts(approval) {
+  let input = {};
+  try { input = typeof approval?.toolInput === "string" ? JSON.parse(approval.toolInput) : (approval?.toolInput ?? {}); } catch {}
+  const folder = [approval?.cwd, input?.workdir, input?.cwd, input?.project_root].find((value) => typeof value === "string" && path.isAbsolute(value));
+  if (!folder) return [];
+  let root;
+  try { root = fs.realpathSync.native(folder); } catch { return []; }
+  const text = [approval?.command, input?.cmd, input?.command].filter((value) => typeof value === "string").join(" ");
+  const excerpts = [];
+  for (const token of [...new Set(text.match(REVIEW_SCRIPT) ?? [])]) {
+    if (excerpts.length >= 2) break;
+    let real;
+    try { real = fs.realpathSync.native(path.resolve(root, token)); } catch { continue; }
+    const relative = path.relative(root, real);
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) continue;
+    try {
+      const stat = fs.statSync(real);
+      if (!stat.isFile()) continue;
+      const handle = fs.openSync(real, "r");
+      try {
+        const buffer = Buffer.alloc(Math.min(stat.size, REVIEW_SCRIPT_BYTES));
+        const read = fs.readSync(handle, buffer, 0, buffer.length, 0);
+        excerpts.push({ file: relative, text: buffer.subarray(0, read).toString("utf8"), truncated: stat.size > REVIEW_SCRIPT_BYTES });
+      } finally { fs.closeSync(handle); }
+    } catch {}
+  }
+  return excerpts;
+}
+
 function delayToMilliseconds(value, unit) {
   const multiplier = {seconds:1000,minutes:60000,hours:3600000}[unit];
   const ms = value * multiplier;
@@ -1942,13 +1979,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const candidates = up.length ? up : all;
     if (!candidates.length) throw new Error("CPA has no model for the command approver");
     const deadline = now() + REVIEW_BUDGET_MS;
+    const scripts = reviewScriptExcerpts(approval);
     const prompt = [
       "You are the command approver for an orchestrated coding mission. A worker asks to run a tool request.",
       `Workspace: ${mission.workspace_id}. Approver rules: ${String(approver.settings?.instructions || "none").slice(0, 1500)}`,
       `Request: ${describeRequest(approval)}`,
       approval.permissions ? `Permissions: ${JSON.stringify(approval.permissions).slice(0, 800)}` : "",
+      ...scripts.map((script) => `Local script ${script.file} (from the request's working folder${script.truncated ? ", first 4 KB" : ""}):\n${script.text}`),
       'Answer with JSON only: {"action":"allow"|"deny"|"ask","reason":"<one sentence for the user>"}.',
       "allow: clearly safe and needed for the task. deny: destructive, outside the workspace, secret-touching or unrelated. ask: anything unclear.",
+      scripts.length ? "Judge a command that runs a local script by the script's contents shown above." : "",
     ].filter(Boolean).join("\n");
     let failure = null;
     for (const model of candidates) {
@@ -3613,4 +3653,4 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, routineCommand, routineAppTool, routineAppCommand, blockedRequest, recommendedAnswer, subagentLaunchArgs });
 }
 
-module.exports = { createAgentOrchestratorWorkflow, delayToMilliseconds, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
+module.exports = { createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

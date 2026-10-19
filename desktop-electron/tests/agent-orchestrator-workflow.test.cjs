@@ -5,7 +5,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-const { createAgentOrchestratorWorkflow, resolveAoNativeConnection } = require("../electron/agent-orchestrator-workflow.cjs");
+const { createAgentOrchestratorWorkflow, resolveAoNativeConnection, reviewScriptExcerpts } = require("../electron/agent-orchestrator-workflow.cjs");
 const { createCodingToolsAppsHost } = require("../../app-handler/host.cjs");
 const { invokeContract } = require("../electron/ipc-schema.cjs");
 
@@ -1892,6 +1892,33 @@ test("AO typed native replies preserve exact payload and thread/turn scope after
     const before = calls.filter(call => call.endpoint.endsWith("/approval")).length;
     await assert.rejects(workflow.call("approve_harness", invalid), /scope|reply|either|turn|thread|pending/i);
     assert.equal(calls.filter(call => call.endpoint.endsWith("/approval")).length, before);
+  }
+});
+
+test("the reviewer sees the local script a command runs, never a file outside its folder", () => {
+  // Seen live: "Command approver suggests ask: Please confirm what start-nova.ps1 does" because the
+  // reviewer only had the command line.
+  const os = require("node:os");
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "review-scripts-"));
+  const folder = path.join(base, "project");
+  fs.mkdirSync(path.join(folder, "tools"), { recursive: true });
+  fs.writeFileSync(path.join(folder, "start-nova.ps1"), "Start-Process node -ArgumentList 'server.js'\n");
+  fs.writeFileSync(path.join(folder, "tools", "big.py"), "x = 1\n".repeat(2000));
+  fs.writeFileSync(path.join(base, "outside.ps1"), "SECRET\n");
+  try {
+    const request = (cmd) => ({ kind: "permission", tool: "mcp__coding-tools__exec_command", toolInput: JSON.stringify({ cmd, workdir: folder }) });
+    const found = reviewScriptExcerpts(request("powershell.exe -NoProfile -ExecutionPolicy Bypass -File start-nova.ps1"));
+    assert.deepEqual(found.map((script) => script.file), ["start-nova.ps1"]);
+    assert.match(found[0].text, /Start-Process node/);
+    const big = reviewScriptExcerpts(request("python tools/big.py"))[0];
+    assert.equal(big.truncated, true);
+    assert.equal(big.text.length, 4000);
+    assert.deepEqual(reviewScriptExcerpts(request("powershell -File ..\\outside.ps1")), [], "outside the working folder");
+    assert.deepEqual(reviewScriptExcerpts(request(`powershell -File ${path.join(base, "outside.ps1")}`)), [], "an absolute path outside it");
+    assert.deepEqual(reviewScriptExcerpts(request("node missing.js")), [], "a file that does not exist");
+    assert.deepEqual(reviewScriptExcerpts({ command: "bash run.sh" }), [], "no working folder, nothing read");
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
   }
 });
 
