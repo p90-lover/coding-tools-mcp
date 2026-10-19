@@ -51,6 +51,11 @@ test("upstream AO gateway runs trusted UI requests automatically and blocks untr
 
 
 /** The real observe() with its helpers, run against a fake AO API. */
+// The module-level bounds and line diff the timeline helpers read (EDIT_DIFF_BYTES to lineChange).
+function timelineBounds(source) {
+  return source.slice(source.indexOf("// How much of an edit's diff"), source.indexOf("// Where a single-repo project's chats work"));
+}
+
 function observeHarness(context) {
   const vm = require("node:vm");
   const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
@@ -60,7 +65,7 @@ function observeHarness(context) {
   const helpers = source.slice(source.indexOf("  async function chatHostGone"), source.indexOf("  // Mission-owned AO calls."));
   const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
   const states = source.match(/const TERMINAL_TURN_STATES = .*;/)[0];
-  return vm.runInNewContext(states + helpers + identity + "({" + method + "})", {
+  return vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + method + "})", {
     Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"),
     agentTools: null, observeTui: async () => { throw new Error("not a TUI fixture"); }, ...context,
   });
@@ -492,7 +497,7 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
   const calls = [];
   let resumeOk = true;
   let status = "exited";
-  const upstream = vm.runInNewContext(states + helpers + identity + "({" + methods + "})", {
+  const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
     Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), Date, Math, Number, Promise, agentTools: null,
     internalApi: async (method, endpoint) => {
       calls.push([method, endpoint]);
@@ -527,7 +532,7 @@ test("a resumed chat gets the app's tools again, and an AO that refuses them sti
   let refuseServers = false;
   let status = "exited";
   const servers = [{ name: "coding-tools", type: "http", url: "http://127.0.0.1:1/mcp/ws/k", headers: { Authorization: "Bearer fixture" } }];
-  const upstream = vm.runInNewContext(states + helpers + identity + "({" + methods + "})", {
+  const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
     Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), Date, Math, Number, Promise,
     agentTools: { renew: async id => id === "chat-1" ? { servers } : null },
     internalApi: async (method, endpoint, body) => {
@@ -563,7 +568,7 @@ test("reopening a released chat and sending at once resumes its agent once, and 
   const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
   const states = source.match(/const TERMINAL_TURN_STATES = .*;/)[0];
   let status = "exited", resuming = false, resumes = 0, renewals = 0;
-  const upstream = vm.runInNewContext(states + helpers + identity + "({" + methods + "})", {
+  const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
     Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), Date, Math, Number, Promise,
     agentTools: { renew: async () => { renewals += 1; return null; } },
     internalApi: async (method, endpoint) => {
@@ -758,6 +763,26 @@ test("a reasoning item carries the model's summary text (AO keeps it in detail.t
   const [item] = JSON.parse(JSON.stringify((await upstream.observe("s")).timeline));
   assert.equal(item.kind, "reasoning");
   assert.match(item.text, /^\*\*Inspecting the register route\*\*/);
+});
+
+test("an ACP edit opens on its changed lines, not the whole file, and a long message is not cut at 4 KB", async () => {
+  // As AO stored it live: the whole file before and after, and a patch marking every line changed.
+  const lines = Array.from({ length: 200 }, (_, at) => `line ${at}`);
+  const before = lines.join("\r\n"), after = before.replace("line 100", "changed 100");
+  const answer = `${"word ".repeat(1200)}\`_complete_oauth_in_page\` returns None.`;
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.includes("/conversation") ? {
+      turns: [{ id: "t", state: "running" }],
+      messages: [{ id: "m", turnId: "t", sequence: 2, role: "assistant", text: answer }],
+      activities: [{ id: "e", turnId: "t", sequence: 1, activityKind: "file_change", status: "completed", summary: "Edit",
+        detail: { files: [{ path: "C:\\app\\Accounts.tsx", status: "modified", additions: 1, deletions: 1, oldText: before, newText: after,
+          patch: ["--- C:\\app\\Accounts.tsx", "+++ C:\\app\\Accounts.tsx", ...lines.map(line => `-${line}`), ...lines.map(line => `+${line}`)].join("\n") }] } }],
+    } : { session: { id: "s", mode: "chat", status: "working" } },
+  });
+  const [edit, message] = JSON.parse(JSON.stringify((await upstream.observe("s")).timeline));
+  assert.equal(edit.kind, "edit");
+  assert.equal(edit.files[0].diff, "-line 100\n+changed 100");
+  assert.equal(message.text, answer, "the whole answer, its closing code span included");
 });
 
 test("a tool call carries its description, arguments and output, so its row can open on them as Claude Code's do", async () => {

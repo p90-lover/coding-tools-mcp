@@ -75,31 +75,31 @@ export type ChatActivity = {
 export type ChatLiveItem = {
   id: string; kind: string; status: string; text: string; label?: string;
   description?: string; input?: string; output?: string;
-  /** The same call made this many times in a row (tidyTimeline). */
-  count?: number;
   /** For kind "edit": the files it changed (Claude Code's "Edited <file> +12 −3"). */
   files?: ChatEditedFile[];
 };
 /**
  * A turn's activity as it reads: requests "Approve for me" (or the user) already answered drop
- * out, since every tool call left a second "Approval <tool>" row under it, and the same call made
- * again and again ("read_output" while a test runs) is one row with a count. A request that timed
- * out or was cancelled (AO labels those) still shows.
+ * out, since every tool call left a second "Approval <tool>" row under it. A request that timed
+ * out or was cancelled (AO labels those) still shows. Every tool call keeps its own row: calls to
+ * the same tool ran different commands, and folding them into one row with a count showed only the
+ * last call's input and output.
  */
 export function tidyTimeline(items: ChatLiveItem[]): ChatLiveItem[] {
-  const out: ChatLiveItem[] = [];
-  for (const item of items) {
-    if (item.kind === "approval" && !item.label && !/reject|denied|declin/i.test(item.status)) continue;
-    const last = out.at(-1);
-    if (last && (item.kind === "tool" || item.kind === "command") && last.kind === item.kind && last.label === item.label
-      && last.text === item.text && (last.description ?? "") === (item.description ?? "")) {
-      // The row keeps the first call's id: it keys the row (and its group), so one the user opened stays open.
-      out[out.length - 1] = { ...item, id: last.id, count: (last.count ?? 1) + 1 };
-      continue;
-    }
-    out.push(item);
-  }
-  return out;
+  return items.filter((item) => item.kind !== "approval" || Boolean(item.label) || /reject|denied|declin/i.test(item.status));
+}
+
+/**
+ * A card's turn as the chat keeps it: a poll carries only the newest items, so the ones seen in
+ * earlier polls that have since fallen out of that window stay in front of it, and a long turn
+ * keeps every step instead of only its last few. A poll sharing no item with what is kept is a new
+ * attempt of the card (a retry keeps its key), which starts over.
+ */
+export function mergeTimeline(known: ChatLiveItem[] | null | undefined, latest: ChatLiveItem[]): ChatLiveItem[] {
+  if (!known?.length) return latest;
+  const fresh = new Set(latest.map((item) => item.id));
+  const earlier = known.filter((item) => !fresh.has(item.id));
+  return earlier.length === known.length ? latest : [...earlier, ...latest];
 }
 
 /** A stretch of a turn: a message, steer or edit on its own, or a run of tool calls and thinking. */
@@ -120,13 +120,13 @@ export function groupTimeline(items: ChatLiveItem[]): ChatLiveSegment[] {
 
 /** "Ran 2 commands, read_output ×7, search_text · 3 thoughts": what a folded group did. */
 export function activitySummary(items: ChatLiveItem[]): string {
-  const commands = items.filter((item) => item.kind === "command").reduce((sum, item) => sum + (item.count ?? 1), 0);
+  const commands = items.filter((item) => item.kind === "command").length;
   const thoughts = items.filter((item) => item.kind === "reasoning").length;
   const tools = new Map<string, number>();
   for (const item of items) {
     if (item.kind !== "tool") continue;
     const name = item.text.replace(/^mcp__[\w-]+__/, "").replace(/\s+/g, " ").trim().slice(0, 40) || item.label || "tool";
-    tools.set(name, (tools.get(name) ?? 0) + (item.count ?? 1));
+    tools.set(name, (tools.get(name) ?? 0) + 1);
   }
   const named = [...tools].sort((a, b) => b[1] - a[1]);
   const parts = [

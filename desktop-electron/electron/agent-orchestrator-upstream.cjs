@@ -27,6 +27,11 @@ const API_OPERATIONS = Object.freeze({
 
 // How much of an edit's diff a chat timeline item carries (it is polled with every working card).
 const EDIT_DIFF_BYTES = 6000;
+// How much of a message or a thought a timeline item carries. At 4 KB a long answer stopped
+// mid-word, and a cut inside a code span or fence broke how the rest of it rendered.
+const TIMELINE_TEXT_BYTES = 64 * 1024;
+// The most items a turn's timeline carries: a finished turn's read-back pages in up to 6 × 60.
+const TIMELINE_ITEMS = 400;
 
 /**
  * Lines one text change added and removed, as a "+56 −26" count and a short diff: the lines the
@@ -304,8 +309,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   }
   /**
    * The current turn as a Codex-style transcript: assistant messages, reasoning and tool calls
-   * in AO sequence order. Bounded to the newest 40 items so a long turn stays a small IPC frame;
-   * the prompt (user message) is left out because the chat already shows it.
+   * in AO sequence order. A live poll reads only the session's newest items (conversationTail) and
+   * the chat keeps the earlier ones it saw; a finished turn read back here keeps every item AO
+   * paged in. The prompt (user message) is left out because the chat already shows it.
    */
   function turnTimeline(conversation, turnId, turnOver = false) {
     if (typeof turnId !== "string") return [];
@@ -313,16 +319,16 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       ...(Array.isArray(conversation?.messages) ? conversation.messages : [])
         .filter(message => message.turnId === turnId && message.role === "assistant" && typeof message.text === "string" && message.text.trim())
         .map(message => ({ id: String(message.id), sequence: Number(message.sequence) || 0, kind: "message",
-          status: message.streaming && !turnOver ? "running" : "completed", text: utf8Prefix(message.text.trim(), 4096) })),
+          status: message.streaming && !turnOver ? "running" : "completed", text: utf8Prefix(message.text.trim(), TIMELINE_TEXT_BYTES) })),
       ...(Array.isArray(conversation?.activities) ? conversation.activities : [])
         .filter(activity => activity.turnId === turnId && typeof activity.activityKind === "string")
         .map(activity => activity.activityKind === "system" && activity.detail?.event === "steer" && typeof activity.detail.text === "string"
           // AO records a steer as a system row tagged event "steer"; it is the user's own words.
           ? { id: String(activity.id), sequence: Number(activity.sequence) || 0, kind: "steer", status: "completed",
-            text: utf8Prefix(activity.detail.text.trim(), 4096) }
+            text: utf8Prefix(activity.detail.text.trim(), TIMELINE_TEXT_BYTES) }
           : timelineActivity(activity)),
     ];
-    return items.sort((a, b) => a.sequence - b.sequence).slice(-40);
+    return items.sort((a, b) => a.sequence - b.sequence).slice(-TIMELINE_ITEMS);
   }
   /**
    * A finished turn's transcript, read back from AO for the chat's folded "Worked" row. AO keeps
@@ -386,8 +392,16 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   function editedFiles(activity, detail, input) {
     if (activity.activityKind === "file_change") {
       const files = (Array.isArray(detail.files) ? detail.files : []).filter(file => typeof file?.path === "string").slice(0, 50)
-        .map(file => ({ path: utf8Prefix(file.path, 500), additions: Number(file.additions) || 0, deletions: Number(file.deletions) || 0,
-          ...(typeof file.patch === "string" && file.patch ? { diff: utf8Prefix(file.patch, EDIT_DIFF_BYTES) } : {}) }));
+        .map(file => {
+          // An ACP edit's file carries the whole file before and after, and AO's patch from them
+          // marked every line removed and re-added, so a two-line change opened onto the whole
+          // file in red. The changed lines come from the two texts instead; AO's patch is the
+          // fallback (Codex's real git diff has no texts).
+          const diff = typeof file.oldText === "string" && typeof file.newText === "string"
+            ? lineChange(file.oldText, file.newText).diff : typeof file.patch === "string" ? file.patch : "";
+          return { path: utf8Prefix(file.path, 500), additions: Number(file.additions) || 0, deletions: Number(file.deletions) || 0,
+            ...(diff ? { diff: utf8Prefix(diff, EDIT_DIFF_BYTES) } : {}) };
+        });
       return files.length ? { label: "Edited", files } : null;
     }
     if (activity.activityKind !== "mcp_tool") return null;
@@ -435,7 +449,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     // The model's reasoning summary: AO streams it into the activity's text (detail.text); its
     // summary is only the word "Reasoning".
     if (activity.activityKind === "reasoning") {
-      return { ...base, kind: "reasoning", text: utf8Prefix(typeof detail.text === "string" ? detail.text.trim() : "", 4096) };
+      return { ...base, kind: "reasoning", text: utf8Prefix(typeof detail.text === "string" ? detail.text.trim() : "", TIMELINE_TEXT_BYTES) };
     }
     // A request nobody answered: AO marks it resolved by the provider when its 30-minute wait runs
     // out, or when the turn ends first. The agent then only says it was "blocked by permissions",

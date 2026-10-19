@@ -1304,9 +1304,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
    * the rest opens under it.
    */
   function publicTimeline(items) {
-    return (Array.isArray(items) ? items : []).slice(-40).map(item => ({
+    // The same bounds the upstream adapter's turnTimeline reads with (TIMELINE_ITEMS and
+    // TIMELINE_TEXT_BYTES there): every item it built, and a message or thought uncut.
+    return (Array.isArray(items) ? items : []).slice(-400).map(item => ({
       id: publicText(item.id, 80), kind: publicText(item.kind, 32), status: publicText(item.status, 32),
-      text: publicText(item.text, item.kind === "message" || item.kind === "reasoning" ? 4096 : 400),
+      text: publicText(item.text, item.kind === "message" || item.kind === "reasoning" ? 64 * 1024 : 400),
       ...(item.label ? { label: publicText(item.label, 40) } : {}),
       ...(item.description ? { description: publicText(item.description, 200) } : {}),
       ...(item.input ? { input: publicText(item.input, 1000) } : {}),

@@ -15,7 +15,7 @@ import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, chatAcceptsMessage, chatDuration, chatList, chatMessageWithAttachments, chatRunOpen,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatStatsSpan, petMood, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
-  activitySummary, groupTimeline, tidyTimeline,
+  activitySummary, groupTimeline, mergeTimeline, tidyTimeline,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -120,7 +120,7 @@ function ToolItem({ item }: { item: ChatLiveItem }) {
   const tone = toolTone(item.status);
   const name = item.kind === "command" ? (tone === "running" ? "Running" : "Ran") : item.label ?? item.kind.replace(/_/g, " ");
   const head = <><span className="cx-tool-dot" aria-hidden="true" /><span className="cx-live-label">{name}</span>
-    <span className="cx-live-text">{toolHeadline(item)}</span>{item.count && item.count > 1 ? <span className="cx-tool-count">×{item.count}</span> : null}</>;
+    <span className="cx-live-text">{toolHeadline(item)}</span></>;
   const opens = item.kind === "command" || item.input || item.output;
   return opens
     ? <details className={`cx-tool tone-${tone}`}><summary>{head}</summary>
@@ -185,7 +185,7 @@ export const COMPACT_ACTIVITY_KEY = "coding-tools:ao:compact-activity";
 
 /** A row redraws only when what it shows changed: a poll rebuilds every item object each second. */
 const sameLiveItem = (a: ChatLiveItem, b: ChatLiveItem) => a === b || (a.id === b.id && a.kind === b.kind && a.status === b.status
-  && a.text === b.text && a.label === b.label && a.description === b.description && a.count === b.count
+  && a.text === b.text && a.label === b.label && a.description === b.description
   && a.input === b.input && a.output === b.output && a.files === b.files);
 const LiveRow = memo(LiveRowView, (prev, next) => sameLiveItem(prev.item, next.item));
 
@@ -245,7 +245,8 @@ type LoadWork = (runId: string, nodeId: string) => Promise<ChatLiveItem[]>;
 function useStepWork(step: ChatStep, runId: string, wanted: boolean, loadWork?: LoadWork): ChatLiveItem[] | null {
   const live = step.working?.timeline;
   const [, setLoaded] = useState(0);
-  if (live?.length) { CHAT_WORK.set(step.key, live); CHAT_WORK_LIVE.add(step.key); }
+  // A poll carries only the turn's newest items; the ones before them stay (mergeTimeline).
+  if (live?.length) { CHAT_WORK.set(step.key, mergeTimeline(CHAT_WORK.get(step.key), live)); CHAT_WORK_LIVE.add(step.key); }
   const known = CHAT_WORK.get(step.key) ?? null;
   const settled = !step.working;
   useEffect(() => {
@@ -254,7 +255,7 @@ function useStepWork(step: ChatStep, runId: string, wanted: boolean, loadWork?: 
     let current = true;
     void loadWork(runId, step.nodeId).then((items) => {
       if (!items.length) return;
-      CHAT_WORK.set(step.key, items);
+      CHAT_WORK.set(step.key, mergeTimeline(CHAT_WORK.get(step.key), items));
       if (current) setLoaded((count) => count + 1);
     }).catch(() => undefined);
     return () => { current = false; };

@@ -946,7 +946,7 @@ test("a queued message survives an unmount while its delivery fails", async () =
   assert.deepEqual(plain(queues.get("task-a")), [next]);
 });
 
-test("a turn's activity drops answered approvals, counts a call made again and again, and folds runs of calls and thinking", () => {
+test("a turn's activity drops answered approvals, keeps every tool call, and folds runs of calls and thinking", () => {
   const items = [
     { id: "1", kind: "reasoning", status: "completed", text: "Let me wait for the tests" },
     { id: "2", kind: "tool", status: "completed", label: "MCP", text: "mcp__coding-tools__read_output" },
@@ -961,14 +961,27 @@ test("a turn's activity drops answered approvals, counts a call made again and a
     { id: "11", kind: "edit", status: "completed", text: "a.ts", files: [] },
   ];
   const tidy = chat.tidyTimeline(items);
-  assert.deepEqual([...tidy.map((item) => item.id)], ["1", "2", "7", "8", "9", "10", "11"], "answered approvals drop; a denied or timed-out one stays; a repeated call keeps its first id");
-  assert.equal(tidy[1].count, 3, "three read_output calls are one row");
-  assert.equal(tidy[1].status, "running", "the row keeps the latest call's state");
+  assert.deepEqual([...tidy.map((item) => item.id)], ["1", "2", "4", "6", "7", "8", "9", "10", "11"],
+    "answered approvals drop; a denied or timed-out one stays; each read_output call keeps its own row");
   const segments = chat.groupTimeline(tidy);
   assert.deepEqual([...segments.map((segment) => segment.kind === "group" ? `group:${segment.items.length}` : segment.item.id)],
-    ["group:2", "7", "8", "group:1", "10", "11"]);
-  assert.equal(chat.activitySummary(segments[0].items), "read_output ×3 · 1 thought");
-  assert.equal(chat.activitySummary([{ id: "c", kind: "command", status: "completed", text: "ls", count: 2 }]), "Ran 2 commands");
+    ["group:4", "7", "8", "group:1", "10", "11"]);
+  assert.equal(chat.activitySummary(segments[0].items), "read_output ×3 · 1 thought", "the folded line still tallies them");
+  const ls = { id: "c", kind: "command", status: "completed", text: "ls" };
+  assert.equal(chat.activitySummary([ls, { ...ls, id: "d" }]), "Ran 2 commands");
+});
+
+test("a card's timeline keeps the steps that fell out of the newest poll, and a new attempt starts over", () => {
+  const item = (id) => ({ id, kind: "tool", status: "completed", text: `call ${id}` });
+  const seen = [item("1"), item("2"), item("3")];
+  const ids = (items) => [...items.map((entry) => entry.id)];
+  assert.deepEqual(ids(chat.mergeTimeline(null, seen)), ["1", "2", "3"]);
+  // The poll window moved on: 1 and 2 are no longer in it, 3 changed state and 4 is new.
+  const later = chat.mergeTimeline(seen, [{ ...item("3"), status: "running" }, item("4")]);
+  assert.deepEqual(ids(later), ["1", "2", "3", "4"]);
+  assert.equal(later[2].status, "running", "an item still in the window takes its latest state");
+  // A retry reuses the card's key; its first poll shares nothing with the old attempt.
+  assert.deepEqual(ids(chat.mergeTimeline(later, [item("9")])), ["9"]);
 });
 
 test("a single-model chat's card is named by its model, a team's by its role", () => {

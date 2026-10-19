@@ -388,8 +388,6 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-group-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cx-group .cx-live { margin: 2px 0 4px 7px; }
 .cx-live.cx-group-now { margin: 0 0 2px 7px; opacity: .85; }
-.cx-tool-count { flex: none; padding: 0 6px; border-radius: 8px; background: color-mix(in srgb, var(--ao-muted) 14%, transparent); color: var(--ao-muted);
-  font-size: 11px; font-variant-numeric: tabular-nums; }
 /* Thinking reads as one dim line; the rest opens on click. */
 .cx-live.is-compact .cx-live-item.kind-reasoning .cx-live-text, .cx-group .cx-live-item.kind-reasoning summary .cx-live-text {
   overflow: hidden; color: color-mix(in srgb, var(--ao-muted) 85%, transparent); font-style: italic; text-overflow: ellipsis; white-space: nowrap; }
