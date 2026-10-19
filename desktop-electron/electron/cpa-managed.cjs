@@ -178,6 +178,25 @@ function installBundledCommandCodePlugin(state) {
 }
 
 function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUrl = "") {
+  let savedSource = "";
+  try { savedSource = fs.readFileSync(path.join(state, "config.yaml"), "utf8"); }
+  catch (error) {
+    if (error.code !== "ENOENT") throw new Error("Saved CPA configuration is unavailable; it was not replaced");
+  }
+  let saved = {};
+  let yaml;
+  if (savedSource.trim()) {
+    yaml = globalThis.Bun?.YAML ?? require("js-yaml");
+    try {
+      saved = (yaml.parse ?? yaml.load)(savedSource);
+      if (Object.prototype.toString.call(saved) !== "[object Object]") throw new Error();
+      for (const value of [saved.plugins, saved.plugins?.configs, saved.oauth]) {
+        if (value !== undefined && Object.prototype.toString.call(value) !== "[object Object]") throw new Error();
+      }
+    } catch {
+      throw new Error("Saved CPA configuration is invalid; it was not replaced");
+    }
+  }
   const authDirectory = path.join(state, "auth");
   const logDirectory = path.join(state, "logs");
   const pluginDirectory = path.resolve(state, "plugins");
@@ -193,7 +212,7 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     fs.chmodSync(logDirectory, 0o700);
     fs.chmodSync(pluginDirectory, 0o700);
   }
-  return [
+  const generated = [
     "host: \"127.0.0.1\"",
     "port: 8317",
     `auth-dir: ${yamlString(authDirectory)}`,
@@ -240,6 +259,18 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     ...cpaLongRunYamlLines(),
     "",
   ].join("\n");
+  if (!savedSource.trim()) return generated;
+  const managed = (yaml.parse ?? yaml.load)(generated);
+  // User settings survive restarts; listener, credentials and bundled plugin paths stay managed.
+  const owned = ["host", "port", "auth-dir", "api-keys", "proxy-url", "remote-management", "plugins"];
+  const retained = Object.fromEntries(Object.entries(saved).filter(([key]) => !owned.includes(key)));
+  const merged = {
+    ...managed, ...retained,
+    plugins: { ...saved.plugins, ...managed.plugins,
+      configs: { ...saved.plugins?.configs, ...managed.plugins.configs } },
+  };
+  if (saved.oauth) merged.oauth = { ...saved.oauth, "auth-dir": authDirectory };
+  return (yaml.stringify ?? yaml.dump)(merged);
 }
 
 function run(homeValue, stateValue) {
