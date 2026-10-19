@@ -1106,8 +1106,10 @@ export function AgentOrchestratorChat({
           {structure || latest ? <button type="button" className="cx-icon-button" aria-pressed={showStructure} title="Show cards (Structure)" aria-label="Show cards"
             disabled={!latest} onClick={() => structure ? setShowStructure((value) => !value) : latest && openStructure(latest.id)}>
             <Icon name="orchestrator" width="16" height="16" /></button> : null}
-          {selectedTaskId ? <button type="button" className="cx-icon-button" aria-pressed={workbench !== null} title="Preview and terminal"
-            aria-label="Show preview and terminal" onClick={() => setWorkbench((open) => (open ? null : "preview"))}>
+          {/* The side panel opens on its Overview, as Claude Code's side column: context, changes,
+              tasks and usage, each a click from its tab (the browser chip still opens Preview). */}
+          {selectedTaskId ? <button type="button" className="cx-icon-button" aria-pressed={workbench !== null} title="Side panel: overview, preview, terminal, changes and files"
+            aria-label="Show side panel" onClick={() => setWorkbench((open) => (open ? null : "overview"))}>
             <Icon name="browser" width="16" height="16" /></button> : null}
           {onOpenMissionBoard ? <button type="button" className="cx-icon-button" title="Mission Board" aria-label="Open Mission Board" onClick={onOpenMissionBoard}>
             <Icon name="logs" width="16" height="16" /></button> : null}

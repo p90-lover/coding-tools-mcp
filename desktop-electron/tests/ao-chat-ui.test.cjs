@@ -199,6 +199,17 @@ test("an AO agent's question shows as a card with its options, an Other box, and
   assert.match(html, />Skip<\/button>/);
 });
 
+test("the side panel opens on an Overview of the chat: environment, context, changes, background tasks and usage", () => {
+  const workbench = load("ChatWorkbench.tsx", { "../api/client": client, "../icons": { Icon: () => null }, "./ao-chat": chat,
+    "./cpa-usage": load("cpa-usage.ts", { "../api/client": client }) });
+  const html = renderToStaticMarkup(React.createElement(workbench.ChatWorkbench, {
+    sessions: [{ id: "ao-1", label: "Claude Code", model: "cpa/cline-pass/glm-5.3-flash", contextWindow: 400000 }],
+    tab: "overview", onTab: () => {}, onClose: () => {}, workspaceId: "ws" }));
+  for (const heading of ["Environment", "Context", "Changes", "Background tasks", "Usage"]) assert.match(html, new RegExp(`<h4>${heading}`), heading);
+  assert.match(html, /glm-5\.3-flash/, "the model by its own name");
+  assert.match(html, /Today<\/button>/, "usage can switch between today, 7 and 30 days");
+});
+
 test("an agent's new page brings the Preview pane forward, even over the Terminal its dev server opened", () => {
   // Seen live: the agent started its dev server (the Terminal opened), then preview_open'd the page,
   // and the panel stayed on the Terminal: the user never saw the browser.
