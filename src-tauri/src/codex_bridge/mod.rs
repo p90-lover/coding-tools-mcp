@@ -724,6 +724,9 @@ fn native_child_command(
         .arg("app-server")
         .current_dir(&options.codex_home)
         .env_clear();
+    // LOCALAPPDATA: the MXC sandbox keeps its AppContainer profile there; without it every
+    // sandboxed command fails "CreateProcessInSandbox failed with error code 203"
+    // (ERROR_ENVVAR_NOT_FOUND).
     for key in [
         "SystemRoot",
         "SystemDrive",
@@ -731,6 +734,7 @@ fn native_child_command(
         "PATH",
         "HOME",
         "USERPROFILE",
+        "LOCALAPPDATA",
         "LANG",
         "LC_ALL",
     ] {
@@ -2234,6 +2238,15 @@ mod tests {
             Some(std::ffi::OsStr::new("loopback-ao-web"))
         );
         assert!(!web.get_envs().any(|(name, _)| name == key));
+        // The MXC sandbox AO children use cannot start a command without LOCALAPPDATA.
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            assert_eq!(
+                web.get_envs()
+                    .find(|(name, _)| *name == std::ffi::OsStr::new("LOCALAPPDATA"))
+                    .and_then(|(_, value)| value),
+                Some(local.as_os_str())
+            );
+        }
     }
 
     #[test]
