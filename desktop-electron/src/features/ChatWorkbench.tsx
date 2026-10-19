@@ -3,7 +3,8 @@ import type { PointerEvent as ReactPointerEvent, ReactElement } from "react";
 import { getCodingToolsClient } from "../api/client";
 import type { JsonObject } from "../api/contracts";
 import { Caret, Icon } from "../icons";
-import type { ChatAgentSession } from "./ao-chat";
+import { contextFraction, tokensShort, type ChatAgentSession } from "./ao-chat";
+import { costLabel, costSourceLabel, readCpaUsage, type CpaUsage, type CpaUsageRange } from "./cpa-usage";
 
 // The chat's side panel, as Codex shows one beside a thread: tabs for the page the chat's agent
 // opened in its own browser (a native view drawn over the pane's slot), the changes in its
@@ -11,7 +12,7 @@ import type { ChatAgentSession } from "./ao-chat";
 // plus a new-tab page with those tools and the pages this chat opened. Everything acts for the
 // user: navigating, stopping a command or typing into it needs no approval, since the user does it.
 
-export type WorkbenchTab = "preview" | "terminal" | "changes" | "files" | "new";
+export type WorkbenchTab = "overview" | "preview" | "terminal" | "changes" | "files" | "new";
 type PanelTab = { id: string; kind: WorkbenchTab };
 
 type PreviewState = { url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; errors: number };
@@ -27,7 +28,7 @@ const isAgentShell = (command: Command | undefined) => command?.source === "agen
 /** Still running: an app command, an agent's command mid-call, or one it left running in the background. */
 const isLive = (command: Command | undefined) => command?.status === "running" || command?.status === "background";
 
-const TAB_TITLES: Record<WorkbenchTab, string> = { preview: "Preview", terminal: "Terminal", changes: "Changes", files: "Files", new: "New tab" };
+const TAB_TITLES: Record<WorkbenchTab, string> = { overview: "Overview", preview: "Preview", terminal: "Terminal", changes: "Changes", files: "Files", new: "New tab" };
 const PANEL_WIDTH_KEY = "coding-tools:ao:workbench-width";
 let tabSequence = 0;
 const newTab = (kind: WorkbenchTab): PanelTab => ({ id: `tab-${++tabSequence}`, kind });
@@ -248,6 +249,7 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId }: {
     </header>
     {!sessionId
       ? <p className="cx-workbench-empty">No agent has started in this chat yet. The pages it opens, its changes, files and commands show here.</p>
+      : current?.kind === "overview" ? <OverviewPane key={sessionId} session={sessions.find((item) => item.id === sessionId)} sessionId={sessionId} workspaceId={workspaceId} onTool={show} />
       : current?.kind === "preview" ? <PreviewPane key={sessionId} sessionId={sessionId} />
         : current?.kind === "terminal" ? <TerminalPane key={sessionId} sessionId={sessionId} workspaceId={workspaceId} />
           : current?.kind === "changes" ? <ChangesPane key={sessionId} sessionId={sessionId} workspaceId={workspaceId} />
@@ -266,8 +268,8 @@ function NewTabPage({ sessionId, onTool }: { sessionId: string; onTool: (kind: W
   return <div className="cx-newtab">
     <p className="cx-newtab-label">Tools</p>
     <div className="cx-newtab-tools">
-      {(["preview", "changes", "terminal", "files"] as const).map((kind) => <button key={kind} type="button" onClick={() => onTool(kind)}>
-        <span>{TAB_TITLES[kind]}</span><small>{kind === "preview" ? "The agent's browser" : kind === "changes" ? "Its worktree's diff" : kind === "terminal" ? "Commands and a shell" : "Browse its worktree"}</small>
+      {(["overview", "preview", "changes", "terminal", "files"] as const).map((kind) => <button key={kind} type="button" onClick={() => onTool(kind)}>
+        <span>{TAB_TITLES[kind]}</span><small>{kind === "overview" ? "Context, changes, tasks and usage" : kind === "preview" ? "The agent's browser" : kind === "changes" ? "Its worktree's diff" : kind === "terminal" ? "Commands and a shell" : "Browse its worktree"}</small>
       </button>)}
     </div>
     <p className="cx-newtab-label">Recents</p>
@@ -275,6 +277,104 @@ function NewTabPage({ sessionId, onTool }: { sessionId: string; onTool: (kind: W
       <button type="button" onClick={() => open(page.url)}><span>{page.title || page.url}</span><small>{page.url}</small>
         <time>{new Date(page.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</time></button>
     </li>)}</ul> : <p className="cx-workbench-empty">Pages the agent opens show here.</p>}
+  </div>;
+}
+
+const OVERVIEW_POLL_MS = 5_000;
+
+/**
+ * The chat at a glance, as Claude Code's side column shows one: where its agent works, how full its
+ * context is, what it changed, what still runs, and what its provider accounts spent. Each block
+ * opens the tab with the detail. Usage is CPA's per-account report (cpa_usage); keys the app holds
+ * for other providers report no usage, which the block says rather than guessing.
+ */
+function OverviewPane({ session, sessionId, workspaceId, onTool }: {
+  session?: ChatAgentSession; sessionId: string; workspaceId?: string; onTool: (kind: WorkbenchTab) => void;
+}) {
+  const [context, setContext] = useState<{ used: number | null; window: number | null; controller: string | null } | null>(null);
+  const [changes, setChanges] = useState<{ root: string; branch: string; count: number } | null>(null);
+  const [tasks, setTasks] = useState<Command[]>([]);
+  const [range, setRange] = useState<CpaUsageRange>("24h");
+  const [usage, setUsage] = useState<CpaUsage | null>(null);
+  useEffect(() => {
+    let live = true;
+    const scope: JsonObject = workspaceId ? { workspaceId } : {};
+    const read = () => {
+      if (document.visibilityState !== "visible") return;
+      void paneCall("chat_context", { sessionIds: [sessionId] }).then((result) => {
+        const found = (result.sessions as Record<string, { controller?: string | null; usage?: { contextUsed: number | null; contextWindow: number | null } | null }> | undefined)?.[sessionId];
+        if (live) setContext({ used: found?.usage?.contextUsed ?? null, window: found?.usage?.contextWindow ?? session?.contextWindow ?? null, controller: found?.controller ?? null });
+      }).catch(() => undefined);
+      void paneCall("chat_changes", { sessionId, ...scope }).then((result) => {
+        if (live) setChanges({ root: String(result.root ?? ""), branch: String(result.branch ?? ""), count: Array.isArray(result.entries) ? result.entries.length : 0 });
+      }).catch(() => undefined);
+      void paneCall("chat_processes", { sessionIds: [sessionId], ...scope }).then((result) => {
+        if (live) setTasks((((result.sessions as { commands: Command[] }[] | undefined)?.[0]?.commands) ?? []).filter(isLive));
+      }).catch(() => undefined);
+    };
+    read();
+    const timer = window.setInterval(read, OVERVIEW_POLL_MS);
+    return () => { live = false; window.clearInterval(timer); };
+  }, [sessionId, workspaceId, session?.contextWindow]);
+  // Usage changes slowly and the main process caches it for 20 s: once per range, then each minute.
+  useEffect(() => {
+    let live = true;
+    const read = () => { void readCpaUsage(range).then((next) => { if (live) setUsage(next); }).catch(() => undefined); };
+    read();
+    const timer = window.setInterval(read, 60_000);
+    return () => { live = false; window.clearInterval(timer); };
+  }, [range]);
+
+  const fraction = contextFraction(context ? { contextUsed: context.used, contextWindow: context.window } : null);
+  const busy = Boolean(context?.controller && /busy|running|working/i.test(context.controller));
+  const accounts = (usage?.available ? usage.accounts ?? [] : []).filter((account) => account.requests > 0)
+    .sort((left, right) => (right.cost ?? 0) - (left.cost ?? 0) || right.totalTokens - left.totalTokens);
+  return <div className="cx-overview">
+    <section className="cx-overview-block">
+      <h4>Environment</h4>
+      <p className="cx-overview-row"><span>Agent</span><b title={session?.model}>{session?.label || "—"}</b></p>
+      {session?.model ? <p className="cx-overview-row"><span>Model</span><b title={session.model}>{session.model.slice(session.model.lastIndexOf("/") + 1)}</b></p> : null}
+      {changes?.branch ? <p className="cx-overview-row"><span>Branch</span><b>{changes.branch}</b></p> : null}
+      {changes?.root ? <p className="cx-overview-row"><span>Folder</span><b className="is-path" title={changes.root}>{changes.root}</b></p> : null}
+      {context?.controller ? <p className="cx-overview-row"><span>Status</span><b className={busy ? "is-busy" : undefined} title={context.controller}>{busy ? "Working" : "Idle"}</b></p> : null}
+    </section>
+    <section className="cx-overview-block">
+      <h4>Context<small>{fraction === null ? "" : `${Math.round(fraction * 100)}%`}</small></h4>
+      <div className={`cx-ctx-bar is-${fraction === null ? "unknown" : fraction >= 0.85 ? "high" : fraction >= 0.6 ? "mid" : "low"}`}>
+        <span style={{ width: `${Math.round((fraction ?? 0) * 100)}%` }} /></div>
+      <p className="cx-overview-note">{context?.used === null || context?.used === undefined ? "The agent has not reported its context yet."
+        : `${tokensShort(context.used)} of ${tokensShort(context.window)} used`}</p>
+    </section>
+    <section className="cx-overview-block">
+      <h4>Changes<small>{changes ? `${changes.count} ${changes.count === 1 ? "file" : "files"}` : ""}</small></h4>
+      <button type="button" className="cx-overview-link" onClick={() => onTool("changes")}>
+        {changes?.count ? "Review the diff" : "No uncommitted changes"}</button>
+    </section>
+    <section className="cx-overview-block">
+      <h4>Background tasks<small>{tasks.length ? `${tasks.length} running` : ""}</small></h4>
+      {tasks.length ? <ul className="cx-overview-tasks">{tasks.slice(0, 4).map((task) => <li key={task.id}>
+        <button type="button" title={task.cmd} onClick={() => onTool("terminal")}><i aria-hidden="true" /><span>{task.cmd}</span></button>
+      </li>)}</ul> : <p className="cx-overview-note">Nothing running.</p>}
+    </section>
+    <section className="cx-overview-block">
+      <h4>Usage
+        <span className="cx-overview-range" role="group" aria-label="Usage period">
+          {(["24h", "7d", "30d"] as const).map((value) => <button key={value} type="button" aria-pressed={range === value} onClick={() => setRange(value)}>
+            {value === "24h" ? "Today" : value}</button>)}
+        </span></h4>
+      {!usage ? <p className="cx-overview-note">Reading usage…</p>
+        : !usage.available ? <p className="cx-overview-note">{usage.reason || "Usage is unavailable."}</p> : <>
+          {usage.totals ? <p className="cx-overview-total" title={costSourceLabel(usage.totals.costSource, usage.totals.costPartial, false)}>
+            <b>{costLabel(usage.totals.cost, usage.totals.costPartial)}</b>
+            <span>{tokensShort(usage.totals.totalTokens)} tokens · {usage.totals.requests.toLocaleString()} requests</span></p> : null}
+          {accounts.length ? <ul className="cx-overview-usage">{accounts.slice(0, 8).map((account) => <li key={account.id}
+            title={`In ${tokensShort(account.inputTokens)} · out ${tokensShort(account.outputTokens)} · cached ${tokensShort(account.cachedTokens)}\n${costSourceLabel(account.costSource, account.costPartial, false)}`}>
+            <span><b>{account.label}</b><small>{account.provider ?? ""}</small></span>
+            <span><b>{costLabel(account.cost, account.costPartial)}</b><small>{tokensShort(account.totalTokens)} · {account.requests.toLocaleString()} req</small></span>
+          </li>)}</ul> : <p className="cx-overview-note">No requests in this period.</p>}
+          <p className="cx-overview-note">Costs are estimated at API list prices; subscription accounts are not billed per token. Keys used outside CPA report no usage.</p>
+        </>}
+    </section>
   </div>;
 }
 
