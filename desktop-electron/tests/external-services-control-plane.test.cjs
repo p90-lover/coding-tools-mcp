@@ -222,6 +222,111 @@ function archivedFile(archive, snapshot, relative) {
   return path.join(archive, holder, relative);
 }
 
+for (const code of ["ENOENT", "ENOSPC"]) {
+  test(`an archive ${code} does not prevent startup or discard unarchived legacy data`, (t) => {
+    const directory = temporaryDirectory();
+    t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+    const filePath = path.join(directory, "external-services.json");
+    const keyPath = path.join(directory, "external-services.key");
+    const key = Buffer.alloc(32, 7).toString("base64");
+    const original = {
+      version: 1,
+      services: { cpa: { enabled: true }, paseo: { enabled: true, autoStart: true } },
+      secrets: {
+        cpa: { scheme: "electron-safe-storage-v1", data: "cpa-ciphertext" },
+        paseo: { scheme: "aes-256-gcm-v1", data: "retired-ciphertext" },
+      },
+    };
+    fs.writeFileSync(filePath, JSON.stringify(original));
+    fs.writeFileSync(keyPath, key);
+    const options = { filePath, keyPath };
+    createExternalServicesController(options).dispose();
+    const archive = path.join(directory, "archives", "retired-services");
+    const manifest = fs.readFileSync(path.join(archive, "manifest.json"), "utf8");
+    original.services.cpa.autoStart = true;
+    fs.writeFileSync(filePath, JSON.stringify(original));
+
+    const warnings = [];
+    const mkdirSync = fs.mkdirSync;
+    let failures = 0;
+    let controller;
+    fs.mkdirSync = function (target, ...args) {
+      if (String(target).startsWith(path.join(archive, "snapshots") + path.sep)) {
+        failures += 1;
+        throw Object.assign(new Error(`${code}: archive snapshot unavailable`), { code, syscall: "mkdir" });
+      }
+      return mkdirSync.call(this, target, ...args);
+    };
+    try {
+      controller = createExternalServicesController({
+        ...options,
+        logger: { warn: (event, detail) => warnings.push({ event, detail }) },
+      });
+      assert.equal(failures, 1, "the failing snapshot path must actually be exercised");
+      assert.deepEqual(controller.snapshot().services.map((service) => service.id), ["cpa"]);
+      assert.equal(fs.readFileSync(filePath, "utf8"), JSON.stringify(original));
+      controller.configure("cpa", { enabled: false });
+      const saved = JSON.parse(fs.readFileSync(filePath, "utf8"));
+      assert.equal(saved.services.cpa.enabled, false, "CPA changes still persist");
+      assert.deepEqual(saved.services.paseo, original.services.paseo);
+      assert.deepEqual(saved.secrets, original.secrets, "unarchived credentials must remain recoverable");
+      assert.equal(fs.readFileSync(keyPath, "utf8"), key);
+      assert.equal(fs.readFileSync(path.join(archive, "manifest.json"), "utf8"), manifest);
+      assert.equal(warnings.length, 1);
+      assert.equal(warnings[0].detail.code, code);
+    } finally {
+      fs.mkdirSync = mkdirSync;
+      controller?.dispose();
+    }
+
+    // A later launch must archive the preserved data before retiring it from the live file.
+    const unarchived = fs.readFileSync(filePath, "utf8");
+    const recovered = createExternalServicesController(options);
+    try {
+      const latest = JSON.parse(fs.readFileSync(path.join(archive, "latest.json"), "utf8")).relative;
+      assert.equal(fs.readFileSync(path.join(archive, latest, "external-services.json"), "utf8"), unarchived);
+      assert.equal(fs.readFileSync(path.join(archive, latest, "external-services.key"), "utf8"), key);
+      recovered.configure("cpa", { enabled: true });
+      const saved = JSON.parse(fs.readFileSync(filePath, "utf8"));
+      assert.deepEqual(Object.keys(saved.services), ["cpa"]);
+      assert.deepEqual(saved.secrets, { cpa: original.secrets.cpa });
+    } finally {
+      recovered.dispose();
+    }
+  });
+}
+
+test("a failed keep-alive lease write does not fail healthy CPA inspection", async (t) => {
+  const warnings = [];
+  const { controller, directory } = controllerFixture({
+    logger: { warn: (event, detail) => warnings.push({ event, detail }) },
+  });
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  controller.configure("cpa", { keepAlive: true });
+  const filePath = path.join(directory, "external-services.json");
+  const saved = fs.readFileSync(filePath, "utf8");
+  const writeFileSync = fs.writeFileSync;
+  let failedWrites = 0;
+  fs.writeFileSync = function (target, ...args) {
+    if (String(target).startsWith(filePath + ".tmp-")) {
+      failedWrites += 1;
+      throw Object.assign(new Error("ENOSPC: lease storage is full"), { code: "ENOSPC" });
+    }
+    return writeFileSync.call(this, target, ...args);
+  };
+  try {
+    assert.equal((await controller.inspect("cpa")).status, "ready");
+    assert.equal(failedWrites, 1);
+    assert.equal(warnings.length, 1);
+    assert.equal(warnings[0].detail.code, "ENOSPC");
+    assert.throws(() => controller.configure("cpa", { autoStart: true }), { code: "ENOSPC" });
+    assert.equal(fs.readFileSync(filePath, "utf8"), saved);
+  } finally {
+    fs.writeFileSync = writeFileSync;
+    controller.dispose();
+  }
+});
+
 test("legacy Paseo cannot reenable keep-alive through configuration", () => {
   const { controller } = controllerFixture();
   assert.throws(() => controller.configure("paseo", { enabled: true, autoStart: true, keepAlive: true }), /Unknown external service/);
