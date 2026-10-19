@@ -88,11 +88,16 @@ function stepTone(step: ChatStep): string {
 function ReasoningItem({ item }: { item: ChatLiveItem }) {
   const dsh = useContext(DshStyle);
   const lines = item.text.trim().split(/\r?\n/);
-  if (!lines[0]) return <span className="cx-live-label">{dsh ? "Think" : item.status === "running" ? "Thinking…" : "Thought"}</span>;
-  const label = dsh ? "Think" : item.status === "running" ? "Thinking" : "Thought";
-  const headline = lines[0].replace(/^\s*\*\*(.+?)\*\*\s*$/, "$1").replace(/[*_`]/g, "").trim();
+  const running = item.status === "running";
+  if (!lines[0]) return <span className="cx-live-label">{dsh ? "Think" : running ? "Thinking…" : "Thought"}</span>;
+  const label = dsh ? "Think" : running ? "Thinking" : "Thought";
+  // Live reasoning arrives as its newest part, so it headlines the current thought, not the first.
+  const current = running ? lines.filter((line) => line.trim()).at(-1) ?? lines[0] : lines[0];
+  const headline = current.replace(/^\s*\*\*(.+?)\*\*\s*$/, "$1").replace(/[*_`]/g, "").trim();
   // A model that thinks in one long paragraph shows it as one line, the whole of it a click away.
-  const rest = lines.slice(1).join("\n").trim() || (headline.length > 140 ? headline : "");
+  const rest = running
+    ? (lines.length > 1 || headline.length > 140 ? item.text.trim() : "")
+    : lines.slice(1).join("\n").trim() || (headline.length > 140 ? headline : "");
   return rest
     ? <details className="cx-reasoning"><summary><span className="cx-live-label">{label}</span><span className="cx-live-text">{headline}</span></summary>
       <div className="cx-reasoning-body"><ChatMarkdown text={rest} /></div></details>
