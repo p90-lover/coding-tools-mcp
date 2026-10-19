@@ -107,7 +107,7 @@
   "cline": {
     "id": "cline-pass-switcher",
     "provider": "cline",
-    "version": "0.1.0-codingtools.2",
+    "version": "0.1.0-codingtools.3",
     "source": {
       "repository": "https://github.com/munmunjaklin458-afk/cline-pass-switcher",
       "commit": "02538a3137a08948a94f26f17dd4aeff8c029ed1",
@@ -120,7 +120,8 @@
       "Owned ephemeral-loopback managed runtime; selected outbound proxy; local-only account storage",
       "DeepSeek V4.1 Flash native none/low/high/max efforts with suffix-to-body translation",
       "Normalize embedded Windows JavaScript line endings before managed runtime patches",
-      "DeepSeek V4.1 Flash's dated builds (deepseek-v4.1-flash-1017) take the same none/low/high/max efforts"
+      "DeepSeek V4.1 Flash's dated builds (deepseek-v4.1-flash-1017) take the same none/low/high/max efforts",
+      "Streams are SSE-framed for cross-format requests (Claude /v1/messages, Responses) and raw for OpenAI Chat, by CPA's request_path; multiline JSON chunks are compacted (from #352)"
     ],
     "build": {
       "go": "1.26.0",
@@ -129,9 +130,9 @@
     },
     "platforms": {
       "win32/x64": {
-        "path": "windows/amd64/cline-pass-switcher-v0.1.0-codingtools.2.dll",
-        "sha256": "ae8e1556224aed7ba56d22e67d0fad21ab833c365af86aff36cd65fd7d530e1a",
-        "size": 7303680
+        "path": "windows/amd64/cline-pass-switcher-v0.1.0-codingtools.3.dll",
+        "sha256": "36d5224dc699a2263ad0f58f88cac8c3d3c8138fcf5188bda1f2b2e5756c175f",
+        "size": 7306752
       }
     }
   }

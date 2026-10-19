@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 )
 
@@ -96,13 +99,51 @@ func TestDeepSeekEffortCatalogAndTransport(t *testing.T) {
 func TestSSEPreservesReasoningToolsAndUsage(t *testing.T) {
 	wire := ": keepalive\n\ndata: {\"choices\":[{\"delta\":{\"reasoning_content\":\"reason\",\"tool_calls\":[{\"id\":\"call_1\"}]}}]}\n\ndata: {\"choices\":[],\"usage\":{\"completion_tokens\":1}}\n\ndata: [DONE]\n\n"
 	var chunks [][]byte
-	if e := relaySSE(strings.NewReader(wire), func(b []byte) error { chunks = append(chunks, append([]byte(nil), b...)); return nil }); e != nil {
+	if e := relaySSE(strings.NewReader(wire), true, func(b []byte) error { chunks = append(chunks, append([]byte(nil), b...)); return nil }); e != nil {
 		t.Fatal(e)
 	}
 	if len(chunks) != 2 || !bytes.Contains(chunks[0], []byte("reasoning_content")) || !bytes.Contains(chunks[0], []byte("tool_calls")) || !bytes.Contains(chunks[1], []byte("usage")) {
 		t.Fatalf("lost stream payload: %q", chunks)
 	}
 }
+func TestSSEFramesAreCompleteForCPAAndPreserveMultilineJSON(t *testing.T) {
+	for _, wire := range []string{
+		": keepalive\n\nevent: chunk\ndata: {\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}\n\ndata: [DONE]\n\n",
+		": keepalive\r\ndata:{\"choices\": [\r\ndata: {\"delta\":{\"content\":\"OK\"}}]}\r\n\r\ndata: [DONE]\r\n\r\n",
+		"data: {\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}",
+	} {
+		var chunks [][]byte
+		err := relaySSE(iotest.OneByteReader(strings.NewReader(wire)), true, func(b []byte) error {
+			chunks = append(chunks, append([]byte(nil), b...))
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(chunks) != 1 {
+			t.Fatalf("expected one JSON frame; CPA host close owns DONE: %q", chunks)
+		}
+		if !bytes.HasPrefix(chunks[0], []byte("data: ")) || !bytes.HasSuffix(chunks[0], []byte("\n\n")) {
+			t.Fatalf("missing CPA stream framing: %q", chunks[0])
+		}
+		payload := bytes.TrimSuffix(bytes.TrimPrefix(chunks[0], []byte("data: ")), []byte("\n\n"))
+		if !json.Valid(payload) || bytes.Contains(payload, []byte("\n")) || !bytes.Contains(payload, []byte(`"content":"OK"`)) {
+			t.Fatalf("multiline data was not reconstructed as one JSON event: %q", chunks[0])
+		}
+	}
+}
+
+func TestSSEFramingPreservesEmitAndReadFailures(t *testing.T) {
+	sentinel := errors.New("fixture stream failure")
+	if err := relaySSE(strings.NewReader("data: {}\n\n"), true, func([]byte) error { return sentinel }); !errors.Is(err, sentinel) {
+		t.Fatalf("lost emit failure: %v", err)
+	}
+	reader := io.MultiReader(strings.NewReader("data: {}\n\n"), iotest.ErrReader(sentinel))
+	if err := relaySSE(reader, true, func([]byte) error { return nil }); !errors.Is(err, sentinel) {
+		t.Fatalf("lost read failure: %v", err)
+	}
+}
+
 func TestFullNativeProviderConsoleAndLifecycle(t *testing.T) {
 	runtime := os.Getenv("CLINE_TEST_RUNTIME")
 	if runtime == "" {
@@ -246,24 +287,34 @@ func TestFullNativeProviderConsoleAndLifecycle(t *testing.T) {
 		}
 		return json.RawMessage("{}"), nil
 	}
-	streamReq, _ := json.Marshal(map[string]any{"Payload": payload, "Model": "cline-pass/fixture", "stream_id": "fixture-stream"})
-	stream, e := execute(streamReq, true)
-	if e != nil {
-		t.Fatal(e)
-	}
-	result(t, stream)
-	select {
-	case <-closed:
-	case <-time.After(10 * time.Second):
-		t.Fatal("native stream did not close")
-	}
-	select {
-	case chunk := <-chunks:
-		if !bytes.Contains(chunk, []byte("reasoning_content")) {
-			t.Fatal("lost native streaming reasoning")
+	for _, requestPath := range []string{"/v1/chat/completions", "/v1/messages", "/v1/responses", "", " /v1/completions/ "} {
+		streamReq, _ := json.Marshal(map[string]any{"Payload": payload, "Model": "cline-pass/fixture", "stream_id": "fixture-stream",
+			"Metadata": map[string]any{"request_path": requestPath}, "SourceFormat": "openai"})
+		stream, e := execute(streamReq, true)
+		if e != nil {
+			t.Fatal(e)
 		}
-	default:
-		t.Fatal("native stream emitted no chunks")
+		result(t, stream)
+		select {
+		case <-closed:
+		case <-time.After(10 * time.Second):
+			t.Fatal("native stream did not close")
+		}
+		select {
+		case chunk := <-chunks:
+			if !bytes.Contains(chunk, []byte("reasoning_content")) {
+				t.Fatal("lost native streaming reasoning")
+			}
+			framed := requestPath == "/v1/messages" || requestPath == "/v1/responses"
+			if bytes.HasPrefix(chunk, []byte("data: ")) != framed {
+				t.Fatalf("wrong framing for request path %q: %q", requestPath, chunk)
+			}
+			if !framed && !json.Valid(chunk) {
+				t.Fatalf("OpenAI host requires raw JSON, got %q", chunk)
+			}
+		default:
+			t.Fatal("native stream emitted no chunks")
+		}
 	}
 	runtimeMu.Lock()
 	s := active
