@@ -12,6 +12,7 @@ const CONTROL_PROTOCOL_VERSION = 1;
 const START_TIMEOUT_MS = 20_000;
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
+const MAX_STARTUP_STDERR_BYTES = 4096;
 
 function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -210,7 +211,9 @@ class HeadlessHost {
     if (selection.ignoredOverride) {
       this.logger?.warn?.("headless.binary_override_ignored", { reason: "packaged app without CODING_TOOLS_DEV_HOME" });
     }
-    const appDataDir = path.join(this.app.getPath("userData"), "headless");
+    const requestedAppDataDir = path.join(this.app.getPath("userData"), "headless");
+    fs.mkdirSync(requestedAppDataDir, { recursive: true, mode: 0o700 });
+    const appDataDir = fs.realpathSync.native(requestedAppDataDir);
     const id = `${process.pid}-${crypto.randomUUID()}`;
     const uiToken = crypto.randomBytes(32).toString("base64url");
     const descriptorPath = path.join(appDataDir, "runtime", `control-${id}.json`);
@@ -221,6 +224,17 @@ class HeadlessHost {
     // window may still be another instance's (dev and packaged builds can share this folder).
     removeStaleTokenFiles(path.dirname(tokenPath), { keep: tokenPath, before: Date.now() - START_TIMEOUT_MS });
 
+    let startupStderr = Buffer.alloc(0), captureStartup = true;
+    const startupError = (message) => {
+      captureStartup = false;
+      const detail = safeErrorMessage(startupStderr.toString("utf8")
+        .split(uiToken).join("[redacted]")
+        .replace(/(\b(?:[\w-]*token|api[_-]?key|authorization)\s*[:=]\s*)(?:Bearer\s+)?[^\s,;]+/gi, "$1[redacted]")
+        .replace(/\b[A-Za-z0-9_-]{32,}\b/g, "[redacted]")
+        .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/g, " ").trim());
+      startupStderr = Buffer.alloc(0);
+      return new Error(message + (detail ? ": " + detail : ""));
+    };
     const child = spawn(executable, ["serve"], {
       cwd: path.dirname(executable),
       env: {
@@ -236,8 +250,14 @@ class HeadlessHost {
         CODING_TOOLS_LOCAL_UI_STDIN: "1",
         ...(this.aoWorktreesRoot ? { CODING_TOOLS_AO_WORKTREES_DIR: this.aoWorktreesRoot } : {}),
       },
-      stdio: ["pipe", "ignore", "ignore"],
+      stdio: ["pipe", "ignore", "pipe"],
       windowsHide: true,
+    });
+    const childClosed = new Promise(resolve => child.once("close", resolve));
+    child.stderr?.on("data", chunk => {
+      if (!captureStartup) return; // Keep draining after readiness without retaining service logs.
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      startupStderr = Buffer.concat([startupStderr, bytes.subarray(-MAX_STARTUP_STDERR_BYTES)]).subarray(-MAX_STARTUP_STDERR_BYTES);
     });
     this.child = child;
     if (!child.stdin) {
@@ -266,8 +286,9 @@ class HeadlessHost {
     const deadline = Date.now() + START_TIMEOUT_MS;
     while (Date.now() < deadline) {
       if (child.exitCode !== null) {
+        await Promise.race([childClosed, sleep(100)]);
         removeTokenFile(tokenPath, this.logger);
-        throw new Error(`Local execution service exited during startup (${child.exitCode})`);
+        throw startupError(`Local execution service exited during startup (${child.exitCode})`);
       }
       if (fs.existsSync(descriptorPath) && fs.existsSync(tokenPath)) {
         try {
@@ -286,6 +307,8 @@ class HeadlessHost {
           // The token lives on in memory only: headless never reads its file back, and a file
           // left at a known path could be read by any command the service runs for a tool call.
           removeTokenFile(tokenPath, this.logger);
+          captureStartup = false;
+          startupStderr = Buffer.alloc(0);
           this.control = Object.freeze({
             endpoint: descriptor.endpoint,
             token,
@@ -310,7 +333,7 @@ class HeadlessHost {
     }
     child.kill();
     removeTokenFile(tokenPath, this.logger);
-    throw new Error("Local execution service did not become ready");
+    throw startupError("Local execution service did not become ready");
   }
 
   readDescriptor(descriptorPath, appDataDir, pid) {

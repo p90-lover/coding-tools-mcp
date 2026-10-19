@@ -728,8 +728,12 @@ export function AgentOrchestratorSurface({ language, setError }: {
   };
 
   useEffect(() => {
-    let live = true;
-    void (async () => {
+    let live = true, reading = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    const refresh = async (retried = false) => {
+      if (!live || reading || pageHidden()) return;
+      if (retryTimer !== undefined) { clearTimeout(retryTimer); retryTimer = undefined; }
+      reading = true;
       try {
         const items = await listAllWorkspaces();
         if (live) {
@@ -739,10 +743,24 @@ export function AgentOrchestratorSurface({ language, setError }: {
           if (!items.length) setSheet("settings");
         }
       } catch (cause) {
-        if (live) setError(cause instanceof Error ? cause.message : String(cause));
-      }
-    })();
-    return () => { live = false; };
+        if (live) {
+          setError(cause instanceof Error ? cause.message : String(cause));
+          if (!retried && !pageHidden()) {
+            retryTimer = setTimeout(() => { retryTimer = undefined; void refresh(true); }, 750);
+          }
+        }
+      } finally { reading = false; }
+    };
+    const onVisible = () => { void refresh(); };
+    void refresh();
+    window.addEventListener("focus", onVisible);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      live = false;
+      if (retryTimer !== undefined) clearTimeout(retryTimer);
+      window.removeEventListener("focus", onVisible);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [setError]);
 
   useEffect(() => {

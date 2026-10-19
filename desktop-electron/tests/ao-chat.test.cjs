@@ -684,7 +684,113 @@ function rendererCallback(file, name, globals) {
   }).outputText, { exports, ...globals });
   return exports.callback;
 }
-const delayedReply = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
+const delayedReply = () => { let resolve, reject; const promise = new Promise((done, fail) => { resolve = done; reject = fail; }); return { promise, resolve, reject }; };
+
+function workspaceRecovery({ hidden = false, selected = "p3" } = {}) {
+  let isHidden = hidden, timerId = 0;
+  const focus = new Set(), visibility = new Set(), timers = new Map(), replies = [];
+  const state = { workspaces: [], workspaceId: selected, ready: false, sheet: "", errors: [] };
+  const set = key => value => { state[key] = typeof value === "function" ? value(state[key]) : value; };
+  const effect = rendererCallback("AgentOrchestratorSurface.tsx", "effect:listAllWorkspaces", {
+    Error, listAllWorkspaces: () => { const reply = delayedReply(); replies.push(reply); return reply.promise; },
+    pageHidden: () => isHidden, setWorkspaces: set("workspaces"), setWorkspaceId: set("workspaceId"),
+    setWorkspaceReady: set("ready"), setSheet: set("sheet"), setError: error => state.errors.push(error),
+    window: { addEventListener: (name, handler) => { assert.equal(name, "focus"); focus.add(handler); },
+      removeEventListener: (name, handler) => { assert.equal(name, "focus"); focus.delete(handler); } },
+    document: { addEventListener: (name, handler) => { assert.equal(name, "visibilitychange"); visibility.add(handler); },
+      removeEventListener: (name, handler) => { assert.equal(name, "visibilitychange"); visibility.delete(handler); } },
+    setTimeout: (callback, delay) => { const id = ++timerId; timers.set(id, { callback, delay }); return id; },
+    clearTimeout: id => timers.delete(id),
+  });
+  return { state, replies, timers, focus, visibility, cleanup: effect(), hide: value => { isHidden = value; },
+    onFocus: () => { for (const handler of [...focus]) handler(); },
+    onVisible: () => { for (const handler of [...visibility]) handler(); },
+    tick: () => { for (const [id, timer] of [...timers]) { timers.delete(id); timer.callback(); } } };
+}
+const workspaceProjects = Array.from({ length: 4 }, (_, index) => ({ id: "p" + (index + 1), name: "Project " + (index + 1) }));
+
+test("the project effect retries a visible startup failure after an in-flight focus and preserves selection", async () => {
+  const w = workspaceRecovery();
+  try {
+    assert.equal(w.replies.length, 1);
+    w.onFocus(); w.onVisible();
+    assert.equal(w.replies.length, 1, "focus while the first read is pending never overlaps it");
+    w.replies[0].reject(new Error("backend unavailable"));
+    await new Promise(setImmediate);
+    assert.equal(w.state.ready, false);
+    assert.equal(w.timers.size, 1, "the failed initial visible attempt gets one bounded retry");
+    const [timer] = w.timers.values();
+    assert.ok(timer.delay > 0 && timer.delay <= 1000);
+    w.tick();
+    assert.equal(w.replies.length, 2);
+    w.onFocus(); w.onVisible();
+    assert.equal(w.replies.length, 2);
+    w.state.workspaceId = "p4";
+    w.replies[1].resolve(workspaceProjects);
+    await new Promise(setImmediate);
+    assert.equal(w.state.workspaces.length, 4);
+    assert.equal(w.state.ready, true);
+    assert.equal(w.state.workspaceId, "p4", "the current selected project survives a delayed refresh");
+    assert.equal(w.timers.size, 0);
+    assert.deepEqual(w.state.errors, ["backend unavailable"], "recovery does not clear unrelated global errors");
+  } finally { w.cleanup(); }
+});
+
+test("workspace retries are bounded until another legitimate visible return", async () => {
+  const w = workspaceRecovery();
+  try {
+    w.replies[0].reject(new Error("offline")); await new Promise(setImmediate);
+    assert.equal(w.timers.size, 1); w.tick();
+    assert.equal(w.replies.length, 2);
+    w.replies[1].reject(new Error("still offline")); await new Promise(setImmediate);
+    assert.equal(w.timers.size, 0, "an automatic retry failure never creates an error polling loop");
+    w.tick(); assert.equal(w.replies.length, 2);
+    w.onFocus(); assert.equal(w.replies.length, 3, "a real return can recover without remounting the tab");
+    w.replies[2].reject(new Error("reconnecting")); await new Promise(setImmediate);
+    assert.equal(w.timers.size, 1);
+    w.tick(); w.replies[3].resolve(workspaceProjects); await new Promise(setImmediate);
+    assert.equal(w.state.ready, true);
+  } finally { w.cleanup(); }
+});
+
+test("workspace loading skips hidden startup, events, and retries without overlapping visible reads", async (t) => {
+  for (const phase of ["startup", "retry"]) await t.test(phase, async () => {
+    const w = workspaceRecovery({ hidden: phase === "startup" });
+    try {
+      if (phase === "retry") {
+        w.replies[0].reject(new Error("offline")); await new Promise(setImmediate);
+        assert.equal(w.timers.size, 1); w.hide(true); w.tick();
+      }
+      const count = phase === "startup" ? 0 : 1;
+      w.onFocus(); w.onVisible();
+      assert.equal(w.replies.length, count, "no native request starts while the page is hidden");
+      w.hide(false); w.onVisible(); w.onFocus(); w.onVisible();
+      assert.equal(w.replies.length, count + 1, "visible events share one in-flight read");
+      w.replies.at(-1).resolve(workspaceProjects); await new Promise(setImmediate);
+      assert.equal(w.state.ready, true);
+    } finally { w.cleanup(); }
+  });
+});
+
+test("workspace effect cleanup removes recovery listeners, cancels retry, and ignores late replies", async (t) => {
+  for (const result of ["resolve", "reject", "retry"]) await t.test(result, async () => {
+    const w = workspaceRecovery();
+    let staleTimer;
+    if (result === "retry") {
+      w.replies[0].reject(new Error("offline")); await new Promise(setImmediate);
+      assert.equal(w.timers.size, 1); staleTimer = [...w.timers.values()][0].callback;
+    }
+    w.cleanup();
+    assert.equal(w.focus.size, 0); assert.equal(w.visibility.size, 0); assert.equal(w.timers.size, 0);
+    if (result === "resolve") w.replies[0].resolve(workspaceProjects);
+    if (result === "reject") w.replies[0].reject(new Error("late failure"));
+    staleTimer?.(); w.onFocus(); w.onVisible(); await new Promise(setImmediate);
+    assert.equal(w.replies.length, 1);
+    assert.equal(w.state.workspaces.length, 0); assert.equal(w.state.ready, false);
+    assert.equal(w.state.errors.length, result === "retry" ? 1 : 0);
+  });
+});
+
 
 test("late chat creation never overwrites another project, another chat, or an unmounted surface", async () => {
   for (const stage of ["start", "refresh", "unmount"]) {
