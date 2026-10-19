@@ -553,7 +553,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
     }).catch(() => undefined);
     return () => { live = false; };
   }, [wantsDependencyLinks, workspaceId, pendingApprovals.length]);
-  const shownApprovals = pendingApprovalsHere.map((approval) => {
+  // A request the "Approve for me" reviewer is still checking is not shown as a question: the run's
+  // status line says it is being reviewed, and only an "ask" (or a reviewer that cannot answer)
+  // comes to the person.
+  const shownApprovals = pendingApprovalsHere.filter((approval) => !approval.awaiting_review).map((approval) => {
     const note = dependencyInstallNote(approval.command, dependencyLinks?.workspaceId === workspaceId ? dependencyLinks.links : null);
     return note ? { ...approval, dependencyNote: note } : approval;
   });
@@ -2016,7 +2019,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
               onConnect={addDependency} canConnect={(nodeId, parentId) => Boolean(aoDependencyChange(selectedRun, nodeId, parentId))}
               onUnlink={unlink} canUnlink={(nodeId, parentId) => Boolean(aoUnlinkChange(selectedRun, nodeId, parentId))}
               onRemove={removeCard} canRemove={(nodeId) => Boolean(aoRemoveChange(selectedRun, nodeId))}>
-              {pendingApprovals.length ? <aside className="ao-approvals ao-canvas-overlay" aria-label="AO tool approvals">
+              {shownApprovals.length ? <aside className="ao-approvals ao-canvas-overlay" aria-label="AO tool approvals">
                 {shownApprovals.map(approval => <AgentOrchestratorApproval key={JSON.stringify([approval.nodeId, approval.approval_id])} approval={approval} busy={Boolean(busy)} approve={approve} />)}
               </aside> : null}
               <button type="button" className="ao-fab ao-canvas-overlay" title="Add worker"
