@@ -328,7 +328,7 @@ test("a working chat on a non-AO model is not offered steering; a message typed 
   await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0, "nothing is sent while the turn runs");
   assert.equal(textarea().props.value, "", "the composer is free for the next message");
-  assert.match(text(walk(view.render()).find((element) => String(element.props?.className).includes("cx-command-card"))), /^QueuedIt's sent when the current turn finishes/);
+  assert.match(text(walk(view.render()).find((element) => String(element.props?.className).includes("cx-command-card"))), /^Queuedalso check the logsIt's sent when the current turn finishes/, "the card quotes the queued message");
 });
 
 test("after an app restart a running AO card is still steered, though the page isn't driving its run", async () => {
@@ -463,7 +463,7 @@ test("Delete names the runs its turn showed: a restarted message takes its resta
   assert.deepEqual(forked, [1]);
 });
 
-test("while the agent waits on a request, a typed message is queued, never steered (steering would cancel it)", async () => {
+test("while the agent waits on a request, a typed message is still steered: the steer waits for the answer instead of cancelling it", async () => {
   const steered = [];
   const pending = { nodeId: "w", approval_id: "req-1", source: "ao", kind: "plan", tool: "ExitPlanMode", plan: "1. Add the route",
     decisions: [{ id: "default", kind: "allow_once", label: "Yes, and manually approve edits" }, { id: "plan", kind: "reject_once", label: "No, keep planning" }] };
@@ -472,12 +472,13 @@ test("while the agent waits on a request, a typed message is queued, never steer
     steer: async (input) => { steered.push(input); return true; } });
   const view = mount(props);
   const textarea = () => walk(view.render()).find((element) => element.type === "textarea");
-  assert.equal(textarea().props.placeholder, "Answer the request above first — a message now is sent after it");
+  // With "Approve for me" every tool call waits a moment; a message typed then used to wait for the
+  // whole turn. The steer now waits on the backend until the request is answered (chat_steer).
+  assert.equal(textarea().props.placeholder, "Steer the agent — sent to it right away");
   textarea().props.onChange({ target: { value: "yes, go ahead" } });
-  assert.ok(!walk(view.render()).some((element) => element.props?.["aria-label"] === "Steer the agent"), "no Steer button while a request waits");
   await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
-  assert.deepEqual(steered, [], "the message never reaches the agent as a steer");
-  assert.equal(calls.filter(([kind]) => kind === "send").length, 0, "nor as a send into the busy turn: it is queued");
+  assert.deepEqual(steered.map((input) => input.message), ["yes, go ahead"]);
+  assert.equal(calls.filter(([kind]) => kind === "send").length, 0, "never a send into the busy turn");
 });
 
 test("a single-model chat shows its finished work unfolded; a Team chat folds the workers but always shows the answer", () => {

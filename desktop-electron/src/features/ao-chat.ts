@@ -630,6 +630,8 @@ export function chatQueueAdd(queue: QueuedChatMessage[], item: QueuedChatMessage
 /** What a command shows above the composer: a few facts, a block of text, or a list to pick from. */
 export type ChatCommandCard = {
   title: string; rows?: [string, string][]; text?: string; mono?: boolean;
+  /** The user's own message the card is about (a queued message), shown quoted above the text. */
+  quote?: string;
   items?: { label: string; detail?: string; run: () => void }[];
 };
 /** What the page provides so the chat's commands reach real data and actions. */

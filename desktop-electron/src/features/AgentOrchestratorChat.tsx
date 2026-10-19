@@ -7,6 +7,7 @@ import { ChatMarkdown } from "./ChatMarkdown";
 import { ChatWorkbench, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
 import { ChatBranchBar } from "./ChatBranchBar";
 import { ChatContextMeter } from "./ChatContextMeter";
+import { ChatTurnStats } from "./ChatTurnStats";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
@@ -577,7 +578,10 @@ export function AgentOrchestratorChat({
   // An agent waiting on a request (a tool approval, ExitPlanMode's plan) must be answered on its
   // card: steering pre-empts the turn, which cancels the request ("Tool use aborted").
   const awaitingAnswer = approvals.length > 0;
-  const steering = !accepts && !awaitingAnswer && steerOn && steerable && Boolean(steer && selectedTaskId);
+  // A request waiting on an answer does not turn steering into queueing: with "Approve for me" each
+  // tool call shows as one for a moment, and every message typed then waited for the whole turn.
+  // The steer waits for the request to be answered, then reaches the agent.
+  const steering = !accepts && steerOn && steerable && Boolean(steer && selectedTaskId);
   // Otherwise a message typed while the chat runs waits and is sent when the turn finishes, as in Codex.
   const queueing = !accepts && !steering && runOpen && Boolean(selectedTaskId);
   const canSend = !busy && !sending && Boolean(draft.trim() || attachments.length) && (accepts || steering || queueing);
@@ -587,7 +591,7 @@ export function AgentOrchestratorChat({
   const [card, setCard] = useState<ChatCommandCard | null>(null);
   // Edit goal: the objective being edited, or null.
   const [goalEditing, setGoalEditing] = useState<string | null>(null);
-  const say = (title: string, text: string) => setCard({ title, text });
+  const say = (title: string, text: string, quote?: string) => setCard({ title, text, ...(quote ? { quote } : {}) });
 
   /** Sends a message the way the composer does: into this chat, or as a new chat. */
   const deliver = async (message: string, goal?: string) => {
@@ -606,8 +610,8 @@ export function AgentOrchestratorChat({
           setDraft(""); setAttachments([]); setAttachNote("");
           say(steered === "restart" ? "Restarting" : "Queued", steered === "restart"
             ? "The agent had stopped responding, so its turn was stopped; your message is sent as the next turn."
-            : steered === "starting" ? "The agent is still starting; your message is sent when its first turn finishes."
-            : "The agent is waiting for your answer to its request; your message is sent when the turn finishes.");
+            : steered === "starting" ? "The agent is still starting; your message is steered in once it can take it."
+            : "The agent is waiting for an answer to its request; your message is steered in once that is answered.", message);
         }
         return true;
       }
@@ -638,7 +642,7 @@ export function AgentOrchestratorChat({
       // Several messages typed during one turn go together, in order.
       setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what: "Message", message: text }));
       setDraft(""); setAttachments([]); setAttachNote("");
-      say("Queued", `It's sent when the current turn finishes.${latest && runOpen && stop ? " Send /stop to end the turn now." : ""}`);
+      say("Queued", `It's sent when the current turn finishes.${latest && runOpen && stop ? " Send /stop to end the turn now." : ""}`, text);
       return;
     }
     await deliver(text);
@@ -687,6 +691,19 @@ export function AgentOrchestratorChat({
       say(next.what, next.what === "Message" ? "The queued message couldn't be sent; it's back in the composer." : "The queued message couldn't be sent; run the command again.");
     });
   }, [queueVersion, selectedTaskId, accepts, busy, sending, windowFocused]);
+  // In steer mode a queued message (the agent was waiting on a request, or still starting) is
+  // steered in as soon as the agent can take it, not held until the whole turn ends. A steer that
+  // still finds it waiting comes back to the queue; the backend waits up to half a minute each time.
+  const steeringQueue = useRef(false);
+  useEffect(() => {
+    const task = selectedTaskId, [next, ...rest] = queueOf(task);
+    if (!task || !next || accepts || !steering || awaitingAnswer || next.goal || next.what !== "Message"
+      || busy || sending || steeringQueue.current || !windowFocused) return;
+    steeringQueue.current = true;
+    setQueue(task, rest);
+    void deliver(next.message).then((sent) => { if (!sent) setQueue(task, [next, ...queueOf(task)]); })
+      .finally(() => { steeringQueue.current = false; });
+  }, [queueVersion, selectedTaskId, accepts, steering, awaitingAnswer, busy, sending, windowFocused]);
   /**
    * Sends a command's message now when the chat is free, steers it into the working agent when it
    * can be steered (never a goal), and otherwise queues it for when the current turn finishes.
@@ -1061,6 +1078,7 @@ export function AgentOrchestratorChat({
         {card ? <section className="cx-command-card" role="status" aria-label={card.title}>
           <header><strong>{card.title}</strong>
             <button type="button" className="cx-icon-button" aria-label="Close" onClick={() => setCard(null)}><Icon name="close" width="12" height="12" /></button></header>
+          {card.quote ? <blockquote className="cx-command-quote">{card.quote.length > 280 ? `${card.quote.slice(0, 279)}…` : card.quote}</blockquote> : null}
           {card.rows?.length ? <dl>{card.rows.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl> : null}
           {card.text ? card.mono ? <pre>{card.text}</pre> : <p>{card.text}</p> : null}
           {card.items?.length ? <ul>{card.items.map((item, index) => <li key={`${item.label}:${index}`}>
@@ -1174,6 +1192,8 @@ export function AgentOrchestratorChat({
                   <Icon name="forward" width="18" height="18" /></button>}
           </div>
         </form>
+        {selectedTaskId ? <ChatTurnStats model={agentSessions[0]?.model} rounds={turns.filter((turn) => turn.runId).length}
+          from={[...turns].reverse().find((turn) => turn.runId && turn.startedAtMs)?.startedAtMs} running={runOpen} /> : null}
       </section>
       {showStructure && structure ? <aside className="cx-structure" aria-label="Cards" style={cardsWidth ? { flexBasis: cardsWidth } : undefined}>
         <div className="cx-structure-resize" role="separator" aria-orientation="vertical" aria-label="Resize the cards panel" tabIndex={0}

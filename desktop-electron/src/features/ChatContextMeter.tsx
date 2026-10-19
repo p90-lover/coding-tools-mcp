@@ -72,26 +72,35 @@ function checkedLabel(at: number | null, now = Date.now()): string {
   return minutes < 1 ? "checked just now" : minutes < 60 ? `checked ${minutes} min ago` : `checked ${Math.round(minutes / 60)} h ago`;
 }
 
+/** "deepseek-v4.1-flash" from "cpa/cline-pass/deepseek-v4.1-flash". */
+const modelName = (model?: string) => (model ? model.slice(model.lastIndexOf("/") + 1) : "");
+/** The legend's short names; the full ones are on hover. */
+const SHORT_CATEGORY: Record<string, string> = { system: "System", tools: "Tool calls", messages: "Messages" };
+
 const tone = (fraction: number | null) => (fraction === null ? "unknown" : fraction >= 0.85 ? "high" : fraction >= 0.6 ? "mid" : "low");
 
-/** "Last 7 days: 1.2M tokens (in 900k · out 300k) · 42 requests · ~$3.10" for one CPA account. */
+/** "7 days · 1.2M tokens · 42 requests · ~$3.10" for one CPA account; the in/out split is on hover. */
 function UsageLine({ account }: { account: CpaUsageAccount | undefined }) {
   if (!account) return null;
-  if (!account.requests) return <p className="cx-context-note">Last 7 days: no requests</p>;
-  return <p className="cx-context-note" title={costSourceLabel(account.costSource, account.costPartial, false)}>
-    Last 7 days: {tokensShort(account.totalTokens)} tokens (in {tokensShort(account.inputTokens)} · out {tokensShort(account.outputTokens)})
-    {" "}· {account.requests.toLocaleString()} requests · {costLabel(account.cost, account.costPartial)}
+  if (!account.requests) return <p className="cx-ctx-meta">7 days · no requests</p>;
+  return <p className="cx-ctx-meta" title={`In ${tokensShort(account.inputTokens)} · out ${tokensShort(account.outputTokens)}\n${costSourceLabel(account.costSource, account.costPartial, false)}`}>
+    7 days · {tokensShort(account.totalTokens)} tokens · {account.requests.toLocaleString()} requests · {costLabel(account.cost, account.costPartial)}
   </p>;
 }
 
-/** A plan usage limit as Claude Code shows one: its name, a bar, "N% used" and when it resets. */
+/** A bar that grows in when the panel opens and follows each new reading after. */
+function Bar({ percent, level }: { percent: number; level: string }) {
+  return <div className={`cx-ctx-bar is-${level}`}><span style={{ width: `${Math.max(0, Math.min(100, percent))}%` }} /></div>;
+}
+
+/** A plan usage limit: its name, the share used and a bar; when it resets is on the right. */
 function LimitRow({ name, used, resetsAt }: { name: string; used: number; resetsAt: number | null }) {
   const percent = Math.max(0, Math.min(100, Math.round(used)));
   const resets = resetLabel(resetsAt);
-  return <div className="cx-context-limit">
-    <div><span>{name}</span><b>{percent}% used</b></div>
-    <div className={`cx-context-bar is-${tone(percent / 100)}`}><span style={{ width: `${percent}%` }} /></div>
-    {resets ? <small>{resets}</small> : null}
+  return <div className="cx-ctx-limit" title={resets || undefined}>
+    <div><span>{name}</span><b>{percent}%</b></div>
+    <Bar percent={percent} level={tone(percent / 100)} />
+    {resets ? <small>{resets.replace(/^Resets/, "resets")}</small> : null}
   </div>;
 }
 
@@ -112,27 +121,31 @@ export function contextGrid(categories: { id: string; tokens: number }[], window
   return cells;
 }
 
-const share = (tokens: number, window: number | null) => (window ? ` (${((tokens / window) * 100).toFixed(1)}%)` : "");
+type Segment = { id: string; label: string; tokens: number };
 
-/** The panel's top half, laid out as Claude Code's /context: the grid, and beside it the model,
- * the total and each category's tokens. */
-function ContextUsage({ breakdown, model }: { breakdown: ContextBreakdown; model?: string }) {
-  const { window, used, free } = breakdown;
-  // An agent can report more in use than its window; shares and the grid then measure against
-  // the larger figure so they never pass 100%, and the total reads full, as contextFraction does.
-  const scale = window ? Math.max(window, used) : null;
-  const fraction = contextFraction({ contextUsed: used, contextWindow: window });
-  const rows = [...breakdown.categories.filter((category) => category.tokens > 0),
-    ...(free !== null ? [{ id: "free", label: "Free space", tokens: free }] : [])];
-  return <div className="cx-context-usage">
-    {scale ? <div className="cx-context-grid" aria-hidden="true">
-      {contextGrid(breakdown.categories, scale).map((id, index) => <span key={index} className={`is-${id}`} />)}
-    </div> : null}
-    <div className="cx-context-legend">
-      <p>{model ? <><b>{model}</b> · </> : null}{tokensShort(used)}{window ? `/${tokensShort(window)}` : ""} tokens{fraction !== null ? ` (${Math.round(fraction * 100)}%)` : ""}</p>
-      <ul>{rows.map((row) => <li key={row.id}><i className={`is-${row.id}`} aria-hidden="true" />
-        <span>{row.label}:</span> <b>{tokensShort(row.tokens)}</b>{share(row.tokens, scale)}</li>)}</ul>
+/**
+ * The window as one stacked bar: each part of the context (system and tools, messages, or only
+ * "used" when the agent reports a total) a segment, the rest free. It sweeps in when the panel
+ * opens; pointing at a segment or its legend chip lifts both.
+ */
+function ContextBar({ segments, scale, estimated }: { segments: Segment[]; scale: number; estimated: string | null }) {
+  const [focus, setFocus] = useState("");
+  const used = segments.reduce((sum, segment) => sum + segment.tokens, 0);
+  const free = Math.max(0, scale - used);
+  const parts = [...segments.filter((segment) => segment.tokens > 0), ...(free > 0 ? [{ id: "free", label: "Free", tokens: free }] : [])];
+  const share = (tokens: number) => `${((tokens / scale) * 100).toFixed(tokens / scale < 0.1 ? 1 : 0)}%`;
+  return <div className={`cx-ctx-stack${focus ? " has-focus" : ""}`} onPointerLeave={() => setFocus("")}>
+    <div className="cx-ctx-track" role="img" aria-label={parts.map((part) => `${part.label} ${tokensShort(part.tokens)}`).join(", ")}>
+      {parts.map((part) => <span key={part.id} className={`is-${part.id}${focus === part.id ? " is-focus" : ""}`}
+        style={{ flexBasis: `${(part.tokens / scale) * 100}%` }} title={`${part.label} · ${tokensShort(part.tokens)} · ${share(part.tokens)}`}
+        onPointerEnter={() => setFocus(part.id)} />)}
     </div>
+    <ul className="cx-ctx-legend">
+      {parts.map((part) => <li key={part.id} className={focus === part.id ? "is-focus" : undefined} onPointerEnter={() => setFocus(part.id)}
+        title={part.id !== "free" && estimated ? estimated : undefined}>
+        <i className={`is-${part.id}`} aria-hidden="true" />{part.label}<b>{tokensShort(part.tokens)}</b>
+      </li>)}
+    </ul>
   </div>;
 }
 
@@ -267,6 +280,10 @@ export function ChatContextMeter({ sessionId, agentLabel, model, launchedWindow,
     ? (cpaUsage?.accounts ?? []).find((account) => account.quota?.kind === "cline") : undefined;
   const clineKeys = clineBridge?.quota?.kind === "cline" ? clineBridge.quota : null;
 
+  // An agent can report more in use than its window; the bar then measures against the larger figure.
+  const scale = usage?.contextWindow ? Math.max(usage.contextWindow, breakdown?.used ?? 0, usage.contextUsed ?? 0) : null;
+  const estimated = breakdown ? `Estimated from ${breakdown.counts.messages} messages and ${breakdown.counts.toolCalls} tool calls${breakdown.sinceCompaction ? " since the last compaction" : ""}${breakdown.complete ? "" : " (the most recent ones)"}; the agent reports only its total.` : null;
+
   return <>
     <button ref={button} type="button" className={`cx-icon-button cx-context-meter is-${tone(fraction)}`} aria-label={label} title={label}
       aria-haspopup="dialog" aria-expanded={Boolean(open)}
@@ -283,78 +300,77 @@ export function ChatContextMeter({ sessionId, agentLabel, model, launchedWindow,
     </button>
     {open ? <FloatingLayer className="cx-context-panel" role="dialog" style={{ left: open.left, bottom: open.bottom }}>
       <div ref={panel} aria-label="Context window">
-        <div className="cx-context-head">
-          <strong>Context Usage</strong>
-          {!breakdown ? <span>{usage ? fraction === null ? `${tokensShort(usage.contextUsed)} tokens` : `${tokensShort(usage.contextUsed)} / ${tokensShort(usage.contextWindow)} (${Math.round(fraction * 100)}%)` : "—"}</span> : null}
-        </div>
-        {breakdown ? <ContextUsage breakdown={breakdown} model={model} />
-          : fraction !== null ? <div className={`cx-context-bar is-${tone(fraction)}`}><span style={{ width: `${Math.round(fraction * 100)}%` }} /></div> : null}
-        {agentLabel ? <p className="cx-context-note">{agentLabel}{snapshot?.controller ? ` · ${snapshot.controller}` : ""}</p> : null}
-        {overridden ? <p className="cx-context-note">Launched with a {tokensShort(launched!)} window; the agent's own report says {tokensShort(reported?.contextWindow ?? null)}.</p> : null}
-        {pendingWindow ? <p className="cx-context-note is-pending">Next run: {tokensShort(pendingWindow)} window (set in the model menu).</p> : null}
-        {!sessionId ? <p className="cx-context-note">No agent has started in this chat yet; the meter fills once one answers.</p>
-          : !usage ? <p className="cx-context-note">The agent has not reported its context yet. It does after its first reply.</p> : <>
-            {breakdown ? null : fraction !== null ? <p className="cx-context-note">{tokensShort(Math.max(0, (usage.contextWindow ?? 0) - (usage.contextUsed ?? 0)))} free</p>
-              : <p className="cx-context-note">This agent does not say how large its window is, so there is no percentage.</p>}
-            <p className="cx-context-label">This conversation's tokens</p>
-            <dl className="cx-context-rows">
-              <dt>Input</dt><dd>{tokensShort(usage.inputTokens)}</dd>
-              <dt>Output</dt><dd>{tokensShort(usage.outputTokens)}</dd>
-              <dt>Cached</dt><dd>{tokensShort(usage.cachedTokens)}</dd>
-              <dt>Total</dt><dd>{tokensShort(usage.totalTokens)}</dd>
-              {usage.cost !== null ? <><dt>Cost</dt><dd>{usage.currency && usage.currency !== "USD" ? `${usage.cost.toFixed(2)} ${usage.currency}` : `$${usage.cost.toFixed(2)}`}</dd></> : null}
-            </dl>
-          </>}
-        {limitRows.length ? <>
-          <p className="cx-context-label">Plan usage limits{limits?.planLabel || snapshot?.planLabel ? ` · ${limits?.planLabel || snapshot?.planLabel}` : ""}</p>
-          {limitRows.map((row) => <LimitRow key={row.name} name={row.name} used={row.used} resetsAt={row.resetsAt} />)}
-        </> : null}
-        {cpaAccounts.length ? <>
-          <p className="cx-context-label">Plan usage limits · CPA Codex accounts ({cpaAccounts.length})</p>
-          {cpaAccounts.map((account) => <section key={account.id || account.label} className={`cx-context-account${account.disabled || account.paused ? " is-resting" : ""}`}>
-            <div className="cx-context-account-head">
+        <header className="cx-ctx-head">
+          <div>
+            <strong>Context</strong>
+            {agentLabel ? <small title={[agentLabel, snapshot?.controller].filter(Boolean).join(" · ")}>{modelName(model) || agentLabel}</small> : null}
+          </div>
+          {snapshot?.controller ? <span className={`cx-ctx-state is-${/busy|running|working/i.test(snapshot.controller) ? "busy" : "idle"}`}>{snapshot.controller}</span> : null}
+        </header>
+        {!sessionId || !usage ? <p className="cx-ctx-empty">{!sessionId ? "No agent yet" : "Waiting for the agent's first reply"}</p> : <>
+          <div className="cx-ctx-hero">
+            <b className={`is-${tone(fraction)}`}>{fraction === null ? tokensShort(usage.contextUsed) : `${Math.round(fraction * 100)}%`}</b>
+            <span>{fraction === null ? "tokens in context" : <>{tokensShort(usage.contextUsed)} <em>of</em> {tokensShort(usage.contextWindow)}</>}</span>
+          </div>
+          {scale ? <ContextBar scale={scale} estimated={estimated}
+            segments={breakdown ? breakdown.categories.map((category) => ({ id: category.id, label: SHORT_CATEGORY[category.id] ?? category.label, tokens: category.tokens }))
+              : [{ id: "used", label: "Used", tokens: usage.contextUsed ?? 0 }]} /> : null}
+          {overridden || pendingWindow ? <p className="cx-ctx-meta">
+            {overridden ? <span title={`The agent's own report says ${tokensShort(reported?.contextWindow ?? null)}`}>Launched at {tokensShort(launched!)}</span> : null}
+            {pendingWindow ? <span className="is-pending">Next run {tokensShort(pendingWindow)}</span> : null}
+          </p> : null}
+          <div className="cx-ctx-stats">
+            {[["In", usage.inputTokens], ["Out", usage.outputTokens], ["Cached", usage.cachedTokens], ["Total", usage.totalTokens]].map(([name, value]) =>
+              <div key={name as string}><b>{tokensShort(value as number | null)}</b><span>{name}</span></div>)}
+            {usage.cost !== null ? <div><b>{usage.currency && usage.currency !== "USD" ? `${usage.cost.toFixed(2)} ${usage.currency}` : `$${usage.cost.toFixed(2)}`}</b><span>Cost</span></div> : null}
+          </div>
+        </>}
+        {limitRows.length ? <section className="cx-ctx-section">
+          <h4>Limits{limits?.planLabel || snapshot?.planLabel ? <small>{limits?.planLabel || snapshot?.planLabel}</small> : null}</h4>
+          {limitRows.map((row) => <LimitRow key={row.name} name={row.name.replace("Current ", "")} used={row.used} resetsAt={row.resetsAt} />)}
+        </section> : null}
+        {cpaAccounts.length ? <section className="cx-ctx-section">
+          <h4>Codex accounts<small>{cpaAccounts.length}</small></h4>
+          {cpaAccounts.map((account) => <div key={account.id || account.label} className={`cx-ctx-account${account.disabled || account.paused ? " is-resting" : ""}`}>
+            <div className="cx-ctx-account-head">
               <span title={account.label}>{account.label}</span>
-              <small>{[account.plan ? account.plan[0].toUpperCase() + account.plan.slice(1) : "",
-                account.disabled ? "disabled" : account.paused ? "paused at its limit" : "", checkedLabel(account.checkedAt)].filter(Boolean).join(" · ")}</small>
+              <small title={checkedLabel(account.checkedAt)}>{[account.plan ? account.plan[0].toUpperCase() + account.plan.slice(1) : "",
+                account.disabled ? "disabled" : account.paused ? "at limit" : ""].filter(Boolean).join(" · ")}</small>
             </div>
-            {account.session ? <LimitRow name="Current session (5 h)" used={account.session.usedPercent} resetsAt={account.session.resetsAt} /> : null}
-            {account.week ? <LimitRow name="Current week" used={account.week.usedPercent} resetsAt={account.week.resetsAt} /> : null}
-            {!account.session && !account.week ? <p className="cx-context-note">{account.error || "CPA Helper has not checked this account's limits yet."}</p> : null}
+            {account.session ? <LimitRow name="5 hours" used={account.session.usedPercent} resetsAt={account.session.resetsAt} /> : null}
+            {account.week ? <LimitRow name="Week" used={account.week.usedPercent} resetsAt={account.week.resetsAt} /> : null}
+            {!account.session && !account.week ? <p className="cx-ctx-meta">{account.error || "Not checked yet"}</p> : null}
             <UsageLine account={usageById.get(account.id)} />
-          </section>)}
-        </> : onCpaCodex && !limitRows.length && quota && !quota.available ? <>
-          <p className="cx-context-label">Plan usage limits</p>
-          <p className="cx-context-note">{quota.reason || "CPA's account limits are unavailable."}</p>
-        </> : null}
-        {onCpaCline && !limitRows.length ? <>
-          <p className="cx-context-label">Plan usage limits · Cline Pass{clineKeys?.accounts.length ? ` (${clineKeys.accounts.length} keys, ${clineKeys.mode === "roundrobin" ? "round-robin" : "single key"})` : ""}</p>
-          {!cpaUsage ? null : !cpaUsage.available ? <p className="cx-context-note">{cpaUsage.reason || "CPA's account usage is unavailable."}</p> : <>
-            <p className="cx-context-note">Cline reports no remaining quota for a Cline Pass key. Each key's last request says whether it hit its limit.</p>
-            {(clineKeys?.accounts ?? []).map((key) => <section key={key.name} className={`cx-context-account${key.state === "disabled" || key.state === "limited" ? " is-resting" : ""}`}>
-              <div className="cx-context-account-head">
-                <span title={key.lastError ?? key.name}>{key.name}{key.active ? " · in use" : ""}</span>
-                <small>{[clineStateLabel(key.state, false), `${key.requests.toLocaleString()} requests`, `last used ${agoLabel(key.lastUsedAt, false)}`].join(" · ")}</small>
-              </div>
-            </section>)}
-            {!clineKeys ? <p className="cx-context-note">The Cline Pass switcher did not answer through CPA.</p> : null}
-            {clineKeys && !clineKeys.accounts.length ? <p className="cx-context-note">The Cline Pass switcher has no keys yet. Add one in CPA, under Plugins, Cline Pass.</p> : null}
+          </div>)}
+        </section> : onCpaCodex && !limitRows.length && quota && !quota.available ? <section className="cx-ctx-section">
+          <h4>Limits</h4><p className="cx-ctx-meta">{quota.reason || "CPA's account limits are unavailable."}</p>
+        </section> : null}
+        {onCpaCline && !limitRows.length && cpaUsage ? <section className="cx-ctx-section">
+          <h4 title="Cline reports no remaining quota for a Cline Pass key; each key's last request says whether it hit its limit.">Cline Pass
+            {clineKeys?.accounts.length ? <small>{clineKeys.accounts.length} {clineKeys.accounts.length === 1 ? "key" : "keys"}{clineKeys.accounts.length > 1 ? ` · ${clineKeys.mode === "roundrobin" ? "round-robin" : "single key"}` : ""}</small> : null}</h4>
+          {!cpaUsage.available ? <p className="cx-ctx-meta">{cpaUsage.reason || "CPA's account usage is unavailable."}</p> : <>
+            {(clineKeys?.accounts ?? []).map((key) => <div key={key.name} className={`cx-ctx-key${key.state === "disabled" || key.state === "limited" ? " is-resting" : ""}`} title={key.lastError ?? undefined}>
+              <i className={`cx-ctx-dot is-${key.state === "limited" || key.state === "disabled" ? "failed" : key.active ? "ok" : "other"}`} aria-hidden="true" />
+              <span>{key.name}</span>
+              {key.active ? <em>in use</em> : null}
+              <small>{key.requests.toLocaleString()} req · {agoLabel(key.lastUsedAt, false)}</small>
+            </div>)}
+            {!clineKeys ? <p className="cx-ctx-meta">The switcher did not answer through CPA.</p> : null}
+            {clineKeys && !clineKeys.accounts.length ? <p className="cx-ctx-meta">No keys yet: add one in CPA › Plugins › Cline Pass.</p> : null}
             <UsageLine account={clineBridge} />
           </>}
-        </> : null}
-        {snapshot?.mcpServers.length ? <>
-          <p className="cx-context-label">Tool servers ({snapshot.mcpServers.length})</p>
-          <ul className="cx-context-servers">{snapshot.mcpServers.map((server) => <li key={server.name}>
-            <span className={`cx-context-dot is-${/^(ready|connected|running|ok)$/i.test(server.status) ? "ok" : /fail|error/i.test(server.status) ? "failed" : "other"}`} aria-hidden="true" />
-            {server.name}<small>{server.status}</small></li>)}</ul>
-        </> : null}
-        <div className="cx-context-foot">
-          <span>{snapshot?.compactedAt ? `Compacted ${new Date(snapshot.compactedAt).toLocaleString()}` : "Not compacted yet"}</span>
+        </section> : null}
+        {snapshot?.mcpServers.length ? <section className="cx-ctx-section">
+          <h4>Tool servers<small>{snapshot.mcpServers.length}</small></h4>
+          <ul className="cx-ctx-servers">{snapshot.mcpServers.map((server) => <li key={server.name} title={server.status}>
+            <i className={`cx-ctx-dot is-${/^(ready|connected|running|ok)$/i.test(server.status) ? "ok" : /fail|error/i.test(server.status) ? "failed" : "other"}`} aria-hidden="true" />
+            {server.name}</li>)}</ul>
+        </section> : null}
+        <footer className="cx-ctx-foot">
+          <span title={snapshot?.compactedAt ? new Date(snapshot.compactedAt).toLocaleString() : undefined}>{snapshot?.compactedAt ? `Compacted ${agoLabel(Date.parse(snapshot.compactedAt), false)}` : "Never compacted"}</span>
           <button type="button" disabled={!canCompact} title={canCompact ? "Summarize the history to free context (/compact)" : "Compact works once the chat is not running"}
-            onClick={() => { setOpen(null); onCompact(); }}>Compact session</button>
-        </div>
-        <p className="cx-context-note is-quiet">{breakdown
-          ? `The agent reports only its total; the split is estimated from ${breakdown.counts.messages} messages and ${breakdown.counts.toolCalls} tool calls${breakdown.sinceCompaction ? " since the last compaction" : ""}${breakdown.complete ? "" : " (the most recent ones)"}, and the rest is its system prompt, tool definitions and memory files.`
-          : "The agent reports totals only, not a split by system prompt, tools and messages."}</p>
+            onClick={() => { setOpen(null); onCompact(); }}>Compact</button>
+        </footer>
       </div>
     </FloatingLayer> : null}
   </>;
