@@ -37,6 +37,26 @@ const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "../icons": { 
   "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => {} },
   "./ChatThreadList": load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu }) });
 
+test("every new card starts with instructions and an expected output for its role", () => {
+  const team = roles.defaultTeam("workspace", roles.workerRoute(roles.DEFAULT_WORKER_HARNESS, roles.DEFAULT_WORKER_MODEL));
+  for (const node of team.nodes) {
+    assert.ok(node.settings.instructions.length > 40, `${node.role} has instructions`);
+    assert.ok(node.settings.expected_output.length > 20, `${node.role} has an expected output`);
+  }
+  // The reviewer's verdict goes first in its final message, which is where the controller reads it.
+  assert.match(team.nodes.find(node => node.role === "reviewer").settings.expected_output, /^APPROVED or CHANGES_REQUIRED as the first word of your final message/);
+  for (const role of ["planner", "approver", "worker", "retry", "review_split", "sub_reviewer", "reviewer"]) {
+    const settings = roles.starterSettings(role, "Card");
+    assert.ok(settings.instructions && settings.expected_output, role);
+    assert.ok(settings.instructions.length <= 4096 && settings.expected_output.length <= 2048, `${role} fits the saved limits`);
+  }
+  // A quick preset adds its focus's rules and keeps its custom role name.
+  const tester = roles.starterSettings("worker", "Tester", "testing", "Tester");
+  assert.equal(tester.role_name, "Tester");
+  assert.match(tester.instructions, /pass\/fail counts/);
+  assert.equal(roles.starterSettings("worker", "Worker").role_name, undefined);
+});
+
 test("opening a working role shows live step and output, not a final-result placeholder", () => {
   const team = roles.defaultTeam("workspace", roles.workerRoute(roles.DEFAULT_WORKER_HARNESS, roles.DEFAULT_WORKER_MODEL));
   const node = { ...team.nodes[1], state: "running" };

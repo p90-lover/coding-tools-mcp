@@ -21,6 +21,62 @@ export type AoModelCatalog = { models: string[]; capabilities?: Record<string, A
 export type AoModelLoader = (harness: string) => Promise<string[] | AoModelCatalog>;
 export const emptyRoleSettings = (): RoleSettings => ({ name: "", specialty: "", instructions: "", expected_output: "", working_directory: "", revision: 0 });
 
+type CardRole = AoNode["role"];
+/**
+ * What a new card of each role is told to do. The card keeps its own editable copy (Instructions and
+ * Expected output), which is the text its agent reads; the role's built-in duty is added by the
+ * controller, so these are the working rules on top of it.
+ */
+const ROLE_STARTERS: Record<CardRole, { instructions: string; expected_output: string }> = {
+  planner: {
+    instructions: "Read the mission and the workspace before planning. Give each worker one concrete assignment with the files or areas it owns, the exact steps or commands, and a done-when check it can prove. Keep assignments independent so workers do not edit the same files. Name the tools each check must use.",
+    expected_output: "A short plan: one line per worker with its assignment and done-when check, then anything the reviewer must look at closely.",
+  },
+  approver: {
+    instructions: "Read every assignment as the commands it will run. Send it back if a step deletes or overwrites data, force-pushes, installs software, reaches outside the workspace or network, or touches secrets without the mission asking for it. Also send it back when a done-when check cannot be verified.",
+    expected_output: "APPROVED or CHANGES_REQUIRED as the first word, then the exact step that must change and why.",
+  },
+  worker: {
+    instructions: "Do only your assignment, inside the workspace. Use the tools the assignment names and run its done-when check yourself. Finish the work before you answer: your final message must contain every requested value (counts, paths, command output), not a promise to report it. If something blocks you, say exactly what and stop.",
+    expected_output: "What you changed or checked, the exact commands or tool calls with their key output, and whether the done-when check passed.",
+  },
+  retry: {
+    instructions: "Read the failed worker's error and evidence. Retry only when the failure looks temporary (rate limit, timeout, lost connection) or the assignment can succeed unchanged; wait when a provider or sign-in must recover; give up when the assignment itself is wrong.",
+    expected_output: "JSON only, with the action and a one-sentence reason.",
+  },
+  review_split: {
+    instructions: "Give every worker's output to exactly one sub-reviewer, and tell each sub-reviewer which done-when checks to verify.",
+    expected_output: "One line per sub-reviewer with the worker cards and checks it covers.",
+  },
+  sub_reviewer: {
+    instructions: "Check only your part. Re-run the cheapest read-only check that proves each claim (read the file, list the folder, run the test) instead of trusting the report. Do not edit anything.",
+    expected_output: "PART_OK or PART_FAILED as the first word of your final message, then what you verified and any claim that did not hold.",
+  },
+  reviewer: {
+    instructions: "Verify each worker's report against its assignment and done-when check. Re-run a read-only check for any claim you can test cheaply. A report that is cut off or missing a requested value is not done. Do not edit the implementation.",
+    expected_output: "APPROVED or CHANGES_REQUIRED as the first word of your final message, on its own line, then why. With CHANGES_REQUIRED, list the worker cards that must redo their work.",
+  },
+};
+
+/** Extra working rules for a quick worker preset, keyed by its focus. */
+const SPECIALTY_STARTERS: Record<string, string> = {
+  frontend: "Check the changed screens at the sizes they are used and keep them keyboard accessible.",
+  backend: "Validate inputs, handle errors explicitly, and add or update tests for the changed paths.",
+  testing: "Report each test command with its pass/fail counts; do not change product code to make a test pass.",
+  research: "Cite where each fact comes from (file and line, doc link, or command output) and do not edit files.",
+  security: "Report each risk with where it is, how it could be used, and a fix; do not change credentials.",
+  docs: "Match the existing documentation style and check every command or path you document.",
+  devops: "Make each build or deploy step repeatable and say how to roll it back.",
+};
+
+/** Settings for a new card: its name and focus, plus the starter instructions for its role. */
+export function starterSettings(role: CardRole, name: string, specialty = "", roleName?: string): RoleSettings {
+  const starter = ROLE_STARTERS[role];
+  const extra = SPECIALTY_STARTERS[specialty];
+  return { ...emptyRoleSettings(), name, specialty, ...(roleName ? { role_name: roleName } : {}),
+    instructions: extra ? `${starter.instructions}\n${extra}` : starter.instructions, expected_output: starter.expected_output };
+}
+
 export const NATIVE_HARNESS = "codex-native";
 /** New workers run Gemini through the CPA gateway on Claude Code (Native Codex is for OpenAI models). */
 export const DEFAULT_WORKER_HARNESS = "ao:claude-code";
@@ -327,9 +383,9 @@ export function teamForMission(mission: AoMission, saved: AoTeam | null): AoTeam
 export function defaultTeam(workspaceId: string, worker: AoRoute): AoTeam {
   return { id: crypto.randomUUID(), workspace_id: workspaceId, name: "Workspace team", revision: 0, worker_limit: 3,
     nodes: [
-      { id: "lead", task_id: "", role: "planner", parents: [], x: 0, y: 0, state: "pending", route: WEB_ROUTE, settings: { ...emptyRoleSettings(), name: "Orchestrator", specialty: "planning", instructions: "Break the mission into clear assignments. Coordinate workers and pass their evidence to independent review." } },
-      { id: "worker", task_id: "", role: "worker", parents: ["lead"], x: 0, y: 1, state: "pending", route: worker, settings: { ...emptyRoleSettings(), name: "Worker", specialty: "implementation", instructions: "Complete the assigned task within the selected workspace and report the result with evidence." } },
-      { id: "review", task_id: "", role: "reviewer", parents: ["worker"], x: 0, y: 2, state: "pending", route: WEB_ROUTE, settings: { ...emptyRoleSettings(), name: "Reviewer", specialty: "review", expected_output: "Begin with APPROVED or CHANGES_REQUIRED and explain why. Do not edit the implementation." } },
+      { id: "lead", task_id: "", role: "planner", parents: [], x: 0, y: 0, state: "pending", route: WEB_ROUTE, settings: starterSettings("planner", "Orchestrator", "planning") },
+      { id: "worker", task_id: "", role: "worker", parents: ["lead"], x: 0, y: 1, state: "pending", route: worker, settings: starterSettings("worker", "Worker", "implementation") },
+      { id: "review", task_id: "", role: "reviewer", parents: ["worker"], x: 0, y: 2, state: "pending", route: WEB_ROUTE, settings: starterSettings("reviewer", "Reviewer", "review") },
     ] };
 }
 
@@ -487,9 +543,21 @@ export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, l
   let immediateChange = false;
   const updateRole = (patch: Partial<AoNode>) => change({ ...draft, nodes: draft.nodes.map(item => item.id === roleId ? { ...item, ...patch } : item) }, immediateChange);
   const updateSettings = (patch: Partial<RoleSettings>) => updateRole({ settings: { ...settings, ...patch } });
+  // Starter text the user has not edited follows the card's role; edited text stays.
+  const followsStarter = (kind: AoNode["role"]) => {
+    const starter = starterSettings(kind, settings.name, settings.specialty);
+    return (!settings.instructions || settings.instructions === starter.instructions)
+      && (!settings.expected_output || settings.expected_output === starter.expected_output);
+  };
+  const roleDefaults = (kind: AoNode["role"]) => {
+    const { instructions, expected_output } = starterSettings(kind, settings.name, settings.specialty);
+    return { instructions, expected_output };
+  };
   const changeKind = (kind: AoNode["role"]) => {
     // Every role may run on any harness and model, so changing the role keeps its route.
-    if (role && (template || kind !== "retry" && role.role !== "retry")) updateRole({ role: kind, settings: { ...settings, role_name: "" } });
+    if (role && (template || kind !== "retry" && role.role !== "retry")) {
+      updateRole({ role: kind, settings: { ...settings, role_name: "", ...(followsStarter(role.role) ? roleDefaults(kind) : {}) } });
+    }
   };
   // A custom role works as a worker under the name the user typed; names already used in this
   // team are offered again.
@@ -530,6 +598,9 @@ export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, l
         <option value="">Custom</option>{SPECIALTIES.map(value => <option key={value} value={value}>{value}</option>)}
       </select></label>
       <label>Instructions<textarea aria-label="Instructions" rows={4} maxLength={4096} value={settings.instructions} onChange={event => updateSettings({ instructions: event.target.value })} /></label>
+      {!followsStarter(role.role) || !settings.instructions
+        ? <button type="button" className="ao-role-defaults" title="Replace this card's Instructions and Expected output with the starter text for its role and focus"
+          onClick={() => updateSettings(roleDefaults(role.role))}>Use role defaults</button> : null}
       <details className="ao-more">
         <summary>More</summary>
         <label>Expected output<textarea aria-label="Expected output" rows={3} maxLength={2048} value={settings.expected_output} onChange={event => updateSettings({ expected_output: event.target.value })} /></label>
