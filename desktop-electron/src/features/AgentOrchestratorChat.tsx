@@ -7,13 +7,14 @@ import { ChatMarkdown } from "./ChatMarkdown";
 import { ChatWorkbench, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
 import { ChatBranchBar } from "./ChatBranchBar";
 import { ChatContextMeter } from "./ChatContextMeter";
+import { ChatPet } from "./ChatPet";
 import { ChatTurnStats } from "./ChatTurnStats";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, chatAcceptsMessage, chatDuration, chatList, chatMessageWithAttachments, chatRunOpen,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
-  chatStatsSpan, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
+  chatStatsSpan, dshActivityTitle, isDeepSeekModel, petMood, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
   activitySummary, groupTimeline, tidyTimeline,
 } from "./ao-chat";
 
@@ -38,6 +39,8 @@ const CHAT_DRAFTS = new Map<string, string>();
 const CHAT_ATTACHMENTS = new Map<string, ChatAttachment[]>();
 /** The cards panel's dragged width (px), kept on this computer. */
 const CARDS_WIDTH_KEY = "coding-tools:ao:cards-panel-width";
+/** Whether the chat's pet is shown ("off" hides it), kept on this computer. */
+const PET_KEY = "coding-tools:ao:pet";
 
 /** Thread actions the chat header, its ⋯ menu and its slash commands share with the thread list. */
 export type ChatThreadActions = {
@@ -83,9 +86,10 @@ function stepTone(step: ChatStep): string {
  * "**Inspecting the register route**") as one progress line, the rest a click away.
  */
 function ReasoningItem({ item }: { item: ChatLiveItem }) {
+  const dsh = useContext(DshStyle);
   const lines = item.text.trim().split(/\r?\n/);
-  if (!lines[0]) return <span className="cx-live-label">{item.status === "running" ? "Thinking…" : "Thought"}</span>;
-  const label = item.status === "running" ? "Thinking" : "Thought";
+  if (!lines[0]) return <span className="cx-live-label">{dsh ? "Think" : item.status === "running" ? "Thinking…" : "Thought"}</span>;
+  const label = dsh ? "Think" : item.status === "running" ? "Thinking" : "Thought";
   const headline = lines[0].replace(/^\s*\*\*(.+?)\*\*\s*$/, "$1").replace(/[*_`]/g, "").trim();
   // A model that thinks in one long paragraph shows it as one line, the whole of it a click away.
   const rest = lines.slice(1).join("\n").trim() || (headline.length > 140 ? headline : "");
@@ -115,7 +119,8 @@ function toolTone(status: string): "ok" | "failed" | "running" {
 /** A tool call as Claude Code shows it: a dot, its name and one line, opening on what it ran and got back. */
 function ToolItem({ item }: { item: ChatLiveItem }) {
   const tone = toolTone(item.status);
-  const name = item.kind === "command" ? (tone === "running" ? "Running" : "Ran") : item.label ?? item.kind.replace(/_/g, " ");
+  const dsh = useContext(DshStyle);
+  const name = item.kind === "command" ? (dsh ? "Bash" : tone === "running" ? "Running" : "Ran") : item.label ?? item.kind.replace(/_/g, " ");
   const head = <><span className="cx-tool-dot" aria-hidden="true" /><span className="cx-live-label">{name}</span>
     <span className="cx-live-text">{toolHeadline(item)}</span>{item.count && item.count > 1 ? <span className="cx-tool-count">×{item.count}</span> : null}</>;
   const opens = item.kind === "command" || item.input || item.output;
@@ -143,7 +148,8 @@ function EditItem({ item }: { item: ChatLiveItem }) {
   const tone = toolTone(item.status);
   const additions = files.reduce((sum, file) => sum + file.additions, 0);
   const deletions = files.reduce((sum, file) => sum + file.deletions, 0);
-  const head = <><span className="cx-tool-dot" aria-hidden="true" /><span className="cx-live-label">{item.label ?? "Edited"}</span>
+  const dsh = useContext(DshStyle);
+  const head = <><span className="cx-tool-dot" aria-hidden="true" /><span className="cx-live-label">{dsh ? "Edit" : item.label ?? "Edited"}</span>
     <span className="cx-live-text" title={files.map((file) => file.path).join("\n")}>{files.length === 1 ? fileName(files[0].path) : `${files.length} files`}</span>
     <DiffCount additions={additions} deletions={deletions} /></>;
   if (!files.some((file) => file.diff)) return <div className={`cx-tool tone-${tone}`}><div className="cx-tool-row">{head}</div></div>;
@@ -178,6 +184,12 @@ export function workSummary(items: ChatLiveItem[]): { text: string; additions: n
 
 /** Compact activity: runs of tool calls and thinking fold into one line each (the chat's toggle). */
 export const CompactActivity = createContext(true);
+/**
+ * A turn on a DeepSeek model shows as DeepSeek Harness (dsh) shows one: "Think" rows, "Bash" and
+ * "Edit" rows, groups headed by the kind of work, "Deep diving for 12s" while it runs and
+ * "Completed" once done. Set per turn (its model), so other models keep their own look.
+ */
+export const DshStyle = createContext(false);
 export const COMPACT_ACTIVITY_KEY = "coding-tools:ao:compact-activity";
 
 /** A row redraws only when what it shows changed: a poll rebuilds every item object each second. */
@@ -205,11 +217,16 @@ function LiveRowView({ item }: { item: ChatLiveItem }) {
 function ActivityGroup({ items, live }: { items: ChatLiveItem[]; live: boolean }) {
   const [open, setOpen] = useState(false);
   const latest = items[items.length - 1];
+  const dsh = useContext(DshStyle);
   return <div className={`cx-group${live ? " is-live" : ""}`}>
     <button type="button" className="cx-activity-head" aria-expanded={open} onClick={() => setOpen(!open)}>
       <Icon name="chevron" width="11" height="11" className={open ? "is-open" : undefined} />
-      <span className={`cx-group-verb${live ? " cx-shimmer" : ""}`}>{live ? "Working" : "Explored"}</span>
-      <span className="cx-group-text">{activitySummary(items)}</span>
+      {/* dsh heads a group by its kind of work and no counts: "Running commands · npm test" live,
+          "Read files, searched code and ran commands" once done. */}
+      {dsh ? <><span className={`cx-group-verb${live ? " cx-shimmer" : ""}`}>{dshActivityTitle(items, live)}</span>
+        {live && latest && latest.kind !== "reasoning" ? <span className="cx-group-text">{toolHeadline(latest)}</span> : null}</>
+        : <><span className={`cx-group-verb${live ? " cx-shimmer" : ""}`}>{live ? "Working" : "Explored"}</span>
+          <span className="cx-group-text">{activitySummary(items)}</span></>}
     </button>
     {open ? <ol className="cx-live">{items.map((item) => <LiveRow key={item.id} item={item} />)}</ol>
       : live && latest ? <ol className="cx-live cx-group-now"><LiveRow item={latest} /></ol> : null}
@@ -297,11 +314,13 @@ function AnswerWork({ step, runId, expanded, loadWork }: { step: ChatStep; runId
   const [chosen, setChosen] = useState<boolean | null>(null);
   const open = chosen ?? expanded;
   const work = useStepWork(step, runId, open, loadWork);
+  const dsh = useContext(DshStyle);
   if (!work?.length && !step.hasWork) return null;
   const summary = workSummary(work ?? []);
   return <div className="cx-work">
+    {/* dsh folds a finished turn under "Completed", the answer showing below it. */}
     <button type="button" className="cx-work-head" aria-expanded={open} onClick={() => setChosen(!open)}>
-      <span>{summary.text}</span>
+      <span>{dsh ? "Completed" : summary.text}</span>
       {summary.additions || summary.deletions ? <DiffCount additions={summary.additions} deletions={summary.deletions} /> : null}
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
     </button>
@@ -337,16 +356,21 @@ function WorkGroupView({ turn, idle = false, expanded = false, loadWork }: WorkG
   // Live and failed work opens by itself, and finished work too when the chat shows its details
   // (single-model chats by default); a toggle on the turn itself holds over both.
   const [chosen, setChosen] = useState<boolean | null>(null);
+  const dsh = useContext(DshStyle);
   const open = chosen ?? (expanded || Boolean(working) || turn.steps.some((step) => step.error));
   if (!turn.steps.length) {
     if (turn.final) return <AnswerWork step={turn.final} runId={turn.runId} expanded={expanded} loadWork={loadWork} />;
     return !idle && (turn.status === "running" || turn.status === "queued")
-      ? <div className="cx-work is-live"><span className="cx-shimmer">Starting…</span></div> : null;
+      ? <div className="cx-work is-live"><span className="cx-shimmer">{dsh ? "Deep diving ···" : "Starting…"}</span></div> : null;
   }
+  // dsh says "Deep diving for 12s ···" while the model works, and how the turn ended once it has.
   const label = working
-    ? <>{working.working!.stalled ? "May be stuck" : "Working"}{turn.startedAtMs ? <> for <Elapsed since={turn.startedAtMs} /></> : null}
-      {` · ${working.name}${working.working!.activity ? ` — ${working.working!.activity}` : ""}`}</>
-    : `Worked · ${turn.steps.length} ${turn.steps.length === 1 ? "step" : "steps"}`;
+    ? dsh && !working.working!.stalled
+      ? <span className="cx-dsh-diving">Deep diving{turn.startedAtMs ? <> for <Elapsed since={turn.startedAtMs} /></> : null} ···</span>
+      : <>{working.working!.stalled ? "May be stuck" : "Working"}{turn.startedAtMs ? <> for <Elapsed since={turn.startedAtMs} /></> : null}
+        {` · ${working.name}${working.working!.activity ? ` — ${working.working!.activity}` : ""}`}</>
+    : dsh ? (turn.steps.some((step) => step.error) ? "Failed" : turn.status === "stopped" ? "Stopped" : "Completed")
+      : `Worked · ${turn.steps.length} ${turn.steps.length === 1 ? "step" : "steps"}`;
   return <div className={`cx-work${working ? " is-live" : ""}${working?.working?.stalled ? " is-stalled" : ""}`}>
     <button type="button" className="cx-work-head" aria-expanded={open} onClick={() => setChosen(!open)}>
       <span className={working ? "cx-shimmer" : undefined}>{label}</span>
@@ -585,6 +609,14 @@ export function AgentOrchestratorChat({
     try { localStorage.setItem(COMPACT_ACTIVITY_KEY, current ? "off" : "on"); } catch { /* applies now regardless */ }
     return !current;
   });
+  // Bit, the chat's pet (ChatPet), shown unless turned off from the header menu or its own right-click.
+  const [petOn, setPetOn] = useState(() => { try { return localStorage.getItem(PET_KEY) !== "off"; } catch { return true; } });
+  const togglePet = () => setPetOn((current) => {
+    try { localStorage.setItem(PET_KEY, current ? "off" : "on"); } catch { /* applies now regardless */ }
+    return !current;
+  });
+  // The context ring's reading, which the pet's belly follows.
+  const [contextShare, setContextShare] = useState<number | null>(null);
   // The cards panel can be dragged wider for more board room; the width is kept per viewer.
   const [cardsWidth, setCardsWidth] = useState<number | null>(() => {
     try { const value = Number(localStorage.getItem(CARDS_WIDTH_KEY)); return Number.isFinite(value) && value >= 280 ? value : null; } catch { return null; }
@@ -1007,6 +1039,7 @@ export function AgentOrchestratorChat({
     ] as ChatMenuItem[] : []),
     ...(steer ? [{ label: "Steer while working", checked: steerOn, run: toggleSteer } as ChatMenuItem] : []),
     { label: "Compact activity", checked: compactActivity, run: toggleCompact } as ChatMenuItem,
+    { label: "Show pet", checked: petOn, run: togglePet } as ChatMenuItem,
     { label: workMode === "single" ? "Show work details" : "Show workers' activity", checked: showWork, run: toggleWork } as ChatMenuItem,
     { kind: "separator" },
     latest && chat?.status === "paused" && onResume ? { label: "Resume mission", run: onResume }
@@ -1029,7 +1062,9 @@ export function AgentOrchestratorChat({
 
   // The conversation, kept while only the composer changes: each keystroke re-rendered every turn,
   // and a long running turn's hundreds of rows with it, which made typing lag.
-  const threadTurns = useMemo(() => turns.map((turn, turnIndex) => <article key={turn.key} className="cx-turn">
+  const threadTurns = useMemo(() => turns.map((turn, turnIndex) => {
+    const dsh = isDeepSeekModel(chatRuns.find((run) => run.id === turn.runId)?.nodes.find((node) => node.role === "planner")?.route?.model);
+    return <DshStyle.Provider key={turn.key} value={dsh}><article className={`cx-turn${dsh ? " is-dsh" : ""}`}>
               {turn.user ? <div className="cx-user">
                 <div className="cx-bubble"><p>{turn.user.text}</p></div>
                 <MessageActions text={turn.user.text}>
@@ -1063,7 +1098,8 @@ export function AgentOrchestratorChat({
                 ? <p className="cx-note">Finished without an answer.</p> : null}
               {turn.status === "stopped" ? <p className="cx-note">Stopped</p> : null}
               {turn.solo ? <p className="cx-note">Answered by the orchestrator alone; no workers ran.</p> : null}
-            </article>), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, restart, runOpen, busy]);
+            </article></DshStyle.Provider>;
+  }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, restart, runOpen, busy]);
 
   return (<CompactActivity.Provider value={compactActivity}>
     <div className={`cx-chat${showStructure && structure ? " has-structure" : ""}`}>
@@ -1094,8 +1130,10 @@ export function AgentOrchestratorChat({
           {structure || latest ? <button type="button" className="cx-icon-button" aria-pressed={showStructure} title="Show cards (Structure)" aria-label="Show cards"
             disabled={!latest} onClick={() => structure ? setShowStructure((value) => !value) : latest && openStructure(latest.id)}>
             <Icon name="orchestrator" width="16" height="16" /></button> : null}
-          {selectedTaskId ? <button type="button" className="cx-icon-button" aria-pressed={workbench !== null} title="Preview and terminal"
-            aria-label="Show preview and terminal" onClick={() => setWorkbench((open) => (open ? null : "preview"))}>
+          {/* The side panel opens on its Overview, as Claude Code's side column: context, changes,
+              tasks and usage, each a click from its tab (the browser chip still opens Preview). */}
+          {selectedTaskId ? <button type="button" className="cx-icon-button" aria-pressed={workbench !== null} title="Side panel: overview, preview, terminal, changes and files"
+            aria-label="Show side panel" onClick={() => setWorkbench((open) => (open ? null : "overview"))}>
             <Icon name="browser" width="16" height="16" /></button> : null}
           {onOpenMissionBoard ? <button type="button" className="cx-icon-button" title="Mission Board" aria-label="Open Mission Board" onClick={onOpenMissionBoard}>
             <Icon name="logs" width="16" height="16" /></button> : null}
@@ -1271,6 +1309,12 @@ export function AgentOrchestratorChat({
         <form className="cx-composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}
           onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
           onDrop={(event) => { if (event.dataTransfer.files.length) { event.preventDefault(); void addFiles(event.dataTransfer.files); } }}>
+          {petOn && selectedTaskId ? (() => {
+            const last = [...turns].reverse().find((turn) => turn.runId);
+            return <ChatPet context={contextShare} onHide={togglePet}
+              mood={petMood({ asking: awaitingAnswer, running: runOpen && anyWorking, lastStatus: last?.status,
+                lastFailed: Boolean(last && !runOpen && [...last.steps, ...(last.final ? [last.final] : [])].some((step) => step.state === "failed" || step.state === "held")) })} />;
+          })() : null}
           {slash.length ? <ul className="cx-slash" role="listbox" aria-label="Commands">
             {slash.map((command, index) => <li key={command.name} role="option" aria-selected={index === slashIndex % slash.length}>
               <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => pick(command.name)}>
@@ -1326,7 +1370,7 @@ export function AgentOrchestratorChat({
             <span className="cx-head-spacer" />
             {selectedTaskId ? <ChatContextMeter sessionId={agentSessions[0]?.id} agentLabel={agentSessions[0]?.label} model={agentSessions[0]?.model}
               launchedWindow={agentSessions[0]?.contextWindow} nextWindow={composer?.route?.context_window}
-              canCompact={Boolean(commands && accepts)} onCompact={() => void runCommand("compact")} /> : null}
+              canCompact={Boolean(commands && accepts)} onCompact={() => void runCommand("compact")} onFraction={setContextShare} /> : null}
             <button type="button" className="cx-icon-button cx-mic" aria-label="Voice input" title="Voice input isn't available yet" disabled>
               <ChatGlyph name="mic" size={16} /></button>
             {latest && runOpen && stop && !accepts && !((steering || queueing) && canSend)

@@ -13,6 +13,19 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 const node = (id, role, state, extra = {}) => ({ id, role, state, x: 0, ...extra });
 const run = (id, taskId, nodes, extra = {}) => ({ id, project_id: taskId, cancelled: false, nodes, ...extra });
 
+test("a DeepSeek model's work is headed as DeepSeek Harness heads it: what it is doing live, the kinds of work once done", () => {
+  const item = (kind, extra = {}) => ({ id: `${kind}${Math.random()}`, kind, status: "completed", text: "", ...extra });
+  assert.equal(chat.isDeepSeekModel("cpa/cline-pass/deepseek-v4.1-flash"), true);
+  assert.equal(chat.isDeepSeekModel("cpa/cline-pass/glm-5.3-flash"), false);
+  assert.equal(chat.dshActivityTitle([item("tool", { label: "Read" }), item("command", { text: "npm test" })], true), "Running commands", "live: the latest step");
+  assert.equal(chat.dshActivityTitle([item("tool", { label: "Read" }), item("tool", { label: "Grep" }), item("command"), item("reasoning")], false),
+    "Read files, searched code and ran commands", "done: the kinds of work, no counts, thinking left out");
+  assert.equal(chat.dshActivityTitle([item("tool", { label: "Read" }), item("tool", { label: "Grep" }), item("command"), item("edit")], false),
+    "Read files, searched code and ran commands, etc.", "more than three kinds");
+  assert.equal(chat.dshActivityTitle([item("reasoning")], false), "Thought", "thinking alone");
+  assert.equal(chat.dshActivityTitle([item("tool", { text: "mcp__coding-tools__list_dir" })], false), "Read files", "an MCP read tool by its own name");
+});
+
 test("the stats line counts the latest turn and the failed or stopped attempts right before it, on every model they used", () => {
   // Seen live: a message stopped on deepseek-v4.1-flash and sent again on -1017 showed only the new run's time.
   const card = (state, model, started) => node("p", "planner", state, { route: { harness_id: "ao:claude-code", model }, receipt: { started_at_ms: started } });

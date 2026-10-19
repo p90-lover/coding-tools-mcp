@@ -25,6 +25,7 @@ const meter = load("ChatContextMeter.tsx", { "./ao-chat": chat, "./ChatMenu": me
   "../api/client": client, "./cpa-usage": load("cpa-usage.ts", { "../api/client": client }) });
 const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null, Caret: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
   "./ChatContextMeter": meter,
+  "./ChatPet": load("ChatPet.tsx", { "./ao-chat": chat }),
   "./ChatTurnStats": load("ChatTurnStats.tsx", { "./ao-chat": chat, "../api/client": client }),
   "./codex-prompts": load("codex-prompts.ts"),
   // The branch bar reads git asynchronously and renders nothing until then, as here; composer
@@ -196,6 +197,17 @@ test("an AO agent's question shows as a card with its options, an Other box, and
   assert.match(html, /placeholder="Other: type your own answer"/);
   assert.match(html, /<button[^>]*disabled=""[^>]*>Send answer<\/button>/, "nothing chosen yet");
   assert.match(html, />Skip<\/button>/);
+});
+
+test("the side panel opens on an Overview of the chat: environment, context, changes, background tasks and usage", () => {
+  const workbench = load("ChatWorkbench.tsx", { "../api/client": client, "../icons": { Icon: () => null }, "./ao-chat": chat,
+    "./cpa-usage": load("cpa-usage.ts", { "../api/client": client }) });
+  const html = renderToStaticMarkup(React.createElement(workbench.ChatWorkbench, {
+    sessions: [{ id: "ao-1", label: "Claude Code", model: "cpa/cline-pass/glm-5.3-flash", contextWindow: 400000 }],
+    tab: "overview", onTab: () => {}, onClose: () => {}, workspaceId: "ws" }));
+  for (const heading of ["Environment", "Context", "Changes", "Background tasks", "Usage"]) assert.match(html, new RegExp(`<h4>${heading}`), heading);
+  assert.match(html, /glm-5\.3-flash/, "the model by its own name");
+  assert.match(html, /Today<\/button>/, "usage can switch between today, 7 and 30 days");
 });
 
 test("an agent's new page brings the Preview pane forward, even over the Terminal its dev server opened", () => {
