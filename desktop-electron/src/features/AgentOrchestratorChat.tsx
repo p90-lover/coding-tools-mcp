@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, memo, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { Caret, Icon } from "../icons";
 import { AgentOrchestratorComposerControls, type ComposerControlsProps } from "./AgentOrchestratorComposerControls";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
@@ -14,6 +14,7 @@ import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, chatAcceptsMessage, chatDuration, chatList, chatMessageWithAttachments, chatRunOpen,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
+  activitySummary, groupTimeline, tidyTimeline,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -81,7 +82,8 @@ function ReasoningItem({ item }: { item: ChatLiveItem }) {
   if (!lines[0]) return <span className="cx-live-label">{item.status === "running" ? "Thinking…" : "Thought"}</span>;
   const label = item.status === "running" ? "Thinking" : "Thought";
   const headline = lines[0].replace(/^\s*\*\*(.+?)\*\*\s*$/, "$1").replace(/[*_`]/g, "").trim();
-  const rest = lines.slice(1).join("\n").trim();
+  // A model that thinks in one long paragraph shows it as one line, the whole of it a click away.
+  const rest = lines.slice(1).join("\n").trim() || (headline.length > 140 ? headline : "");
   return rest
     ? <details className="cx-reasoning"><summary><span className="cx-live-label">{label}</span><span className="cx-live-text">{headline}</span></summary>
       <div className="cx-reasoning-body"><ChatMarkdown text={rest} /></div></details>
@@ -110,7 +112,7 @@ function ToolItem({ item }: { item: ChatLiveItem }) {
   const tone = toolTone(item.status);
   const name = item.kind === "command" ? (tone === "running" ? "Running" : "Ran") : item.label ?? item.kind.replace(/_/g, " ");
   const head = <><span className="cx-tool-dot" aria-hidden="true" /><span className="cx-live-label">{name}</span>
-    <span className="cx-live-text">{toolHeadline(item)}</span></>;
+    <span className="cx-live-text">{toolHeadline(item)}</span>{item.count && item.count > 1 ? <span className="cx-tool-count">×{item.count}</span> : null}</>;
   const opens = item.kind === "command" || item.input || item.output;
   return opens
     ? <details className={`cx-tool tone-${tone}`}><summary>{head}</summary>
@@ -169,17 +171,55 @@ export function workSummary(items: ChatLiveItem[]): { text: string; additions: n
   };
 }
 
+/** Compact activity: runs of tool calls and thinking fold into one line each (the chat's toggle). */
+export const CompactActivity = createContext(true);
+export const COMPACT_ACTIVITY_KEY = "coding-tools:ao:compact-activity";
+
+/** A row redraws only when what it shows changed: a poll rebuilds every item object each second. */
+const sameLiveItem = (a: ChatLiveItem, b: ChatLiveItem) => a === b || (a.id === b.id && a.kind === b.kind && a.status === b.status
+  && a.text === b.text && a.label === b.label && a.description === b.description && a.count === b.count
+  && a.input === b.input && a.output === b.output && a.files === b.files);
+const LiveRow = memo(LiveRowView, (prev, next) => sameLiveItem(prev.item, next.item));
+
+function LiveRowView({ item }: { item: ChatLiveItem }) {
+  return <li className={`cx-live-item kind-${item.kind} is-${item.status || "done"}`}>
+    {item.kind === "steer" ? <div className="cx-user cx-steer"><div className="cx-bubble"><p>{item.text}</p></div></div>
+      : item.kind === "message" ? <ChatMarkdown text={item.text} />
+      : item.kind === "reasoning" ? <ReasoningItem item={item} />
+      : item.kind === "edit" ? <EditItem item={item} />
+      : item.kind === "command" || item.kind === "tool" ? <ToolItem item={item} />
+      : <><span className="cx-live-label">{item.label ?? item.kind.replace(/_/g, " ")}</span><span className="cx-live-text">{item.text}</span></>}
+  </li>;
+}
+
+/**
+ * A run of tool calls and thinking as one line, as Codex, Cursor and Claude Code fold them:
+ * "Explored · Ran a command, read_output ×7 · 3 thoughts". While the agent is in it, its latest
+ * step shows underneath; a click opens every step.
+ */
+function ActivityGroup({ items, live }: { items: ChatLiveItem[]; live: boolean }) {
+  const [open, setOpen] = useState(false);
+  const latest = items[items.length - 1];
+  return <div className={`cx-group${live ? " is-live" : ""}`}>
+    <button type="button" className="cx-group-head" aria-expanded={open} onClick={() => setOpen(!open)}>
+      <Icon name="chevron" width="11" height="11" className={open ? "is-open" : undefined} />
+      <span className={`cx-group-verb${live ? " cx-shimmer" : ""}`}>{live ? "Working" : "Explored"}</span>
+      <span className="cx-group-text">{activitySummary(items)}</span>
+    </button>
+    {open ? <ol className="cx-live">{items.map((item) => <LiveRow key={item.id} item={item} />)}</ol>
+      : live && latest ? <ol className="cx-live cx-group-now"><LiveRow item={latest} /></ol> : null}
+  </div>;
+}
+
 /** A role's turn, as Codex and Claude Code show it: thinking, tool calls and streamed messages. */
-function LiveTimeline({ items }: { items: ChatLiveItem[] }) {
-  return <ol className="cx-live">
-    {items.map((item) => <li key={item.id} className={`cx-live-item kind-${item.kind} is-${item.status || "done"}`}>
-      {item.kind === "steer" ? <div className="cx-user cx-steer"><div className="cx-bubble"><p>{item.text}</p></div></div>
-        : item.kind === "message" ? <ChatMarkdown text={item.text} />
-        : item.kind === "reasoning" ? <ReasoningItem item={item} />
-        : item.kind === "edit" ? <EditItem item={item} />
-        : item.kind === "command" || item.kind === "tool" ? <ToolItem item={item} />
-        : <><span className="cx-live-label">{item.label ?? item.kind.replace(/_/g, " ")}</span><span className="cx-live-text">{item.text}</span></>}
-    </li>)}
+function LiveTimeline({ items, live = false }: { items: ChatLiveItem[]; live?: boolean }) {
+  const compact = useContext(CompactActivity);
+  const tidy = tidyTimeline(items);
+  if (!compact) return <ol className="cx-live">{tidy.map((item) => <LiveRow key={item.id} item={item} />)}</ol>;
+  const segments = groupTimeline(tidy);
+  return <ol className="cx-live is-compact">
+    {segments.map((segment, index) => segment.kind === "item" ? <LiveRow key={segment.item.id} item={segment.item} />
+      : <li key={segment.key} className="cx-live-item kind-group"><ActivityGroup items={segment.items} live={live && index === segments.length - 1} /></li>)}
   </ol>;
 }
 
@@ -215,9 +255,11 @@ function StepRow({ step, runId, loadWork }: { step: ChatStep; runId: string; loa
   const [chosen, setOpen] = useState<boolean | null>(null);
   const open = chosen ?? Boolean(step.error || step.working?.timeline?.length);
   const work = useStepWork(step, runId, open, loadWork);
+  const compact = useContext(CompactActivity);
   const body = step.error || step.text || (work?.length || step.hasWork ? "work" : "");
   return <li className={`cx-step tone-${stepTone(step)}`}>
-    <button type="button" className="cx-step-head" aria-expanded={open} disabled={!body && !step.working} onClick={() => setOpen(!open)}>
+    <button type="button" className="cx-step-head" aria-expanded={open} disabled={!body && !step.working} onClick={() => setOpen(!open)}
+      title={step.working?.detail || undefined}>
       <span className="cx-step-dot" aria-hidden="true" />
       <span className="cx-step-name">{step.name}</span>
       <span className="cx-step-meta">
@@ -228,8 +270,8 @@ function StepRow({ step, runId, loadWork }: { step: ChatStep; runId: string; loa
     </button>
     {open ? <div className="cx-step-body">
       {step.detail ? <p className="cx-step-detail">{step.detail}</p> : null}
-      {step.working ? <p className="cx-step-detail">{step.working.detail}</p> : null}
-      {work?.length ? <LiveTimeline items={work} /> : null}
+      {step.working && !compact ? <p className="cx-step-detail">{step.working.detail}</p> : null}
+      {work?.length ? <LiveTimeline items={work} live={Boolean(step.working)} /> : null}
       {/* A held or failed card keeps the reply it gave: the error says why, the reply stays readable. */}
       {step.error ? <p className="cx-step-error">{step.error}</p> : null}
       {step.text ? <ChatMarkdown text={step.text} /> : null}
@@ -326,7 +368,7 @@ function GoalGlyph({ name }: { name: "target" | "trash" | "play" | "pause" | "ex
 
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
-  approvals, approve, describeRoute: _describeRoute, notice, retryStart, working = false, describeNode, activity, permissions, composer, onOpenTeam, onOpenMissionBoard,
+  approvals, approve, describeRoute: _describeRoute, notice, retryStart, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
   projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject, projectBranch: branch, steer,
   pendingMessage, pendingTitle, pendingCreation = false, commands, loadWork,
 }: {
@@ -361,6 +403,8 @@ export function AgentOrchestratorChat({
   onOpenTeam?: () => void;
   onOpenMissionBoard?: () => void;
   describeRoute: (nodeId: string, runId: string) => string;
+  /** A model's short name: a single-model chat's card is named by its model. */
+  modelName?: (model: string) => string;
   /** Why this chat's latest run could not start, if it could not. */
   notice?: string;
   retryStart: (runId: string) => void;
@@ -487,8 +531,8 @@ export function AgentOrchestratorChat({
     return () => window.clearInterval(timer);
   }, [anyWorking]);
   const turns: ChatTurn[] = useMemo(
-    () => chatTurns(chatRuns, descriptions[selectedTaskId] ?? pendingMessage, { describe: describeNode, activity, now }),
-    [chatRuns, descriptions, selectedTaskId, describeNode, activity, now, pendingMessage],
+    () => chatTurns(chatRuns, descriptions[selectedTaskId] ?? pendingMessage, { describe: describeNode, activity, now, modelName }),
+    [chatRuns, descriptions, selectedTaskId, describeNode, activity, now, pendingMessage, modelName],
   );
   const stepCount = turns.reduce((total, turn) => total + turn.steps.length + (turn.final ? 1 : 0), 0);
   // The side panel beside the thread (ChatWorkbench: preview, changes, files, terminal) for the
@@ -501,6 +545,24 @@ export function AgentOrchestratorChat({
   // Following new output jumps, even under a theme's smooth scrolling: an animated follow lags the
   // stream and flashes the ↓ button. Only that button scrolls smoothly.
   useEffect(() => { if (atBottom) scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "instant" }); }, [turns.length, stepCount, atBottom]);
+  // A running step grows without a new turn or step (each tool call, each streamed line): the
+  // thread follows any growth of its content while it is read at the bottom.
+  const column = useRef<HTMLDivElement>(null);
+  const following = useRef(atBottom);
+  following.current = atBottom;
+  useEffect(() => {
+    const box = scroller.current, content = column.current;
+    if (!box || !content || typeof ResizeObserver === "undefined") return undefined;
+    const observer = new ResizeObserver(() => { if (following.current) box.scrollTop = box.scrollHeight; });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [selectedTaskId]);
+  // Compact activity (the header's toggle): tool calls and thinking fold into one line per run.
+  const [compactActivity, setCompactActivity] = useState(() => { try { return localStorage.getItem(COMPACT_ACTIVITY_KEY) !== "off"; } catch { return true; } });
+  const toggleCompact = () => setCompactActivity((current) => {
+    try { localStorage.setItem(COMPACT_ACTIVITY_KEY, current ? "off" : "on"); } catch { /* applies now regardless */ }
+    return !current;
+  });
   // The cards panel can be dragged wider for more board room; the width is kept per viewer.
   const [cardsWidth, setCardsWidth] = useState<number | null>(() => {
     try { const value = Number(localStorage.getItem(CARDS_WIDTH_KEY)); return Number.isFinite(value) && value >= 280 ? value : null; } catch { return null; }
@@ -554,13 +616,8 @@ export function AgentOrchestratorChat({
     onSeedUsed?.();
     window.setTimeout(() => input.current?.focus(), 0);
   }, [seed?.key]);
-  // The composer grows with its text, like Codex, up to a cap.
-  useEffect(() => {
-    const box = input.current;
-    if (!box) return;
-    box.style.height = "auto";
-    box.style.height = `${Math.min(box.scrollHeight, 240)}px`;
-  }, [draft]);
+  // The composer grows with its text, like Codex, up to a cap: CSS field-sizing does it. Measuring
+  // it here on every key forced a layout of the whole chat each time, which typing felt.
 
   const runOpen = Boolean(latest) && chatRunOpen(chat?.status);
   const accepts = chatAcceptsMessage(chat?.status, working);
@@ -887,6 +944,7 @@ export function AgentOrchestratorChat({
       { label: "Copy conversation", run: thread.copyConversation },
     ] as ChatMenuItem[] : []),
     ...(steer ? [{ label: "Steer while working", checked: steerOn, run: toggleSteer } as ChatMenuItem] : []),
+    { label: "Compact activity", checked: compactActivity, run: toggleCompact } as ChatMenuItem,
     { label: workMode === "single" ? "Show work details" : "Show workers' activity", checked: showWork, run: toggleWork } as ChatMenuItem,
     { kind: "separator" },
     latest && chat?.status === "paused" && onResume ? { label: "Resume mission", run: onResume }
@@ -907,7 +965,45 @@ export function AgentOrchestratorChat({
     if (value && chat && value !== chat.title) await thread?.rename(value).catch(() => {});
   };
 
-  return (
+  // The conversation, kept while only the composer changes: each keystroke re-rendered every turn,
+  // and a long running turn's hundreds of rows with it, which made typing lag.
+  const threadTurns = useMemo(() => turns.map((turn, turnIndex) => <article key={turn.key} className="cx-turn">
+              {turn.user ? <div className="cx-user">
+                <div className="cx-bubble"><p>{turn.user.text}</p></div>
+                <MessageActions text={turn.user.text}>
+                  {thread ? <button type="button" title="Fork from here" aria-label="Fork from this message" onClick={() => thread.fork(turn.messageIndex ?? turnIndex)}>⑂</button> : null}
+                  {thread?.rewind ? <button type="button" title="Rewind: edit this message in a new chat" aria-label="Rewind to this message" onClick={() => thread.rewind?.(turn.messageIndex ?? turnIndex)}>↶</button> : null}
+                  {thread?.deleteMessage ? <button type="button" title={deleteBlocked || (deletion(turn) ? "Delete this message and its reply" : notYet)} aria-label="Delete this message"
+                    disabled={Boolean(deleteBlocked) || !deletion(turn) || deletingBusy} onClick={() => setDeleting(turnIndex)}>🗑</button> : null}
+                </MessageActions>
+                {turn.user.stamp ? <span className="cx-stamp">{turn.user.stamp} UTC</span> : null}
+              </div> : null}
+              {/* Messages steered into this turn. While it works they show in its live timeline, where
+                  they were sent; once it is done, here under the turn's message. */}
+              {turn.user?.steers?.length && !turn.steps.some((step) => step.working?.timeline?.some((item) => item.kind === "steer"))
+                ? turn.user.steers.map((steer, index) => <div key={`steer:${index}`} className="cx-user cx-steer">
+                  <div className="cx-bubble"><p>{steer.text}</p></div>
+                  <span className="cx-stamp">Steered · {steer.stamp} UTC</span>
+                </div>) : null}
+              <WorkGroup key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} idle={notStarted && turn.runId === latest?.id} expanded={showWork} loadWork={loadWork} />
+              {turn.final ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`}>
+                <div className="cx-answer-meta">
+                  <span>{turn.final.name}</span>
+                  {turn.final.verdict ? <span className={`cx-verdict is-${turn.final.verdict.toLowerCase()}`}>{turn.final.verdict}</span> : null}
+                  {turn.final.detail ? <span className="cx-answer-detail">{turn.final.detail}</span> : null}
+                </div>
+                <ChatMarkdown text={turn.final.text ?? ""} />
+                <MessageActions text={turn.final.text ?? ""}>
+                  {restart && turn.runId && turn.runId === latest?.id && !runOpen ? <button type="button" title="Retry" aria-label="Retry this mission" disabled={busy} onClick={() => restart(turn.runId)}>↻</button> : null}
+                </MessageActions>
+              </div> : null}
+              {!turn.final && turn.status === "done" && !turn.steps.some((step) => step.text || step.error)
+                ? <p className="cx-note">Finished without an answer.</p> : null}
+              {turn.status === "stopped" ? <p className="cx-note">Stopped</p> : null}
+              {turn.solo ? <p className="cx-note">Answered by the orchestrator alone; no workers ran.</p> : null}
+            </article>), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, restart, runOpen, busy]);
+
+  return (<CompactActivity.Provider value={compactActivity}>
     <div className={`cx-chat${showStructure && structure ? " has-structure" : ""}`}>
       <section className="cx-thread" aria-label={chat?.title || CHAT_DEFAULT_TITLE}>
         <header className="cx-thread-head">
@@ -924,6 +1020,10 @@ export function AgentOrchestratorChat({
           {chat ? <span className={`cx-status status-${chat.status}`}>{STATUS_LABEL[chat.status]}</span> : null}
           <span className="cx-head-spacer" />
           {headerExtra}
+          {selectedTaskId ? <button type="button" className="cx-icon-button cx-compact-toggle" aria-pressed={compactActivity}
+            title={compactActivity ? "Compact activity: tool calls and thinking fold into one line (click to show every step)" : "Every step shown (click to compact)"}
+            aria-label="Compact activity" onClick={toggleCompact}>
+            <Icon name={compactActivity ? "expand" : "minus"} width="16" height="16" /></button> : null}
           {structure || latest ? <button type="button" className="cx-icon-button" aria-pressed={showStructure} title="Show cards (Structure)" aria-label="Show cards"
             disabled={!latest} onClick={() => structure ? setShowStructure((value) => !value) : latest && openStructure(latest.id)}>
             <Icon name="orchestrator" width="16" height="16" /></button> : null}
@@ -968,7 +1068,7 @@ export function AgentOrchestratorChat({
 
         <div className="cx-scroll" ref={scroller}
           onScroll={(event) => { const box = event.currentTarget; setAtBottom(box.scrollHeight - box.scrollTop - box.clientHeight < 48); }}>
-          <div className="cx-column">
+          <div className="cx-column" ref={column}>
             {!turns.length ? <div className="cx-empty">
               {selectedTaskId ? <p>Loading…</p> : <>
                 <span className="cx-empty-glyph" aria-hidden="true"><ChatGlyph name="codex" size={40} /></span>
@@ -977,41 +1077,7 @@ export function AgentOrchestratorChat({
                   : <span className="cx-empty-project">{projectName}</span>}</> : null}?</h1>
               </>}
             </div> : null}
-            {turns.map((turn, turnIndex) => <article key={turn.key} className="cx-turn">
-              {turn.user ? <div className="cx-user">
-                <div className="cx-bubble"><p>{turn.user.text}</p></div>
-                <MessageActions text={turn.user.text}>
-                  {thread ? <button type="button" title="Fork from here" aria-label="Fork from this message" onClick={() => thread.fork(turn.messageIndex ?? turnIndex)}>⑂</button> : null}
-                  {thread?.rewind ? <button type="button" title="Rewind: edit this message in a new chat" aria-label="Rewind to this message" onClick={() => thread.rewind?.(turn.messageIndex ?? turnIndex)}>↶</button> : null}
-                  {thread?.deleteMessage ? <button type="button" title={deleteBlocked || (deletion(turn) ? "Delete this message and its reply" : notYet)} aria-label="Delete this message"
-                    disabled={Boolean(deleteBlocked) || !deletion(turn) || deletingBusy} onClick={() => setDeleting(turnIndex)}>🗑</button> : null}
-                </MessageActions>
-                {turn.user.stamp ? <span className="cx-stamp">{turn.user.stamp} UTC</span> : null}
-              </div> : null}
-              {/* Messages steered into this turn. While it works they show in its live timeline, where
-                  they were sent; once it is done, here under the turn's message. */}
-              {turn.user?.steers?.length && !turn.steps.some((step) => step.working?.timeline?.some((item) => item.kind === "steer"))
-                ? turn.user.steers.map((steer, index) => <div key={`steer:${index}`} className="cx-user cx-steer">
-                  <div className="cx-bubble"><p>{steer.text}</p></div>
-                  <span className="cx-stamp">Steered · {steer.stamp} UTC</span>
-                </div>) : null}
-              <WorkGroup key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} idle={notStarted && turn.runId === latest?.id} expanded={showWork} loadWork={loadWork} />
-              {turn.final ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`}>
-                <div className="cx-answer-meta">
-                  <span>{turn.final.name}</span>
-                  {turn.final.verdict ? <span className={`cx-verdict is-${turn.final.verdict.toLowerCase()}`}>{turn.final.verdict}</span> : null}
-                  {turn.final.detail ? <span className="cx-answer-detail">{turn.final.detail}</span> : null}
-                </div>
-                <ChatMarkdown text={turn.final.text ?? ""} />
-                <MessageActions text={turn.final.text ?? ""}>
-                  {restart && turn.runId && turn.runId === latest?.id && !runOpen ? <button type="button" title="Retry" aria-label="Retry this mission" disabled={busy} onClick={() => restart(turn.runId)}>↻</button> : null}
-                </MessageActions>
-              </div> : null}
-              {!turn.final && turn.status === "done" && !turn.steps.some((step) => step.text || step.error)
-                ? <p className="cx-note">Finished without an answer.</p> : null}
-              {turn.status === "stopped" ? <p className="cx-note">Stopped</p> : null}
-              {turn.solo ? <p className="cx-note">Answered by the orchestrator alone; no workers ran.</p> : null}
-            </article>)}
+            {threadTurns}
             {(notice || notStarted) && latest && chat?.status === "queued" && !working ? (
               <div className="cx-card tone-error">
                 <strong>{notice ? "The run could not start" : "This run hasn't started"}</strong>
@@ -1212,5 +1278,5 @@ export function AgentOrchestratorChat({
       {workbench && selectedTaskId ? <ChatWorkbench sessions={agentSessions} workspaceId={projectId} tab={workbench} onTab={setWorkbench} onClose={() => setWorkbench(null)} /> : null}
       <ChatMenu menu={menu} onClose={() => setMenu(null)} />
     </div>
-  );
+  </CompactActivity.Provider>);
 }

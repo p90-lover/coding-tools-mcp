@@ -74,3 +74,13 @@ test("with the catalog exposed, an upstream catalog refresh changes the revision
   fs.writeFileSync(path.join(root, "cline-pass-switcher-data", "metadata.json"), JSON.stringify({ catalog: ["a", "b", "c"] }));
   assert.equal(syncClineMarker(root), true, "the marker follows the catalog");
 });
+
+test("the watcher asks the switcher to fetch Cline's official model list on a schedule, through CPA's management route", async (t) => {
+  const { refreshClineModels } = require("../electron/cpa-plugin-models.cjs");
+  const calls = [];
+  const added = await refreshClineModels({ baseUrl: "http://127.0.0.1:8317", managementKey: "manage",
+    fetchImpl: async (url, init) => { calls.push([url, init.method, init.headers.Authorization]); return { ok: true, json: async () => ({ added: ["cline-pass/deepseek-v4.1-flash-1017"] }) }; } });
+  assert.deepEqual(calls, [["http://127.0.0.1:8317/v0/management/cline-pass-switcher/api/fetch-official-models", "POST", "Bearer manage"]]);
+  assert.deepEqual(added, ["cline-pass/deepseek-v4.1-flash-1017"]);
+  await assert.rejects(refreshClineModels({ baseUrl: "http://127.0.0.1:8317", managementKey: "manage", fetchImpl: async () => ({ ok: false, status: 404 }) }), /HTTP 404/);
+});

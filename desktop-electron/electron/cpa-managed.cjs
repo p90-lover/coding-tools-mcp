@@ -323,6 +323,8 @@ function run(homeValue, stateValue) {
   const pluginModels = watchCpaPluginModels({
     stateRoot: state,
     logger: { warn: (event, detail) => console.error(`${event} ${detail?.message ?? ""}`.trim()) },
+    // CPA listens on the loopback port this config sets; the switcher's own route fetches the list.
+    refresh: { baseUrl: "http://127.0.0.1:8317", managementKey },
   });
   child.once("exit", (code, signal) => {
     pluginModels.stop();

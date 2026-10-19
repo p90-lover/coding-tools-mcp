@@ -286,7 +286,10 @@ function PreviewPane({ sessionId }: { sessionId: string }) {
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
         const rect = element.getBoundingClientRect();
-        if (rect.width < 2 || rect.height < 2) return;
+        // The chat page stays mounted behind other pages (hidden): its slot then has no size, and
+        // the native view must leave the screen with it, or it stayed drawn over CPA, Settings and
+        // every other page with no way to close it. It comes back when the slot does.
+        if (rect.width < 2 || rect.height < 2) { void paneCall("chat_preview_hide").catch(() => undefined); return; }
         void paneCall("chat_preview_show", { sessionId, bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } }).catch(() => undefined);
       });
     };

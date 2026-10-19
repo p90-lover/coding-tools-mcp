@@ -378,6 +378,27 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-live-item.is-running .cx-live-label { animation: cx-pulse 1.4s ease-in-out infinite; }
 .cx-live-item code { min-width: 0; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .cx-live-text { min-width: 0; overflow-wrap: anywhere; }
+/* Compact activity (Codex / Cursor / Claude Code): no rail, a run of tool calls and thinking is one
+   line ("Explored · read_output ×7 · 3 thoughts"), messages and edits stay in full. */
+.cx-live.is-compact { gap: 4px; padding-left: 0; border-left: 0; }
+.cx-live-item.kind-group { display: block; }
+.cx-group-head { display: flex; align-items: center; gap: 7px; max-width: 100%; padding: 3px 6px 3px 2px; border: 0; border-radius: 6px; background: transparent;
+  color: var(--ao-muted); font: inherit; font-size: 13px; text-align: left; cursor: pointer; transition: background .12s ease, color .12s ease; }
+.cx-group-head:hover { background: var(--cx-hover); color: var(--color-text-primary); }
+.cx-group-head svg { flex: none; transition: transform .15s ease; }
+.cx-group-head svg.is-open { transform: rotate(90deg); }
+.cx-group-verb { flex: none; color: var(--color-text-primary); font-weight: 500; }
+.cx-group-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cx-group .cx-live { margin: 2px 0 4px 7px; }
+.cx-live.cx-group-now { margin: 0 0 2px 7px; opacity: .85; }
+.cx-tool-count { flex: none; padding: 0 6px; border-radius: 8px; background: color-mix(in srgb, var(--ao-muted) 14%, transparent); color: var(--ao-muted);
+  font-size: 11px; font-variant-numeric: tabular-nums; }
+/* Thinking reads as one dim line; the rest opens on click. */
+.cx-live.is-compact .cx-live-item.kind-reasoning .cx-live-text, .cx-group .cx-live-item.kind-reasoning summary .cx-live-text {
+  overflow: hidden; color: color-mix(in srgb, var(--ao-muted) 85%, transparent); font-style: italic; text-overflow: ellipsis; white-space: nowrap; }
+.cx-live-item.kind-reasoning summary { min-width: 0; }
+.cx-live-item.kind-reasoning .cx-reasoning { min-width: 0; max-width: 100%; }
+.cx-compact-toggle[aria-pressed="true"] { color: var(--color-text-primary); }
 @media (prefers-reduced-motion: reduce) { .cx-live-item.is-running .cx-live-label { animation: none; } }
 /* Thinking reads as an aside, as Claude Code sets it: italic and quieter than the tool calls. */
 .cx-live-item.kind-reasoning .cx-live-text { font-style: italic; }
@@ -461,7 +482,8 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 /* Codex shows focus on the composer's own border, not a second box around the text:
    outranks the orchestrator's `.ao-workflow textarea:focus-visible` outline. */
 .ao-workflow .cx-composer textarea:focus-visible { outline: none; }
-.cx-composer textarea { display: block; width: 100%; min-height: 24px; max-height: 240px; padding: 4px 4px 6px; border: 0; outline: none; resize: none;
+/* It grows with its text up to the cap (field-sizing), with no script measuring it on each key. */
+.cx-composer textarea { display: block; width: 100%; min-height: 24px; max-height: 240px; padding: 4px 4px 6px; border: 0; outline: none; resize: none; field-sizing: content; overflow-y: auto;
   background: transparent; color: var(--color-text-primary); font: inherit; font-size: 14px; line-height: 1.5; }
 /* The line under the chat box: rounds, then the latest turn's model requests (ChatTurnStats). */
 .cx-turn-stats { display: flex; flex-wrap: wrap; justify-content: center; width: calc(100% - 48px); max-width: 780px; margin: -8px auto 10px; padding: 0;

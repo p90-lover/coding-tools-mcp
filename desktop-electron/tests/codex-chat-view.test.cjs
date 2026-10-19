@@ -33,6 +33,8 @@ function mount(props) {
     useMemo: (calculate) => calculate(), useEffect() {}, useRef: (initial) => ({ current: initial }),
     // Every render here is a fresh one, so a memoized component renders as itself.
     memo: (component) => component,
+    // Context reads its default; a Provider renders its children.
+    createContext: (value) => ({ Provider: ({ children }) => children, value }), useContext: (context) => context.value,
   };
   // Function components render inline, so their output (work lines, steps, actions) is visible.
   const jsx = (type, props, key) => typeof type === "function" ? type(props || {}) : ({ type, props: props || {}, key });
@@ -534,7 +536,12 @@ test("a tool call opens on what it ran and what came back, with a dot for how it
       { id: "c", kind: "command", status: "failed", text: "npm config list", description: "Inspect npm registry configuration", output: "User refused permission to run tool" },
       { id: "m", kind: "tool", status: "completed", label: "MCP", text: "mcp__coding-tools__read_file", input: "{\"path\":\"main.py\"}", output: "from fastapi import FastAPI" },
       { id: "p", kind: "tool", status: "pending", label: "Read", text: "Read x" }] } } });
-  const tools = walk(mount(props).render()).filter((element) => /(^|\s)cx-tool(\s|$)/.test(element.props?.className ?? ""));
+  // Compact activity folds the run of calls into one line; opening it shows every row.
+  const view = mount(props);
+  const group = walk(view.render()).find((element) => element.props?.className === "cx-group-head");
+  assert.match(text(group), /Ran a command/);
+  group.props.onClick();
+  const tools = walk(view.render()).filter((element) => /(^|\s)cx-tool(\s|$)/.test(element.props?.className ?? ""));
   const [command, mcp, waiting] = tools;
   assert.equal(command.type, "details");
   assert.match(command.props.className, /tone-failed/);

@@ -53,7 +53,24 @@ function syncClineMarker(stateRoot) {
   return true;
 }
 
-function watchCpaPluginModels({ stateRoot, logger = console, intervalMs = INTERVAL_MS }) {
+// The switcher learns new Cline Pass models (deepseek-v4.1-flash-1017, released on 19 Oct) only
+// when someone presses its "fetch official models" button. CPA serves the plugin's management
+// routes, so the watcher asks for that fetch itself: a minute after CPA starts, then every 6 hours.
+// A model it adds lands in the switcher's config, and the marker check above takes it to CPA.
+const REFRESH_FIRST_MS = 60_000;
+const REFRESH_EVERY_MS = 6 * 60 * 60_000;
+
+async function refreshClineModels({ baseUrl, managementKey, fetchImpl = fetch }) {
+  const response = await fetchImpl(`${baseUrl}/v0/management/cline-pass-switcher/api/fetch-official-models`, {
+    method: "POST", headers: { Authorization: `Bearer ${managementKey}`, "Content-Type": "application/json" }, body: "{}",
+    signal: AbortSignal.timeout(120_000),
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const body = await response.json().catch(() => null);
+  return Array.isArray(body?.added) ? body.added.filter((id) => typeof id === "string") : [];
+}
+
+function watchCpaPluginModels({ stateRoot, logger = console, intervalMs = INTERVAL_MS, refresh = null }) {
   const check = () => {
     try {
       if (syncClineMarker(stateRoot)) logger.info?.("cpa.plugin_models_changed", { plugin: "cline-pass-switcher" });
@@ -64,7 +81,18 @@ function watchCpaPluginModels({ stateRoot, logger = console, intervalMs = INTERV
   check();
   const timer = setInterval(check, intervalMs);
   timer.unref?.();
-  return { check, stop: () => clearInterval(timer) };
+  // refresh: { baseUrl, managementKey } of the managed loopback CPA, to keep Cline Pass's list current.
+  const timers = [];
+  if (refresh?.baseUrl && refresh.managementKey) {
+    const pull = () => void refreshClineModels(refresh).then((added) => {
+      if (added.length) { logger.info?.("cpa.cline_models_added", { added }); check(); }
+    }).catch((error) => logger.warn?.("cpa.cline_models_refresh_failed", { message: String(error?.message ?? error).slice(0, 200) }));
+    const first = setTimeout(pull, refresh.firstMs ?? REFRESH_FIRST_MS);
+    const every = setInterval(pull, refresh.everyMs ?? REFRESH_EVERY_MS);
+    first.unref?.(); every.unref?.();
+    timers.push(() => clearTimeout(first), () => clearInterval(every));
+  }
+  return { check, stop: () => { clearInterval(timer); for (const clear of timers) clear(); } };
 }
 
-module.exports = { clineModelsRevision, syncClineMarker, watchCpaPluginModels };
+module.exports = { clineModelsRevision, syncClineMarker, watchCpaPluginModels, refreshClineModels };
