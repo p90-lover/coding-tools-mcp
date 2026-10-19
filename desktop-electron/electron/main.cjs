@@ -2931,7 +2931,8 @@ async function start() {
       // Agents' commands run in Codex's Windows sandbox when it is installed (its unelevated mode:
       // the worktree and package caches writable, the network on), as Codex runs its own.
       const { createSandboxRunner } = backendBundles.requireModule(backend, "chat-sandbox.cjs");
-      const chatSandbox = createSandboxRunner({ logger });
+      // An agent's `ao` commands work in the app's terminal too, as in its own shell.
+      const chatSandbox = createSandboxRunner({ logger, extraPath: () => [agentOrchestratorUpstream?.aoShimFolder?.()].filter(Boolean) });
       app.on("will-quit", () => chatSandbox.killAll());
       chatAgentTools = createChatAgentTools({
         previews: chatPreviews,

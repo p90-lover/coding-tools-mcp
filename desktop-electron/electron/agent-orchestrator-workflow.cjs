@@ -179,10 +179,12 @@ const REVIEW_SCRIPT_BYTES = 4000;
  * files whose real path is inside the request's working folder are read (a command cannot point
  * the reviewer at files elsewhere), at most two, the first 4 KB of each.
  */
-function reviewScriptExcerpts(approval) {
+function reviewScriptExcerpts(approval, sessionFolder = null) {
   let input = {};
   try { input = typeof approval?.toolInput === "string" ? JSON.parse(approval.toolInput) : (approval?.toolInput ?? {}); } catch {}
-  const folder = [approval?.cwd, input?.workdir, input?.cwd, input?.project_root].find((value) => typeof value === "string" && path.isAbsolute(value));
+  // A request that names no working folder runs in the agent's session folder.
+  const folder = [approval?.cwd, input?.workdir, input?.cwd, input?.project_root, sessionFolder]
+    .find((value) => typeof value === "string" && path.isAbsolute(value));
   if (!folder) return [];
   let root;
   try { root = fs.realpathSync.native(folder); } catch { return []; }
@@ -2011,10 +2013,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const candidates = up.length ? up : all;
     if (!candidates.length) throw new Error("CPA has no model for the command approver");
     const deadline = now() + REVIEW_BUDGET_MS;
-    const scripts = reviewScriptExcerpts(approval);
+    // The folder the agent works in. Without it the reviewer saw only the workspace's id, so it had
+    // to guess whether an absolute path was "outside the workspace": the same `dir` of a project
+    // subfolder was denied, then allowed when retried.
+    const where = await Promise.resolve().then(() => harnessService().sessionWorkspace?.(approval.thread_id, mission.workspace_id))
+      .catch(() => null);
+    const folder = typeof where?.projectFolder === "string" ? where.projectFolder : typeof where?.root === "string" ? where.root : null;
+    const scripts = reviewScriptExcerpts(approval, folder);
     const prompt = [
       "You are the command approver for an orchestrated coding mission. A worker asks to run a tool request.",
       `Workspace: ${mission.workspace_id}. Approver rules: ${String(approver.settings?.instructions || "none").slice(0, 1500)}`,
+      folder ? `Workspace folder: ${folder}. Paths inside this folder, and relative paths, are inside the workspace; a command with no working folder runs there.` : "",
       `Request: ${describeRequest(approval)}`,
       approval.permissions ? `Permissions: ${JSON.stringify(approval.permissions).slice(0, 800)}` : "",
       ...scripts.map((script) => `Local script ${script.file} (from the request's working folder${script.truncated ? ", first 4 KB" : ""}):\n${script.text}`),
@@ -2038,7 +2047,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const decision = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
         if (!["allow", "deny", "ask"].includes(decision?.action)) throw new Error(`Command approver ${model} gave no decision`);
         reviewerDown.delete(model);
-        return { action: decision.action, reason: String(decision.reason || "").slice(0, 300) };
+        const reason = String(decision.reason || "").slice(0, 300);
+        // The reason otherwise lived only in the run's latest note, so a wrong deny could not be traced.
+        logger?.info?.("ao.approval_reviewed", { model, action: decision.action, tool: String(approval.tool ?? approval.kind ?? "").slice(0, 80),
+          folder: Boolean(folder), reason: publicText(reason, 200) });
+        return { action: decision.action, reason };
       } catch (error) {
         failure = error;
         reviewerDown.set(model, now() + REVIEWER_DOWN_MS);

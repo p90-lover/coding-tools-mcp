@@ -136,6 +136,8 @@ const tomlPath = (value) => `'${String(value).replace(/\\/g, "/").replace(/'/g, 
 function createSandboxRunner({
   locate = findCodexSandbox, roots = cacheRoots, scriptDir = path.join(os.tmpdir(), "coding-tools-sandbox"),
   env = process.env, spawnProcess = spawn, logger = console, now = Date.now, platform = process.platform,
+  // Folders put first on a command's PATH, e.g. the one AO keeps `ao` in for its own sessions.
+  extraPath = () => [],
 } = {}) {
   const processes = new Map(); // id -> record
   let located = { at: 0, value: null };
@@ -150,6 +152,12 @@ function createSandboxRunner({
 
   function childEnv() {
     const kept = Object.fromEntries(Object.entries(env).filter(([key]) => !PRIVATE_ENV.test(key)));
+    let extra = [];
+    try { extra = (extraPath() ?? []).filter((folder) => typeof folder === "string" && path.isAbsolute(folder)); } catch {}
+    if (extra.length) {
+      const pathKey = Object.keys(kept).find((key) => key.toUpperCase() === "PATH") ?? "PATH";
+      kept[pathKey] = [...extra, kept[pathKey]].filter(Boolean).join(platform === "win32" ? ";" : ":");
+    }
     return windowsChildEnvironment(kept, { platform, system: systemEnvironment() });
   }
 
