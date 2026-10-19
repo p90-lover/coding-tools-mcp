@@ -13,6 +13,19 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 const node = (id, role, state, extra = {}) => ({ id, role, state, x: 0, ...extra });
 const run = (id, taskId, nodes, extra = {}) => ({ id, project_id: taskId, cancelled: false, nodes, ...extra });
 
+test("a DeepSeek model's work is headed as DeepSeek Harness heads it: what it is doing live, the kinds of work once done", () => {
+  const item = (kind, extra = {}) => ({ id: `${kind}${Math.random()}`, kind, status: "completed", text: "", ...extra });
+  assert.equal(chat.isDeepSeekModel("cpa/cline-pass/deepseek-v4.1-flash"), true);
+  assert.equal(chat.isDeepSeekModel("cpa/cline-pass/glm-5.3-flash"), false);
+  assert.equal(chat.dshActivityTitle([item("tool", { label: "Read" }), item("command", { text: "npm test" })], true), "Running commands", "live: the latest step");
+  assert.equal(chat.dshActivityTitle([item("tool", { label: "Read" }), item("tool", { label: "Grep" }), item("command"), item("reasoning")], false),
+    "Read files, searched code and ran commands", "done: the kinds of work, no counts, thinking left out");
+  assert.equal(chat.dshActivityTitle([item("tool", { label: "Read" }), item("tool", { label: "Grep" }), item("command"), item("edit")], false),
+    "Read files, searched code and ran commands, etc.", "more than three kinds");
+  assert.equal(chat.dshActivityTitle([item("reasoning")], false), "Thought", "thinking alone");
+  assert.equal(chat.dshActivityTitle([item("tool", { text: "mcp__coding-tools__list_dir" })], false), "Read files", "an MCP read tool by its own name");
+});
+
 test("the stats line counts the latest turn and the failed or stopped attempts right before it, on every model they used", () => {
   // Seen live: a message stopped on deepseek-v4.1-flash and sent again on -1017 showed only the new run's time.
   const card = (state, model, started) => node("p", "planner", state, { route: { harness_id: "ao:claude-code", model }, receipt: { started_at_ms: started } });
@@ -30,15 +43,25 @@ test("the stats line counts the latest turn and the failed or stopped attempts r
   assert.deepEqual(plain(chat.chatStatsSpan([], [])), { models: [] });
 });
 
-test("only a single chat interrupted by an app restart resumes by itself, and only within its attempt budget", () => {
+test("a chat the app restart left behind resumes when its project opens, single or team, within its budget", () => {
   const restarted = { error: "The agent's process ended before it finished (the app restarted); retry this card." };
   const single = (card, extra = {}) => run("r", "t", [card], { execution_mode: "single", ...extra });
-  assert.equal(chat.resumableAfterRestart(single(node("p", "planner", "held", { receipt: restarted }))), true);
-  assert.equal(chat.resumableAfterRestart(single(node("p", "planner", "held", { receipt: { error: "API Error: 503" } }))), false, "a real failure waits");
-  assert.equal(chat.resumableAfterRestart(single(node("p", "planner", "held", { receipt: restarted }), { cancelled: true })), false, "a stopped chat stays stopped");
-  assert.equal(chat.resumableAfterRestart(single(node("p", "planner", "held", { receipt: restarted }), { paused: true })), false);
-  assert.equal(chat.resumableAfterRestart(single(node("p", "planner", "held", { receipt: restarted, history: [{}, {}] }))), false, "attempts used up");
-  assert.equal(chat.resumableAfterRestart(run("r", "t", [node("p", "planner", "held", { receipt: restarted })], { execution_mode: "team" })), false, "a team uses its own controls");
+  assert.equal(chat.restartResume(single(node("p", "planner", "held", { receipt: restarted }))), "retry");
+  assert.equal(chat.restartResume(single(node("p", "planner", "held", { receipt: { error: "API Error: 503" } }))), null, "a real failure waits");
+  assert.equal(chat.restartResume(single(node("p", "planner", "held", { receipt: restarted }), { cancelled: true })), null, "a stopped chat stays stopped");
+  assert.equal(chat.restartResume(single(node("p", "planner", "held", { receipt: restarted }), { paused: true })), null);
+  assert.equal(chat.restartResume(single(node("p", "planner", "held", { receipt: restarted, history: [{}, {}] }))), null, "attempts used up");
+  assert.equal(chat.restartResume(single(node("p", "planner", "finished"))), null, "a finished chat stays finished");
+  assert.equal(chat.restartResume(single(node("p", "planner", "pending"))), "continue", "a chat whose step never started");
+  // Seen live: after a restart a team's workers finished on hosts that outlived the app, and its
+  // reviewer never started. Teams now resume too; their own loop recovers interrupted workers.
+  const team = (cards) => run("r", "t", cards, { execution_mode: "team" });
+  assert.equal(chat.restartResume(team([node("p", "planner", "finished"), node("w", "worker", "finished"), node("v", "reviewer", "pending")])), "continue");
+  assert.equal(chat.restartResume(team([node("p", "planner", "finished"), node("w", "worker", "running"), node("v", "reviewer", "pending")])), "continue");
+  assert.equal(chat.restartResume(team([node("p", "planner", "finished"), node("w", "worker", "held", { receipt: restarted })])), "retry");
+  assert.equal(chat.restartResume(team([node("p", "planner", "finished"), node("v", "reviewer", "held", { receipt: { error: "needs you" } }), node("w", "worker", "pending")])), null,
+    "a card held for the person keeps the team waiting");
+  assert.equal(chat.restartResume(team([node("p", "planner", "reserved"), node("w", "worker", "pending")])), null, "a card mid-launch");
 });
 
 test("archived and deleted task metadata hides chats without losing explicit history or scheduled status", () => {
@@ -893,6 +916,38 @@ test("a temporary status failure does not permanently suppress orphan-run recove
   });
   settle(); await new Promise(setImmediate); settle(); await new Promise(setImmediate);
   assert.deepEqual(calls, ["run_status", "run_status"]);
+});
+
+test("opening a project resumes a team whose loop died with the app, once per session", async () => {
+  // Seen live: after a restart the team's workers had finished but its reviewer never started,
+  // and re-entering the project did not rerun the chat.
+  const mission = { id: "r", workspace_id: "a", execution_mode: "team", cancelled: false, nodes: [
+    { id: "p", role: "planner", state: "finished" }, { id: "w", role: "worker", state: "finished" }, { id: "v", role: "reviewer", state: "pending" }] };
+  const calls = [];
+  const context = {
+    workspaceId: "a", mounted: { current: true }, missions: [mission], settledRuns: { current: new Set() }, resumedRuns: { current: new Set() },
+    selection: { current: { workspaceId: "a" } }, restartResume: chat.restartResume, executableArg: () => ({}),
+    moduleCall: async (operation, args) => {
+      calls.push(operation);
+      if (operation === "run_status") return { driven: false, status: "idle" };
+      if (operation === "runs") return { runs: [mission] };
+      return { ok: true };
+    },
+    loadMissions: async () => {}, setTimeout,
+  };
+  const settle = rendererCallback("AgentOrchestratorSurface.tsx", "effect:settledRuns.current.add(key)", context);
+  settle(); for (let i = 0; i < 5; i += 1) await new Promise(setImmediate);
+  assert.deepEqual(calls, ["run_status", "runs", "start_run"]);
+  context.settledRuns.current.clear();
+  settle(); for (let i = 0; i < 5; i += 1) await new Promise(setImmediate);
+  assert.equal(calls.filter((call) => call === "start_run").length, 1, "resumed once per app session");
+  // A loop in this session already starting it is left alone.
+  const fresh = { ...context, settledRuns: { current: new Set() }, resumedRuns: { current: new Set() }, moduleCall: async (operation) => {
+    calls.push(`fresh:${operation}`); return operation === "run_status" ? { driven: false, status: "starting" } : { runs: [mission] };
+  } };
+  rendererCallback("AgentOrchestratorSurface.tsx", "effect:settledRuns.current.add(key)", fresh)();
+  for (let i = 0; i < 5; i += 1) await new Promise(setImmediate);
+  assert.deepEqual(calls.filter((call) => call.startsWith("fresh:")), ["fresh:run_status"]);
 });
 
 test("an old terminal read cannot advance a newly selected command's output cursor", async () => {

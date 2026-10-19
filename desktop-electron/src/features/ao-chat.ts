@@ -522,18 +522,24 @@ type ResumeCandidate = {
 };
 
 /**
- * Whether a chat picks up by itself after an app restart: its step failed only because the app
- * (and AO with it) restarted mid-turn, so nothing about the work itself went wrong.
+ * How a chat that no loop in this app session is driving picks up after an app restart, or null
+ * when it waits for the person. "retry": a step ended only because the app (and AO with it)
+ * restarted mid-turn. "continue": work is left, a card still running on an agent host that
+ * outlived the app or cards that never started; the run's own loop then drives them, and a
+ * team's loop recovers its interrupted workers itself. Teams resume too: before, re-entering a
+ * project after a restart left a team chat stuck with its next cards never started.
  */
-export function resumableAfterRestart(mission: ResumeCandidate): boolean {
+export function restartResume(mission: ResumeCandidate): "retry" | "continue" | null {
   // A chat stopped or paused on purpose stays that way.
-  if (mission.cancelled || mission.paused) return false;
-  // Only a single chat resumes by itself: resuming a team is a bigger step, left to its own controls.
-  if (mission.execution_mode !== "single") return false;
-  const card = mission.nodes[0];
+  if (mission.cancelled || mission.paused) return null;
+  const restarted = mission.nodes.filter(node => ["held", "failed"].includes(node.state)
+    && RESTART_INTERRUPTED.test(String(node.receipt?.error || "")));
+  // Held for any other reason (an approval, a failure to inspect) is the person's call; a reserved
+  // card is mid-launch and a start would refuse it.
+  if (mission.nodes.some(node => node.state === "reserved" || (node.state === "held" && !restarted.includes(node)))) return null;
   // Within the attempt budget, so an agent that brings the app down each time is not restarted forever.
-  return Boolean(card) && ["held", "failed"].includes(card.state)
-    && RESTART_INTERRUPTED.test(String(card.receipt?.error || "")) && (card.history?.length ?? 0) < 2;
+  if (restarted.length) return restarted.every(node => (node.history?.length ?? 0) < 2) ? "retry" : null;
+  return mission.nodes.some(node => ["running", "pending"].includes(node.state)) ? "continue" : null;
 }
 
 /**
@@ -574,6 +580,38 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
     }
   }
   return step;
+}
+
+/** A DeepSeek model, whose turns show as DeepSeek Harness (dsh) shows them. */
+export const isDeepSeekModel = (model?: string | null) => /deepseek/i.test(model ?? "");
+
+const READ_TOOL = /^(read|view|cat|list|ls|open|file)/i;
+const SEARCH_TOOL = /^(grep|glob|search|find|rg)/i;
+/** One work item's kind as DeepSeek Harness groups them. */
+function dshCategory(item: ChatLiveItem): "read" | "search" | "run" | "edit" | "think" | "tool" {
+  if (item.kind === "reasoning") return "think";
+  if (item.kind === "command") return "run";
+  if (item.kind === "edit") return "edit";
+  const name = (item.label || item.text || "").replace(/^mcp__[\w-]+__/, "");
+  return SEARCH_TOOL.test(name) ? "search" : READ_TOOL.test(name) ? "read" : "tool";
+}
+const DSH_DONE = { read: "read files", search: "searched code", run: "ran commands", edit: "edited files", think: "thought", tool: "used tools" } as const;
+const DSH_NOW = { read: "Reading files", search: "Searching code", run: "Running commands", edit: "Editing files", think: "Thinking", tool: "Using tools" } as const;
+
+/**
+ * A group's heading as DeepSeek Harness words it: while live, what the latest step is doing
+ * ("Running commands"); once done, the kinds of work it did, at most three and no counts ("Read
+ * files, searched code and ran commands"). Thinking alone reads "Thought".
+ */
+export function dshActivityTitle(items: ChatLiveItem[], live: boolean): string {
+  if (!items.length) return live ? "Working" : "Worked";
+  if (live) return DSH_NOW[dshCategory(items[items.length - 1])];
+  const kinds = [...new Set(items.map(dshCategory))];
+  const work = kinds.filter((kind) => kind !== "think");
+  const words = (work.length ? work : kinds).map((kind) => DSH_DONE[kind]);
+  const shown = words.slice(0, 3);
+  const text = shown.length > 1 ? `${shown.slice(0, -1).join(", ")} and ${shown[shown.length - 1]}` : shown[0];
+  return `${text[0].toUpperCase()}${text.slice(1)}${words.length > 3 ? ", etc." : ""}`;
 }
 
 /** The chat pet's mood (ChatPet.tsx). */
