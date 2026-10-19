@@ -987,6 +987,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
           if (sessionOwners.size > 500) sessionOwners.delete(sessionOwners.keys().next().value);
           sent = await harnessService().send(continued.session, continued.text, reserved.request_key).catch(() => null);
         }
+        // A follow-up that should have continued the chat's session starts a fresh one without the
+        // conversation: logged, so "it forgot everything" can be traced to it.
+        if (continued && !sent?.turnId) logger?.warn?.("ao.continuation_lost", { reason: sent ? "send_refused" : "session_gone" });
         // Otherwise a pre-warmed session for exactly this route takes the first prompt as its first
         // turn: it already has its worktree and a running agent, so nothing is launched now.
         const warmed = sent?.turnId ? null : await takeWarm(workspaceId, node.route, plain);

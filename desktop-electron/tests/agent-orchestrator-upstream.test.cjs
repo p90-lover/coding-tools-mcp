@@ -884,3 +884,18 @@ test("a send binds its workspace in AO once, not for every catalog read and the 
   failing = false;
   assert.equal(await upstream.projectFor("ws-2"), "project-ws-2", "a failed binding is not kept");
 });
+
+test("the context meter keeps its reading through a steer's zero snapshot, and drops on a compaction", () => {
+  const { steadyContext } = require("../electron/agent-orchestrator-upstream.cjs");
+  const readings = new Map();
+  const at = (contextUsed, compactedAt = null) => steadyContext(readings, "s1", { contextUsed, contextWindow: 200000, totalTokens: 9 }, compactedAt);
+  assert.equal(at(120000).contextUsed, 120000);
+  const steered = at(0);
+  assert.equal(steered.contextUsed, 120000, "a steer's interrupted request reports 0 input: the last reading stands");
+  assert.equal(steered.totalTokens, 9, "the rest of the report still comes through");
+  assert.equal(at(20000).contextUsed, 120000, "a fall below a quarter with no compaction is the same snapshot");
+  assert.equal(at(130000).contextUsed, 130000, "growth is read as reported");
+  assert.equal(at(90000).contextUsed, 90000, "a smaller drop is real (a tool result trimmed)");
+  assert.equal(at(5000, "2026-10-19T12:00:00Z").contextUsed, 5000, "a compaction really empties it");
+  assert.equal(steadyContext(readings, "s2", { contextUsed: 0, contextWindow: 200000 }, null).contextUsed, 0, "another session starts on its own");
+});

@@ -575,6 +575,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   // shows it over the agent's own report (Claude Code over ACP says 200K for any unknown model).
   // In memory and bounded: after a restart the meter falls back to the card's explicit window.
   const launchWindows = new Map();
+  // Each session's last good context reading (steadyContext), bounded like launchWindows.
+  const contextReadings = new Map();
   function rememberLaunchWindow(id, tokens) {
     if (!Number.isSafeInteger(tokens) || tokens <= 0) return;
     launchWindows.delete(id);
@@ -1395,7 +1397,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       await Promise.all(ids.map(async (id) => {
         const conversation = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=1`).catch(() => null);
         if (!conversation || typeof conversation !== "object") return;
-        const usage = conversation.usage && typeof conversation.usage === "object" ? conversation.usage : null;
+        const reported = conversation.usage && typeof conversation.usage === "object" ? conversation.usage : null;
+        const compactedAt = typeof conversation.compactedAt === "string" ? conversation.compactedAt : null;
+        const usage = steadyContext(contextReadings, id, reported, compactedAt);
         const limits = conversation.rateLimits && typeof conversation.rateLimits === "object" ? conversation.rateLimits : null;
         sessions[id] = {
           controller: typeof conversation.controller === "string" ? conversation.controller : null,
@@ -1410,7 +1414,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
             primaryResetsInSeconds: number(limits.primaryResetsInSeconds), secondaryResetsInSeconds: number(limits.secondaryResetsInSeconds),
             planLabel: typeof limits.planLabel === "string" ? limits.planLabel.slice(0, 80) : null,
           } : null,
-          compactedAt: typeof conversation.compactedAt === "string" ? conversation.compactedAt : null,
+          compactedAt,
           launchedWindow: launchWindows.get(id) ?? null,
           planLabel: typeof conversation.account?.planLabel === "string" ? conversation.account.planLabel.slice(0, 80) : null,
           mcpServers: (Array.isArray(conversation.mcpServers) ? conversation.mcpServers : []).slice(0, 40)
@@ -1505,4 +1509,27 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   return { call, start, stop, show, hide, snapshot, harness };
 }
 
-module.exports = { agentCatalog, createAgentOrchestratorUpstream, createAgentInventory, API_OPERATIONS };
+/**
+ * The context reading the meter shows for a session. A steer interrupts the model's request before
+ * its final usage arrives, and Claude Code then reports the request's opening snapshot, which a
+ * translated (non-Anthropic) CPA stream gives as zero input: the meter dropped to nothing after
+ * every steer, and briefly at the start of each request. A reading that falls below a quarter of
+ * the last one with no compaction in between is that snapshot, so the last reading stands; a
+ * compaction (compactedAt moved) is a real drop. readings: id -> { usage, compactedAt }.
+ */
+function steadyContext(readings, id, usage, compactedAt) {
+  const previous = readings.get(id);
+  const used = Number(usage?.contextUsed), before = Number(previous?.usage?.contextUsed);
+  if (usage && previous && previous.compactedAt === compactedAt && Number.isFinite(before) && before > 0
+    && (!Number.isFinite(used) || used < before / 4)) {
+    return { ...usage, contextUsed: before, contextWindow: usage.contextWindow || previous.usage.contextWindow };
+  }
+  if (usage && Number.isFinite(used) && used > 0) {
+    readings.delete(id);
+    readings.set(id, { usage, compactedAt });
+    if (readings.size > 64) readings.delete(readings.keys().next().value);
+  }
+  return usage;
+}
+
+module.exports = { steadyContext, agentCatalog, createAgentOrchestratorUpstream, createAgentInventory, API_OPERATIONS };
