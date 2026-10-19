@@ -421,6 +421,7 @@ func execute(raw []byte, stream bool) ([]byte, error) {
 		Payload  []byte
 		Model    string
 		StreamID string `json:"stream_id"`
+		Metadata map[string]any
 	}
 	if e := json.Unmarshal(raw, &req); e != nil {
 		return nil, e
@@ -480,9 +481,12 @@ func execute(raw []byte, stream bool) ([]byte, error) {
 		_ = r.Body.Close()
 		return errorEnvelope("invalid_stream", "missing stream ID"), nil
 	}
+	requestPath, _ := req.Metadata["request_path"].(string)
+	requestPath = strings.TrimRight(strings.TrimSpace(requestPath), "/")
+	framed := requestPath != "" && !strings.HasSuffix(requestPath, "/completions")
 	go func() {
 		defer r.Body.Close()
-		err := relaySSE(r.Body, func(b []byte) error {
+		err := relaySSE(r.Body, framed, func(b []byte) error {
 			_, e := hostCall("host.stream.emit", map[string]any{"stream_id": req.StreamID, "payload": b})
 			return e
 		})
@@ -494,7 +498,7 @@ func execute(raw []byte, stream bool) ([]byte, error) {
 	}()
 	return okEnvelope(map[string]any{"headers": r.Header})
 }
-func relaySSE(reader io.Reader, emit func([]byte) error) error {
+func relaySSE(reader io.Reader, framed bool, emit func([]byte) error) error {
 	sc := bufio.NewScanner(reader)
 	sc.Buffer(make([]byte, 64<<10), 4<<20)
 	parts := []string{}
@@ -507,7 +511,15 @@ func relaySSE(reader io.Reader, emit func([]byte) error) error {
 		if string(b) == "[DONE]" {
 			return nil
 		}
-		return emit(b)
+		var payload bytes.Buffer
+		if err := json.Compact(&payload, b); err != nil {
+			return err
+		}
+		// The OpenAI host adds SSE framing; cross-format translators consume framed chunks.
+		if !framed {
+			return emit(payload.Bytes())
+		}
+		return emit([]byte("data: " + payload.String() + "\n\n"))
 	}
 	for sc.Scan() {
 		line := sc.Text()
