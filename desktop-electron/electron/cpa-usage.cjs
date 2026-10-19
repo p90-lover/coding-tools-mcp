@@ -27,6 +27,8 @@ const MAX_MODELS = 12;
 const DAY_MS = 24 * 60 * 60_000;
 const RANGES = Object.freeze({ "24h": DAY_MS, "7d": 7 * DAY_MS, "30d": 30 * DAY_MS, all: null });
 const DEFAULT_RANGE = "30d";
+/** A turn's request stats are read again after this; the line polls while the chat is open. */
+const TURN_CACHE_MS = 3_000;
 
 const count = (value) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.round(value) : 0);
 const money = (value) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0);
@@ -363,9 +365,61 @@ function createCpaUsage({ getConnection, quota = null, fetchImpl = fetch, now = 
     return pending.get(key);
   }
 
-  return Object.freeze({ read });
+  /**
+   * One chat turn's model requests, as the line under the chat box shows them: how many requests
+   * (steps), time spent in the model, average time to first token, output speed, cache hits and
+   * tokens. CPA Helper records each request CPA serves with its latency and time to first token;
+   * those of the turn's model since the turn started are this turn's (another chat on the same
+   * model at the same moment would be counted too). Cached a few seconds per turn.
+   */
+  async function turnStats({ model, from } = {}) {
+    const target = connection();
+    const name = String(model ?? "").replace(/^cpa\//, "").replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "").trim().slice(0, 200);
+    const start = Number(from);
+    if (!target || !name || !Number.isFinite(start) || start <= 0) return { ok: true, available: false };
+    const key = `turn:${name}:${start}`;
+    const hit = cache.get(key);
+    if (hit && now() - hit.at < TURN_CACHE_MS) return hit.value;
+    const params = new URLSearchParams({ model: name, from: String(Math.floor(start)), page_size: "500" });
+    const listing = await optional(target, `/cpa-helper/records?${params}`);
+    const value = listing && Array.isArray(listing.items)
+      ? { ok: true, available: true, ...summarizeRecords(listing.items) } : { ok: true, available: false };
+    cache.set(key, { at: now(), value });
+    for (const stale of cache.keys()) if (stale.startsWith("turn:") && now() - cache.get(stale).at > 60_000) cache.delete(stale);
+    return value;
+  }
+
+  return Object.freeze({ read, turnStats });
+}
+
+/** CPA Helper records -> one turn's totals; failed requests count as steps but not as speed. */
+function summarizeRecords(items) {
+  let steps = 0, failed = 0, latencyMs = 0, ttftSum = 0, ttftCount = 0, inputTokens = 0, outputTokens = 0, cachedTokens = 0;
+  let speedTokens = 0, speedMs = 0;
+  for (const item of items) {
+    if (!item || typeof item !== "object") continue;
+    steps += 1;
+    if (item.failed === true) { failed += 1; continue; }
+    const latency = count(item.latency_ms);
+    const ttft = count(item.ttft_ms);
+    const output = count(item.output_tokens);
+    latencyMs += latency;
+    if (ttft) { ttftSum += ttft; ttftCount += 1; }
+    inputTokens += count(item.input_tokens);
+    outputTokens += output;
+    cachedTokens += count(item.cached_tokens);
+    // Speed over the streaming part: from the first token to the end.
+    if (output && latency > ttft) { speedTokens += output; speedMs += latency - ttft; }
+  }
+  return {
+    steps, failed, latencyMs,
+    ttftMs: ttftCount ? Math.round(ttftSum / ttftCount) : null,
+    tokensPerSecond: speedMs ? Math.round((speedTokens / speedMs) * 1000) : null,
+    cacheHit: inputTokens ? Math.min(1, cachedTokens / inputTokens) : null,
+    inputTokens, outputTokens, cachedTokens,
+  };
 }
 
 module.exports = Object.freeze({
-  createCpaUsage, aggregateUsage, clineQuotaOf, priceFor, estimateCost, cellCost, modelKey, RANGES,
+  createCpaUsage, aggregateUsage, summarizeRecords, clineQuotaOf, priceFor, estimateCost, cellCost, modelKey, RANGES,
 });

@@ -22,6 +22,8 @@ const text = (item) => item === null || item === undefined || typeof item === "b
 const node = (id, role, state, extra = {}) => ({ id, role, state, x: 0, ...extra });
 const run = (id, taskId, nodes, extra = {}) => ({ id, project_id: taskId, cancelled: false, nodes, ...extra });
 
+// The page the agent's browser has open, as useWorkbenchAutoOpen reports it (null: none).
+let openPage = null;
 function mount(props) {
   const states = []; let cursor = 0;
   const react = {
@@ -33,6 +35,8 @@ function mount(props) {
     useMemo: (calculate) => calculate(), useEffect() {}, useRef: (initial) => ({ current: initial }),
     // Every render here is a fresh one, so a memoized component renders as itself.
     memo: (component) => component,
+    // Context reads its default; a Provider renders its children.
+    createContext: (value) => ({ Provider: ({ children }) => children, value }), useContext: (context) => context.value,
   };
   // Function components render inline, so their output (work lines, steps, actions) is visible.
   const jsx = (type, props, key) => typeof type === "function" ? type(props || {}) : ({ type, props: props || {}, key });
@@ -40,7 +44,7 @@ function mount(props) {
     : name === "./ao-chat" ? chat : name === "./codex-prompts" ? prompts : name === "../icons" ? { Icon: "Icon" } : name === "./ChatMarkdown" ? { ChatMarkdown: "Markdown" }
       : name === "./ChatMenu" ? { ChatMenu: "ChatMenu", ChatGlyph: "Glyph", FloatingLayer: "FloatingLayer" } : name === "./AgentOrchestratorComposerControls" ? { AgentOrchestratorComposerControls: "Controls" }
         : name === "./AgentOrchestratorApproval" ? { AgentOrchestratorApproval: "Approval" }
-          : name === "./ChatWorkbench" ? { ChatWorkbench: "Workbench", useWorkbenchAutoOpen: () => {} } : {},
+          : name === "./ChatWorkbench" ? { ChatWorkbench: "Workbench", useWorkbenchAutoOpen: () => openPage } : {},
   { window: { setTimeout: () => 0, setInterval: () => 0, clearInterval() {}, confirm: () => true }, document: { querySelector: () => null }, navigator: {} });
   return { render: (next = {}) => { cursor = 0; return module.AgentOrchestratorChat({ ...props, ...next }); } };
 }
@@ -328,7 +332,7 @@ test("a working chat on a non-AO model is not offered steering; a message typed 
   await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0, "nothing is sent while the turn runs");
   assert.equal(textarea().props.value, "", "the composer is free for the next message");
-  assert.match(text(walk(view.render()).find((element) => String(element.props?.className).includes("cx-command-card"))), /^QueuedIt's sent when the current turn finishes/);
+  assert.match(text(walk(view.render()).find((element) => String(element.props?.className).includes("cx-command-card"))), /^Queuedalso check the logsIt's sent when the current turn finishes/, "the card quotes the queued message");
 });
 
 test("after an app restart a running AO card is still steered, though the page isn't driving its run", async () => {
@@ -463,7 +467,7 @@ test("Delete names the runs its turn showed: a restarted message takes its resta
   assert.deepEqual(forked, [1]);
 });
 
-test("while the agent waits on a request, a typed message is queued, never steered (steering would cancel it)", async () => {
+test("while the agent waits on a request, a typed message is still steered: the steer waits for the answer instead of cancelling it", async () => {
   const steered = [];
   const pending = { nodeId: "w", approval_id: "req-1", source: "ao", kind: "plan", tool: "ExitPlanMode", plan: "1. Add the route",
     decisions: [{ id: "default", kind: "allow_once", label: "Yes, and manually approve edits" }, { id: "plan", kind: "reject_once", label: "No, keep planning" }] };
@@ -472,12 +476,13 @@ test("while the agent waits on a request, a typed message is queued, never steer
     steer: async (input) => { steered.push(input); return true; } });
   const view = mount(props);
   const textarea = () => walk(view.render()).find((element) => element.type === "textarea");
-  assert.equal(textarea().props.placeholder, "Answer the request above first — a message now is sent after it");
+  // With "Approve for me" every tool call waits a moment; a message typed then used to wait for the
+  // whole turn. The steer now waits on the backend until the request is answered (chat_steer).
+  assert.equal(textarea().props.placeholder, "Steer the agent — sent to it right away");
   textarea().props.onChange({ target: { value: "yes, go ahead" } });
-  assert.ok(!walk(view.render()).some((element) => element.props?.["aria-label"] === "Steer the agent"), "no Steer button while a request waits");
   await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
-  assert.deepEqual(steered, [], "the message never reaches the agent as a steer");
-  assert.equal(calls.filter(([kind]) => kind === "send").length, 0, "nor as a send into the busy turn: it is queued");
+  assert.deepEqual(steered.map((input) => input.message), ["yes, go ahead"]);
+  assert.equal(calls.filter(([kind]) => kind === "send").length, 0, "never a send into the busy turn");
 });
 
 test("a single-model chat shows its finished work unfolded; a Team chat folds the workers but always shows the answer", () => {
@@ -533,7 +538,12 @@ test("a tool call opens on what it ran and what came back, with a dot for how it
       { id: "c", kind: "command", status: "failed", text: "npm config list", description: "Inspect npm registry configuration", output: "User refused permission to run tool" },
       { id: "m", kind: "tool", status: "completed", label: "MCP", text: "mcp__coding-tools__read_file", input: "{\"path\":\"main.py\"}", output: "from fastapi import FastAPI" },
       { id: "p", kind: "tool", status: "pending", label: "Read", text: "Read x" }] } } });
-  const tools = walk(mount(props).render()).filter((element) => /(^|\s)cx-tool(\s|$)/.test(element.props?.className ?? ""));
+  // Compact activity folds the run of calls into one line; opening it shows every row.
+  const view = mount(props);
+  const group = walk(view.render()).find((element) => element.props?.className === "cx-group-head");
+  assert.match(text(group), /Ran a command/);
+  group.props.onClick();
+  const tools = walk(view.render()).filter((element) => /(^|\s)cx-tool(\s|$)/.test(element.props?.className ?? ""));
   const [command, mcp, waiting] = tools;
   assert.equal(command.type, "details");
   assert.match(command.props.className, /tone-failed/);
@@ -575,4 +585,20 @@ test("approval cards from different team members retain separate React identitie
   const cards = walk(mount(props).render()).filter(item => item.type === "Approval");
   assert.equal(cards.length, 2);
   assert.equal(new Set(cards.map(item => item.key)).size, 2);
+});
+
+test("a hidden agent browser is offered back from the chat header, and opens the side panel on it", () => {
+  openPage = { sessionId: "s1", url: "http://127.0.0.1:8000/register", title: "Auto Register" };
+  try {
+    const { props } = base({ selectedTaskId: "t", working: true,
+      runs: [run("r1", "t", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/m" }, receipt: { thread_id: "s1" } })], { execution_mode: "single" })] });
+    const view = mount(props);
+    const chip = walk(view.render()).find((element) => element.props?.className === "cx-browser-chip");
+    assert.ok(chip, "the chip shows while the browser is hidden");
+    assert.match(text(chip), /Auto Register/);
+    chip.props.onClick();
+    const after = walk(view.render());
+    assert.ok(after.some((element) => element.type === "Workbench" && element.props.tab === "preview"), "the panel opens on the browser");
+    assert.ok(!after.some((element) => element.props?.className === "cx-browser-chip"), "no chip while it shows");
+  } finally { openPage = null; }
 });

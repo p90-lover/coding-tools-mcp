@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -33,7 +34,7 @@ const pluginID = "cline-pass-switcher"
 const apiPrefix = "/v0/management/" + pluginID
 const resourcePrefix = "/v0/resource/plugins/" + pluginID
 
-var pluginVersion = "0.1.0-codingtools.1"
+var pluginVersion = "0.1.0-codingtools.2"
 var hostAvailable atomic.Bool
 
 type envelope struct {
@@ -365,8 +366,13 @@ func management(raw []byte) ([]byte, error) {
 	}
 	return okEnvelope(map[string]any{"StatusCode": status, "Headers": headers, "Body": b})
 }
+
+// DeepSeek V4.1 Flash and its dated builds (cline-pass/deepseek-v4.1-flash-1017, released on
+// 19 Oct) take the same reasoning levels.
+var deepseekV41Flash = regexp.MustCompile(`^cline-pass/deepseek-v4\.1-flash(-\d{4,8})?$`)
+
 func modelEfforts(model string) []string {
-	if model == "cline-pass/deepseek-v4.1-flash" {
+	if deepseekV41Flash.MatchString(model) {
 		return []string{"none", "low", "high", "max"}
 	}
 	return nil

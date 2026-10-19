@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent, ReactElement } from "react";
 import { getCodingToolsClient } from "../api/client";
 import type { JsonObject } from "../api/contracts";
-import { Icon } from "../icons";
+import { Caret, Icon } from "../icons";
 import type { ChatAgentSession } from "./ao-chat";
 
 // The chat's side panel, as Codex shows one beside a thread: tabs for the page the chat's agent
@@ -68,7 +68,9 @@ export function startsNewChat(sessionIds: string[], polled: Set<string>): boolea
  * through the app's exec_command or the agent's own shell tool (source "agent"). Each page and command opens it
  * once; closing the panel is respected until the agent does something new (see autoOpenTab).
  */
-export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen: (tab: WorkbenchTab) => void, workspaceId?: string) {
+export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen: (tab: WorkbenchTab) => void, workspaceId?: string): LivePage | null {
+  // The page an agent's browser shows now, if any: the chat offers it back when the panel is hidden.
+  const [livePage, setLivePage] = useState<LivePage | null>(null);
   const seen = useRef(new Set<string>());
   const polled = useRef(new Set<string>());
   // The latest panel state and callback, read by the poll without restarting it: a restart on each
@@ -79,6 +81,7 @@ export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen
   onOpenNow.current = onOpen;
   const key = sessionIds.join(",");
   useEffect(() => {
+    setLivePage(null);
     if (!sessionIds.length) return undefined;
     let live = true;
     const tick = async () => {
@@ -88,6 +91,12 @@ export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen
           paneCall("chat_preview_state", { sessionIds }), paneCall("chat_processes", { sessionIds, ...(workspaceId ? { workspaceId } : {}) }),
         ]);
         if (!live) return;
+        const shown = Object.entries((previews.previews as Record<string, PreviewState> | undefined) ?? {})
+          .find(([, state]) => state.url && state.url !== "about:blank");
+        setLivePage((current) => {
+          const next = shown ? { sessionId: shown[0], url: shown[1].url, title: shown[1].title } : null;
+          return current?.url === next?.url && current?.title === next?.title && current?.sessionId === next?.sessionId ? current : next;
+        });
         const pages = Object.entries((previews.previews as Record<string, PreviewState> | undefined) ?? {})
           .filter(([, state]) => state.url && state.url !== "about:blank").map(([id, state]) => `page:${id}:${new URL(state.url).origin}`);
         const commands = ((processes.sessions as { commands: Command[] }[] | undefined) ?? [])
@@ -108,7 +117,11 @@ export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen
     return () => { live = false; window.clearInterval(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
+  return livePage;
 }
+
+/** A page a chat agent's browser has open (its preview keeps running while the panel is hidden). */
+export type LivePage = { sessionId: string; url: string; title: string };
 
 const PREVIEW_POLL_MS = 1500;
 const COMMANDS_POLL_MS = 2000;
@@ -177,7 +190,13 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId }: {
     const rest = tabs.filter((item) => item.id !== id);
     if (!rest.length) { onClose(); return; }
     setTabs(rest);
-    if (id === active) setActive(rest[Math.max(0, index - 1)].id);
+    if (id === active) {
+      const next = rest[Math.max(0, index - 1)];
+      setActive(next.id);
+      // The chat's state follows, or asking for the closed kind again (the browser chip, the
+      // header button) found it "already shown" and did nothing.
+      onTab(next.kind);
+    }
   };
   const addTab = () => { const added = newTab("new"); setTabs((list) => [...list, added]); setActive(added.id); };
 
@@ -210,7 +229,9 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId }: {
         {tabs.map((item) => <div key={item.id} className={`cx-workbench-tab${item.id === current?.id ? " is-active" : ""}`}>
           <button type="button" role="tab" aria-selected={item.id === current?.id} onClick={() => { setActive(item.id); onTab(item.kind); }}>
             {TAB_TITLES[item.kind]}</button>
-          <button type="button" className="cx-workbench-tab-close" aria-label={`Close ${TAB_TITLES[item.kind]}`} onClick={() => close(item.id)}>×</button>
+          <button type="button" className="cx-workbench-tab-close" aria-label={`Close ${TAB_TITLES[item.kind]}`}
+            title={item.kind === "preview" ? "Hide the browser: it keeps running for the agent, and the Browser chip in the chat header brings it back" : `Close ${TAB_TITLES[item.kind]}`}
+            onClick={() => close(item.id)}>×</button>
         </div>)}
         <button type="button" className="cx-icon-button cx-workbench-add" aria-label="New tab" title="New tab" onClick={addTab}>
           <Icon name="plus" width="14" height="14" /></button>
@@ -218,7 +239,7 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId }: {
       {sessions.length > 1 ? <select className="cx-workbench-agent" aria-label="Agent" value={sessionId} onChange={(event) => setSessionId(event.target.value)}>
         {sessions.map((session) => <option key={session.id} value={session.id}>{session.label}</option>)}
       </select> : null}
-      <button type="button" className="cx-icon-button" aria-label="Hide side panel" onClick={onClose}>
+      <button type="button" className="cx-icon-button" aria-label="Hide side panel" title="Hide the panel: the agent's browser and commands keep running" onClick={onClose}>
         <Icon name="close" width="14" height="14" /></button>
     </header>
     {!sessionId
@@ -286,7 +307,10 @@ function PreviewPane({ sessionId }: { sessionId: string }) {
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
         const rect = element.getBoundingClientRect();
-        if (rect.width < 2 || rect.height < 2) return;
+        // The chat page stays mounted behind other pages (hidden): its slot then has no size, and
+        // the native view must leave the screen with it, or it stayed drawn over CPA, Settings and
+        // every other page with no way to close it. It comes back when the slot does.
+        if (rect.width < 2 || rect.height < 2) { void paneCall("chat_preview_hide").catch(() => undefined); return; }
         void paneCall("chat_preview_show", { sessionId, bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } }).catch(() => undefined);
       });
     };
@@ -338,6 +362,8 @@ function TerminalPane({ sessionId, workspaceId }: { sessionId: string; workspace
   const [input, setInput] = useState("");
   const [error, setError] = useState("");
   const [now, setNow] = useState(Date.now());
+  // Finished commands are the agent's tool calls (already in the chat): folded away unless asked for.
+  const [showHistory, setShowHistory] = useState(false);
   const offsets = useRef({ stdout: 0, stderr: 0 });
   const screen = useRef<HTMLPreElement>(null);
   const pinned = useRef(true);
@@ -355,9 +381,10 @@ function TerminalPane({ sessionId, workspaceId }: { sessionId: string; workspace
           .sort((left, right) => Number(isLive(right)) - Number(isLive(left)));
         setCommands(found);
         setNow(Date.now());
-        // First choice: a running app the agent started (not the user's own shell), then anything live.
+        // First choice: a running app the agent started (not the user's own shell), then anything
+        // live. With nothing running nothing is picked: a finished tool call is not the app.
         setSelected((current) => (found.some((command) => command.id === current) ? current
-          : (found.find((command) => isLive(command) && !command.user) ?? found.find(isLive) ?? found[0])?.id ?? ""));
+          : (found.find((command) => isLive(command) && !command.user) ?? found.find(isLive))?.id ?? ""));
       }).catch(() => undefined);
     };
     tick();
@@ -439,43 +466,55 @@ function TerminalPane({ sessionId, workspaceId }: { sessionId: string; workspace
   const shellButton = <button type="button" className="cx-terminal-new" disabled={starting} onClick={startShell}
     title="A PowerShell in the agent's worktree, yours to type in">{starting ? "Starting…" : "New terminal"}</button>;
 
-  if (!commands.length) {
-    return <div className="cx-terminal">
-      <div className="cx-terminal-head">{shellButton}</div>
-      {error ? <p className="cx-workbench-error" role="alert">{error}</p> : null}
-      <p className="cx-workbench-empty">No commands yet. Dev servers and other commands the agent starts through the app's terminal show here with their output (Settings → "Let chat agents run commands through the app's terminal"), and so do the commands it runs with its own shell tool. New terminal opens your own shell in the agent's worktree.</p>
-    </div>;
-  }
+  const live = commands.filter((item) => isLive(item));
+  const history = commands.filter((item) => !isLive(item));
   const agentShellLabel = <span className="cx-terminal-source" title="Run by the agent with its own shell tool; shown read-only">agent shell</span>;
+  const row = (item: Command) => <li key={item.id}>
+    <button type="button" aria-pressed={item.id === selected} title={[item.cmd, item.workdir].filter(Boolean).join("\n")} onClick={() => setSelected(item.id)}>
+      <span className={`cx-terminal-dot is-${isLive(item) ? "running" : item.exitCode === 0 || (isAgentShell(item) && item.exitCode === null && item.status === "completed") ? "ok" : "failed"}`} aria-hidden="true" />
+      <code>{item.user ? "Your terminal" : item.cmd}</code>
+      {isAgentShell(item) ? agentShellLabel : null}
+      <small>{isLive(item) ? `${item.status === "background" ? "background · " : ""}${since(item.startedAt, now)}` : item.exitCode !== null ? `exit ${item.exitCode}` : item.status}</small>
+    </button>
+  </li>;
   return <div className="cx-terminal">
-    <div className="cx-terminal-head">{shellButton}</div>
-    <ul className="cx-terminal-list" aria-label="Commands">
-      {commands.map((item) => <li key={item.id}>
-        <button type="button" aria-pressed={item.id === selected} title={item.cmd} onClick={() => setSelected(item.id)}>
-          <span className={`cx-terminal-dot is-${isLive(item) ? "running" : item.exitCode === 0 || (isAgentShell(item) && item.exitCode === null && item.status === "completed") ? "ok" : "failed"}`} aria-hidden="true" />
-          <code>{item.user ? "Your terminal" : item.cmd}</code>
-          {isAgentShell(item) ? agentShellLabel : null}
-          <small>{isLive(item) ? `${item.status === "background" ? "background · " : ""}${since(item.startedAt, now)}` : item.exitCode !== null ? `exit ${item.exitCode}` : item.status}</small>
-        </button>
-      </li>)}
-    </ul>
-    {command ? <div className="cx-terminal-head">
-      <code title={command.workdir || command.cmd}>{command.cmd}</code>
-      {agentShell ? agentShellLabel : null}
-      <small className="cx-terminal-status" role="status">{running
-        ? `${command.status === "background" ? "running in the background" : "running"} · ${since(command.startedAt, now)}`
-        : command.exitCode !== null ? `exited ${command.exitCode}` : command.status}</small>
-      {running && !agentShell ? <button type="button" className="cx-terminal-stop" onClick={stop}>Stop</button> : null}
+    <div className="cx-terminal-bar">
+      <strong>{live.length ? `Running · ${live.length}` : "Nothing running"}</strong>
+      <span className="cx-head-spacer" />
+      {shellButton}
+    </div>
+    {live.length ? <ul className="cx-terminal-list" aria-label="Running">{live.map(row)}</ul>
+      : <p className="cx-terminal-idle">When the agent starts your app (a dev server, a script left running) it shows here with its live output.
+        Its one-off commands are in the chat. For live output and Stop, turn on Settings → "Let chat agents run commands through the app's terminal".
+        New terminal opens your own shell in the agent's worktree.</p>}
+    {history.length ? <div className="cx-terminal-history">
+      <button type="button" className="cx-terminal-history-toggle" aria-expanded={showHistory} onClick={() => setShowHistory((value) => !value)}>
+        <Caret />{showHistory ? "Hide" : "Show"} the agent's finished commands ({history.length})</button>
+      {showHistory ? <ul className="cx-terminal-list is-history" aria-label="Finished commands">{history.map(row)}</ul> : null}
     </div> : null}
     {error ? <p className="cx-workbench-error" role="alert">{error}</p> : null}
-    <pre ref={screen} className="cx-terminal-output" aria-live="off"
-      onScroll={(event) => { const box = event.currentTarget; pinned.current = box.scrollHeight - box.scrollTop - box.clientHeight < 24; }}>
-      {shown || (running ? "Waiting for output…" : "No output.")}
-    </pre>
-    {running && !agentShell ? <form className="cx-terminal-input" onSubmit={(event) => { event.preventDefault(); send(); }}>
-      <input aria-label={command?.user ? "Type a command" : "Type into the command"} placeholder={command?.user ? "PS> type a command, Enter runs it" : "Type into the command, Enter sends"}
-        value={input} spellCheck={false} onChange={(event) => setInput(event.target.value)} />
-    </form> : null}
+    {command ? <>
+      <div className="cx-terminal-head">
+        <span className={`cx-terminal-dot is-${running ? "running" : command.exitCode === 0 || (agentShell && command.exitCode === null && command.status === "completed") ? "ok" : "failed"}`} aria-hidden="true" />
+        <div className="cx-terminal-title">
+          <code title={command.cmd}>{command.user ? "Your terminal" : command.cmd}</code>
+          {command.workdir ? <small title={command.workdir}>{command.workdir}</small> : null}
+        </div>
+        {agentShell ? agentShellLabel : null}
+        <small className="cx-terminal-status" role="status">{running
+          ? `${command.status === "background" ? "running in the background" : "running"} · ${since(command.startedAt, now)}`
+          : command.exitCode !== null ? `exited ${command.exitCode}` : command.status}</small>
+        {running && !agentShell ? <button type="button" className="cx-terminal-stop" onClick={stop}>Stop</button> : null}
+      </div>
+      <pre ref={screen} className="cx-terminal-output" aria-live="off"
+        onScroll={(event) => { const box = event.currentTarget; pinned.current = box.scrollHeight - box.scrollTop - box.clientHeight < 24; }}>
+        {shown || (running ? "Waiting for output…" : "No output.")}
+      </pre>
+      {running && !agentShell ? <form className="cx-terminal-input" onSubmit={(event) => { event.preventDefault(); send(); }}>
+        <input aria-label={command?.user ? "Type a command" : "Type into the command"} placeholder={command?.user ? "PS> type a command, Enter runs it" : "Type into the command, Enter sends"}
+          value={input} spellCheck={false} onChange={(event) => setInput(event.target.value)} />
+      </form> : null}
+    </> : null}
   </div>;
 }
 

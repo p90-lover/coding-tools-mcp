@@ -606,7 +606,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   // reasoning level. A plugin model is known by its namespace, or by the provider CPA names for it.
   const PLUGIN_NAMESPACES = new Set(["cline-pass", ...PLUGIN_PROVIDERS]);
   // Cline's plugin decodes these suffixes into the provider's request body.
-  const CLINE_EFFORTS = new Map([["cline-pass/deepseek-v4.1-flash", ["none", "low", "high", "max"]]]);
+  // DeepSeek V4.1 Flash and its dated builds ("…-flash-1017"), as the plugin's modelEfforts.
+  const CLINE_EFFORT_MODELS = [[/^cline-pass\/deepseek-v4\.1-flash(?:-\d{4,8})?$/, ["none", "low", "high", "max"]]];
+  const CLINE_EFFORTS = { get: id => CLINE_EFFORT_MODELS.find(([pattern]) => pattern.test(String(id)))?.[1], has: id => Boolean(CLINE_EFFORTS.get(id)) };
   // Ids the last catalog read named a plugin as provider of, for launches that have only the id.
   let pluginModels = new Set();
   const verbatimModel = (id, provider) => {
@@ -2728,6 +2730,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    */
   const STEER_STALL_MS = 3 * 60_000;
   const STEER_STALL_TOOL_MS = 20 * 60_000;
+  // "Approve for me" answers a request within 20 s (its reviewer up to 25 s): a steer waits that long.
+  const STEER_ANSWER_WAIT_MS = 30_000;
+  const STEER_ANSWER_POLL_MS = 750;
   async function chatSteer({ workspaceId, taskId, message } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
     const text = clean(message, 8192, false);
@@ -2739,12 +2744,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       && (run.execution_mode === "single" || node.role === "planner"));
     if (!card) return { ok: true, steered: false, reason: "No AO agent you can steer is working in this chat" };
     // Steering a turn that waits on an approval or a question cancelled that request ("Tool use
-    // aborted"), and the agent lost the step it asked about. While one waits, the message is not
-    // steered; the chat sends it once the turn ends, like any queued message.
-    const waiting = await Promise.resolve().then(() => harnessService().observe?.(card.receipt.thread_id, expectedTurns.get(card.receipt.thread_id)))
+    // aborted"), and the agent lost the step it asked about. While one waits, the steer waits for it
+    // to be answered: with "Approve for me" every tool call waits a moment (the routine ones are
+    // allowed at once, the rest within 20 s), and a message typed then used to wait for the whole
+    // turn. Only a request still unanswered after STEER_ANSWER_WAIT_MS sends the message back to the
+    // chat's queue, which steers it again once the request is gone.
+    const observeCard = () => Promise.resolve().then(() => harnessService().observe?.(card.receipt.thread_id, expectedTurns.get(card.receipt.thread_id)))
       .catch(() => null);
-    if (waiting?.approvals?.length || waiting?.needsInput) {
-      return { ok: true, steered: false, waiting: true, reason: "The agent is waiting for your answer to its request; your message is sent after it" };
+    let waiting = await observeCard();
+    const asking = (state) => Boolean(state?.approvals?.length || state?.needsInput);
+    for (const deadline = now() + STEER_ANSWER_WAIT_MS; asking(waiting) && now() < deadline;) {
+      await new Promise(resolve => setTimer(resolve, STEER_ANSWER_POLL_MS));
+      waiting = await observeCard();
+    }
+    if (asking(waiting)) {
+      return { ok: true, steered: false, waiting: true, reason: "The agent is waiting for an answer to its request; your message is steered in once that is answered" };
     }
     // A turn whose agent hung (a model request that never came back, a retry loop) takes a steer and
     // never reads it: "keep going" did nothing. Nothing new for STEER_STALL_MS (longer while a tool

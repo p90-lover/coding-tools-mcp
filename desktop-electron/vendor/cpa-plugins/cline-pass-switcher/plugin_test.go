@@ -278,3 +278,16 @@ func TestFullNativeProviderConsoleAndLifecycle(t *testing.T) {
 		t.Fatal("managed child remained after shutdown")
 	}
 }
+
+func TestDatedDeepSeekBuildsTakeTheSameEfforts(t *testing.T) {
+	for _, model := range []string{"cline-pass/deepseek-v4.1-flash", "cline-pass/deepseek-v4.1-flash-1017", "cline-pass/deepseek-v4.1-flash-20261017"} {
+		if got := modelEfforts(model); len(got) != 4 || got[3] != "max" {
+			t.Fatalf("%s: %v", model, got)
+		}
+	}
+	for _, model := range []string{"cline-pass/deepseek-v4.1-flash-x", "cline-pass/deepseek-v4-flash", "cline-pass/deepseek-v4.1-flash-1017(high)"} {
+		if got := modelEfforts(model); got != nil {
+			t.Fatalf("%s should take no effort: %v", model, got)
+		}
+	}
+}

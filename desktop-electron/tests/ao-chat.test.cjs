@@ -182,6 +182,7 @@ test("a new chat's prompt is Codex's \"Do anything\" in either mode; follow-up a
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
   const jsx = (type, props) => ({ type, props: props || {} });
   const react = { useMemo: calculate => calculate(), useEffect() {}, useRef: initial => ({ current: initial }), memo: component => component,
+    createContext: value => ({ Provider: ({ children }) => children, value }), useContext: context => context.value,
     useState: initial => [typeof initial === "function" ? initial() : initial, () => {}] };
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
     exports: component, require: name => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : name === "./ao-chat" ? chat
@@ -915,4 +916,38 @@ test("a queued message survives an unmount while its delivery fails", async () =
   });
   flush(); alive.current = false; reply.resolve(false); await new Promise(setImmediate);
   assert.deepEqual(plain(queues.get("task-a")), [next]);
+});
+
+test("a turn's activity drops answered approvals, counts a call made again and again, and folds runs of calls and thinking", () => {
+  const items = [
+    { id: "1", kind: "reasoning", status: "completed", text: "Let me wait for the tests" },
+    { id: "2", kind: "tool", status: "completed", label: "MCP", text: "mcp__coding-tools__read_output" },
+    { id: "3", kind: "approval", status: "completed", text: "mcp__coding-tools__read_output" },
+    { id: "4", kind: "tool", status: "completed", label: "MCP", text: "mcp__coding-tools__read_output" },
+    { id: "5", kind: "approval", status: "completed", text: "mcp__coding-tools__read_output" },
+    { id: "6", kind: "tool", status: "running", label: "MCP", text: "mcp__coding-tools__read_output" },
+    { id: "7", kind: "approval", status: "rejected", text: "git push" },
+    { id: "8", kind: "approval", status: "completed", label: "Approval timed out", text: "Nobody answered" },
+    { id: "9", kind: "command", status: "completed", text: "npm test" },
+    { id: "10", kind: "message", status: "completed", text: "Tests pass." },
+    { id: "11", kind: "edit", status: "completed", text: "a.ts", files: [] },
+  ];
+  const tidy = chat.tidyTimeline(items);
+  assert.deepEqual([...tidy.map((item) => item.id)], ["1", "6", "7", "8", "9", "10", "11"], "answered approvals drop; a denied or timed-out one stays");
+  assert.equal(tidy[1].count, 3, "three read_output calls are one row");
+  assert.equal(tidy[1].status, "running", "the row keeps the latest call's state");
+  const segments = chat.groupTimeline(tidy);
+  assert.deepEqual([...segments.map((segment) => segment.kind === "group" ? `group:${segment.items.length}` : segment.item.id)],
+    ["group:2", "7", "8", "group:1", "10", "11"]);
+  assert.equal(chat.activitySummary(segments[0].items), "read_output ×3 · 1 thought");
+  assert.equal(chat.activitySummary([{ id: "c", kind: "command", status: "completed", text: "ls", count: 2 }]), "Ran 2 commands");
+});
+
+test("a single-model chat's card is named by its model, a team's by its role", () => {
+  const route = { harness_id: "ao:claude-code", model: "cpa/cline-pass/deepseek-v4.1-flash" };
+  const node = { id: "one", role: "planner", state: "running", x: 0, route, settings: { name: "Single assistant" } };
+  const name = (mode) => chat.chatTurns([{ id: "r", project_id: "t", cancelled: false, execution_mode: mode, nodes: [node] }], "hi",
+    { modelName: (model) => `Model<${model}>` })[0].steps[0].name;
+  assert.equal(name("single"), "Model<cpa/cline-pass/deepseek-v4.1-flash>");
+  assert.equal(name("team"), "Single assistant");
 });

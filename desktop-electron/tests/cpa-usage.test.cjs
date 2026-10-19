@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 const test = require("node:test");
 const {
-  createCpaUsage, aggregateUsage, clineQuotaOf, priceFor, estimateCost, cellCost, modelKey, RANGES,
+  createCpaUsage, aggregateUsage, summarizeRecords, clineQuotaOf, priceFor, estimateCost, cellCost, modelKey, RANGES,
 } = require("../electron/cpa-usage.cjs");
 const { MODEL_PRICES } = require("../electron/cpa-model-prices.cjs");
 
@@ -248,4 +248,43 @@ test("cpa_usage is a read-only Agent Orchestrator operation served by the AO run
   assert.deepEqual(seen, [["upstream", "cpa_usage", { range: "24h" }]]);
   const { BACKEND_MODULES } = require("../electron/backend-bundle.cjs");
   assert.ok(BACKEND_MODULES.includes("cpa-usage.cjs") && BACKEND_MODULES.includes("cpa-model-prices.cjs"));
+});
+
+test("a turn's model requests sum to its steps, model time, first-token time, speed, cache hits and tokens", () => {
+  const stats = summarizeRecords([
+    { latency_ms: 1800, ttft_ms: 600, input_tokens: 7700, cached_tokens: 0, output_tokens: 161 },
+    { latency_ms: 2400, ttft_ms: 400, input_tokens: 8000, cached_tokens: 6000, output_tokens: 239 },
+    { failed: true, latency_ms: 300, input_tokens: 9000 },
+  ]);
+  assert.equal(stats.steps, 3);
+  assert.equal(stats.failed, 1);
+  assert.equal(stats.latencyMs, 4200, "a failed request is a step, not model time");
+  assert.equal(stats.ttftMs, 500);
+  assert.equal(stats.tokensPerSecond, Math.round((400 / 3200) * 1000), "speed is output over the streaming part");
+  assert.equal(stats.cacheHit, 6000 / 15700);
+  assert.deepEqual([stats.inputTokens, stats.outputTokens], [15700, 400]);
+  assert.deepEqual(summarizeRecords([]), { steps: 0, failed: 0, latencyMs: 0, ttftMs: null, tokensPerSecond: null, cacheHit: null, inputTokens: 0, outputTokens: 0, cachedTokens: 0 });
+});
+
+test("a turn's stats read CPA Helper's records for its model since it started, without the cpa/ prefix or an effort suffix", async () => {
+  const urls = [];
+  const usage = createCpaUsage({
+    now: () => NOW,
+    getConnection: () => ({ baseUrl: "http://127.0.0.1:8317", managementKey: KEY }),
+    fetchImpl: async (url, init) => {
+      urls.push(String(url));
+      assert.equal(init.headers.Authorization, `Bearer ${KEY}`);
+      return { ok: true, status: 200, json: async () => ({ items: [{ latency_ms: 1000, ttft_ms: 200, input_tokens: 10, output_tokens: 80 }] }) };
+    },
+  });
+  const stats = await usage.turnStats({ model: "cpa/cline-pass/deepseek-v4.1-flash(high)", from: NOW - 5000 });
+  assert.equal(stats.available, true);
+  assert.equal(stats.steps, 1);
+  const url = new URL(urls[0]);
+  assert.equal(url.pathname, "/v0/management/cpa-helper/records");
+  assert.equal(url.searchParams.get("model"), "cline-pass/deepseek-v4.1-flash");
+  assert.equal(url.searchParams.get("from"), String(NOW - 5000));
+  await usage.turnStats({ model: "cpa/cline-pass/deepseek-v4.1-flash(high)", from: NOW - 5000 });
+  assert.equal(urls.length, 1, "read again only after a few seconds");
+  assert.deepEqual(await usage.turnStats({ model: "", from: NOW }), { ok: true, available: false });
 });

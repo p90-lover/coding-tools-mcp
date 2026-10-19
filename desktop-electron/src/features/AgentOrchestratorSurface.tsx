@@ -16,7 +16,7 @@ import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { createLatestConfigQueue } from "./ao-config";
 import {
   AGENT_DEFAULT_MODEL, AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, defaultTeam, emptyRoleSettings,
-  cardMeta, harnessLabel, modelLabel, teamForMission, workerRoute, type AoHarness, type AoModelCatalog, type AoModelLoader, type AoRoute, type AoTeam, type RoleSettings,
+  cardMeta, harnessLabel, modelLabel, modelShortLabel, teamForMission, workerRoute, type AoHarness, type AoModelCatalog, type AoModelLoader, type AoRoute, type AoTeam, type RoleSettings,
 } from "./AgentOrchestratorRoleEditor";
 import "./agent-orchestrator.css";
 import "./codex-chat.css";
@@ -452,6 +452,9 @@ const NATIVE_ENTRY: AoHarness = { id: NATIVE_HARNESS, label: "Native Codex", run
 
 /** A project folder's git kind for the chat list's labels; one stable function, so each folder is read once. */
 const readProjectGit = (folder: string) => window.codexWebLauncher?.projectGit?.(folder) ?? Promise.resolve(null);
+
+/** A chat card's model as the composer's chip names it ("DeepSeek V4.1 Flash", "WebGPT High"). */
+const chatModelName = (model: string) => modelShortLabel(model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, ""), model.startsWith("cpa/")).name;
 
 export function AgentOrchestratorSurface({ language, setError }: {
   language: Language;
@@ -1970,7 +1973,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
                 approve={approve}
                 notice={chatTaskId ? chatNotices[chatTaskId] || (selectedRun?.project_id === chatTaskId && ["held", "failed"].includes(autoStatus) ? advanceNotice || undefined : undefined) : undefined}
                 retryStart={retryChatStart}
-                describeNode={describeChatNode} activity={chatActivity}
+                describeNode={describeChatNode} activity={chatActivity} modelName={chatModelName}
                 describeRoute={(nodeId, runId) => { const node = missions.find((mission) => mission.id === runId)?.nodes.find((entry) => entry.id === nodeId); return node ? describeNode(node as unknown as CanvasNode) : ""; }} />
         ) : null}
 

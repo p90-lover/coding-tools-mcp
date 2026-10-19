@@ -75,9 +75,71 @@ export type ChatActivity = {
 export type ChatLiveItem = {
   id: string; kind: string; status: string; text: string; label?: string;
   description?: string; input?: string; output?: string;
+  /** The same call made this many times in a row (tidyTimeline). */
+  count?: number;
   /** For kind "edit": the files it changed (Claude Code's "Edited <file> +12 −3"). */
   files?: ChatEditedFile[];
 };
+/**
+ * A turn's activity as it reads: requests "Approve for me" (or the user) already answered drop
+ * out, since every tool call left a second "Approval <tool>" row under it, and the same call made
+ * again and again ("read_output" while a test runs) is one row with a count. A request that timed
+ * out or was cancelled (AO labels those) still shows.
+ */
+export function tidyTimeline(items: ChatLiveItem[]): ChatLiveItem[] {
+  const out: ChatLiveItem[] = [];
+  for (const item of items) {
+    if (item.kind === "approval" && !item.label && !/reject|denied|declin/i.test(item.status)) continue;
+    const last = out.at(-1);
+    if (last && (item.kind === "tool" || item.kind === "command") && last.kind === item.kind && last.label === item.label
+      && last.text === item.text && (last.description ?? "") === (item.description ?? "")) {
+      out[out.length - 1] = { ...item, count: (last.count ?? 1) + 1 };
+      continue;
+    }
+    out.push(item);
+  }
+  return out;
+}
+
+/** A stretch of a turn: a message, steer or edit on its own, or a run of tool calls and thinking. */
+export type ChatLiveSegment = { kind: "item"; item: ChatLiveItem } | { kind: "group"; key: string; items: ChatLiveItem[] };
+const GROUPED = new Set(["tool", "command", "reasoning"]);
+
+/** Runs of tool calls and thinking fold into one group each, as Codex, Cursor and Claude Code show them. */
+export function groupTimeline(items: ChatLiveItem[]): ChatLiveSegment[] {
+  const segments: ChatLiveSegment[] = [];
+  for (const item of items) {
+    const last = segments.at(-1);
+    if (!GROUPED.has(item.kind)) segments.push({ kind: "item", item });
+    else if (last?.kind === "group") last.items.push(item);
+    else segments.push({ kind: "group", key: item.id, items: [item] });
+  }
+  return segments;
+}
+
+/** "Ran 2 commands, read_output ×7, search_text · 3 thoughts": what a folded group did. */
+export function activitySummary(items: ChatLiveItem[]): string {
+  const commands = items.filter((item) => item.kind === "command").reduce((sum, item) => sum + (item.count ?? 1), 0);
+  const thoughts = items.filter((item) => item.kind === "reasoning").length;
+  const tools = new Map<string, number>();
+  for (const item of items) {
+    if (item.kind !== "tool") continue;
+    const name = item.text.replace(/^mcp__[\w-]+__/, "").replace(/\s+/g, " ").trim().slice(0, 40) || item.label || "tool";
+    tools.set(name, (tools.get(name) ?? 0) + (item.count ?? 1));
+  }
+  const named = [...tools].sort((a, b) => b[1] - a[1]);
+  const parts = [
+    commands ? `ran ${commands === 1 ? "a command" : `${commands} commands`}` : "",
+    ...named.slice(0, 3).map(([name, count]) => (count > 1 ? `${name} ×${count}` : name)),
+    named.length > 3 ? `${named.length - 3} more tools` : "",
+  ].filter(Boolean);
+  const text = parts.join(", ");
+  const thinking = thoughts ? `${thoughts} ${thoughts === 1 ? "thought" : "thoughts"}` : "";
+  const line = [text, thinking].filter(Boolean).join(" · ") || "Worked";
+  // "Ran …" and "3 thoughts" read as sentences; a tool's own name keeps its spelling.
+  return commands ? line[0].toUpperCase() + line.slice(1) : line;
+}
+
 /** A file a tool call edited: lines added and removed, and the changed lines ("-old", "+new"). */
 export type ChatEditedFile = { path: string; additions: number; deletions: number; diff?: string };
 
@@ -140,6 +202,8 @@ export type ChatOptions = {
   /** Live activity by "<run id>:<card id>". */
   activity?: Record<string, ChatActivity>;
   now?: number;
+  /** A model's short name ("DeepSeek V4.1 Flash"): a single-model chat's card is named by it. */
+  modelName?: (model: string) => string;
 };
 
 /** A working card that has not been heard from for this long is shown as possibly stuck. */
@@ -463,7 +527,9 @@ export function liveTimeline(key: string, live: ChatActivity | undefined): ChatL
 function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: number): ChatStep {
   const key = `${run.id}:${node.id}`;
   const step: ChatStep = {
-    key, nodeId: node.id, role: node.role, name: chatNodeName(node), detail: options.describe?.(node, run) ?? "", state: node.state,
+    key, nodeId: node.id, role: node.role,
+    // A single-model chat's one card reads as the model it runs ("Single assistant" said nothing).
+    name: (run.execution_mode === "single" && node.route?.model && options.modelName?.(node.route.model)) || chatNodeName(node), detail: options.describe?.(node, run) ?? "", state: node.state,
     ...(node.receipt?.started_at_ms ? { startedAtMs: node.receipt.started_at_ms } : {}),
     ...(node.receipt?.thread_id && node.route?.harness_id?.startsWith("ao:") && node.state !== "running" && node.state !== "reserved"
       ? { hasWork: true } : {}),
@@ -630,6 +696,8 @@ export function chatQueueAdd(queue: QueuedChatMessage[], item: QueuedChatMessage
 /** What a command shows above the composer: a few facts, a block of text, or a list to pick from. */
 export type ChatCommandCard = {
   title: string; rows?: [string, string][]; text?: string; mono?: boolean;
+  /** The user's own message the card is about (a queued message), shown quoted above the text. */
+  quote?: string;
   items?: { label: string; detail?: string; run: () => void }[];
 };
 /** What the page provides so the chat's commands reach real data and actions. */

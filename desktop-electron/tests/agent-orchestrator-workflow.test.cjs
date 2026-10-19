@@ -4322,3 +4322,48 @@ test("Stop interrupts the run's working agents even when the service refuses the
   // A run the service does not know either is not pretended stopped.
   await assert.rejects(workflow.call("control_run", { workspaceId: "ws", runId: "other", action: "stop" }), /revision changed/);
 });
+
+test("a steer typed while a request waits for its answer reaches the agent once it is answered, not after the turn", async () => {
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  let clock = 1_000_000, observed = 0;
+  const steered = [];
+  const pending = [{ approval_id: "a1", kind: "tool", tool: "mcp__coding-tools__read_output" }];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: world.requestHeadless, now: () => clock,
+    // Each wait moves the clock; "Approve for me" answers the request on the third look.
+    setTimer: (resolve, ms) => { clock += ms; resolve(); return 0; },
+    aoHarness: {
+      observe: async () => ({ turnId: "t1", turnState: "running", status: "working", lastActivityAt: clock, timeline: [], approvals: ++observed < 3 ? pending : [] }),
+      steer: async (session, text) => { steered.push([session, text]); return { steered: true }; },
+    },
+  });
+  const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "check the logs too" });
+  assert.equal(result.steered, true);
+  assert.deepEqual(steered, [["sess-1", "check the logs too"]]);
+
+  // A request nobody answers: after half a minute the message goes back to the chat's queue.
+  observed = -1_000;
+  steered.length = 0;
+  const unanswered = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "and this" });
+  assert.equal(unanswered.steered, false);
+  assert.equal(unanswered.waiting, true);
+  assert.deepEqual(steered, [], "a request still waiting is never cancelled by a steer");
+});
+
+test("a dated DeepSeek V4.1 Flash build from Cline Pass takes the same effort levels as the model itself", async () => {
+  const workflow = createAgentOrchestratorWorkflow({
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ data: [
+      { id: "cline-pass/deepseek-v4.1-flash", owned_by: "cline" },
+      { id: "cline-pass/deepseek-v4.1-flash-1017", owned_by: "cline" },
+      { id: "cline-pass/kimi-k3", owned_by: "cline" },
+    ] }) }),
+  });
+  const { capabilities } = await workflow.call("models", {});
+  assert.deepEqual(capabilities["cline-pass/deepseek-v4.1-flash-1017"].efforts, ["none", "low", "high", "max"]);
+  assert.deepEqual(capabilities["cline-pass/deepseek-v4.1-flash"].efforts, ["none", "low", "high", "max"]);
+  assert.deepEqual(capabilities["cline-pass/kimi-k3"].efforts, [], "another Cline model still passes its name unchanged");
+});
