@@ -513,6 +513,29 @@ export type ChatTurn = {
   startedAtMs?: number;
 };
 
+/** The error the main process gives a card whose turn ended only because the app restarted. */
+export const RESTART_INTERRUPTED = /process ended before it finished \(the app restarted\)/;
+
+type ResumeCandidate = {
+  cancelled: boolean; paused?: boolean; execution_mode?: string;
+  nodes: { state: string; receipt?: { error?: string | null } | null; history?: unknown[] }[];
+};
+
+/**
+ * Whether a chat picks up by itself after an app restart: its step failed only because the app
+ * (and AO with it) restarted mid-turn, so nothing about the work itself went wrong.
+ */
+export function resumableAfterRestart(mission: ResumeCandidate): boolean {
+  // A chat stopped or paused on purpose stays that way.
+  if (mission.cancelled || mission.paused) return false;
+  // Only a single chat resumes by itself: resuming a team is a bigger step, left to its own controls.
+  if (mission.execution_mode !== "single") return false;
+  const card = mission.nodes[0];
+  // Within the attempt budget, so an agent that brings the app down each time is not restarted forever.
+  return Boolean(card) && ["held", "failed"].includes(card.state)
+    && RESTART_INTERRUPTED.test(String(card.receipt?.error || "")) && (card.history?.length ?? 0) < 2;
+}
+
 /**
  * A working card's turn so far. AO harness cards report a timeline; Native Codex cards (WebGPT and
  * the CPA pool) report only the reply streamed so far (`output`), which the chat used to drop, so a
@@ -551,6 +574,24 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
     }
   }
   return step;
+}
+
+/**
+ * What the line under the chat box counts: the latest turn, and before it every turn that ended
+ * without finishing (failed, stopped, held). A message whose attempt failed and was sent again,
+ * often on another model, kept only the new attempt's time and tokens. `from` is when the earliest
+ * of those started; `models` are the models they ran on, newest first.
+ */
+export function chatStatsSpan(turns: ChatTurn[], runs: ChatRun[]): { from?: number; models: string[] } {
+  const started = turns.filter((turn) => turn.runId && turn.startedAtMs);
+  const latest = started.at(-1);
+  if (!latest) return { models: [] };
+  const span = [latest];
+  for (let index = started.length - 2; index >= 0 && started[index].status !== "done"; index -= 1) span.push(started[index]);
+  const byId = new Map(runs.map((run) => [run.id, run]));
+  const models = [...new Set(span.flatMap((turn) => (byId.get(turn.runId)?.nodes ?? []).map((node) => node.route?.model ?? ""))
+    .filter((model) => model.startsWith("cpa/")))];
+  return { from: Math.min(...span.map((turn) => turn.startedAtMs!)), models };
 }
 
 /** The conversation as Codex turns, oldest first, plus a just-sent message whose run is not visible yet. */
@@ -736,7 +777,11 @@ export function chatSlashCommand(draft: string): string | null {
   return name && CHAT_SLASH_COMMANDS.some((command) => command.name === name) ? name : null;
 }
 
-export type ChatAttachment = { name: string; path?: string; text?: string; image?: boolean };
+export type ChatAttachment = {
+  name: string; path?: string; text?: string; image?: boolean;
+  /** The chat box's thumbnail (an object URL of the file); never sent. */
+  preview?: string;
+};
 
 /** Attachments appended to the message: a file path agents read themselves, or a small text file inline. */
 export function chatMessageWithAttachments(message: string, attachments: ChatAttachment[]): string {

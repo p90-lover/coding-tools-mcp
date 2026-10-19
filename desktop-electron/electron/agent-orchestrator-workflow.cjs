@@ -200,6 +200,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   const dispatching = new Set();
   // runId -> { session, text }: a single-model follow-up that continues its chat's live AO session.
   const continuations = new Map();
+  // runId -> { workspaceId, taskId }: a follow-up whose agent may start fresh; a fresh start gets
+  // the earlier replies (chatHandoff), a continued session already has them.
+  const handoffs = new Map();
   /**
    * The single card whose live AO session a single-model follow-up on `singleRoute` continues, or
    * null: the chat's last run was a single model on exactly this route and its card is done (a
@@ -987,9 +990,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
           if (sessionOwners.size > 500) sessionOwners.delete(sessionOwners.keys().next().value);
           sent = await harnessService().send(continued.session, continued.text, reserved.request_key).catch(() => null);
         }
-        // A follow-up that should have continued the chat's session starts a fresh one without the
-        // conversation: logged, so "it forgot everything" can be traced to it.
+        // A follow-up that should have continued the chat's session starts a fresh one: logged, so
+        // "it forgot everything" can be traced to it.
         if (continued && !sent?.turnId) logger?.warn?.("ao.continuation_lost", { reason: sent ? "send_refused" : "session_gone" });
+        // A fresh start of a follow-up (another model or setting, or a session that is gone) begins
+        // with what the earlier agents replied; the first card to start takes it.
+        const handoff = handoffs.get(runId);
+        handoffs.delete(runId);
+        const handoffRoom = PROMPT_BYTES - utf8Bytes(reserved.prompt);
+        const prompt = !sent?.turnId && handoff
+          ? (await chatHandoff(handoff.workspaceId, handoff.taskId, runId, handoffRoom).catch(() => "")) + reserved.prompt : reserved.prompt;
         // Otherwise a pre-warmed session for exactly this route takes the first prompt as its first
         // turn: it already has its worktree and a running agent, so nothing is launched now.
         const warmed = sent?.turnId ? null : await takeWarm(workspaceId, node.route, plain);
@@ -998,7 +1008,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
           while (sessionStops.has(warmed)) await sessionStops.get(warmed);
           sessionOwners.set(warmed, runKey(workspaceId, runId));
           if (sessionOwners.size > 500) sessionOwners.delete(sessionOwners.keys().next().value);
-          first = await harnessService().send(warmed, reserved.prompt, reserved.request_key).catch(() => null);
+          first = await harnessService().send(warmed, prompt, reserved.request_key).catch(() => null);
         }
         if (warmed && !first?.turnId) {
           warmLog("send_failed", { model: node.route.model });
@@ -1010,7 +1020,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
           if (expectedTurns.size > 500) expectedTurns.delete(expectedTurns.keys().next().value);
           session = live;
           launchedVia = sent?.turnId ? "continued" : "warm";
-        } else session = await harnessService().spawn({ ...launch, prompt: reserved.prompt });
+        } else session = await harnessService().spawn({ ...launch, prompt });
         // The next chat on this route finds a session waiting too, started once this turn is under
         // way rather than beside its first model call.
         if (warmed && !idleStopped) {
@@ -2188,7 +2198,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function recoverHeld(workspaceId, mission, state = {}) {
     const held = mission.nodes.filter(node => node.state === "held");
     if (!held.length || mission.cancelled) return null;
-    if (mission.execution_mode === "single") return { detail: "Single model failed; inspect the saved answer and retry explicitly." };
+    if (mission.execution_mode === "single") {
+      // The app restarted under the turn: nothing about the step failed, so it runs again (once
+      // per attempt budget) instead of waiting for an explicit retry.
+      const interrupted = held.find(node => RESTART_INTERRUPTED.test(String(node.receipt?.error || ""))
+        && (node.history?.length ?? 0) < HELPER_ATTEMPT_LIMIT);
+      if (!interrupted) return { detail: "Single model failed; inspect the saved answer and retry explicitly." };
+      await controlRun({ workspaceId, runId: mission.id, action: "retry" });
+      return { changed: true, retried: true, detail: "The app restarted while this step was running; it continues" };
+    }
     const workers = held.filter(node => node.role === "worker");
     const exhausted = workers.filter(node => (node.history?.length ?? 0) >= HELPER_ATTEMPT_LIMIT ||
       POOL_EXHAUSTED.test(String(node.receipt?.error || "")));
@@ -2749,6 +2767,31 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // "Approve for me" answers a request within 20 s (its reviewer up to 25 s): a steer waits that long.
   const STEER_ANSWER_WAIT_MS = 30_000;
   const STEER_ANSWER_POLL_MS = 750;
+  // How long a declined request may take to clear before the steer is tried anyway.
+  const STEER_DECLINE_WAIT_MS = 5_000;
+  /**
+   * Declines what an AO agent's session is waiting on, as just observed (tool requests, questions);
+   * true when anything was declined.
+   */
+  async function declinePending(session, observed) {
+    let declined = false;
+    for (const pending of observed?.approvals ?? []) {
+      try {
+        if (pending.kind === "question") {
+          await harnessService().resolveInput(session, pending.approval_id, "decline");
+        } else {
+          // A native (Codex) request keeps its own card; only AO's offered "reject" answer is used.
+          const decision = pending.source === "ao" ? aoDecision(pending, false) : null;
+          if (!decision) continue;
+          await harnessService().resolveApproval(session, pending.approval_id, decision);
+        }
+        declined = true;
+      } catch (error) {
+        logger?.warn?.("ao.steer_decline_failed", { message: publicText(error?.message || error, 200) });
+      }
+    }
+    return declined;
+  }
   async function chatSteer({ workspaceId, taskId, message } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
     const text = clean(message, 8192, false);
@@ -2769,6 +2812,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       .catch(() => null);
     let waiting = await observeCard();
     const asking = (state) => Boolean(state?.approvals?.length || state?.needsInput);
+    // Typing while the agent asks is the answer, as in Claude Code: the request is declined (never
+    // allowed) and the message reaches the agent at once. Holding it until the request was answered
+    // looked to the person like a message that could not be sent.
+    if (asking(waiting) && await declinePending(card.receipt.thread_id, waiting)) {
+      for (const deadline = now() + STEER_DECLINE_WAIT_MS; asking(waiting) && now() < deadline;) {
+        await new Promise(resolve => setTimer(resolve, STEER_ANSWER_POLL_MS));
+        waiting = await observeCard();
+      }
+    }
     for (const deadline = now() + STEER_ANSWER_WAIT_MS; asking(waiting) && now() < deadline;) {
       await new Promise(resolve => setTimer(resolve, STEER_ANSWER_POLL_MS));
       waiting = await observeCard();
@@ -2913,6 +2965,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       continuations.set(runId, continuation);
       if (continuations.size > 200) continuations.delete(continuations.keys().next().value);
     }
+    if (taskId) {
+      handoffs.set(runId, { workspaceId: id, taskId: task });
+      if (handoffs.size > 200) handoffs.delete(handoffs.keys().next().value);
+    }
     if (objective) { goals.set(id, task, objective); goals.update(id, task, { round: 1, lastRunId: runId }); }
     if (deferStart === true) {
       // Keep the normal authorization path: an expired/missing local approval fails visibly.
@@ -3016,6 +3072,67 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
   // Codex's own compaction instruction (codex-rs core/src/tasks/compact.rs).
   const COMPACT_PROMPT = "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.\n\nInclude:\n- Current progress and key decisions made\n- Important context, constraints, or user preferences\n- What remains to be done (clear next steps)\n- Any critical data, examples, or references needed to continue\n\nBe concise, structured, and focused on helping the next LLM seamlessly continue the work.";
+  /** A CPA model's handoff summary of a conversation (COMPACT_PROMPT); throws when none answers. */
+  async function handoffSummary(text) {
+    const { baseUrl, key } = connection();
+    const model = (await models()).models[0];
+    const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model, temperature: 0, max_tokens: 1600, messages: [
+        { role: "system", content: COMPACT_PROMPT }, { role: "user", content: text }] }),
+      signal: AbortSignal.timeout(120_000),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return String((await response.json())?.choices?.[0]?.message?.content ?? "").trim();
+  }
+
+  // A chat switched to another model, agent or setting starts a fresh session, which got only the
+  // chat's task text: the person's messages, never what the earlier agents said or found. It now
+  // also gets their replies, in order, or a handoff summary of them when they are too long.
+  // AO keeps the first 16 KiB of UTF-8 of a prompt (upstream spawn), with room for its own
+  // instruction: the handoff goes in front of the chat's prompt, so it gets only what the prompt
+  // leaves, and the person's latest request is never the part that is cut.
+  const PROMPT_BYTES = 16_384 - 1_024;
+  const HANDOFF_MIN_BYTES = 1_024;
+  const utf8Bytes = text => Buffer.byteLength(text, "utf8");
+  /** The end of a text within a UTF-8 byte budget, never splitting a character. */
+  const utf8Tail = (text, bytes) => {
+    const chars = Array.from(text);
+    let used = 0, start = chars.length;
+    while (start > 0 && used + utf8Bytes(chars[start - 1]) <= bytes) used += utf8Bytes(chars[--start]);
+    return chars.slice(start).join("");
+  };
+  async function chatHandoff(workspaceId, taskId, runId, maxBytes) {
+    const saved = await runs({ workspaceId });
+    const earlier = chatEdits.visible(workspaceId, saved.runs.filter(run => run.project_id === taskId && run.id !== runId));
+    const replies = [];
+    for (const run of earlier) {
+      for (const node of run.nodes || []) {
+        const answer = String(node.receipt?.answer || "").trim();
+        if (!answer) continue;
+        const who = [node.settings?.name || node.role, String(node.route?.model || "").replace(/^cpa\//, "")].filter(Boolean).join(" · ");
+        replies.push(`--- Reply ${replies.length + 1} (${who}):\n${answer}`);
+      }
+    }
+    if (!replies.length || maxBytes < HANDOFF_MIN_BYTES) return "";
+    const head = "Earlier in this chat, other agents answered the messages below. Their replies, in order, so you can continue from where they left off:\n\n";
+    const end = "\n\n--- End of earlier replies.\n\n";
+    const transcript = replies.join("\n\n");
+    const whole = `${head}${transcript}${end}`;
+    if (utf8Bytes(whole) <= maxBytes) return whole;
+    const summary = await handoffSummary(transcript).catch(() => "");
+    if (summary) {
+      const summaryHead = "Earlier in this chat, other agents worked on the messages below. A handoff summary of their replies:\n\n";
+      const summaryEnd = "\n\n--- End of summary.\n\n";
+      const room = maxBytes - utf8Bytes(summaryHead + summaryEnd);
+      if (room >= HANDOFF_MIN_BYTES / 2) return `${summaryHead}${utf8Bytes(summary) <= room ? summary : utf8Tail(summary, room)}${summaryEnd}`;
+    }
+    // No model answered: the newest replies, which matter most for going on.
+    const cut = `${head}[earlier replies cut]\n`;
+    return `${cut}${utf8Tail(transcript, maxBytes - utf8Bytes(cut + end))}${end}`;
+  }
+
   // /compact: a chat's context is its task text (every follow-up is appended to it, up to 8,192
   // characters). Replace it with a handoff summary so the chat can keep going.
   async function compactChat({ workspaceId, taskId } = {}) {
@@ -3028,17 +3145,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (before.length < 800) return { ok: true, compacted: false, before: before.length, after: before.length };
     let summary = "";
     try {
-      const { baseUrl, key } = connection();
-      const model = (await models()).models[0];
-      const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model, temperature: 0, max_tokens: 1600, messages: [
-          { role: "system", content: COMPACT_PROMPT }, { role: "user", content: before }] }),
-        signal: AbortSignal.timeout(120_000),
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      summary = String((await response.json())?.choices?.[0]?.message?.content ?? "").trim();
+      summary = await handoffSummary(before);
     } catch (error) {
       throw new Error(`Compacting needs a CPA model and none answered (${String(error?.message || error).slice(0, 160)})`);
     }

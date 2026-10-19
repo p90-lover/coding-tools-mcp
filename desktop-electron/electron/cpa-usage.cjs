@@ -372,18 +372,22 @@ function createCpaUsage({ getConnection, quota = null, fetchImpl = fetch, now = 
    * those of the turn's model since the turn started are this turn's (another chat on the same
    * model at the same moment would be counted too). Cached a few seconds per turn.
    */
-  async function turnStats({ model, from } = {}) {
+  async function turnStats({ model, models, from } = {}) {
     const target = connection();
-    const name = String(model ?? "").replace(/^cpa\//, "").replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "").trim().slice(0, 200);
+    const clean = (value) => String(value ?? "").replace(/^cpa\//, "").replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "").trim().slice(0, 200);
+    // A turn retried on another model (a failed or stopped attempt, then a new run) counts every
+    // model it used since its first attempt started.
+    const names = [...new Set([model, ...(Array.isArray(models) ? models : [])].map(clean).filter(Boolean))].slice(0, 4);
     const start = Number(from);
-    if (!target || !name || !Number.isFinite(start) || start <= 0) return { ok: true, available: false };
-    const key = `turn:${name}:${start}`;
+    if (!target || !names.length || !Number.isFinite(start) || start <= 0) return { ok: true, available: false };
+    const key = `turn:${names.join("|")}:${start}`;
     const hit = cache.get(key);
     if (hit && now() - hit.at < TURN_CACHE_MS) return hit.value;
-    const params = new URLSearchParams({ model: name, from: String(Math.floor(start)), page_size: "500" });
-    const listing = await optional(target, `/cpa-helper/records?${params}`);
-    const value = listing && Array.isArray(listing.items)
-      ? { ok: true, available: true, ...summarizeRecords(listing.items) } : { ok: true, available: false };
+    const listings = await Promise.all(names.map((name) => optional(target,
+      `/cpa-helper/records?${new URLSearchParams({ model: name, from: String(Math.floor(start)), page_size: "500" })}`)));
+    const value = listings.some((listing) => listing && Array.isArray(listing.items))
+      ? { ok: true, available: true, ...summarizeRecords(listings.flatMap((listing) => (Array.isArray(listing?.items) ? listing.items : []))) }
+      : { ok: true, available: false };
     cache.set(key, { at: now(), value });
     for (const stale of cache.keys()) if (stale.startsWith("turn:") && now() - cache.get(stale).at > 60_000) cache.delete(stale);
     return value;

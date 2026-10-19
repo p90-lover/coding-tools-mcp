@@ -791,6 +791,10 @@ export interface LauncherApi {
   filePath?(file: File): string;
   /** Opens an existing folder in the system file manager. */
   openFolder?(folder: string): Promise<boolean>;
+  /** Saves a chat attachment that has no path (a pasted screenshot) for the agent to open by path. */
+  saveAttachment?(input: { name: string; type: string; bytes: Uint8Array }): Promise<{ path: string }>;
+  /** Selects an existing file in the system file manager. */
+  revealFile?(file: string): Promise<boolean>;
   /** Opens or refreshes a chat's read-only window; `open: false` once the user has closed it. */
   showChatWindow?(input: { key: string; title: string; page: string; body: string; mode: "open" | "update" }): Promise<{ open: boolean }>;
   /** A project folder's git origin as "owner/repo", or null. */

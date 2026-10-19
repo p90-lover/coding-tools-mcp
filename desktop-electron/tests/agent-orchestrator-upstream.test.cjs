@@ -159,6 +159,20 @@ test("observe shows the reply of a turn that ended while AO still flagged it as 
   assert.equal(JSON.stringify(observed.timeline.map((item) => item.status)), '["completed"]');
 });
 
+test("a turn AO failed because its controller died with the app reads as a restart interruption", async () => {
+  // Seen live after an in-app update: AO's daemon closed with the app and, starting again, failed
+  // the running turn as "controller ended before the turn completed"; the chat could not resume it.
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {
+      turns: [{ id: "t", state: "failed", errorMessage: "controller ended before the turn completed" }],
+      messages: [{ id: "m0", role: "user", turnId: "t", sequence: 1, text: "the prompt" }],
+    } : { session: { id: "s", mode: "chat", status: "idle" } },
+  });
+  const observed = await upstream.observe("s");
+  assert.equal(observed.turnState, "interrupted");
+  assert.match(observed.error, /process ended before it finished \(the app restarted\)/);
+});
+
 test("observe returns the current turn's reasoning, tool calls and messages in order", async () => {
   const upstream = observeHarness({
     internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {
@@ -898,4 +912,9 @@ test("the context meter keeps its reading through a steer's zero snapshot, and d
   assert.equal(at(90000).contextUsed, 90000, "a smaller drop is real (a tool result trimmed)");
   assert.equal(at(5000, "2026-10-19T12:00:00Z").contextUsed, 5000, "a compaction really empties it");
   assert.equal(steadyContext(readings, "s2", { contextUsed: 0, contextWindow: 200000 }, null).contextUsed, 0, "another session starts on its own");
+  // Seen live: after a steer the panel read In 0 · Out 0 · Cached 0 · Total 0 beside a $6.40 cost.
+  steadyContext(readings, "s3", { contextUsed: 300000, contextWindow: 400000, inputTokens: 13_000_000, outputTokens: 100_000, cachedTokens: 12_000_000, totalTokens: 13_100_000, cost: 6.4 }, null);
+  const snapshot = steadyContext(readings, "s3", { contextUsed: 0, contextWindow: 400000, inputTokens: 0, outputTokens: 0, cachedTokens: 0, totalTokens: 0, cost: 6.41 }, null);
+  assert.deepEqual([snapshot.contextUsed, snapshot.inputTokens, snapshot.outputTokens, snapshot.cachedTokens, snapshot.totalTokens, snapshot.cost],
+    [300000, 13_000_000, 100_000, 12_000_000, 13_100_000, 6.41], "the zeroed counts keep the last reading's; what it does report (cost) comes through");
 });
