@@ -311,3 +311,28 @@ test("Codex Auto Review's page gets the key on its own routes and a read-only ac
   assert.deepEqual(await f.request({ frame: other, url: `${ORIGIN}/v0/management/auth-files`, method: "GET", requestHeaders }), { requestHeaders });
   assert.equal(JSON.stringify(f.logs).includes(SECRET), false);
 });
+
+test("the installed plugin's own name gets the same sign-in, and neither name reaches the other's routes", async () => {
+  // Seen live: the plugin registers as codex-review-account-selector, the page never got the key,
+  // and the user was asked to paste the management key.
+  const f = fixture();
+  f.install();
+  await f.webContents.listeners("did-frame-finish-load")[0]({}, false, 5, 9);
+  const marker = f.sessionStorage.getItem("coding-tools-cpa-session");
+  const frame = { url: `${ORIGIN}/v0/resource/plugins/codex-review-account-selector/index.html`,
+    top: f.mainFrame, parent: f.frame, isDestroyed: () => false };
+  const requestHeaders = { Authorization: `Bearer ${marker}` };
+  const swapped = { requestHeaders: { Authorization: `Bearer ${SECRET}` } };
+  for (const [path, method] of [["settings", "GET"], ["settings", "PUT"], ["accounts", "GET"]]) {
+    assert.deepEqual(await f.request({ frame, url: `${ORIGIN}/v0/management/codex-review-account-selector/${path}`, method, requestHeaders }),
+      swapped, `${method} ${path}`);
+  }
+  assert.deepEqual(await f.request({ frame, url: `${ORIGIN}/v0/management/codex-auto-review/settings`, method: "GET", requestHeaders }),
+    { requestHeaders }, "the other plugin name's routes");
+  const older = { ...frame, url: `${ORIGIN}/v0/resource/plugins/codex-auto-review/index.html` };
+  assert.deepEqual(await f.request({ frame: older, url: `${ORIGIN}/v0/management/codex-review-account-selector/settings`, method: "GET", requestHeaders }),
+    { requestHeaders });
+  const lookalike = { ...frame, url: `${ORIGIN}/v0/resource/plugins/codex-review-account-selector-x/index.html` };
+  assert.deepEqual(await f.request({ frame: lookalike, url: `${ORIGIN}/v0/management/auth-files`, method: "GET", requestHeaders }),
+    { requestHeaders }, "a look-alike plugin page");
+});
