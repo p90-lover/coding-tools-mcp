@@ -251,6 +251,8 @@ async function withAgentShellCommands(appSessions, sessionIds, readConversation,
       } catch (cause) {
         // The pane polls every few seconds: a failure is logged once until it changes.
         const message = String(cause?.message || cause).slice(0, 200);
+        // A Terminal UI session has no chat conversation, so it has no agent commands: nothing failed.
+        if (/SESSION_MODE_MISMATCH/.test(message)) return;
         if (warned.get(id) !== message) {
           if (warned.size >= 64) warned.clear();
           warned.set(id, message);
