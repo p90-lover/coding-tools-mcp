@@ -19,20 +19,22 @@ const storage = { getItem: (key) => stored[key] ?? null, setItem: (key, value) =
 const chat = compile("ao-chat.ts", () => ({}));
 
 // A tiny hook runtime: state persists across renders by call order.
-function mount(Component, props) {
-  const states = []; let cursor = 0;
+function mount(Component, props, { effects = false } = {}) {
+  const states = []; const refs = []; let cursor = 0, refCursor = 0;
   const react = {
     useState(initial) {
       const at = cursor++;
       if (!(at in states)) states[at] = typeof initial === "function" ? initial() : initial;
       return [states[at], (value) => { states[at] = typeof value === "function" ? value(states[at]) : value; }];
     },
-    useRef: (initial) => ({ current: initial }), useEffect() {},
+    // Refs persist like state; effects run after each render only when a test asks for them.
+    useRef: (initial) => { const at = refCursor++; if (!(at in refs)) refs[at] = { current: initial }; return refs[at]; },
+    useEffect: (effect) => { if (effects) effect(); },
   };
   const jsx = (type, props) => ({ type, props: props || {} });
   const module = compile(Component, (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
     : name === "./ao-chat" ? chat : name === "../icons" ? { Icon: "Icon" } : name === "./ChatMenu" ? { ChatMenu: "ChatMenu", FloatingLayer: "FloatingLayer" } : {});
-  const render = (next = {}) => { cursor = 0; return module.ChatThreadList({ ...props, ...next }); };
+  const render = (next = {}) => { cursor = 0; refCursor = 0; return module.ChatThreadList({ ...props, ...next }); };
   return { render, states };
 }
 const walk = (item) => !item || typeof item !== "object" ? [] : Array.isArray(item) ? item.flatMap(walk) : [item, ...walk(item.props?.children)];
@@ -74,20 +76,64 @@ test("each chat row has Codex's hover Pin and Archive buttons, not the old envel
   assert.deepEqual(calls, [["pin", "t2"], ["lifecycle", "t2", "archive"], ["select", "t2"]]);
 });
 
-test("clicking the open project collapses it; clicking another project opens it", () => {
+const projectButton = (view, name) => walk(view).find((element) => element.type === "button" && element.props.className === "cx-project" && text(element).includes(name));
+
+test("clicking the open project collapses it; clicking another project opens its chats in place, as in Codex", () => {
   const { props, calls } = fixture();
   const list = mount("ChatThreadList.tsx", props);
-  const project = (view, name) => walk(view).find((element) => element.type === "button" && element.props.className === "cx-project" && text(element).includes(name));
   let view = list.render();
-  assert.equal(project(view, "Alpha").props["aria-expanded"], true);
-  project(view, "Alpha").props.onClick();
+  assert.equal(projectButton(view, "Alpha").props["aria-expanded"], true);
+  projectButton(view, "Alpha").props.onClick();
   view = list.render();
-  assert.equal(project(view, "Alpha").props["aria-expanded"], false, "collapsed");
+  assert.equal(projectButton(view, "Alpha").props["aria-expanded"], false, "collapsed");
   assert.equal(JSON.parse(stored["coding-tools:ao:collapsed-projects"]).includes("a"), true, "the choice is remembered");
-  project(view, "Alpha").props.onClick();
-  assert.equal(project(list.render(), "Alpha").props["aria-expanded"], true, "expanded again");
-  project(list.render(), "Beta").props.onClick();
-  assert.deepEqual(calls, [["workspace", "b"]]);
+  projectButton(view, "Alpha").props.onClick();
+  assert.equal(projectButton(list.render(), "Alpha").props["aria-expanded"], true, "expanded again");
+  projectButton(list.render(), "Beta").props.onClick();
+  view = list.render();
+  assert.equal(projectButton(view, "Beta").props["aria-expanded"], true, "Beta opens under its row");
+  assert.deepEqual(calls, [], "the open chat and project stay put");
+  assert.match(text(view), /Loading chats…/);
+  assert.deepEqual(JSON.parse(stored["coding-tools:ao:open-projects"]), ["b"], "open projects are remembered");
+  projectButton(view, "Beta").props.onClick();
+  assert.equal(projectButton(list.render(), "Beta").props["aria-expanded"], false, "and closes again");
+});
+
+test("another open project lists its chats; opening one switches to its project first", async () => {
+  const { props, calls } = fixture();
+  stored["coding-tools:ao:open-projects"] = JSON.stringify(["b"]);
+  const loaded = [];
+  const list = mount("ChatThreadList.tsx", { ...props, loadProjectChats: async (id) => {
+    loaded.push(id);
+    return [{ taskId: "b1", title: "Beta chat", status: "done", runIds: ["rb"], latestRunId: "rb" }];
+  } }, { effects: true });
+  list.render();
+  await new Promise((resolve) => setImmediate(resolve));
+  const view = list.render();
+  assert.ok(loaded.includes("b"), "only the other open project is read");
+  assert.ok(!loaded.includes("a"));
+  const row = walk(view).find((element) => element.type === "button" && element.props.className === "cx-thread-select" && text(element).includes("Beta chat"));
+  assert.ok(row, "Beta's chat shows under Beta");
+  row.props.onClick();
+  assert.deepEqual(calls, [["selectIn", "b", "b1"]]);
+  delete stored["coding-tools:ao:open-projects"];
+});
+
+test("a used chat rises to the top of its project, and its project to the top of Projects (pinned first)", () => {
+  const list = compile("ChatThreadList.tsx", (name) => name === "react" ? { useState() {}, useRef() {}, useEffect() {} } : name === "react/jsx-runtime" ? { jsx() {}, jsxs() {} } : name === "./ao-chat" ? chat : {});
+  const projects = [{ id: "a" }, { id: "b" }, { id: "c" }];
+  // The module runs in its own realm: compare plain copies.
+  const plain = (value) => JSON.parse(JSON.stringify(value));
+  assert.deepEqual(plain(list.orderProjects(projects, [], {}).map((item) => item.id)), ["a", "b", "c"], "unused projects keep the list's order");
+  assert.deepEqual(plain(list.orderProjects(projects, [], { c: 5, b: 2 }).map((item) => item.id)), ["c", "b", "a"], "the most recently used comes first");
+  assert.deepEqual(plain(list.orderProjects(projects, ["a"], { c: 5 }).map((item) => item.id)), ["a", "c", "b"], "pinned projects stay first");
+
+  const chats = [{ taskId: "t1", latestRunId: "r1" }, { taskId: "t2", latestRunId: "r9" }];
+  assert.deepEqual(plain(list.releaseUsedChats(["t1", "t2"], { t1: "r1", t2: "r2" }, chats)), { order: ["t1"], used: ["t2"] },
+    "a chat with a new run leaves the dragged order, so it rises with the newest chats");
+  const unchanged = ["t1", "t2"];
+  assert.equal(list.releaseUsedChats(unchanged, { t1: "r1", t2: "r9" }, chats).order, unchanged, "no new run, no change");
+  assert.deepEqual(plain(list.releaseUsedChats(unchanged, {}, chats).used), [], "a chat seen for the first time is not a use");
 });
 
 test("right-click menus match Codex: its order and glyphs, and every chat item does something", () => {
