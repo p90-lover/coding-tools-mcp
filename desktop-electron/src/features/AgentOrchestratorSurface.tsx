@@ -569,9 +569,13 @@ export function AgentOrchestratorSurface({ language, setError }: {
   // A request the "Approve for me" reviewer is still checking is not shown (awaiting_review), and
   // neither is one the app is answering for the person right after (approvalAnsweredForYou): a card
   // then only flashed up, offering a click that arrived after the answer.
+  // The run is looked up here, not through `selectedRun`: that const is declared further down, and
+  // reading it while this filter runs during render threw "Cannot access … before initialization"
+  // (the window's render error, every time a request was pending).
+  const approvalRun = missions.find((mission) => mission.id === selectedRunId);
   const shownApprovals = pendingApprovalsHere.filter((approval) => !approval.awaiting_review && !approvalAnsweredForYou(approval,
-    selectedRun?.nodes.find((node) => node.id === approval.nodeId)?.route as { approval_policy?: string; approvals_reviewer?: string } | undefined,
-    Date.now() - seenAt(approval), Boolean(selectedRun?.nodes.some((node) => node.role === "approver")))).map((approval) => {
+    approvalRun?.nodes.find((node) => node.id === approval.nodeId)?.route as { approval_policy?: string; approvals_reviewer?: string } | undefined,
+    Date.now() - seenAt(approval), Boolean(approvalRun?.nodes.some((node) => node.role === "approver")))).map((approval) => {
     const note = dependencyInstallNote(approval.command, dependencyLinks?.workspaceId === workspaceId ? dependencyLinks.links : null);
     return note ? { ...approval, dependencyNote: note } : approval;
   });
