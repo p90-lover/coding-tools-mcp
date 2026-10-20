@@ -947,9 +947,12 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 @media (prefers-reduced-motion: reduce) { .cx-browser-chip, .cx-browser-dot { animation: none; } }
 
 /* Bit, the chat's pet (ChatPet.tsx): Clawd perched on the chat box's top edge at its right end (the
-   left end holds the branch chip), dragged along it. 18×7 pixels at 3×. */
-.cx-pet { position: absolute; bottom: 100%; z-index: 2; width: 54px; height: 21px; margin-bottom: 0; pointer-events: none; }
-.cx-pet-body { pointer-events: auto; display: block; width: 54px; height: 21px; padding: 0; border: 0; background: transparent; cursor: grab; touch-action: none; }
+   left end holds the branch chip), dragged along it. 18×7 pixels of 4×8 px, a terminal cell's halves
+   as Claude Code draws it. */
+.cx-pet { position: absolute; bottom: 100%; z-index: 2; width: 72px; height: 56px; margin-bottom: 0; pointer-events: none; }
+.cx-pet-body { pointer-events: auto; display: block; width: 72px; height: 56px; padding: 0; border: 0; background: transparent; cursor: grab; touch-action: none; }
+/* Claude Code's working spinner, turning over its head while the agent works. */
+.cx-pet-spinner { position: absolute; top: -6px; left: 50%; transform: translateX(-50%); color: #d97757; font-size: 16px; font-weight: 700; line-height: 1; }
 .cx-pet-body:active { cursor: grabbing; }
 .cx-pet-body:focus-visible { outline: 2px solid var(--ao-blue); outline-offset: 2px; border-radius: 6px; }
 .cx-pet-body svg { display: block; transform-origin: 50% 100%; }
@@ -962,9 +965,9 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-pet-body.is-shake svg { animation: cx-pet-shake .4s ease 3; }
 .cx-pet-body.is-spin svg { animation: cx-pet-spin .6s ease-in-out; }
 .cx-pet-body.is-bounce svg { animation: cx-pet-bounce .42s cubic-bezier(.3, 1.6, .5, 1); }
-.cx-pet-bubble { position: absolute; bottom: 26px; right: 0; padding: 3px 9px; border: 1px solid var(--ao-line); border-radius: 8px;
+.cx-pet-bubble { position: absolute; bottom: 60px; right: 0; padding: 3px 9px; border: 1px solid var(--ao-line); border-radius: 8px;
   background: var(--color-bg-primary, #fff); color: var(--color-text-primary, inherit); font-size: 12px; line-height: 1.4; white-space: nowrap; }
-.cx-pet-float { position: absolute; bottom: 18px; font-size: 13px; animation: cx-pet-rise 1.1s ease-out forwards; }
+.cx-pet-float { position: absolute; bottom: 44px; font-size: 13px; animation: cx-pet-rise 1.1s ease-out forwards; }
 @media (prefers-reduced-motion: reduce) { .cx-pet-body svg { animation: none !important; } }
 @keyframes cx-pet-bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
 @keyframes cx-pet-breathe { 0%, 100% { transform: scaleY(1); } 50% { transform: scaleY(.95); } }
