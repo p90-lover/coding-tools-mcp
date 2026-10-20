@@ -763,9 +763,10 @@ class BrowserHost {
     view.webContents.setZoomFactor(this.state.zoomFactor);
     this.bindShellZoomShortcuts(view.webContents);
     this.bindTurnContents(tab);
-    try {
-      // A new turn tab gets the primary view's retries: one 10 s window failed turns as
-      // browser_page on a busy machine. The windows fit the tab's 120 s bootstrap budget.
+    // A new turn tab gets the primary view's retries: one 10 s window failed turns as
+    // browser_page on a busy machine. The windows fit the tab's 120 s bootstrap budget. The tab
+    // keeps the promise so a repeated start of the same turn waits for it (beginTurn).
+    tab.surfaceReady = (async () => {
       await loadIdleSurfaceWithRetries(
         view.webContents,
         this.bootstrapAttemptsMs ?? PRIMARY_VIEW_BOOTSTRAP_ATTEMPTS_MS,
@@ -773,6 +774,9 @@ class BrowserHost {
       );
       await this.markTurnTabSurface(tab);
       tab.initializingSurface = false;
+    })();
+    try {
+      await tab.surfaceReady;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error("browser.tab_initialization_failed", {
@@ -2636,6 +2640,17 @@ class BrowserHost {
     if (sameTrace && (sameTrace.conversationKey !== conversationKey
       || sameTrace.connectorIdentity !== connectorIdentity)) {
       throw new Error(`ChatGPT browser turn ${traceId} conversation metadata does not match its owned tab`);
+    }
+    // A start whose request gave up while its tab was still loading (a busy machine) is repeated by
+    // the helper under the same trace. Handing the half-loaded tab back at once made that turn fail
+    // as browser_page ("ChatGPT did not complete the context handoff"): wait for the load to end.
+    // A load that failed removed its tab, so the turn gets a fresh one below.
+    if (sameTrace?.status === "running" && sameTrace.initializingSurface && sameTrace.surfaceReady) {
+      this.logger.info("browser.tab_reuse_waits_for_surface", { tabId: sameTrace.id, traceId });
+      await sameTrace.surfaceReady.catch(() => {});
+      if (this.turnTabs.get(sameTrace.id) !== sameTrace) sameTrace = undefined;
+      if (this.manualOperation) throw new Error(`ChatGPT browser is busy with ${this.manualOperation}`);
+      if (this.userCancelledTurnOwners.has(traceId)) throw new BrowserTurnCancelledError(traceId);
     }
     const retainedMatches = conversationKey ? [...this.turnTabs.values()].filter((tab) => (
       tab.interactionMode === "automatic"

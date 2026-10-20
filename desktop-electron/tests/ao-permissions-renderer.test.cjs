@@ -496,6 +496,50 @@ test("the composer starts a window only for a model whose limit is known, and dr
   assert.deepEqual(view.routes, [], "a window the model takes is kept");
 });
 
+test("a model that lists efforts but no Auto starts on one it takes, as an adjustment, not a pick", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/deepseek-v4.1-flash", permission_profile: ":ao-default" };
+  const adjusted = [];
+  const load = (capabilities, start = route) => composerLoad(start, capabilities);
+  // DeepSeek V4.1 Flash on CPA lists None/Low/High/Max: no effort sent was no request CPA could serve.
+  let view = await load({ "cpa/deepseek-v4.1-flash": { efforts: ["none", "low", "high", "max"] } });
+  assert.equal(view.routes.at(-1).effort, "high", "high when there is no medium");
+  view = await load({ "cpa/deepseek-v4.1-flash": { efforts: ["low", "medium", "high"] } });
+  assert.equal(view.routes.at(-1).effort, "medium");
+  view = await load({ "cpa/deepseek-v4.1-flash": { efforts: ["none", "low"] } });
+  assert.equal(view.routes.at(-1).effort, "low", "never None unless it is all there is");
+  view = await load({ "cpa/deepseek-v4.1-flash": { efforts: ["low", "high", "auto"] } });
+  assert.deepEqual(view.routes, [], "a model that takes Auto stays on it");
+  view = await load({ "cpa/deepseek-v4.1-flash": { efforts: [] } });
+  assert.deepEqual(view.routes, [], "a model that takes no effort gets none");
+  view = await load({ "cpa/deepseek-v4.1-flash": { efforts: ["low", "high"] } }, { ...route, effort: "low" });
+  assert.deepEqual(view.routes, [], "a picked effort is kept");
+  view = await load({ "cpa/gemini-3.8-flash-high": { efforts: ["low", "medium", "high"] } }, { ...route, model: "cpa/gemini-3.8-flash-high" });
+  assert.deepEqual(view.routes, [], "a model whose id names its effort keeps its own");
+  // The start is the composer fitting the route to the model, so it is reported as an adjustment:
+  // the next new chat (or a rewind) keeps the person's own last pick, not this chat's fit-up.
+  const fit = renderer("AgentOrchestratorComposerControls.tsx");
+  const caps = { "cpa/deepseek-v4.1-flash": { efforts: ["none", "low", "high", "max"] } };
+  fit.render("AgentOrchestratorComposerControls", { mode: "single", onModeChange() {}, route, onRouteChange: (next, auto) => adjusted.push([plain(next).effort, auto]),
+    harnesses: [], teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false,
+    loadModels: async harness => harness === "codex-native" ? [] : { models: Object.keys(caps), capabilities: caps } }, composerState(null));
+  fit.effects[fit.effects.length - 1]();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(adjusted, [["high", true]]);
+});
+
+test("picking a model that lists no Auto effort picks a real effort with it", () => {
+  const view = renderer("AgentOrchestratorComposerControls.tsx");
+  const routes = [];
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/glm-5", permission_profile: ":ao-default" };
+  const caps = { "cpa/glm-5": { efforts: [] }, "cpa/deepseek-v4.1-flash": { efforts: ["none", "low", "high", "max"] } };
+  const props = { mode: "single", onModeChange() {}, route, onRouteChange: (next, auto) => routes.push([plain(next), auto]), harnesses: [], loadModels: async () => [], teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false };
+  const tree = view.render("AgentOrchestratorComposerControls", props, composerState(Object.keys(caps), caps));
+  optionsIn(menuNamed(tree, "Model")).find(row => row.props.title.includes("deepseek")).props.onPick();
+  const [picked, auto] = routes.at(-1);
+  assert.equal(picked.effort, "high");
+  assert.notEqual(auto, true, "a model the person picked is their pick, effort included");
+});
+
 test("a catalog that loads after the user picked another model does not put the old one back", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/first", permission_profile: ":ao-default" };
   const caps = { "cpa/first": { efforts: [], contextLimit: 262144, contextWindow: { min: 4096, max: 262144 } },
