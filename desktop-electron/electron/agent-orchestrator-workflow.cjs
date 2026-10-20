@@ -220,7 +220,7 @@ function delayToMilliseconds(value, unit) {
   }
   return ms;
 }
-function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, logger = null }) {
   const goals = createGoalStore({ file: goalsFile, now });
   // Chats whose agent asked to be woken later (schedule_wakeup, chat-wakeups.cjs).
   const wakeups = createWakeupStore({ file: wakeupsFile, now });
@@ -3772,7 +3772,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const id=clean(workspaceId,128),task=clean(taskId,128);
     const detail=await board({workspaceId:id,taskId:task});
     if (!detail.task) throw new Error("The selected task was not found");
-    if (visibility !== "active" && !await confirm({message:`${visibility === "deleted" ? "Delete" : "Archive"} "${detail.task.title}"?`,
+    if (visibility !== "active" && !await (confirmRecoverable ?? confirm)({message:`${visibility === "deleted" ? "Delete" : "Archive"} "${detail.task.title}"?`,
       detail:"Stop only this task's owned work and cancel its delayed start. Original input and history remain recoverable."})) return {ok:true,cancelled:true};
     clearSchedule(id,task);
     const queued=configurationJobs.get(JSON.stringify([id,task]));

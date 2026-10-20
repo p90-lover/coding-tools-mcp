@@ -9,7 +9,7 @@ const { createAgentOrchestratorWorkflow, resolveAoNativeConnection, reviewScript
 const { createCodingToolsAppsHost } = require("../../app-handler/host.cjs");
 const { invokeContract } = require("../electron/ipc-schema.cjs");
 
-function reconfigureWorld(observation = {status:"needs_input",turnState:"interrupted"}) {
+function reconfigureWorld(observation = {status:"needs_input",turnState:"interrupted"}, options = {}) {
   const calls=[];
   const node={id:"lead",role:"planner",task_id:"task",state:"running",request_key:"request-one",
     route:{harness_id:"ao:codex",model:"agent-model"},settings:{name:"Lead"},
@@ -48,9 +48,25 @@ function reconfigureWorld(observation = {status:"needs_input",turnState:"interru
         ok:true,revision:1,tasks:[],task:{id:"task",title:"Original task",description:"Unchanged"}}}};
       throw Error("Unexpected endpoint "+endpoint);
     },
+    ...options,
   });
   return {workflow,calls,saved,team};
 }
+
+test("archive and delete ask through confirmRecoverable, so turning the dialogs off in Settings skips them", async()=>{
+  for (const action of ["archive_task","delete_task"]) {
+    const asked=[];
+    const world=reconfigureWorld(undefined,{
+      confirm:async()=>{throw Error("the plain workflow dialog must not open for "+action)},
+      confirmRecoverable:async(request)=>{asked.push(request.message);return false},
+    });
+    const result=await world.workflow.call(action,{workspaceId:"ws",taskId:"task"});
+    assert.deepEqual(result,{ok:true,cancelled:true});
+    assert.equal(asked.length,1);
+    assert.match(asked[0],action==="archive_task"?/^Archive /:/^Delete /);
+    assert.ok(!world.calls.some(c=>c[1]?.change?.change?.operation==="set_visibility"));
+  }
+});
 
 test("reconfigure replaces only the captured task after acknowledged interruption and carries visible work, not private thinking", async()=>{
   const world=reconfigureWorld(),before=structuredClone(world.saved.runs[1]);
