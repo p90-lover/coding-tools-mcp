@@ -1,9 +1,24 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { numberedDiff } from "./ao-chat";
+import { numberedDiff, type ChatStepRound } from "./ao-chat";
 
 // Parts of a chat turn both transcripts draw: the Claude Code one (AgentOrchestratorChat) and the
 // DeepSeek Harness one (DshTranscript), so a fix to one is a fix to both.
+
+/**
+ * A card's earlier rounds (a reviewer's past cycles, a retried card's past attempts), oldest first,
+ * each folded under its label and verdict: the history of a review stays traceable without crowding
+ * out the round in progress.
+ */
+export function EarlierRounds({ rounds }: { rounds?: ChatStepRound[] }) {
+  if (!rounds?.length) return null;
+  return <div className="cx-step-earlier">
+    {rounds.map((round) => <details key={round.label} className="cx-step-round">
+      <summary><span>{round.label}</span>{round.verdict ? <span className={`cx-step-round-verdict is-${round.verdict.toLowerCase()}`}>{round.verdict.replace(/_/g, " ")}</span> : null}</summary>
+      <ChatMarkdown text={round.text} />
+    </details>)}
+  </div>;
+}
 
 /**
  * A shield on a tool call that needed approval, saying who let it run ("Allowed by the reviewer:

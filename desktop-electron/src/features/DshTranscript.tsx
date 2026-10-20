@@ -10,7 +10,7 @@
  */
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { AnsweredRecord, ApprovedMark, EditDiff, StreamingMarkdown } from "./ChatToolParts";
+import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, StreamingMarkdown } from "./ChatToolParts";
 import {
   dshActivity, dshDuration, dshItemDetail, dshLiveTitle, dshProcessTitle, dshQuietNote, dshSegments, dshThinkSummary, dshToolTitle,
   tidyTimeline, type ChatLiveItem, type ChatStep, type ChatTurn, type DshActivity,
@@ -233,8 +233,9 @@ function DshAgent({ step, useWork, answer }: { step: ChatStep; useWork: UseStepW
   const summary = live ? (step.working!.activity || dshLiveTitle(work ?? []).label)
     : step.error ? step.error.split(/\r?\n/)[0] : step.verdict || (step.state === "finished" ? "Completed" : step.state);
   return <DshRow className="dsh-agent" icon={ICON.sparkle} title={step.name} summary={summary} running={live} tone={tone}
-    open={open} expandable={Boolean(step.hasWork || work?.length || step.text)} onToggle={() => setChosen(!open)}>
+    open={open} expandable={Boolean(step.hasWork || work?.length || step.text || step.earlier?.length)} onToggle={() => setChosen(!open)}>
     <div className="dsh-agent-body">
+      <EarlierRounds rounds={step.earlier} />
       {work?.length ? <DshFlow items={work} grouped={!live} hideReply={answer} /> : null}
       {step.text && step.text.trim() !== answer?.trim() ? <div className="dsh-reply"><ChatMarkdown text={step.text} /></div> : null}
     </div>

@@ -12,7 +12,7 @@ import { ChatContextMeter } from "./ChatContextMeter";
 import { ChatPet } from "./ChatPet";
 import { ChatTurnStats } from "./ChatTurnStats";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
-import { AnsweredRecord, ApprovedMark, EditDiff, StreamingMarkdown } from "./ChatToolParts";
+import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, StreamingMarkdown } from "./ChatToolParts";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
@@ -349,7 +349,7 @@ function StepRow({ step, runId, loadWork }: { step: ChatStep; runId: string; loa
   const open = chosen ?? Boolean(step.error || step.working?.timeline?.length);
   const work = useStepWork(step, runId, open, loadWork);
   const compact = useContext(CompactActivity);
-  const body = step.error || step.text || (work?.length || step.hasWork ? "work" : "");
+  const body = step.error || step.text || (work?.length || step.hasWork || step.earlier?.length ? "work" : "");
   return <li className={`cx-step tone-${stepTone(step)}`}>
     <button type="button" className="cx-step-head" aria-expanded={open} disabled={!body && !step.working} onClick={() => setOpen(!open)}
       title={step.working?.detail || undefined}>
@@ -366,6 +366,8 @@ function StepRow({ step, runId, loadWork }: { step: ChatStep; runId: string; loa
       {step.working && !compact ? <p className="cx-step-detail">{step.working.detail}</p> : null}
       {work?.length ? <LiveTimeline items={work} live={Boolean(step.working)} /> : null}
       {/* A held or failed card keeps the reply it gave: the error says why, the reply stays readable. */}
+      {/* Its earlier rounds first, folded (oldest first), then where it stands now. */}
+      <EarlierRounds rounds={step.earlier} />
       {step.error ? <p className="cx-step-error">{step.error}</p> : null}
       {step.text ? <ChatMarkdown text={step.text} /> : null}
     </div> : null}
@@ -397,7 +399,8 @@ type WorkGroupProps = { turn: ChatTurn; idle?: boolean; expanded?: boolean; load
 /** A turn still being worked on: its steps change on every update, so it always re-renders. */
 const liveTurn = (turn: ChatTurn) => turn.status === "running" || turn.status === "queued"
   || turn.steps.some((step) => step.working) || Boolean(turn.final?.working);
-const stepShape = (step: ChatStep) => [step.key, step.name, step.detail, step.state, step.verdict ?? "", step.error ?? "", step.text ?? "", step.hasWork ?? false];
+const stepShape = (step: ChatStep) => [step.key, step.name, step.detail, step.state, step.verdict ?? "", step.error ?? "", step.text ?? "", step.hasWork ?? false,
+  (step.earlier ?? []).map((round) => `${round.label}:${round.verdict ?? ""}`).join(",")];
 /** What a finished turn's work shows; equal shapes render the same rows. */
 const workShape = (turn: ChatTurn) => JSON.stringify([turn.runId, turn.status, turn.startedAtMs ?? 0, turn.steps.map(stepShape), turn.final ? stepShape(turn.final) : null]);
 
@@ -1295,6 +1298,8 @@ export function AgentOrchestratorChat({
                     {turn.final.verdict ? <span className={`cx-verdict is-${turn.final.verdict.toLowerCase()}`}>{turn.final.verdict}</span> : null}
                     {turn.final.detail ? <span className="cx-answer-detail">{turn.final.detail}</span> : null}
                   </div>}
+                {/* A finished reviewer becomes the answer; its earlier cycles stay above it (DeepSeek's row shows them). */}
+                {dsh ? null : <EarlierRounds rounds={turn.final.earlier} />}
                 <ChatMarkdown text={turn.final.text ?? ""} />
                 <MessageActions text={turn.final.text ?? ""}>
                   {restart && turn.runId && turn.runId === latest?.id && !runOpen ? <button type="button" title="Retry" aria-label="Retry this mission" disabled={busy} onClick={() => restart(turn.runId)}>↻</button> : null}
