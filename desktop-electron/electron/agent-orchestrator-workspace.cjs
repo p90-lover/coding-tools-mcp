@@ -60,13 +60,20 @@ async function listBranches(folder, chatRoot = null) {
     const commit = await git(directory, ["rev-parse", "--short", "HEAD"]);
     return commit ? `detached at ${commit}` : null;
   };
-  const [refs, worktrees, current, chatBranch, recordedDefault] = await Promise.all([
-    git(folder, ["for-each-ref", "--sort=-committerdate", `--count=${MAX_BRANCHES}`,
-      "--format=%(refname:short)%09%(committerdate:unix)%09%(upstream:short)", "refs/heads"]),
+  // The default branch first: each branch is measured against it (commits ahead and behind).
+  const recordedDefault = await defaultBranchOf(folder);
+  const exists = async (name) => Boolean(name) && (await git(folder, ["show-ref", "--verify", "--quiet", `refs/heads/${name}`])) !== null;
+  let defaultBranch = null;
+  for (const name of [recordedDefault, "main", "master"]) if (await exists(name)) { defaultBranch = name; break; }
+  const fields = ["%(refname:short)", "%(committerdate:unix)", "%(upstream:short)", "%(objectname:short)",
+    "%(upstream:track,nobracket)", ...(defaultBranch ? [`%(ahead-behind:${defaultBranch})`] : []), "%(subject)"];
+  const [refs, worktrees, current, chatBranch, folderChanges, chatChanges] = await Promise.all([
+    git(folder, ["for-each-ref", "--sort=-committerdate", `--count=${MAX_BRANCHES}`, `--format=${fields.join("%09")}`, "refs/heads"]),
     git(folder, ["worktree", "list", "--porcelain"]),
     headOf(folder),
     chatRoot ? headOf(chatRoot) : Promise.resolve(null),
-    defaultBranchOf(folder),
+    changesIn(folder),
+    chatRoot && path.resolve(chatRoot) !== path.resolve(folder) ? changesIn(chatRoot) : Promise.resolve(null),
   ]);
   const checkedOut = new Map();
   let worktree = null;
@@ -75,19 +82,45 @@ async function listBranches(folder, chatRoot = null) {
     else if (line.startsWith("branch refs/heads/") && worktree) checkedOut.set(line.slice(18), worktree);
   }
   const branches = String(refs || "").split(/\r?\n/).filter(Boolean).map((line) => {
-    const [name, time, upstream] = line.split("\t");
+    const columns = line.split("\t");
+    const [name, time, upstream, commit, track] = columns;
+    // The subject is last: it is the one field that may itself contain a tab.
+    const [ahead, behind] = defaultBranch ? String(columns[5] ?? "").split(" ").map(Number) : [];
+    const subject = columns.slice(defaultBranch ? 6 : 5).join("\t");
     return {
+      // updatedAt is the tip commit's date: a branch made from an old commit and never committed
+      // to carries that commit's age, so the list says "last commit", and "same as main" for it.
       name, updatedAt: Number(time) > 0 ? new Date(Number(time) * 1000).toISOString() : null,
       upstream: upstream || null, worktree: checkedOut.get(name) ?? null,
       current: name === current, chat: Boolean(chatBranch) && name === chatBranch,
+      commit: commit || null, subject: subject ? subject.slice(0, 200) : null,
+      ...(Number.isInteger(ahead) && Number.isInteger(behind) ? { ahead, behind } : {}),
+      ...(track ? { track: track.slice(0, 80) } : {}),
     };
   });
-  const names = new Set(branches.map(branch => branch.name));
-  const defaultBranch = [recordedDefault, "main", "master"].find(name => name && names.has(name)) ?? null;
   const rank = (branch) => (branch.name === defaultBranch ? 0 : branch.name.startsWith("ao/") ? 2 : 1);
   branches.sort((a, b) => rank(a) - rank(b));
   for (const branch of branches) branch.default = branch.name === defaultBranch;
-  return { git: true, root, current, chatBranch, defaultBranch, branches, truncated: branches.length >= MAX_BRANCHES };
+  return { git: true, root, current, chatBranch, defaultBranch, branches, truncated: branches.length >= MAX_BRANCHES,
+    ...(folderChanges ? { folderChanges } : {}), ...(chatChanges ? { chatChanges } : {}) };
+}
+
+/** Uncommitted work in a checkout: staged, modified and untracked files. Null when unreadable. */
+async function changesIn(directory) {
+  // Not git(): its trim() would eat the first line's leading status column (" M file").
+  const status = await new Promise((resolve) => {
+    execFile("git", ["-C", directory, "status", "--porcelain=v1"], { windowsHide: true, timeout: 10_000 },
+      (error, stdout) => resolve(error ? null : String(stdout)));
+  });
+  if (status === null) return null;
+  const counts = { staged: 0, modified: 0, untracked: 0 };
+  for (const line of status.split(/\r?\n/)) {
+    if (line.length < 3) continue;
+    if (line.startsWith("??")) { counts.untracked += 1; continue; }
+    if (line[0] !== " ") counts.staged += 1;
+    if (line[1] !== " ") counts.modified += 1;
+  }
+  return counts;
 }
 
 /**

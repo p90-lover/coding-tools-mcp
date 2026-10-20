@@ -8,10 +8,15 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } f
 
 import type { PetMood } from "./ao-chat";
 
-const POSITION_KEY = "coding-tools:ao:pet-left";
+// Measured from the chat box's right edge: the left end of its top edge holds the branch chip.
+const POSITION_KEY = "coding-tools:ao:pet-right";
 const NAP_MS = 12_000;
 const CHEER_MS = 6_000;
-const WIDTH = 48;
+const SCALE = 3;
+const WIDTH = 18 * SCALE;
+const HEIGHT = 7 * SCALE;
+/** Space kept clear between the pet and the branch chip when it is dragged left. */
+const CHIP_GAP = 8;
 
 const LINES: Record<PetMood, string> = {
   idle: "Nothing running. Want to start something?",
@@ -22,29 +27,32 @@ const LINES: Record<PetMood, string> = {
 };
 const PETTED = ["Hehe", "More pets, please", "I like you", "*purr*"];
 
-const C = { body: "#D85A30", dark: "#993C1D", eye: "#2C2C2A", shine: "#FFFFFF", belly: "#F0997B", desk: "#FAECE7" };
+// Claude Code's Clawd: its banner glyph " ▐▛███▜▌ / ▝▜█████▛▘ /   ▘▘ ▝▝" read as 2×2 quadrants
+// is an 18×5 sprite. The two quadrants missing from the top row are its eyes.
+const C = { body: "#D97757", eye: "#1F1E1D", tint: "#B85C3F" };
 
-/** The 16×14 sprite for a mood, its belly filled to the context fraction. */
-function Sprite({ mood, asleep, fill }: { mood: PetMood; asleep: boolean; fill: number }) {
+/** Clawd for a mood, on an 18×7 grid: two rows above its head for a raised arm, a "!" or a "z". */
+function Sprite({ mood, asleep, step }: { mood: PetMood; asleep: boolean; step: boolean }) {
   const r = (x: number, y: number, w: number, h: number, color: string, key: string) =>
     <rect key={key} x={x} y={y} width={w} height={h} fill={color} />;
-  const parts = [r(4, 2, 8, 1, C.body, "a"), r(3, 3, 10, 1, C.body, "b"), r(2, 4, 12, 5, C.body, "c"), r(3, 9, 10, 1, C.body, "d"),
-    r(1, 5, 1, 2, C.body, "e"), r(14, 5, 1, 2, C.body, "f")];
-  if (fill >= 0.8) parts.push(r(1, 4, 1, 4, C.body, "g"), r(14, 4, 1, 4, C.body, "h"), r(2, 9, 12, 1, C.body, "i"));
-  const belly = Math.round(Math.max(0, Math.min(1, fill)) * 4);
-  if (belly) parts.push(r(5, 9 - belly, 6, belly, C.belly, "j"));
-  if (asleep) parts.push(r(5, 6, 2, 1, C.eye, "k"), r(9, 6, 2, 1, C.eye, "l"));
-  else if (mood === "error") parts.push(r(5, 5, 1, 1, C.eye, "k"), r(6, 6, 1, 1, C.eye, "l"), r(9, 6, 1, 1, C.eye, "m"), r(10, 5, 1, 1, C.eye, "n"), r(6, 8, 4, 1, C.dark, "o"));
-  else if (mood === "done") parts.push(r(5, 6, 1, 1, C.eye, "k"), r(6, 5, 1, 1, C.eye, "l"), r(9, 5, 1, 1, C.eye, "m"), r(10, 6, 1, 1, C.eye, "n"),
-    r(6, 7, 4, 1, C.dark, "o"), r(5, 6, 1, 1, C.dark, "p"), r(10, 6, 1, 1, C.dark, "q"));
-  else {
-    parts.push(r(5, 5, 2, 2, C.eye, "k"), r(9, 5, 2, 2, C.eye, "l"), r(mood === "working" ? 6 : 5, 5, 1, 1, C.shine, "m"), r(mood === "working" ? 10 : 9, 5, 1, 1, C.shine, "n"));
-    parts.push(mood === "ask" ? r(7, 7, 2, 2, C.dark, "o") : r(7, 8, 2, 1, C.dark, "o"));
-    if (mood === "ask") parts.push(r(14, 1, 1, 3, C.dark, "p"), r(14, 0, 1, 1, C.dark, "q"));
-  }
-  parts.push(r(4, 10, 2, 2, C.dark, "r"), r(10, 10, 2, 2, C.dark, "s"));
-  if (mood === "working" && !asleep) parts.push(r(1, 11, 14, 1, C.desk, "t"), ...[2, 5, 8, 11].map((x) => r(x, 11, 1, 1, C.dark, `u${x}`)));
-  return <svg viewBox="0 0 16 14" width={WIDTH} height={42} aria-hidden="true" shapeRendering="crispEdges">{parts}</svg>;
+  const top = 2;
+  const asking = mood === "ask" && !asleep;
+  const parts = [
+    r(3, top, 12, 2, C.body, "head"),
+    r(3, top + 2, 12, 2, C.body, "body"),
+    // The arms stick out of the second body row; asking, the right one goes up to wave.
+    r(1, top + 2, 2, 1, C.body, "arm-l"),
+    asking ? r(15, top - 1, 1, 3, C.body, "arm-r") : r(15, top + 2, 2, 1, C.body, "arm-r"),
+  ];
+  // Eyes: open holes (drawn dark to read on a light page), closed when napping or pleased.
+  if (asleep || (mood === "done" && !asleep)) parts.push(r(5, top + 1, 1, 1, C.tint, "eye-l"), r(12, top + 1, 1, 1, C.tint, "eye-r"));
+  else if (mood === "error") parts.push(r(5, top, 1, 1, C.eye, "eye-l"), r(12, top, 1, 1, C.eye, "eye-r"), r(5, top + 1, 1, 1, C.eye, "eye-l2"), r(12, top + 1, 1, 1, C.eye, "eye-r2"));
+  else parts.push(r(5, top + 1, 1, 1, C.eye, "eye-l"), r(12, top + 1, 1, 1, C.eye, "eye-r"));
+  // Four legs; working, they alternate like Claude Code's walking Clawd.
+  const legs = mood === "working" && !asleep && step ? [3, 7, 10, 14] : [4, 6, 11, 13];
+  legs.forEach((x, index) => parts.push(r(x, top + 4, 1, 1, C.body, `leg${index}`)));
+  if (asking) parts.push(r(16, 0, 1, 2, C.eye, "bang"), r(16, 3, 1, 1, C.eye, "bang-dot"));
+  return <svg viewBox="0 0 18 7" width={WIDTH} height={HEIGHT} aria-hidden="true" shapeRendering="crispEdges">{parts}</svg>;
 }
 
 type Floater = { id: number; text: string; offset: number };
@@ -56,14 +64,15 @@ export function ChatPet({ mood, context, onHide }: {
   onHide: () => void;
 }) {
   const box = useRef<HTMLDivElement>(null);
-  const [left, setLeft] = useState(() => { try { const value = Number(localStorage.getItem(POSITION_KEY)); return Number.isFinite(value) && value >= 0 ? value : 16; } catch { return 16; } });
+  const [right, setRight] = useState(() => { try { const value = Number(localStorage.getItem(POSITION_KEY)); return Number.isFinite(value) && value >= 0 ? value : 16; } catch { return 16; } });
+  const [step, setStep] = useState(false);
   const [asleep, setAsleep] = useState(false);
   const [cheering, setCheering] = useState(false);
   const [bubble, setBubble] = useState<string | null>(null);
   const [motion, setMotion] = useState("");
   const [floaters, setFloaters] = useState<Floater[]>([]);
   const [fed, setFed] = useState(0);
-  const drag = useRef<{ x: number; left: number; moved: boolean } | null>(null);
+  const drag = useRef<{ x: number; right: number; max: number; moved: boolean } | null>(null);
   const clickTimer = useRef<number | undefined>(undefined);
   const bubbleTimer = useRef<number | undefined>(undefined);
   const napTimer = useRef<number | undefined>(undefined);
@@ -103,13 +112,31 @@ export function ChatPet({ mood, context, onHide }: {
   }, [mood]);
   const full = context !== null && context >= 0.8;
   useEffect(() => { if (full) say("I'm getting full. Compact soon?", 2600); }, [full]);
+  // While the agent works, Clawd walks in place.
+  const walking = mood === "working" && !asleep;
+  useEffect(() => {
+    if (!walking) { setStep(false); return undefined; }
+    const timer = window.setInterval(() => setStep((current) => !current), 280);
+    return () => window.clearInterval(timer);
+  }, [walking]);
   useEffect(() => () => { window.clearTimeout(clickTimer.current); window.clearTimeout(bubbleTimer.current); window.clearTimeout(napTimer.current); }, []);
 
   const shown: PetMood = mood === "done" && !cheering ? "idle" : mood;
   const wake = () => { if (!asleep) return false; setAsleep(false); say("Huh? I'm up.", 1500); play("hop"); poke(); return true; };
 
+  /** The farthest from the right edge it may sit: short of the branch chip on the box's top edge. */
+  const maxRight = () => {
+    const composer = box.current?.parentElement;
+    const width = composer?.clientWidth ?? 600;
+    const chip = composer?.parentElement?.querySelector(".cx-branch-chip, .cx-branch-note");
+    const chipEnd = chip && composer ? chip.getBoundingClientRect().right - composer.getBoundingClientRect().left + CHIP_GAP : 0;
+    return Math.max(0, width - WIDTH - Math.max(8, chipEnd));
+  };
+  // A saved spot from a wider window, or a chip that grew, never leaves it on the chip.
+  useEffect(() => { const max = maxRight(); if (right > max) setRight(max); });
+
   const onPointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    drag.current = { x: event.clientX, left, moved: false };
+    drag.current = { x: event.clientX, right, max: maxRight(), moved: false };
     event.currentTarget.setPointerCapture(event.pointerId);
   };
   const onPointerMove = (event: ReactPointerEvent<HTMLButtonElement>) => {
@@ -118,14 +145,13 @@ export function ChatPet({ mood, context, onHide }: {
     const dx = event.clientX - state.x;
     if (Math.abs(dx) > 4) state.moved = true;
     if (!state.moved) return;
-    const room = (box.current?.parentElement?.clientWidth ?? 600) - WIDTH - 8;
-    setLeft(Math.max(0, Math.min(room, state.left + dx)));
+    setRight(Math.max(0, Math.min(state.max, state.right - dx)));
   };
   const onPointerUp = () => {
     const state = drag.current;
     drag.current = null;
     if (!state?.moved) return;
-    try { localStorage.setItem(POSITION_KEY, String(Math.round(left))); } catch { /* the spot still applies now */ }
+    try { localStorage.setItem(POSITION_KEY, String(Math.round(right))); } catch { /* the spot still applies now */ }
     wake();
     say("Wheee", 900);
     play("hop");
@@ -133,7 +159,7 @@ export function ChatPet({ mood, context, onHide }: {
   };
 
   const percent = context === null ? null : Math.round(context * 100);
-  return <div ref={box} className="cx-pet" style={{ left }}>
+  return <div ref={box} className="cx-pet" style={{ right }}>
     {bubble ? <span className="cx-pet-bubble" role="status">{bubble}</span> : null}
     {floaters.map((item) => <span key={item.id} className="cx-pet-float" style={{ left: item.offset }} aria-hidden="true">{item.text}</span>)}
     <button type="button" className={`cx-pet-body is-${shown}${asleep ? " is-asleep" : ""}${motion ? ` is-${motion}` : ""}`}
@@ -161,7 +187,7 @@ export function ChatPet({ mood, context, onHide }: {
         poke();
       }}
       onContextMenu={(event) => { event.preventDefault(); onHide(); }}>
-      <Sprite mood={shown} asleep={asleep} fill={context ?? 0} />
+      <Sprite mood={shown} asleep={asleep} step={step} />
     </button>
   </div>;
 }
