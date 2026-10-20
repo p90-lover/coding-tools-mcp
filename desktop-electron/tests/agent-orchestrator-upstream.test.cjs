@@ -207,6 +207,23 @@ test("actual upstream observe exposes bounded current streaming output separatel
   await assert.rejects(upstream.observe("bad/session"), /valid AO session ID/);
 });
 
+test("a pending item too large for any page still lets the chat be read (and stopped)", async () => {
+  // Seen live: a stuck 1 MB screenshot call was pending, so includePending put it in every page,
+  // every read exceeded the handler limit, and Stop failed with "AO response exceeds the handler limit".
+  const asked = [];
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => {
+      if (!endpoint.includes("/conversation")) return { session: { id: "s", mode: "chat", status: "working" } };
+      asked.push(endpoint.split("?")[1]);
+      if (endpoint.includes("includePending=1")) throw new Error("AO response exceeds the handler limit (GET /api/v1/sessions/s/conversation)");
+      return { turns: [{ id: "t", state: "running" }], messages: [] };
+    },
+  });
+  const observed = await upstream.observe("s");
+  assert.equal(observed.turnState, "running");
+  assert.deepEqual(asked, ["limit=100&includePending=1", "limit=40&includePending=1", "limit=10&includePending=1", "limit=10"]);
+});
+
 test("observe shows the reply of a turn that ended while AO still flagged it as streaming", async () => {
   // Seen live: a provider error ended the turn mid-stream and AO kept streaming=true on its reply.
   const upstream = observeHarness({

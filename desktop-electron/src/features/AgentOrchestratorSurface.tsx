@@ -1714,8 +1714,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const describeChatNode = useCallback((node: ChatNode, run?: ChatRun) => node.route
     ? cardMeta(node as unknown as AoNode, harnesses, run?.execution_mode !== "single") : "", [harnesses]);
   const [chatActivity, setChatActivity] = useState<Record<string, ChatActivity>>({});
+  // Only runs of the open project: right after a project switch `missions` still holds the previous
+  // one's, and asking this workspace for them failed every second ("AO run not found in this workspace").
   const workingRunIds = (view === "overview" && inspectedId && selectedRun ? [selectedRun] : missions.filter(mission => mission.project_id === chatTaskId))
-    .filter(mission => mission.nodes.some(node => ["running", "reserved"].includes(node.state))).map(mission => mission.id).join(",");
+    .filter(mission => mission.workspace_id === workspaceId && mission.nodes.some(node => ["running", "reserved"].includes(node.state))).map(mission => mission.id).join(",");
   useEffect(() => {
     if (!workspaceId || !workingRunIds) return;
     let live = true;

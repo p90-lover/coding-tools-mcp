@@ -393,7 +393,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // came after it; one that fell out of the newest items never showed and sat until it timed out.
         return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${limits[at]}&includePending=1`);
       } catch (error) {
-        if (at === limits.length - 1 || !/exceeds the handler limit/.test(String(error?.message))) throw error;
+        if (!/exceeds the handler limit/.test(String(error?.message))) throw error;
+        if (at === limits.length - 1) {
+          // A pending item is in every page, so one that is itself over the limit (a stuck 1 MB
+          // screenshot call, seen live) failed every read: the chat stopped updating and Stop could
+          // not be confirmed. The newest items alone are read instead.
+          return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${limits[at]}`);
+        }
       }
     }
   }
