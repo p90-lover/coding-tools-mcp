@@ -523,20 +523,70 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .ao-workflow .cx-branch-chip > svg { flex: none; }
 .ao-workflow .cx-branch-chip > span:nth-of-type(1) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ao-workflow .cx-branch-note { display: inline-flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ao-workflow .cx-branch-popup { width: min(400px, calc(100vw - 40px)); padding: 10px; }
-.ao-workflow .cx-branch-list { max-height: 320px; margin: 8px 0 0; padding: 0; overflow: auto; list-style: none; }
-.ao-workflow .cx-branch-list li { border-radius: 8px; font-size: 13px; }
-.ao-workflow .cx-branch-list li.cx-branch-empty { padding: 6px 8px; }
-.ao-workflow .cx-branch-list li.is-in-use { background: var(--cx-hover); }
-.ao-workflow .cx-branch-option { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border: 0; border-radius: 8px; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-.ao-workflow .cx-branch-option:hover:not(:disabled) { background: var(--cx-hover); }
-.ao-workflow .cx-branch-option:disabled { cursor: default; opacity: .55; }
+/* The branch picker: frosted glass over the chat, springing up from its chip, rows fading in. */
+.ao-workflow .cx-branch-popup {
+  display: flex; flex-direction: column; width: min(460px, calc(100vw - 40px)); max-height: min(70vh, 560px); padding: 0; overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--claude-line, #e4e1da) 70%, transparent); border-radius: 16px;
+  background: color-mix(in srgb, var(--claude-surface, #fff) 74%, transparent); color: var(--claude-text, #1f1e1d);
+  -webkit-backdrop-filter: blur(22px) saturate(1.6); backdrop-filter: blur(22px) saturate(1.6);
+  box-shadow: 0 22px 60px rgb(24 22 18 / 20%), 0 2px 8px rgb(24 22 18 / 8%), inset 0 1px 0 rgb(255 255 255 / 45%);
+  transform-origin: bottom left; animation: cx-glass-in .26s cubic-bezier(.2, .9, .25, 1.05) both;
+}
+/* Not the popover's generic header row (a flex title bar) nor its search-last order. */
+.ao-workflow .cx-branch-popup .cx-branch-head { display: block; margin: 0; }
+.ao-workflow .cx-branch-popup .cx-branch-search { order: 0; }
+.ao-workflow .cx-branch-head { position: relative; padding: 14px 16px 12px; border-bottom: 1px solid color-mix(in srgb, var(--claude-line, #e4e1da) 60%, transparent);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--claude-accent, #d97757) 12%, transparent), transparent 70%); }
+/* A slow sheen across the header, the "glass" catching light once as it opens. */
+.ao-workflow .cx-branch-head::after { content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(105deg, transparent 30%, rgb(255 255 255 / 28%) 48%, transparent 66%); background-size: 250% 100%;
+  animation: cx-glass-sheen 1.4s ease-out .1s both; }
+.ao-workflow .cx-branch-head-title { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 14px; }
+.ao-workflow .cx-branch-head-title strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.ao-workflow .cx-branch-head-line { display: flex; flex-wrap: wrap; gap: 4px 10px; margin: 6px 0 0; color: var(--claude-text-2, #73726c); font-size: 12px; }
+.ao-workflow .cx-branch-head-line .is-dirty { color: var(--ao-amber, #b7791f); font-weight: 500; }
+.ao-workflow .cx-branch-head-line .is-clean { color: var(--ao-green, #2f855a); }
+.ao-workflow .cx-branch-head-line.is-secondary { margin-top: 4px; opacity: .8; }
+.ao-workflow .cx-branch-head-commit { display: flex; align-items: baseline; gap: 8px; min-width: 0; margin: 6px 0 0; font-size: 12px; color: var(--claude-text-2, #73726c); }
+.ao-workflow .cx-branch-head-commit > span { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ao-workflow .cx-branch-popup code { flex: none; padding: 0 5px; border-radius: 5px; background: color-mix(in srgb, var(--claude-text, #1f1e1d) 7%, transparent);
+  font-family: var(--claude-mono, ui-monospace, monospace); font-size: 11px; }
+.ao-workflow .cx-branch-search { margin: 10px 12px 4px; width: auto; border-radius: 10px; background: color-mix(in srgb, var(--claude-surface, #fff) 60%, transparent); }
+.ao-workflow .cx-branch-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 2px 6px 8px; overscroll-behavior: contain; }
+.ao-workflow .cx-branch-group h4 { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 6px; margin: 0; padding: 8px 10px 4px;
+  background: color-mix(in srgb, var(--claude-surface, #fff) 82%, transparent); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+  color: var(--claude-text-2, #73726c); font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.ao-workflow .cx-branch-group h4 span { font-weight: 500; opacity: .7; }
+.ao-workflow .cx-branch-list { margin: 0; padding: 0; list-style: none; }
+.ao-workflow .cx-branch-list li { border-radius: 10px; font-size: 13px; animation: cx-glass-row .32s cubic-bezier(.2, .8, .2, 1) both; animation-delay: calc(var(--row, 0) * 16ms + 40ms); }
+.ao-workflow .cx-branch-list li.is-in-use { background: color-mix(in srgb, var(--claude-accent, #d97757) 10%, transparent); }
+.ao-workflow .cx-branch-option { display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 10px; border: 0; border-radius: 10px; background: transparent; color: inherit;
+  font: inherit; text-align: left; cursor: pointer; transition: background-color .16s ease, transform .16s ease; }
+.ao-workflow .cx-branch-option:hover:not(:disabled) { background: color-mix(in srgb, var(--claude-text, #1f1e1d) 6%, transparent); transform: translateX(2px); }
+.ao-workflow .cx-branch-option:focus-visible { outline: 2px solid var(--claude-accent, #d97757); outline-offset: -2px; }
+.ao-workflow .cx-branch-option:disabled { cursor: default; opacity: .6; }
 .ao-workflow .cx-branch-list li.is-in-use .cx-branch-option:disabled { opacity: 1; }
-.ao-workflow .cx-branch-error { margin: 8px 0 0; padding: 6px 8px; border-radius: 8px; background: var(--ao-danger-soft, #fdecea); color: var(--ao-danger, #b42318); font-size: 12px; }
-.ao-workflow .cx-branch-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ao-workflow .cx-branch-tags { display: inline-flex; flex: none; align-items: center; gap: 6px; color: var(--ao-muted); font-size: 11.5px; }
-.ao-workflow .cx-branch-tags em { padding: 0 6px; border-radius: 6px; background: var(--claude-accent-soft, #eef3ff); color: var(--color-text-primary); font-style: normal; }
-.ao-workflow .cx-branch-empty { color: var(--ao-muted); }
+.ao-workflow .cx-branch-error { margin: 6px 12px 0; padding: 6px 8px; border-radius: 8px; background: var(--ao-danger-soft, #fdecea); color: var(--ao-danger, #b42318); font-size: 12px; }
+.ao-workflow .cx-branch-main { display: flex; flex: 1 1 auto; flex-direction: column; gap: 1px; min-width: 0; }
+.ao-workflow .cx-branch-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.ao-workflow .cx-branch-sub { display: flex; align-items: baseline; gap: 6px; min-width: 0; color: var(--claude-text-2, #73726c); font-size: 11.5px; }
+.ao-workflow .cx-branch-sub > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ao-workflow .cx-branch-tags { display: inline-flex; flex: none; align-items: center; gap: 5px; color: var(--claude-text-2, #73726c); font-size: 11px; }
+.ao-workflow .cx-branch-tags em { padding: 1px 7px; border-radius: 999px; background: var(--claude-accent-soft, #f6e8e1); color: var(--claude-text, #1f1e1d); font-style: normal; }
+.ao-workflow .cx-branch-pill { padding: 1px 7px; border: 1px solid color-mix(in srgb, var(--claude-line, #e4e1da) 80%, transparent); border-radius: 999px; font-size: 11px; white-space: nowrap; }
+.ao-workflow .cx-branch-pill.is-faint { opacity: .65; }
+.ao-workflow .cx-branch-versus { font-variant-numeric: tabular-nums; color: var(--claude-text, #1f1e1d); }
+.ao-workflow .cx-branch-versus.is-even { color: var(--claude-text-2, #73726c); }
+.ao-workflow .cx-branch-age { min-width: 26px; text-align: right; font-variant-numeric: tabular-nums; }
+.ao-workflow .cx-branch-empty { margin: 8px 10px; color: var(--ao-muted); }
+@keyframes cx-glass-in { from { opacity: 0; transform: translateY(10px) scale(.96); filter: blur(6px); } to { opacity: 1; transform: none; filter: none; } }
+@keyframes cx-glass-row { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@keyframes cx-glass-sheen { from { background-position: 120% 0; } to { background-position: -40% 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .ao-workflow .cx-branch-popup, .ao-workflow .cx-branch-list li, .ao-workflow .cx-branch-head::after { animation: none; }
+  .ao-workflow .cx-branch-option { transition: none; }
+  .ao-workflow .cx-branch-option:hover:not(:disabled) { transform: none; }
+}
 .ao-workflow .cx-composer .ao-mode-switch { gap: 0; padding: 0; border: 0; background: transparent; }
 .ao-workflow .cx-composer .ao-mode-switch button { height: 30px; padding: 0 6px; border-radius: 8px; color: var(--ao-muted); font-size: 13px; }
 .ao-workflow .cx-composer .ao-mode-switch button.is-active { background: transparent; box-shadow: none; color: var(--color-text-primary); }
@@ -818,22 +868,33 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-browser-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--ao-green, #2e9d5b); animation: cx-pulse 1.6s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) { .cx-browser-chip, .cx-browser-dot { animation: none; } }
 
-/* Bit, the chat's pet (ChatPet.tsx): perched on the chat box's top edge, dragged along it. */
-.cx-pet { position: absolute; bottom: 100%; z-index: 2; width: 48px; height: 44px; margin-bottom: -6px; pointer-events: none; }
-.cx-pet-body { pointer-events: auto; display: block; width: 48px; height: 42px; padding: 0; border: 0; background: transparent; cursor: grab; touch-action: none; }
+/* Bit, the chat's pet (ChatPet.tsx): Clawd perched on the chat box's top edge at its right end (the
+   left end holds the branch chip), dragged along it. 18×7 pixels at 3×. */
+.cx-pet { position: absolute; bottom: 100%; z-index: 2; width: 54px; height: 21px; margin-bottom: 0; pointer-events: none; }
+.cx-pet-body { pointer-events: auto; display: block; width: 54px; height: 21px; padding: 0; border: 0; background: transparent; cursor: grab; touch-action: none; }
 .cx-pet-body:active { cursor: grabbing; }
 .cx-pet-body:focus-visible { outline: 2px solid var(--ao-blue); outline-offset: 2px; border-radius: 6px; }
-.cx-pet-body svg { display: block; }
-.cx-pet-body.is-working svg, .cx-pet-body.is-idle svg { animation: cx-pet-bob 1.2s ease-in-out infinite; }
+.cx-pet-body svg { display: block; transform-origin: 50% 100%; }
+/* Working, its legs walk (ChatPet's step); idle, it bobs. */
+.cx-pet-body.is-idle svg { animation: cx-pet-bob 1.6s ease-in-out infinite; }
 .cx-pet-body.is-asleep svg { animation: cx-pet-breathe 3s ease-in-out infinite; }
+/* Walking, each step lifts it a pixel (ChatPet moves the box itself along the edge). */
+.cx-pet-body.is-walking svg { animation: cx-pet-step .28s ease-in-out infinite; }
 .cx-pet-body.is-hop svg { animation: cx-pet-hop .45s ease; }
 .cx-pet-body.is-shake svg { animation: cx-pet-shake .4s ease 3; }
-.cx-pet-bubble { position: absolute; bottom: 46px; left: 24px; transform: translateX(-50%); padding: 3px 9px; border: 1px solid var(--ao-line); border-radius: 8px;
+.cx-pet-body.is-spin svg { animation: cx-pet-spin .6s ease-in-out; }
+.cx-pet-body.is-bounce svg { animation: cx-pet-bounce .42s cubic-bezier(.3, 1.6, .5, 1); }
+.cx-pet-bubble { position: absolute; bottom: 26px; right: 0; padding: 3px 9px; border: 1px solid var(--ao-line); border-radius: 8px;
   background: var(--color-bg-primary, #fff); color: var(--color-text-primary, inherit); font-size: 12px; line-height: 1.4; white-space: nowrap; }
-.cx-pet-float { position: absolute; bottom: 30px; font-size: 13px; animation: cx-pet-rise 1.1s ease-out forwards; }
+.cx-pet-float { position: absolute; bottom: 18px; font-size: 13px; animation: cx-pet-rise 1.1s ease-out forwards; }
+@media (prefers-reduced-motion: reduce) { .cx-pet-body svg { animation: none !important; } }
 @keyframes cx-pet-bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
 @keyframes cx-pet-breathe { 0%, 100% { transform: scaleY(1); } 50% { transform: scaleY(.95); } }
-@keyframes cx-pet-hop { 0%, 100% { transform: translateY(0); } 40% { transform: translateY(-16px); } }
+@keyframes cx-pet-hop { 0%, 100% { transform: translateY(0) scale(1, 1); } 15% { transform: translateY(0) scale(1.12, .82); }
+  45% { transform: translateY(-18px) scale(.92, 1.1); } 85% { transform: translateY(0) scale(1.1, .88); } }
+@keyframes cx-pet-step { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-1.5px); } }
+@keyframes cx-pet-spin { 0%, 100% { transform: scaleX(1); } 50% { transform: scaleX(-1); } }
+@keyframes cx-pet-bounce { 0%, 100% { transform: scale(1, 1); } 35% { transform: scale(1.14, .8); } 70% { transform: scale(.94, 1.1); } }
 @keyframes cx-pet-shake { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-3px); } 75% { transform: translateX(3px); } }
 @keyframes cx-pet-rise { to { transform: translateY(-36px); opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .cx-pet-body svg, .cx-pet-float { animation: none !important; } }

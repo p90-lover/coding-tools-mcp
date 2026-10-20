@@ -47,6 +47,43 @@ test("the branch bar lists every branch, its worktree, and which one the folder 
   }
 });
 
+test("each branch carries its tip commit and its distance from the default; the folders carry their uncommitted work", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chat-branch-details-"));
+  try {
+    const repo = path.join(root, "repo");
+    fs.mkdirSync(repo);
+    git(repo, "init", "-q", "-b", "main");
+    fs.writeFileSync(path.join(repo, "a.txt"), "a");
+    git(repo, "add", "a.txt");
+    git(repo, "commit", "-q", "-m", "first");
+    // An agent branch made from main and never committed to: same as main, with main's old tip.
+    const chatWorktree = path.join(root, "chat-wt");
+    git(repo, "worktree", "add", "-q", "-b", "ao/chat-1", chatWorktree);
+    git(repo, "switch", "-q", "-c", "feature/two");
+    fs.writeFileSync(path.join(repo, "b.txt"), "b");
+    git(repo, "add", "b.txt");
+    git(repo, "commit", "-q", "-m", "add\tb with a tab");
+    git(repo, "switch", "-q", "main");
+    // The project folder: one modified file (first in status, so its leading space matters), one untracked.
+    fs.writeFileSync(path.join(repo, "a.txt"), "changed");
+    fs.writeFileSync(path.join(repo, "new.txt"), "new");
+    fs.writeFileSync(path.join(chatWorktree, "staged.txt"), "s");
+    git(chatWorktree, "add", "staged.txt");
+
+    const result = await listBranches(repo, chatWorktree);
+    const byName = Object.fromEntries(result.branches.map((branch) => [branch.name, branch]));
+    assert.deepEqual([byName["feature/two"].ahead, byName["feature/two"].behind], [1, 0]);
+    assert.equal(byName["feature/two"].subject, "add\tb with a tab", "a subject keeps its own tab");
+    assert.match(byName["feature/two"].commit, /^[0-9a-f]{7,}$/);
+    assert.deepEqual([byName["ao/chat-1"].ahead, byName["ao/chat-1"].behind], [0, 0]);
+    assert.equal(byName["ao/chat-1"].subject, "first");
+    assert.deepEqual(result.folderChanges, { staged: 0, modified: 1, untracked: 1 });
+    assert.deepEqual(result.chatChanges, { staged: 1, modified: 0, untracked: 0 });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("choosing a branch checks it out in the project folder and creates nothing", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "chat-branches-"));
   try {
