@@ -1468,6 +1468,27 @@ test("desktop tools are hidden and refused unless the user opts in, and every sc
   } finally { await tools.close(); tree.cleanup(); }
 });
 
+test("under Approve for me on Claude Code, screen tools its reviewer already judged are not asked again", async () => {
+  const tree = tempTree();
+  const { tools, calls, confirmations } = fixture({ root: tree.root, desktop: () => true, confirm: async () => true });
+  try {
+    const reviewed = await session(tools, { agent: "claude-code", autoReview: true, id: "ao-1" });
+    const init = await post(reviewed.url, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, reviewed.auth);
+    assert.match(init.body.result.instructions, /each call is reviewed before it runs/);
+    assert.equal((await callTool(reviewed.url, reviewed.auth, "list_windows")).isError, false);
+    assert.equal(calls.at(-1).body.tool, "list_windows");
+    await callTool(reviewed.url, reviewed.auth, "computer_action", { session_id: "lease" });
+    assert.equal(calls.at(-1).body.tool, "computer_action");
+    assert.equal(confirmations.length, 0, "the reviewer's approval is the approval");
+
+    // Codex's approval policy can let an MCP call through unreviewed: it keeps the app's dialog.
+    const codex = await session(tools, { agent: "codex", autoReview: true, id: "ao-2" });
+    await callTool(codex.url, codex.auth, "list_windows");
+    assert.equal(confirmations.length, 1);
+    assert.match(confirmations[0].message, /list the windows/);
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
 test("turning the app's tools off refuses calls in running sessions", async () => {
   const tree = tempTree();
   let on = true;

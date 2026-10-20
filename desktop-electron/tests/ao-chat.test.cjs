@@ -770,6 +770,11 @@ test("a chat's AO agent sessions for its Preview and Terminal panes: newest firs
   ], "a native Codex thread is not an AO session");
   assert.deepEqual(plain(chat.chatAgentSessions([run("r1", "t", [card("a", "s1", { settings: { name: "Builder" } })])])),
     [{ id: "s1", label: "Builder · cpa/gpt-6-luna", model: "cpa/gpt-6-luna" }], "a single session keeps its plain name");
+  // The chat splits these labels while rendering; a card saved with no name, role name or role
+  // must still give a string, or the whole window unmounts.
+  const nameless = chat.chatAgentSessions([{ nodes: [{ id: "x", route: { harness_id: "ao:claude-code" }, receipt: { thread_id: "s9" } }] }, { id: "r", nodes: undefined }]);
+  assert.deepEqual(plain(nameless), [{ id: "s9", label: "Agent" }]);
+  assert.equal(nameless[0].label.split(" · ")[0], "Agent");
 });
 
 test("the context meter's numbers: short token counts, and fullness only when the agent gives its window", () => {

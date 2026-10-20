@@ -4,7 +4,7 @@ const http = require("node:http");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
-const { spawn } = require("node:child_process");
+const { execFile, spawn } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { DEFAULT_BYPASS } = require("./provider-network.cjs");
 const { processRunning, terminateOwnedProcessTree } = require("./process-tree.cjs");
@@ -303,6 +303,29 @@ function portHeld(port) {
   });
 }
 
+// The process listening on a local port and its command line, or null (unknown, or not Windows).
+// Asynchronous: it is asked only after a bind failed, and must not block the main process.
+function windowsPortOwner(port) {
+  if (process.platform !== "win32" || !Number.isInteger(port) || port < 1) return Promise.resolve(null);
+  const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT || "C:\\Windows";
+  const powershell = path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const script = `$c = Get-NetTCPConnection -State Listen -LocalPort ${port} -ErrorAction SilentlyContinue | Select-Object -First 1; `
+    + "if ($c) { $p = Get-CimInstance Win32_Process -Filter \"ProcessId=$($c.OwningProcess)\"; "
+    + "[pscustomobject]@{ pid = [int]$c.OwningProcess; commandLine = [string]$p.CommandLine } | ConvertTo-Json -Compress }";
+  return new Promise((resolve) => {
+    execFile(powershell, ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", windowsHide: true, timeout: 10_000 },
+      (error, stdout) => {
+        if (error || !String(stdout).trim()) return resolve(null);
+        try {
+          const owner = JSON.parse(String(stdout).trim());
+          resolve(Number.isInteger(owner.pid) && owner.pid > 0 ? { pid: owner.pid, commandLine: String(owner.commandLine || "") } : null);
+        } catch {
+          resolve(null);
+        }
+      });
+  });
+}
+
 // The Codex bridge (daemon) and MCP tunnel pids from the runtime supervisor's ownership state, so
 // a "needs restart" note clears once they run as new processes.
 function readSupervisorPids(coreHome) {
@@ -356,6 +379,8 @@ function createProxyGatewayController({
   readServicePids = () => null,
   rotationDedupMs = 60_000,
   portReleaseWaitMs = 5_000,
+  // Who listens on a port ({ pid, commandLine } or null): finds a helper an earlier app left running.
+  portOwner = windowsPortOwner,
   // The clock for the restart backoff, the launch hold and the rotation dedup (tests advance it).
   now = Date.now,
 }) {
@@ -738,7 +763,27 @@ function createProxyGatewayController({
     }
   }
 
-  async function ensureHelperPass({ restart = false, rotateKey = false } = {}) {
+  /**
+   * Stops a gateway helper an earlier app left on the port without a state file pointing at it (seen
+   * live: a 0.7.0-rc.26 relay held 17894 for hours, and every pass failed to bind and rotated the
+   * key). Only a process running this gateway's relay script is stopped; true when the port is free.
+   */
+  async function stopOrphanHelper(port) {
+    const owner = await Promise.resolve().then(() => portOwner(port)).catch(() => null);
+    if (!owner || owner.pid === process.pid || owner.pid === helper?.pid) return false;
+    if (!owner.commandLine.toLowerCase().includes(path.basename(helperScript).toLowerCase())) return false;
+    try {
+      process.kill(owner.pid);
+    } catch {
+      return false;
+    }
+    await waitForExit(owner.pid, 3_000);
+    await waitForPortRelease(port, portReleaseWaitMs);
+    logger.warn("proxy_gateway.orphan_helper_stopped", { pid: owner.pid, port });
+    return !(await portHeld(port));
+  }
+
+  async function ensureHelperPass({ restart = false, rotateKey = false } = {}, retried = false) {
     const upstream = resolveUpstream();
     const fingerprint = relay.upstreamFingerprint(upstream);
     let target = helper;
@@ -810,7 +855,11 @@ function createProxyGatewayController({
       helper = await spawnHelper(upstream, fingerprint, startKey);
       pendingKey = null;
     } catch (error) {
-      if (/already in use/.test(error?.message || "")) rotateOnEvidence("bind_failed", settings.port);
+      if (/already in use/.test(error?.message || "")) {
+        // Our own helper from an earlier app is not a squat: stop it and start ours once more.
+        if (!retried && await stopOrphanHelper(settings.port)) return ensureHelperPass({ restart, rotateKey }, true);
+        rotateOnEvidence("bind_failed", settings.port);
+      }
       throw error;
     }
     return helper;
