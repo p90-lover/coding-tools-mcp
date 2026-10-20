@@ -658,6 +658,8 @@ function controllerFor(setup, spawns, options = {}) {
     controlTimeoutMs: 10_000,
     readyTimeoutMs: 60_000,
     portReleaseWaitMs: 15_000,
+    // Hermetic: no PowerShell lookups unless a test says who holds a port.
+    portOwner: async () => null,
     ...options,
   });
   controllers.add(controller);
@@ -1265,6 +1267,51 @@ test("a failed bind rotates the key; the hook runs once a helper serves it", asy
   await controller.setRunning(true);
   assert.deepEqual(rotations, [{ reason: "bind_failed" }]);
   await controller.setRunning(false);
+});
+
+test("a helper an earlier app left on the port is stopped and replaced, without rotating the key", async (t) => {
+  // Seen live: a 0.7.0-rc.26 relay with no state file held 17894; every pass failed to bind and
+  // rotated the key ("restart needed" every 10 minutes for hours).
+  const setup = tempSetup(t);
+  await addUpstream(setup, t);
+  const rotations = [];
+  const port = await freePort();
+  const orphan = spawn(process.execPath, ["-e", `require("node:net").createServer().listen(${port}, "127.0.0.1", () => console.log("up")); setInterval(() => {}, 1000);`],
+    { stdio: ["ignore", "pipe", "ignore"] });
+  t.after(() => { try { orphan.kill(); } catch {} });
+  await new Promise((resolve) => orphan.stdout.once("data", resolve));
+  const asked = [];
+  const controller = controllerFor(setup, [], {
+    onAccessKeyRotated: (detail) => rotations.push(detail),
+    portOwner: async (held) => { asked.push(held); return held === port ? { pid: orphan.pid, commandLine: `bun.exe "H:\\Apps\\Coding Tools\\resources\\app.asar.unpacked\\electron\\proxy-gateway-relay.cjs"` } : null; },
+  });
+  await controller.configure({ upstreamProfileId: "isp-upstream", port, tokenlessPort: await freePort() });
+  await controller.setUseForApp(true);
+  await controller.setRunning(false);
+  const oldKey = gatewayToken(setup.store);
+
+  const status = await controller.setRunning(true);
+  assert.equal(status.running, true, "the orphan was stopped and our helper took the port");
+  assert.ok(asked.includes(port));
+  assert.equal(orphan.exitCode !== null || orphan.signalCode !== null, true, "the orphan exited");
+  assert.equal(gatewayToken(setup.store), oldKey, "no rotation: it was our helper, not a squat");
+  assert.deepEqual(rotations, []);
+  await controller.setRunning(false);
+});
+
+test("a process that is not our relay keeps the port: the key rotates as before", async (t) => {
+  const setup = tempSetup(t);
+  await addUpstream(setup, t);
+  const port = await freePort();
+  const controller = controllerFor(setup, [], { portOwner: async () => ({ pid: 999_999, commandLine: "C:\\other\\server.exe --port" }) });
+  await controller.configure({ upstreamProfileId: "isp-upstream", port, tokenlessPort: await freePort() });
+  await controller.setUseForApp(true);
+  await controller.setRunning(false);
+  const oldKey = gatewayToken(setup.store);
+  const release = await squat(t, port, "");
+  await assert.rejects(controller.setRunning(true), /already in use/);
+  assert.notEqual(gatewayToken(setup.store), oldKey);
+  await release();
 });
 
 test("our busy helper (503) or an older helper (407) on the port is not taken for a squatter", async (t) => {
