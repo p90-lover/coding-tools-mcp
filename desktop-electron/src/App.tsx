@@ -12,6 +12,7 @@ import {
 import { createPortal } from "react-dom";
 import { copyFor, localizeRuntimeMessage, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
+import { appendLog, logKey, replaceLogs, useLogs } from "./log-store";
 import { ProviderCenterSurface } from "./features/ProviderHubSaasSurface";
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
 import { ProxyGatewaySurface } from "./features/ProxyGatewaySurface";
@@ -38,7 +39,6 @@ import type {
   Language,
   LauncherSnapshot,
   LauncherState,
-  LogRecord,
   OperationState,
   RefreshPart,
   Surface,
@@ -66,7 +66,6 @@ export function App() {
   const [browser, setBrowser] = useState<BrowserState | null>(null);
   const [operation, setOperation] = useState<OperationState | null>(null);
   const lastOperationRef = useRef<OperationState | null>(null);
-  const [logs, setLogs] = useState<LogRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
   const documentLanguage = snapshot?.state.language ?? "en";
 
@@ -110,7 +109,7 @@ export function App() {
       if (cancelled) return;
       setSnapshot(next);
       setBrowser(next.browser);
-      setLogs(next.logs);
+      replaceLogs(next.logs);
       setOperation(next.operation);
       lastOperationRef.current = next.operation ?? null;
       if (next.operation?.status === "failed" && next.operation.name !== "mcp-verification") {
@@ -139,7 +138,7 @@ export function App() {
       setOperation(next);
       if (next.status === "failed" && next.name !== "mcp-verification") setError(next.message);
     });
-    const unsubscribeLog = api.onLog((record) => setLogs((current) => [...current.slice(-299), record]));
+    const unsubscribeLog = api.onLog(appendLog);
     const unsubscribeUpdate = api.onUpdateState((update) => {
       setSnapshot((current) => current ? { ...current, update } : current);
     });
@@ -197,7 +196,6 @@ export function App() {
             copy={copy}
             key="launcher"
             language={language}
-            logs={logs}
             operation={operation}
             setError={setError}
             snapshot={snapshot}
@@ -404,7 +402,6 @@ function LauncherShell({
   browser,
   copy,
   language,
-  logs,
   operation,
   setError,
   snapshot,
@@ -413,7 +410,6 @@ function LauncherShell({
   browser: BrowserState | null;
   copy: Copy;
   language: Language;
-  logs: LogRecord[];
   operation: OperationState | null;
   setError: (error: string | null) => void;
   snapshot: LauncherSnapshot;
@@ -936,7 +932,7 @@ function LauncherShell({
               />
             ) : null}
             {keepAlive("activity", () => (
-              <ActivitySurface copy={copy} language={language} logs={logs} setError={setError} />
+              <ActivitySurface copy={copy} language={language} setError={setError} />
             ))}
             {keepAlive("instant-mcp", () => (
               <InstantMcpToolsSurface copy={copy} language={language} setError={setError} />
@@ -1997,14 +1993,13 @@ function McpSurface({
 function ActivitySurface({
   copy,
   language,
-  logs,
   setError,
 }: {
   copy: Copy;
   language: Language;
-  logs: LogRecord[];
   setError: (error: string | null) => void;
 }) {
+  const logs = useLogs();
   return (
     <ContentSurface subtitle={copy.activitySubtitle} title={copy.activityTitle}>
       <div className="section-heading activity-heading">
@@ -2023,8 +2018,8 @@ function ActivitySurface({
             <span>{copy.noLogs}</span>
           </div>
         ) : null}
-        {[...logs].reverse().map((record, index) => (
-          <div className="activity-row" key={`${record.at}-${record.event}-${index}`}>
+        {[...logs].reverse().map((record) => (
+          <div className="activity-row" key={logKey(record)}>
             <StateDot state={record.level === "error" ? "error" : record.level === "warning" ? "busy" : "ready"} />
             <div>
               <strong>{humanEvent(record.event)}</strong>
