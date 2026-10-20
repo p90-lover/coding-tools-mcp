@@ -51,6 +51,13 @@ const NOTICE = 180;
 const REACH = 70;
 /** Between two leaps onto the pointer, so it plays now and then rather than pestering. */
 const PLAY_EVERY = 15_000;
+/** A ride lasts at most this long (ms) before it jumps off by itself; a click, Escape or a quick
+ *  shake of the pointer makes it jump off at once. */
+const MAX_RIDE = 4_000;
+/** A pointer move this fast (px in one frame) shakes it off. */
+const SHAKE = 90;
+/** What it does now and then while riding, from Claude Code's own animations. */
+const RIDE_PLAYS: AnimationName[] = ["jump", "wink", "look", "boop", "tap"];
 
 const LINES: Record<PetMood, string> = {
   idle: "Nothing running. Want to start something?",
@@ -225,6 +232,8 @@ export function ChatPet({ mood, context, onHide }: {
   const pointer = useRef({ x: 0, y: 0 });
   const lastPlay = useRef(0);
   const clickTimer = useRef<number | undefined>(undefined);
+  // The end of a ride: its own timer, so nothing that clears the wander plans can leave it riding.
+  const rideTimer = useRef<number | undefined>(undefined);
   const bubbleTimer = useRef<number | undefined>(undefined);
   const napTimer = useRef<number | undefined>(undefined);
   const walkFrame = useRef(0);
@@ -463,9 +472,12 @@ export function ChatPet({ mood, context, onHide }: {
   };
   /** It jumps off the pointer, back onto the box's top edge below it (never onto a button). */
   const leave = () => {
+    window.clearTimeout(rideTimer.current);
+    if (rideNow.current?.mode === "leaving") return;
     const current = loopNow.current;
     const frame = composer.current?.getBoundingClientRect();
     if (!rideNow.current || !current || !frame) { setRide(null); return; }
+    rideNow.current = { ...rideNow.current, mode: "leaving" };
     const x = Math.max(WIDTH / 2, Math.min(current.width - WIDTH / 2, pointer.current.x - frame.left));
     const spot = freeNear(nearLap(current, x, atNow.current));
     setPose({ ...REST, arms: "both" });
@@ -493,12 +505,14 @@ export function ChatPet({ mood, context, onHide }: {
       setRide((current) => current && { ...current, ...pointer.current, mode: "boarding" })));
     later(420, () => {
       setRide((current) => current && { ...current, ...pointer.current, mode: "riding" });
-      setPose({ ...REST, sit: true });
+      // Aboard, its feet dangle and it looks the way it is carried (see the ride frame below).
+      setPose({ ...REST, walking: true });
       float("♥", 18); float("♥", 40);
       later(200, () => float("♥", 28));
       say(stay > 2000 ? pick(RIDING) : "Hi!", 1400);
     });
-    later(420 + stay, leave);
+    window.clearTimeout(rideTimer.current);
+    rideTimer.current = window.setTimeout(leave, 420 + Math.min(stay, MAX_RIDE));
   };
 
   // React to the agent: each mood gets its own little scene, then the wander loop resumes.
@@ -581,7 +595,10 @@ export function ChatPet({ mood, context, onHide }: {
         moved = 0;
         if (rideNow.current) {
           // Aboard, it goes wherever the pointer goes, facing the way it is carried.
-          if (rideNow.current.mode === "riding") setRide((current) => current && { ...current, x, y, look: dx < -1 ? -1 : dx > 1 ? 1 : current.look });
+          if (rideNow.current.mode !== "riding") return;
+          // Shaken hard, it lets go and jumps back to the box.
+          if (Math.abs(dx) > SHAKE) { say("Whoa!", 900); leave(); return; }
+          setRide((current) => current && { ...current, x, y, look: dx < -1 ? -1 : dx > 1 ? 1 : current.look });
           return;
         }
         const body = box.current?.getBoundingClientRect();
@@ -591,7 +608,7 @@ export function ChatPet({ mood, context, onHide }: {
         const calm = moodNow.current === "idle" || moodNow.current === "done";
         if (calm && distance < REACH && !homeNow.current && Date.now() - lastPlay.current > PLAY_EVERY && Math.random() < 0.6) {
           lastPlay.current = Date.now();
-          board(Math.random() < 0.5 ? 1200 : 4000 + Math.random() * 6000);
+          board(Math.random() < 0.5 ? 1200 : 2200 + Math.random() * 1800);
           return;
         }
         setPose((current) => {
@@ -615,7 +632,23 @@ export function ChatPet({ mood, context, onHide }: {
     return () => { window.removeEventListener("pointermove", onMove); form?.removeEventListener("input", onInput); if (frame) window.cancelAnimationFrame(frame); };
   }, [still]);
 
-  useEffect(() => () => { window.clearTimeout(clickTimer.current); window.clearTimeout(bubbleTimer.current); window.clearTimeout(napTimer.current); cancelPlans(); }, []);
+  // While it rides: any click or Escape makes it jump off, and it hops, winks and looks about.
+  const riding = ride?.mode === "riding";
+  useEffect(() => {
+    if (!riding) return undefined;
+    const off = () => leave();
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") leave(); };
+    window.addEventListener("pointerdown", off, true);
+    window.addEventListener("keydown", onKey, true);
+    const timer = window.setInterval(() => play(pickOne(RIDE_PLAYS)), 1600);
+    return () => {
+      window.removeEventListener("pointerdown", off, true);
+      window.removeEventListener("keydown", onKey, true);
+      window.clearInterval(timer);
+    };
+  }, [riding]);
+
+  useEffect(() => () => { window.clearTimeout(rideTimer.current); window.clearTimeout(clickTimer.current); window.clearTimeout(bubbleTimer.current); window.clearTimeout(napTimer.current); cancelPlans(); }, []);
 
   const shown: PetMood = mood === "done" && !cheering ? "idle" : mood;
 
@@ -736,7 +769,6 @@ export function ChatPet({ mood, context, onHide }: {
     {busy ? <span className="cx-pet-spinner" aria-hidden="true">{SPINNER[spin]}</span> : null}
     {floaters.map((item) => <span key={item.id} className="cx-pet-float" style={{ left: item.offset }} aria-hidden="true">{item.text}</span>)}
     <button type="button" className={`cx-pet-body is-${shown}${asleep ? " is-asleep" : ""}${pose.walking ? " is-walking" : ""}${job !== "none" ? ` is-${job}` : ""}`}
-      style={ride && ride.look < 0 ? { transform: "scaleX(-1)" } : undefined}
       aria-label={`Bit the pet: ${asleep ? "napping" : LINES[shown]}${percent !== null ? ` Context ${percent}%.` : ""}`}
       title={asleep ? "Napping. Click to wake" : `${LINES[shown]}${percent !== null ? ` · ${percent}% context` : ""}\nClick to pet · double-click to feed · drag it around the box, or away from it to lift it`}
       onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}
@@ -762,7 +794,8 @@ export function ChatPet({ mood, context, onHide }: {
       }}
       onContextMenu={(event) => { event.preventDefault(); onHide(); }}>
       {!asleep && job === "carry" ? <CarriedBox /> : null}
-      <ClawdFrame frame={clawd.frame ?? restFrame({ mood: shown, asleep, step, pose, blink, job })} />
+      <ClawdFrame frame={clawd.frame ?? restFrame({ mood: shown, asleep, step, blink, job,
+        pose: ride ? { ...pose, walking: ride.mode === "riding", look: ride.look } : pose })} />
       <Prop job={asleep || ride ? "none" : job} step={step} tick={tick} />
     </button>
   </div>;
