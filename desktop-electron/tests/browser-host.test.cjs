@@ -1758,6 +1758,28 @@ test("an uninitialized browser surface is reaped instead of remaining as a gray 
   }]]);
 });
 
+test("a tab its start is still loading is held to the bootstrap deadline, not the helper heartbeat", () => {
+  // ChatGPT's page loaded (bootstrapReady) but the start has not returned, so no helper has
+  // heartbeated: a load past 60 s was reaped as a lost heartbeat just before its lease went out.
+  const tab = {
+    id: "tab-loading", traceId: "trace_loading", helperPid: 555, status: "running", loading: true,
+    bootstrapReady: true, initializingSurface: true, bootstrapDeadlineAt: 120_000, lastHeartbeatAt: 0,
+    view: { webContents: { isDestroyed: () => false, close() {} } },
+  };
+  const warnings = [];
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    turnTabs: new Map([[tab.id, tab]]), closedTurnOwners: new Map(), selectedTabId: tab.id,
+    window: { contentView: { removeChildView() {} } }, syncViewVisibility() {}, snapshot: () => ({ tabs: [] }),
+    publishState() {}, writeDescriptor() {}, logger: { warn: (event, detail) => warnings.push([event, detail.evidence]) },
+  });
+  fixture.lastTurnSweepAt = 89_000;
+  BrowserHost.prototype.reapExpiredTurnTabs.call(fixture, 90_000);
+  assert.equal(fixture.turnTabs.size, 1, "still loading inside its 120 s budget");
+  fixture.lastTurnSweepAt = 119_000; // sweeps 5 s apart; a longer gap reads as a suspended machine
+  BrowserHost.prototype.reapExpiredTurnTabs.call(fixture, 120_000);
+  assert.deepEqual(warnings, [["browser.orphan_turn_reaped", "browser_surface_bootstrap_timeout"]]);
+});
+
 test("removing the final turn tab keeps the descriptor-owned idle host attached offscreen", () => {
   const calls = [];
   const hiddenBounds = { x: 1201, y: 801, width: 1200, height: 800 };
@@ -2261,6 +2283,54 @@ test("a failed runtime cancellation keeps the running DOM attached", async () =>
   assert.equal(fixture.turnTabs.get(tab.id), tab);
   assert.equal(tab.status, "running");
   assert.deepEqual(closed, []);
+});
+
+test("a repeated start of a turn waits for its tab to load, and opens a new one if that load failed", async () => {
+  // The helper's first start gave up while the tab still loaded ChatGPT; its retry got the
+  // half-loaded tab at once and the turn failed ("ChatGPT did not complete the context handoff").
+  const fixtureWith = (tab, events) => Object.assign(Object.create(BrowserHost.prototype), {
+    manualOperation: null,
+    turnTabs: new Map([[tab.id, tab]]),
+    userCancelledTurnOwners: new Map(),
+    selectedTabId: "home",
+    syncViewVisibility: () => {},
+    snapshot: () => ({ tabs: [] }),
+    publishState: () => {},
+    writeDescriptor: () => {},
+    logger: { info: (event) => events.push(event) },
+  });
+  const loadingTab = (surfaceReady) => ({
+    id: "tab-loading", surfaceId: "surface-loading", traceId: "trace_same", interactionMode: "automatic",
+    helperPid: 333, status: "running", loading: true, initializingSurface: true, bootstrapReady: false, surfaceReady,
+    view: { webContents: { isDestroyed: () => false, setBackgroundThrottling: () => {} } },
+  });
+
+  let finishLoad;
+  const loaded = loadingTab(new Promise((resolve) => { finishLoad = resolve; }));
+  let events = [];
+  const fixture = fixtureWith(loaded, events);
+  let settled = false;
+  const pending = BrowserHost.prototype.beginTurn.call(fixture, "trace_same", false, 333).then((lease) => { settled = true; return lease; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false, "the half-loaded tab is not handed back");
+  loaded.initializingSurface = false;
+  finishLoad();
+  assert.deepEqual(await pending, { surfaceId: "surface-loading", tabId: "tab-loading", reused: false, connectorBound: false });
+  assert.deepEqual(events, ["browser.tab_reuse_waits_for_surface", "browser.tab_reused"]);
+
+  // A load that failed removed its tab (createTurnTab's catch): the turn gets a fresh one.
+  let failLoad;
+  const failed = loadingTab(new Promise((_resolve, reject) => { failLoad = reject; }));
+  events = [];
+  const retry = fixtureWith(failed, events);
+  const created = [];
+  retry.createTurnTab = async (traceId) => { created.push(traceId); return { id: "tab-new", surfaceId: "surface-new" }; };
+  const restarted = BrowserHost.prototype.beginTurn.call(retry, "trace_same", false, 333);
+  await new Promise((resolve) => setImmediate(resolve));
+  retry.turnTabs.delete(failed.id);
+  failLoad(new Error("Browser idle document failed (-3)"));
+  assert.deepEqual(await restarted, { surfaceId: "surface-new", tabId: "tab-new", reused: false, connectorBound: false });
+  assert.deepEqual(created, ["trace_same"]);
 });
 
 test("a later provider round reuses only its exact connector-bound conversation", async () => {

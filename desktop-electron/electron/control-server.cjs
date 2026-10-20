@@ -450,6 +450,12 @@ class BrowserControlServer {
         if (host.browserInteractionMode() === "manual") {
           throw new Error("Automatic browser interaction is disabled");
         }
+        // A start can wait up to two minutes for its tab to load. A helper that stops waiting (its
+        // turn was cancelled, or it gave up and may start the turn again) closes the request: the
+        // turn it asked for is then released here, unless a later start of the turn took the tab.
+        const startRequest = randomBytes(12).toString("base64url");
+        let abandoned = false;
+        response.once("close", () => { if (!response.writableEnded) abandoned = true; });
         const lease = await host.beginTurn(
           body.traceId,
           preferences.showBrowserDuringTurns === true,
@@ -457,7 +463,17 @@ class BrowserControlServer {
           body.conversationKey,
           body.connectorIdentity,
           body.requireRetainedConversation === true,
+          startRequest,
         );
+        if (abandoned) {
+          const owned = host.ownsTurnStart?.(body.traceId, startRequest) === true;
+          if (owned) {
+            await host.endTurn(body.traceId, body.helperPid, "aborted", preferences.showBrowserDuringTurns === true,
+              "The browser turn's start was abandoned");
+          }
+          this.logger.warn("browser.turn_start_abandoned", { traceId: body.traceId, released: owned });
+          return;
+        }
         this.logger.info("browser.turn_started", { traceId: body.traceId });
         this.reportTurnEvent({ type: "start", traceId: body.traceId, conversationKey: body.conversationKey, manual: false });
         writeJson(response, 200, { ok: true, ...lease });

@@ -140,9 +140,28 @@ const CPA_MODEL_PREFIX = "cpa/";
 // agy listed none, since its own catalog is empty without a Google sign-in. Its gateway mode sends
 // its tools only for Gemini ids it knows, so another model on agy can chat but not touch files.
 const GATEWAY_AGENTS = new Set(["claude-code", "codex", "opencode", "agy"]);
+// Agents whose AO adapter honours the three permission modes. agy maps them onto its --mode
+// (accept-edits, auto) and --dangerously-skip-permissions; without one it ran in request-review
+// and stopped at approvals in a terminal nobody saw, so its card never finished.
+const PERMISSION_AGENTS = new Set(["claude-code", "codex", "agy"]);
+const AGY_ASK_REASON = "Antigravity asks for approval in its own terminal, which the chat does not show, and its auto mode is not available through the CPA gateway, so it would wait for good. Choose Full access.";
 // Gateway agents whose own model catalogs are not CPA or WebGPT models; they list only CPA models.
 const CPA_ONLY_AGENTS = new Set(["claude-code", "opencode"]);
 const webModel = (model) => WEB_TIERS.includes(model) || LUNA_TIERS.includes(model);
+const EFFORT_RANK = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+/**
+ * The effort a CPA model with none picked starts on when it lists efforts but no "auto" (the
+ * composer's startEffort): sent without one, CPA had nothing to serve DeepSeek V4.1 Flash
+ * (None/Low/High/Max). Medium, else High, else the lowest real one by rank (catalogs keep the
+ * provider's order), None only when it is all there is. A model naming its own effort keeps it.
+ */
+function startEffort(model, efforts) {
+  if (!Array.isArray(efforts) || !efforts.length || efforts.includes("auto")) return null;
+  if (/chatgpt-web\//.test(model) || /[-(](minimal|low|medium|high|xhigh|max)\)?$/i.test(model)) return null;
+  const rank = (effort) => { const index = EFFORT_RANK.indexOf(effort); return index < 0 ? EFFORT_RANK.length : index; };
+  const real = efforts.filter((effort) => effort !== "none").sort((a, b) => rank(a) - rank(b));
+  return ["medium", "high"].find((effort) => efforts.includes(effort)) ?? real[0] ?? efforts[0];
+}
 
 const webTierName = (model) => {
   // "light" is what ChatGPT's effort picker calls Instant (the runtime's own name for it too).
@@ -322,16 +341,32 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       return tokens >= setting.min ? tokens : null;
     } catch { return null; }
   }
+  /**
+   * The effort a CPA card with none set starts with (startEffort), from the same cached catalog, so a
+   * message sent before the composer's model list loaded still names one. Null leaves it unset.
+   */
+  async function defaultEffort(workspaceId, node) {
+    if (node.route.effort || !node.route.model.startsWith(CPA_MODEL_PREFIX)) return null;
+    try {
+      const catalog = await models({ harness: node.route.harness_id, workspaceId });
+      const baseModel = node.route.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
+      return startEffort(node.route.model, (catalog.capabilities?.[node.route.model] ?? catalog.capabilities?.[baseModel])?.efforts);
+    } catch { return null; }
+  }
   /** The AO spawn arguments for a card, without its prompt; throws when the route cannot be honored. */
-  function aoLaunchArgs(workspaceId, node, plain, contextDefault = null) {
+  function aoLaunchArgs(workspaceId, node, plain, contextDefault = null, effortDefault = null) {
     const contextWindow = node.route.context_window ?? contextDefault;
+    const effort = node.route.effort ?? effortDefault;
     const agent = externalAgent(node);
     const profile = node.route.native_permission_profile ?? node.route.permission_profile;
-    if ((node.route.approval_policy !== undefined || node.route.native_permission_profile !== undefined) && (!["claude-code", "codex"].includes(agent)
+    if ((node.route.approval_policy !== undefined || node.route.native_permission_profile !== undefined) && (!PERMISSION_AGENTS.has(agent)
       || !(profile === ":workspace" && node.route.approval_policy === "on-request" && ["user", "auto_review"].includes(node.route.approvals_reviewer ?? "user")
         || profile === ":danger-full-access" && node.route.approval_policy === "never" && (node.route.approvals_reviewer ?? "user") === "user"))) {
       throw new Error("This adapter cannot honor the saved permission tuple; choose a supported mode explicitly.");
     }
+    // A saved Ask or Approve-for-me route (a team template, an older chat) is refused rather than
+    // left waiting at an approval in agy's terminal that nobody sees.
+    if (agent === "agy" && node.route.approval_policy === "on-request") throw new Error(AGY_ASK_REASON);
     const viaCpa = node.route.model.startsWith(CPA_MODEL_PREFIX) ? node.route.model.slice(CPA_MODEL_PREFIX.length) : null;
     if (viaCpa && !GATEWAY_AGENTS.has(agent)) {
       throw new Error(`${node.settings?.name || "This card"}: ${agent} cannot use CPA models (${node.route.model}); choose one of its own models`);
@@ -339,12 +374,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     // The gateway serves CPA through OpenAI- and Anthropic-compatible endpoints; opencode names
     // models as provider/model, so a CPA model is its OpenAI provider's "openai/<model>".
     // A provider plugin's model goes by its bare name: any saved suffix is dropped, none is added.
-    const verbatim = Boolean(viaCpa) && verbatimModel(viaCpa);
+    // agy also gets the bare name: it sends its tools only for a model it recognizes, and a name with
+    // CPA's "(high)" suffix is one it never does ("not recognized as a known model"), so the model
+    // could only print its tool calls as text. agy picks its own thinking level.
+    const verbatim = Boolean(viaCpa) && (agent === "agy" || verbatimModel(viaCpa));
     let wireModel = verbatim ? viaCpa.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "") : viaCpa;
-    if (viaCpa && node.route.effort && !verbatim) {
-      if (!tuningEfforts.has(node.route.effort)) throw new Error("Choose a supported CPA reasoning level");
+    if (viaCpa && effort && !verbatim) {
+      if (!tuningEfforts.has(effort)) throw new Error("Choose a supported CPA reasoning level");
       // The suffix is session-local; the saved mission model and account remain unchanged.
-      wireModel = viaCpa.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "") + "(" + node.route.effort + ")";
+      wireModel = viaCpa.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "") + "(" + effort + ")";
     }
     const agentModel = wireModel && agent === "opencode" ? `openai/${wireModel}` : wireModel ?? node.route.model;
     return { workspaceId, agent, model: agentModel, name: node.settings?.name || "AO worker",
@@ -452,7 +490,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     };
     const busy = deferred();
     if (busy) return busy;
-    const args = aoLaunchArgs(workspaceId, node, plain, await defaultContextWindow(workspaceId, node));
+    const args = aoLaunchArgs(workspaceId, node, plain, ...await Promise.all([defaultContextWindow(workspaceId, node), defaultEffort(workspaceId, node)]));
     if (warm.has(key)) return { ok: true, warmed: true };
     const busyNow = deferred();
     if (busyNow) return busyNow;
@@ -1080,7 +1118,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       warmDeferred.delete(workspaceId);
       try {
         await checkRoute();
-        const launch = aoLaunchArgs(workspaceId, node, plain, await defaultContextWindow(workspaceId, node));
+        const launch = aoLaunchArgs(workspaceId, node, plain, ...await Promise.all([defaultContextWindow(workspaceId, node), defaultEffort(workspaceId, node)]));
         launchStarted = now();
         // A single-model follow-up continues the chat's live session as its next turn: no new
         // session, worktree or replayed prompt, and the agent keeps what it already read and ran.
@@ -1372,7 +1410,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       }
       if (route.harness_id !== "codex-native") {
         const agent = externalAgent({ route });
-        if (!["claude-code", "codex"].includes(agent)) return unavailable("This adapter does not support the three permission modes.");
+        if (!PERMISSION_AGENTS.has(agent)) return unavailable("This adapter does not support the three permission modes.");
         const catalog = await recentHarnessCatalog();
         const adapter = catalog.find(item => item.id === agent && item.installed);
         if (!adapter) return unavailable("This harness is not installed.");
@@ -1383,6 +1421,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
           profiles: [{ id: ":workspace", allowed: agent !== "codex" || adapter.chat === true }, { id: ":danger-full-access", allowed: true }],
           ...(agent === "codex" && !adapter.chat ? { reason: "Workspace presets require the Codex chat driver; TUI inherits unverified sandbox settings." } : {}),
           approval_policies: ["on-request", "never"], approvals_reviewers: ["user", "auto_review"],
+          // agy in its terminal asks there, which no chat or card shows: Ask (accept-edits still asks
+          // before shell commands) would wait for good, and Approve for me (--mode auto) is "not
+          // available for this account" through the CPA gateway, so it falls back to asking too.
+          // Only Full access runs unattended.
+          ...(agent === "agy" && !adapter.chat ? { excluded_modes: ["user", "auto_review"].map(reviewer =>
+            ({ profile: ":workspace", policy: "on-request", reviewer, reason: AGY_ASK_REASON })) } : {}),
         } };
       }
     }
@@ -1431,15 +1475,34 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
    * A Native Codex thread's recent tool steps (codex_bridge `steps`: Codex item type, status and a
    * short redacted label) as timeline items the chat already draws for AO cards. Before, a WebGPT
    * reviewer showed only "running a command" with nothing under it.
+   *
+   * A file change is a tool row ("Edited app.ts, readme.md"): the bridge keeps file names but no
+   * line counts, and an edit row reads its files' counts, so it said "Edited 0 files +0 −0".
+   * `answer` is the thread's text so far. It goes where it was said: before `answerBeforeStep` when
+   * the bridge names that step (a note before a long command), else after every step. As a message
+   * item it also keeps the chat from appending it after the steps.
    */
-  function nativeStepTimeline(steps) {
-    const kind = { commandExecution: "command", fileChange: "edit", mcpToolCall: "tool", dynamicToolCall: "tool", webSearch: "tool" };
-    return (Array.isArray(steps) ? steps : []).filter(step => step && kind[step.kind]).map(step => ({
-      id: step.id, kind: kind[step.kind], status: step.status === "running" ? "running" : step.status === "failed" ? "failed" : "completed",
-      text: step.label || "",
-      ...(step.kind === "webSearch" ? { label: "Web search" } : step.kind === "mcpToolCall" || step.kind === "dynamicToolCall"
-        ? { label: String(step.label || "tool").split(": ").pop() } : {}),
-    }));
+  function nativeStepTimeline(steps, answer = "", answerBeforeStep = null) {
+    const kind = { commandExecution: "command", fileChange: "tool", mcpToolCall: "tool", dynamicToolCall: "tool", webSearch: "tool" };
+    const label = { fileChange: "Edited", webSearch: "Web search" };
+    const all = Array.isArray(steps) ? steps : [];
+    const items = [];
+    let pending = Boolean(answer);
+    const place = () => { items.push({ id: "native:answer", kind: "message", status: "running", text: answer }); pending = false; };
+    // A step the bridge has since dropped from its bounded list came first, so the note goes first.
+    const before = answerBeforeStep ? Math.max(0, all.findIndex(step => step?.id === answerBeforeStep)) : -1;
+    all.forEach((step, index) => {
+      if (pending && before >= 0 && index >= before) place();
+      if (!step || !kind[step.kind]) return;
+      items.push({
+        id: step.id, kind: kind[step.kind], status: step.status === "running" ? "running" : step.status === "failed" ? "failed" : "completed",
+        text: step.label || "",
+        ...(label[step.kind] ? { label: label[step.kind] } : step.kind === "mcpToolCall" || step.kind === "dynamicToolCall"
+          ? { label: String(step.label || "tool").split(": ").pop() } : {}),
+      });
+    });
+    if (pending && all.length) place();
+    return items;
   }
 
   function publicTimeline(items) {
@@ -1537,13 +1600,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
               const status = (await harnessStatus({ workspaceId: id, runId: run, nodeId: node.id })).status || {};
               const thread = (Array.isArray(status.threads) ? status.threads : []).find(entry => entry.id === node.receipt?.thread_id);
               const turnStarted = Boolean(thread?.turn_id || node.receipt?.turn_id);
+              const output = publicText(status.live_output || thread?.answer || thread?.output);
               frame = { ...base, turn_started: turnStarted,
                 activity: !status.connected ? "not connected" : thread?.activity || (turnStarted ? "working" : "waiting for the turn to start"),
-                step: publicText(thread?.activity || "working", 120), output: publicText(status.live_output || thread?.answer || thread?.output),
+                step: publicText(thread?.activity || "working", 120), output,
                 error: publicText(status.live_error || thread?.error, 500),
                 activity_at_ms: thread?.activity_at_ms || null, last_event_at_ms: thread?.last_event_at_ms || null,
-                // What a Native Codex card is doing (its commands, edits and tools), as AO cards show it.
-                timeline: publicTimeline(nativeStepTimeline(thread?.steps)),
+                // What a Native Codex card is doing (its commands, edits and tools), as AO cards show
+                // it, with its text where it was said.
+                timeline: publicTimeline(nativeStepTimeline(thread?.steps, output, thread?.answer_before_step)),
                 started_at_ms: base.started_at_ms ?? (thread?.started_at_ms || null) };
             }
             const latest = await savedNode(id, run, node.id);
@@ -3142,7 +3207,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // agent reads the steer when that call returns.
     const idle = Number.isFinite(waiting?.lastActivityAt) ? now() - waiting.lastActivityAt : 0;
     // A notice (a provider retry's "Retrying Claude, attempt 7 of 10" stays "running") is no tool.
-    const toolRunning = Array.isArray(waiting?.timeline) && waiting.timeline.some(item => item?.status === "running" && !["message", "system"].includes(item.kind));
+    // Nor is the model's reasoning: a stream that stopped mid-thought stays "running" too, so a
+    // DeepSeek turn silent for 23 minutes counted as a long tool call, every steer was handed to
+    // the hung turn (blocking the composer for minutes) and never read.
+    const toolRunning = Array.isArray(waiting?.timeline) && waiting.timeline.some(item => item?.status === "running"
+      && !["message", "system", "reasoning", "thinking"].includes(item.kind));
     if (!toolRunning && idle > STEER_STALL_MS) {
       await stopExternalTurn(card.receipt.thread_id);
       logger?.info?.("ao.steer_restarted_stalled_turn", { idleSeconds: Math.round(idle / 1000) });

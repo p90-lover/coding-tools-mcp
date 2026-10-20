@@ -1877,6 +1877,46 @@ test("activity reports each working card's runtime and current step without adva
   assert.ok(calls.every((endpoint) => endpoint === "/api/v1/ao/read" || endpoint === "/api/v1/ao/harness/status"), "read-only calls only");
 });
 
+test("a Native Codex card's steps show in order, its note before the command it announced, its edits by name", async () => {
+  const native = { id: "w1", role: "reviewer", state: "running", route: { harness_id: "codex-native", provider_id: "chatgpt-web", model: "chatgpt-web/high" },
+    receipt: { status: "submitted", thread_id: "thread-1", started_at_ms: 1_000 } };
+  const steps = [
+    { id: "e1", kind: "fileChange", status: "completed", label: "app.ts, readme.md" },
+    { id: "c1", kind: "commandExecution", status: "running", label: "npm test" },
+    { id: "m1", kind: "mcpToolCall", status: "running", label: "coding-tools: read_file" },
+  ];
+  let thread = { id: "thread-1", turn_id: "turn-1", activity: "running a command", steps, answer_before_step: "c1" };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [native] }] };
+      if (endpoint === "/api/v1/ao/harness/status") return { ok: true, status: { connected: true, live_output: "Running the tests now", threads: [thread] } };
+      throw new Error(`unexpected ${endpoint}`);
+    },
+    confirm: async () => true,
+  });
+  // Each read settles the refresh the one before left in flight, then one with the current thread.
+  const read = async () => {
+    for (let pass = 0; pass < 2; pass++) {
+      await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    return (await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" })).nodes.w1.timeline;
+  };
+  const timeline = await read();
+  assert.deepEqual(timeline.map(item => [item.kind, item.label ?? "", item.text]), [
+    ["tool", "Edited", "app.ts, readme.md"],
+    ["message", "", "Running the tests now"],
+    ["command", "", "npm test"],
+    ["tool", "read_file", "coding-tools: read_file"],
+  ], "the note sits before the command it was said before; an edit names its files");
+  // A note whose first later step the bridge already dropped came before every kept step.
+  thread = { ...thread, answer_before_step: "gone" };
+  assert.deepEqual((await read()).map(item => item.kind), ["message", "tool", "command", "tool"]);
+  // Text written after the steps follows them.
+  thread = { ...thread, answer_before_step: null };
+  assert.deepEqual((await read()).map(item => item.kind), ["tool", "command", "tool", "message"]);
+});
+
 test("a finished AO card's work is read back for the chat (turn_timeline), redacted, with labels, details and full reasoning", async () => {
   const asked = [];
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna" };
@@ -2459,15 +2499,24 @@ test("permission capabilities use installed AO adapter modes without fabricating
     requestHeadless: async (endpoint) => { reads.push(endpoint); throw new Error("No native connection"); },
     aoHarness: { catalog: async () => [
       { id: "claude-code", installed: true }, { id: "codex", installed: true }, { id: "opencode", installed: true },
+      { id: "agy", installed: true },
     ], spawn: async (...args) => { launches.push(args); } },
   });
-  const capability = (await workflow.call("permission_profiles", { workspaceId: "ws-1", route: { harness_id: "ao:claude-code" } })).capability;
-  assert.equal(capability.supported, true);
-  assert.equal(capability.source, "ao-adapter");
-  assert.equal(capability.requested_only, true, "adapter modes are requests, not effective native readback");
-  assert.deepEqual(capability.profiles.map(profile => profile.id), [":workspace", ":danger-full-access"]);
-  assert.deepEqual(capability.approval_policies, ["on-request", "never"]);
-  assert.deepEqual(capability.approvals_reviewers, ["user", "auto_review"]);
+  // agy takes the three modes too (AO maps them onto its --mode and --dangerously-skip-permissions):
+  // without one it waited at approvals in a terminal nobody saw and its card never finished.
+  for (const harness_id of ["ao:claude-code", "ao:agy"]) {
+    const capability = (await workflow.call("permission_profiles", { workspaceId: "ws-1", route: { harness_id } })).capability;
+    assert.equal(capability.supported, true, harness_id);
+    assert.equal(capability.source, "ao-adapter");
+    assert.equal(capability.requested_only, true, "adapter modes are requests, not effective native readback");
+    assert.deepEqual(capability.profiles.map(profile => profile.id), [":workspace", ":danger-full-access"]);
+    assert.deepEqual(capability.approval_policies, ["on-request", "never"]);
+    assert.deepEqual(capability.approvals_reviewers, ["user", "auto_review"]);
+    // agy in its terminal cannot bring an approval to the chat, and its auto mode is unavailable
+    // through the gateway, so Ask and Approve for me are excluded there; Full access remains.
+    assert.deepEqual((capability.excluded_modes ?? []).map(mode => [mode.profile, mode.policy, mode.reviewer]),
+      harness_id === "ao:agy" ? [[":workspace", "on-request", "user"], [":workspace", "on-request", "auto_review"]] : [], harness_id);
+  }
   for (const harness_id of ["ao:opencode", "codex-native"]) {
     const unsupported = await workflow.call("permission_profiles", { workspaceId: "ws-1", route: { harness_id } });
     assert.equal(unsupported.capability.supported, false);
@@ -3472,6 +3521,27 @@ test("a message sent to a hung turn stops it and goes as the next turn instead o
   lastActivityAt = 1_000_000 + 3 * 60_000;
   assert.equal((await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "ok" })).steered, true, "a working agent is steered");
   assert.equal(interrupted.length, 1);
+});
+
+test("a turn whose reasoning stream stopped mid-thought is restarted by a message, not waited on as a running tool", async () => {
+  // Seen live: a DeepSeek turn's "Deep diving" reasoning ended mid-sentence and showed nothing for
+  // 23 minutes; its reasoning row stayed "running", so every steer went to the hung turn.
+  const route = { harness_id: "ao:claude-code", model: "cline-pass/deepseek-v4.1-flash-1017" };
+  const task = { id: "task-1", title: "Play Ero", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  const interrupted = [], steered = [];
+  const timeline = [{ kind: "tool", status: "completed" }, { kind: "reasoning", status: "running", text: "Actually wait. Before making" }];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 23 * 60_000,
+    aoHarness: {
+      observe: async () => ({ turnId: "t1", turnState: interrupted.length ? "interrupted" : "running", status: interrupted.length ? "ready" : "working", lastActivityAt: 1_000_000, timeline, approvals: [] }),
+      steer: async (id, text) => { steered.push([id, text]); return { steered: true }; },
+      interrupt: async id => { interrupted.push(id); },
+    } });
+  const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "the war map is clan_war_map" });
+  assert.equal(result.restarted, true, "a stalled reasoning stream is a hang");
+  assert.deepEqual(interrupted, ["sess-1"]);
+  assert.equal(steered.length, 0, "nothing is handed to a turn that cannot read it");
 });
 
 test("a turn that has only been retrying its model request for minutes is restarted by a message, not given 20 minutes as a running tool", async () => {

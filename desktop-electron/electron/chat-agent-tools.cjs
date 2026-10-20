@@ -844,6 +844,8 @@ function createChatAgentTools({
   previews = null, previewEnabled = () => true,
   // Why a command line is a routine project command "Approve for me" may run unasked, or null.
   routineCommand = () => null,
+  // RTK (rtk.cjs): the compact command a command line runs as instead, or null to run it as written.
+  rewriteCommand = () => null,
   // Runtime > Subagents (subagents.cjs): the helpers a chat agent may start, when the user set any up.
   subagents = null,
   // schedule_wakeup's scheduler ({ schedule({ workspaceId, session, minutes, reason }) }); without it the tool is not offered.
@@ -1394,6 +1396,14 @@ function createChatAgentTools({
     } catch (error) {
       if (error instanceof ScopeError) return failedCall(error.message);
       throw error;
+    }
+    // With RTK on, a command runs as its compact rtk equivalent ("git status" -> "rtk git status"),
+    // whichever agent sent it. It is rewritten before anything reviews it, so an approval (the
+    // person's or the reviewer's) is for the command that actually runs.
+    if (name === "exec_command" && typeof args.cmd === "string") {
+      let compact = null;
+      try { compact = rewriteCommand(args.cmd); } catch { compact = null; }
+      if (typeof compact === "string" && compact && compact !== args.cmd) args = { ...args, cmd: compact };
     }
     // Under "Approve for me" on Claude Code every call here already went through the chat's
     // reviewer (reviewedUpstream), as exec_command does: asking the person again was a second

@@ -763,9 +763,10 @@ class BrowserHost {
     view.webContents.setZoomFactor(this.state.zoomFactor);
     this.bindShellZoomShortcuts(view.webContents);
     this.bindTurnContents(tab);
-    try {
-      // A new turn tab gets the primary view's retries: one 10 s window failed turns as
-      // browser_page on a busy machine. The windows fit the tab's 120 s bootstrap budget.
+    // A new turn tab gets the primary view's retries: one 10 s window failed turns as
+    // browser_page on a busy machine. The windows fit the tab's 120 s bootstrap budget. The tab
+    // keeps the promise so a repeated start of the same turn waits for it (beginTurn).
+    tab.surfaceReady = (async () => {
       await loadIdleSurfaceWithRetries(
         view.webContents,
         this.bootstrapAttemptsMs ?? PRIMARY_VIEW_BOOTSTRAP_ATTEMPTS_MS,
@@ -773,6 +774,11 @@ class BrowserHost {
       );
       await this.markTurnTabSurface(tab);
       tab.initializingSurface = false;
+      // The helper heartbeats only once its start returns; a slow load must not count against it.
+      tab.lastHeartbeatAt = Date.now();
+    })();
+    try {
+      await tab.surfaceReady;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error("browser.tab_initialization_failed", {
@@ -1723,9 +1729,13 @@ class BrowserHost {
         continue;
       }
       if (tab.status !== "running") continue;
-      const bootstrapExpired = tab.bootstrapReady !== true
+      // A tab its start is still loading (initializingSurface) stays on the bootstrap deadline even
+      // after ChatGPT's page loaded: no helper heartbeats before the start returns, and a load past
+      // 60 s was reaped as a lost heartbeat just before its lease was handed out.
+      const bootstrapping = tab.bootstrapReady !== true || tab.initializingSurface === true;
+      const bootstrapExpired = bootstrapping
         && now >= (tab.bootstrapDeadlineAt ?? Number.POSITIVE_INFINITY);
-      const heartbeatExpired = tab.bootstrapReady === true
+      const heartbeatExpired = !bootstrapping
         && now - (tab.lastHeartbeatAt ?? 0) >= TURN_HEARTBEAT_TIMEOUT_MS;
       if (!bootstrapExpired && !heartbeatExpired) continue;
       const evidence = bootstrapExpired ? "browser_surface_bootstrap_timeout" : "helper_heartbeat_expired";
@@ -2622,6 +2632,9 @@ class BrowserHost {
     conversationKey,
     connectorIdentity,
     requireRetainedConversation = false,
+    // The start request this call answers (the control server's): the tab records the latest one
+    // it was handed to, so an abandoned start releases the tab only if no later start took it.
+    startRequest = null,
   ) {
     if (this.manualOperation) {
       throw new Error(`ChatGPT browser is busy with ${this.manualOperation}`);
@@ -2636,6 +2649,17 @@ class BrowserHost {
     if (sameTrace && (sameTrace.conversationKey !== conversationKey
       || sameTrace.connectorIdentity !== connectorIdentity)) {
       throw new Error(`ChatGPT browser turn ${traceId} conversation metadata does not match its owned tab`);
+    }
+    // A start whose request gave up while its tab was still loading (a busy machine) is repeated by
+    // the helper under the same trace. Handing the half-loaded tab back at once made that turn fail
+    // as browser_page ("ChatGPT did not complete the context handoff"): wait for the load to end.
+    // A load that failed removed its tab, so the turn gets a fresh one below.
+    if (sameTrace?.status === "running" && sameTrace.initializingSurface && sameTrace.surfaceReady) {
+      this.logger.info("browser.tab_reuse_waits_for_surface", { tabId: sameTrace.id, traceId });
+      await sameTrace.surfaceReady.catch(() => {});
+      if (this.turnTabs.get(sameTrace.id) !== sameTrace) sameTrace = undefined;
+      if (this.manualOperation) throw new Error(`ChatGPT browser is busy with ${this.manualOperation}`);
+      if (this.userCancelledTurnOwners.has(traceId)) throw new BrowserTurnCancelledError(traceId);
     }
     const retainedMatches = conversationKey ? [...this.turnTabs.values()].filter((tab) => (
       tab.interactionMode === "automatic"
@@ -2687,6 +2711,7 @@ class BrowserHost {
         existing.bootstrapDeadlineAt = Date.now() + TURN_TAB_BOOTSTRAP_TIMEOUT_MS;
       }
       existing.lastHeartbeatAt = Date.now();
+      existing.startRequest = startRequest;
       if (!existing.view.webContents.isDestroyed()) {
         existing.view.webContents.setBackgroundThrottling(false);
       }
@@ -2709,6 +2734,7 @@ class BrowserHost {
       throw error;
     }
     const tab = await this.createTurnTab(traceId, helperPid, conversationKey, connectorIdentity);
+    tab.startRequest = startRequest;
     this.selectedTabId = tab.id;
     if (reveal) this.show();
     else this.syncViewVisibility();
@@ -2716,6 +2742,12 @@ class BrowserHost {
     this.logger.info("browser.tab_created", { tabId: tab.id, traceId, tabCount: this.turnTabs.size });
     this.writeDescriptor();
     return { surfaceId: tab.surfaceId, tabId: tab.id, reused: false, connectorBound: false };
+  }
+
+  /** Whether the running turn's tab was last handed to `startRequest` (no later start of it took it). */
+  ownsTurnStart(traceId, startRequest) {
+    const tab = [...this.turnTabs.values()].find((candidate) => candidate.traceId === traceId);
+    return Boolean(tab && startRequest && tab.status === "running" && tab.startRequest === startRequest);
   }
 
   async endTurn(

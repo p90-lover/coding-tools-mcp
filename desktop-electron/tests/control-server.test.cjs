@@ -205,6 +205,9 @@ test("browser control server authenticates and owns turn visibility", async () =
       }),
     });
     assert.equal(end.status, 200);
+    // The last start argument is the request's own opaque id (an abandoned start releases by it).
+    const startRequest = calls[0][7];
+    assert.match(startRequest, /^[A-Za-z0-9_-]{16}$/);
     assert.deepEqual(calls, [
       [
         "start",
@@ -214,6 +217,7 @@ test("browser control server authenticates and owns turn visibility", async () =
         "a".repeat(64),
         "Codex Native2",
         true,
+        startRequest,
       ],
       ["heartbeat", "abcdef123456", process.pid, true],
       ["end", "abcdef123456", process.pid, "completed", true, undefined, true, true],
@@ -222,6 +226,52 @@ test("browser control server authenticates and owns turn visibility", async () =
     assert.equal(logs.some(([, event]) => event === "browser.turn_ended"), true);
   } finally {
     await server.close();
+  }
+});
+
+test("a turn start its helper stopped waiting for releases the turn, unless a later start took the tab", async () => {
+  // The helper's turn was cancelled (or it gave up and will start again) while the tab still loaded.
+  for (const takenLater of [false, true]) {
+    let finishLoad, reportBegin;
+    const loaded = new Promise((resolve) => { finishLoad = resolve; });
+    const begun = new Promise((resolve) => { reportBegin = resolve; });
+    const ended = [];
+    const host = {
+      browserInteractionMode: () => "automatic",
+      async beginTurn(traceId, _reveal, _pid, _key, _connector, _retained, startRequest) {
+        reportBegin(startRequest);
+        await loaded;
+        return { surfaceId: "launcher_surface_id_0123456789AB", tabId: "tab-1", reused: false, connectorBound: false };
+      },
+      ownsTurnStart: () => !takenLater,
+      endTurn: async (...args) => { ended.push(args.slice(0, 3)); return { cancelledByUser: false }; },
+    };
+    const logs = [];
+    const server = await new BrowserControlServer({
+      logger: { info() {}, warn: (event, detail) => logs.push([event, detail]), error() {} },
+      getBrowserHost: () => host,
+      getPreferences: () => ({ showBrowserDuringTurns: false }),
+    }).start();
+    const descriptor = server.descriptor();
+    try {
+      const helper = new AbortController();
+      const request = fetch(`${descriptor.endpoint}/v1/turn/start`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${descriptor.token}`, "content-type": "application/json" },
+        body: JSON.stringify({ phase: "start", traceId: "abandon12345", helperPid: process.pid }),
+        signal: helper.signal,
+      }).catch((error) => error);
+      await begun;
+      helper.abort();
+      assert.equal((await request).name, "AbortError");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      finishLoad();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.deepEqual(ended, takenLater ? [] : [["abandon12345", process.pid, "aborted"]]);
+      assert.deepEqual(logs.at(-1), ["browser.turn_start_abandoned", { traceId: "abandon12345", released: !takenLater }]);
+    } finally {
+      await server.close();
+    }
   }
 });
 

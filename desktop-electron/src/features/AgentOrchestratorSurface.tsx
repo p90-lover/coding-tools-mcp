@@ -526,8 +526,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [singleRoute, setSingleRoute] = useState<AoRoute>(newChatRoute);
   // A model, effort, window or permission picked in the composer is the next new chat's too, from
   // the moment it is picked: only a sent message kept it before, so a New chat (or another task)
-  // opened right after picking went back to the old model.
-  const pickSingleRoute = (route: AoRoute) => { setSingleRoute(route); rememberChatRoute(route); };
+  // opened right after picking went back to the old model. Only the person's picks are kept: the
+  // composer fitting an opened chat's route to its model (`adjusted`) is that chat's, and keeping it
+  // made a rewind or a new chat start on the old chat's model, effort and window.
+  const pickSingleRoute = (route: AoRoute, adjusted = false) => { setSingleRoute(route); if (!adjusted) rememberChatRoute(route); };
   const hydratedComposer = useRef("");
   // The New mission sheet's team choice (#254); the composer keeps its own (composerTeamId).
   const [missionTeamId, setMissionTeamId] = useState("");
@@ -847,20 +849,25 @@ export function AgentOrchestratorSurface({ language, setError }: {
     setMissions([]);
     setSelectedRunId("");
     setTeam(null); setSavedTeams([]); setComposerTeamId(""); setMissionTeamId(""); setDraftTeam(null); setInspectedId(""); setTaskLifecycle([]); setConfigStatus("");
-    void (async () => {
-      // Both reads at once: one after the other, behind every poll a switch sets off, left the new
-      // project's list empty ("No chats yet") for 2-6 s.
-      const [boardRead, runsRead] = await Promise.allSettled([
-        moduleCall("board", { workspaceId }) as unknown as Promise<Board>, moduleCall("runs", { workspaceId })]);
+    // This project is loading again (it may have been loaded before: A, then B, then A).
+    setLoadedWorkspace("");
+    // Both reads start at once (one after the other, behind every poll a switch sets off, they left
+    // the new project's list empty for 2-6 s), and each is applied as soon as it lands: the board
+    // never waits on the runs. The chat list counts as loaded only once both have landed.
+    const boardRead = (async () => {
       try {
-        if (boardRead.status === "rejected") throw boardRead.reason;
-        if (live) { boardWorkspace.current = workspaceId; setBoard(boardRead.value); }
+        const current = await moduleCall("board", { workspaceId }) as unknown as Board;
+        if (live) { boardWorkspace.current = workspaceId; setBoard(current); }
+        return true;
       } catch (cause) {
         if (live) setError(cause instanceof Error ? cause.message : String(cause));
+        return false;
       }
+    })();
+    void (async () => {
+      let runsLoaded = false;
       try {
-        if (runsRead.status === "rejected") throw runsRead.reason;
-        const current = runsRead.value;
+        const current = await moduleCall("runs", { workspaceId });
         if (live) {
           const runs = Array.isArray(current.runs) ? current.runs as AoMission[] : [];
           setTaskLifecycle((current.task_lifecycle as TaskLifecycleView[]) || []);
@@ -872,11 +879,14 @@ export function AgentOrchestratorSurface({ language, setError }: {
           setTeam(current.team as AoTeam | null ?? setups[0] ?? null);
           if (current.limits) { setLimits(current.limits as typeof limits); setGlobalLimit((current.limits as typeof limits).max_workers); }
           setSelectedRunId(runs[0]?.id ?? "");
+          runsLoaded = true;
         }
       } catch (cause) {
         if (live) setError(cause instanceof Error ? cause.message : String(cause));
       }
-      if (live) setLoadedWorkspace(workspaceId);
+      // A failed read leaves the list loading (the runs poller marks it loaded once a read lands),
+      // never the false "No chats yet".
+      if (await boardRead && runsLoaded && live) setLoadedWorkspace(workspaceId);
     })();
     return () => { live = false; };
   }, [workspaceId, workspaceReady, setError]);
@@ -987,6 +997,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
         if (live && Array.isArray(current.runs)) {
           // What did not change keeps its object, so a refresh that found nothing new redraws nothing.
           setMissions((previous) => keepRevisions(previous, current.runs as AoMission[]));
+          // A switch whose own runs read failed is loaded once a refresh lands with the board there.
+          if (boardWorkspace.current === workspaceId) setLoadedWorkspace(workspaceId);
           const goals = chatGoals(current), team = current.team as AoTeam | null ?? null, saved = aoSavedTeams(current);
           const lifecycle = (current.task_lifecycle as TaskLifecycleView[]) || [];
           setGoals((previous) => JSON.stringify(previous) === JSON.stringify(goals) ? previous : goals);
@@ -1475,7 +1487,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
           ...execution, ...executableArg(), ...(input.goal ? { goal: input.goal } : {}) });
         if (result.cancelled) throw new Error("Message start cancelled; no new attempt confirmed.");
         if (!current()) { resolve(); return; }
-        if (composerMode === "single") rememberChatRoute(singleRoute);
+        // The route is not kept here: picks are kept as they are made, and a follow-up in an older
+        // chat runs on that chat's route, which must not become the next new chat's (or a rewind's).
         await Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]);
         if (!current()) { resolve(); return; }
         const taskId = String(result.taskId);
@@ -1741,7 +1754,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
   // chat as soon as its runs have loaded (the switch empties the current project's state first).
   const pendingSelect = useRef<{ workspaceId: string; taskId: string } | null>(null);
   const selectChatIn = (id: string, taskId: string) => {
-    if (id === workspaceId) { selectChat(taskId); return; }
+    // A cached row of the project just switched to (its runs not read yet) waits like another
+    // project's: selecting it now set a chat with no run, and the load then picked another chat's run.
+    if (id === workspaceId && loadedWorkspace === workspaceId) { selectChat(taskId); return; }
+    if (id === workspaceId) { pendingSelect.current = { workspaceId: id, taskId }; return; }
     pendingSelect.current = { workspaceId: id, taskId };
     chooseWorkspace(id);
   };

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { KeyboardEvent, ReactNode } from "react";
 import { Caret, Icon } from "../icons";
 import {
-  capabilityText, contextText, harnessLabel, parseTokens, rememberCpaProviders, routeTuning,
+  capabilityText, contextText, harnessLabel, parseTokens, rememberCpaProviders, routeTuning, EFFORTS,
   NATIVE_HARNESS, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, WEB_ROUTE, WEB_TIERS, isWebModel, modelLabel, modelShortLabel, nativePermission, webTier, workerRoute, withTuning,
   type AoHarness, type AoModelCapabilities, type AoModelCatalog, type AoModelLoader, type AoRoute, type AoTeam,
 } from "./AgentOrchestratorRoleEditor";
@@ -29,10 +29,28 @@ const defaultWindow = (route: AoRoute, capability: AoModelCapabilities | undefin
   if (!context || !capability?.contextLimit && !isWebModel(route.model)) return null;
   return Math.max(context.min, Math.min(DEFAULT_CONTEXT_WINDOW, context.max ?? DEFAULT_CONTEXT_WINDOW));
 };
+/**
+ * The effort a chat starts on when its CPA model lists efforts but no "auto": sent without one, CPA
+ * had nothing to serve DeepSeek V4.1 Flash (None/Low/High/Max) and the chip read "Auto" anyway.
+ * Medium, else High, else the lowest real one by EFFORTS' order (catalogs keep the provider's order);
+ * None only when it is all there is. A picked effort, a model that takes Auto or names its own effort
+ * ("…-flash-high"), WebGPT (its tier is its effort) and a harness's own models (they run at their
+ * own default) keep theirs. The launch applies the same start (agent-orchestrator-workflow's
+ * startEffort), so a message sent before the model list loads gets it too.
+ */
+const startEffort = (route: AoRoute, efforts: readonly string[] | undefined) => {
+  // agy gets the bare model name (it sends no tools for a suffixed one) and picks its own thinking level.
+  const viaCpa = route.harness_id !== "ao:agy" && (route.model.startsWith("cpa/") || route.harness_id === NATIVE_HARNESS && !isWebModel(route.model));
+  if (!viaCpa || route.effort || !efforts?.length || efforts.includes("auto") || isWebModel(route.model) || ownEffort(route.model)) return null;
+  const rank = (effort: string) => { const index = (EFFORTS as readonly string[]).indexOf(effort); return index < 0 ? EFFORTS.length : index; };
+  const real = efforts.filter(effort => effort !== "none").sort((a, b) => rank(a) - rank(b));
+  return ["medium", "high"].find(effort => efforts.includes(effort)) ?? real[0] ?? efforts[0];
+};
 
 export type ComposerControlsProps = {
   mode: "single" | "team"; onModeChange: (mode: "single" | "team") => void;
-  route: AoRoute; onRouteChange: (route: AoRoute) => void;
+  /** `adjusted`: the composer fitted the route to its model (a window or effort start), not the person's pick. */
+  route: AoRoute; onRouteChange: (route: AoRoute, adjusted?: boolean) => void;
   harnesses: AoHarness[]; loadModels: AoModelLoader;
   teams: AoTeam[]; teamId: string; onTeamChange: (teamId: string) => void;
   permissions: ReactNode; busy: boolean;
@@ -141,17 +159,22 @@ export function AgentOrchestratorComposerControls({
       // does not take is dropped, then the model's own start applies. A model the catalog does not
       // describe is left alone: it is flagged as unavailable and its send is refused anyway.
       const capability = loaded[current.model];
-      const { context } = routeTuning(current, capability);
+      const { context, efforts } = routeTuning(current, capability);
       const fits = current.context_window && context && current.context_window >= context.min
         && (context.max === undefined || current.context_window <= context.max);
-      if (current.context_window && (fits || !capability && current.harness_id !== NATIVE_HARNESS)) return;
       const next = { ...current };
-      const start = defaultWindow(current, capability);
-      if (start) next.context_window = start; else delete next.context_window;
-      if (next.context_window !== current.context_window) onRouteChange(next);
+      if (!current.context_window || !fits && (capability || current.harness_id === NATIVE_HARNESS)) {
+        const start = defaultWindow(current, capability);
+        if (start) next.context_window = start; else delete next.context_window;
+      }
+      // A model without "auto" gets a real effort too (a chat opened or rewound on an older route included).
+      const effort = startEffort(current, efforts);
+      if (effort) next.effort = effort;
+      // Reported as an adjustment: it is this chat's fit, not a pick the next new chat should start on.
+      if (next.context_window !== current.context_window || next.effort !== current.effort) onRouteChange(next, true);
     }).catch(cause => { if (live) { setModels([]); setError(cause instanceof Error ? cause.message : String(cause)); } });
     return () => { live = false; };
-  }, [mode, route.harness_id, loadModels, reload]);
+  }, [mode, route.harness_id, route.model, loadModels, reload]);
   const selectedTeam = teams.find(team => team.id === teamId);
   // Native Codex runs a bare non-WebGPT id through the CPA pool; the labels need to know which.
   const viaPool = (model: string) => route.harness_id === NATIVE_HARNESS && !isWebModel(model);
@@ -205,6 +228,8 @@ export function AgentOrchestratorComposerControls({
       const start = defaultWindow(next, caps[model]);
       if (start) next.context_window = start; else delete next.context_window;
     }
+    const effort = startEffort(next, tuning.efforts);
+    if (effort) next.effort = effort;
     onRouteChange(next);
   };
   return <div className="ao-composer-controls">

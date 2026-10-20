@@ -163,6 +163,8 @@ let shutdownInProgress = false;
 let exitCommitted = false;
 /** The launcher's logger, for the quit path (which runs outside start's scope). */
 let quitLogger = null;
+// Runtime > RTK (rtk.cjs), made once the logger exists; IPC reads it from here.
+let rtkService = null;
 /** How long Electron may linger after app.quit() once every stop has run (app.relaunch still applies). */
 const QUIT_EXIT_GRACE_MS = 10_000;
 let codexBridgeConnectInFlight = null;
@@ -1195,6 +1197,8 @@ function registerMinimalPreRendererIpc({ logger, stateStore }) {
 }
 
 function registerIpc({ logger, stateStore }) {
+  // Runtime > RTK's handlers read the service the startup made (set below, after the logger).
+  const rtk = { status: () => rtkService?.status(), gain: () => rtkService?.gain(), install: () => rtkService?.install() };
   if (ipcRegistrar.isFull()) {
     logger.info("launcher.ipc_already_registered", { reason: "idempotent" });
     return;
@@ -2476,10 +2480,19 @@ function registerIpc({ logger, stateStore }) {
     if (!IS_DEV_PROFILE && result.configured) startCatalogVerificationMonitor({ logger, stateStore });
     return { state, credentialsRequired: false, targetMode: mode };
   });
+  // Runtime > RTK: whether rtk is installed and on, its savings, and installing it (winget).
+  handle("rtk:status", async () => rtk.status() ?? { enabled: false, installed: false, path: null, version: null });
+  handle("rtk:gain", async () => rtk.gain() ?? { available: false });
+  handle("rtk:install", async (event) => {
+    // Installing software is the person's own click in the visible app.
+    assertFocusedMainWindow(event, true);
+    if (!rtkService) throw new Error("RTK is unavailable in this build");
+    return rtk.install();
+  });
   handle("launcher:set-preference", (_event, key, value) => {
     const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "autoConnectExistingMcp"
       || key === "chatAgentTools" || key === "chatAgentDesktopTools" || key === "chatAgentTerminalTools" || key === "chatAgentPreviewTools"
-      || key === "confirmAgentToolRequests";
+      || key === "confirmAgentToolRequests" || key === "rtkEnabled";
     if (!ordinary) throw new Error("Unknown preference");
     // Consent: auto-connecting MCP, letting chat agents see and drive the screen or run commands,
     // and dropping the dialog that confirms their tool requests, are the user's.
@@ -2736,6 +2749,9 @@ async function start() {
     publish: (record) => send("launcher:log", record),
   });
   quitLogger = logger;
+  // Runtime > RTK: the person's installed rtk compacts the commands chat agents run (rtk.cjs).
+  const rtk = require("./rtk.cjs").createRtk({ getEnabled: () => stateStore.read().rtkEnabled !== false, logger });
+  rtkService = rtk;
   // The GPU process (or a utility process) dying is logged with its reason; Chromium restarts it.
   app.on("child-process-gone", (_event, details) => {
     logger.warn("launcher.child_process_gone", { type: details?.type, reason: details?.reason, exitCode: details?.exitCode, name: details?.name });
@@ -3010,7 +3026,7 @@ async function start() {
       // the worktree and package caches writable, the network on), as Codex runs its own.
       const { createSandboxRunner } = backendBundles.requireModule(backend, "chat-sandbox.cjs");
       // An agent's `ao` commands work in the app's terminal too, as in its own shell.
-      const chatSandbox = createSandboxRunner({ logger, extraPath: () => [agentOrchestratorUpstream?.aoShimFolder?.()].filter(Boolean) });
+      const chatSandbox = createSandboxRunner({ logger, extraPath: () => [agentOrchestratorUpstream?.aoShimFolder?.(), rtk.binDir()].filter(Boolean) });
       app.on("will-quit", () => chatSandbox.killAll());
       chatAgentTools = createChatAgentTools({
         previews: chatPreviews,
@@ -3019,7 +3035,9 @@ async function start() {
         // allows from the agent's own shell (the workflow's list), without a dialog each.
         // The workflow running now: these tools outlive the backend start that created them, and
         // that start's own workflow is declared further down (unset if the start failed first).
-        routineCommand: (command) => missionWorkflowRuntime?.routineCommand?.(command) ?? null,
+        // A command RTK rewrote is judged as the command it wraps.
+        routineCommand: (command) => missionWorkflowRuntime?.routineCommand?.(rtk.unwrap(command)) ?? null,
+        rewriteCommand: (command) => rtk.rewrite(command),
         // ...and never answers for the user what the command approver's safety rules block.
         blockedCommand: (text) => missionWorkflowRuntime?.blockedRequest?.(text) ?? true,
         // The subagents a chat agent may start (Runtime > Subagents).
@@ -3123,10 +3141,13 @@ async function start() {
       getCpaPricesPath: () => require("./cpa-managed.cjs").helperPricesPath(
         path.join(app.getPath("userData"), "integrations", "state", "cpa")),
 
-      extraPath: () => antigravityCli.binDir(),
+      // rtk's folder too: a command RTK rewrote in an agent's own shell calls `rtk`.
+      extraPath: () => [antigravityCli.binDir(), rtk.binDir()].filter(Boolean).join(path.delimiter),
       extraEnv: () => {
         let env = {};
         try { env = shimProxyEnvironment(antigravityProxyEnvironment()); } catch { /* no proxy for agy */ }
+        // RTK's Claude Code hook, which AO puts in each Claude session's own settings (empty: off).
+        try { env = { ...env, ...rtk.daemonEnvironment() }; } catch { /* runs without RTK */ }
         // Lets AO run any session's model through CPA; the daemon blanks it for the agents themselves.
         let cpaKey = null;
         try { cpaKey = externalServicesController?.cpaConnection()?.proxyApiKey; } catch { /* CPA not running */ }
