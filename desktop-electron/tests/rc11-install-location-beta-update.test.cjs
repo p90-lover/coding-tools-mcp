@@ -71,12 +71,18 @@ test("desktop GUI updates reload the renderer without the full-installer quit pa
 test("current prerelease discovery keeps a newer beta eligible", () => {
   const { compareVersions, selectCompatibleRelease } = require(updatePath);
   const current = manifest.version;
-  const older = current.replace(/\.\d+$/u, (value) => {
+  // Works for a release candidate (0.7.0-rc.31) and for a stable release (0.8.0) alike.
+  const prerelease = current.includes("-");
+  // Below it: the candidate before it, or for a stable release one of its own candidates.
+  const older = prerelease ? current.replace(/\.\d+$/u, (value) => {
     const previous = Math.max(0, Number(value.slice(1)) - 1);
     return `.${String(previous).padStart(value.length - 1, "0")}`;
-  });
+  }) : `${current}-rc.1`;
   assert.equal(compareVersions(current, older), 1);
-  assert.equal(compareVersions("0.7.0", current), 1);
+  // Above it: a candidate's own final release, or the next minor release after a stable one.
+  const above = prerelease ? current.replace(/-.*$/u, "")
+    : current.replace(/^(\d+)\.(\d+)\.\d+$/u, (_, major, minor) => `${major}.${Number(minor) + 1}.0`);
+  assert.equal(compareVersions(above, current), 1);
 
   const installerName = `Coding.Tools_${current}_windows_x64_setup.exe`;
   const selected = selectCompatibleRelease([{

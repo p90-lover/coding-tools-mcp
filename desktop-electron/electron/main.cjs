@@ -2932,7 +2932,7 @@ async function start() {
         (() => { try { return portOf(externalServicesController.cpaConnection()?.baseUrl); } catch { return null; } })(),
       ].filter((port) => Number.isInteger(port) && port > 0);
       const chatPreviews = createNativeChatPreviews({
-        BaseWindow, WebContentsView, mainWindow: () => mainWindow, blockedPorts: appServicePorts, logger,
+        BaseWindow, WebContentsView, Menu, clipboard, mainWindow: () => mainWindow, blockedPorts: appServicePorts, logger,
       });
       app.on("will-quit", () => chatPreviews.closeAll());
       // Agents' commands run in Codex's Windows sandbox when it is installed (its unelevated mode:

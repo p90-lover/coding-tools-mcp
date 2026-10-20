@@ -334,6 +334,56 @@ test("the pane draws one agent's preview at its slot, scaled by the page zoom, a
   assert.equal(service.state("a"), null);
 });
 
+test("a preview moved into the pane while awake repaints there, and a slot with no room never gets the page", async () => {
+  // Seen live: the pane went white while the page still took clicks. The agent had used the page
+  // within the last 30 s, so it was already visible in the background host; moved into the window
+  // it got setVisible(true) again, which changed nothing, and never drew a frame there.
+  const calls = [];
+  const view = fakeView();
+  view.setVisible = (visible) => calls.push(["visible", visible]);
+  view.webContents.invalidate = () => calls.push(["invalidate"]);
+  let host = "background";
+  const service = createChatPreviews({
+    createView: () => view, logger: { warn() {} }, contentSize: () => [1600, 1000],
+    attachView: (_view, visible) => { const next = visible ? "window" : "background"; const moved = next !== host; host = next; return moved; },
+  });
+  await service.call("a", "preview_open", { url: "http://localhost:3000/" });
+  calls.length = 0;
+  assert.equal(service.show("a", { x: 10, y: 10, width: 400, height: 300 }), true);
+  assert.deepEqual(calls, [["visible", false], ["visible", true], ["invalidate"]], "hidden, shown and invalidated in its new window");
+  calls.length = 0;
+  assert.equal(service.show("a", { x: 10, y: 10, width: 420, height: 300 }), true);
+  assert.deepEqual(calls, [["visible", true], ["invalidate"]], "a resize in the same window repaints without a flash");
+  // The window's size lagging a resize leaves no room: the page is taken out, not set to 0x0.
+  assert.equal(service.show("a", { x: 1599, y: 10, width: 400, height: 300 }), false);
+  assert.equal(service.state("a").shown, false);
+  assert.notDeepEqual(view.bounds, { x: 1599, y: 10, width: 1, height: 300 });
+});
+
+test("right-clicking the preview opens Chrome's menu for what was clicked, with Inspect last", () => {
+  const { previewMenuTemplate } = require("../electron/chat-preview.cjs");
+  const did = [];
+  const contents = new Proxy({ navigationHistory: { canGoBack: () => true, canGoForward: () => false, goBack: () => did.push("back") } },
+    { get: (target, name) => (name in target ? target[name] : (...args) => did.push([name, ...args])) });
+  const clipboard = { writeText: (text) => did.push(["clipboard", text]) };
+  const labels = (template) => template.map((item) => item.type === "separator" ? "—" : `${item.label}${item.enabled === false ? " (off)" : ""}`);
+  const menu = (params) => previewMenuTemplate({ contents, params: { x: 5, y: 6, editFlags: {}, ...params }, clipboard,
+    openLink: (url) => did.push(["open", url]), canOpen: (url) => url.startsWith("http://localhost:3000") });
+
+  assert.deepEqual(labels(menu({})), ["Back", "Forward (off)", "Reload", "—", "Select all", "—", "Inspect"], "on the page");
+  assert.deepEqual(labels(menu({ linkURL: "https://example.com/" })), ["Open link (off)", "Copy link address", "—", "Inspect"],
+    "a link elsewhere opens only within the chat's origins");
+  assert.deepEqual(labels(menu({ isEditable: true, editFlags: { canUndo: false, canRedo: false, canCut: true, canCopy: true, canPaste: true, canSelectAll: true } })),
+    ["Undo (off)", "Redo (off)", "—", "Cut", "Copy", "Paste", "Paste as plain text", "Select all", "—", "Inspect"], "in a field");
+  assert.deepEqual(labels(menu({ selectionText: "hello" })), ["Copy", "—", "Inspect"], "on selected text");
+  assert.deepEqual(labels(menu({ mediaType: "image", srcURL: "http://localhost:3000/a.png" })), ["Copy image", "Copy image address", "—", "Inspect"]);
+
+  menu({ linkURL: "http://localhost:3000/next" })[0].click();
+  menu({}).at(-1).click();
+  menu({})[0].click();
+  assert.deepEqual(did, [["open", "http://localhost:3000/next"], ["inspectElement", 5, 6], "back"]);
+});
+
 test("no page opens when the preview's network guard cannot be set up", async () => {
   const service = createChatPreviews({
     createView: () => {
@@ -655,7 +705,8 @@ test("a running agent keeps its tools across an app restart: same port, its cred
   t.after(() => second.close());
   await second.listen();
   const list = await post(url, { jsonrpc: "2.0", id: id++, method: "tools/list" }, { authorization: headers.Authorization });
-  assert.deepEqual(list.result.tools.map((tool) => tool.name), ["read_file"], "the old address and credential still work");
+  // show_in_chat comes with every agent's tools (#386).
+  assert.deepEqual(list.result.tools.map((tool) => tool.name), ["read_file", "show_in_chat"], "the old address and credential still work");
   const forged = await new Promise((resolve) => {
     const request = http.request(url, { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer forged" } },
       (response) => { response.resume(); resolve(response.statusCode); });
