@@ -310,7 +310,12 @@ async fn run_command(
         })?;
     let admitted = {
         let _policy = ctx.policy_execution_guard()?;
-        let mut child = command.spawn().map_err(|e| WorkspaceError::ToolDetails {
+        // Only the spawn holds the gate (resource_lease::spawn_gate), never what follows it.
+        let spawned = {
+            let _gate = crate::harness::resource_lease::spawn_gate();
+            command.spawn()
+        };
+        let mut child = spawned.map_err(|e| WorkspaceError::ToolDetails {
             code: "COMMAND_SPAWN_FAILED",
             message: format!("Failed to start command: {e}"),
             category: "runtime",

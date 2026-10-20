@@ -282,9 +282,12 @@ pub async fn spawn_cloudflare_tunnel(
         cmd.env("TUNNEL_TOKEN", cloudflare_token.trim());
     }
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|err| AppError::Message(format!("启动 cloudflared 失败: {err}")))?;
+    let spawned = {
+        let _gate = crate::harness::resource_lease::spawn_gate();
+        cmd.spawn()
+    };
+    let mut child =
+        spawned.map_err(|err| AppError::Message(format!("启动 cloudflared 失败: {err}")))?;
     let pid = child.id();
 
     if let Some(parent) = log_path.parent() {

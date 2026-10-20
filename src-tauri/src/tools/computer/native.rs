@@ -902,20 +902,23 @@ mod fixture_test {
         }
     }
     fn external_fixture() -> ExternalFixture {
-        let mut child = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "tools::computer::native::fixture_test::computer_native_fixture_host",
-                "--ignored",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env("COMPUTER_USE_NATIVE_FIXTURE_HOST", "1")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .expect("isolated fixture process");
+        let mut child = {
+            let _gate = crate::harness::resource_lease::spawn_gate();
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tools::computer::native::fixture_test::computer_native_fixture_host",
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("COMPUTER_USE_NATIVE_FIXTURE_HOST", "1")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+        }
+        .expect("isolated fixture process");
         let stdout = child.stdout.take().unwrap();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {

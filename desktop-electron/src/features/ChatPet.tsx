@@ -13,9 +13,14 @@ import type { PetMood } from "./ao-chat";
 const POSITION_KEY = "coding-tools:ao:pet-right";
 const NAP_MS = 45_000;
 const CHEER_MS = 6_000;
-const SCALE = 3;
-const WIDTH = 18 * SCALE;
-const HEIGHT = 7 * SCALE;
+// Claude Code draws Clawd with block characters, each quadrant half a terminal cell: pixels about
+// twice as tall as wide. Square pixels made it a squat miniature; these match a 14px terminal.
+const PIXEL_W = 4;
+const PIXEL_H = 8;
+const WIDTH = 18 * PIXEL_W;
+const HEIGHT = 7 * PIXEL_H;
+/** Claude Code's working spinner, cycled over Clawd's head while the agent works. */
+const SPINNER = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"];
 /** Space kept clear between the pet and the branch chip when it is dragged left. */
 const CHIP_GAP = 8;
 /** Walking speed in px/s: a stroll while nothing runs, a scurry while the agent works. */
@@ -38,28 +43,32 @@ const MUSINGS = ["Hmm…", "*looks around*", "What are we building?", "♪", "Ni
 // is an 18×5 sprite. The two quadrants missing from the top row are its eyes.
 const C = { body: "#D97757", eye: "#1F1E1D", tint: "#B85C3F" };
 
-type Arms = "down" | "right" | "both";
+type Arms = "down" | "left" | "right" | "both";
 type Pose = { look: -1 | 0 | 1; arms: Arms; walking: boolean; sit: boolean };
 
 /** Clawd on an 18×7 grid: two rows above its head for raised arms and a "!". */
-function Sprite({ mood, asleep, step, pose }: { mood: PetMood; asleep: boolean; step: boolean; pose: Pose }) {
+function Sprite({ mood, asleep, step, pose, blink }: { mood: PetMood; asleep: boolean; step: boolean; pose: Pose; blink: boolean }) {
   const r = (x: number, y: number, w: number, h: number, color: string, key: string) =>
     <rect key={key} x={x} y={y} width={w} height={h} fill={color} />;
   // Sitting, the body drops a row onto its tucked legs.
   const top = pose.sit ? 3 : 2;
   const asking = mood === "ask" && !asleep;
-  const arms: Arms = asleep ? "down" : asking ? "right" : pose.arms;
+  // Working and standing, its arms take turns, typing; walking, they swing down.
+  const typing = mood === "working" && !asleep && !pose.walking && pose.arms === "down";
+  const arms: Arms = asleep ? "down" : asking ? "right" : typing ? (step ? "left" : "right") : pose.arms;
+  const leftUp = arms === "both" || arms === "left";
+  const rightUp = arms === "both" || arms === "right";
   const parts = [
     r(3, top, 12, 2, C.body, "head"),
     r(3, top + 2, 12, 2, C.body, "body"),
     // The arms stick out of the second body row; raised, they go up beside the head.
-    arms === "both" ? r(2, top - 1, 1, 3, C.body, "arm-l") : r(1, top + 2, 2, 1, C.body, "arm-l"),
-    arms === "down" ? r(15, top + 2, 2, 1, C.body, "arm-r") : r(15, top - 1, 1, 3, C.body, "arm-r"),
+    leftUp ? r(2, top - 1, 1, 3, C.body, "arm-l") : r(1, top + 2, 2, 1, C.body, "arm-l"),
+    rightUp ? r(15, top - 1, 1, 3, C.body, "arm-r") : r(15, top + 2, 2, 1, C.body, "arm-r"),
   ];
   // Eyes: holes in the head (drawn dark to read on a light page), turned where it looks; closed
-  // when napping or pleased; wide and worried after an error.
+  // when napping, pleased or blinking; wide and worried after an error.
   const look = asleep ? 0 : pose.look;
-  if (asleep || mood === "done") parts.push(r(5, top + 1, 1, 1, C.tint, "eye-l"), r(12, top + 1, 1, 1, C.tint, "eye-r"));
+  if (asleep || mood === "done" || blink) parts.push(r(5, top + 1, 1, 1, C.tint, "eye-l"), r(12, top + 1, 1, 1, C.tint, "eye-r"));
   else if (mood === "error") parts.push(r(5, top, 1, 2, C.eye, "eye-l"), r(12, top, 1, 2, C.eye, "eye-r"));
   else parts.push(r(5 + look, top + 1, 1, 1, C.eye, "eye-l"), r(12 + look, top + 1, 1, 1, C.eye, "eye-r"));
   // Four legs, cycling while it walks; none showing while it sits.
@@ -68,7 +77,7 @@ function Sprite({ mood, asleep, step, pose }: { mood: PetMood; asleep: boolean; 
     legs.forEach((x, index) => parts.push(r(x, top + 4, 1, 1, C.body, `leg${index}`)));
   }
   if (asking) parts.push(r(16, 0, 1, 2, C.eye, "bang"), r(16, 3, 1, 1, C.eye, "bang-dot"));
-  return <svg viewBox="0 0 18 7" width={WIDTH} height={HEIGHT} aria-hidden="true" shapeRendering="crispEdges">{parts}</svg>;
+  return <svg viewBox="0 0 18 7" width={WIDTH} height={HEIGHT} preserveAspectRatio="none" aria-hidden="true" shapeRendering="crispEdges">{parts}</svg>;
 }
 
 type Floater = { id: number; text: string; offset: number };
@@ -86,6 +95,8 @@ export function ChatPet({ mood, context, onHide }: {
   const [travelMs, setTravelMs] = useState(0);
   const [pose, setPose] = useState<Pose>(REST);
   const [step, setStep] = useState(false);
+  const [blink, setBlink] = useState(false);
+  const [spin, setSpin] = useState(0);
   const [asleep, setAsleep] = useState(false);
   const [cheering, setCheering] = useState(false);
   const [bubble, setBubble] = useState<string | null>(null);
@@ -215,13 +226,33 @@ export function ChatPet({ mood, context, onHide }: {
   const full = context !== null && context >= 0.8;
   useEffect(() => { if (full) say("I'm getting full. Compact soon?", 2600); }, [full]);
 
-  // Legs cycle while it walks or the agent works.
+  // Legs cycle while it walks; working in place, its arms type at the same beat.
   const walking = !asleep && (pose.walking || mood === "working");
   useEffect(() => {
     if (!walking) { setStep(false); return undefined; }
-    const timer = window.setInterval(() => setStep((current) => !current), pose.walking ? 140 : 280);
+    const timer = window.setInterval(() => setStep((current) => !current), pose.walking ? 140 : 200);
     return () => window.clearInterval(timer);
   }, [walking, pose.walking]);
+  // While the agent works, Claude Code's spinner turns over its head.
+  const busy = mood === "working" && !asleep;
+  useEffect(() => {
+    if (!busy || still) { setSpin(0); return undefined; }
+    const timer = window.setInterval(() => setSpin((current) => (current + 1) % SPINNER.length), 120);
+    return () => window.clearInterval(timer);
+  }, [busy, still]);
+  // Awake, it blinks now and then.
+  useEffect(() => {
+    if (asleep || still) return undefined;
+    let timer = 0;
+    const next = () => {
+      timer = window.setTimeout(() => {
+        setBlink(true);
+        timer = window.setTimeout(() => { setBlink(false); next(); }, 130);
+      }, 2500 + Math.random() * 3500);
+    };
+    next();
+    return () => { window.clearTimeout(timer); setBlink(false); };
+  }, [asleep, still]);
 
   // It watches the pointer when it comes near, and perks up while you type in the box.
   useEffect(() => {
@@ -299,6 +330,7 @@ export function ChatPet({ mood, context, onHide }: {
   const percent = context === null ? null : Math.round(context * 100);
   return <div ref={box} className="cx-pet" style={{ right, transition: travelMs ? `right ${travelMs}ms linear` : "none" }}>
     {bubble ? <span className="cx-pet-bubble" role="status">{bubble}</span> : null}
+    {busy ? <span className="cx-pet-spinner" aria-hidden="true">{SPINNER[spin]}</span> : null}
     {floaters.map((item) => <span key={item.id} className="cx-pet-float" style={{ left: item.offset }} aria-hidden="true">{item.text}</span>)}
     <button type="button" className={`cx-pet-body is-${shown}${asleep ? " is-asleep" : ""}${pose.walking ? " is-walking" : ""}${motion ? ` is-${motion}` : ""}`}
       aria-label={`Bit the pet: ${asleep ? "napping" : LINES[shown]}${percent !== null ? ` Context ${percent}%.` : ""}`}
@@ -327,7 +359,7 @@ export function ChatPet({ mood, context, onHide }: {
         poke();
       }}
       onContextMenu={(event) => { event.preventDefault(); onHide(); }}>
-      <Sprite mood={shown} asleep={asleep} step={step} pose={pose} />
+      <Sprite mood={shown} asleep={asleep} step={step} pose={pose} blink={blink} />
     </button>
   </div>;
 }
