@@ -1431,15 +1431,34 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
    * A Native Codex thread's recent tool steps (codex_bridge `steps`: Codex item type, status and a
    * short redacted label) as timeline items the chat already draws for AO cards. Before, a WebGPT
    * reviewer showed only "running a command" with nothing under it.
+   *
+   * A file change is a tool row ("Edited app.ts, readme.md"): the bridge keeps file names but no
+   * line counts, and an edit row reads its files' counts, so it said "Edited 0 files +0 −0".
+   * `answer` is the thread's text so far. It goes where it was said: before `answerBeforeStep` when
+   * the bridge names that step (a note before a long command), else after every step. As a message
+   * item it also keeps the chat from appending it after the steps.
    */
-  function nativeStepTimeline(steps) {
-    const kind = { commandExecution: "command", fileChange: "edit", mcpToolCall: "tool", dynamicToolCall: "tool", webSearch: "tool" };
-    return (Array.isArray(steps) ? steps : []).filter(step => step && kind[step.kind]).map(step => ({
-      id: step.id, kind: kind[step.kind], status: step.status === "running" ? "running" : step.status === "failed" ? "failed" : "completed",
-      text: step.label || "",
-      ...(step.kind === "webSearch" ? { label: "Web search" } : step.kind === "mcpToolCall" || step.kind === "dynamicToolCall"
-        ? { label: String(step.label || "tool").split(": ").pop() } : {}),
-    }));
+  function nativeStepTimeline(steps, answer = "", answerBeforeStep = null) {
+    const kind = { commandExecution: "command", fileChange: "tool", mcpToolCall: "tool", dynamicToolCall: "tool", webSearch: "tool" };
+    const label = { fileChange: "Edited", webSearch: "Web search" };
+    const all = Array.isArray(steps) ? steps : [];
+    const items = [];
+    let pending = Boolean(answer);
+    const place = () => { items.push({ id: "native:answer", kind: "message", status: "running", text: answer }); pending = false; };
+    // A step the bridge has since dropped from its bounded list came first, so the note goes first.
+    const before = answerBeforeStep ? Math.max(0, all.findIndex(step => step?.id === answerBeforeStep)) : -1;
+    all.forEach((step, index) => {
+      if (pending && before >= 0 && index >= before) place();
+      if (!step || !kind[step.kind]) return;
+      items.push({
+        id: step.id, kind: kind[step.kind], status: step.status === "running" ? "running" : step.status === "failed" ? "failed" : "completed",
+        text: step.label || "",
+        ...(label[step.kind] ? { label: label[step.kind] } : step.kind === "mcpToolCall" || step.kind === "dynamicToolCall"
+          ? { label: String(step.label || "tool").split(": ").pop() } : {}),
+      });
+    });
+    if (pending && all.length) place();
+    return items;
   }
 
   function publicTimeline(items) {
@@ -1537,13 +1556,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
               const status = (await harnessStatus({ workspaceId: id, runId: run, nodeId: node.id })).status || {};
               const thread = (Array.isArray(status.threads) ? status.threads : []).find(entry => entry.id === node.receipt?.thread_id);
               const turnStarted = Boolean(thread?.turn_id || node.receipt?.turn_id);
+              const output = publicText(status.live_output || thread?.answer || thread?.output);
               frame = { ...base, turn_started: turnStarted,
                 activity: !status.connected ? "not connected" : thread?.activity || (turnStarted ? "working" : "waiting for the turn to start"),
-                step: publicText(thread?.activity || "working", 120), output: publicText(status.live_output || thread?.answer || thread?.output),
+                step: publicText(thread?.activity || "working", 120), output,
                 error: publicText(status.live_error || thread?.error, 500),
                 activity_at_ms: thread?.activity_at_ms || null, last_event_at_ms: thread?.last_event_at_ms || null,
-                // What a Native Codex card is doing (its commands, edits and tools), as AO cards show it.
-                timeline: publicTimeline(nativeStepTimeline(thread?.steps)),
+                // What a Native Codex card is doing (its commands, edits and tools), as AO cards show
+                // it, with its text where it was said.
+                timeline: publicTimeline(nativeStepTimeline(thread?.steps, output, thread?.answer_before_step)),
                 started_at_ms: base.started_at_ms ?? (thread?.started_at_ms || null) };
             }
             const latest = await savedNode(id, run, node.id);
