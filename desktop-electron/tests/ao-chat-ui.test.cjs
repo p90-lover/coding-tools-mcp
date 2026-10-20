@@ -249,7 +249,7 @@ test("an answer's Markdown is parsed once per text, not on every chat re-render"
   assert.equal(parses, 1);
 });
 
-test("an AO agent's question shows as a card with its options, an Other box, and Send / Skip", () => {
+test("an AO agent's question and tool request show as Codex's cards: numbered options to pick, then Submit", () => {
   const approvalUi = load("AgentOrchestratorApproval.tsx", { "./ChatMarkdown": markdown });
   const question = { nodeId: "one", approval_id: "ask", source: "ao", kind: "question", message: "Please answer the following questions.",
     fields: [
@@ -258,14 +258,37 @@ test("an AO agent's question shows as a card with its options, an Other box, and
       { key: "question_1", type: "multi", title: "Backend", description: "", options: [{ value: "fastapi", label: "fastapi", description: "" }] },
     ] };
   const html = renderToStaticMarkup(React.createElement(approvalUi.AgentOrchestratorApproval, { approval: question, busy: false, approve() {} }));
-  assert.match(html, /Question from the agent/);
-  assert.match(html, /Rewrite the lockfile hosts or regenerate it\?/);
-  assert.match(html, /type="radio"[^>]*name="ask-question_0"/);
-  assert.match(html, /type="checkbox"/);
+  assert.match(html, /class="cdx-title">Rewrite the lockfile hosts or regenerate it\?</, "the question is the card's title");
+  assert.match(html, /1 of 2/, "one question at a time, as Codex asks them");
+  assert.match(html, /role="radiogroup"/);
+  assert.match(html, /class="cdx-option-mark"[^>]*>1<\/span><span class="cdx-option-label">Rewrite hosts/, "numbered options");
   assert.match(html, /Keep every pinned version/);
-  assert.match(html, /placeholder="Other: type your own answer"/);
-  assert.match(html, /<button[^>]*disabled=""[^>]*>Send answer<\/button>/, "nothing chosen yet");
-  assert.match(html, />Skip<\/button>/);
+  assert.match(html, /placeholder="Type here"/);
+  assert.match(html, />Skip<\/button>/, "Skip while nothing is entered");
+  assert.match(html, />Dismiss <kbd class="cdx-kbd">ESC<\/kbd><\/button>/);
+
+  // A tool request the reviewer left at "ask": Codex's approval card, titled with the card's model.
+  const request = { nodeId: "one", approval_id: "req", source: "ao", kind: "command", tool: "PowerShell", summary: "Parse recent refresh and recovery task results",
+    command: "$env:PYTHONUTF8='1'\npython -c \"print(1)\"", recommendation: { action: "ask", reason: "Inspect the complete native command yourself" },
+    decisions: [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "always", kind: "allow_always", label: "Always allow" }, { id: "no", kind: "reject_once", label: "Reject" }] };
+  const ask = renderToStaticMarkup(React.createElement(approvalUi.AgentOrchestratorApproval, { approval: request, busy: false, approve() {}, actor: "DeepSeek V4.1 Flash" }));
+  assert.match(ask, /class="cdx-kind">Terminal</);
+  assert.match(ask, /Allow DeepSeek V4\.1 Flash to run this command\?/);
+  assert.match(ask, /<pre>\$env:PYTHONUTF8=&#x27;1&#x27;/);
+  assert.match(ask, /<span>Reason<\/span><p>Parse recent refresh and recovery task results/);
+  assert.match(ask, /<span>Reviewer<\/span><p>Inspect the complete native command yourself/);
+  assert.deepEqual([...ask.matchAll(/class="cdx-option-label">([^<]+)</g)].map((match) => match[1]), ["Allow once", "Allow this conversation", "Deny"], "Codex's words");
+  assert.match(ask, /<button[^>]*disabled=""[^>]*>Submit <kbd class="cdx-kbd">Enter<\/kbd><\/button>/, "nothing picked yet");
+  assert.match(ask, />Deny <kbd class="cdx-kbd">Esc<\/kbd><\/button>/);
+});
+
+test("a question the person answered shows as Claude Code shows one: the question, then the answer", () => {
+  const parts = load("ChatToolParts.tsx", { "./ao-chat": chat, "./ChatMarkdown": markdown });
+  const html = renderToStaticMarkup(React.createElement(parts.AnsweredRecord, { question: "Allow DeepSeek to run this command?", answer: "Allow once" }));
+  assert.match(html, /class="cx-answered-question">Allow DeepSeek to run this command\?<\/p><p class="cx-answered-answer">Allow once</);
+  const tidy = chat.tidyTimeline([{ id: "a", kind: "approval", status: "completed", text: "PowerShell", approval: "Allowed",
+    answered: { question: "Parse results", answer: "Allow once" } }]);
+  assert.equal(tidy.length, 1, "the answered request keeps its own row");
 });
 
 test("the side panel opens on an Overview of the chat: environment, context, changes, background tasks and usage", () => {

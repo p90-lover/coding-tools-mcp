@@ -16,6 +16,10 @@ import type { PetMood } from "./ao-chat";
 
 // Where it was left, as a fraction of the way around the box from the top-left corner.
 const POSITION_KEY = "coding-tools:ao:pet-around";
+// How far out from the box's edge it was lifted (px), and the most it can be: dragged away from the
+// edge it stays there, standing on nothing, and walks round the box at that distance.
+const LIFT_KEY = "coding-tools:ao:pet-lift";
+const MAX_LIFT = 160;
 const NAP_MS = 45_000;
 const CHEER_MS = 6_000;
 // Claude Code draws Clawd with block characters, each quadrant half a terminal cell: pixels about
@@ -187,6 +191,11 @@ export function ChatPet({ mood, context, onHide }: {
   // Distance walked around the box from its top-left corner, NaN until the box is measured. It is
   // never wrapped, so every lap keeps turning the same way at the corners.
   const [at, setAt] = useState(Number.NaN);
+  const [lift, setLift] = useState(() => {
+    try { const saved = Number(localStorage.getItem(LIFT_KEY)); return saved > 0 ? Math.min(MAX_LIFT, saved) : 0; } catch { return 0; }
+  });
+  const liftNow = useRef(lift);
+  liftNow.current = lift;
   const [loop, setLoop] = useState<Loop | null>(null);
   const [pose, setPose] = useState<Pose>(REST);
   const [job, setJob] = useState<Job>("none");
@@ -267,7 +276,10 @@ export function ChatPet({ mood, context, onHide }: {
   const remember = () => {
     const current = loopNow.current;
     if (!current || Number.isNaN(atNow.current)) return;
-    try { localStorage.setItem(POSITION_KEY, String((((atNow.current % current.length) + current.length) % current.length) / current.length)); } catch { /* the spot still applies now */ }
+    try {
+      localStorage.setItem(POSITION_KEY, String((((atNow.current % current.length) + current.length) % current.length) / current.length));
+      localStorage.setItem(LIFT_KEY, String(Math.round(liftNow.current)));
+    } catch { /* the spot still applies now */ }
   };
 
   /** Buttons, chips and fields around the box: Bit dashes across them and never rests on one. */
@@ -608,6 +620,19 @@ export function ChatPet({ mood, context, onHide }: {
       : 2 * current.width + current.height + (current.height - y);
     return nearLap(current, along, atNow.current);
   };
+  /**
+   * How far out from the box a pointer holds it: the pointer's distance outside the edge the spot is
+   * on, less half its height (it is held by the middle of its body), from 0 on the edge to MAX_LIFT.
+   */
+  const liftAt = (clientX: number, clientY: number, spot: number) => {
+    const current = loopNow.current;
+    const frame = composer.current?.getBoundingClientRect();
+    if (!current || !frame) return liftNow.current;
+    const { side } = spotAt(current, spot);
+    const outside = side === 0 ? frame.top - clientY : side === 1 ? clientX - frame.right
+      : side === 2 ? clientY - frame.bottom : frame.left - clientX;
+    return Math.max(0, Math.min(MAX_LIFT, Math.round(outside - HEIGHT / 2)));
+  };
 
   const onPointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
     // Picked up mid-walk or mid-job: it stops where it is and goes where it is carried.
@@ -630,13 +655,18 @@ export function ChatPet({ mood, context, onHide }: {
     const spot = nearestSpot(event.clientX, event.clientY);
     atNow.current = spot;
     setAt(spot);
+    // Drawn away from the edge, it comes away with the pointer, as far as MAX_LIFT.
+    const height = liftAt(event.clientX, event.clientY, spot);
+    liftNow.current = height;
+    setLift(height);
   };
   const onPointerUp = () => {
     const state = drag.current;
     drag.current = null;
     if (!state?.moved) { if (!asleepNow.current) wander(); return; }
-    // Dropped on a button: it hops off to the nearest free spot.
-    const free = freeNear(atNow.current);
+    // Dropped on a button: it hops off to the nearest free spot. Lifted clear of the edge it covers
+    // none of the buttons along it, so it stays where it was let go.
+    const free = liftNow.current > HEIGHT ? atNow.current : freeNear(atNow.current);
     if (free !== atNow.current) walkTo(free, SCURRY * DASH, remember);
     else remember();
     say("Wheee", 900);
@@ -654,7 +684,8 @@ export function ChatPet({ mood, context, onHide }: {
       transition: ride.mode === "riding" ? "none" : "left .42s ease-out, top .42s cubic-bezier(.3,-.7,.6,1)" }
     : loop && !Number.isNaN(at) ? (() => {
       const { x, y } = spotAt(loop, at);
-      return { left: x - WIDTH / 2, top: y - HEIGHT, transform: `rotate(${side * 90 + Math.floor(at / loop.length) * 360}deg)`,
+      // Turned to its side, "up" is away from the box, so its lift is a move up after the turn.
+      return { left: x - WIDTH / 2, top: y - HEIGHT, transform: `rotate(${side * 90 + Math.floor(at / loop.length) * 360}deg)${lift ? ` translateY(${-lift}px)` : ""}`,
         transformOrigin: `${WIDTH / 2}px ${HEIGHT}px` };
     })() : { visibility: "hidden" };
   const bedStyle = { "--bed-dx": `${bed.side * BED_GAP}px` } as CSSProperties;
@@ -667,7 +698,7 @@ export function ChatPet({ mood, context, onHide }: {
     <button type="button" className={`cx-pet-body is-${shown}${asleep ? " is-asleep" : ""}${pose.walking ? " is-walking" : ""}${job !== "none" ? ` is-${job}` : ""}${motion ? ` is-${motion}` : ""}`}
       style={ride && ride.look < 0 ? { transform: "scaleX(-1)" } : undefined}
       aria-label={`Bit the pet: ${asleep ? "napping" : LINES[shown]}${percent !== null ? ` Context ${percent}%.` : ""}`}
-      title={asleep ? "Napping. Click to wake" : `${LINES[shown]}${percent !== null ? ` · ${percent}% context` : ""}\nClick to pet · double-click to feed · drag it around the box`}
+      title={asleep ? "Napping. Click to wake" : `${LINES[shown]}${percent !== null ? ` · ${percent}% context` : ""}\nClick to pet · double-click to feed · drag it around the box, or away from it to lift it`}
       onAnimationEnd={(event) => { if (event.target !== event.currentTarget) setMotion(""); }}
       onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}
       onClick={() => {

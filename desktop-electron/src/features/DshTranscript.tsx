@@ -10,7 +10,7 @@
  */
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { ApprovedMark, EditDiff, StreamingMarkdown } from "./ChatToolParts";
+import { AnsweredRecord, ApprovedMark, EditDiff, StreamingMarkdown } from "./ChatToolParts";
 import {
   dshActivity, dshDuration, dshItemDetail, dshLiveTitle, dshProcessTitle, dshSegments, dshThinkSummary, dshToolTitle,
   tidyTimeline, type ChatLiveItem, type ChatStep, type ChatTurn, type DshActivity,
@@ -170,6 +170,7 @@ function DshTool({ item }: { item: ChatLiveItem }) {
 }
 
 function DshItem({ item }: { item: ChatLiveItem }) {
+  if (item.answered) return <AnsweredRecord question={item.answered.question} answer={item.answered.answer} />;
   if (item.kind === "reasoning") return <DshThink item={item} />;
   if (item.kind === "message") return <div className="dsh-reply"><StreamingMarkdown text={item.text} live={item.status === "running"} /></div>;
   if (item.kind === "steer") return <div className="cx-user cx-steer"><div className="cx-bubble"><p>{item.text}</p></div></div>;

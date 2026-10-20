@@ -1400,6 +1400,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       ...(item.input ? { input: publicText(item.input, 1000) } : {}),
       ...(item.output ? { output: publicText(item.output, 2000) } : {}),
       ...(item.kind === "approval" && typeof item.requestId === "string" ? { approval: publicText(approvalNote(item.requestId, item.status), 240) } : {}),
+      // The person's own answer, shown as Claude Code shows an answered question (question, then answer).
+      ...((item.kind === "approval" || item.kind === "user_input") && typeof item.requestId === "string" && personAnswers.has(item.requestId)
+        ? { answered: personAnswers.get(item.requestId) } : {}),
       // An edit's files: paths, counts, and the changed lines (redacted like any output).
       ...(item.kind === "edit" && Array.isArray(item.files) ? { files: item.files.slice(0, 50).map(file => ({
         path: publicText(file.path, 500), additions: Number(file.additions) || 0, deletions: Number(file.deletions) || 0,
@@ -1621,6 +1624,35 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     return response.pending_approvals ? { ...response, pending_approvals: withAdvice(response.pending_approvals, found) } : response;
   }
 
+  // The person's answers to AO requests and questions (request id -> { question, answer }), for the
+  // transcript's record of them, as Claude Code shows an answered question: AO keeps only the
+  // decision's id, not what was asked nor the words of the answer.
+  const personAnswers = new Map();
+  function rememberAnswer(requestId, question, answer) {
+    personAnswers.delete(requestId);
+    personAnswers.set(requestId, { question: publicText(question, 400), answer: publicText(answer, 400) });
+    if (personAnswers.size > 500) personAnswers.delete(personAnswers.keys().next().value);
+  }
+  /** What a tool request asked, in one line: its reason, else the tool and what it runs or touches. */
+  const requestText = (pending) => String(pending.reason || pending.summary
+    || [pending.tool, pending.command || pending.path].filter(Boolean).join(": ") || "Tool request").split(/\r?\n/)[0];
+  /** What an agent's question asked: its message, else its fields' own questions. */
+  const questionText = (pending) => String(pending.message
+    || (pending.fields ?? []).map((field) => field.description || field.title).filter(Boolean).join(" · ") || "Question from the agent");
+  /** The person's answer to an agent's question, in its options' words. */
+  function questionAnswerText(pending, content) {
+    const parts = [];
+    for (const field of pending.fields ?? []) {
+      const label = (value) => (field.options ?? []).find((option) => option.value === value)?.label ?? String(value);
+      const value = content?.[field.key];
+      const own = field.customKey ? content?.[field.customKey] : undefined;
+      if (Array.isArray(value)) parts.push(value.map(label).join(", "));
+      else if (value !== undefined && value !== "") parts.push(typeof value === "boolean" ? (value ? "Yes" : "No") : label(value));
+      if (typeof own === "string" && own.trim()) parts.push(own.trim());
+    }
+    return parts.join(" · ") || "Answered";
+  }
+
   async function approveAoHarness({ workspaceId, runId, nodeId, approvalId, allow, response, threadId, turnId, decisionId, answer } = {}) {
     const id = clean(workspaceId, 128), run = clean(runId, 80), node = clean(nodeId, 80);
     const approval = clean(approvalId, 128);
@@ -1637,6 +1669,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       const pending = current.status?.pending_approvals?.find((entry) => entry.approval_id === approval);
       if (!pending || pending.kind !== "question") throw new Error("The agent's question is no longer waiting for an answer");
       await harnessService().resolveInput(pending.thread_id, approval, answer.action, content);
+      rememberAnswer(approval, questionText(pending), answer.action === "accept" ? questionAnswerText(pending, content) : "Skipped");
       return { ok: true, result: { ok: true } };
     }
     const typed = response !== undefined;
@@ -1674,6 +1707,7 @@ Tool: ${pending.tool}
 ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pending.path}` : `Request: ${pending.summary}`}`,
       })) return { ok: false, cancelled: true };
       await harnessService().resolveApproval(pending.thread_id, approval, decision);
+      rememberAnswer(approval, requestText(pending), chosen ? offered.label : approving ? "Allow once" : "Deny");
       return { ok: true, result: { ok: true } };
     }
     if (typed && (!pending.method || pending.thread_id !== thread || pending.turn_id !== turn)) {
@@ -2111,10 +2145,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (["question", "plan"].includes(approval?.kind) || !(approval?.kind === "command" || approval?.source === "ao")) return true;
     const approver = cardApprover(mission, node);
     if (!approver || approver.settings?.auto_decide !== true) return true;
-    // "Approve for me" answers every tool call itself: the reviewer's answer, or after AUTO_ANSWER_MS
-    // the safety rules' (autoVerdict). A request it left at "ask" popped up as a question for those
-    // 20 s anyway, with a desktop notice, and the person raced the automatic answer.
-    if (answersForPerson(node)) return false;
+    // "Approve for me" answers what its reviewer allows or denies. What the reviewer cannot decide
+    // ("ask": a script too long to read whole, a reviewer that failed) is the person's, and waits
+    // for them as a question with no timer (the user's call, 2026-10-20): answering it for them,
+    // after 20 s or at once, ran or refused commands nobody had judged.
     const advice = approverAdvice.get(approval.approval_id);
     // Not reviewed yet: the reviewer answers it within its budget, or passes it to the person then.
     return Boolean(advice) && advice.action === "ask";
@@ -2262,12 +2296,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const opened = Math.min(pendingSeen.get(id), Number.isFinite(since) ? since : Infinity);
         // A question or a plan is the person's: it waits AUTO_ANSWER_MS for them. A command or tool
         // request the card's reviewer screens is answered as soon as that review is in ("wait"
-        // until then), "ask" included (approvalNeedsPerson shows it to nobody): its answer after
-        // the wait was the same, so the wait only held the agent up, and a click on its card after
-        // the wait failed as "no longer waiting". A team whose Command approver has not approved
-        // yet has no reviewer here: its requests keep waiting for it or the person.
+        // until then): the wait only held the agent up. One the reviewer left at "ask" is never
+        // answered here: it waits for the person, with no timer (approvalNeedsPerson). A team whose
+        // Command approver has not approved yet has no reviewer here: its requests keep waiting
+        // for it or the person.
         const personal = ["question", "plan"].includes(approval.kind);
         const reviewedHere = !personal && Boolean(cardApprover(mission, node));
+        if (reviewedHere && approverAdvice.get(id)?.action === "ask") continue;
         if (!reviewedHere && at - opened < AUTO_ANSWER_MS) continue;
         const verdict = personal ? null : autoVerdict(mission, node, approval);
         if (verdict === "wait") continue;

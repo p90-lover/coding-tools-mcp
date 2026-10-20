@@ -504,3 +504,58 @@
   .ao-workflow > .ao-chat-list { display: none; }
   .ao-workflow .ao-chat-head .ao-pill { display: none; }
 }
+
+/* The agent's questions and tool requests as the Codex desktop app asks them (AgentOrchestratorApproval's
+   cdx- cards, from its approval and request_user_input markup): rounded-3xl card, px-4 pt-4 pb-3 body
+   with gap-2, the title in medium chat text, rounded-xl option rows of min-h-8 with a size-5 numbered
+   box, a max-h-80 command box, a right-aligned px-4 pt-2 pb-4 footer, kbd chips of h-4. */
+.cdx-card { --cdx-text: var(--color-text-primary); --cdx-secondary: color-mix(in srgb, var(--color-text-primary) 62%, transparent);
+  --cdx-tertiary: color-mix(in srgb, var(--color-text-primary) 45%, transparent); --cdx-line: var(--ao-line);
+  --cdx-surface: color-mix(in srgb, var(--color-text-primary) 3%, var(--color-bg-primary)); --cdx-code: color-mix(in srgb, var(--color-text-primary) 6%, var(--color-bg-primary));
+  display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--cdx-line); border-radius: 24px; background: var(--cdx-surface);
+  color: var(--cdx-text); font-size: 14px; outline: none; }
+.cdx-card:focus-visible { box-shadow: 0 0 0 2px color-mix(in srgb, var(--ao-blue, #2f6fdd) 45%, transparent); }
+.cdx-body { display: flex; flex-direction: column; gap: 8px; padding: 16px 16px 12px; min-width: 0; }
+.cdx-kind { color: var(--cdx-secondary); font-size: 13px; }
+.cdx-title { color: var(--cdx-text); font-weight: 500; line-height: 20px; overflow-wrap: anywhere; }
+.cdx-question-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.cdx-progress { display: inline-flex; flex: none; align-items: center; gap: 2px; color: var(--cdx-tertiary); font-size: 12px; font-variant-numeric: tabular-nums; }
+.cdx-icon { display: inline-grid; width: 20px; height: 20px; place-items: center; padding: 0; border: 0; border-radius: 6px; background: transparent; color: inherit; cursor: pointer; }
+.cdx-icon:hover:not(:disabled) { background: color-mix(in srgb, var(--cdx-text) 6%, transparent); color: var(--cdx-text); }
+.cdx-icon:disabled { opacity: .35; cursor: default; }
+.cdx-message { color: var(--cdx-secondary); }
+.cdx-reason { margin: 0; color: var(--cdx-secondary); font-size: 13px; }
+.cdx-link { color: var(--ao-blue, #2f6fdd); overflow-wrap: anywhere; }
+.cdx-command { position: relative; }
+.cdx-command pre { max-height: 320px; margin: 0; padding: 8px 10px; overflow: auto; border-radius: 6px; background: var(--cdx-code); color: var(--cdx-tertiary);
+  font: 500 12.5px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cdx-command.is-collapsed pre { max-height: 132px; overflow: hidden; -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); }
+.cdx-expand { margin-top: 4px; padding: 0; border: 0; background: transparent; color: var(--cdx-secondary); font-size: 12px; cursor: pointer; }
+.cdx-expand:hover { color: var(--cdx-text); }
+.cdx-row { display: grid; grid-template-columns: 64px 1fr; gap: 8px; font-size: 13px; }
+.cdx-row > span { color: var(--cdx-tertiary); }
+.cdx-row > p { margin: 0; color: var(--cdx-secondary); overflow-wrap: anywhere; }
+.cdx-options { display: flex; flex-direction: column; gap: 2px; margin-top: 2px; }
+.cdx-option { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 6px 8px; border: 0; border-radius: 12px; background: transparent;
+  color: var(--cdx-text); font: inherit; font-size: 14px; text-align: left; cursor: pointer; }
+.cdx-option:hover, .cdx-option.is-selected { background: color-mix(in srgb, var(--cdx-text) 5%, transparent); }
+.cdx-option-mark { display: inline-grid; flex: none; width: 20px; height: 20px; place-items: center; border: 1px solid var(--cdx-line); border-radius: 2px;
+  background: color-mix(in srgb, var(--cdx-text) 5%, transparent); color: var(--cdx-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
+.cdx-option.is-selected .cdx-option-mark { border-color: var(--cdx-text); background: var(--cdx-text); color: var(--color-bg-primary); }
+.cdx-option-label { font-weight: 500; }
+.cdx-option-description { min-width: 0; overflow: hidden; color: var(--cdx-tertiary); text-overflow: ellipsis; white-space: nowrap; }
+.cdx-badge { flex: none; padding: 0 6px; border-radius: 6px; background: color-mix(in srgb, var(--ao-blue, #2f6fdd) 12%, transparent); color: var(--ao-blue, #2f6fdd); font-size: 11px; line-height: 18px; }
+.cdx-input { width: 100%; min-height: 32px; padding: 6px 10px; border: 1px solid var(--cdx-line); border-radius: 12px; background: var(--color-bg-primary); color: var(--cdx-text); font: inherit; }
+.cdx-input:focus { border-color: color-mix(in srgb, var(--cdx-text) 35%, transparent); outline: none; }
+.cdx-foot { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 8px 16px 16px; }
+.cdx-button { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border: 1px solid transparent; border-radius: 999px;
+  font: inherit; font-size: 13px; font-weight: 500; cursor: pointer; }
+.cdx-button:disabled { opacity: .45; cursor: default; }
+.cdx-button.is-primary { background: var(--cdx-text); color: var(--color-bg-primary); }
+.cdx-button.is-outline { border-color: var(--cdx-line); background: transparent; color: var(--cdx-text); }
+.cdx-button.is-ghost { margin-right: auto; background: transparent; color: var(--cdx-secondary); }
+.cdx-button:not(:disabled):hover { filter: brightness(.96); }
+.cdx-button.is-ghost:not(:disabled):hover, .cdx-button.is-outline:not(:disabled):hover { background: color-mix(in srgb, var(--cdx-text) 5%, transparent); filter: none; }
+.cdx-kbd { display: inline-grid; min-width: 16px; height: 16px; place-items: center; padding: 0 6px; border-radius: 6px; background: color-mix(in srgb, currentColor 10%, transparent);
+  font: inherit; font-size: 12px; font-weight: 400; }
+@container (max-width: 360px) { .cdx-foot .cdx-button { flex: 1 1 100%; justify-content: center; } }

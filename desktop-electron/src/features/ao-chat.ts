@@ -82,6 +82,8 @@ export type ChatLiveItem = {
    * call, the answer that let it run, folded in by tidyTimeline.
    */
   approval?: string;
+  /** On a request or question the person answered: what was asked and what they chose. */
+  answered?: { question: string; answer: string };
 };
 /**
  * A turn's activity as it reads. A request "Approve for me" (or the user) allowed is no row of its
@@ -94,6 +96,8 @@ export type ChatLiveItem = {
 export function tidyTimeline(items: ChatLiveItem[]): ChatLiveItem[] {
   const out: ChatLiveItem[] = [];
   for (const item of items) {
+    // One the person answered stays as its own row, shown as Claude Code shows an answered question.
+    if (item.answered) { out.push(item); continue; }
     const answered = item.kind === "approval" && !item.label && !/reject|denied|declin/i.test(item.status);
     if (!answered) { out.push(item); continue; }
     if (!item.approval || /pending/i.test(item.status)) continue;
@@ -281,15 +285,17 @@ export const SELF_ANSWER_GRACE_MS = 30_000;
  * at once, so a card would only flash up and offer a click that arrives after the answer. A
  * question or a plan is the person's and always shows; so does a request still waiting after the
  * grace period (an answer that could not be sent), so nothing sits hidden. In a team with a
- * Command approver the card's own reviewer stands aside, so its requests always show.
+ * Command approver the card's own reviewer stands aside, so its requests always show; and one the
+ * reviewer left at "ask" is the person's, waiting for them with no timer, so it shows at once.
  */
 export function approvalAnsweredForYou(
-  approval: { kind?: string },
+  approval: { kind?: string; recommendation?: { action?: string } },
   route: { approval_policy?: string; approvals_reviewer?: string } | null | undefined,
   waitingMs: number,
   teamHasApprover = false,
 ): boolean {
   if (approval.kind === "question" || approval.kind === "plan" || teamHasApprover) return false;
+  if (approval.recommendation?.action === "ask") return false;
   const answersForYou = route?.approvals_reviewer === "auto_review" || route?.approval_policy === "never";
   return answersForYou && waitingMs < SELF_ANSWER_GRACE_MS;
 }

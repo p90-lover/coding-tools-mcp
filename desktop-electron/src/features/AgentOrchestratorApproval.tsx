@@ -1,5 +1,54 @@
-import { useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { ChatMarkdown } from "./ChatMarkdown";
+
+// The agent's questions and tool requests as the Codex desktop app asks them (its approval card and
+// request_user_input card, from the app's own markup and words, with "ChatGPT" read as the card's
+// agent): a 24px card, a kind line, the question, numbered options to pick and change, then one
+// Submit. Enter submits and Escape dismisses or denies, as Codex's hotkeys do.
+
+/** A key chip as Codex draws one beside a button ("Esc", "Enter"). */
+const Kbd = ({ children }: { children: ReactNode }) => <kbd className="cdx-kbd">{children}</kbd>;
+
+/** Codex's numbered choices: a box with the number (filled when picked), the label, its description. */
+function CdxOptions({ options, picked, multi, onPick, name }: {
+  options: { value: string; label: string; description?: string }[]; picked: string[]; multi?: boolean;
+  onPick: (value: string) => void; name: string;
+}) {
+  return <div className="cdx-options" role={multi ? "group" : "radiogroup"} aria-label={name}>
+    {options.map((option, index) => {
+      const selected = picked.includes(option.value);
+      // A trailing " (Recommended)" becomes Codex's badge.
+      const recommended = /\s*\(recommended\)\s*$/i.test(option.label);
+      const label = option.label.replace(/\s*\(recommended\)\s*$/i, "");
+      return <button key={option.value} type="button" className={`cdx-option${selected ? " is-selected" : ""}`}
+        role={multi ? "checkbox" : "radio"} aria-checked={selected} onClick={() => onPick(option.value)}>
+        {options.length > 1 ? <span className="cdx-option-mark" aria-hidden="true">{index + 1}</span> : null}
+        <span className="cdx-option-label">{label}</span>
+        {recommended ? <span className="cdx-badge">Recommended</span> : null}
+        {option.description ? <span className="cdx-option-description">{option.description}</span> : null}
+      </button>;
+    })}
+  </div>;
+}
+
+/** Keys on a card: a number picks that option, Enter submits, Escape dismisses or denies. */
+function cardKeys(event: KeyboardEvent<HTMLElement>, count: number, pick: (index: number) => void, submit: () => void, dismiss: () => void) {
+  const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement;
+  if (event.key === "Escape") { event.preventDefault(); dismiss(); return; }
+  if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submit(); return; }
+  if (!typing && /^[1-9]$/.test(event.key) && Number(event.key) <= count) { event.preventDefault(); pick(Number(event.key) - 1); }
+}
+
+/** Focuses the card when it appears, unless the person is typing somewhere (the composer). */
+function useCardFocus() {
+  const card = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const active = document.activeElement;
+    if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement || (active as HTMLElement | null)?.isContentEditable) return;
+    card.current?.focus({ preventScroll: true });
+  }, []);
+  return card;
+}
 
 export type AoApproval = {
   nodeId: string; approval_id: string; kind?: string; method?: string; path?: string; reason?: string; command?: string; cwd?: string;
@@ -38,8 +87,9 @@ function AoQuestion({ approval, busy, approve }: { approval: AoApproval; busy: b
     const value = values[field.key];
     return Boolean((field.customKey && other[field.key]?.trim()) || (Array.isArray(value) ? value.length : value !== undefined && value !== ""));
   };
-  const ready = fields.every((field) => !field.required || answered(field)) && (fields.length === 0 || fields.some(answered));
+  const ready = fields.every((field) => !field.required || answered(field));
   const send = () => {
+    if (busy || !ready) return;
     const content: Record<string, unknown> = {};
     for (const field of fields) {
       const value = values[field.key];
@@ -49,55 +99,133 @@ function AoQuestion({ approval, busy, approve }: { approval: AoApproval; busy: b
     }
     approve(approval, { action: "accept", content });
   };
-  const when = waited(approval.since);
-  const single = fields.length === 1;
-  return <div className="ao-msg ao-msg-approval ao-msg-question" role="group" aria-label="The agent's question">
-    <span className="ao-msg-meta">Question from the agent{when ? ` · asked ${when}` : ""}</span>
-    {approval.message && !(single && fields[0].description === approval.message) ? <div className="ao-question-message"><ChatMarkdown text={approval.message} /></div> : null}
-    <fieldset disabled={busy}>
-      {approval.mode === "url" ? <>
-        {approval.url ? <a href={approval.url} target="_blank" rel="noreferrer">Open the page the agent asks you to visit</a> : <p>The page address is unavailable.</p>}
-        <div className="ao-msg-actions">
-          <button type="button" className="button-primary" onClick={() => approve(approval, { action: "accept" })}>Done</button>
-          <button type="button" className="button-secondary" onClick={() => approve(approval, { action: "decline" })}>Decline</button>
-        </div>
-      </> : <>
-        {fields.map((field) => <div key={field.key} className="ao-question-field">
-          {field.title ? <strong className="ao-question-header">{field.title}</strong> : null}
-          {field.description ? <p className="ao-question-text">{field.description}</p> : null}
-          {field.type === "choice" || field.type === "multi" ? <div className="ao-question-options" role={field.type === "choice" ? "radiogroup" : "group"}>
-            {field.options.map((option) => {
-              const current = values[field.key];
-              const checked = field.type === "multi" ? Array.isArray(current) && current.includes(option.value) : current === option.value;
-              return <label key={option.value} className={`ao-question-option${checked ? " is-checked" : ""}`}>
-                <input type={field.type === "multi" ? "checkbox" : "radio"} name={`${approval.approval_id}-${field.key}`} checked={checked}
-                  onChange={(event) => {
-                    if (field.type === "multi") {
-                      const list = Array.isArray(current) ? current : [];
-                      set(field.key, event.target.checked ? [...list, option.value] : list.filter((value) => value !== option.value));
-                    } else set(field.key, option.value);
-                  }} />
-                <span><span className="ao-question-label">{option.label}</span>{option.description ? <small>{option.description}</small> : null}</span>
-              </label>;
-            })}
-          </div>
-            : field.type === "boolean" ? <label className="ao-question-option"><input type="checkbox" checked={values[field.key] === true}
-              onChange={(event) => set(field.key, event.target.checked)} /><span>Yes</span></label>
-            : <input className="ao-question-input" type={field.type === "number" ? "number" : "text"} aria-label={field.title || field.key}
-              value={String(values[field.key] ?? "")} onChange={(event) => set(field.key, event.target.value)} />}
-          {field.customKey ? <input className="ao-question-input" type="text" placeholder="Other: type your own answer" aria-label={`${field.title || "Answer"}: other`}
-            value={other[field.key] ?? ""} onChange={(event) => setOther((current) => ({ ...current, [field.key]: event.target.value }))} /> : null}
-        </div>)}
-        <div className="ao-msg-actions">
-          <button type="button" className="button-primary" disabled={!ready} onClick={send}>Send answer</button>
-          <button type="button" className="button-secondary" title="Tell the agent you won't answer; it goes on without one"
-            onClick={() => approve(approval, { action: "decline" })}>Skip</button>
-        </div>
-      </>}
-    </fieldset>
-    <p className="ao-hint">The agent waits for your answer (up to 30 minutes).</p>
+  const dismiss = () => { if (!busy) approve(approval, { action: "decline" }); };
+  // Codex asks one question at a time, "‹ 1 of 3 ›" between them; answers stay as you move.
+  const [at, setAt] = useState(0);
+  const card = useCardFocus();
+  const field = fields[Math.min(at, Math.max(0, fields.length - 1))];
+  const last = at >= fields.length - 1;
+  const pick = (value: string) => {
+    if (!field) return;
+    if (field.type === "multi") {
+      const list = Array.isArray(values[field.key]) ? values[field.key] as string[] : [];
+      set(field.key, list.includes(value) ? list.filter((entry) => entry !== value) : [...list, value]);
+    } else set(field.key, value);
+  };
+  const next = () => (last ? send() : setAt(at + 1));
+  if (approval.mode === "url") {
+    return <div ref={card} tabIndex={-1} className="cdx-card" role="alert" aria-label="The agent's question"
+      onKeyDown={(event) => cardKeys(event, 0, () => undefined, () => approve(approval, { action: "accept" }), dismiss)}>
+      <div className="cdx-body">
+        <span className="cdx-title">{approval.message || "The agent asks you to visit a page"}</span>
+        {approval.url ? <a className="cdx-link" href={approval.url} target="_blank" rel="noreferrer">{approval.url}</a> : <p className="cdx-reason">The page address is unavailable.</p>}
+      </div>
+      <div className="cdx-foot">
+        <button type="button" className="cdx-button is-ghost" disabled={busy} onClick={dismiss}>Dismiss <Kbd>ESC</Kbd></button>
+        <button type="button" className="cdx-button is-primary" disabled={busy} onClick={() => approve(approval, { action: "accept" })}>Submit <Kbd>Enter</Kbd></button>
+      </div>
+    </div>;
+  }
+  const title = field ? field.description || field.title || approval.message || "Question" : approval.message || "Question";
+  const options = field && (field.type === "choice" || field.type === "multi") ? field.options
+    : field?.type === "boolean" ? [{ value: "true", label: "Yes", description: "" }, { value: "false", label: "No", description: "" }] : [];
+  const picked = !field ? [] : field.type === "boolean" ? (values[field.key] === undefined ? [] : [String(values[field.key])])
+    : Array.isArray(values[field.key]) ? values[field.key] as string[] : values[field.key] !== undefined ? [String(values[field.key])] : [];
+  const entered = field ? answered(field) : false;
+  return <div ref={card} tabIndex={-1} className="cdx-card" role="alert" aria-label="The agent's question"
+    onKeyDown={(event) => cardKeys(event, options.length, (index) => {
+      if (!field) return;
+      if (field.type === "boolean") set(field.key, index === 0); else pick(options[index].value);
+    }, () => (entered || !field?.required ? next() : undefined), dismiss)}>
+    <div className="cdx-body">
+      <div className="cdx-question-head">
+        <span className="cdx-title">{title}</span>
+        {fields.length > 1 ? <span className="cdx-progress">
+          <button type="button" className="cdx-icon" aria-label="Previous question" disabled={at === 0} onClick={() => setAt(at - 1)}>‹</button>
+          {at + 1} of {fields.length}
+          <button type="button" className="cdx-icon" aria-label="Next question" disabled={last} onClick={() => setAt(at + 1)}>›</button>
+        </span> : null}
+      </div>
+      {approval.message && approval.message !== title ? <div className="cdx-message"><ChatMarkdown text={approval.message} /></div> : null}
+      {field && field.title && field.description && field.title !== title ? <span className="cdx-reason">{field.title}</span> : null}
+      {options.length ? <CdxOptions name={title} options={options} picked={picked} multi={field?.type === "multi"}
+        onPick={(value) => (field?.type === "boolean" ? set(field.key, value === "true") : pick(value))} /> : null}
+      {field && (field.type === "text" || field.type === "number") ? <input className="cdx-input" type={field.type === "number" ? "number" : "text"}
+        aria-label={title} placeholder="Type here" value={String(values[field.key] ?? "")} onChange={(event) => set(field.key, event.target.value)} /> : null}
+      {field?.customKey ? <input className="cdx-input" type="text" aria-label={`${title}: other`} placeholder="Type here"
+        value={other[field.key] ?? ""} onChange={(event) => setOther((current) => ({ ...current, [field.key]: event.target.value }))} /> : null}
+    </div>
+    <div className="cdx-foot">
+      <button type="button" className="cdx-button is-ghost" disabled={busy} title="Tell the agent you won't answer; it goes on without one" onClick={dismiss}>
+        Dismiss <Kbd>ESC</Kbd></button>
+      {/* Codex: "Skip" while nothing is entered, then "Next" or, on the last question, "Submit". */}
+      {!entered && !field?.required
+        ? <button type="button" className="cdx-button is-outline" disabled={busy || (last && !ready)} onClick={next}>Skip</button>
+        : <button type="button" className="cdx-button is-primary" disabled={busy || (last ? !ready : !entered)} onClick={next}>
+          {last ? "Submit" : "Next"} <Kbd>Enter</Kbd></button>}
+    </div>
   </div>;
 }
+/** Codex's words for the answers an AO request offers (AO names them by kind). */
+const DECISION_WORDS: Record<string, string> = {
+  allow_once: "Allow once", allow_always: "Allow this conversation", reject_once: "Deny", reject_always: "Always deny",
+};
+const EDIT_TOOL = /^(?:Edit|MultiEdit|Write|NotebookEdit|str_replace_based_edit_tool|apply_patch)$/i;
+const SHELL_TOOL = /(?:^|__)(?:Bash|PowerShell|exec_command|shell|run_terminal_cmd)$/i;
+const prettyInput = (text: string) => { try { return JSON.stringify(JSON.parse(text), null, 2); } catch { return text; } };
+
+/**
+ * A tool request from an AO agent as Codex's approval card asks it: "Terminal" / "Edit files" /
+ * "Ask permission", "Allow {agent} to run this command?", the command in a box that expands, the
+ * reason (and the reviewer's, when it left it to you), then the answers the agent offered as
+ * numbered options: pick one, change it, Submit. Deny (Esc) answers at once.
+ */
+function AoAsk({ approval, busy, approve, actor }: {
+  approval: AoApproval; busy: boolean; approve: (approval: AoApproval, reply: ApprovalReply) => void; actor: string;
+}) {
+  const tool = String(approval.tool ?? "").replace(/^mcp__[\w-]+__/, "");
+  const shell = approval.kind === "command" || Boolean(approval.command) || SHELL_TOOL.test(String(approval.tool ?? ""));
+  const edit = !shell && (EDIT_TOOL.test(tool) || approval.kind === "file_change");
+  const kindLine = shell ? "Terminal" : edit ? "Edit files" : "Ask permission";
+  const title = shell ? `Allow ${actor} to run this command?` : edit ? `Allow ${actor} to edit the following file?` : `Allow ${actor} to use ${tool || "this tool"}?`;
+  const shellInput = (() => { try { const input = JSON.parse(approval.toolInput ?? ""); return typeof input?.cmd === "string" ? input.cmd : typeof input?.command === "string" ? input.command : ""; } catch { return ""; } })();
+  const body = approval.command || shellInput || (edit ? approval.path : "") || (approval.toolInput ? prettyInput(approval.toolInput) : approval.path) || "";
+  const long = body.split("\n").length > 8 || body.length > 600;
+  const [expanded, setExpanded] = useState(false);
+  const offered = (approval.decisions ?? []).length ? approval.decisions!
+    : [{ id: "allow", kind: "allow_once", label: "Allow once" }, { id: "deny", kind: "reject_once", label: "Deny" }];
+  const options = offered.map((decision) => ({ value: decision.id, label: DECISION_WORDS[decision.kind] ?? decision.label }));
+  const [picked, setPicked] = useState<string | null>(null);
+  const card = useCardFocus();
+  const send = (id: string | null) => {
+    if (busy || !id) return;
+    if (!(approval.decisions ?? []).length) { approve(approval, id === "allow"); return; }
+    approve(approval, { decisionId: id });
+  };
+  const denyId = offered.find((decision) => decision.kind === "reject_once")?.id ?? offered.find((decision) => decision.kind.startsWith("reject"))?.id ?? null;
+  const reason = approval.reason && approval.reason !== approval.summary ? approval.reason : approval.summary && approval.summary !== tool ? approval.summary : "";
+  return <div ref={card} tabIndex={-1} className="cdx-card" role="alert" aria-label={title}
+    onKeyDown={(event) => cardKeys(event, options.length, (index) => setPicked(options[index].value), () => send(picked), () => send(denyId))}>
+    <div className="cdx-body">
+      <span className="cdx-kind">{kindLine}</span>
+      <span className="cdx-title">{title}</span>
+      {body ? <div className={`cdx-command${long && !expanded ? " is-collapsed" : ""}`}>
+        <pre>{body}</pre>
+        {long ? <button type="button" className="cdx-expand" onClick={() => setExpanded(!expanded)}>{expanded ? "Collapse" : "Expand"}</button> : null}
+      </div> : null}
+      {reason ? <div className="cdx-row"><span>Reason</span><p>{reason}</p></div> : null}
+      {approval.recommendation?.reason ? <div className="cdx-row"><span>Reviewer</span><p>{approval.recommendation.reason}</p></div> : null}
+      {approval.dependencyNote ? <p className={`cdx-reason ao-dependency-note is-${approval.dependencyNote.tone}`}
+        role={approval.dependencyNote.tone === "warn" ? "alert" : "note"}>{approval.dependencyNote.text}</p> : null}
+      <CdxOptions name={title} options={options} picked={picked ? [picked] : []} onPick={setPicked} />
+    </div>
+    <div className="cdx-foot">
+      {denyId ? <button type="button" className="cdx-button is-outline" disabled={busy} onClick={() => send(denyId)}>Deny <Kbd>Esc</Kbd></button> : null}
+      <button type="button" className="cdx-button is-primary" disabled={busy || !picked} onClick={() => send(picked)}>Submit <Kbd>Enter</Kbd></button>
+    </div>
+  </div>;
+}
+
 export type ApprovalReply = boolean | { decisionId: string } | Record<string, unknown>;
 /** How long ago an AO request started waiting (AO ends an unanswered one after 30 minutes). */
 function waited(since?: string) {
@@ -109,8 +237,10 @@ function waited(since?: string) {
 const object = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 
 
-export function AgentOrchestratorApproval({ approval, busy, approve }: {
+export function AgentOrchestratorApproval({ approval, busy, approve, actor = "the agent" }: {
   approval: AoApproval; busy: boolean; approve: (approval: AoApproval, reply: ApprovalReply) => void;
+  /** Who asks, as Codex names "ChatGPT" in "Allow ChatGPT to run this command?": the card's model. */
+  actor?: string;
 }) {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [content, setContent] = useState("{}");
@@ -171,6 +301,8 @@ export function AgentOrchestratorApproval({ approval, busy, approve }: {
       </div></fieldset>
     </div>;
   }
+  // An AO agent's tool request: Codex's approval card.
+  if (approval.source === "ao") return <AoAsk approval={approval} busy={busy} approve={approve} actor={actor} />;
   return <div className="ao-msg ao-msg-approval">
     <span className="ao-msg-meta">{typed ? "Native request" : "Approval needed"} · {kind || "Tool request"}{approval.tool ? " · " + approval.tool : ""}</span>
     <p>{approval.reason || approval.summary || String(request.message || "Tool request")}{location ? ` · ${location}` : ""}</p>

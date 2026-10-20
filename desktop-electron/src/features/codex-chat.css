@@ -476,6 +476,14 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-approval-dock.is-dsh .ao-msg-approval > .ao-msg-meta:first-child { display: block; margin: 0 -16px 10px; padding: 8px 16px;
   background: color-mix(in srgb, #f59e0b 12%, transparent); color: #b45309; font-size: 12px; }
 :root[data-theme="dark"] .cx-approval-dock.is-dsh .ao-msg-approval > .ao-msg-meta:first-child { color: #f59e0b; }
+/* A question the person answered, as Claude Code shows one: a rounded box, the question in body
+   text and the chosen answer under it in muted type. */
+.cx-answered { display: flex; flex-direction: column; gap: 2px; margin: 4px 0; padding: 10px 14px; border: 1px solid var(--ao-line); border-radius: 12px;
+  background: color-mix(in srgb, var(--color-text-primary) 2%, var(--color-bg-primary)); }
+.cx-answered p { margin: 0; overflow-wrap: anywhere; }
+.cx-answered-question { color: var(--color-text-primary); font-size: 14px; line-height: 20px; }
+.cx-answered-answer { color: var(--ao-muted); font-size: 13px; line-height: 18px; }
+.cx-answered + .cx-answered, .cx-live-item:has(> .cx-answered) + .cx-live-item:has(> .cx-answered) { margin-top: -2px; }
 /* Who let a tool call run: a small shield after its line, the answer in its tooltip. */
 .cx-approved { display: inline-flex; flex: none; align-items: center; margin-left: 6px; color: var(--ao-green, #2e9d5b); opacity: .75; cursor: help; }
 .cx-approved.is-denied { color: var(--ao-red, #c0392b); }
