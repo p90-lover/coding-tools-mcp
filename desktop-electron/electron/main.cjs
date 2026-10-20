@@ -29,6 +29,7 @@ const { BrowserHost, navigationErrorForLog, writeRestartMarker } = require("./br
 const { createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatgpt-desktop.cjs");
 const { createGptBrowserHost, cleanUserAgent } = require("./gpt-browser.cjs");
 const { createEmailHost } = require("./email-host.cjs");
+const { createRegisterHost } = require("./register-host.cjs");
 const { createChatWindows } = require("./chat-windows.cjs");
 const { readBranch, readGitInfo, readRemote } = require("./git-remote.cjs");
 const { boundedQuitStep } = require("./quit-steps.cjs");
@@ -149,6 +150,7 @@ let browserHost = null;
 let chatgptDesktop = null;
 let gptBrowser = null;
 let emailHost = null;
+let registerHost = null;
 const chatgptDesktopOwners = new WeakSet();
 let runtimeHost = null;
 let headlessHost = null;
@@ -331,6 +333,24 @@ async function fetchThroughLauncherNetwork(url, options) {
         ? credentials : null
     ),
   });
+}
+
+function getRegisterHost(logger) {
+  if (registerHost) return registerHost;
+  registerHost = createRegisterHost({
+    projectRoot: path.join(app.getPath("documents"), "ChatGPT", "reg-machine"),
+    configPath: path.join(app.getPath("userData"), "runtime-register.json"),
+    isQuitting: () => quitting,
+    createView: (partition) => new WebContentsView({
+      webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true },
+    }),
+    prepareSession: (browserSession) => browserSession.setProxy({ mode: "direct" }),
+    attachView: (view) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.contentView.addChildView(view); },
+    detachView: (view) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.contentView.removeChildView(view); },
+    openExternal: (url) => openWebUrl(url),
+    onChange: (status) => send("launcher:register-changed", status),
+  });
+  return registerHost;
 }
 
 function getEmailHost(logger) {
@@ -913,6 +933,11 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
   };
   window.webContents.on("will-navigate", guardRendererNavigation);
   window.webContents.on("will-redirect", guardRendererNavigation);
+  window.webContents.on("did-start-navigation", (_event, url, inPlace, isMainFrame) => {
+    if (mainWindow === window && isMainFrame && !inPlace && rendererNavigationAllowed(url)) {
+      registerHost?.setSurfaceActive(false);
+    }
+  });
   window.webContents.setWindowOpenHandler(({ url }) => {
     void openWebUrl(url).catch((error) => {
       logger.warn("launcher.external_url_rejected", {
@@ -932,6 +957,7 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
   // is reloaded instead; after three crashes in two minutes the whole app restarts.
   const rendererCrashes = [];
   window.webContents.on("render-process-gone", (_event, details) => {
+    if (mainWindow === window) registerHost?.setSurfaceActive(false);
     logger.warn("launcher.renderer_gone", { reason: details?.reason, exitCode: details?.exitCode });
     if (quitting || window.isDestroyed() || details?.reason === "clean-exit") return;
     const at = Date.now();
@@ -978,6 +1004,7 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
 }
 
 async function loadRenderer(window) {
+  if (mainWindow === window) registerHost?.setSurfaceActive(false);
   if (isDev) {
     await window.loadURL(process.env.VITE_DEV_SERVER_URL);
     return;
@@ -1978,6 +2005,30 @@ function registerIpc({ logger, stateStore }) {
     return true;
   });
 
+  // Register's page has no launcher preload; only the launcher's own frame controls its host.
+  const registerFor = (event, write = false, hidden = false) => {
+    if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents
+      || event.senderFrame !== event.sender.mainFrame) throw new Error("Register controls require the main launcher frame");
+    if (!hidden) assertFocusedMainWindow(event, write);
+    return getRegisterHost(logger);
+  };
+  handle("launcher:register-status", (event) => registerFor(event).status());
+  handle("launcher:register-configure", (event, projectRoot) => registerFor(event, true).configure(projectRoot));
+  handle("launcher:register-start", (event) => registerFor(event, true).start());
+  handle("launcher:register-stop", (event) => registerFor(event, true).stop());
+  handle("launcher:register-reload", (event) => registerFor(event, true).reload());
+  handle("launcher:register-surface-active", (event, active) => registerFor(event, false, active !== true).setSurfaceActive(active === true));
+  handle("launcher:register-bounds", (event, bounds) => {
+    const host = registerFor(event);
+    const rect = validateBounds(bounds);
+    const zoom = event.sender.getZoomFactor();
+    host.setBounds({
+      x: Math.round(rect.x * zoom), y: Math.round(rect.y * zoom),
+      width: Math.round(rect.width * zoom), height: Math.round(rect.height * zoom),
+    });
+    return true;
+  });
+
   // Runtime -> Email. Reads require the trusted main renderer; mutations require it focused.
   handle("launcher:email-status", (event) => {
     assertFocusedMainWindow(event, false);
@@ -2543,6 +2594,7 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     const step = (name, work, ms) => boundedQuitStep(name, work, { ms,
       onTimeout: (stepName, limit) => quitLogger?.warn("launcher.quit_step_timeout", { step: stepName, ms: limit }) });
     await step("headless", () => headlessHost?.shutdown("launcher-quit"));
+    await step("register", () => registerHost?.shutdown());
     stopCatalogVerificationMonitor();
     updateController?.stopPeriodicChecks?.();
     autoInstaller?.stop();
@@ -2569,6 +2621,8 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     quitting = false;
+    try { await registerHost?.recoverAfterCancelledQuit(); }
+    catch { quitLogger?.warn("launcher.register_recovery_failed", { reason: "cancelled-quit" }); }
     showMainWindow();
     publishOperation({ name: "launcher-quit", status: "failed", message });
     return { ok: false, message };

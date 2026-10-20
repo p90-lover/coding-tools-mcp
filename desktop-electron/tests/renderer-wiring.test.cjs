@@ -32,6 +32,165 @@ test("Chat mounts the AO chat surface and the original AO UI links back to it", 
   assert.match(appSource, /label="Chat" onClick=\{\(\) => navigateSurface\("agent-orchestrator"\)\}/);
 });
 
+test("Register keeps its Runtime destination and native overlay visibility gate", () => {
+  const runtime = appSource.slice(appSource.indexOf("<SidebarGroup label={copy.runtime}>"), appSource.indexOf('<details className="sidebar-more"'));
+  assert.match(runtime, /active=\{surface === "register"\}[\s\S]*?label=\{copy.register\}[\s\S]*?navigateSurface\("register"\)/);
+  assert.ok(appSource.includes('{keepAlive("register"'));
+  const gate = /<RegisterSurface[\s\S]*?active=\{([^}]+)\}/.exec(appSource)?.[1];
+  assert.equal(gate, 'surface === "register" && !(compactSidebar && sidebarOpen) && !biggerContextRecommendationOpen && !sessionReminderDue && !refreshMenuOpen');
+  assert.match(typesSource, /type Surface[^;]*"register"/);
+  assert.equal((i18nSource.match(/register: /g) || []).length, 4);
+});
+
+test("Refresh menu reports every open and close path to the Register native gate", async () => {
+  const vm = require("node:vm"), ts = require("typescript");
+  const file = ts.createSourceFile("App.tsx", appSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const functions = file.statements.filter(ts.isFunctionDeclaration);
+  const parts = file.statements.find((node) => ts.isVariableStatement(node)
+    && node.declarationList.declarations.some((item) => item.name.getText(file) === "REFRESH_PARTS"));
+  const code = [parts.getText(file), ...["RefreshMenu", "TitleBar"].map((name) => functions.find((node) => node.name?.text === name).getText(file)),
+    "exports.RefreshMenu = RefreshMenu; exports.TitleBar = TitleBar;"].join("\n");
+  const states = [], effects = [], pending = [], listeners = new Map(), requests = [], errors = [];
+  let stateIndex = 0, effectIndex = 0, reportedOpen = false;
+  const effect = (work, deps) => {
+    const index = effectIndex++, previous = effects[index];
+    if (!previous || deps.some((value, i) => value !== previous.deps[i])) pending.push(() => {
+      previous?.cleanup?.(); effects[index] = { deps, cleanup: work() };
+    });
+  };
+  const jsx = (type, props) => ({ type, props }), exports = {};
+  vm.runInNewContext(ts.transpileModule(code, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
+    exports, Icon: "icon", IconButton: "icon-button", useEffect: effect, useLayoutEffect: effect,
+    useRef: () => ({ current: { contains: (target) => target === "inside" } }),
+    useState: (initial) => { const index = stateIndex++; if (!(index in states)) states[index] = initial;
+      return [states[index], (next) => { states[index] = typeof next === "function" ? next(states[index]) : next; }]; },
+    document: { addEventListener: (name, listener) => listeners.set(name, listener),
+      removeEventListener: (name, listener) => { if (listeners.get(name) === listener) listeners.delete(name); } },
+    api: { refreshPart: async (part) => { requests.push(part); throw new Error("fixture refresh failed"); } },
+    messageOf: (cause) => cause.message, require: () => ({ jsx, jsxs: jsx }),
+  });
+  const nodes = (node, type) => !node || typeof node !== "object" ? []
+    : [...(node.type === type ? [node] : []), ...[node.props?.children].flat(Infinity).flatMap((child) => nodes(child, type))];
+  const notify = (open) => { reportedOpen = open; };
+  const titlebar = exports.TitleBar({ copy: {}, devProfile: false, draggable: false, sidebarOpen: false,
+    toggleSidebar() {}, setError: (value) => errors.push(value), onRefreshMenuOpenChange: notify });
+  const menu = nodes(titlebar, exports.RefreshMenu)[0];
+  assert.equal(menu.props.onOpenChange, notify, "TitleBar must forward the visibility callback");
+  assert.match(appSource, /onRefreshMenuOpenChange=\{setRefreshMenuOpen\}/);
+  const expression = /<RegisterSurface[\s\S]*?active=\{([^}]+)\}/.exec(appSource)[1];
+  const gate = new Function("surface", "compactSidebar", "sidebarOpen", "biggerContextRecommendationOpen", "sessionReminderDue", "refreshMenuOpen", "return " + expression);
+  const visible = () => gate("register", false, false, false, false, reportedOpen);
+  const render = () => { stateIndex = 0; effectIndex = 0; const tree = exports.RefreshMenu(menu.props);
+    for (const work of pending.splice(0)) work(); return tree; };
+  let tree = render();
+  const toggle = () => { nodes(tree, "button")[0].props.onClick(); tree = render(); };
+  assert.equal(visible(), true);
+  toggle(); assert.equal(reportedOpen, true); assert.equal(visible(), false);
+  listeners.get("mousedown")({ target: "inside" }); tree = render(); assert.equal(reportedOpen, true);
+  listeners.get("mousedown")({ target: "outside" }); tree = render(); assert.equal(reportedOpen, false); assert.equal(visible(), true);
+  toggle(); toggle(); assert.equal(reportedOpen, false, "the toolbar button also closes its menu");
+  toggle();
+  nodes(tree, "button").find((node) => node.props.children === "UI only").props.onClick();
+  tree = render(); assert.equal(reportedOpen, false); assert.equal(visible(), true);
+  await new Promise(setImmediate); tree = render();
+  assert.deepEqual(requests, ["ui"]); assert.equal(errors.at(-1), "fixture refresh failed"); assert.equal(reportedOpen, false);
+  toggle(); assert.equal(reportedOpen, true);
+  for (const entry of effects) entry?.cleanup?.();
+  assert.equal(reportedOpen, false, "unmount releases the native visibility gate");
+  assert.equal(visible(), true); assert.equal(listeners.size, 0);
+});
+
+test("Register IPC trusts only the launcher frame and permits hidden detach", async () => {
+  const vm = require("node:vm"), ts = require("typescript");
+  const file = ts.createSourceFile("main.cjs", electronMain, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const functions = file.statements.filter(ts.isFunctionDeclaration);
+  const registration = functions.find((node) => node.name?.text === "registerIpc");
+  const guard = registration.body.statements.filter(ts.isVariableStatement)
+    .flatMap((node) => Array.from(node.declarationList.declarations)).find((node) => node.name.getText(file) === "registerFor");
+  assert.ok(guard, "Register controls need their own trusted-frame gate");
+  const calls = [];
+  const visit = (node) => {
+    if (ts.isCallExpression(node) && node.expression.getText(file) === "handle"
+      && node.arguments[0]?.text?.startsWith("launcher:register-")) calls.push(node.getText(file));
+    ts.forEachChild(node, visit);
+  };
+  visit(registration);
+  const handlers = new Map(), seen = [];
+  let visible = true, focused = true;
+  const mainFrame = {};
+  const sender = { mainFrame, isFocused: () => focused, getZoomFactor: () => 2 };
+  const mainWindow = { webContents: sender, isDestroyed: () => false,
+    isVisible: () => visible, isMinimized: () => !visible, isFocused: () => focused };
+  const host = Object.fromEntries(["status", "configure", "start", "stop", "reload", "setSurfaceActive", "setBounds"]
+    .map((name) => [name, (...args) => { seen.push([name, ...args]); return { ready: true }; }]));
+  vm.runInNewContext(functions.filter((node) => ["validateBounds", "assertFocusedMainWindow"].includes(node.name?.text))
+    .map((node) => node.getText(file)).join("\n") + "\nconst registerFor = " + guard.initializer.getText(file) + ";\n" + calls.join(";\n"), {
+    mainWindow, BrowserWindow: { fromWebContents: (value) => value === sender ? mainWindow : null },
+    logger: {}, getRegisterHost: () => host, handle: (channel, handler) => handlers.set(channel, handler),
+  });
+  assert.equal(handlers.size, 7);
+  const event = { sender, senderFrame: mainFrame };
+  for (const handler of handlers.values()) assert.throws(() => handler({ sender, senderFrame: {} }), /main.*frame/i);
+  assert.equal(seen.length, 0);
+  focused = false;
+  for (const suffix of ["configure", "start", "stop"]) assert.throws(() => handlers.get("launcher:register-" + suffix)(event, "C:\\fixture"), /focused/);
+  await handlers.get("launcher:register-status")(event);
+  assert.equal(seen.length, 1);
+  visible = false;
+  handlers.get("launcher:register-surface-active")(event, false);
+  assert.deepEqual(seen.at(-1), ["setSurfaceActive", false]);
+  assert.throws(() => handlers.get("launcher:register-surface-active")(event, true), /Open the Coding Tools/);
+  visible = true;
+  handlers.get("launcher:register-bounds")(event, { x: 2, y: 3, width: 100, height: 80 });
+  assert.deepEqual(JSON.parse(JSON.stringify(seen.at(-1))), ["setBounds", { x: 4, y: 6, width: 200, height: 160 }]);
+  assert.throws(() => handlers.get("launcher:register-bounds")(event, { x: NaN, y: 0, width: 1, height: 1 }), /finite/);
+});
+
+test("Register native page detaches for launcher reload and crash without stopping its service", async () => {
+  const vm = require("node:vm"), ts = require("typescript");
+  const file = ts.createSourceFile("main.cjs", electronMain, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const functions = file.statements.filter(ts.isFunctionDeclaration);
+  const sourceOf = (name) => functions.find((node) => node.name?.text === name).getText(file);
+  const callbacks = new Map(), calls = [];
+  const collect = (node) => {
+    if (ts.isCallExpression(node) && node.expression.getText(file) === "window.webContents.on"
+      && ["did-start-navigation", "render-process-gone"].includes(node.arguments[0]?.text)) {
+      callbacks.set(node.arguments[0].text, node.arguments[1].getText(file));
+    }
+    ts.forEachChild(node, collect);
+  };
+  collect(functions.find((node) => node.name?.text === "createWindow"));
+  const window = { isDestroyed: () => false, loadURL: async () => calls.push("load") };
+  const scope = { window, mainWindow: window, URL, isDev: true, process: { env: { VITE_DEV_SERVER_URL: "http://localhost:4318/" } },
+    registerHost: { setSurfaceActive: (value) => calls.push(value), shutdown: () => assert.fail("Renderer reload must not stop Register") },
+    logger: { warn() {} }, quitting: false, rendererCrashes: [], setTimeout() {},
+  };
+  const load = vm.runInNewContext("(" + sourceOf("loadRenderer") + ")", scope);
+  await load(window);
+  assert.deepEqual(calls, [false, "load"], "UI refresh hides the native view before its document is replaced");
+  calls.length = 0;
+  scope.mainWindow = {};
+  await load(window);
+  assert.deepEqual(calls, ["load"], "a stale window cannot detach the current window's view");
+  scope.mainWindow = window; calls.length = 0;
+  assert.ok(callbacks.has("did-start-navigation"), "Cmd/Ctrl-R also needs a main-document navigation hook");
+  vm.runInNewContext(sourceOf("rendererNavigationAllowed"), scope);
+  const navigate = vm.runInNewContext("(" + callbacks.get("did-start-navigation") + ")", scope);
+  navigate({}, "http://localhost:4318/#chat", true, true);
+  navigate({}, "http://localhost:4318/", false, false);
+  navigate({}, "https://example.invalid/", false, true);
+  assert.deepEqual(calls, [], "SPA, subframe and blocked navigation preserve the current view");
+  navigate({}, "http://localhost:4318/", false, true);
+  assert.deepEqual(calls, [false]);
+  calls.length = 0; scope.mainWindow = {};
+  navigate({}, "http://localhost:4318/", false, true);
+  assert.deepEqual(calls, []);
+  scope.mainWindow = window;
+  const crashed = vm.runInNewContext("(" + callbacks.get("render-process-gone") + ")", scope);
+  crashed({}, { reason: "crashed", exitCode: 1 });
+  assert.deepEqual(calls, [false], "a crashed React renderer cannot run its own detach cleanup");
+});
+
 test("In-Process Apps shows only CPA/AO and refuses a stale retired selection", async () => {
   const vm = require("node:vm");
   const ts = require(require.resolve("typescript", { paths: [launcherRoot] }));

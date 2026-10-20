@@ -23,6 +23,7 @@ const REQUIRED_NAMESPACES = [
 function loadPreload(respond = () => null) {
   const exposed = Object.create(null);
   const invocations = [];
+  const subscriptions = new Map();
   const electronMock = {
     contextBridge: {
       exposeInMainWorld(name, value) {
@@ -35,8 +36,8 @@ function loadPreload(respond = () => null) {
         invocations.push({ channel, payload: clonedPayload });
         return respond(channel, clonedPayload);
       },
-      on() {},
-      removeListener() {},
+      on(channel, listener) { subscriptions.set(channel, listener); },
+      removeListener(channel, listener) { if (subscriptions.get(channel) === listener) subscriptions.delete(channel); },
       send() {},
     },
   };
@@ -55,7 +56,7 @@ function loadPreload(respond = () => null) {
     Module._load = originalLoad;
   }
 
-  return { api: exposed.codingTools, launcher: exposed.codexWebLauncher, invocations };
+  return { api: exposed.codingTools, launcher: exposed.codexWebLauncher, invocations, subscriptions };
 }
 
 test("the sandboxed window loads a bundled preload before every launch path", () => {
@@ -84,6 +85,30 @@ test("preload exposes only the named Coding Tools domains and no generic privile
   assert.equal(api.spawn, undefined);
   assert.equal(api.readFile, undefined);
   assert.equal(api.cookies, undefined);
+});
+
+test("Register launcher calls keep their named channels and unsubscribe changes", async () => {
+  const { launcher, invocations, subscriptions } = loadPreload();
+  const operations = [
+    ["registerStatus", "launcher:register-status", undefined],
+    ["configureRegister", "launcher:register-configure", "C:\\fixture\\reg-machine"],
+    ["startRegister", "launcher:register-start", undefined],
+    ["stopRegister", "launcher:register-stop", undefined],
+    ["reloadRegister", "launcher:register-reload", undefined],
+    ["setRegisterSurfaceActive", "launcher:register-surface-active", false],
+    ["setRegisterBounds", "launcher:register-bounds", { x: 2, y: 3, width: 640, height: 480 }],
+  ];
+  for (const [method, , payload] of operations) await launcher[method](payload);
+  assert.deepEqual(invocations, operations.map(([, channel, payload]) => ({ channel, payload })));
+  let changed;
+  const unsubscribe = launcher.onRegisterChanged((value) => { changed = value; });
+  const listener = subscriptions.get("launcher:register-changed");
+  assert.equal(typeof listener, "function");
+  const next = { ready: true, owned: false };
+  listener({}, next);
+  assert.equal(changed, next);
+  unsubscribe();
+  assert.equal(subscriptions.has("launcher:register-changed"), false);
 });
 
 test("a typed workspace list call uses its exact channel and validates its response", async () => {

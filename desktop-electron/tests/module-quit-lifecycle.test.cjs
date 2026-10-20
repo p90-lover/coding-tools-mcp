@@ -18,11 +18,11 @@ function visit(node) {
 }
 visit(file);
 
-function fixture({ active = null, failCleanup = false, restoreFails = false, quitAnyway = false } = {}) {
+function fixture({ active = null, failCleanup = false, restoreFails = false, quitAnyway = false, registerShutdownFails = false, browserSaveFails = false } = {}) {
   const disposed = [];
   const nativeStops = [];
   const quits = [];
-  const order = [];
+  const order = [], recovered = [];
   const controller = name => ({ dispose() {
     disposed.push(name);
     if (failCleanup && name === "external") throw new Error("Owned process cleanup failed");
@@ -34,9 +34,11 @@ function fixture({ active = null, failCleanup = false, restoreFails = false, qui
       order.push("restore-route");
       if (restoreFails) throw new Error("Route restore failed");
     } },
-    browserHost: { currentOperation: () => null, persistSession: async () => {}, destroy() {} },
+    browserHost: { currentOperation: () => null, persistSession: async () => { if (browserSaveFails) throw new Error("Browser save failed"); }, destroy() {} },
     runtimeSupervisor: { shutdown: async () => { order.push("stop-runtime"); nativeStops.push("runtime"); } },
     headlessHost: { shutdown: async () => {} }, browserControl: { close: async () => {} },
+    registerHost: { shutdown: async () => { order.push("stop-register"); if (registerShutdownFails) throw new Error("Register stop failed"); },
+      recoverAfterCancelledQuit: async () => { recovered.push(context.quitting); } },
     stopCatalogVerificationMonitor() {}, updateController: { stopPeriodicChecks() {} }, autoInstaller: { stop() {} },
     stopBridgeWatchdog() {}, backendBundles: { stopWatching() {} },
     agentOrchestratorUpstream: { stop: async () => {} }, antigravityReauth: { stop() {} },
@@ -56,7 +58,7 @@ function fixture({ active = null, failCleanup = false, restoreFails = false, qui
   const quit = vm.runInContext(`(${quitSource})`, context);
   let result;
   context.requestQuit = () => (result = quit());
-  return { disposed, nativeStops, quits, order, quit, async beforeQuit() {
+  return { disposed, nativeStops, quits, order, recovered, quit, async beforeQuit() {
     let prevented = 0;
     for (const listener of listeners) vm.runInContext(`(${listener})`, context)({ preventDefault: () => { prevented += 1; } });
     assert.equal(prevented, 1);
@@ -71,6 +73,7 @@ test("rejected app quit does not dispose integrations before the active-operatio
   assert.deepEqual(f.disposed, []);
   assert.deepEqual(f.nativeStops, []);
   assert.deepEqual(f.quits, []);
+  assert.deepEqual(f.order, []);
 });
 
 test("accepted app quit disposes each integration controller once", async () => {
@@ -79,7 +82,7 @@ test("accepted app quit disposes each integration controller once", async () => 
   assert.equal(result.ok, true);
   assert.deepEqual(f.disposed, ["bootstrap", "visuals", "external", "upstream"]);
   assert.equal(f.quits.length, 1);
-  assert.deepEqual(f.order, ["restore-route", "stop-runtime", "stop-chatgpt-desktop"]);
+  assert.deepEqual(f.order, ["restore-route", "stop-runtime", "stop-register", "stop-chatgpt-desktop"]);
 });
 
 test("route restoration failure cancels quit unless the user chooses Quit anyway", async () => {
@@ -90,8 +93,17 @@ test("route restoration failure cancels quit unless the user chooses Quit anyway
 
   const accepted = fixture({ restoreFails: true, quitAnyway: true });
   assert.equal((await accepted.quit()).ok, true);
-  assert.deepEqual(accepted.order, ["restore-route", "stop-runtime", "stop-chatgpt-desktop"]);
+  assert.deepEqual(accepted.order, ["restore-route", "stop-runtime", "stop-register", "stop-chatgpt-desktop"]);
   assert.equal(accepted.quits.length, 1);
+});
+
+test("cancelled quits recover Register only after the main quitting flag clears", async () => {
+  for (const options of [{ registerShutdownFails: true }, { browserSaveFails: true }]) {
+    const f = fixture(options), result = await f.quit();
+    assert.equal(result.ok, false); assert.deepEqual(f.quits, []);
+    assert.deepEqual(f.recovered, [false]); assert.ok(f.order.includes("stop-register"));
+  }
+  const successful = fixture(); await successful.quit(); assert.deepEqual(successful.recovered, []);
 });
 
 test("module cleanup failure leaves the native bridge running and refuses exit", async () => {

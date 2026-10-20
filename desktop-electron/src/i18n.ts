@@ -45,6 +45,7 @@ const en = {
   workspace: "Workspace",
   configuration: "Configuration",
   runtime: "Runtime",
+  register: "Register",
   browser: "Browser",
   openChatgpt: "Open ChatGPT",
   temporaryChat: "Temporary Chat",
@@ -393,6 +394,7 @@ const zh: Record<keyof typeof en, string> = {
   workspace: "工作区",
   configuration: "配置",
   runtime: "运行时",
+  register: "注册",
   browser: "浏览器",
   openChatgpt: "打开 ChatGPT",
   temporaryChat: "临时聊天",
@@ -741,6 +743,7 @@ const ja: Record<keyof typeof en, string> = {
   workspace: "ワークスペース",
   configuration: "構成",
   runtime: "ランタイム",
+  register: "登録",
   browser: "ブラウザー",
   openChatgpt: "ChatGPT を開く",
   temporaryChat: "一時チャット",
@@ -1050,6 +1053,7 @@ export type Copy = typeof en;
 const zhTW = {
   ...zh,
   ...zhTWOverrides,
+  register: "註冊",
 } as unknown as Copy;
 
 export function copyFor(language: Language): Copy {

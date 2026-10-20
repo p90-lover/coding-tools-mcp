@@ -29,6 +29,7 @@ import { ChatGptDesktopSurface } from "./features/ChatGptDesktopSurface";
 import { EmailSurface } from "./features/EmailSurface";
 import { KeysmithSetupPanel } from "./features/KeysmithSetupPanel";
 import { GptBrowserSurface } from "./features/GptBrowserSurface";
+import { RegisterSurface } from "./features/RegisterSurface";
 
 import type {
   BrowserInteractionMode,
@@ -456,6 +457,7 @@ function LauncherShell({
   const [browserSlot, setBrowserSlot] = useState<HTMLDivElement | null>(null);
   const [sessionReminderBusy, setSessionReminderBusy] = useState(false);
   const [sessionReminderDue, setSessionReminderDue] = useState(false);
+  const [refreshMenuOpen, setRefreshMenuOpen] = useState(false);
   const [mcpTargetMode, setMcpTargetMode] = useState<BrowserInteractionMode | null>(null);
   const [biggerContextRecommendationOpen, setBiggerContextRecommendationOpen] = useState(false);
   const [biggerContextRecommendationBusy, setBiggerContextRecommendationBusy] = useState(false);
@@ -679,6 +681,7 @@ function LauncherShell({
         copy={copy}
         devProfile={devProfile}
         draggable={surface !== "browser"}
+        onRefreshMenuOpenChange={setRefreshMenuOpen}
         setError={setError}
         sidebarOpen={sidebarOpen}
         toggleSidebar={toggleSidebar}
@@ -786,6 +789,7 @@ function LauncherShell({
                 <SidebarItem active={surface === "workspace-auth"} icon="mcp" label={copy.workspaceAuth} onClick={() => navigateSurface("workspace-auth")} />
                 <SidebarItem active={surface === "native-codex"} icon="orchestrator" label={copy.nativeCodex} onClick={() => navigateSurface("native-codex")} />
                 <SidebarItem active={surface === "oauth"} icon="providers" label={copy.providerOAuth} onClick={() => navigateSurface("oauth")} />
+                <SidebarItem active={surface === "register"} icon="providers" label={copy.register} onClick={() => navigateSurface("register")} />
 
 
               </SidebarGroup>
@@ -890,6 +894,14 @@ function LauncherShell({
             ))}
             {keepAlive("email", () => (
               <EmailSurface api={api!} setError={setError} />
+            ))}
+            {keepAlive("register", () => (
+              <RegisterSurface
+                api={api!}
+                active={surface === "register" && !(compactSidebar && sidebarOpen) && !biggerContextRecommendationOpen && !sessionReminderDue && !refreshMenuOpen}
+                language={language}
+                setError={setError}
+              />
             ))}
             {keepAlive("setup", () => (
               <SetupSurface
@@ -1039,10 +1051,17 @@ const REFRESH_PARTS: readonly [RefreshPart, string][] = [
 ];
 
 /** One-click refresh for the UI and each separately running part. */
-function RefreshMenu({ setError }: { setError: (error: string | null) => void }) {
+function RefreshMenu({ setError, onOpenChange }: {
+  setError: (error: string | null) => void;
+  onOpenChange: (open: boolean) => void;
+}) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState<RefreshPart | "">("");
   const menu = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    onOpenChange(open);
+    return () => onOpenChange(false);
+  }, [onOpenChange, open]);
   useEffect(() => {
     if (!open) return undefined;
     const close = (event: MouseEvent) => {
@@ -1094,6 +1113,7 @@ function TitleBar({
   copy,
   devProfile,
   draggable,
+  onRefreshMenuOpenChange,
   setError,
   sidebarOpen,
   toggleSidebar,
@@ -1101,6 +1121,7 @@ function TitleBar({
   copy: Copy;
   devProfile: boolean;
   draggable: boolean;
+  onRefreshMenuOpenChange: (open: boolean) => void;
   setError: (error: string | null) => void;
   sidebarOpen: boolean;
   toggleSidebar: () => void;
@@ -1113,7 +1134,7 @@ function TitleBar({
           label={sidebarOpen ? copy.hideSidebar : copy.showSidebar}
           onClick={toggleSidebar}
         />
-        <RefreshMenu setError={setError} />
+        <RefreshMenu setError={setError} onOpenChange={onRefreshMenuOpenChange} />
         {devProfile ? <span className="titlebar-dev-profile">{copy.devBadge}</span> : null}
       </div>
     </header>
