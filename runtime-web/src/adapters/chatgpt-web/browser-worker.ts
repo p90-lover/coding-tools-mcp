@@ -3958,8 +3958,13 @@ export class ChatGptBrowserWorker {
     await input.waitFor({ state: "attached", timeout: 20_000 });
     await input.setInputFiles(files);
     try {
+      // The redesigned composer (seen 2026-10-20) draws each file as a button named after it, an
+      // image as its thumbnail; the earlier one drew a group. Waiting for the group alone failed
+      // every turn that carried an image (a compaction handoff with a screenshot) after 60 s.
       await Promise.all(files.map(file => (
         composerForm.getByRole("group", { name: file.name, exact: true })
+          .or(composerForm.getByRole("button", { name: file.name, exact: true }))
+          .first()
           .waitFor({ state: "visible", timeout: 60_000 })
       )));
     } catch {
@@ -3970,6 +3975,16 @@ export class ChatGptBrowserWorker {
         `ChatGPT did not accept all prompt attachments`
         + (alerts.length > 0 ? `: ${alerts.join(" | ")}` : ""),
       );
+    }
+    // Send is enabled while a file still uploads: each file's "Uploading <name>" bar must be gone,
+    // or the message would go out without it.
+    try {
+      await Promise.all(files.map(file => (
+        composerForm.getByRole("progressbar", { name: `Uploading ${file.name}`, exact: true })
+          .waitFor({ state: "hidden", timeout: 120_000 })
+      )));
+    } catch {
+      throw new Error("ChatGPT did not finish uploading the prompt attachments");
     }
     const send = composerForm.locator(CHATGPT_SEND_BUTTON_SELECTOR);
     const deadline = Date.now() + 60_000;
