@@ -23,8 +23,9 @@ const menu = load("ChatMenu.tsx");
 const client = { getCodingToolsClient: () => ({ apps: { call: async () => ({ result: { sessions: {} } }) } }) };
 const meter = load("ChatContextMeter.tsx", { "./ao-chat": chat, "./ChatMenu": menu, "./AgentOrchestratorRoleEditor": roles,
   "../api/client": client, "./cpa-usage": load("cpa-usage.ts", { "../api/client": client }) });
+const dsh = load("DshTranscript.tsx", { "./ao-chat": chat, "./ChatMarkdown": markdown });
 const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null, Caret: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
-  "./ChatContextMeter": meter,
+  "./ChatContextMeter": meter, "./DshTranscript": dsh,
   "./ChatPet": load("ChatPet.tsx", { "./ao-chat": chat }),
   "./ChatTurnStats": load("ChatTurnStats.tsx", { "./ao-chat": chat, "../api/client": client }),
   "./codex-prompts": load("codex-prompts.ts"),
@@ -36,6 +37,36 @@ const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "../icons": { 
   // The side panel opens on demand; the chat only needs its auto-open hook to exist here.
   "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => {} },
   "./ChatThreadList": load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu }) });
+
+test("a DeepSeek turn renders as DeepSeek Harness's: flat rows and Deep diving while it runs, Completed once it ends", () => {
+  const timeline = [
+    { id: "r1", kind: "reasoning", status: "completed", text: "**Let me check health.**\nThen the configs." },
+    { id: "c1", kind: "command", status: "completed", text: "curl /healthz", description: "Check backend health", output: "ok" },
+    { id: "e1", kind: "edit", status: "completed", text: "", files: [{ path: "src/_recovery_state.py", additions: 28, deletions: 0, diff: "+a" }] },
+    { id: "t1", kind: "tool", status: "running", text: "mcp__coding-tools__read_file", input: JSON.stringify({ path: "README.md" }) },
+  ];
+  const step = { key: "s", nodeId: "n", role: "planner", name: "DeepSeek V4.1 Flash", detail: "", state: "running", startedAtMs: Date.now() - 64_000,
+    working: { detail: "", stalled: false, timeline } };
+  const turn = { key: "k", runId: "run", steps: [step], status: "running", solo: false, startedAtMs: Date.now() - 64_000 };
+  const useWork = (item) => item.working?.timeline ?? null;
+  const running = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn, live: true, expanded: false, useWork }));
+  assert.match(running, /dsh-title">Think<\/span><span class="dsh-sep"[^>]*><\/span><span class="dsh-summary">Let me check health\.<\/span>/, "a Think row with its first line, ** dropped");
+  assert.match(running, />Bash<\/span><span class="dsh-sep"[^>]*><\/span><span class="dsh-summary">Check backend health</, "a Bash row with the agent's words");
+  assert.match(running, />Edit<\/span>.*src\/_recovery_state\.py.*\+28<\/span> <span class="is-del">-0</, "an Edit row with its path and totals");
+  assert.match(running, /dsh-row-text dsh-shimmer"><span class="dsh-title">Read<\/span>.*README\.md/, "the running call shimmers");
+  assert.match(running, /Deep diving for 1m [45]s ···/, "the running status, with its clock");
+  assert.doesNotMatch(running, /dsh-group-title|dsh-turn-process/, "a running turn stays flat, without a Completed header");
+  // The same turn, seen ending: it took 1m 4s. A turn ended before the chat saw it says only "Completed".
+  const settled = (key) => ({ ...turn, key, status: "done", steps: [{ ...step, state: "finished", working: undefined, hasWork: true }] });
+  const doneWork = () => timeline.map((item) => ({ ...item, status: "completed" }));
+  const done = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn: settled("k"), live: false, expanded: true, useWork: doneWork }));
+  assert.match(done, /dsh-turn-process-label">Completed in <span class="dsh-num">1m [45]s<\/span>/, "a turn seen ending is headed with its time");
+  assert.match(done, /dsh-group-label">Ran commands, edited files, read files</, "its work grouped under the kinds it did");
+  assert.doesNotMatch(done, /Deep diving/);
+  const earlier = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn: settled("older"), live: false, expanded: false, useWork: doneWork }));
+  assert.match(earlier, /dsh-turn-process-label">Completed<\/span>/, "an earlier turn says Completed");
+  assert.doesNotMatch(earlier, /dsh-group/, "and stays folded until opened");
+});
 
 test("every new card starts with instructions and an expected output for its role", () => {
   const team = roles.defaultTeam("workspace", roles.workerRoute(roles.DEFAULT_WORKER_HARNESS, roles.DEFAULT_WORKER_MODEL));

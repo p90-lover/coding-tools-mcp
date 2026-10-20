@@ -13,17 +13,69 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 const node = (id, role, state, extra = {}) => ({ id, role, state, x: 0, ...extra });
 const run = (id, taskId, nodes, extra = {}) => ({ id, project_id: taskId, cancelled: false, nodes, ...extra });
 
-test("a DeepSeek model's work is headed as DeepSeek Harness heads it: what it is doing live, the kinds of work once done", () => {
+test("a DeepSeek model's work is grouped and worded as DeepSeek Harness does it", () => {
   const item = (kind, extra = {}) => ({ id: `${kind}${Math.random()}`, kind, status: "completed", text: "", ...extra });
   assert.equal(chat.isDeepSeekModel("cpa/cline-pass/deepseek-v4.1-flash"), true);
   assert.equal(chat.isDeepSeekModel("cpa/cline-pass/glm-5.3-flash"), false);
-  assert.equal(chat.dshActivityTitle([item("tool", { label: "Read" }), item("command", { text: "npm test" })], true), "Running commands", "live: the latest step");
-  assert.equal(chat.dshActivityTitle([item("tool", { label: "Read" }), item("tool", { label: "Grep" }), item("command"), item("reasoning")], false),
-    "Read files, searched code and ran commands", "done: the kinds of work, no counts, thinking left out");
-  assert.equal(chat.dshActivityTitle([item("tool", { label: "Read" }), item("tool", { label: "Grep" }), item("command"), item("edit")], false),
-    "Read files, searched code and ran commands, etc.", "more than three kinds");
-  assert.equal(chat.dshActivityTitle([item("reasoning")], false), "Thought", "thinking alone");
-  assert.equal(chat.dshActivityTitle([item("tool", { text: "mcp__coding-tools__list_dir" })], false), "Read files", "an MCP read tool by its own name");
+  // step-process.ts: the top three kinds by number of calls, ties by first appearance, no counts.
+  const read = item("tool", { text: "mcp__coding-tools__read_file" });
+  assert.equal(chat.dshProcessTitle([read, item("command"), item("command"), item("reasoning")]), "Ran commands and read files", "most calls first, thinking left out");
+  assert.equal(chat.dshProcessTitle([read, item("tool", { label: "Grep" }), item("command")]), "Read files, searched code, ran commands", "a tie keeps first appearance");
+  assert.equal(chat.dshProcessTitle([read, item("tool", { label: "Grep" }), item("command"), item("edit")]), "Read files, searched code, ran commands, etc.", "past three kinds");
+  assert.equal(chat.dshProcessTitle([item("reasoning")]), "Analysis completed", "thinking alone");
+  assert.equal(chat.dshProcessTitle([item("command", { count: 3 }), read, read]), "Ran commands and read files", "a repeated call counts each time");
+  // process-activity.ts: the app's MCP tools land in DeepSeek Harness's own kinds.
+  assert.equal(chat.dshActivity(item("tool", { text: "mcp__coding-tools__exec_command" })), "commands");
+  assert.equal(chat.dshActivity(item("tool", { text: "mcp__coding-tools__list_dir" })), "search");
+  assert.equal(chat.dshActivity(item("tool", { text: "mcp__coding-tools__apply_patch" })), "edit");
+  assert.equal(chat.dshActivity(item("tool", { text: "mcp__coding-tools__browser_open" })), "tools");
+  // ui-tool's row titles.
+  assert.equal(chat.dshToolTitle(item("command", { text: "npm test" })), "Bash");
+  assert.equal(chat.dshToolTitle(read), "Read");
+  assert.equal(chat.dshToolTitle(item("tool", { text: "mcp__coding-tools__exec_command" })), "Bash");
+  assert.equal(chat.dshToolTitle(item("tool", { text: "web_fetch" })), "Fetch");
+  assert.equal(chat.dshToolTitle(item("tool", { text: "mcp__coding-tools__browser_open" })), "Tool call");
+  // A row's detail: the agent's own words, else the command, path or query from its arguments.
+  assert.equal(chat.dshItemDetail(item("command", { text: "npm test", description: "Check backend health" })), "Check backend health");
+  assert.equal(chat.dshItemDetail(item("tool", { text: "read_file", input: JSON.stringify({ path: "src/app.ts" }) })), "src/app.ts");
+  assert.equal(chat.dshItemDetail(item("command", { text: "x".repeat(400) })).length, 160, "bounded to 160 characters");
+});
+
+test("a sent message splits back into its text and its attachments, for cards and thumbnails", () => {
+  const sent = chat.chatMessageWithAttachments("look at this", [
+    { name: "image-de5e4a0a.png", image: true, path: "G:\\AppData\\Coding Tools\\chat-attachments\\2026-10-20\\image-de5e4a0a.png" },
+    { name: "notes.txt", text: "a\n```\nb" },
+    { name: "spec.pdf", path: "C:/docs/spec.pdf" },
+  ]);
+  const parts = chat.chatMessageParts(sent);
+  assert.equal(parts.text, "look at this");
+  // Inline text files come first (read before the path lines), then the files sent by path, in order.
+  assert.deepEqual(plain(parts.attachments), [
+    { image: false, name: "notes.txt" },
+    { image: true, name: "image-de5e4a0a.png", path: "G:\\AppData\\Coding Tools\\chat-attachments\\2026-10-20\\image-de5e4a0a.png" },
+    { image: false, name: "spec.pdf", path: "C:/docs/spec.pdf" },
+  ]);
+  assert.deepEqual(plain(chat.chatMessageParts("Attached image: C:\\a.png")), { text: "", attachments: [{ image: true, name: "a.png", path: "C:\\a.png" }] });
+  assert.deepEqual(plain(chat.chatMessageParts("I said Attached image: inline")), { text: "I said Attached image: inline", attachments: [] }, "only a line of its own");
+});
+
+test("a DeepSeek turn's live heading, Think line and durations read as DeepSeek Harness's", () => {
+  const item = (kind, extra = {}) => ({ id: `${kind}${Math.random()}`, kind, status: "completed", text: "", ...extra });
+  assert.equal(chat.dshLiveTitle([item("reasoning", { text: "x" }), item("command", { status: "running", text: "npm test" })]).label, "Running commands · npm test");
+  assert.equal(chat.dshLiveTitle([item("command"), item("reasoning", { text: "First idea.\n\n**Second** idea" })]).label,
+    "Analyzing the request · Second idea", "no call running: the latest thought's last paragraph, ** dropped");
+  // ReasoningRow.tsx: settled, the first line; streaming, the newest completed paragraph's first line.
+  assert.equal(chat.dshThinkSummary("**Checking health**\nmore", false), "Checking health");
+  assert.equal(chat.dshThinkSummary("Let me check health.\nok\n\nNow the configs\nstill typing", true), "Now the configs");
+  assert.equal(chat.dshThinkSummary("Still on the first line", true), "", "nothing until a line completes");
+  // formatRunDuration: "4s", "1m 4s", "1h 0m 4s", never under a second.
+  assert.equal(chat.dshDuration(400), "1s");
+  assert.equal(chat.dshDuration(64_000), "1m 4s");
+  assert.equal(chat.dshDuration(3_604_000), "1h 0m 4s");
+  // process-groups.ts: thinking and calls run together; a reply or a steered message stands alone.
+  const segments = chat.dshSegments([item("reasoning"), item("command"), item("message"), item("edit"), item("steer"), item("tool")]);
+  assert.deepEqual(plain(segments.map((segment) => segment.kind === "group" ? `group:${segment.items.length}` : segment.item.kind)),
+    ["group:2", "message", "group:1", "steer", "group:1"]);
 });
 
 test("the stats line counts the latest turn and the failed or stopped attempts right before it, on every model they used", () => {

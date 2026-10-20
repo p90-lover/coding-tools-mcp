@@ -1967,6 +1967,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
                 revealFile={(file) => {
                   void window.codexWebLauncher?.revealFile?.(file).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
                 }}
+                attachmentPreview={(file) => window.codexWebLauncher?.attachmentPreview?.(file) ?? Promise.reject(new Error("Previews show in the desktop app"))}
                 structure={selectedRun && chatTaskId && selectedRun.project_id === chatTaskId ? <AgentOrchestratorCanvas key={`chat-${selectedRun.id}`}
                   nodes={visibleNodes} levels={aoLevels(selectedRun).map(level => level.filter(node => visibleNodes.includes(node)))}
                   selectedId="" busy={Boolean(busy)} describe={describeNode}

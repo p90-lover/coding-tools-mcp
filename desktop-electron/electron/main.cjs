@@ -53,7 +53,7 @@ const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs")
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createGuiUpdateController, guiShellHash } = require("./gui-update.cjs");
 const { combineUpdateControllers, createAppUpdateController, createAutoInstaller, sweepUpdateLeftovers, waitForUpdateApply } = require("./app-update.cjs");
-const { saveChatAttachment } = require("./chat-attachments.cjs");
+const { readImagePreview, saveChatAttachment } = require("./chat-attachments.cjs");
 const { useNativeUpdateTransport } = require("./update.cjs");
 const {
   providerNetworkReady,
@@ -1565,6 +1565,13 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:save-attachment", async (event, input) => {
     assertFocusedMainWindow(event, false);
     return { path: await saveChatAttachment(path.join(app.getPath("userData"), "chat-attachments"), input) };
+  });
+
+  // An attached image's thumbnail in a sent message, as Claude Code shows one (chat-attachments.cjs:
+  // an image file up to 20 MB, read only).
+  handle("launcher:attachment-preview", async (event, file) => {
+    assertFocusedMainWindow(event, false);
+    return readImagePreview(file);
   });
 
   // Shows an attached file in the system file manager (its card in the chat box). Only an existing

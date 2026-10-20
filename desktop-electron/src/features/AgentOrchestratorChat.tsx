@@ -9,12 +9,13 @@ import { ChatBranchBar } from "./ChatBranchBar";
 import { ChatContextMeter } from "./ChatContextMeter";
 import { ChatPet } from "./ChatPet";
 import { ChatTurnStats } from "./ChatTurnStats";
+import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, chatAcceptsMessage, chatDuration, chatList, chatMessageWithAttachments, chatRunOpen,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
-  chatStatsSpan, dshActivityTitle, isDeepSeekModel, petMood, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
+  chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
   activitySummary, groupTimeline, tidyTimeline,
 } from "./ao-chat";
 
@@ -86,11 +87,10 @@ function stepTone(step: ChatStep): string {
  * "**Inspecting the register route**") as one progress line, the rest a click away.
  */
 function ReasoningItem({ item }: { item: ChatLiveItem }) {
-  const dsh = useContext(DshStyle);
   const lines = item.text.trim().split(/\r?\n/);
   const running = item.status === "running";
-  if (!lines[0]) return <span className="cx-live-label">{dsh ? "Think" : running ? "Thinking…" : "Thought"}</span>;
-  const label = dsh ? "Think" : running ? "Thinking" : "Thought";
+  if (!lines[0]) return <span className="cx-live-label">{running ? "Thinking…" : "Thought"}</span>;
+  const label = running ? "Thinking" : "Thought";
   // Live reasoning arrives as its newest part, so it headlines the current thought, not the first.
   const current = running ? lines.filter((line) => line.trim()).at(-1) ?? lines[0] : lines[0];
   const headline = current.replace(/^\s*\*\*(.+?)\*\*\s*$/, "$1").replace(/[*_`]/g, "").trim();
@@ -124,8 +124,7 @@ function toolTone(status: string): "ok" | "failed" | "running" {
 /** A tool call as Claude Code shows it: a dot, its name and one line, opening on what it ran and got back. */
 function ToolItem({ item }: { item: ChatLiveItem }) {
   const tone = toolTone(item.status);
-  const dsh = useContext(DshStyle);
-  const name = item.kind === "command" ? (dsh ? "Bash" : tone === "running" ? "Running" : "Ran") : item.label ?? item.kind.replace(/_/g, " ");
+  const name = item.kind === "command" ? (tone === "running" ? "Running" : "Ran") : item.label ?? item.kind.replace(/_/g, " ");
   const head = <><span className="cx-tool-dot" aria-hidden="true" /><span className="cx-live-label">{name}</span>
     <span className="cx-live-text">{toolHeadline(item)}</span>{item.count && item.count > 1 ? <span className="cx-tool-count">×{item.count}</span> : null}</>;
   const opens = item.kind === "command" || item.input || item.output;
@@ -153,8 +152,7 @@ function EditItem({ item }: { item: ChatLiveItem }) {
   const tone = toolTone(item.status);
   const additions = files.reduce((sum, file) => sum + file.additions, 0);
   const deletions = files.reduce((sum, file) => sum + file.deletions, 0);
-  const dsh = useContext(DshStyle);
-  const head = <><span className="cx-tool-dot" aria-hidden="true" /><span className="cx-live-label">{dsh ? "Edit" : item.label ?? "Edited"}</span>
+  const head = <><span className="cx-tool-dot" aria-hidden="true" /><span className="cx-live-label">{item.label ?? "Edited"}</span>
     <span className="cx-live-text" title={files.map((file) => file.path).join("\n")}>{files.length === 1 ? fileName(files[0].path) : `${files.length} files`}</span>
     <DiffCount additions={additions} deletions={deletions} /></>;
   if (!files.some((file) => file.diff)) return <div className={`cx-tool tone-${tone}`}><div className="cx-tool-row">{head}</div></div>;
@@ -189,12 +187,6 @@ export function workSummary(items: ChatLiveItem[]): { text: string; additions: n
 
 /** Compact activity: runs of tool calls and thinking fold into one line each (the chat's toggle). */
 export const CompactActivity = createContext(true);
-/**
- * A turn on a DeepSeek model shows as DeepSeek Harness (dsh) shows one: "Think" rows, "Bash" and
- * "Edit" rows, groups headed by the kind of work, "Deep diving for 12s" while it runs and
- * "Completed" once done. Set per turn (its model), so other models keep their own look.
- */
-export const DshStyle = createContext(false);
 export const COMPACT_ACTIVITY_KEY = "coding-tools:ao:compact-activity";
 
 /** A row redraws only when what it shows changed: a poll rebuilds every item object each second. */
@@ -222,16 +214,11 @@ function LiveRowView({ item }: { item: ChatLiveItem }) {
 function ActivityGroup({ items, live }: { items: ChatLiveItem[]; live: boolean }) {
   const [open, setOpen] = useState(false);
   const latest = items[items.length - 1];
-  const dsh = useContext(DshStyle);
   return <div className={`cx-group${live ? " is-live" : ""}`}>
     <button type="button" className="cx-activity-head" aria-expanded={open} onClick={() => setOpen(!open)}>
       <Icon name="chevron" width="11" height="11" className={open ? "is-open" : undefined} />
-      {/* dsh heads a group by its kind of work and no counts: "Running commands · npm test" live,
-          "Read files, searched code and ran commands" once done. */}
-      {dsh ? <><span className={`cx-group-verb${live ? " cx-shimmer" : ""}`}>{dshActivityTitle(items, live)}</span>
-        {live && latest && latest.kind !== "reasoning" ? <span className="cx-group-text">{toolHeadline(latest)}</span> : null}</>
-        : <><span className={`cx-group-verb${live ? " cx-shimmer" : ""}`}>{live ? "Working" : "Explored"}</span>
-          <span className="cx-group-text">{activitySummary(items)}</span></>}
+      <span className={`cx-group-verb${live ? " cx-shimmer" : ""}`}>{live ? "Working" : "Explored"}</span>
+      <span className="cx-group-text">{activitySummary(items)}</span>
     </button>
     {open ? <ol className="cx-live">{items.map((item) => <LiveRow key={item.id} item={item} />)}</ol>
       : live && latest ? <ol className="cx-live cx-group-now"><LiveRow item={latest} /></ol> : null}
@@ -319,13 +306,11 @@ function AnswerWork({ step, runId, expanded, loadWork }: { step: ChatStep; runId
   const [chosen, setChosen] = useState<boolean | null>(null);
   const open = chosen ?? expanded;
   const work = useStepWork(step, runId, open, loadWork);
-  const dsh = useContext(DshStyle);
   if (!work?.length && !step.hasWork) return null;
   const summary = workSummary(work ?? []);
   return <div className="cx-work">
-    {/* dsh folds a finished turn under "Completed", the answer showing below it. */}
     <button type="button" className="cx-work-head" aria-expanded={open} onClick={() => setChosen(!open)}>
-      <span>{dsh ? "Completed" : summary.text}</span>
+      <span>{summary.text}</span>
       {summary.additions || summary.deletions ? <DiffCount additions={summary.additions} deletions={summary.deletions} /> : null}
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
     </button>
@@ -355,27 +340,25 @@ export function sameWork(prev: WorkGroupProps, next: WorkGroupProps): boolean {
 }
 
 const WorkGroup = memo(WorkGroupView, sameWork);
+/** A DeepSeek turn's work (DshTranscript), skipped on re-render by the same check as WorkGroup. */
+const DshWork = memo(DshTurnWork, (prev: DshTurnWorkProps, next: DshTurnWorkProps) => prev.live === next.live
+  && prev.useWork === next.useWork && sameWork({ turn: prev.turn, expanded: prev.expanded }, { turn: next.turn, expanded: next.expanded }));
 
 function WorkGroupView({ turn, idle = false, expanded = false, loadWork }: WorkGroupProps) {
   const working = turn.steps.find((step) => step.working);
   // Live and failed work opens by itself, and finished work too when the chat shows its details
   // (single-model chats by default); a toggle on the turn itself holds over both.
   const [chosen, setChosen] = useState<boolean | null>(null);
-  const dsh = useContext(DshStyle);
   const open = chosen ?? (expanded || Boolean(working) || turn.steps.some((step) => step.error));
   if (!turn.steps.length) {
     if (turn.final) return <AnswerWork step={turn.final} runId={turn.runId} expanded={expanded} loadWork={loadWork} />;
     return !idle && (turn.status === "running" || turn.status === "queued")
-      ? <div className="cx-work is-live"><span className="cx-shimmer">{dsh ? "Deep diving ···" : "Starting…"}</span></div> : null;
+      ? <div className="cx-work is-live"><span className="cx-shimmer">Starting…</span></div> : null;
   }
-  // dsh says "Deep diving for 12s ···" while the model works, and how the turn ended once it has.
   const label = working
-    ? dsh && !working.working!.stalled
-      ? <span className="cx-dsh-diving">Deep diving{turn.startedAtMs ? <> for <Elapsed since={turn.startedAtMs} /></> : null} ···</span>
-      : <>{working.working!.stalled ? "May be stuck" : "Working"}{turn.startedAtMs ? <> for <Elapsed since={turn.startedAtMs} /></> : null}
-        {` · ${working.name}${working.working!.activity ? ` — ${working.working!.activity}` : ""}`}</>
-    : dsh ? (turn.steps.some((step) => step.error) ? "Failed" : turn.status === "stopped" ? "Stopped" : "Completed")
-      : `Worked · ${turn.steps.length} ${turn.steps.length === 1 ? "step" : "steps"}`;
+    ? <>{working.working!.stalled ? "May be stuck" : "Working"}{turn.startedAtMs ? <> for <Elapsed since={turn.startedAtMs} /></> : null}
+      {` · ${working.name}${working.working!.activity ? ` — ${working.working!.activity}` : ""}`}</>
+    : `Worked · ${turn.steps.length} ${turn.steps.length === 1 ? "step" : "steps"}`;
   return <div className={`cx-work${working ? " is-live" : ""}${working?.working?.stalled ? " is-stalled" : ""}`}>
     <button type="button" className="cx-work-head" aria-expanded={open} onClick={() => setChosen(!open)}>
       <span className={working ? "cx-shimmer" : undefined}>{label}</span>
@@ -383,6 +366,62 @@ function WorkGroupView({ turn, idle = false, expanded = false, loadWork }: WorkG
     </button>
     {open ? <ol className="cx-steps">{turn.steps.map((step) => <StepRow key={step.key} step={step} runId={turn.runId} loadWork={loadWork} />)}</ol> : null}
   </div>;
+}
+
+/** Reads an attached image for its thumbnail and shows a file in its folder (the desktop app's). */
+type AttachmentAccess = { preview?: (path: string) => Promise<string>; reveal?: (path: string) => void };
+const Attachments = createContext<AttachmentAccess>({});
+/** Thumbnails already read, by path: a poll re-renders every message, and each image is read once. */
+const PREVIEWS = new Map<string, Promise<string>>();
+
+function SentImage({ item, onOpen }: { item: ChatSentAttachment; onOpen: (url: string) => void }) {
+  const { preview } = useContext(Attachments);
+  const [url, setUrl] = useState<string | null>(null);
+  const [missing, setMissing] = useState(false);
+  useEffect(() => {
+    if (!item.path || !preview) return;
+    let current = true;
+    let read = PREVIEWS.get(item.path);
+    if (!read) { read = preview(item.path); PREVIEWS.set(item.path, read); }
+    read.then((value) => { if (current) setUrl(value); }, () => { PREVIEWS.delete(item.path!); if (current) setMissing(true); });
+    return () => { current = false; };
+  }, [item.path, preview]);
+  return <button type="button" className={`cx-sent-image${missing ? " is-missing" : ""}`} title={item.path} disabled={!url} onClick={() => url && onOpen(url)}>
+    {url ? <img src={url} alt={item.name} /> : <span>{missing ? "Image not found" : item.name}</span>}
+  </button>;
+}
+
+/**
+ * A message the person sent, as Claude Code shows one: its attachments above the bubble (images as
+ * thumbnails that open full size, other files as cards that show them in their folder), and in
+ * the bubble only what they typed.
+ */
+function SentMessage({ text }: { text: string }) {
+  const { reveal } = useContext(Attachments);
+  const [open, setOpen] = useState<string | null>(null);
+  const parts = chatMessageParts(text);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: KeyboardEvent) => { if (event.key === "Escape") setOpen(null); };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [open]);
+  return <>
+    {parts.attachments.length ? <div className="cx-sent-attachments">
+      {parts.attachments.map((item, index) => item.image && item.path
+        ? <SentImage key={`${item.path}:${index}`} item={item} onOpen={setOpen} />
+        : <button key={`${item.name}:${index}`} type="button" className="cx-sent-file" disabled={!item.path || !reveal}
+          title={item.path ? `${item.path}\nClick to show it in its folder` : `${item.name} (sent inline)`} onClick={() => item.path && reveal?.(item.path)}>
+          <span className="cx-sent-file-icon" aria-hidden="true">{/\.pdf$/i.test(item.name) ? "PDF" : "TXT"}</span>
+          <span className="cx-sent-file-name">{item.name}</span>
+        </button>)}
+    </div> : null}
+    {parts.text ? <div className="cx-bubble"><p>{parts.text}</p></div> : null}
+    {open ? <div className="cx-lightbox" role="dialog" aria-label="Image preview" onClick={() => setOpen(null)}>
+      <img src={open} alt="" onClick={(event) => event.stopPropagation()} />
+      <button type="button" className="cx-lightbox-close" aria-label="Close image preview" onClick={() => setOpen(null)}>×</button>
+    </div> : null}
+  </>;
 }
 
 function MessageActions({ text, children }: { text: string; children?: ReactNode }) {
@@ -408,7 +447,7 @@ function GoalGlyph({ name }: { name: "target" | "trash" | "play" | "pause" | "ex
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
-  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject, projectBranch: branch, steer,
+  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject, projectBranch: branch, steer,
   pendingMessage, pendingTitle, pendingCreation = false, commands, loadWork,
 }: {
   /** A finished card's thinking and tool calls, read back from its AO session (turn_timeline). */
@@ -463,6 +502,8 @@ export function AgentOrchestratorChat({
   saveAttachment?: (input: { name: string; type: string; bytes: Uint8Array }) => Promise<{ path: string }>;
   /** Shows an attached file in the system file manager. */
   revealFile?: (path: string) => void;
+  /** An attached image as a data: URL, for its thumbnail in a sent message. */
+  attachmentPreview?: (path: string) => Promise<string>;
   /** A new chat's starting draft ("Continue in project"); taken once, then onSeedUsed clears it. */
   seed?: { key: string; title: string; text: string; context?: string[] };
   onSeedUsed?: () => void;
@@ -1067,11 +1108,21 @@ export function AgentOrchestratorChat({
 
   // The conversation, kept while only the composer changes: each keystroke re-rendered every turn,
   // and a long running turn's hundreds of rows with it, which made typing lag.
+  const attachmentAccess = useMemo(() => ({ preview: attachmentPreview, reveal: revealFile }), [attachmentPreview, revealFile]);
+  // One work reader per run for DeepSeek turns, kept across renders so a finished turn stays memoized.
+  const dshReaders = useMemo(() => new Map<string, UseStepWork>(), [loadWork]);
   const threadTurns = useMemo(() => turns.map((turn, turnIndex) => {
+    // A turn on a DeepSeek model shows as DeepSeek Harness shows one (DshTranscript); others as Claude Code.
     const dsh = isDeepSeekModel(chatRuns.find((run) => run.id === turn.runId)?.nodes.find((node) => node.role === "planner")?.route?.model);
-    return <DshStyle.Provider key={turn.key} value={dsh}><article className={`cx-turn${dsh ? " is-dsh" : ""}`}>
+    let readWork = dshReaders.get(turn.runId);
+    if (dsh && !readWork) {
+      readWork = (step, wanted) => useStepWork(step, turn.runId, wanted, loadWork);
+      dshReaders.set(turn.runId, readWork);
+    }
+    const idle = notStarted && turn.runId === latest?.id;
+    return <article key={turn.key} className={`cx-turn${dsh ? " is-dsh" : ""}`}>
               {turn.user ? <div className="cx-user">
-                <div className="cx-bubble"><p>{turn.user.text}</p></div>
+                <SentMessage text={turn.user.text} />
                 <MessageActions text={turn.user.text}>
                   {thread ? <button type="button" title="Fork from here" aria-label="Fork from this message" onClick={() => thread.fork(turn.messageIndex ?? turnIndex)}>⑂</button> : null}
                   {thread?.rewind ? <button type="button" title="Rewind: edit this message in a new chat" aria-label="Rewind to this message" onClick={() => thread.rewind?.(turn.messageIndex ?? turnIndex)}>↶</button> : null}
@@ -1084,16 +1135,20 @@ export function AgentOrchestratorChat({
                   they were sent; once it is done, here under the turn's message. */}
               {turn.user?.steers?.length && !turn.steps.some((step) => step.working?.timeline?.some((item) => item.kind === "steer"))
                 ? turn.user.steers.map((steer, index) => <div key={`steer:${index}`} className="cx-user cx-steer">
-                  <div className="cx-bubble"><p>{steer.text}</p></div>
+                  <SentMessage text={steer.text} />
                   <span className="cx-stamp">Steered · {steer.stamp} UTC</span>
                 </div>) : null}
-              <WorkGroup key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} idle={notStarted && turn.runId === latest?.id} expanded={showWork} loadWork={loadWork} />
-              {turn.final ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`}>
-                <div className="cx-answer-meta">
-                  <span>{turn.final.name}</span>
-                  {turn.final.verdict ? <span className={`cx-verdict is-${turn.final.verdict.toLowerCase()}`}>{turn.final.verdict}</span> : null}
-                  {turn.final.detail ? <span className="cx-answer-detail">{turn.final.detail}</span> : null}
-                </div>
+              {dsh && readWork
+                ? <DshWork key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} live={!idle && liveTurn(turn)} expanded={showWork} useWork={readWork} />
+                : <WorkGroup key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} idle={idle} expanded={showWork} loadWork={loadWork} />}
+              {turn.final && !(dsh && turn.final.working) ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`}>
+                {/* DeepSeek Harness names no agent above its reply; a team's verdict still shows. */}
+                {dsh ? (turn.final.verdict ? <div className="cx-answer-meta"><span className={`cx-verdict is-${turn.final.verdict.toLowerCase()}`}>{turn.final.verdict}</span></div> : null)
+                  : <div className="cx-answer-meta">
+                    <span>{turn.final.name}</span>
+                    {turn.final.verdict ? <span className={`cx-verdict is-${turn.final.verdict.toLowerCase()}`}>{turn.final.verdict}</span> : null}
+                    {turn.final.detail ? <span className="cx-answer-detail">{turn.final.detail}</span> : null}
+                  </div>}
                 <ChatMarkdown text={turn.final.text ?? ""} />
                 <MessageActions text={turn.final.text ?? ""}>
                   {restart && turn.runId && turn.runId === latest?.id && !runOpen ? <button type="button" title="Retry" aria-label="Retry this mission" disabled={busy} onClick={() => restart(turn.runId)}>↻</button> : null}
@@ -1101,12 +1156,12 @@ export function AgentOrchestratorChat({
               </div> : null}
               {!turn.final && turn.status === "done" && !turn.steps.some((step) => step.text || step.error)
                 ? <p className="cx-note">Finished without an answer.</p> : null}
-              {turn.status === "stopped" ? <p className="cx-note">Stopped</p> : null}
+              {turn.status === "stopped" && !dsh ? <p className="cx-note">Stopped</p> : null}
               {turn.solo ? <p className="cx-note">Answered by the orchestrator alone; no workers ran.</p> : null}
-            </article></DshStyle.Provider>;
-  }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, restart, runOpen, busy]);
+            </article>;
+  }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy]);
 
-  return (<CompactActivity.Provider value={compactActivity}>
+  return (<Attachments.Provider value={attachmentAccess}><CompactActivity.Provider value={compactActivity}>
     <div className={`cx-chat${showStructure && structure ? " has-structure" : ""}`}>
       <section className="cx-thread" aria-label={chat?.title || CHAT_DEFAULT_TITLE}>
         <header className="cx-thread-head">
@@ -1343,7 +1398,10 @@ export function AgentOrchestratorChat({
                 {item.preview ? <img src={item.preview} alt={item.name} /> : <span aria-hidden="true">{item.image ? "🖼" : "📄"}</span>}
                 <span className="cx-attachment-name">{item.name}</span>
               </button>
-              <button type="button" className="cx-attachment-remove" aria-label={`Remove ${item.name}`} onClick={() => setAttachments((current) => current.filter((_, at) => at !== index))}>×</button>
+              <button type="button" className="cx-attachment-remove" aria-label={`Remove ${item.name}`} data-tip={`Remove ${item.name}`}
+                onClick={() => setAttachments((current) => current.filter((_, at) => at !== index))}>
+                <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 2l6 6M8 2l-6 6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /></svg>
+              </button>
             </span>)}
             {attachNote ? <span className="cx-attach-note" role="status">{attachNote}</span> : null}
           </div> : null}
@@ -1405,5 +1463,5 @@ export function AgentOrchestratorChat({
       {workbench && selectedTaskId ? <ChatWorkbench sessions={agentSessions} workspaceId={projectId} tab={workbench} onTab={setWorkbench} onClose={() => setWorkbench(null)} /> : null}
       <ChatMenu menu={menu} onClose={() => setMenu(null)} />
     </div>
-  </CompactActivity.Provider>);
+  </CompactActivity.Provider></Attachments.Provider>);
 }
