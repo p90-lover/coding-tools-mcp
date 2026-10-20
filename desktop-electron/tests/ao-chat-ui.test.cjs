@@ -33,6 +33,8 @@ const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "../icons": { 
   // The branch bar reads git asynchronously and renders nothing until then, as here; composer
   // controls and approval cards render only when a composer or an approval is passed.
   "./ChatBranchBar": { ChatBranchBar: () => null },
+  // Annotations are the real module: with no transcript mounted (server render) the selection bar draws nothing.
+  "./ChatAnnotations": load("ChatAnnotations.tsx", { "./ao-chat": chat }),
   "./AgentOrchestratorComposerControls": { AgentOrchestratorComposerControls: () => null },
   "./AgentOrchestratorApproval": { AgentOrchestratorApproval: () => null },
   // The side panel opens on demand; the chat only needs its auto-open hook to exist here.
@@ -374,4 +376,11 @@ test("edits on the Subagents page survive leaving the page and coming back befor
   assert.deepEqual(page.keptDraft(null, null, saved), saved, "the first load");
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/SubagentsSurface.tsx"), "utf8");
   assert.match(source, /setDraft\(current => keptDraft\(current, previous, config\)\)/, "the page's reload goes through it");
+});
+
+test("an answer citing an annotation (Codex's :codex-annotation directive) shows its number as a badge, never the raw directive", () => {
+  const html = renderToStaticMarkup(React.createElement(markdown.ChatMarkdown, { text: 'Both gates matter :codex-annotation{index="1"} and the installer waits :codex-annotation{index="2"}.' }));
+  assert.match(html, /<span class="cx-annotation-ref" title="Your annotation 1">1<\/span>/);
+  assert.match(html, /<span class="cx-annotation-ref" title="Your annotation 2">2<\/span>/);
+  assert.doesNotMatch(html, /codex-annotation\{/);
 });

@@ -60,6 +60,24 @@ test("a sent message splits back into its text and its attachments, for cards an
   assert.deepEqual(plain(chat.chatMessageParts("I said Attached image: inline")), { text: "I said Attached image: inline", attachments: [] }, "only a line of its own");
 });
 
+test("annotations go out in Codex's format and come back as a chip, with the message and attachments intact", () => {
+  const annotations = [{ text: "checking the overlap and merge gates", comment: "why both gates?" }, { text: "rebuild the installer", comment: "" }];
+  const sent = chat.chatMessageWithAnnotations(chat.chatMessageWithAttachments("look at these", [{ name: "a.png", image: true, path: "C:\\a.png" }]), annotations);
+  assert.match(sent, /^# Response annotations:\n/, "Codex's heading leads, as its prompt builder writes it");
+  assert.match(sent, /`:codex-annotation\{index="N"\}`/, "the agent is asked to cite each one by number");
+  const block = /<response-annotations>\n(.*)\n<\/response-annotations>/.exec(sent);
+  assert.deepEqual(JSON.parse(block[1]), [
+    { text: "checking the overlap and merge gates", annotation: "why both gates?", source: "chat-response" },
+    { text: "rebuild the installer", annotation: "", source: "chat-response" },
+  ]);
+  const parts = plain(chat.chatMessageParts(sent));
+  assert.equal(parts.text, "look at these");
+  assert.deepEqual(parts.annotations, annotations);
+  assert.deepEqual(parts.attachments, [{ image: true, name: "a.png", path: "C:\\a.png" }]);
+  assert.equal(chat.chatMessageWithAnnotations("plain", []), "plain", "no annotations, no block");
+  assert.equal(chat.chatMessageParts("# Response annotations:\nnot ours").text, "# Response annotations:\nnot ours", "text that only looks like one stays as written");
+});
+
 test("a DeepSeek turn's live heading, Think line and durations read as DeepSeek Harness's", () => {
   const item = (kind, extra = {}) => ({ id: `${kind}${Math.random()}`, kind, status: "completed", text: "", ...extra });
   assert.equal(chat.dshLiveTitle([item("reasoning", { text: "x" }), item("command", { status: "running", text: "npm test" })]).label, "Running commands · npm test");

@@ -9,6 +9,7 @@ function Inline({ parts }: { parts: MdInline[] }) {
       case "strong": return <strong key={index}><Inline parts={part.children} /></strong>;
       case "em": return <em key={index}><Inline parts={part.children} /></em>;
       case "link": return <a key={index} href={part.href} target="_blank" rel="noreferrer noopener">{part.text}</a>;
+      case "annotation": return <span key={index} className="cx-annotation-ref" title={`Your annotation ${part.index}`}>{part.index}</span>;
       default: return <span key={index}>{part.text}</span>;
     }
   })}</>;

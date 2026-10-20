@@ -7,7 +7,9 @@ export type MdInline =
   | { kind: "code"; text: string }
   | { kind: "strong"; children: MdInline[] }
   | { kind: "em"; children: MdInline[] }
-  | { kind: "link"; text: string; href: string };
+  | { kind: "link"; text: string; href: string }
+  // An answer citing the person's Nth annotation (:codex-annotation{index="N"}, as Codex asks for).
+  | { kind: "annotation"; index: number };
 
 export type MdBlock =
   | { kind: "heading"; level: number; inline: MdInline[] }
@@ -37,6 +39,8 @@ export function parseInline(source: string): MdInline[] {
   let index = 0;
   while (index < source.length) {
     const rest = source.slice(index);
+    const cite = /^:codex-annotation\{index="?(\d{1,3})"?\}/.exec(rest);
+    if (cite) { flush(); out.push({ kind: "annotation", index: Number(cite[1]) }); index += cite[0].length; continue; }
     const code = /^(`+)([\s\S]*?[^`])\1(?!`)/.exec(rest);
     if (code) { flush(); out.push({ kind: "code", text: code[2].replace(/^ (.*) $/, "$1") }); index += code[0].length; continue; }
     const link = /^\[([^\]\n]+)\]\(([^)\s]+)\)/.exec(rest);
