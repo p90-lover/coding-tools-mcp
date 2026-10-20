@@ -39,7 +39,8 @@ const defaultWindow = (route: AoRoute, capability: AoModelCapabilities | undefin
  * startEffort), so a message sent before the model list loads gets it too.
  */
 const startEffort = (route: AoRoute, efforts: readonly string[] | undefined) => {
-  const viaCpa = route.model.startsWith("cpa/") || route.harness_id === NATIVE_HARNESS && !isWebModel(route.model);
+  // agy gets the bare model name (it sends no tools for a suffixed one) and picks its own thinking level.
+  const viaCpa = route.harness_id !== "ao:agy" && (route.model.startsWith("cpa/") || route.harness_id === NATIVE_HARNESS && !isWebModel(route.model));
   if (!viaCpa || route.effort || !efforts?.length || efforts.includes("auto") || isWebModel(route.model) || ownEffort(route.model)) return null;
   const rank = (effort: string) => { const index = (EFFORTS as readonly string[]).indexOf(effort); return index < 0 ? EFFORTS.length : index; };
   const real = efforts.filter(effort => effort !== "none").sort((a, b) => rank(a) - rank(b));
