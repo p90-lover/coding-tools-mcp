@@ -468,6 +468,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const copy = words[language];
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [workspaceReady, setWorkspaceReady] = useState(false);
+  // The project whose board and runs were last read in full: until it is the open one, the chat
+  // list is still loading, not empty.
+  const [loadedWorkspace, setLoadedWorkspace] = useState("");
   const [workspaceId, setWorkspaceId] = useState(() => { try { return localStorage.getItem("coding-tools:ao:workspace") || ""; } catch { return ""; } });
   // One project tree switches between the conversation and the selected graph above its workspace board.
   const [view, setView] = useState<"chat" | "overview" | "board">("chat");
@@ -841,14 +844,19 @@ export function AgentOrchestratorSurface({ language, setError }: {
     setSelectedRunId("");
     setTeam(null); setSavedTeams([]); setComposerTeamId(""); setMissionTeamId(""); setDraftTeam(null); setInspectedId(""); setTaskLifecycle([]); setConfigStatus("");
     void (async () => {
+      // Both reads at once: one after the other, behind every poll a switch sets off, left the new
+      // project's list empty ("No chats yet") for 2-6 s.
+      const [boardRead, runsRead] = await Promise.allSettled([
+        moduleCall("board", { workspaceId }) as unknown as Promise<Board>, moduleCall("runs", { workspaceId })]);
       try {
-        const current = await moduleCall("board", { workspaceId }) as unknown as Board;
-        if (live) { boardWorkspace.current = workspaceId; setBoard(current); }
+        if (boardRead.status === "rejected") throw boardRead.reason;
+        if (live) { boardWorkspace.current = workspaceId; setBoard(boardRead.value); }
       } catch (cause) {
         if (live) setError(cause instanceof Error ? cause.message : String(cause));
       }
       try {
-        const current = await moduleCall("runs", { workspaceId });
+        if (runsRead.status === "rejected") throw runsRead.reason;
+        const current = runsRead.value;
         if (live) {
           const runs = Array.isArray(current.runs) ? current.runs as AoMission[] : [];
           setTaskLifecycle((current.task_lifecycle as TaskLifecycleView[]) || []);
@@ -864,6 +872,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
       } catch (cause) {
         if (live) setError(cause instanceof Error ? cause.message : String(cause));
       }
+      if (live) setLoadedWorkspace(workspaceId);
     })();
     return () => { live = false; };
   }, [workspaceId, workspaceReady, setError]);
@@ -1922,7 +1931,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
           editProject: (id) => setProjectEdit({ id, step: "edit" }),
           removeProject: (id) => setProjectEdit({ id, step: "remove" }),
           selectIn: selectChatIn }}
-        loadProjectChats={loadProjectChats}
+        loadProjectChats={loadProjectChats} chatsLoading={loadedWorkspace !== workspaceId}
         projectRemote={(folder) => window.codexWebLauncher?.projectRemote?.(folder) ?? Promise.resolve(null)}
         projectGit={readProjectGit} />
       <div className="ao-main">

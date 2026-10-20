@@ -99,6 +99,8 @@ export type ThreadListProps = {
   setArchiveDays?: (days: number) => void;
   /** Another project's chats, for a project opened in the list without switching to it (Codex). */
   loadProjectChats?: (workspaceId: string) => Promise<ChatSummary[]>;
+  /** The open project's chats are still being read (just switched to it): `chats` is not yet its list. */
+  chatsLoading?: boolean;
 };
 
 /** An archived chat of any project; `archivedAt` (ms) is when its days started counting. */
@@ -305,6 +307,9 @@ export function ChatThreadList(props: ThreadListProps) {
     const left = previousWorkspace.current;
     previousWorkspace.current = workspaceId;
     if (left === workspaceId) return;
+    // A chat's hover card outlived its row (the row became another project's) and then named the
+    // new project's folder for a chat of the old one.
+    setHover(null);
     const others = new Set(openOthers);
     if (left && !collapsed.has(left)) others.add(left);
     others.delete(workspaceId);
@@ -614,7 +619,11 @@ export function ChatThreadList(props: ThreadListProps) {
                   {projectChats.length > settings.visible
                     ? <li><button type="button" className="cx-show-more" onClick={() => toggleShowAll()}>{showAll ? "Show less" : "Show more"}</button></li>
                     : null}
-                  {!chats.length ? <li className="cx-thread-empty">No chats yet</li> : null}
+                  {/* Just switched here: the chats this list read while the project was open in place
+                      stand in until its own load lands, and an empty list says it is loading, not "No chats yet". */}
+                  {!chats.length && props.chatsLoading
+                    ? otherChats[item.id]?.length ? otherRows(item.id) : <li className="cx-thread-empty">Loading chats…</li>
+                    : !chats.length ? <li className="cx-thread-empty">No chats yet</li> : null}
                 </ul> : null}
               </li>;
             })}

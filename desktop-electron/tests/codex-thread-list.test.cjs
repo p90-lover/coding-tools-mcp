@@ -119,6 +119,33 @@ test("another open project lists its chats; opening one switches to its project 
   delete stored["coding-tools:ao:open-projects"];
 });
 
+test("right after switching to a project, its list loads instead of saying No chats yet, and a chat's hover card closes", async () => {
+  const { props } = fixture();
+  stored["coding-tools:ao:open-projects"] = JSON.stringify(["b"]);
+  const list = mount("ChatThreadList.tsx", { ...props, loadProjectChats: async () => [
+    { taskId: "b1", title: "Beta chat", status: "done", runIds: ["rb"], latestRunId: "rb" }] }, { effects: true });
+  list.render();
+  await new Promise((resolve) => setImmediate(resolve));
+  // A chat of the project being left has its hover card open (its timer fired): the list's fourth
+  // state is the hover (collapsed, renaming, menu, hover).
+  const HOVER_STATE = 3;
+  assert.equal(list.states[HOVER_STATE], null);
+  list.states[HOVER_STATE] = { chat: props.chats[0], top: 0, left: 0 };
+  assert.ok(walk(list.render()).some((element) => element.type === "FloatingLayer" && element.props.className === "cx-hover-card"), "the card shows before the switch");
+  // Switched to Beta: its board and runs are still being read.
+  let view = list.render({ workspaceId: "b", chats: [], chatsLoading: true });
+  view = list.render({ workspaceId: "b", chats: [], chatsLoading: true });
+  assert.doesNotMatch(text(view), /No chats yet/);
+  assert.ok(walk(view).some((element) => element.props?.className === "cx-thread-select" && text(element).includes("Beta chat")),
+    "the chats read while Beta was open in place stand in");
+  assert.ok(!walk(view).some((element) => element.type === "FloatingLayer" && element.props.className === "cx-hover-card"), "the old chat's hover card is gone");
+  // A project never opened in place says it is loading; once loaded and empty, No chats yet.
+  const fresh = mount("ChatThreadList.tsx", { ...fixture().props, workspaceId: "b", chats: [], chatsLoading: true });
+  assert.match(text(fresh.render()), /Loading chats…/);
+  assert.match(text(fresh.render({ chatsLoading: false })), /No chats yet/);
+  delete stored["coding-tools:ao:open-projects"];
+});
+
 test("a used chat rises to the top of its project, and its project to the top of Projects (pinned first)", () => {
   const list = compile("ChatThreadList.tsx", (name) => name === "react" ? { useState() {}, useRef() {}, useEffect() {} } : name === "react/jsx-runtime" ? { jsx() {}, jsxs() {} } : name === "./ao-chat" ? chat : {});
   const projects = [{ id: "a" }, { id: "b" }, { id: "c" }];
