@@ -1016,8 +1016,10 @@ test("CPA models go only to agents that can use them through the gateway", async
   });
   // Aider has no gateway launch support: its own models only.
   assert.deepEqual((await workflow.call("models", { harness: "ao:aider" })).models, ["own-model"]);
-  // agy's gateway mode sends no tools for CPA's model names, so it keeps its own models.
-  assert.deepEqual((await workflow.call("models", { harness: "ao:agy" })).models, ["own-model"]);
+  // agy runs CPA models through its gateway mode too: every harness offers every pool model but
+  // WebGPT (an agy with no Google sign-in listed nothing at all and fell back to WebGPT's tiers).
+  assert.deepEqual((await workflow.call("models", { harness: "ao:agy" })).models,
+    ["own-model", "cpa/gpt-5.5", "cpa/gemini-3.8-flash-high", "cpa/gemini-3.1-pro-low"]);
   // Claude Code and opencode offer only CPA models: their own aliases (fable/haiku/opus/sonnet)
   // are neither CPA nor WebGPT. Codex keeps its ChatGPT-account models next to CPA's.
   for (const harness of ["ao:claude-code", "ao:opencode"]) {
