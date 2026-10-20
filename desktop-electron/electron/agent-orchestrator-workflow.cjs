@@ -144,6 +144,7 @@ const GATEWAY_AGENTS = new Set(["claude-code", "codex", "opencode", "agy"]);
 // (accept-edits, auto) and --dangerously-skip-permissions; without one it ran in request-review
 // and stopped at approvals in a terminal nobody saw, so its card never finished.
 const PERMISSION_AGENTS = new Set(["claude-code", "codex", "agy"]);
+const AGY_ASK_REASON = "Antigravity asks for approval in its own terminal, which the chat does not show, so it would wait for good. Choose Approve for me or Full access.";
 // Gateway agents whose own model catalogs are not CPA or WebGPT models; they list only CPA models.
 const CPA_ONLY_AGENTS = new Set(["claude-code", "opencode"]);
 const webModel = (model) => WEB_TIERS.includes(model) || LUNA_TIERS.includes(model);
@@ -362,6 +363,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       || !(profile === ":workspace" && node.route.approval_policy === "on-request" && ["user", "auto_review"].includes(node.route.approvals_reviewer ?? "user")
         || profile === ":danger-full-access" && node.route.approval_policy === "never" && (node.route.approvals_reviewer ?? "user") === "user"))) {
       throw new Error("This adapter cannot honor the saved permission tuple; choose a supported mode explicitly.");
+    }
+    // A saved Ask route (a team template, an older chat) is refused rather than left waiting at an
+    // approval in agy's terminal that nobody sees.
+    if (agent === "agy" && node.route.approval_policy === "on-request" && (node.route.approvals_reviewer ?? "user") === "user") {
+      throw new Error(AGY_ASK_REASON);
     }
     const viaCpa = node.route.model.startsWith(CPA_MODEL_PREFIX) ? node.route.model.slice(CPA_MODEL_PREFIX.length) : null;
     if (viaCpa && !GATEWAY_AGENTS.has(agent)) {
@@ -1421,6 +1427,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
           profiles: [{ id: ":workspace", allowed: agent !== "codex" || adapter.chat === true }, { id: ":danger-full-access", allowed: true }],
           ...(agent === "codex" && !adapter.chat ? { reason: "Workspace presets require the Codex chat driver; TUI inherits unverified sandbox settings." } : {}),
           approval_policies: ["on-request", "never"], approvals_reviewers: ["user", "auto_review"],
+          // agy in its terminal asks there, which no chat or card shows: Ask (accept-edits still asks
+          // before shell commands) would wait for good. Approve for me and Full access run unattended.
+          ...(agent === "agy" && !adapter.chat ? { excluded_modes: [{ profile: ":workspace", policy: "on-request", reviewer: "user", reason: AGY_ASK_REASON }] } : {}),
         } };
       }
     }

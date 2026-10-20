@@ -2512,6 +2512,9 @@ test("permission capabilities use installed AO adapter modes without fabricating
     assert.deepEqual(capability.profiles.map(profile => profile.id), [":workspace", ":danger-full-access"]);
     assert.deepEqual(capability.approval_policies, ["on-request", "never"]);
     assert.deepEqual(capability.approvals_reviewers, ["user", "auto_review"]);
+    // agy in its terminal cannot bring an approval to the chat, so Ask is excluded there.
+    assert.deepEqual((capability.excluded_modes ?? []).map(mode => [mode.profile, mode.policy, mode.reviewer]),
+      harness_id === "ao:agy" ? [[":workspace", "on-request", "user"]] : [], harness_id);
   }
   for (const harness_id of ["ao:opencode", "codex-native"]) {
     const unsupported = await workflow.call("permission_profiles", { workspaceId: "ws-1", route: { harness_id } });
