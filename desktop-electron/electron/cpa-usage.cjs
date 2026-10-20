@@ -29,6 +29,9 @@ const RANGES = Object.freeze({ "24h": DAY_MS, "7d": 7 * DAY_MS, "30d": 30 * DAY_
 const DEFAULT_RANGE = "30d";
 /** A turn's request stats are read again after this; the line polls while the chat is open. */
 const TURN_CACHE_MS = 3_000;
+// A turn's records are read 500 at a time, up to 40 pages (20,000 model requests) per model.
+const TURN_PAGE_SIZE = 500;
+const TURN_RECORD_PAGES = 40;
 
 const count = (value) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.round(value) : 0);
 const money = (value) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0);
@@ -372,6 +375,33 @@ function createCpaUsage({ getConnection, quota = null, fetchImpl = fetch, now = 
    * those of the turn's model since the turn started are this turn's (another chat on the same
    * model at the same moment would be counted too). Cached a few seconds per turn.
    */
+  /**
+   * Every record of `name` since `start`, page by page. One page of 500 capped a long turn's line
+   * at "1000 steps" (500 per model) and undercounted its time and tokens. Stops at a short page or
+   * at a page that brings nothing new, so a helper that ignores `page` is read once, never twice.
+   * Null when the first page cannot be read.
+   */
+  async function turnRecords(target, name, start) {
+    const items = [];
+    const seen = new Set();
+    for (let page = 1; page <= TURN_RECORD_PAGES; page += 1) {
+      const listing = await optional(target, `/cpa-helper/records?${new URLSearchParams({
+        model: name, from: String(Math.floor(start)), page_size: String(TURN_PAGE_SIZE), page: String(page),
+      })}`);
+      if (!Array.isArray(listing?.items)) return page === 1 ? null : items;
+      let fresh = 0;
+      for (const item of listing.items) {
+        const identity = JSON.stringify(item);
+        if (seen.has(identity)) continue;
+        seen.add(identity);
+        items.push(item);
+        fresh += 1;
+      }
+      if (listing.items.length < TURN_PAGE_SIZE || fresh === 0) break;
+    }
+    return items;
+  }
+
   async function turnStats({ model, models, from } = {}) {
     const target = connection();
     const clean = (value) => String(value ?? "").replace(/^cpa\//, "").replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "").trim().slice(0, 200);
@@ -383,10 +413,9 @@ function createCpaUsage({ getConnection, quota = null, fetchImpl = fetch, now = 
     const key = `turn:${names.join("|")}:${start}`;
     const hit = cache.get(key);
     if (hit && now() - hit.at < TURN_CACHE_MS) return hit.value;
-    const listings = await Promise.all(names.map((name) => optional(target,
-      `/cpa-helper/records?${new URLSearchParams({ model: name, from: String(Math.floor(start)), page_size: "500" })}`)));
-    const value = listings.some((listing) => listing && Array.isArray(listing.items))
-      ? { ok: true, available: true, ...summarizeRecords(listings.flatMap((listing) => (Array.isArray(listing?.items) ? listing.items : []))) }
+    const listings = await Promise.all(names.map((name) => turnRecords(target, name, start)));
+    const value = listings.some(Boolean)
+      ? { ok: true, available: true, ...summarizeRecords(listings.flatMap((items) => items ?? [])) }
       : { ok: true, available: false };
     cache.set(key, { at: now(), value });
     for (const stale of cache.keys()) if (stale.startsWith("turn:") && now() - cache.get(stale).at > 60_000) cache.delete(stale);

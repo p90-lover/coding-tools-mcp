@@ -37,6 +37,26 @@ const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "../icons": { 
   "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => {} },
   "./ChatThreadList": load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu }) });
 
+test("every new card starts with instructions and an expected output for its role", () => {
+  const team = roles.defaultTeam("workspace", roles.workerRoute(roles.DEFAULT_WORKER_HARNESS, roles.DEFAULT_WORKER_MODEL));
+  for (const node of team.nodes) {
+    assert.ok(node.settings.instructions.length > 40, `${node.role} has instructions`);
+    assert.ok(node.settings.expected_output.length > 20, `${node.role} has an expected output`);
+  }
+  // The reviewer's verdict goes first in its final message, which is where the controller reads it.
+  assert.match(team.nodes.find(node => node.role === "reviewer").settings.expected_output, /^APPROVED or CHANGES_REQUIRED as the first word of your final message/);
+  for (const role of ["planner", "approver", "worker", "retry", "review_split", "sub_reviewer", "reviewer"]) {
+    const settings = roles.starterSettings(role, "Card");
+    assert.ok(settings.instructions && settings.expected_output, role);
+    assert.ok(settings.instructions.length <= 4096 && settings.expected_output.length <= 2048, `${role} fits the saved limits`);
+  }
+  // A quick preset adds its focus's rules and keeps its custom role name.
+  const tester = roles.starterSettings("worker", "Tester", "testing", "Tester");
+  assert.equal(tester.role_name, "Tester");
+  assert.match(tester.instructions, /pass\/fail counts/);
+  assert.equal(roles.starterSettings("worker", "Worker").role_name, undefined);
+});
+
 test("opening a working role shows live step and output, not a final-result placeholder", () => {
   const team = roles.defaultTeam("workspace", roles.workerRoute(roles.DEFAULT_WORKER_HARNESS, roles.DEFAULT_WORKER_MODEL));
   const node = { ...team.nodes[1], state: "running" };
@@ -210,7 +230,7 @@ test("the side panel opens on an Overview of the chat: environment, context, cha
   assert.match(html, /Today<\/button>/, "usage can switch between today, 7 and 30 days");
 });
 
-test("the Terminal pane opens for a server or a long run, never for a one-off tool call", () => {
+test("the Terminal pane opens for a server or the project's app launcher, never for a one-off tool call", () => {
   // Seen live: every `git status` and `ls` the agent ran opened the pane beside the chat.
   const workbench = load("ChatWorkbench.tsx", { "../api/client": client, "../icons": { Icon: () => null } });
   const now = 1_000_000;
@@ -219,7 +239,8 @@ test("the Terminal pane opens for a server or a long run, never for a one-off to
   assert.equal(workbench.opensTerminal(command("aiTemp\\run_app.cmd"), now), true, "the user's app launcher does");
   assert.equal(workbench.opensTerminal(command("npm run dev"), now), true, "a dev server does");
   assert.equal(workbench.opensTerminal(command("pytest -q", { status: "background", background: true }), now), true, "one left in the background does");
-  assert.equal(workbench.opensTerminal(command("pytest -q", { startedAt: now - 61_000 }), now), true, "anything still running after a minute does");
+  assert.equal(workbench.opensTerminal(command("pytest -q", { startedAt: now - 61_000 }), now), false, "a long test run does not");
+  assert.equal(workbench.opensTerminal(command("scripts/start-server.ps1"), now), true, "nor does it miss a start-server script");
   assert.equal(workbench.opensTerminal(command("npm run dev", { status: "exited", exitCode: 0 }), now), false, "an ended command never does");
 });
 
@@ -232,6 +253,14 @@ test("an agent's new page brings the Preview pane forward, even over the Termina
   assert.equal(workbench.autoOpenTab(["cmd:c1"], false), "terminal", "a command opens a closed panel on the Terminal");
   assert.equal(workbench.autoOpenTab(["cmd:c1"], true), null, "but never takes the place of what the user looks at");
   assert.equal(workbench.autoOpenTab([], false), null);
+  // Only a server process opens it: the agent's one-off commands (a status poll, a build, a test)
+  // put the Terminal over the chat while it worked.
+  const server = (cmd, extra = {}) => workbench.isServerProcess({ cmd, status: "running", ...extra });
+  for (const cmd of ["npm run dev", "pnpm dev", "yarn start", "npx vite", "next dev -p 3000", "python -m http.server 8000",
+    "uvicorn app:app --reload", "flask run", "python manage.py runserver", "docker compose up"]) assert.equal(server(cmd), true, cmd);
+  for (const cmd of ['$body = \'{}\'; Invoke-RestMethod -Method POST -Uri "http://127.0.0.1:8000/api/actions"', "npm test", "npm run build",
+    "cargo test", "git status", "dir /b", "python tools/poll.py"]) assert.equal(server(cmd), false, cmd);
+  assert.equal(server("python tools/poll.py", { status: "background" }), true, "anything the agent left running in the background");
   const polled = new Set(["ao-1"]);
   assert.equal(workbench.startsNewChat(["ao-2"], polled), true, "another chat starts over");
   assert.equal(workbench.startsNewChat(["ao-1", "ao-3"], polled), false, "an agent joining the same chat does not");

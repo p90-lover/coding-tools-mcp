@@ -657,6 +657,7 @@ function applyReadyRuntimeAfterBridge({ logger, stateStore, bridgeRouteChanged =
     coreSetupComplete: true,
     mcpRuntimeInstalled: config.mode === "full",
     experimentalBiggerContext: config.experimentalBiggerContext === true,
+    useSavedChats: config.useSavedChats !== false,
     zeroRiskProEnabled: config.zeroRiskProEnabled === true,
     ...(bridgeRouteChanged ? {
       codexCatalogVerified: false,
@@ -2342,6 +2343,17 @@ function registerIpc({ logger, stateStore }) {
     if (!IS_DEV_PROFILE) startCatalogVerificationMonitor({ logger, stateStore });
     return state;
   });
+  handle("launcher:use-saved-chats", async (_event, enabled) => {
+    if (browserHost.activeTraceId || browserHost.currentOperation()) {
+      throw new Error("Finish or cancel active ChatGPT turns before changing saved chats");
+    }
+    // Retained tabs of the other chat kind are released on their next reuse (browser-host checks
+    // the kind), so the setting needs no Codex restart.
+    const result = await runtimeHost.setUseSavedChats(enabled === true);
+    const state = stateStore.update({ useSavedChats: result.enabled });
+    send("launcher:state-changed", state);
+    return state;
+  });
   handle("launcher:zero-risk-pro", async (_event, enabled) => {
     const browserOperation = browserHost.currentOperation();
     if (browserHost.activeTraceId || browserOperation) {
@@ -2919,7 +2931,8 @@ async function start() {
       // Agents' commands run in Codex's Windows sandbox when it is installed (its unelevated mode:
       // the worktree and package caches writable, the network on), as Codex runs its own.
       const { createSandboxRunner } = backendBundles.requireModule(backend, "chat-sandbox.cjs");
-      const chatSandbox = createSandboxRunner({ logger });
+      // An agent's `ao` commands work in the app's terminal too, as in its own shell.
+      const chatSandbox = createSandboxRunner({ logger, extraPath: () => [agentOrchestratorUpstream?.aoShimFolder?.()].filter(Boolean) });
       app.on("will-quit", () => chatSandbox.killAll());
       chatAgentTools = createChatAgentTools({
         previews: chatPreviews,
@@ -3053,6 +3066,14 @@ async function start() {
     const runChanged = typeof createRunChangeFilter === "function" ? createRunChangeFilter() : () => true;
     const stopAoWatch = agentOrchestratorUpstream.harness.watch((change) => aoPulse.session(change.sessionId));
     aoChangeWatch = () => { stopAoWatch(); aoPulse.stop(); };
+    // Chats whose agents outlived the last app run reattach now, not when the AO panel first
+    // opens: until AO is back, a permission request they raised meanwhile waits unanswered.
+    const upstreamAtLaunch = agentOrchestratorUpstream;
+    void upstreamAtLaunch.survivingChatHosts().then((count) => {
+      if (count === 0 || agentOrchestratorUpstream !== upstreamAtLaunch) return undefined;
+      logger.info("ao.surviving_chats", { count });
+      return upstreamAtLaunch.start();
+    }).catch((error) => logger.warn("ao.surviving_chats_failed", { detail: String(error?.message ?? error).slice(0, 300) }));
     missionWorkflowRuntime?.dispose();
     const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
       // Stop agents that sat idle for a while; their chats resume them on the next message.
@@ -3318,6 +3339,15 @@ async function start() {
     },
     showWindow: showMainWindow,
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
+    // The runtime config decides the chat kind its turns open; the host must agree with it. An
+    // unreadable config falls back to the synced launcher state rather than failing the turn.
+    getUseSavedChats: () => {
+      try {
+        return runtimeHost.runtimeConfigSnapshot().config?.useSavedChats !== false;
+      } catch {
+        return stateStore.read().useSavedChats !== false;
+      }
+    },
   });
   setProviderBrowserHost(() => browserHost);
   registerIpc({ logger, stateStore });
@@ -3408,6 +3438,7 @@ async function start() {
       codexRestartRequired: false,
       autoStart: false,
       experimentalBiggerContext: config?.experimentalBiggerContext === true,
+      useSavedChats: config?.useSavedChats !== false,
       zeroRiskProEnabled: config?.zeroRiskProEnabled === true,
     });
     send("launcher:state-changed", state);
@@ -3461,11 +3492,13 @@ async function start() {
     const configuredRuntime = runtimeHost.runtimeConfigSnapshot();
     if (configuredRuntime.configured) {
       const enabled = configuredRuntime.config?.experimentalBiggerContext === true;
+      const useSavedChats = configuredRuntime.config?.useSavedChats !== false;
       const zeroRiskProEnabled = configuredRuntime.config?.zeroRiskProEnabled === true;
       const saved = stateStore.read();
       if (saved.experimentalBiggerContext !== enabled
+        || saved.useSavedChats !== useSavedChats
         || saved.zeroRiskProEnabled !== zeroRiskProEnabled) {
-        const state = stateStore.update({ experimentalBiggerContext: enabled, zeroRiskProEnabled });
+        const state = stateStore.update({ experimentalBiggerContext: enabled, useSavedChats, zeroRiskProEnabled });
         send("launcher:state-changed", state);
       }
     }
@@ -3496,6 +3529,7 @@ async function start() {
         codexRestartRequired: true,
         mcpRuntimeInstalled: config.mode === "full",
         experimentalBiggerContext: config.experimentalBiggerContext === true,
+        useSavedChats: config.useSavedChats !== false,
         zeroRiskProEnabled: config.zeroRiskProEnabled === true,
         ...(config.mode === "browser-only" ? { mcpSetupComplete: false, mcpGuideStep: 0 } : {}),
       };

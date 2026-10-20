@@ -181,6 +181,8 @@
 .ao-check input { width: auto; }
 .ao-hint { margin: 0; color: var(--ao-muted); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
 .ao-more summary { cursor: pointer; color: var(--ao-muted); font-size: 11px; padding: 4px 0; }
+.ao-role-defaults { align-self: flex-start; margin-top: -4px; padding: 2px 8px; font-size: 11px; color: var(--ao-muted); background: transparent; border: 1px solid currentColor; border-radius: 6px; cursor: pointer; }
+.ao-role-defaults:hover { color: inherit; }
 .ao-more[open] > :not(summary) { margin-top: 8px; }
 .ao-more pre { white-space: pre-wrap; font-size: 11px; }
 .ao-chip-line { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; }

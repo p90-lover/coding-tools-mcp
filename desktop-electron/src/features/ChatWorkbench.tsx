@@ -27,6 +27,16 @@ type Command = {
 const isAgentShell = (command: Command | undefined) => command?.source === "agent";
 /** Still running: an app command, an agent's command mid-call, or one it left running in the background. */
 const isLive = (command: Command | undefined) => command?.status === "running" || command?.status === "background";
+// Commands that start something which keeps serving: dev servers, file servers, watchers.
+const SERVER_COMMAND = /\b(?:(?:npm|pnpm|yarn|bun)(?:\.cmd)?\s+(?:run\s+)?(?:dev|start|serve|preview|watch)\b|npx\s+(?:vite|next|serve|http-server|live-server)\b|vite(?:\s+(?:dev|serve|preview))?(?:\s|$)|next\s+(?:dev|start)\b|nodemon\b|webpack(?:-dev-server|\s+serve)\b|uvicorn\b|gunicorn\b|flask\s+run\b|manage\.py\s+runserver\b|http\.server\b|php\s+-S\b|rails\s+s(?:erver)?\b|hugo\s+server\b|jekyll\s+serve\b|cargo\s+watch\b|dotnet\s+watch\b|docker(?:-|\s+)compose\s+up\b)/i;
+/**
+ * Whether a command is a server process: the agent left it running in the background, or it starts
+ * a dev or file server. Only those open the side panel by themselves; the agent's one-off commands
+ * (a status poll, a build, a test run) filled the screen with the Terminal while it worked.
+ */
+export function isServerProcess(command: Pick<Command, "cmd" | "status" | "background">): boolean {
+  return command.status === "background" || command.background === true || SERVER_COMMAND.test(String(command.cmd ?? ""));
+}
 
 const TAB_TITLES: Record<WorkbenchTab, string> = { overview: "Overview", preview: "Preview", terminal: "Terminal", changes: "Changes", files: "Files", new: "New tab" };
 const PANEL_WIDTH_KEY = "coding-tools:ao:workbench-width";
@@ -63,17 +73,12 @@ export function autoOpenTab(fresh: string[], open: boolean): WorkbenchTab | null
  * or an ended state), `startedAt` (ms), `background` and `source` ("app" for exec_command, "agent"
  * for its own shell tool).
  */
-export function opensTerminal(command: Command, now: number): boolean {
-  if (!isLive(command)) return false;
-  // Left running in the background by the agent: a server or watcher by its own account.
-  if (command.status === "background" || command.background) return true;
-  // Named like one (the user's run_app.cmd, `npm run dev`, uvicorn, a watcher): shown at once.
-  if (SERVER_COMMAND.test(command.cmd)) return true;
-  // Anything else earns the pane by outliving a tool call; a long test run may, `git status` never.
-  return now - command.startedAt >= LONG_RUNNING_MS;
+export function opensTerminal(command: Command, _now: number): boolean {
+  // A server process (isServerProcess), or a project's own app launcher (the user's run_app.cmd).
+  return isLive(command) && (isServerProcess(command) || APP_LAUNCHER.test(String(command.cmd ?? "")));
 }
-const LONG_RUNNING_MS = 60_000;
-const SERVER_COMMAND = /\b(?:dev|serve|server|runserver|watch|start|run_app|uvicorn|gunicorn|hypercorn|flask\s+run|http\.server|nodemon|vite|next\s+dev|webpack-dev-server|live-server)\b/i;
+// A script that starts the project's app: run_app.cmd, start-app.ps1, run_server.bat and the like.
+const APP_LAUNCHER = /(?:^|[\\/\s])(?:run|start)[_-]?(?:app|server|dev)\b/i;
 
 /**
  * Whether a poll of `sessionIds` starts over for another chat (none of its sessions was polled
@@ -86,8 +91,8 @@ export function startsNewChat(sessionIds: string[], polled: Set<string>): boolea
 }
 
 /**
- * Opens the side panel the first time a chat agent opens a page in its preview or starts a command,
- * as Codex shows the browser or terminal when its agent uses one. A command counts whether it went
+ * Opens the side panel the first time a chat agent opens a page in its preview or starts a server
+ * process (isServerProcess), as Codex shows the browser or terminal when its agent uses one. A command counts whether it went
  * through the app's exec_command or the agent's own shell tool (source "agent"). Each page and command opens it
  * once; closing the panel is respected until the agent does something new (see autoOpenTab).
  */

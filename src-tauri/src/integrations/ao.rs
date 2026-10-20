@@ -1624,9 +1624,9 @@ give the final answer yourself and end with the solo block.\n",
         }
     }
     prompt.push_str(match node.role {
-        Role::Approver => "\nReply with APPROVED or CHANGES_REQUIRED first, then a concise reason. With CHANGES_REQUIRED, say exactly what the orchestrator must change.\n",
-        Role::SubReviewer => "\nReply with PART_OK or PART_FAILED first, then your findings with evidence (files, commands, results).\n",
-        Role::Reviewer => "\nReply with APPROVED or CHANGES_REQUIRED first, then a concise reason. With CHANGES_REQUIRED, end with a ```rework block listing the worker card ids that must redo their work, for example:\n```rework\n[\"<card id>\"]\n```\n",
+        Role::Approver => "\nStart your final message with APPROVED or CHANGES_REQUIRED as its first word, then a concise reason. With CHANGES_REQUIRED, say exactly what the orchestrator must change.\n",
+        Role::SubReviewer => "\nStart your final message with PART_OK or PART_FAILED as its first word, then your findings with evidence (files, commands, results).\n",
+        Role::Reviewer => "\nStart your final message with APPROVED or CHANGES_REQUIRED as its first word, then a concise reason. With CHANGES_REQUIRED, end with a ```rework block listing the worker card ids that must redo their work, for example:\n```rework\n[\"<card id>\"]\n```\n",
         _ => "",
     });
     if let Some(handoff) = super::ao_lifecycle::handoff_for(data, run) {
@@ -2111,6 +2111,28 @@ pub fn record_failed_submission(
     Ok(run.clone())
 }
 
+/// The verdict word that opens a gate's final message. The answer joins every message of the
+/// turn, so a reviewer that writes "I'll check the evidence first" before its tool calls still
+/// puts the verdict at the start of a later line: the first line that opens with one counts.
+/// Markdown heading/quote marks and a "Verdict:" label before the word are allowed.
+fn verdict_word(answer: &str) -> Option<String> {
+    let clean = |word: &str| word.trim_matches(['*', '`', ':', '.']).replace("\\_", "_");
+    answer.lines().find_map(|line| {
+        let mut words = line
+            .trim_start_matches(|c: char| c == '#' || c == '>' || c.is_whitespace())
+            .split_whitespace();
+        let mut word = clean(words.next()?);
+        if word.eq_ignore_ascii_case("verdict") {
+            word = clean(words.next()?);
+        }
+        matches!(
+            word.as_str(),
+            "APPROVED" | "CHANGES_REQUIRED" | "PART_OK" | "PART_FAILED"
+        )
+        .then_some(word)
+    })
+}
+
 // One terminal receipt names its run, node and turn plus the outcome fields; keeping them as
 // explicit parameters matches the other AO receipt recorders.
 #[allow(clippy::too_many_arguments)]
@@ -2182,9 +2204,7 @@ pub fn record_terminal(
             receipt.status == "submitted" && receipt.thread_id.as_deref() == Some(thread_id)
         })
         .ok_or_else(|| fail("AO native thread identity changed"))?;
-    let first_word = answer
-        .and_then(|answer| answer.split_whitespace().next())
-        .map(|word| word.trim_matches(['*', '`', ':', '.']).replace("\\_", "_"));
+    let first_word = answer.and_then(verdict_word);
     let verdict = match (&node.role, first_word.as_deref()) {
         (Role::Reviewer | Role::Approver, Some("APPROVED")) => Some("APPROVED"),
         (Role::Reviewer | Role::Approver, Some("CHANGES_REQUIRED")) => Some("CHANGES_REQUIRED"),
@@ -2390,6 +2410,32 @@ pub fn cancel(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn ao_verdict_is_read_from_the_line_that_opens_with_it() {
+        // The reviewer narrated before its tool calls; the verdict opens its final message.
+        let answer = "I'll verify the workers' evidence before ruling.\nREADME matches.\nCHANGES_REQUIRED\n\n**Reason:** the count is missing.";
+        assert_eq!(verdict_word(answer).as_deref(), Some("CHANGES_REQUIRED"));
+        assert_eq!(
+            verdict_word("**APPROVED**: all good").as_deref(),
+            Some("APPROVED")
+        );
+        assert_eq!(
+            verdict_word("## APPROVED\nDone").as_deref(),
+            Some("APPROVED")
+        );
+        assert_eq!(
+            verdict_word("Verdict: PART\\_OK").as_deref(),
+            Some("PART_OK")
+        );
+        assert_eq!(
+            verdict_word("> PART_FAILED: tests fail").as_deref(),
+            Some("PART_FAILED")
+        );
+        // A verdict word inside a sentence is not a verdict.
+        assert_eq!(verdict_word("I would say APPROVED once fixed"), None);
+        assert_eq!(verdict_word("Looks fine to me."), None);
+    }
 
     #[test]
     fn ao_role_settings_survive_mission_serialization() {

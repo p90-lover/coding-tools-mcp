@@ -89,11 +89,16 @@ function ReasoningItem({ item }: { item: ChatLiveItem }) {
   const dsh = useContext(DshStyle);
   const [open, setOpen] = useState(false);
   const lines = item.text.trim().split(/\r?\n/);
-  if (!lines[0]) return <span className="cx-live-label">{dsh ? "Think" : item.status === "running" ? "Thinking…" : "Thought"}</span>;
-  const label = dsh ? "Think" : item.status === "running" ? "Thinking" : "Thought";
-  const headline = lines[0].replace(/^\s*\*\*(.+?)\*\*\s*$/, "$1").replace(/[*_`]/g, "").trim();
+  const running = item.status === "running";
+  if (!lines[0]) return <span className="cx-live-label">{dsh ? "Think" : running ? "Thinking…" : "Thought"}</span>;
+  const label = dsh ? "Think" : running ? "Thinking" : "Thought";
+  // Live reasoning arrives as its newest part, so it headlines the current thought, not the first.
+  const current = running ? lines.filter((line) => line.trim()).at(-1) ?? lines[0] : lines[0];
+  const headline = current.replace(/^\s*\*\*(.+?)\*\*\s*$/, "$1").replace(/[*_`]/g, "").trim();
   // A model that thinks in one long paragraph shows it as one line, the whole of it a click away.
-  const rest = lines.slice(1).join("\n").trim() || (headline.length > 140 ? headline : "");
+  const rest = running
+    ? (lines.length > 1 || headline.length > 140 ? item.text.trim() : "")
+    : lines.slice(1).join("\n").trim() || (headline.length > 140 ? headline : "");
   // The body is parsed only while it is open: a long thought streams in on every poll, and parsing
   // it inside a closed <details> cost the chat its frame rate for nothing anyone saw.
   return rest

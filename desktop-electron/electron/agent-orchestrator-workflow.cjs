@@ -141,20 +141,73 @@ const GATEWAY_AGENTS = new Set(["claude-code", "codex", "opencode"]);
 const CPA_ONLY_AGENTS = new Set(["claude-code", "opencode"]);
 const webModel = (model) => WEB_TIERS.includes(model) || LUNA_TIERS.includes(model);
 
+const webTierName = (model) => {
+  // "light" is what ChatGPT's effort picker calls Instant (the runtime's own name for it too).
+  const slug = model.slice("chatgpt-web/".length);
+  return slug === "light" ? "Instant" : slug.split("-").map((part) => part[0].toUpperCase() + part.slice(1)).join(" ");
+};
+
 // The runtime's `catalog ao-web` returns one WebGPT row: High, or Luna on a Luna-only (Free/Go)
 // account that has no Sol tiers. Any tier reuses that row under its own slug; the bridge picks
-// the ChatGPT mode from the slug, not from this entry.
+// the ChatGPT mode from the slug, not from this entry. Its `available` list holds the WebGPT rows
+// the account's effort picker last offered; a tier outside it still runs (at the nearest lower
+// tier, in the bridge), and its name says so. `available` never reaches Codex.
 function aoWebCatalogForModel(catalog, model) {
   if (!/^chatgpt-web\/[a-z-]{1,32}$/.test(model)) throw new Error("AO WebGPT model is invalid");
   const template = Array.isArray(catalog?.models) && catalog.models.length === 1 ? catalog.models[0] : null;
   if (typeof template?.slug !== "string" || !/^chatgpt-web\/[a-z-]{1,32}$/.test(template.slug)) {
     throw new Error("AO WebGPT catalog is unavailable");
   }
-  if (template.slug === model) return catalog;
-  // "light" is what ChatGPT's effort picker calls Instant (the runtime's own name for it too).
-  const slug = model.slice("chatgpt-web/".length);
-  const tier = slug === "light" ? "Instant" : slug.split("-").map((part) => part[0].toUpperCase() + part.slice(1)).join(" ");
-  return { models: [{ ...template, slug: model, display_name: `ChatGPT Web — ${tier}` }] };
+  const available = Array.isArray(catalog.available) ? catalog.available.filter((slug) => typeof slug === "string") : null;
+  const tierIndex = WEB_TIERS.indexOf(model);
+  const runsAs = available && tierIndex > 0 && !available.includes(model)
+    ? WEB_TIERS.slice(0, tierIndex).reverse().find((tier) => available.includes(tier))
+    : undefined;
+  if (template.slug === model && !runsAs) return { models: catalog.models };
+  const tier = webTierName(model);
+  const display_name = runsAs
+    ? `ChatGPT Web — ${tier} (not offered by this account; runs as ${webTierName(runsAs)})`
+    : `ChatGPT Web — ${tier}`;
+  return { models: [{ ...template, slug: model, display_name }] };
+}
+
+const REVIEW_SCRIPT = /[^\s"'`;|&<>()]+\.(?:ps1|psm1|py|sh|bash|bat|cmd|js|cjs|mjs|ts)\b/gi;
+const REVIEW_SCRIPT_BYTES = 4000;
+/**
+ * The local scripts a tool request runs, read for the command reviewer. It saw only the command
+ * line, so "run start-nova.ps1" came back "ask" every time and the person had to answer. Only
+ * files whose real path is inside the request's working folder are read (a command cannot point
+ * the reviewer at files elsewhere), at most two, the first 4 KB of each.
+ */
+function reviewScriptExcerpts(approval, sessionFolder = null) {
+  let input = {};
+  try { input = typeof approval?.toolInput === "string" ? JSON.parse(approval.toolInput) : (approval?.toolInput ?? {}); } catch {}
+  // A request that names no working folder runs in the agent's session folder.
+  const folder = [approval?.cwd, input?.workdir, input?.cwd, input?.project_root, sessionFolder]
+    .find((value) => typeof value === "string" && path.isAbsolute(value));
+  if (!folder) return [];
+  let root;
+  try { root = fs.realpathSync.native(folder); } catch { return []; }
+  const text = [approval?.command, input?.cmd, input?.command].filter((value) => typeof value === "string").join(" ");
+  const excerpts = [];
+  for (const token of [...new Set(text.match(REVIEW_SCRIPT) ?? [])]) {
+    if (excerpts.length >= 2) break;
+    let real;
+    try { real = fs.realpathSync.native(path.resolve(root, token)); } catch { continue; }
+    const relative = path.relative(root, real);
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) continue;
+    try {
+      const stat = fs.statSync(real);
+      if (!stat.isFile()) continue;
+      const handle = fs.openSync(real, "r");
+      try {
+        const buffer = Buffer.alloc(Math.min(stat.size, REVIEW_SCRIPT_BYTES));
+        const read = fs.readSync(handle, buffer, 0, buffer.length, 0);
+        excerpts.push({ file: relative, text: buffer.subarray(0, read).toString("utf8"), truncated: stat.size > REVIEW_SCRIPT_BYTES });
+      } finally { fs.closeSync(handle); }
+    } catch {}
+  }
+  return excerpts;
 }
 
 function delayToMilliseconds(value, unit) {
@@ -200,6 +253,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   const dispatching = new Set();
   // runId -> { session, text }: a single-model follow-up that continues its chat's live AO session.
   const continuations = new Map();
+  // What a retried chat's own session is told: its last turn ended early, and it should go on.
+  const RETRY_CONTINUE_TEXT = "Your previous turn was interrupted before it finished (the app restarted or the step failed). "
+    + "Continue the same task from where you left off; do not start over or repeat work that is already done.";
   // runId -> { workspaceId, taskId }: a follow-up whose agent may start fresh; a fresh start gets
   // the earlier replies (chatHandoff), a continued session already has them.
   const handoffs = new Map();
@@ -1075,7 +1131,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   }
 
   const TERMINAL_TURNS = new Set(["completed", "failed", "interrupted", "cancelled", "recovered"]);
-  async function observeExternal(workspaceId, runId, node) {
+  async function observeExternal(workspaceId, runId, node, mission = null) {
     const session = node.receipt?.thread_id;
     if (node.state === "reserved" && !dispatching.has(nodeKey(workspaceId, runId, node.id))) {
       // The launch was lost before AO returned a session; hold it rather than replay.
@@ -1090,9 +1146,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     if (!terminal) {
       // The agent's parked tool requests, answerable from the chat or by the reviewer.
       const pending = aoPending(node, session, observed);
-      pendingFrames.set(nodeKey(workspaceId, runId, node.id), { at: Date.now(), pending });
+      pendingFrames.set(nodeKey(workspaceId, runId, node.id), { at: Date.now(), pending, mission, node });
       if (pendingFrames.size > 500) pendingFrames.delete(pendingFrames.keys().next().value);
-      return { ok: true, pending_approvals: withAdvice(pending), needs_input: observed.needsInput && !pending.length, session_id: session };
+      return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: observed.needsInput && !pending.length, session_id: session };
     }
     const completed = observed.turnState === "completed";
     const result = await requestHeadless("/api/v1/ao/external/terminal", {
@@ -1221,17 +1277,22 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       // run loop's latest frame while it is fresh instead of asking AO again.
       const key = nodeKey(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80));
       const frame = pendingFrames.get(key);
-      if (frame && Date.now() - frame.at < 1500) return { ok: true, status: { connected: true, pending_approvals: withAdvice(frame.pending) } };
+      if (frame && Date.now() - frame.at < 1500) {
+        return { ok: true, status: { connected: true, pending_approvals: withAdvice(frame.pending, frame.mission ? frame : null) } };
+      }
       const found = await savedNode(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80)).catch(() => null);
       if (found && externalAgent(found.node)) {
         const session = found.node.receipt?.thread_id;
         const observed = found.node.state === "running" && session
           ? await harnessService().observe(session, expectedTurns.get(session)).catch(() => ({})) : {};
-        return { ok: true, status: { connected: true, pending_approvals: withAdvice(aoPending(found.node, session, observed)) } };
+        return { ok: true, status: { connected: true, pending_approvals: withAdvice(aoPending(found.node, session, observed), found) } };
       }
     }
-    return response.status?.pending_approvals
-      ? { ...response, status: { ...response.status, pending_approvals: withAdvice(response.status.pending_approvals) } } : response;
+    if (!response.status?.pending_approvals) return response;
+    // Only a card with a request waiting is looked up, to tell which ones its reviewer answers.
+    const card = response.status.pending_approvals.length
+      ? await savedNode(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80)).catch(() => null) : null;
+    return { ...response, status: { ...response.status, pending_approvals: withAdvice(response.status.pending_approvals, card) } };
   }
 
   // AO probes every agent CLI to build its catalog, which takes seconds; the permission menu reads
@@ -1287,7 +1348,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
 
   // What each working card is doing now, for the chat and the cards: when it started, its
   // current step and when anything was last heard. Read-only; it never advances the run.
-  function publicText(value, limit = 4096) {
+  function publicText(value, limit = 4096, keepEnd = false) {
     let text = String(value ?? "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
       .replace(/Bearer\s+\S+|sk-[A-Za-z0-9_-]+/gi, "[redacted]")
       .replace(/((?:api[_-]?key|access[_-]?token|authorization)\s*[:=]\s*)[^\s,;]+/gi, "$1[redacted]");
@@ -1295,7 +1356,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       const key = cpaConnection?.().proxyApiKey;
       if (typeof key === "string" && key.length >= 8) text = text.replaceAll(key, "[redacted]");
     } catch { /* No CPA connection is needed for read-only output. */ }
-    return text.slice(0, limit);
+    return keepEnd ? text.slice(-limit) : text.slice(0, limit);
   }
 
   /**
@@ -1322,7 +1383,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     // TIMELINE_TEXT_BYTES there): every item it built, and a message or thought uncut.
     return (Array.isArray(items) ? items : []).slice(-400).map(item => ({
       id: publicText(item.id, 80), kind: publicText(item.kind, 32), status: publicText(item.status, 32),
-      text: publicText(item.text, item.kind === "message" || item.kind === "reasoning" ? 64 * 1024 : 400),
+      // Live text keeps what the upstream read kept: a running thought's newest part, and messages
+      // and finished thoughts whole (up to 64 KB).
+      text: item.kind === "reasoning" && item.status === "running" ? publicText(item.text, 4096, true)
+        : publicText(item.text, item.kind === "message" || item.kind === "reasoning" ? 64 * 1024 : 400),
       ...(item.label ? { label: publicText(item.label, 40) } : {}),
       ...(item.description ? { description: publicText(item.description, 200) } : {}),
       ...(item.input ? { input: publicText(item.input, 1000) } : {}),
@@ -1540,13 +1604,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
 
   async function observe({ workspaceId, runId, nodeId } = {}) {
     const found = await savedNode(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80));
-    if (externalAgent(found.node)) return observeExternal(workspaceId, runId, found.node);
+    if (externalAgent(found.node)) return observeExternal(workspaceId, runId, found.node, found.mission);
     const response = await requestHeadless("/api/v1/ao/harness/observe", {
       workspace_id: clean(workspaceId, 128), run_id: clean(runId, 80),
       node_id: clean(nodeId, 80),
     });
     if (response?.ok !== true) throw new Error("AO result is unavailable; inspect the run before retrying");
-    return response.pending_approvals ? { ...response, pending_approvals: withAdvice(response.pending_approvals) } : response;
+    return response.pending_approvals ? { ...response, pending_approvals: withAdvice(response.pending_approvals, found) } : response;
   }
 
   async function approveAoHarness({ workspaceId, runId, nodeId, approvalId, allow, response, threadId, turnId, decisionId, answer } = {}) {
@@ -1730,6 +1794,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       logger?.warn?.("ao.stop.control_failed", { run, error: String(error?.message || error).slice(0, 200) });
       result = { ok: true, run: mission ?? { id: run, workspace_id: id, nodes: [] }, notice: "Future work stopped here; the saved mission cancellation could not be confirmed" };
     }
+    // A retried single-model chat continues its agent's own session, which already holds the
+    // conversation and what it read and ran: launching a fresh one began the task again from
+    // nothing. The retry moved the card's receipt into its history; a session that is gone or
+    // refuses the message still falls back to a fresh start (dispatchExternal).
+    if ((action === "retry" || action === "retry_auto") && result.run?.execution_mode === "single") {
+      const card = result.run.nodes?.[0];
+      const session = card?.state === "pending" && externalAgent(card) ? card.history?.at(-1)?.thread_id : null;
+      if (typeof session === "string" && session && !continuations.has(run)) {
+        continuations.set(run, { session, text: RETRY_CONTINUE_TEXT });
+        if (continuations.size > 200) continuations.delete(continuations.keys().next().value);
+      }
+    }
     if (action === "stop") {
       const saved = await runs({workspaceId:id}).catch(() => null);
       const life = saved ? taskLifecycle(saved,result.run.project_id) : {};
@@ -1905,7 +1981,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const aoDecision = (approval, allow) => (approval.decisions || [])
     .find((decision) => decision.kind === (allow ? "allow_once" : "reject_once"))?.id
     ?? (allow ? null : (approval.decisions || []).find((decision) => decision.kind === "reject_always")?.id) ?? null;
-  const withAdvice = (approvals) => Array.isArray(approvals)
+  const withAdvice = (approvals, card = null) => Array.isArray(approvals)
     ? approvals.map((item) => {
       // Modern native commands carry escalation scope separately from item/permissions requests.
       const request = item?.request;
@@ -1913,8 +1989,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         && (Object.hasOwn(request, "additionalPermissions") || Object.hasOwn(request, "networkApprovalContext"))
         ? { ...item, permissions: { additionalPermissions: request.additionalPermissions ?? null,
           networkApprovalContext: request.networkApprovalContext ?? null } } : item;
-      return approverAdvice.has(item?.approval_id)
+      const advised = approverAdvice.has(item?.approval_id)
         ? { ...scoped, recommendation: approverAdvice.get(item.approval_id) } : scoped;
+      // "Approve for me": a request the reviewer is still checking, or has answered and is sending,
+      // is not the person's to answer. The chat popped it up as a question anyway, and the person
+      // waited on (or raced) the reviewer; it now shows as being reviewed instead.
+      return card?.mission && card?.node && !approvalNeedsPerson(card.mission, card.node, item)
+        ? { ...advised, awaiting_review: true } : advised;
     })
     : approvals;
   const describeRequest = (approval) => [approval.kind, approval.tool, approval.command, approval.path, approval.toolInput && `input ${approval.toolInput}`,
@@ -1942,20 +2023,37 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const REVIEW_BUDGET_MS = 25_000;
   const REVIEWER_DOWN_MS = 10 * 60_000;
   const reviewerDown = new Map(); // model -> until
+  // A review no model answered is tried again on the next passes, REVIEW_RETRY_MS apart, before the
+  // request goes to the person: one 502 from the card's model put a routine command in front of
+  // them while the very next review answered.
+  const REVIEW_TRIES = 3;
+  const REVIEW_RETRY_MS = 4_000;
+  const reviewFailures = new Map(); // approval_id -> { tries, at }
   async function askApprover({ approver, mission, approval }) {
     const { baseUrl, key } = connection();
     const all = reviewerModels(approver, (await models()).models);
-    const up = all.filter(model => !(reviewerDown.get(model) > now()));
-    const candidates = up.length ? up : all;
+    // One that failed lately is tried last, not skipped: Codex's auto-review benched by a single
+    // timeout left only the card's own model for ten minutes.
+    const candidates = [...all.filter(model => !(reviewerDown.get(model) > now())), ...all.filter(model => reviewerDown.get(model) > now())];
     if (!candidates.length) throw new Error("CPA has no model for the command approver");
     const deadline = now() + REVIEW_BUDGET_MS;
+    // The folder the agent works in. Without it the reviewer saw only the workspace's id, so it had
+    // to guess whether an absolute path was "outside the workspace": the same `dir` of a project
+    // subfolder was denied, then allowed when retried.
+    const where = await Promise.resolve().then(() => harnessService().sessionWorkspace?.(approval.thread_id, mission.workspace_id))
+      .catch(() => null);
+    const folder = typeof where?.projectFolder === "string" ? where.projectFolder : typeof where?.root === "string" ? where.root : null;
+    const scripts = reviewScriptExcerpts(approval, folder);
     const prompt = [
       "You are the command approver for an orchestrated coding mission. A worker asks to run a tool request.",
       `Workspace: ${mission.workspace_id}. Approver rules: ${String(approver.settings?.instructions || "none").slice(0, 1500)}`,
+      folder ? `Workspace folder: ${folder}. Paths inside this folder, and relative paths, are inside the workspace; a command with no working folder runs there.` : "",
       `Request: ${describeRequest(approval)}`,
       approval.permissions ? `Permissions: ${JSON.stringify(approval.permissions).slice(0, 800)}` : "",
+      ...scripts.map((script) => `Local script ${script.file} (from the request's working folder${script.truncated ? ", first 4 KB" : ""}):\n${script.text}`),
       'Answer with JSON only: {"action":"allow"|"deny"|"ask","reason":"<one sentence for the user>"}.',
       "allow: clearly safe and needed for the task. deny: destructive, outside the workspace, secret-touching or unrelated. ask: anything unclear.",
+      scripts.length ? "Judge a command that runs a local script by the script's contents shown above." : "",
     ].filter(Boolean).join("\n");
     let failure = null;
     for (const model of candidates) {
@@ -1973,7 +2071,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const decision = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
         if (!["allow", "deny", "ask"].includes(decision?.action)) throw new Error(`Command approver ${model} gave no decision`);
         reviewerDown.delete(model);
-        return { action: decision.action, reason: String(decision.reason || "").slice(0, 300) };
+        const reason = String(decision.reason || "").slice(0, 300);
+        // The reason otherwise lived only in the run's latest note, so a wrong deny could not be traced.
+        logger?.info?.("ao.approval_reviewed", { model, action: decision.action, tool: String(approval.tool ?? approval.kind ?? "").slice(0, 80),
+          folder: Boolean(folder), reason: publicText(reason, 200) });
+        return { action: decision.action, reason };
       } catch (error) {
         failure = error;
         reviewerDown.set(model, now() + REVIEWER_DOWN_MS);
@@ -1999,6 +2101,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (["question", "plan"].includes(approval?.kind) || !(approval?.kind === "command" || approval?.source === "ao")) return true;
     const approver = cardApprover(mission, node);
     if (!approver || approver.settings?.auto_decide !== true) return true;
+    // "Approve for me" answers every tool call itself: the reviewer's answer, or after AUTO_ANSWER_MS
+    // the safety rules' (autoVerdict). A request it left at "ask" popped up as a question for those
+    // 20 s anyway, with a desktop notice, and the person raced the automatic answer.
+    if (answersForPerson(node)) return false;
     const advice = approverAdvice.get(approval.approval_id);
     // Not reviewed yet: the reviewer answers it within its budget, or passes it to the person then.
     return Boolean(advice) && advice.action === "ask";
@@ -2017,6 +2123,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // edit, which flooded the reviewer and the person, and the reviewer never saw the plan.
         const screened = !["question", "plan"].includes(approval?.kind) && (approval?.kind === "command" || approval?.source === "ao");
         if (!screened || !approval.approval_id || approverAdvice.has(approval.approval_id)) continue;
+        const failed = reviewFailures.get(approval.approval_id);
+        if (failed && now() - failed.at < REVIEW_RETRY_MS) continue;
         const request = describeRequest(approval);
         // The command advisor must not decide from a truncated command or permission scope.
         const incomplete = request.length >= 1500 || JSON.stringify(approval.permissions ?? {}).length > 800;
@@ -2034,9 +2142,22 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
               // (an MCP tool with a command) keeps going to the reviewer and the app's confirm.
               : approval.kind === "command" && !/^mcp__/.test(String(approval.tool ?? "")) && routineCommand(approval.command)
                 ? { action: "allow", reason: routineCommand(approval.command) }
-                // A reviewer that cannot answer leaves the request to the person, and its card says why.
-                : await askApprover({ approver, mission, approval }).catch((error) => ({ action: "ask",
-                  reason: `The command reviewer could not answer (${publicText(error?.message || error, 160)}); check it yourself` }));
+                // A reviewer that cannot answer is asked again (see REVIEW_TRIES); only then does the
+                // request go to the person, and its card says why.
+                : await askApprover({ approver, mission, approval }).catch((error) => ({ action: "failed", error }));
+        if (advice.action === "failed") {
+          const tries = (reviewFailures.get(approval.approval_id)?.tries ?? 0) + 1;
+          const why = publicText(advice.error?.message || advice.error, 160);
+          logger?.warn?.("ao.approval_review_failed", { tries, tool: String(approval.tool ?? approval.kind ?? "").slice(0, 80), reason: why });
+          if (tries < REVIEW_TRIES) {
+            reviewFailures.set(approval.approval_id, { tries, at: now() });
+            if (reviewFailures.size > 500) reviewFailures.delete(reviewFailures.keys().next().value);
+            note = `The reviewer could not answer yet (${why}); trying again`;
+            continue;
+          }
+          advice = { action: "ask", reason: `The command reviewer could not answer after ${tries} tries (${why}); check it yourself` };
+        }
+        reviewFailures.delete(approval.approval_id);
         const offered = approval.request?.availableDecisions;
         if (Array.isArray(offered) && advice.action !== "ask"
           && !offered.includes(advice.action === "allow" ? "accept" : "decline")) {
@@ -2130,10 +2251,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const since = Date.parse(approval.since ?? "");
         const opened = Math.min(pendingSeen.get(id), Number.isFinite(since) ? since : Infinity);
         // A question or a plan is the person's: it waits AUTO_ANSWER_MS for them. A command or tool
-        // request the card's own reviewer screens is answered as soon as that review is in ("wait"
-        // until then): its answer after the wait was the same, so the wait only held the agent up,
-        // and a click on its card after the wait failed as "no longer waiting". A team's Command
-        // approver is not the card's reviewer: its requests keep waiting for it or the person.
+        // request the card's reviewer screens is answered as soon as that review is in ("wait"
+        // until then), "ask" included (approvalNeedsPerson shows it to nobody): its answer after
+        // the wait was the same, so the wait only held the agent up, and a click on its card after
+        // the wait failed as "no longer waiting". A team whose Command approver has not approved
+        // yet has no reviewer here: its requests keep waiting for it or the person.
         const personal = ["question", "plan"].includes(approval.kind);
         const reviewedHere = !personal && Boolean(cardApprover(mission, node));
         if (!reviewedHere && at - opened < AUTO_ANSWER_MS) continue;
@@ -2473,6 +2595,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       reportRun(workspaceId, runId, state, null, state.stopped ? null : "error");
     } finally { state.driving = false; }
   }
+  /** Whether a run's background grant can start nothing more: every turn started, or its hour over. */
+  function grantSpent(grant) {
+    return Boolean(grant) && (grant.turns_started >= grant.max_turns || Date.now() >= grant.expires_at_ms);
+  }
+
   async function startRun(input = {}) {
     if (!input || typeof input !== "object" || Array.isArray(input)
       || Object.keys(input).some((key) => !["workspaceId", "runId", "executable"].includes(key))) {
@@ -2493,8 +2620,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const saved = await runs({ workspaceId: id, runId: run });
       let mission = saved.runs.find((entry) => entry.id === run && entry.workspace_id === id);
       if (mission?.paused) throw new Error("Resume this paused mission from its local controls");
-      // Starting a run whose card is held (and nothing still running) is an explicit retry.
-      if (mission && !mission.cancelled && mission.nodes.some((node) => node.state === "held" && (node.role !== "worker" || !mission.grant))
+      // A grant whose turns are all started or whose hour is over cannot start anything more: a chat
+      // resumed on it after restarts and retries stopped with "no turns left" and needed a new
+      // message. Starting such a run asks for a fresh grant instead, as a first start does.
+      const spent = grantSpent(mission?.grant);
+      // Starting a run whose card is held (and nothing still running) is an explicit retry; so is a
+      // single chat's failed card once its grant is spent.
+      if (mission && !mission.cancelled && mission.nodes.some((node) => (node.state === "held" && (node.role !== "worker" || !mission.grant || spent))
+          || (spent && mission.execution_mode === "single" && node.state === "failed"))
         && !mission.nodes.some((node) => ["running", "reserved"].includes(node.state))) {
         await controlRun({ workspaceId: id, runId: run, action: "retry" });
         const again = await runs({ workspaceId: id, runId: run });
@@ -2505,7 +2638,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         throw new Error("AO run has an active or unresolved card; inspect it before starting");
       }
       if (missionSettled(mission)) throw new Error("AO run is already finished");
-      const resuming = mission.nodes.some((node) => node.state === "running") || Boolean(mission.grant && mission.nodes.some(node => ["held", "failed"].includes(node.state)));
+      const resuming = mission.nodes.some((node) => node.state === "running")
+        || Boolean(mission.grant && !grantSpent(mission.grant) && mission.nodes.some(node => ["held", "failed"].includes(node.state)));
       const readyWebRole = mission.nodes.find(node => node.state === "pending"
         && node.route?.provider_id === "chatgpt-web"
         && (node.parents ?? []).every(parent => mission.nodes.some(entry => entry.id === parent && entry.state === "finished")));
@@ -3627,4 +3761,4 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, routineCommand, routineAppTool, routineAppCommand, blockedRequest, recommendedAnswer, subagentLaunchArgs });
 }
 
-module.exports = { createAgentOrchestratorWorkflow, delayToMilliseconds, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
+module.exports = { createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

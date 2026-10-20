@@ -45,7 +45,9 @@ import {
 import { estimateCompiledChatGptWebInputTokens } from "./input-tokens";
 import {
   assertAuthenticatedChatGptPage,
-  assertTemporaryChatPage,
+  assertNewChatPage,
+  chatGptNewChatUrl,
+  chatGptRetainedConversationPage,
   CHATGPT_ASSISTANT_TURN_SELECTOR,
   CHATGPT_COMPLETION_ACTION_SELECTOR,
   CHATGPT_COMPOSER_SELECTOR,
@@ -53,12 +55,14 @@ import {
   CHATGPT_EFFORT_ITEM_SELECTOR,
   CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR,
   CHATGPT_STOP_BUTTON_SELECTOR,
-  CHATGPT_TEMPORARY_CHAT_URL,
   CHATGPT_USER_TURN_SELECTOR,
   activateChatGptEffortMenu,
   detectChatGptAccountCapabilities,
   parseChatGptEffortSliderState,
+  readChatGptEffortSnapshot,
+  type ChatGptEffortSliderState,
 } from "../../chatgpt-session";
+import { recordChatGptEffortSnapshot, type ChatGptEffortSnapshot } from "../../chatgpt-account-capabilities";
 import { loginVerificationMarkerPath } from "../../browser-login";
 import {
   connectLauncherBrowserHost,
@@ -189,6 +193,59 @@ function chatGptConnectorUnavailableError(message: string): ChatGptWebAdapterErr
     code: "connector_not_found",
     retryable: false,
   });
+}
+
+// ChatGPT (Oct 2026) answers an @mention in Temporary Chat with "<connector> is unavailable in
+// this temporary chat". No retry or personalization change can fix that, only a saved chat.
+const CHATGPT_TEMPORARY_CHAT_CONNECTOR_REFUSAL = /\bunavailable in (?:this |a )?temporary chat\b/i;
+
+export function chatGptTemporaryChatConnectorRefusalError(appName: string): ChatGptWebAdapterError {
+  return chatGptConnectorUnavailableError(
+    `ChatGPT says ${JSON.stringify(appName)} is unavailable in Temporary Chat, so this task cannot use`
+    + ` the app's tools there. Turn on "Save chats in ChatGPT" in Coding Tools Settings`
+    + ` (or run setup --saved-chats), then retry the task.`,
+  );
+}
+
+/** True when the page shows ChatGPT's own Temporary Chat refusal of the connector. */
+export async function chatGptTemporaryChatRefusesConnector(page: Page, abortSignal?: AbortSignal): Promise<boolean> {
+  try {
+    const visible = await withBrowserTurnAbort(
+      withChatGptBrowserObservationTimeout(
+        page.getByText(CHATGPT_TEMPORARY_CHAT_CONNECTOR_REFUSAL).filter({ visible: true }).count(),
+      ),
+      abortSignal,
+    );
+    return visible > 0;
+  } catch (error) {
+    if (abortSignal?.aborted) throw error;
+    return false;
+  }
+}
+
+/**
+ * Every Sol turn opens the effort slider, so read its ticks in passing (never step it) and keep
+ * the model list current. Best effort: a missing or odd reading must not slow or fail the turn.
+ */
+export async function recordChatGptEffortSnapshotInPassing(
+  sliderContainer: Locator,
+  sliderState: ChatGptEffortSliderState,
+  record: (snapshot: ChatGptEffortSnapshot) => boolean = recordChatGptEffortSnapshot,
+): Promise<void> {
+  try {
+    const snapshot = await withChatGptBrowserObservationTimeout(readChatGptEffortSnapshot(sliderContainer, sliderState));
+    if (snapshot) record(snapshot);
+  } catch (error) {
+    console.warn(`[chatgpt-web] effort availability was not recorded: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function chatGptPageIsTemporaryChat(page: Page): boolean {
+  try {
+    return new URL(page.url()).searchParams.get("temporary-chat") === "true";
+  } catch {
+    return false;
+  }
 }
 
 const CHATGPT_MODEL_CONTROL_UNAVAILABLE_MESSAGE = "ChatGPT model controls are unavailable. Reload ChatGPT and retry the task.";
@@ -1157,6 +1214,8 @@ export interface BrowserTurn {
   retainConversation?: boolean;
   requireRetainedConversation?: boolean;
   conversationKey?: string;
+  /** Use Temporary Chat whatever the setting: the smoke turn needs no connector and no history. */
+  temporaryChat?: boolean;
   onPreparedSelected?: (reused: boolean) => void | Promise<void>;
   abortSignal?: AbortSignal;
   onHeartbeat?: () => void;
@@ -1241,6 +1300,8 @@ export interface ResolvedBrowserConfig {
   turnTimeoutMs?: number;
   headed: boolean;
   autoApproveToolCalls: boolean;
+  /** Task turns open a saved new chat; false keeps them in Temporary Chat. */
+  useSavedChats: boolean;
 }
 
 export function chatGptTurnIsComplete(state: {
@@ -2034,6 +2095,7 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
     ...(turnTimeoutMs !== undefined ? { turnTimeoutMs } : {}),
     headed: configured.headed !== false,
     autoApproveToolCalls: configured.autoApproveToolCalls === true,
+    useSavedChats: configured.useSavedChats !== false,
   };
 }
 
@@ -2461,6 +2523,7 @@ export class ChatGptBrowserWorker {
         "ChatGPT effort slider exposed an invalid ARIA range",
       );
     }
+    await recordChatGptEffortSnapshotInPassing(sliderContainer, sliderState);
     const targetValue = sliderState.min + uiEffortIndex;
     if (targetValue > sliderState.max) {
       const proUsageLimitHint = uiEffortIndex === 4 && sliderState.min === 0 && sliderState.max === 3
@@ -2535,35 +2598,41 @@ export class ChatGptBrowserWorker {
     );
   }
 
-  /** Put every browser operation on one fully hydrated Temporary Chat document. */
-  private async prepareTemporaryChatSurface(
+  /**
+   * Put every browser operation on one fully hydrated, empty new chat. Task turns follow
+   * useSavedChats; account inspection and smoke pass false so they leave no history.
+   */
+  private async prepareChatSurface(
     page: Page,
-    captureDiagnostic?: (checkpoint: string) => Promise<void>,
+    captureDiagnostic: ((checkpoint: string) => Promise<void>) | undefined,
+    useSavedChats: boolean,
   ): Promise<Locator> {
     // Launcher verification refreshes its owned page before attaching Playwright so a newly added
     // connector is present in the catalog. Navigating again here destroys that freshly hydrated
     // document and made the first verification race a second SPA bootstrap. A leased turn starts on
     // about:blank and therefore still performs exactly one navigation through this same method.
-    if (page.url() !== CHATGPT_TEMPORARY_CHAT_URL) {
-      await page.goto(CHATGPT_TEMPORARY_CHAT_URL, {
+    const targetUrl = chatGptNewChatUrl(useSavedChats);
+    if (page.url() !== targetUrl) {
+      await page.goto(targetUrl, {
         waitUntil: "domcontentloaded",
         timeout: 60_000,
       });
-      await captureDiagnostic?.("temporary-chat-navigation-complete");
+      await captureDiagnostic?.(useSavedChats ? "saved-chat-navigation-complete" : "temporary-chat-navigation-complete");
     }
     let composer: Locator;
     try {
       composer = await this.activeComposer(page);
     } catch {
-      throw new Error("ChatGPT web login is expired or the Temporary Chat surface is unavailable");
+      throw new Error(`ChatGPT web login is expired or the ${useSavedChats ? "new chat" : "Temporary Chat"} surface is unavailable`);
     }
-    if (await dismissChatGptTemporaryChatOnboarding(page)) {
+    // The onboarding dialog belongs to Temporary Chat; a saved chat never shows it.
+    if (!useSavedChats && await dismissChatGptTemporaryChatOnboarding(page)) {
       await captureDiagnostic?.("temporary-chat-onboarding-dismissed");
     }
     await captureDiagnostic?.("composer-ready");
     await throwIfChatGptSessionFailureAlert(page);
     await assertAuthenticatedChatGptPage(page);
-    await assertTemporaryChatPage(page);
+    await assertNewChatPage(page, useSavedChats);
     await captureDiagnostic?.("session-verified");
     return composer;
   }
@@ -3104,7 +3173,9 @@ export class ChatGptBrowserWorker {
     const appResult = menuRows.filter({
       has: page.getByText(this.config.appName, { exact: true }),
     });
-    await ensureChatGptPersonalizedConnectorAccess(
+    // Only a Temporary Chat has the per-conversation personalization switch that can hide
+    // connectors. In a saved chat the exact @mention selection below is the whole proof.
+    if (chatGptPageIsTemporaryChat(page)) await ensureChatGptPersonalizedConnectorAccess(
       page,
       capture,
       async (personalizationSignal) => {
@@ -3135,6 +3206,9 @@ export class ChatGptBrowserWorker {
             if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
             proofResult = false;
             await capture("personalization-proof-menu-missing");
+            if (await chatGptTemporaryChatRefusesConnector(page, personalizationSignal)) {
+              throw chatGptTemporaryChatConnectorRefusalError(this.config.appName);
+            }
             const mention = await composer.evaluate(element => ({
               text: element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement
                 ? element.value : element.textContent ?? "",
@@ -3194,9 +3268,19 @@ export class ChatGptBrowserWorker {
             signal: abortSignal,
           });
           await capture("connector-menu-visible");
+          // The refusal may be rendered on the connector's own row; selecting it cannot succeed.
+          if (chatGptPageIsTemporaryChat(page) && await chatGptTemporaryChatRefusesConnector(page, abortSignal)) {
+            throw chatGptTemporaryChatConnectorRefusalError(this.config.appName);
+          }
           break;
         } catch (error) {
           if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
+          // Checked before either failure below: the refusal is final, so neither waiting out the
+          // remaining attempts nor a catalog refresh can help, and only the setting fixes it.
+          if (await chatGptTemporaryChatRefusesConnector(page, abortSignal)) {
+            await capture("connector-temporary-chat-refused");
+            throw chatGptTemporaryChatConnectorRefusalError(this.config.appName);
+          }
           const visibleRows = await this.connectorMentionRowTitles(menuRows, abortSignal);
           const knownIdentityMismatch = this.config.appName === CHATGPT_CONNECTOR_NAME
             && (
@@ -3678,7 +3762,9 @@ export class ChatGptBrowserWorker {
     const captureDiagnostic = (checkpoint: string): Promise<void> => diagnostics.capture(page, checkpoint);
     try {
       await captureDiagnostic("connector-verification-started");
-      await this.prepareTemporaryChatSurface(page, captureDiagnostic);
+      // Verify in the same kind of chat the task turns use: Temporary Chat can refuse a connector
+      // that a saved chat exposes, so proving one says nothing about the other.
+      await this.prepareChatSurface(page, captureDiagnostic, this.config.useSavedChats);
       // The launcher refreshes its owned ChatGPT document before starting this helper. A second
       // reload here can discard the first catalog's exact mismatch evidence and report a generic
       // menu failure instead of identifying the connector the account actually exposes.
@@ -3704,16 +3790,21 @@ export class ChatGptBrowserWorker {
     proAvailable?: boolean;
   }> {
     const page = await this.ensurePage();
-    await this.prepareTemporaryChatSurface(page);
+    // Account inspection sends nothing, so it stays in Temporary Chat and leaves no history.
+    await this.prepareChatSurface(page, undefined, false);
     const url = page.url();
     if (!detectCapabilities) return { authenticated: true, temporary: true, url };
-    const capabilities = await detectChatGptAccountCapabilities(page);
+    // Setup and sign-in refresh the model-list hint too, not only the booleans they return.
+    const capabilities = await detectChatGptAccountCapabilities(page, {
+      onEffortSnapshot: snapshot => { recordChatGptEffortSnapshot(snapshot); },
+    });
     return { authenticated: true, temporary: true, url, ...capabilities };
   }
 
   private async smokeTestExclusive(abortSignal?: AbortSignal): Promise<{ effort: string; response: string }> {
     const page = await this.ensurePage();
-    await this.prepareTemporaryChatSurface(page);
+    // The smoke prompt needs no connector, so it stays in Temporary Chat and leaves no history.
+    await this.prepareChatSurface(page, undefined, false);
     const account = await detectChatGptAccountCapabilities(page);
     // Core smoke runs before the optional MCP connector is configured, so it must remain a
     // browser-only transport check. Connector setup has its own explicit verification operation.
@@ -3727,6 +3818,7 @@ export class ChatGptBrowserWorker {
       modelId,
       reasoning,
       capabilities,
+      temporaryChat: true,
       prepare: async () => ({ text: CHATGPT_SMOKE_TEXT, images: [], release: () => {} }),
       abortSignal,
       onTextDelta: () => {},
@@ -4356,6 +4448,7 @@ export class ChatGptBrowserWorker {
     const requestedMode = resolveChatGptWebModelMode(turn.modelId, turn.reasoning, browserCapabilities);
     const prepare = reuseConversation ? turn.prepareResume : turn.prepare;
     if (!prepare) throw new Error("The retained ChatGPT conversation has no continuation prompt");
+    const useSavedChats = this.config.useSavedChats && turn.temporaryChat !== true;
     const prepared = await prepare();
     const diagnostics = new ChatGptBrowserDiagnostics(
       turn.traceId,
@@ -4576,11 +4669,17 @@ export class ChatGptBrowserWorker {
           turn.traceId,
           "temporary_chat_preparation",
           browserStageTimeouts.temporaryChatPreparation,
-          () => this.prepareTemporaryChatSurface(
+          () => this.prepareChatSurface(
             page,
             checkpoint => diagnostics.capture(page, checkpoint),
+            useSavedChats,
           ),
         );
+      } else if (!chatGptRetainedConversationPage(page.url(), useSavedChats)) {
+        // A retained tab is a live ChatGPT page with the history sidebar. If anything moved it to
+        // another conversation, typing the continuation would post into the user's own chat.
+        await diagnostics.capture(page, "retained-conversation-moved");
+        throw chatGptRetainedConversationUnavailableError();
       }
       // A retained lease proves the connector binding, not the current model selection.
       // Reconcile the live control before every submission, including retained continuations.
@@ -4739,9 +4838,10 @@ export class ChatGptBrowserWorker {
             browserStageTimeouts.temporaryChatPreparation,
             async () => {
               await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
-              await this.prepareTemporaryChatSurface(
+              await this.prepareChatSurface(
                 page,
                 checkpoint => diagnostics.capture(page, checkpoint),
+                useSavedChats,
               );
               mode = await this.selectModelAndEffort(
                 page,

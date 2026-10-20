@@ -724,6 +724,8 @@ fn native_child_command(
         .arg("app-server")
         .current_dir(&options.codex_home)
         .env_clear();
+    // MXC's launcher fails every command without LOCALAPPDATA ("CreateProcessInSandbox failed
+    // with error code 203", ERROR_ENVVAR_NOT_FOUND), so it is kept with the system essentials.
     for key in [
         "SystemRoot",
         "SystemDrive",
@@ -731,6 +733,7 @@ fn native_child_command(
         "PATH",
         "HOME",
         "USERPROFILE",
+        "LOCALAPPDATA",
         "LANG",
         "LC_ALL",
     ] {
@@ -2295,6 +2298,16 @@ mod tests {
                 None,
                 false
             )));
+            // MXC cannot start a command without LOCALAPPDATA (error 203), so it survives env_clear.
+            if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+                let web = native_child_command(&options, Path::new("aiTemp"), None, true);
+                assert_eq!(
+                    web.get_envs()
+                        .find(|(name, _)| *name == std::ffi::OsStr::new("LOCALAPPDATA"))
+                        .and_then(|(_, value)| value),
+                    Some(local.as_os_str())
+                );
+            }
             // Each AO card has its own CODEX_HOME, so AO children never need the admin setup.
             assert_eq!(
                 sandbox(&native_child_command(

@@ -15,7 +15,7 @@ import { GOAL_SUMMARY, approvalAnsweredForYou, chatArchived, chatList, keepRevis
 import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { createLatestConfigQueue } from "./ao-config";
 import {
-  AGENT_DEFAULT_MODEL, AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, defaultTeam, emptyRoleSettings,
+  AGENT_DEFAULT_MODEL, AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, defaultTeam, emptyRoleSettings, starterSettings,
   cardMeta, harnessLabel, modelLabel, modelShortLabel, teamForMission, workerRoute, type AoHarness, type AoModelCatalog, type AoModelLoader, type AoRoute, type AoTeam, type RoleSettings,
 } from "./AgentOrchestratorRoleEditor";
 import "./agent-orchestrator.css";
@@ -561,7 +561,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
     if (approvalSeen.current.size > 500) approvalSeen.current.delete(approvalSeen.current.keys().next().value!);
     return approvalSeen.current.get(key)!;
   };
-  const shownApprovals = pendingApprovalsHere.filter((approval) => !approvalAnsweredForYou(approval,
+  // A request the "Approve for me" reviewer is still checking is not shown (awaiting_review), and
+  // neither is one the app is answering for the person right after (approvalAnsweredForYou): a card
+  // then only flashed up, offering a click that arrived after the answer.
+  const shownApprovals = pendingApprovalsHere.filter((approval) => !approval.awaiting_review && !approvalAnsweredForYou(approval,
     selectedRun?.nodes.find((node) => node.id === approval.nodeId)?.route as { approval_policy?: string; approvals_reviewer?: string } | undefined,
     Date.now() - seenAt(approval), Boolean(selectedRun?.nodes.some((node) => node.role === "approver")))).map((approval) => {
     const note = dependencyInstallNote(approval.command, dependencyLinks?.workspaceId === workspaceId ? dependencyLinks.links : null);
@@ -1362,7 +1365,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     const planner = selectedRun.nodes.find((node) => node.role === "planner");
     if (!planner) return;
     const node = { id: crypto.randomUUID(), task_id: runTaskId, role: "worker", state: "pending",
-      settings: { ...emptyRoleSettings(), name: workerName.trim() || "Worker", specialty: workerSpecialty },
+      settings: starterSettings("worker", workerName.trim() || "Worker", workerSpecialty),
       parents: workerParentId ? [planner.id, workerParentId] : [planner.id],
       x: selectedRun.nodes.length, y: 1, route: workerRouteDraft };
     const result = await moduleCall("update_run", { workspaceId, change: { operation: "graph", run_id: selectedRun.id,
@@ -2042,7 +2045,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
               onConnect={addDependency} canConnect={(nodeId, parentId) => Boolean(aoDependencyChange(selectedRun, nodeId, parentId))}
               onUnlink={unlink} canUnlink={(nodeId, parentId) => Boolean(aoUnlinkChange(selectedRun, nodeId, parentId))}
               onRemove={removeCard} canRemove={(nodeId) => Boolean(aoRemoveChange(selectedRun, nodeId))}>
-              {pendingApprovals.length ? <aside className="ao-approvals ao-canvas-overlay" aria-label="AO tool approvals">
+              {shownApprovals.length ? <aside className="ao-approvals ao-canvas-overlay" aria-label="AO tool approvals">
                 {shownApprovals.map(approval => <AgentOrchestratorApproval key={JSON.stringify([approval.nodeId, approval.approval_id])} approval={approval} busy={Boolean(busy)} approve={approve} />)}
               </aside> : null}
               <button type="button" className="ao-fab ao-canvas-overlay" title="Add worker"

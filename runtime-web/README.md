@@ -24,8 +24,9 @@
 
 Free and Go accounts get **ChatGPT Web — Luna** in Codex's native model picker. Accounts that
 expose the reasoning selector keep **Instant**, **Medium**, **High**, **Extra High**, and **Pro** as
-their subscription allows. The bridge sends the current compiled Codex task context to a fresh
-ChatGPT Temporary Chat, attaches images, and streams visible reasoning, tool activity, and Markdown
+their subscription allows; the list follows what the account's effort picker last offered. The
+bridge sends the current compiled Codex task context to a fresh ChatGPT chat (saved in ChatGPT
+history by default), attaches images, and streams visible reasoning, tool activity, and Markdown
 back into the same Codex task.
 
 <p align="center">
@@ -39,7 +40,7 @@ Codex task ──Responses + SSE──▶ codex-chatgpt-web ──embedded brows
 ```
 
 Codex keeps the native task, context lifecycle, UI, and tool harness. The local Responses bridge
-routes only the selected model task through a task-bound ChatGPT Temporary Chat; in full mode, MCP
+routes only the selected model task through a task-bound ChatGPT chat; in full mode, MCP
 connects ChatGPT back to the tools of that same Codex task until its next compaction boundary.
 
 > [!TIP]
@@ -55,7 +56,7 @@ connects ChatGPT back to the tools of that same Codex task until its next compac
 - **The full Codex harness over MCP.** Full mode gives every effort exposed by the signed-in account,
   including Pro, the active task's filesystem, shell, images, approvals, and configured tools/apps.
 - **Continuous task sessions and native compaction.** Sequential messages reuse one task-bound
-  Temporary Chat. At the context boundary, the retained agent writes the checkpoint before Codex
+  chat. At the context boundary, the retained agent writes the checkpoint before Codex
   starts a clean chat; if that chat was closed, canonical Codex history supplies the fallback.
 - **One cross-platform launcher.** The macOS, Windows, and Linux app owns sign-in, model setup, MCP
   guidance, health checks, safe diagnostics, and up to five visible task-bound browser tabs.
@@ -63,11 +64,14 @@ connects ChatGPT back to the tools of that same Codex task until its next compac
   instead of silently switching route or capability. End-to-end coverage is documented in
   [release validation](docs/release-validation.md).
 
-Temporary Chat is a ChatGPT privacy mode, not anonymity or local-only inference: prompts are still
-processed by OpenAI and are subject to the account's settings and OpenAI's
-[Temporary Chat policy](https://help.openai.com/en/articles/8914046-temporary-chat-faq). This project
-is unofficial; users remain responsible for complying with applicable OpenAI terms and workspace
-policies.
+**Save chats in ChatGPT** (Settings; `setup --saved-chats`, on by default) runs task turns in
+ordinary ChatGPT chats: they appear in your ChatGPT history, and ChatGPT memory and custom
+instructions may apply. ChatGPT refuses connectors in Temporary Chat, so turning the setting off
+(`setup --temporary-chats`) leaves tasks without the app's tools; an explicit off is kept on update.
+Either way prompts are processed by OpenAI and are subject to the account's settings and OpenAI's
+policies ([Temporary Chat](https://help.openai.com/en/articles/8914046-temporary-chat-faq)); neither
+mode is anonymity or local-only inference. This project is unofficial; users remain responsible for
+complying with applicable OpenAI terms and workspace policies.
 
 ## Quick start
 

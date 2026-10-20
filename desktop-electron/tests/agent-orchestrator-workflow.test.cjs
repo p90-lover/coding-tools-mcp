@@ -5,7 +5,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-const { createAgentOrchestratorWorkflow, resolveAoNativeConnection } = require("../electron/agent-orchestrator-workflow.cjs");
+const { createAgentOrchestratorWorkflow, resolveAoNativeConnection, reviewScriptExcerpts } = require("../electron/agent-orchestrator-workflow.cjs");
 const { createCodingToolsAppsHost } = require("../../app-handler/host.cjs");
 const { invokeContract } = require("../electron/ipc-schema.cjs");
 
@@ -419,6 +419,24 @@ test("AO WebGPT catalog serves Luna from a Luna-only account's template and rena
   assert.throws(() => aoWebCatalogForModel({ models: [high] }, "gpt-5.5"), /invalid/);
   assert.throws(() => aoWebCatalogForModel({ models: [{ slug: "gpt-5.5" }] }, "chatgpt-web/luna"), /unavailable/);
   assert.throws(() => aoWebCatalogForModel({ models: [high, luna] }, "chatgpt-web/luna"), /unavailable/);
+});
+
+test("AO WebGPT catalog names a tier the account no longer offers and keeps `available` from Codex", () => {
+  const { aoWebCatalogForModel } = require("../electron/agent-orchestrator-workflow.cjs");
+  const high = { slug: "chatgpt-web/high", display_name: "ChatGPT Web — High" };
+  // A Plus account whose effort picker locks Extra High and Pro.
+  const plus = { models: [high], available: ["chatgpt-web/light", "chatgpt-web/medium", "chatgpt-web/high"] };
+  assert.deepEqual(aoWebCatalogForModel(plus, "chatgpt-web/high"), { models: [high] });
+  assert.deepEqual(aoWebCatalogForModel(plus, "chatgpt-web/medium").models[0].display_name, "ChatGPT Web — Medium");
+  assert.deepEqual(aoWebCatalogForModel(plus, "chatgpt-web/pro").models[0],
+    { ...high, slug: "chatgpt-web/pro", display_name: "ChatGPT Web — Pro (not offered by this account; runs as High)" });
+  assert.equal(aoWebCatalogForModel(plus, "chatgpt-web/extra-high").models[0].display_name,
+    "ChatGPT Web — Extra High (not offered by this account; runs as High)");
+  // Without a detection the names stay as before; nothing extra reaches Codex either way.
+  assert.equal(aoWebCatalogForModel({ models: [high] }, "chatgpt-web/pro").models[0].display_name, "ChatGPT Web — Pro");
+  for (const model of ["chatgpt-web/high", "chatgpt-web/pro"]) {
+    assert.equal(Object.hasOwn(aoWebCatalogForModel(plus, model), "available"), false);
+  }
 });
 
 test("the desktop main process builds the AO WebGPT catalog through the shared tier helper", () => {
@@ -1895,13 +1913,70 @@ test("AO typed native replies preserve exact payload and thread/turn scope after
   }
 });
 
+test("the reviewer sees the local script a command runs, never a file outside its folder", () => {
+  // Seen live: "Command approver suggests ask: Please confirm what start-nova.ps1 does" because the
+  // reviewer only had the command line.
+  const os = require("node:os");
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "review-scripts-"));
+  const folder = path.join(base, "project");
+  fs.mkdirSync(path.join(folder, "tools"), { recursive: true });
+  fs.writeFileSync(path.join(folder, "start-nova.ps1"), "Start-Process node -ArgumentList 'server.js'\n");
+  fs.writeFileSync(path.join(folder, "tools", "big.py"), "x = 1\n".repeat(2000));
+  fs.writeFileSync(path.join(base, "outside.ps1"), "SECRET\n");
+  try {
+    const request = (cmd) => ({ kind: "permission", tool: "mcp__coding-tools__exec_command", toolInput: JSON.stringify({ cmd, workdir: folder }) });
+    const found = reviewScriptExcerpts(request("powershell.exe -NoProfile -ExecutionPolicy Bypass -File start-nova.ps1"));
+    assert.deepEqual(found.map((script) => script.file), ["start-nova.ps1"]);
+    assert.match(found[0].text, /Start-Process node/);
+    const big = reviewScriptExcerpts(request("python tools/big.py"))[0];
+    assert.equal(big.truncated, true);
+    assert.equal(big.text.length, 4000);
+    assert.deepEqual(reviewScriptExcerpts(request("powershell -File ..\\outside.ps1")), [], "outside the working folder");
+    assert.deepEqual(reviewScriptExcerpts(request(`powershell -File ${path.join(base, "outside.ps1")}`)), [], "an absolute path outside it");
+    assert.deepEqual(reviewScriptExcerpts(request("node missing.js")), [], "a file that does not exist");
+    assert.deepEqual(reviewScriptExcerpts({ command: "bash run.sh" }), [], "no working folder, nothing read");
+    // A request that names no folder runs in the agent's session folder, so its script is read there.
+    const bare = { kind: "permission", tool: "mcp__coding-tools__exec_command", toolInput: JSON.stringify({ cmd: "powershell -File start-nova.ps1" }) };
+    assert.deepEqual(reviewScriptExcerpts(bare, folder).map((script) => script.file), ["start-nova.ps1"]);
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("a request the reviewer answers is marked as being reviewed, not shown to the person", async () => {
+  // Seen live: with "Approve for me" every tool request popped up as a question while the reviewer
+  // was still checking it, so the person waited on (or raced) the reviewer.
+  const pending = [{ approval_id: "cmd", kind: "command", command: "node -e \"console.log(6*7)\"" },
+    { approval_id: "ask", kind: "question", reason: "Which branch?" }];
+  const run = (approverState) => ({ id: "run", workspace_id: "ws", cancelled: false, nodes: [
+    { id: "approver", role: "approver", state: approverState, receipt: { verdict: "APPROVED" }, settings: { auto_decide: true } },
+    { id: "worker", role: "worker", state: "running", route: { harness_id: "codex-native", model: "chatgpt-web/high" } }] });
+  let saved = run("finished");
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint) => {
+      if (endpoint.endsWith("/harness/status")) return { ok: true, status: { connected: true, pending_approvals: structuredClone(pending) } };
+      if (endpoint.endsWith("/ao/read")) return { ok: true, runs: [structuredClone(saved)] };
+      return { ok: true };
+    },
+  });
+  const status = async () => (await workflow.call("harness_status", { workspaceId: "ws", runId: "run", nodeId: "worker" })).status.pending_approvals;
+  const reviewed = await status();
+  assert.equal(reviewed.find((item) => item.approval_id === "cmd").awaiting_review, true, "the reviewer is on it");
+  assert.equal(reviewed.find((item) => item.approval_id === "ask").awaiting_review, undefined, "a question is the person's");
+  // With no reviewer answering for the person, every request is theirs.
+  saved = run("running");
+  assert.equal((await status()).some((item) => item.awaiting_review), false);
+});
+
 test("AO typed approval cancelled in the local confirmation never forwards", async () => {
   let sent = 0;
   const workflow = createAgentOrchestratorWorkflow({
     requestHeadless: async (endpoint) => {
       if (endpoint.endsWith("/status")) return { ok: true, status: { pending_approvals: [
         { approval_id: "a", method: "mcpServer/elicitation/request", thread_id: "t", turn_id: "v", kind: "mcp_url" }] } };
-      sent++; return { ok: true, result: { ok: true } };
+      // Only a forwarded answer counts; reading the run to find the card is not one.
+      if (endpoint.endsWith("/approval")) sent++;
+      return { ok: true, result: { ok: true } };
     },
     confirm: async () => false,
   });
@@ -2810,6 +2885,101 @@ test("Approve for me is reviewed by codex-auto-review first, the card's model wh
   assert.match(down.detail, /could not answer/, "and the request says why it is waiting for them");
 });
 
+test("the reviewer is told the agent's workspace folder, so a path inside it is not judged outside", async () => {
+  // Seen live: three parallel `cmd /c dir /b "G:\...\<project subfolder>"` calls; two were denied and
+  // the same command was allowed on retry. The prompt named only the workspace's id.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
+  async function promptFor(sessionWorkspace) {
+    const request = { approval_id: "dir", source: "ao", kind: "permission", tool: "mcp__coding-tools__exec_command",
+      toolInput: JSON.stringify({ cmd: 'cmd /c dir /b "G:\\Projects\\app\\docs"' }), summary: "exec_command", decisions };
+    const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+      { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+    const prompts = [], resolved = [], looked = [];
+    const workflow = createAgentOrchestratorWorkflow({
+      findCodexExecutable: () => process.execPath,
+      resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+      cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+      fetchImpl: async (url, init) => {
+        if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
+        prompts.push(JSON.parse(init.body).messages[0].content);
+        return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"allow","reason":"inside the workspace"}' } }] }) };
+      },
+      requestHeadless: async (endpoint) => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+      aoHarness: {
+        observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: resolved.length ? [] : [request] }),
+        resolveApproval: async (session, requestId, decisionId) => { resolved.push(decisionId); return { ok: true }; },
+        sessionWorkspace: sessionWorkspace && (async (...args) => { looked.push(args); return sessionWorkspace(); }),
+      },
+      confirm: async () => true,
+    });
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 200 && !resolved.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    mission.nodes[0].state = "finished";
+    return { prompt: prompts[0] ?? "", resolved, looked };
+  }
+  const folderMode = await promptFor(() => ({ root: "G:\\Projects\\app", projectFolder: "G:\\Projects\\app" }));
+  assert.deepEqual(folderMode.looked, [["session-1", "ws"]], "the folder of the session that asked, in this workspace");
+  assert.match(folderMode.prompt, /Workspace folder: G:\\Projects\\app\. Paths inside this folder, and relative paths, are inside the workspace/);
+  assert.deepEqual(folderMode.resolved, ["yes"]);
+  const worktree = await promptFor(() => ({ root: "C:\\Users\\me\\.ao\\worktrees\\one" }));
+  assert.match(worktree.prompt, /Workspace folder: C:\\Users\\me\\\.ao\\worktrees\\one\./, "a worktree session names its worktree");
+  // AO not answering never holds the review up: the prompt just has no folder line.
+  const unknown = await promptFor(() => { throw new Error("AO is restarting"); });
+  assert.doesNotMatch(unknown.prompt, /Workspace folder:/);
+  assert.deepEqual(unknown.resolved, ["yes"]);
+});
+
+test("Approve for me asks a reviewer that failed again before involving the person, and never pops a tool call up", async () => {
+  // Seen live: one 502 from the card's model ("Command approver ... returned HTTP 502; check it
+  // yourself") popped a routine command up with a desktop notice; codex-auto-review had been
+  // benched by a single timeout and was not even tried.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
+  const request = { approval_id: "poll", source: "ao", kind: "command", tool: "PowerShell", command: "python tools/poll.py", summary: "poll", decisions };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+    { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+  let clock = 1_000_000;
+  let failing = new Set(["codex-auto-review", "test-model"]);
+  const asked = [], resolved = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    now: () => clock,
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
+      const model = JSON.parse(init.body).model;
+      asked.push(model);
+      if (failing.has(model)) return { ok: false, status: 502, json: async () => ({}) };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"allow","reason":"reads a status file"}' } }] }) };
+    },
+    requestHeadless: async (endpoint) => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: resolved.length ? [] : [request] }),
+      resolveApproval: async (session, requestId, decisionId) => { resolved.push(decisionId); return { ok: true }; },
+    },
+    confirm: async () => true,
+  });
+  const settle = async (ms) => { for (let tries = 0; tries < ms / 10; tries++) await new Promise(resolve => setTimeout(resolve, 10)); };
+  await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  for (let tries = 0; tries < 100 && asked.length < 2; tries++) await settle(10);
+  await settle(100);
+  assert.deepEqual(resolved, [], "the first pass failed: nothing answered yet");
+  const waiting = JSON.stringify(await workflow.call("run_status", { workspaceId: "ws", runId: "run" }));
+  assert.doesNotMatch(waiting, /check it yourself/, "a failed first review is not handed to the person");
+  // CPA recovers; past the retry gap the next pass asks again, Codex's reviewer first despite its failure.
+  failing = new Set();
+  asked.length = 0;
+  clock += 5_000;
+  for (let tries = 0; tries < 300 && !resolved.length; tries++) await settle(10);
+  assert.deepEqual(resolved, ["yes"], "answered by the reviewer, never by the person");
+  assert.equal(asked[0], "codex-auto-review", "a reviewer that failed lately is still tried, first in its order");
+  mission.nodes[0].state = "finished";
+});
+
 test("Approve for me's 20 s answer never allows what the safety rules or the reviewer would not", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
@@ -2956,6 +3126,55 @@ async function followUpContinues(previousState) {
   assert.deepEqual(JSON.parse(JSON.stringify(observedWith[0])), ["sess-1", "turn-2"], "observed on the follow-up's own turn");
   assert.match(world.edits[0].description, /Follow-up \([^)]+ UTC\):\nnow run the tests$/, "the chat still records the follow-up");
 }
+
+test("retrying a chat whose grant is spent gets a fresh grant and continues the agent's own session", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  // The turn that the app restart cut short: the card failed, and its grant has no turns left.
+  const run = { id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 3, cancelled: false,
+    grant: { executable_sha256: "a".repeat(64), max_turns: 1, turns_started: 1, granted_at_ms: Date.now() - 1000, expires_at_ms: Date.now() + 3_600_000 },
+    nodes: [{ id: "one", role: "planner", state: "failed", parents: [], route, history: [],
+      receipt: { thread_id: "sess-1", error: "controller ended before the turn completed" } }] };
+  const calls = [], spawned = [], sent = [];
+  const request = async (endpoint, body) => {
+    calls.push(endpoint === "/api/v1/ao/control" ? `control:${body.action}` : endpoint);
+    if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [run], worker_capacity: { r1: 1 } };
+    if (endpoint === "/api/v1/ao/control") {
+      const card = run.nodes[0];
+      card.history = [...card.history, card.receipt];
+      card.receipt = null;
+      card.state = "pending";
+      return { ok: true, run };
+    }
+    if (endpoint === "/api/v1/ao/grant") {
+      run.grant = { ...run.grant, max_turns: 3, turns_started: 0 };
+      return { ok: true, run, grant: run.grant };
+    }
+    if (endpoint === "/api/v1/ao/external/reserve") { run.nodes[0].state = "reserved"; return { ok: true, request_key: "key-1", prompt: "the task" }; }
+    if (endpoint === "/api/v1/ao/external/submitted") { run.nodes[0].state = "running"; run.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run }; }
+    if (endpoint === "/api/v1/ao/external/terminal") { run.nodes[0].state = "finished"; return { ok: true, run }; }
+    if (endpoint === "/api/v1/tools/call") return { operation: { state: "completed", result: { ok: true, revision: 1, workspace_id: "ws-1", steps: [], task: { id: "task-1", title: "T", description: "d" } } } };
+    throw new Error(`unexpected ${endpoint}`);
+  };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: request, findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    aoHarness: {
+      spawn: async input => { spawned.push(input); return "new-session"; },
+      continuable: async id => id === "sess-1",
+      send: async (id, text, key) => { sent.push([id, text, key]); return { turnId: "turn-2", state: "running" }; },
+      observe: async (_id, expected) => ({ status: "idle", turnId: expected, turnState: "completed", answer: "done" }),
+    },
+  });
+  const started = await workflow.call("start_run", { workspaceId: "ws-1", runId: "r1" });
+  assert.equal(started.status, "running", "no \"no turns left\" refusal");
+  for (let tries = 0; tries < 200 && !sent.length && !spawned.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.ok(calls.indexOf("control:retry") >= 0 && calls.indexOf("control:retry") < calls.indexOf("/api/v1/ao/grant"),
+    "the failed card is requeued, then a fresh grant is asked for");
+  assert.equal(spawned.length, 0, "no fresh session that starts the task over");
+  assert.equal(sent[0]?.[0], "sess-1", "the agent's own session continues");
+  assert.match(sent[0]?.[1] ?? "", /interrupted before it finished.*Continue the same task/s);
+});
 
 test("a single-model follow-up continues the chat's live AO session with just the new message", () => followUpContinues("finished"));
 test("a follow-up after a held turn (a hung turn the user's message stopped) continues its session too", () => followUpContinues("held"));

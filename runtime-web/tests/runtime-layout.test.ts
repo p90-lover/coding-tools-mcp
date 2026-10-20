@@ -238,6 +238,36 @@ test("launcher browser ownership is explicit in provider configuration", () => {
   });
 });
 
+test("saved chats default on, keep an explicit opt-out, reject non-booleans and reach the adapter", () => {
+  const root = join(tmpdir(), `codex-chatgpt-web-saved-chats-${process.pid}-${Date.now()}`);
+  roots.push(root);
+  process.env.CODEX_CHATGPT_WEB_HOME = root;
+  mkdirSync(root, { recursive: true });
+  const config: Record<string, unknown> = { ...defaultConfig("browser-only") };
+  const persist = () => writeFileSync(join(root, "config.json"), `${JSON.stringify(config)}\n`);
+  expect(config.useSavedChats).toBe(true);
+  // Configurations written before the setting existed move to saved chats.
+  delete config.useSavedChats;
+  persist();
+  expect(loadConfig().useSavedChats).toBe(true);
+  expect(loadConfigForSetup().useSavedChats).toBe(true);
+  expect(providerConfig(loadConfig()).chatgptWeb!.useSavedChats).toBe(true);
+  // The user's explicit Temporary Chat choice survives a reload, in both interaction modes.
+  config.useSavedChats = false;
+  persist();
+  const loaded = loadConfig();
+  expect(loaded.useSavedChats).toBe(false);
+  expect(providerConfig(loaded).chatgptWeb!.useSavedChats).toBe(false);
+  expect(providerConfig({ ...loaded, browserInteractionMode: "manual" }).chatgptWeb!.useSavedChats).toBe(false);
+  expect(providerConfig({ ...loaded, useSavedChats: true, browserInteractionMode: "manual" }).chatgptWeb!.useSavedChats)
+    .toBe(true);
+  for (const invalid of ["true", 1, null]) {
+    config.useSavedChats = invalid;
+    persist();
+    expect(() => loadConfig()).toThrow("Invalid useSavedChats");
+  }
+});
+
 test("Luna-only provider configuration exposes only the Luna backend", () => {
   const config = defaultConfig("browser-only");
   config.solAvailable = false;

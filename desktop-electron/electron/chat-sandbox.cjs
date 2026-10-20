@@ -136,6 +136,8 @@ const tomlPath = (value) => `'${String(value).replace(/\\/g, "/").replace(/'/g, 
 function createSandboxRunner({
   locate = findCodexSandbox, roots = cacheRoots, scriptDir = path.join(os.tmpdir(), "coding-tools-sandbox"),
   env = process.env, spawnProcess = spawn, logger = console, now = Date.now, platform = process.platform,
+  // Folders put first on a command's PATH, e.g. the one AO keeps `ao` in for its own sessions.
+  extraPath = () => [],
 } = {}) {
   const processes = new Map(); // id -> record
   let located = { at: 0, value: null };
@@ -150,6 +152,12 @@ function createSandboxRunner({
 
   function childEnv() {
     const kept = Object.fromEntries(Object.entries(env).filter(([key]) => !PRIVATE_ENV.test(key)));
+    let extra = [];
+    try { extra = (extraPath() ?? []).filter((folder) => typeof folder === "string" && path.isAbsolute(folder)); } catch {}
+    if (extra.length) {
+      const pathKey = Object.keys(kept).find((key) => key.toUpperCase() === "PATH") ?? "PATH";
+      kept[pathKey] = [...extra, kept[pathKey]].filter(Boolean).join(platform === "win32" ? ";" : ":");
+    }
     return windowsChildEnvironment(kept, { platform, system: systemEnvironment() });
   }
 
@@ -181,8 +189,14 @@ function createSandboxRunner({
     const id = `sbx-${crypto.randomBytes(9).toString("base64url").replace(/[^A-Za-z0-9]/g, "x")}`;
     fs.mkdirSync(scriptDir, { recursive: true });
     const script = path.join(scriptDir, `${id}.cmd`);
+    // Codex's unelevated sandbox never starts a command whose working folder is not exactly one of
+    // its writable roots (even `echo` hangs), so it starts in the worktree and the script moves to
+    // `cwd`. `%` is doubled because cmd expands it inside a script, even within quotes.
+    const home = writable || cwd;
+    const enter = cwd && path.resolve(cwd) !== path.resolve(home)
+      ? `cd /d "${path.resolve(cwd).replace(/%/g, "%%")}" || exit /b 1\r\n` : "";
     // UTF-8 code page, so non-ASCII paths and output survive; the command exactly as written.
-    fs.writeFileSync(script, `@echo off\r\nchcp 65001 >nul\r\n${cmd.replace(/\r?\n/g, "\r\n")}\r\n`, "utf8");
+    fs.writeFileSync(script, `@echo off\r\nchcp 65001 >nul\r\n${enter}${cmd.replace(/\r?\n/g, "\r\n")}\r\n`, "utf8");
     const writableRoots = [...new Set([writable, ...roots()].filter(Boolean))];
     const args = [
       "sandbox",
@@ -192,7 +206,7 @@ function createSandboxRunner({
       "-c", `sandbox_workspace_write.writable_roots=[${writableRoots.map(tomlPath).join(",")}]`,
       "--", "cmd.exe", "/d", "/c", script,
     ];
-    const child = spawnProcess(found.codex, args, { cwd, env: childEnv(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawnProcess(found.codex, args, { cwd: home, env: childEnv(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
     const record = {
       id, cmd, cwd, startedAt: now(), status: "running", exitCode: null, child, script, stdinOpen: true,
       streams: { stdout: { chunks: [], size: 0, total: 0 }, stderr: { chunks: [], size: 0, total: 0 } },

@@ -3,7 +3,7 @@ import type { JsonObject, WorkspaceSummary } from "../api/contracts";
 import { AgentOrchestratorCanvas, LOOP_LINK, linkPointKey } from "./AgentOrchestratorCanvas";
 import { aoDependencyChange, aoLevels, aoUnlinkChange, listAllWorkspaces, moduleCall, watchHarnesses, type AoMission, type AoNode } from "./AgentOrchestratorSurface";
 import { AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, NATIVE_HARNESS, cardMeta,
-  defaultTeam, emptyRoleSettings, workerRoute, type AoHarness, type AoModelCatalog, type AoModelLoader, type AoTeam } from "./AgentOrchestratorRoleEditor";
+  defaultTeam, starterSettings, workerRoute, type AoHarness, type AoModelCatalog, type AoModelLoader, type AoTeam } from "./AgentOrchestratorRoleEditor";
 import { ROLE_TITLE, prepareTeamGraph } from "./AgentOrchestratorTeam";
 import "./agent-orchestrator.css";
 
@@ -235,8 +235,9 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
     const node: AoNode = { id, task_id: "", role, state: "pending", x: 0, y: 1, parents: [planner.id],
       route: role === "worker" ? workerRoute(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL) : { ...reviewer?.route ?? planner.route },
       settings: preset
-        ? { ...emptyRoleSettings(), name: preset.roleName, role_name: preset.roleName, specialty: preset.specialty }
-        : { ...emptyRoleSettings(), name: `${ROLE_TITLE[role]}${role === "approver" ? "" : ` ${count + 1}`}`, specialty: role === "worker" ? "implementation" : role === "retry" ? "recovery" : "review" } };
+        ? starterSettings(role, preset.roleName, preset.specialty, preset.roleName)
+        : starterSettings(role, `${ROLE_TITLE[role]}${role === "approver" ? "" : ` ${count + 1}`}`,
+          role === "worker" ? "implementation" : role === "retry" ? "recovery" : "review") };
     change({ ...draft, nodes: [...draft.nodes, node] });
     setSelectedId(id);
   };

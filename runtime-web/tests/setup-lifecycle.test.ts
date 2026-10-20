@@ -1,5 +1,16 @@
 import { expect, test } from "bun:test";
-import { launcherCapabilityProbeRequired, setupProxyIsReady } from "../src/setup";
+import { defaultConfig } from "../src/config";
+import { baseConfig, launcherCapabilityProbeRequired, setupProxyIsReady } from "../src/setup";
+
+test("setup applies an explicit chat-mode flag and otherwise keeps the existing choice", () => {
+  const options = { mode: "browser-only" as const, acknowledgedUnofficial: true };
+  const existing = defaultConfig("browser-only");
+  expect(baseConfig(undefined, options).useSavedChats).toBe(true);
+  expect(baseConfig(existing, { ...options, useSavedChats: false }).useSavedChats).toBe(false);
+  // Every later setup (an upgrade, a mode switch, Bigger Context) leaves the user's choice alone.
+  expect(baseConfig({ ...existing, useSavedChats: false }, options).useSavedChats).toBe(false);
+  expect(baseConfig({ ...existing, useSavedChats: false }, { ...options, useSavedChats: true }).useSavedChats).toBe(true);
+});
 
 const config = {
   mode: "browser-only" as const,

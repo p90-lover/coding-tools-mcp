@@ -71,6 +71,37 @@ function observeHarness(context) {
   });
 }
 
+test("chat hosts that outlived the app are counted by whether their loopback address still answers", async () => {
+  const vm = require("node:vm");
+  const net = require("node:net");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("  async function survivingChatHosts");
+  const fn = source.slice(start, source.indexOf("  // continuable() checks in flight", start));
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ct-chat-hosts-"));
+  const live = net.createServer(socket => socket.destroy());
+  await new Promise(resolve => live.listen(0, "127.0.0.1", resolve));
+  const closed = net.createServer();
+  await new Promise(resolve => closed.listen(0, "127.0.0.1", resolve));
+  const deadPort = closed.address().port;
+  await new Promise(resolve => closed.close(resolve));
+  const host = (id, record) => {
+    fs.mkdirSync(path.join(dataRoot, "chat-hosts", id), { recursive: true });
+    fs.writeFileSync(path.join(dataRoot, "chat-hosts", id, "host.json"), typeof record === "string" ? record : JSON.stringify(record));
+  };
+  try {
+    const survivingChatHosts = vm.runInNewContext(`${fn}; survivingChatHosts`, { fs, path, net, dataRoot });
+    assert.equal(await survivingChatHosts(), 0, "no chat-hosts folder");
+    host("alive", { address: `127.0.0.1:${live.address().port}` });
+    host("dead", { address: `127.0.0.1:${deadPort}` });
+    host("broken", "{not json");
+    host("remote", { address: "10.0.0.5:4000" });
+    assert.equal(await survivingChatHosts(), 1, "only the host that still answers on loopback");
+  } finally {
+    await new Promise(resolve => live.close(resolve));
+    fs.rmSync(dataRoot, { recursive: true, force: true });
+  }
+});
+
 test("a session's project folder is named for its tools only for the chat's own folder-mode project", async () => {
   const vm = require("node:vm");
   const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
@@ -807,6 +838,27 @@ test("an ACP edit opens on its changed lines, not the whole file, and a long mes
   assert.equal(edit.files[0].diff, ["@@ -98,7 +98,7 @@", " line 97", " line 98", " line 99", "-line 100", "+changed 100",
     " line 101", " line 102", " line 103"].join("\n"), "one numbered hunk with 3 context lines, as Claude Code shows it");
   assert.equal(message.text, answer, "the whole answer, its closing code span included");
+});
+
+test("live text past 4 KB keeps moving: the streaming answer stays whole and running reasoning keeps its newest part", async () => {
+  const answer = `Start of the answer.\n${"a".repeat(9000)}\nEnd so far.`;
+  const thought = `First thought.\n${"t".repeat(9000)}\nNewest thought: checking lifecycle.py`;
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.includes("/conversation") ? {
+      turns: [{ id: "t", state: "running" }],
+      messages: [{ id: "m", turnId: "t", sequence: 2, role: "assistant", streaming: true, text: answer }],
+      activities: [
+        { id: "r1", turnId: "t", sequence: 1, activityKind: "reasoning", status: "running", summary: "Reasoning", detail: { text: thought } },
+        { id: "r0", turnId: "t", sequence: 0, activityKind: "reasoning", status: "completed", summary: "Reasoning", detail: { text: thought } },
+      ],
+    } : { session: { id: "s", mode: "chat", status: "working" } },
+  });
+  const items = JSON.parse(JSON.stringify((await upstream.observe("s")).timeline));
+  const byId = Object.fromEntries(items.map(item => [item.id, item]));
+  assert.equal(byId.m.text, answer.trim(), "the streaming answer is not frozen at 4 KB");
+  assert.ok(byId.r1.text.endsWith("Newest thought: checking lifecycle.py"), "running reasoning keeps its newest part");
+  assert.ok(Buffer.byteLength(byId.r1.text) <= 4096);
+  assert.equal(byId.r0.text, thought, "finished reasoning is kept whole (up to 64 KB), its opening heading the folded row");
 });
 
 test("a tool call carries its description, arguments and output, so its row can open on them as Claude Code's do", async () => {

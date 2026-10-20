@@ -156,6 +156,14 @@ test("launcher runtime ownership cannot cross production and DEV profiles", () =
     validateConfig({ ...production, stallTimeoutSec: 900 }, descriptorPath).stallTimeoutSec,
     900,
   );
+  // Absent (older configs) and either boolean are valid; anything else is not.
+  for (const useSavedChats of [undefined, true, false]) {
+    assert.doesNotThrow(() => validateConfig({ ...production, useSavedChats }, descriptorPath));
+  }
+  assert.throws(
+    () => validateConfig({ ...production, useSavedChats: "false" }, descriptorPath),
+    /invalid useSavedChats/,
+  );
 });
 
 test("DEV runtime supervision ignores launcher version mismatch and starts only the isolated MCP tunnel", async () => {
