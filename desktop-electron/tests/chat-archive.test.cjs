@@ -1,0 +1,86 @@
+"use strict";
+
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { createChatArchiveStore, DEFAULT_ARCHIVE_DAYS } = require("../electron/chat-archive.cjs");
+const { createAgentOrchestratorWorkflow } = require("../electron/agent-orchestrator-workflow.cjs");
+
+const DAY = 86_400_000;
+
+test("an archived chat counts its days from when it was archived (or first seen) and is due once they are up", () => {
+  let now = 1_000_000;
+  const store = createChatArchiveStore({ now: () => now });
+  assert.equal(store.days(), DEFAULT_ARCHIVE_DAYS, "5 days unless set");
+  store.archived("ws", "a");
+  assert.equal(store.due("ws", "a"), false);
+  // Archived before the app kept times: it gets its full days from the first time it is seen.
+  now += 10 * DAY;
+  assert.equal(store.due("ws", "older"), false, "first seen now, not due at once");
+  assert.equal(store.due("ws", "a"), true);
+  store.setDays(0);
+  assert.equal(store.due("ws", "a"), false, "0 keeps archived chats for good");
+  assert.throws(() => store.setDays(-1), /0 to 365/);
+  assert.throws(() => store.setDays(1.5), /0 to 365/);
+  store.forget("ws", "a");
+  store.setDays(1);
+  assert.equal(store.due("ws", "a"), false, "a restored chat starts again if archived later");
+});
+
+test("the archive times and the days setting survive a restart", () => {
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), "chat-archive-"));
+  const file = path.join(folder, "chat-archive.json");
+  let now = 5_000;
+  const first = createChatArchiveStore({ file, now: () => now });
+  first.setDays(2);
+  first.archived("ws", "t");
+  now += 3 * DAY;
+  const second = createChatArchiveStore({ file, now: () => now });
+  assert.equal(second.days(), 2);
+  assert.equal(second.since("ws", "t"), 5_000);
+  assert.equal(second.due("ws", "t"), true);
+  fs.rmSync(folder, { recursive: true, force: true });
+});
+
+test("listing archived chats moves those past their days to recoverable deletion; younger ones stay and say when they go", async () => {
+  let now = 1_000_000;
+  const runs = ["old", "young", "live"].map((task, index) => ({ id: `r${index}`, workspace_id: "ws", project_id: task, revision: 1, cancelled: false, nodes: [] }));
+  const lives = {
+    old: { workspace_id: "ws", task_id: "old", revision: 2, visibility: "archived", title: "Old chat" },
+    young: { workspace_id: "ws", task_id: "young", revision: 1, visibility: "active", title: "Young chat" },
+    live: { workspace_id: "ws", task_id: "live", revision: 1, visibility: "active", title: "Live chat" },
+    board: { workspace_id: "ws", task_id: "board", revision: 1, visibility: "archived", title: "A board task, never a chat" },
+  };
+  const updates = [];
+  const workflow = createAgentOrchestratorWorkflow({ now: () => now, requestHeadless: async (endpoint, body) => {
+    if (endpoint === "/api/v1/ao/read") return { ok: true, runs: structuredClone(runs), task_lifecycle: Object.values(lives).map((life) => structuredClone(life)) };
+    if (endpoint === "/api/v1/ao/update") {
+      const change = body.change.change;
+      updates.push([change.task_id, change.operation, change.visibility]);
+      const life = lives[change.task_id];
+      assert.equal(change.expected_revision, life.revision, "the deletion is for the state that was read");
+      life.visibility = change.visibility;
+      life.revision += 1;
+      return { ok: true, lifecycle: structuredClone(life) };
+    }
+    throw new Error(`Unexpected ${endpoint}`);
+  } });
+  let listed = await workflow.call("archived_chats", { workspaceIds: ["ws"] });
+  assert.equal(listed.days, 5);
+  assert.deepEqual(listed.chats.map((chat) => [chat.taskId, chat.visibility, chat.title]), [["old", "archived", "Old chat"]], "only chats; the board task is left out");
+  assert.equal(listed.chats[0].archivedAt, 1_000_000);
+  now += 4 * DAY;
+  lives.young.visibility = "archived";
+  listed = await workflow.call("archived_chats", { workspaceIds: ["ws"] });
+  assert.equal(updates.length, 0, "four days in, nothing goes");
+  now += 2 * DAY;
+  listed = await workflow.call("archived_chats", { workspaceIds: ["ws"] });
+  assert.deepEqual(updates, [["old", "set_visibility", "deleted"]], "six days in, only the older chat moves to deleted");
+  assert.deepEqual(listed.chats.map((chat) => [chat.taskId, chat.visibility]), [["old", "deleted"], ["young", "archived"]]);
+  assert.equal((await workflow.call("archive_settings", { days: 0 })).days, 0);
+  now += 100 * DAY;
+  await workflow.call("archived_chats", { workspaceIds: ["ws"] });
+  assert.equal(updates.length, 1, "0 days keeps archived chats for good");
+});

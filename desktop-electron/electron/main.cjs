@@ -3149,6 +3149,7 @@ async function start() {
       goalsFile: path.join(app.getPath("userData"), "integrations", "chat-goals.json"),
       // So do deleted chat messages (their hidden runs and fresh-session flags).
       chatEditsFile: path.join(app.getPath("userData"), "integrations", "chat-edits.json"),
+      archiveFile: path.join(app.getPath("userData"), "integrations", "chat-archive.json"),
       knownModelsFile: path.join(app.getPath("userData"), "integrations", "cpa-known-models.json"),
       requestHeadless: (endpoint, body, options) => {
         if (!headlessHost) throw new Error("Local Coding Tools runtime is unavailable");

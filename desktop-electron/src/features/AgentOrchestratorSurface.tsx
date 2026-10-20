@@ -6,7 +6,7 @@ import type { Language } from "../types";
 import { AgentOrchestratorOriginalSurface } from "./AgentOrchestratorOriginalSurface";
 import { AgentOrchestratorCanvas, type CanvasNode } from "./AgentOrchestratorCanvas";
 import { AgentOrchestratorChat } from "./AgentOrchestratorChat";
-import { ChatThreadList, type ThreadWorkspace } from "./ChatThreadList";
+import { ChatThreadList, type ArchivedChat, type ThreadWorkspace } from "./ChatThreadList";
 import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "./ProjectEditDialog";
 import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
@@ -1806,10 +1806,38 @@ export function AgentOrchestratorSurface({ language, setError }: {
     planMode, setPlanMode,
   };
 
+  // Archived chats of every project, for the list's Archived section (grouped by project there).
+  // Reading them also moves chats archived longer than the set days to "deleted", so it runs when
+  // the list opens, after any chat is archived or restored here, and hourly.
+  const [archivedAll, setArchivedAll] = useState<{ days: number; chats: ArchivedChat[] } | null>(null);
+  const workspaceIds = workspaces.map((item) => item.id).join("\n");
+  const archivedKey = taskLifecycle.map((item) => `${item.task_id}:${item.visibility}`).join(",");
+  const loadArchived = useCallback(async () => {
+    if (!workspaceIds) return;
+    const result = await moduleCall("archived_chats", { workspaceIds: workspaceIds.split("\n") }).catch(() => null);
+    if (result && Array.isArray(result.chats)) setArchivedAll({ days: Number(result.days) || 0, chats: result.chats as ArchivedChat[] });
+  }, [workspaceIds]);
+  useEffect(() => {
+    void loadArchived();
+    const timer = window.setInterval(() => { void loadArchived(); }, 3_600_000);
+    return () => window.clearInterval(timer);
+  }, [loadArchived, archivedKey]);
+  const restoreArchived = (id: string, taskId: string) => void (async () => {
+    if (id === workspaceId) { missionAction(taskId, "restore"); return; }
+    await moduleCall("restore_task", { workspaceId: id, taskId });
+    await loadArchived();
+  })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+  const setArchiveDays = (days: number) => void (async () => {
+    const result = await moduleCall("archive_settings", { days });
+    setArchivedAll((current) => current && { ...current, days: Number(result.days) });
+    await loadArchived();
+  })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+
   return (
     <section className="ao-workflow" aria-label={copy.title} lang={language}>
       <ChatThreadList workspaces={workspaces.map((item) => ({ id: item.id, name: item.name, path: item.path }))} workspaceId={workspaceId} onWorkspace={chooseWorkspace}
         chats={chatList(missions, allTasks, taskLifecycle)} archived={chatArchived(missions, allTasks, taskLifecycle)} selectedTaskId={chatTaskId ?? ""} now={listNow}
+        archivedAll={archivedAll ?? undefined} restoreArchived={restoreArchived} setArchiveDays={setArchiveDays}
         pinned={chatPins} togglePin={togglePin} unread={chatUnread} setUnread={markUnread}
         pinnedProjects={projectPins} toggleProjectPin={toggleProjectPin}
         busyTaskIds={chatBusy} pendingTitle={pendingChat && !pendingChat.taskId ? pendingChat.title : undefined}

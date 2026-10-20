@@ -230,6 +230,30 @@ test("archived chats sit in their own section and can be restored", () => {
   assert.deepEqual(calls, [["lifecycle", "t3", "restore"]]);
 });
 
+test("every project's archived chats show in a folder per project, Chats for chats with no project, and Recently deleted last", () => {
+  const { props } = fixture();
+  const restored = [];
+  const day = 86_400_000;
+  const list = mount("ChatThreadList.tsx", { ...props, now: 10 * day,
+    archivedAll: { days: 5, chats: [
+      { workspaceId: "a", taskId: "x", title: "Alpha old", visibility: "archived", archivedAt: 7 * day },
+      { workspaceId: "b", taskId: "y", title: "Beta loose", visibility: "archived", archivedAt: 9 * day },
+      { workspaceId: "a", taskId: "z", title: "Long gone", visibility: "deleted" },
+    ] },
+    restoreArchived: (workspaceId, taskId) => restored.push([workspaceId, taskId]), setArchiveDays: () => {} });
+  const toggle = walk(list.render()).find((element) => element.props?.className === "cx-archived-toggle");
+  assert.match(text(toggle), /Archived \(2\)/, "deleted chats are counted apart");
+  toggle.props.onClick();
+  const view = list.render();
+  const heads = walk(view).filter((element) => element.type === "button" && /cx-project/.test(String(element.props.className)) && element.props["aria-expanded"] !== undefined)
+    .map((element) => text(element)).filter((value) => /Alpha|Chats|Recently deleted/.test(value) && !/Fix app|Older/.test(value));
+  assert.deepEqual(heads.slice(-3), ["Alpha1", "Chats1", "Recently deleted1"], "Beta has no folder, so its chat is under Chats");
+  const rows = walk(view).filter((element) => element.type === "li" && element.props.className === "cx-thread-row is-archived");
+  assert.match(text(rows[0]), /Alpha old.*2d/, "two days left of five");
+  walk(rows[1]).find((element) => element.props?.className === "cx-restore").props.onClick();
+  assert.deepEqual(restored, [["b", "y"]], "restore goes to the chat's own project");
+});
+
 test("a project's git label: none for a repository's root, worktree said plainly, anything chats can't use flagged", () => {
   const { projectGitLabel } = compile("ChatThreadList.tsx", (name) => name === "react" ? { useState() {}, useRef() {}, useEffect() {} }
     : name === "react/jsx-runtime" ? { jsx() {}, jsxs() {} } : name === "./ao-chat" ? chat : {});
