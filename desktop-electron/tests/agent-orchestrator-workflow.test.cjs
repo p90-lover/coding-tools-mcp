@@ -2256,6 +2256,31 @@ test("an agent's own models take CPA's real window for the same model, and a no-
   assert.match(message, /no longer in this harness's model list/, message);
 });
 
+test("Claude Code is not offered Antigravity's Claude models, and says why; other agents and providers keep them", async () => {
+  // Seen live: Antigravity answers every request carrying Claude Code's "Claude Agent SDK" system
+  // line with "Resource has been exhausted", so those cards retried ten times and failed.
+  const catalog = { data: [
+    { id: "claude-sonnet-4-6", owned_by: "antigravity", context_window: 200000 },
+    { id: "claude-opus-4-6-thinking", owned_by: "antigravity", context_window: 200000 },
+    { id: "claude-haiku-4-5", owned_by: "claude", context_window: 200000 },
+    { id: "gemini-3.8-flash-high", owned_by: "antigravity", context_window: 1000000 },
+  ] };
+  const workflow = createAgentOrchestratorWorkflow({
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async url => String(url).includes("/v1/models") ? { ok: true, json: async () => catalog } : { ok: false, status: 404, json: async () => ({}) },
+    requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [], teams: [], worker_capacity: {} } : { ok: true },
+    aoHarness: { catalog: async () => [], models: async () => [], spawn: async () => "session" },
+    confirm: async () => true,
+  });
+  const claudeCode = await workflow.call("models", { harness: "ao:claude-code" });
+  assert.ok(!claudeCode.models.includes("cpa/claude-sonnet-4-6") && !claudeCode.models.includes("cpa/claude-opus-4-6-thinking"));
+  assert.match(claudeCode.unavailable["cpa/claude-sonnet-4-6"], /Antigravity refuses Claude Code's requests.*Native Codex/);
+  assert.ok(claudeCode.models.includes("cpa/claude-haiku-4-5"), "a Claude model another provider serves stays");
+  assert.ok(claudeCode.models.includes("cpa/gemini-3.8-flash-high"), "Antigravity's other models stay");
+  const native = await workflow.call("models", { harness: "codex-native" }).catch(() => null);
+  if (native?.models) assert.ok(native.models.some(model => /claude-sonnet-4-6$/.test(model)), "Native Codex still runs it");
+});
+
 test("a model CPA stops listing stays in the picker with its effort and window, and a send on it goes to CPA", async () => {
   let catalog = { data: [{ id: "gemini-3.8-flash-high", context_window: 1000000 }, { id: "cline-pass/deepseek-v4-flash", context_window: 1000000 }] };
   let clock = 1_000_000;

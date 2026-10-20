@@ -747,13 +747,21 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         const cpaLimit = catalog?.capabilities[item.id]?.contextLimit;
         return [item.id, modelCapabilities(agent, item.id, item.contextLimit || !cpaLimit ? item : { ...item, contextLimit: cpaLimit })];
       }));
-      const cpa = !catalog ? [] : catalog.models.filter(id => !id.startsWith("chatgpt-web/")).map(id => {
+      // Antigravity refuses every request that carries Claude Code's "You are a Claude agent, built on
+      // Anthropic's Claude Agent SDK." system line, and calls it "Resource has been exhausted": a
+      // Claude Code card on its Claude models retried ten times and failed as if out of quota. Those
+      // models are not offered to Claude Code; Native Codex runs them.
+      const refused = id => agent === "claude-code" && /^claude-/i.test(id)
+        && /antigravity/i.test(String(catalog?.capabilities[id]?.provider ?? ""));
+      const cpa = !catalog ? [] : catalog.models.filter(id => !id.startsWith("chatgpt-web/") && !refused(id)).map(id => {
         const routed = `${CPA_MODEL_PREFIX}${id}`;
         capabilities[routed] = modelCapabilities(agent, id, catalog.capabilities[id], true);
         return routed;
       });
       const routedNotes = notes => notes ? Object.fromEntries(Object.entries(notes).map(([id, why]) => [`${CPA_MODEL_PREFIX}${id}`, why])) : null;
-      const unavailable = routedNotes(catalog?.unavailable);
+      const refusedNotes = Object.fromEntries((catalog?.models ?? []).filter(refused).map(id => [id,
+        "Antigravity refuses Claude Code's requests for its Claude models (it answers \"quota exhausted\"); run this model on Native Codex"]));
+      const unavailable = routedNotes(Object.keys(refusedNotes).length ? { ...catalog?.unavailable, ...refusedNotes } : catalog?.unavailable);
       const held = routedNotes(catalog?.held);
       return { ok: true, harness, models: [...new Set([...items.map(item => item.id), ...cpa])], capabilities,
         ...(unavailable ? { unavailable } : {}), ...(held ? { held } : {}), ...(catalog?.stale ? { stale: true } : {}) };
