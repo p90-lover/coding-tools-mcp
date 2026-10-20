@@ -29,10 +29,12 @@ export type ChatAgentSession = { id: string; label: string; model?: string; cont
 export function chatAgentSessions(runs: { nodes: ChatNode[] }[]): ChatAgentSession[] {
   const seen = new Map<string, ChatAgentSession>();
   for (const run of [...runs].reverse()) {
-    for (const node of [...run.nodes].reverse()) {
+    for (const node of [...(run.nodes ?? [])].reverse()) {
       const id = node.receipt?.thread_id;
       if (!id || seen.has(id) || !node.route?.harness_id?.startsWith("ao:")) continue;
-      const name = node.settings?.name || node.settings?.role_name || node.role;
+      // Always a string: the chat reads these labels while rendering (the context meter splits
+      // them), and a card saved with no name, role name or role would otherwise throw there.
+      const name = node.settings?.name || node.settings?.role_name || node.role || "Agent";
       // The window the card asked for is the one the agent runs with (Claude Code's
       // CLAUDE_CODE_MAX_CONTEXT_TOKENS), even when its usage report still names the model's default.
       const contextWindow = node.route.context_window;
