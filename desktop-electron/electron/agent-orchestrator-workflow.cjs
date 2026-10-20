@@ -917,8 +917,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const plugins = new Set();
     const unavailable = Object.create(null); // model -> why it is not offered (a plugin with no enabled account)
     const held = Object.create(null); // listed model -> why CPA may not serve it right now
+    // Models CPA serves but marks hidden from model menus (Codex's own codex-auto-review): never
+    // offered in a picker, but the command approver uses the review model. Dropping them with the
+    // rest left "Approve for me" without it from the start, on a model that kept answering "ask".
+    const hidden = [];
     for (const entry of rows || []) {
       const id = entry?.slug ?? entry?.id;
+      if (entry?.visibility === "hide" && typeof id === "string" && id && id.length <= 128 && !hidden.includes(id)) hidden.push(id);
       if (typeof id === "string" && id && id.length <= 128 && unserved(id)) {
         unavailable[id] = pluginUnavailable(owners.get(id), accountProviders);
         // A provider whose account is only disabled keeps its models listed, like any model CPA
@@ -970,7 +975,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     if (!ids.length) throw new Error("CPA has no available models");
     pluginModels = plugins;
     return { ok: true, models: ids, capabilities, ...(Object.keys(unavailable).length ? { unavailable: { ...unavailable } } : {}),
-      ...(Object.keys(held).length ? { held: { ...held } } : {}) };
+      ...(Object.keys(held).length ? { held: { ...held } } : {}), ...(hidden.length ? { hidden } : {}) };
   }
 
   // Native Codex runs WebGPT/CPA routes in-process; every other worker harness is AO's own.
@@ -2064,13 +2069,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * its own request; a team's Command approver card keeps the model it was given. Either falls back
    * to the next while CPA cannot serve one (e.g. its Codex sign-in has expired).
    */
-  function reviewerModels(approver, catalog) {
+  function reviewerModels(approver, catalog, hidden = []) {
     const route = approver.route ?? {};
     const own = route.provider_id === "cliproxyapi-antigravity" ? route.model
       : typeof route.model === "string" && route.model.startsWith(CPA_MODEL_PREFIX) ? route.model.slice(CPA_MODEL_PREFIX.length) : null;
     const card = approver.role === "approver";
     const order = card ? [own, AUTO_REVIEW_MODEL, catalog[0]] : [AUTO_REVIEW_MODEL, own, catalog[0]];
-    return [...new Set(order.filter(model => model && catalog.includes(model)))];
+    // The review model is one CPA hides from menus (see readCpaCatalog), so it counts when listed hidden.
+    return [...new Set(order.filter(model => model && (catalog.includes(model) || (model === AUTO_REVIEW_MODEL && hidden.includes(model)))))];
   }
 
   // A reviewer model that just failed (Codex's auto-review with every Codex sign-in expired took
@@ -2087,7 +2093,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const reviewFailures = new Map(); // approval_id -> { tries, at }
   async function askApprover({ approver, mission, approval }) {
     const { baseUrl, key } = connection();
-    const all = reviewerModels(approver, (await models()).models);
+    const catalog = await models();
+    const all = reviewerModels(approver, catalog.models, catalog.hidden ?? []);
     // One that failed lately is tried last, not skipped: Codex's auto-review benched by a single
     // timeout left only the card's own model for ten minutes.
     const candidates = [...all.filter(model => !(reviewerDown.get(model) > now())), ...all.filter(model => reviewerDown.get(model) > now())];

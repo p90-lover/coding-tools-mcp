@@ -3022,6 +3022,44 @@ test("Approve for me is reviewed by codex-auto-review first, the card's model wh
   assert.match(down.detail, /could not answer/, "and the request says why it is waiting for them");
 });
 
+test("Approve for me reviews with codex-auto-review although CPA hides it from model menus, and menus still leave it out", async () => {
+  // Seen live: CPA's catalog lists codex-auto-review with visibility "hide" (Codex keeps its review
+  // model out of pickers). The catalog dropped it, so every review went to another model, which
+  // kept answering "ask" and put routine commands in front of the person.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
+  const request = { approval_id: "write", source: "ao", kind: "permission", path: "C:/elsewhere/file", tool: "Write", summary: "Write", decisions };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+    { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const asked = [], resolved = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async (url, init) => {
+      // CPA's enhanced catalog, as it really answers.
+      if (String(url).includes("/models")) return { ok: true, json: async () => ({ models: [
+        { slug: "test-model", visibility: "list" }, { slug: "codex-auto-review", visibility: "hide" }] }) };
+      asked.push(JSON.parse(init.body).model);
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"allow","reason":"fixture"}' } }] }) };
+    },
+    requestHeadless: async (endpoint) => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: resolved.length ? [] : [request] }),
+      resolveApproval: async (session, requestId, decisionId) => { resolved.push(decisionId); return { ok: true }; },
+    },
+    confirm: async () => true,
+  });
+  await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  for (let tries = 0; tries < 200 && !resolved.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  mission.nodes[0].state = "finished";
+  assert.deepEqual(asked, ["codex-auto-review"], "Codex's hidden review model reviews the request");
+  assert.deepEqual(resolved, ["yes"]);
+  const menu = await workflow.call("models", { harness: "ao:claude-code", workspaceId: "ws" }).catch(() => null);
+  if (menu?.models) assert.ok(!menu.models.some(id => /codex-auto-review/.test(id)), "a hidden model is never offered in a model menu");
+});
+
 test("the reviewer is told the agent's workspace folder, so a path inside it is not judged outside", async () => {
   // Seen live: three parallel `cmd /c dir /b "G:\...\<project subfolder>"` calls; two were denied and
   // the same command was allowed on retry. The prompt named only the workspace's id.
