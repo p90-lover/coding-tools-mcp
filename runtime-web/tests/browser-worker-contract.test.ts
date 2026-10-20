@@ -2226,12 +2226,34 @@ test("image attachment readiness uses exact file tiles and not localized remove-
   };
   const composerForm = {
     getByRole: (role: string, options: { name: string; exact: boolean }) => {
+      if (role === "progressbar") {
+        // The upload bar ChatGPT shows on the tile until the file is uploaded.
+        expect(options).toEqual({ name: "Uploading codex-input-image-1.png", exact: true });
+        return {
+          waitFor: async (state: { state: string; timeout: number }) => {
+            expect(state).toEqual({ state: "hidden", timeout: 120_000 });
+            calls.push(["uploaded", options.name]);
+          },
+        };
+      }
+      // The old composer's group tile, or the redesigned one's button tile (an image's thumbnail).
+      if (role === "button") {
+        expect(options).toEqual({ name: "codex-input-image-1.png", exact: true });
+        return { role };
+      }
       expect(role).toBe("group");
       expect(options).toEqual({ name: "codex-input-image-1.png", exact: true });
       return {
-        waitFor: async (state: { state: string; timeout: number }) => {
-          expect(state).toEqual({ state: "visible", timeout: 60_000 });
-          calls.push(["fileTile", options.name]);
+        or: (other: { role: string }) => {
+          expect(other.role).toBe("button");
+          return {
+            first: () => ({
+              waitFor: async (state: { state: string; timeout: number }) => {
+                expect(state).toEqual({ state: "visible", timeout: 60_000 });
+                calls.push(["fileTile", options.name]);
+              },
+            }),
+          };
         },
       };
     },
@@ -2277,6 +2299,7 @@ test("image attachment readiness uses exact file tiles and not localized remove-
     ["inputReady"],
     ["setFiles", "codex-input-image-1.png"],
     ["fileTile", "codex-input-image-1.png"],
+    ["uploaded", "Uploading codex-input-image-1.png"],
     ["sendEnabled"],
   ]);
 });
