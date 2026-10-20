@@ -229,7 +229,7 @@ export function AgentOrchestratorComposerControls({
           }}>
             {/* One line per harness: its logo, its name, and a short state tag at the end. */}
             <span className="ao-harness-option"><HarnessLogo harnessId={item.id} label={item.label} size={18} /><strong>{item.label}</strong>
-              {!item.runnable ? <small>not installed</small> : item.authStatus === "unauthorized" ? <small>sign in</small> : item.chat === false ? <small>terminal</small> : null}</span>
+              {!item.runnable ? <small>not installed</small> : item.authStatus === "unauthorized" ? <small>sign in</small> : null}</span>
           </Option>)}
           {!harnesses.length ? <p role="status">No agents found yet.</p> : null}
         </div>}

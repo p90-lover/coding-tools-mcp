@@ -221,8 +221,29 @@ function delayToMilliseconds(value, unit) {
   }
   return ms;
 }
-function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, logger = null }) {
+/**
+ * The chat's own preferences that outlive a restart: today only autoRetry (a failed single-model
+ * step is retried by itself, chatAutoRetry). Kept in memory when no file is given (tests).
+ */
+function createChatPreferences(file) {
+  let saved = {};
+  try { if (file) saved = JSON.parse(fs.readFileSync(file, "utf8")) || {}; } catch { saved = {}; }
+  return {
+    get: () => ({ autoRetry: saved.autoRetry === true }),
+    set(change) {
+      saved = { ...saved, ...change };
+      if (!file) return;
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      const temp = `${file}.${process.pid}.tmp`;
+      fs.writeFileSync(temp, `${JSON.stringify(saved)}\n`);
+      fs.renameSync(temp, file);
+    },
+  };
+}
+
+function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, logger = null }) {
   const goals = createGoalStore({ file: goalsFile, now });
+  const chatPreferences = createChatPreferences(chatPreferencesFile);
   // Chats whose agent asked to be woken later (schedule_wakeup, chat-wakeups.cjs).
   const wakeups = createWakeupStore({ file: wakeupsFile, now });
   // Deleted chat messages: their runs are hidden from the chat, and the next follow-up starts afresh.
@@ -981,6 +1002,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   }
 
   // Native Codex runs WebGPT/CPA routes in-process; every other worker harness is AO's own.
+  // Harnesses AO names by their command: the picker shows the product's full name (the user: "show
+  // the agy in full name").
+  const HARNESS_NAMES = { agy: "Antigravity" };
   async function harnesses() {
     const native = { id: "codex-native", label: "Native Codex", runnable: true, installed: true, authStatus: "configured" };
     try {
@@ -988,7 +1012,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       const catalog = await recentHarnessCatalog();
       // While AO is still checking some agents the list is incomplete; the notice makes the page ask again.
       const checking = catalog.filter(item => item.checking).length;
-      return { ok: true, harnesses: [native, ...catalog.map(item => ({ id: `ao:${item.id}`, label: item.label,
+      return { ok: true, harnesses: [native, ...catalog.map(item => ({ id: `ao:${item.id}`, label: HARNESS_NAMES[item.id] ?? item.label,
         installed: item.installed, authStatus: item.authStatus, chat: item.chat, runnable: item.installed }))],
         ...(checking ? { notice: `Still checking ${checking} agent CLI${checking === 1 ? "" : "s"}…` } : {}) };
     } catch (error) {
@@ -2439,6 +2463,38 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       (node.role === "worker" && node.state === "pending" && blockedByFailure(mission, node)));
   }
 
+  // "Retry automatically" (the chat's failed-step card): a failed single-model step runs again by
+  // itself, a few times with a growing pause, unless its failure is one a retry cannot fix (the
+  // account pool or a sign-in). The user: a launch that timed out waited for a click.
+  const AUTO_RETRY_LIMIT = 3;
+  const AUTO_RETRY_PAUSE_MS = 10_000;
+  const autoRetrySeen = new Map(); // `${runId}:${nodeId}:${attempt}` -> when this failure was first seen
+  function autoRetryStep(mission, held) {
+    const node = held.find(entry => entry.role !== "retry") ?? held[0];
+    if (!node) return null;
+    const error = String(node.receipt?.error || "");
+    if (POOL_EXHAUSTED.test(error)) return { detail: "This failure needs you (the account pool or a sign-in); automatic retry does not help it" };
+    const attempt = (node.history?.length ?? 0) + 1;
+    if (attempt > AUTO_RETRY_LIMIT) return { detail: `Retried automatically ${AUTO_RETRY_LIMIT} times; inspect the saved answer and retry explicitly` };
+    const key = `${mission.id}:${node.id}:${attempt}`;
+    if (!autoRetrySeen.has(key)) {
+      autoRetrySeen.set(key, now());
+      if (autoRetrySeen.size > 500) autoRetrySeen.delete(autoRetrySeen.keys().next().value);
+    }
+    const wait = AUTO_RETRY_PAUSE_MS * attempt - (now() - autoRetrySeen.get(key));
+    if (wait > 0) return { detail: `Retrying automatically in ${Math.ceil(wait / 1000)}s (attempt ${attempt} of ${AUTO_RETRY_LIMIT})` };
+    autoRetrySeen.delete(key);
+    return { retry: true, attempt };
+  }
+  /** chat_auto_retry: reads the "Retry automatically" preference, or sets it with `enabled`. */
+  function chatAutoRetry({ enabled } = {}) {
+    if (enabled !== undefined) {
+      if (typeof enabled !== "boolean") throw new Error("Choose on or off");
+      chatPreferences.set({ autoRetry: enabled });
+    }
+    return { ok: true, autoRetry: chatPreferences.get().autoRetry };
+  }
+
   async function recoverHeld(workspaceId, mission, state = {}) {
     const held = mission.nodes.filter(node => node.state === "held");
     if (!held.length || mission.cancelled) return null;
@@ -2447,7 +2503,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // per attempt budget) instead of waiting for an explicit retry.
       const interrupted = held.find(node => RESTART_INTERRUPTED.test(String(node.receipt?.error || ""))
         && (node.history?.length ?? 0) < HELPER_ATTEMPT_LIMIT);
-      if (!interrupted) return { detail: "Single model failed; inspect the saved answer and retry explicitly." };
+      if (!interrupted) {
+        const auto = chatPreferences.get().autoRetry ? autoRetryStep(mission, held) : null;
+        if (auto?.retry) {
+          await controlRun({ workspaceId, runId: mission.id, action: "retry" });
+          logger?.info?.("ao.auto_retried", { attempt: auto.attempt });
+          return { changed: true, retried: true, detail: `Retrying the failed step automatically (attempt ${auto.attempt} of ${AUTO_RETRY_LIMIT})` };
+        }
+        if (auto?.detail) return { detail: auto.detail };
+        return { detail: "Single model failed; inspect the saved answer and retry explicitly." };
+      }
       await controlRun({ workspaceId, runId: mission.id, action: "retry" });
       return { changed: true, retried: true, detail: "The app restarted while this step was running; it continues" };
     }
@@ -3920,6 +3985,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "chat_delete_message": return chatDeleteMessage(args);
       case "chat_goal": return chatGoal(args);
       case "chat_wakeup": return chatWakeup(args);
+      case "chat_auto_retry": return chatAutoRetry(args);
       case "compact_chat": return compactChat(args);
       case "chat_diff": return chatDiff(args);
       case "update_run": return updateRun(args);
