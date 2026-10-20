@@ -2,7 +2,23 @@ export type Language = "en" | "zh-CN" | "zh-TW" | "ja";
 export type RefreshPart = "ui" | "bridge" | "mcp" | "agent-orchestrator" | "cpa" | "headless" | "backend" | "all" | "app";
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "gpt-browser" | "chatgpt-desktop" | "email" | "register" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "agent-orchestrator-teams" | "subagents" | "antigravity-cli" | "providers" | "integrations" | "cpa" | "paseo" | "anneal" | "network" | "proxy-gateway" | "activity" | "settings";
+export type Surface = "browser" | "gpt-browser" | "chatgpt-desktop" | "email" | "register" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "agent-orchestrator-teams" | "subagents" | "rtk" | "antigravity-cli" | "providers" | "integrations" | "cpa" | "paseo" | "anneal" | "network" | "proxy-gateway" | "activity" | "settings";
+
+/** Runtime > RTK (rtk.cjs): the installed rtk, if any, and whether agents' commands use it. */
+export interface RtkStatus {
+  enabled: boolean;
+  installed: boolean;
+  path: string | null;
+  version: string | null;
+  minimum?: string;
+  installCommand?: string;
+}
+/** rtk's own savings report: `rtk gain` as text, and its JSON export when rtk gives one. */
+export interface RtkGain {
+  available: boolean;
+  text?: string;
+  data?: unknown;
+}
 
 export type ProviderAuth = "oauth" | "api_key" | "browser_session" | "local_proxy";
 export type ProviderAccountStatus = "pending" | "connected" | "expired" | "error" | "disabled";
@@ -508,6 +524,8 @@ export interface LauncherState {
   chatAgentPreviewTools?: boolean;
   /** An agent's tool request answered in the chat is confirmed again in a dialog unless false. */
   confirmAgentToolRequests?: boolean;
+  /** Runtime > RTK: agents' commands go through the installed rtk unless false. */
+  rtkEnabled?: boolean;
   browserInteractionMode: BrowserInteractionMode;
   experimentalBiggerContext: boolean;
   /** Task chats are saved in ChatGPT history (default); false uses Temporary Chat. */
@@ -871,9 +889,12 @@ export interface LauncherApi {
     targetMode: BrowserInteractionMode;
   }>;
   setPreference(
-    key: "keepRunningOnClose" | "showBrowserDuringTurns" | "autoConnectExistingMcp" | "chatAgentTools" | "chatAgentDesktopTools" | "chatAgentTerminalTools" | "chatAgentPreviewTools" | "confirmAgentToolRequests",
+    key: "keepRunningOnClose" | "showBrowserDuringTurns" | "autoConnectExistingMcp" | "chatAgentTools" | "chatAgentDesktopTools" | "chatAgentTerminalTools" | "chatAgentPreviewTools" | "confirmAgentToolRequests" | "rtkEnabled",
     value: boolean,
   ): Promise<LauncherState>;
+  rtkStatus(): Promise<RtkStatus>;
+  rtkGain(): Promise<RtkGain>;
+  rtkInstall(): Promise<{ code: number | null; output: string; status: RtkStatus }>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;
   externalServicesSnapshot(): Promise<ExternalServicesSnapshot>;
   managedComponentsSnapshot(): Promise<ManagedComponentsSnapshot>;
