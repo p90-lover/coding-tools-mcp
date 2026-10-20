@@ -135,10 +135,11 @@ const LUNA_TIERS = ["chatgpt-web/luna", "chatgpt-web/think"];
 // AO harness models shown as "cpa/<model>" run that CPA pool model through the local gateway.
 const CPA_MODEL_PREFIX = "cpa/";
 // Agents AO's daemon can point at the CPA gateway, each through its own launch variables
-// (Claude Code: ANTHROPIC_*, Codex: a CPA-only CODEX_HOME, opencode: OPENAI_*). agy is not one:
-// its gateway mode sends its tools only for Gemini ids it knows itself, none of which CPA serves
-// under that name, so a CPA model on agy can chat but cannot read or write files.
-const GATEWAY_AGENTS = new Set(["claude-code", "codex", "opencode"]);
+// (Claude Code: ANTHROPIC_*, Codex: a CPA-only CODEX_HOME, opencode: OPENAI_*, agy:
+// AGY_LLM_GATEWAY_*). Every harness offers every pool model except WebGPT (the user's rule):
+// agy listed none, since its own catalog is empty without a Google sign-in. Its gateway mode sends
+// its tools only for Gemini ids it knows, so another model on agy can chat but not touch files.
+const GATEWAY_AGENTS = new Set(["claude-code", "codex", "opencode", "agy"]);
 // Gateway agents whose own model catalogs are not CPA or WebGPT models; they list only CPA models.
 const CPA_ONLY_AGENTS = new Set(["claude-code", "opencode"]);
 const webModel = (model) => WEB_TIERS.includes(model) || LUNA_TIERS.includes(model);
@@ -721,7 +722,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const slash = model.indexOf("/");
     const unqualifiedOpenCode = agent === "opencode" && !viaCpa
       && (slash < 0 || !model.slice(0, slash).trim() || !model.slice(slash + 1).trim());
-    if (GATEWAY_AGENTS.has(agent) && !claudeFixedWindow && !unqualifiedOpenCode && (!limit || limit >= 4096)) {
+    // agy's gateway variables carry no window, so it takes no context-window setting.
+    if (GATEWAY_AGENTS.has(agent) && agent !== "agy" && !claudeFixedWindow && !unqualifiedOpenCode && (!limit || limit >= 4096)) {
       capabilities.contextWindow = { min: 4096, max: Math.min(2000000, limit || 2000000), kind: "context" };
       capabilities.contextReason = limit
         ? "Client context declaration, not a larger provider limit. Client version/model applicability is checked again at launch."
