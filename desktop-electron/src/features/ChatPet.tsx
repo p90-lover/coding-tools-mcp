@@ -8,9 +8,9 @@ import { createPortal } from "react-dom";
 // sips coffee, reads, looks around, waves. When the pointer comes close it may leap onto it, for a
 // hug with hearts or a ride wherever the pointer goes, then jump back home to the box. It runs to
 // the send button to wave when a request waits for you, dances when a turn finishes and frets when
-// one fails. Left alone while nothing runs, it walks home to its house at the right end of the box
-// and sleeps there. Click to pet it, double-click to feed it, drag it anywhere along the box. Pure
-// view: it reads the chat's state and changes nothing.
+// one fails. Left alone while nothing runs, it walks home to its house beside the box's right side
+// and sleeps there. Click to pet it, double-click to feed it, drag it anywhere on the screen (let
+// go, it falls back onto the box). Pure view: it reads the chat's state and changes nothing.
 //
 // Clawd itself (Clawd.tsx) is Claude Code's: the CLI's glyphs, poses and animations, frame for frame.
 
@@ -21,8 +21,9 @@ import { CELL_H, CELL_W, CLICKABLE, COLS, ClawdFrame, ENTRANCES, ROWS, pickOne, 
 // Where it was left, as a fraction of the way around the box from the top-left corner.
 const POSITION_KEY = "coding-tools:ao:pet-around";
 // LIFT_KEY is where an older build kept how far it was held off the box (it then hovered there after
-// every restart); it is only cleared now. Dragged, it can be held anywhere in the window; let go, it
-// falls back onto the box, faster the shorter the drop.
+// every restart); it is only cleared now. Dragged, it follows the pointer anywhere on the screen
+// (it was held only straight out from the box's edge, and never past the box's ends); let go, it
+// falls onto the box's top edge under where it was dropped, faster the shorter the drop.
 const LIFT_KEY = "coding-tools:ao:pet-lift";
 const FALL_MS = 420;
 const NAP_MS = 45_000;
@@ -33,10 +34,11 @@ const PIXEL_W = CELL_W / 2;
 const PIXEL_H = CELL_H / 2;
 const WIDTH = COLS * CELL_W;
 const HEIGHT = ROWS * CELL_H;
-/** Clawd's house, 24×11 pixels, standing on the box's top edge this far in from its right end. */
+/** Clawd's house, 24×11 pixels, standing beside the box's right side (not on top of it, where it
+ *  covered the box's top edge), its floor level with the box's bottom, this far out from it. */
 const HOUSE_W = 24 * PIXEL_W;
 const HOUSE_H = 11 * PIXEL_H;
-const HOUSE_INSET = 18;
+const HOUSE_GAP = 6;
 /** The entrance plays once per window, as the CLI plays one once per version. */
 let entrancePlayed = false;
 /** Claude Code's working spinner, cycled over Clawd's head while the agent works. */
@@ -109,8 +111,8 @@ function restFrame({ mood, asleep, step, pose, blink, job }: { mood: PetMood; as
 }
 
 /**
- * Clawd's house, standing on the box's top edge at its right end: a clay roof, a door on the side
- * facing the box, and a window, lit while Clawd is home awake. Asleep inside, z's rise from it.
+ * Clawd's house, standing beside the box's right side: a clay roof, a door on the side facing the
+ * box, and a window, lit while Clawd is home awake. Asleep inside, z's rise from it.
  */
 function House({ home, asleep, onKnock }: { home: boolean; asleep: boolean; onKnock: () => void }) {
   const r = rect;
@@ -188,8 +190,8 @@ function spotAt(loop: Loop, at: number): { x: number; y: number; side: 0 | 1 | 2
   if (s < 2 * w + h) return { x: w - (s - w - h), y: h, side: 2 };
   return { x: 0, y: h - (s - 2 * w - h), side: 3 };
 }
-/** Where the house stands on the top edge: its left side, in from the box's right end. */
-const houseLeft = (loop: Loop) => Math.max(0, loop.width - HOUSE_W - HOUSE_INSET);
+/** Where the house stands, relative to the box: just outside its right side, floor at its bottom. */
+const housePlace = (loop: Loop) => ({ left: loop.width + HOUSE_GAP, top: loop.height - HOUSE_H });
 /** `along` (a distance from the top-left corner, under one lap) on the lap nearest `near`. */
 const nearLap = (loop: Loop, along: number, near: number) => along + Math.round((near - along) / loop.length) * loop.length;
 
@@ -205,14 +207,12 @@ export function ChatPet({ mood, context, onHide }: {
   // Distance walked around the box from its top-left corner, NaN until the box is measured. It is
   // never wrapped, so every lap keeps turning the same way at the corners.
   const [at, setAt] = useState(Number.NaN);
-  const [lift, setLift] = useState(() => {
-    try { localStorage.removeItem(LIFT_KEY); } catch { /* nothing saved */ }
-    return 0;
-  });
-  // The drop back onto the box, as its length in ms (0: not falling).
-  const [falling, setFalling] = useState(0);
-  const liftNow = useRef(lift);
-  liftNow.current = lift;
+  useEffect(() => { try { localStorage.removeItem(LIFT_KEY); } catch { /* nothing saved */ } }, []);
+  // Picked up: the middle of its body on the screen, and, once let go, how long its fall back onto
+  // the box takes (ms; 0 while held). Null on the box.
+  const [held, setHeld] = useState<{ x: number; y: number; fall: number } | null>(null);
+  const heldNow = useRef(held);
+  heldNow.current = held;
   const [loop, setLoop] = useState<Loop | null>(null);
   const [pose, setPose] = useState<Pose>(REST);
   const [job, setJob] = useState<Job>("none");
@@ -229,6 +229,9 @@ export function ChatPet({ mood, context, onHide }: {
   const [floaters, setFloaters] = useState<Floater[]>([]);
   const [fed, setFed] = useState(0);
   const drag = useRef<{ moved: boolean; x: number; y: number; lastX: number; lastY: number } | null>(null);
+  // The window listeners of a drag in progress (removed on drop or unmount), and its fall's timer.
+  const dragEnd = useRef<(() => void) | null>(null);
+  const fallTimer = useRef<number | undefined>(undefined);
   const pointer = useRef({ x: 0, y: 0 });
   const lastPlay = useRef(0);
   const clickTimer = useRef<number | undefined>(undefined);
@@ -271,7 +274,7 @@ export function ChatPet({ mood, context, onHide }: {
     setFloaters((current) => [...current, { id, text, offset: left }]);
     window.setTimeout(() => setFloaters((current) => current.filter((item) => item.id !== id)), 1100);
   };
-  const busyElsewhere = () => asleepNow.current || drag.current !== null || rideNow.current !== null || homeNow.current;
+  const busyElsewhere = () => asleepNow.current || drag.current !== null || heldNow.current !== null || rideNow.current !== null || homeNow.current;
 
   // The box it walks around: measured now and whenever it resizes.
   useEffect(() => {
@@ -292,7 +295,7 @@ export function ChatPet({ mood, context, onHide }: {
     if (!loop || !Number.isNaN(atNow.current)) return;
     let saved = Number.NaN;
     try { saved = Number(localStorage.getItem(POSITION_KEY) ?? Number.NaN); } catch { /* first visit */ }
-    setAt(saved >= 0 && saved < 1 ? saved * loop.length : Math.max(WIDTH / 2, houseLeft(loop) - WIDTH));
+    setAt(saved >= 0 && saved < 1 ? saved * loop.length : Math.max(WIDTH / 2, loop.width - 2 * WIDTH));
     if (!entrancePlayed && !still) { entrancePlayed = true; play(pickOne(ENTRANCES)); }
   }, [loop]);
   const remember = () => {
@@ -327,18 +330,20 @@ export function ChatPet({ mood, context, onHide }: {
     return rects.some((found) => found.left < frame.left + right && found.right > frame.left + left
       && found.top < frame.top + bottom && found.bottom > frame.top + top);
   };
-  /** Where Clawd stands to be inside its house: behind the house's middle, on the top edge. */
+  /** Where Clawd stands to go into its house: halfway down the box's right side, at its door. */
   const homeSpot = () => {
     const current = loopNow.current;
-    return current ? nearLap(current, houseLeft(current) + HOUSE_W / 2, atNow.current) : atNow.current;
+    return current ? nearLap(current, current.width + current.height / 2, atNow.current) : atNow.current;
   };
-  /** Whether standing at `spot` would leave it half behind the house: it only stops there to go in. */
+  /** Whether standing at `spot` would leave it half behind the house: it only stops there to go in.
+   *  That is the right side beside the house, and the top edge's right end when the house is taller
+   *  than the box and stands up past its top. */
   const inHouse = (spot: number) => {
     const current = loopNow.current;
     if (!current) return false;
-    const { x, side } = spotAt(current, spot);
-    const left = houseLeft(current);
-    return side === 0 && x > left - WIDTH / 2 && x < left + HOUSE_W + WIDTH / 2;
+    const { x, y, side } = spotAt(current, spot);
+    const top = housePlace(current).top;
+    return (side === 1 && y > top - WIDTH / 2) || (side === 0 && top < 0 && x > current.width - WIDTH / 2 - HOUSE_GAP);
   };
   /** The nearest spot to `spot` that covers no button. */
   const freeNear = (spot: number) => {
@@ -442,7 +447,8 @@ export function ChatPet({ mood, context, onHide }: {
     homeNow.current = false;
     setHome(false);
     if (!walkOut || still || !loopNow.current) return;
-    walkTo(freeNear(atNow.current - HOUSE_W / 2 - WIDTH), STROLL, () => { play("jump"); remember(); wander(); });
+    // Back up the right side and along the top, clear of the house.
+    walkTo(freeNear(atNow.current - (loopNow.current.height / 2 + 1.5 * WIDTH)), STROLL, () => { play("jump"); remember(); wander(); });
   };
   // Nothing running for a while: it goes home to sleep. Any touch, or the agent starting, wakes it.
   const poke = () => {
@@ -602,7 +608,7 @@ export function ChatPet({ mood, context, onHide }: {
           return;
         }
         const body = box.current?.getBoundingClientRect();
-        if (!body || asleepNow.current || drag.current) return;
+        if (!body || asleepNow.current || drag.current || heldNow.current) return;
         const middle = body.left + body.width / 2;
         const distance = Math.hypot(x - middle, y - (body.top + body.height / 2));
         const calm = moodNow.current === "idle" || moodNow.current === "done";
@@ -648,130 +654,117 @@ export function ChatPet({ mood, context, onHide }: {
     };
   }, [riding]);
 
-  useEffect(() => () => { window.clearTimeout(rideTimer.current); window.clearTimeout(clickTimer.current); window.clearTimeout(bubbleTimer.current); window.clearTimeout(napTimer.current); cancelPlans(); }, []);
+  useEffect(() => () => {
+    window.clearTimeout(rideTimer.current); window.clearTimeout(clickTimer.current); window.clearTimeout(bubbleTimer.current);
+    window.clearTimeout(napTimer.current); window.clearTimeout(fallTimer.current); dragEnd.current?.(); cancelPlans();
+  }, []);
 
   const shown: PetMood = mood === "done" && !cheering ? "idle" : mood;
 
-  /** The spot on the outline nearest a pointer, as a distance around near the current one. */
-  const nearestSpot = (clientX: number, clientY: number) => {
-    const current = loopNow.current;
-    const frame = composer.current?.getBoundingClientRect();
-    if (!current || !frame) return atNow.current;
-    const x = Math.max(0, Math.min(current.width, clientX - frame.left));
-    const y = Math.max(0, Math.min(current.height, clientY - frame.top));
-    const distances = [y, current.width - x, current.height - y, x];
-    const side = distances.indexOf(Math.min(...distances));
-    const along = side === 0 ? x : side === 1 ? current.width + y : side === 2 ? current.width + current.height + (current.width - x)
-      : 2 * current.width + current.height + (current.height - y);
-    return nearLap(current, along, atNow.current);
-  };
-  /**
-   * How far out from the box a pointer holds it: the pointer's distance outside the edge the spot is
-   * on, less half its height (it is held by the middle of its body), from 0 on the edge to as far as
-   * the window goes on that side.
-   */
-  const liftAt = (clientX: number, clientY: number, spot: number) => {
-    const current = loopNow.current;
-    const frame = composer.current?.getBoundingClientRect();
-    if (!current || !frame) return liftNow.current;
-    const { side } = spotAt(current, spot);
-    const outside = side === 0 ? frame.top - clientY : side === 1 ? clientX - frame.right
-      : side === 2 ? clientY - frame.bottom : frame.left - clientX;
-    const room = side === 0 ? frame.top : side === 1 ? window.innerWidth - frame.right
-      : side === 2 ? window.innerHeight - frame.bottom : frame.left;
-    return Math.max(0, Math.min(room - HEIGHT, Math.round(outside - HEIGHT / 2)));
-  };
-
-  const onPointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    // Picked up mid-walk or mid-job: it stops where it is and goes where it is carried.
-    cancelPlans();
-    setJob("none");
-    drag.current = { moved: false, x: event.clientX, y: event.clientY, lastX: event.clientX, lastY: event.clientY };
-    event.currentTarget.setPointerCapture(event.pointerId);
-  };
-  const onPointerMove = (event: ReactPointerEvent<HTMLButtonElement>) => {
+  /** Picked up and moved: it follows the pointer anywhere on the screen, held by its middle. */
+  const dragMove = (clientX: number, clientY: number) => {
     const state = drag.current;
     if (!state) return;
-    if (!state.moved && Math.hypot(event.clientX - state.x, event.clientY - state.y) > 4) {
+    if (!state.moved && Math.hypot(clientX - state.x, clientY - state.y) > 4) {
       state.moved = true;
       // Lifted out of its house.
       setAsleep(false);
       leaveHome(false);
-      setPose(REST);
     }
     if (!state.moved) return;
-    state.lastX = event.clientX;
-    state.lastY = event.clientY;
-    const spot = nearestSpot(event.clientX, event.clientY);
-    atNow.current = spot;
-    setAt(spot);
-    // Drawn away from the edge, it comes away with the pointer, anywhere in the window.
-    const height = liftAt(event.clientX, event.clientY, spot);
-    liftNow.current = height;
-    setLift(height);
+    const look: Pose["look"] = clientX < state.lastX - 1 ? -1 : clientX > state.lastX + 1 ? 1 : pose.look;
+    state.lastX = clientX;
+    state.lastY = clientY;
+    // Its feet dangle while it is carried, facing the way it goes.
+    setPose({ ...REST, walking: true, look });
+    setHeld({
+      x: Math.max(WIDTH / 2, Math.min(window.innerWidth - WIDTH / 2, clientX)),
+      y: Math.max(HEIGHT / 2, Math.min(window.innerHeight - HEIGHT / 2, clientY)),
+      fall: 0,
+    });
   };
-  const onPointerUp = () => {
+  /**
+   * Let go, it falls onto the box's top edge under where it was dropped (as far as the box reaches),
+   * from wherever on the screen it was let go, then hops off any button it landed on.
+   */
+  const dragDrop = () => {
     const state = drag.current;
     drag.current = null;
     if (!state?.moved) { if (!asleepNow.current) wander(); return; }
-    // Let go, it falls straight down onto the box's top edge under where it was dropped (the user:
-    // it stayed hovering off the box, drawn sideways when held beside it). It starts the fall from
-    // the height it was let go at, then hops off any button it landed on.
     const current = loopNow.current;
     const frame = composer.current?.getBoundingClientRect();
-    let fallMs = 0;
-    if (current && frame) {
-      const x = Math.max(WIDTH / 2, Math.min(current.width - WIDTH / 2, state.lastX - frame.left));
-      const landing = nearLap(current, x, atNow.current);
-      const height = Math.max(0, Math.round(frame.top - state.lastY - HEIGHT / 2));
-      // A longer drop takes longer, as a fall does: 420 ms from 400 px.
-      fallMs = Math.round(Math.min(1100, Math.max(260, FALL_MS * Math.sqrt(Math.max(height, 1) / 400))));
+    setPose(REST);
+    if (!current || !frame) { setHeld(null); wander(); return; }
+    const x = Math.max(WIDTH / 2, Math.min(current.width - WIDTH / 2, state.lastX - frame.left));
+    const landing = nearLap(current, x, atNow.current);
+    const to = { x: frame.left + x, y: frame.top - HEIGHT / 2 };
+    // A longer drop takes longer, as a fall does: 420 ms from 400 px.
+    const distance = Math.hypot(to.x - state.lastX, to.y - state.lastY);
+    const fallMs = still ? 0 : Math.round(Math.min(1100, Math.max(260, FALL_MS * Math.sqrt(Math.max(distance, 1) / 400))));
+    say("Wheee", 900);
+    // Two frames later, so the fall starts from where it was let go.
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => setHeld({ ...to, fall: fallMs })));
+    // Its own timer: a mood change clears the wander plans, and must not leave it in the air.
+    window.clearTimeout(fallTimer.current);
+    fallTimer.current = window.setTimeout(() => {
       atNow.current = landing;
       setAt(landing);
-      liftNow.current = height;
-      setLift(height);
-      say("Wheee", 900);
-      window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
-        setFalling(fallMs);
-        liftNow.current = 0;
-        setLift(0);
-      }));
-    } else {
-      liftNow.current = 0;
-      setLift(0);
-    }
-    later(fallMs, () => {
-      setFalling(0);
+      setHeld(null);
       play("jump");
       poke();
       const free = freeNear(atNow.current);
       if (free !== atNow.current) walkTo(free, SCURRY * DASH, () => { remember(); wander(); });
       else { remember(); wander(); }
-    });
+    }, fallMs + 34);
+  };
+
+  const onPointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (event.button !== 0 || drag.current) return;
+    // Picked up mid-walk or mid-job: it stops where it is and goes where it is carried.
+    cancelPlans();
+    setJob("none");
+    window.clearTimeout(fallTimer.current);
+    drag.current = { moved: false, x: event.clientX, y: event.clientY, lastX: event.clientX, lastY: event.clientY };
+    // The window follows the drag: carried off the box, Clawd moves onto the page itself, and the
+    // button it was picked up by is no longer the one under the pointer.
+    const move = (moved: PointerEvent) => dragMove(moved.clientX, moved.clientY);
+    const end = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      dragEnd.current = null;
+    };
+    const up = () => { end(); dragDrop(); };
+    dragEnd.current = end;
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
   };
 
   const percent = context === null ? null : Math.round(context * 100);
-  const side = loop && !Number.isNaN(at) && !ride ? spotAt(loop, at).side : 0;
+  const side = loop && !Number.isNaN(at) && !ride && !held ? spotAt(loop, at).side : 0;
   // On the box: feet on the outline, body outward, so upright on top, sideways on the sides and
-  // upside down under it. On the pointer: feet on the pointer's tip, upright, above everything.
+  // upside down under it. On the pointer or held: upright, above everything.
   const placement: CSSProperties = ride
     ? { position: "fixed", left: ride.x - WIDTH / 2, top: ride.y - HEIGHT + 4, zIndex: 60, pointerEvents: "none",
       transition: ride.mode === "riding" ? "none" : "left .42s ease-out, top .42s cubic-bezier(.3,-.7,.6,1)" }
+    : held
+    ? { position: "fixed", left: held.x - WIDTH / 2, top: held.y - HEIGHT / 2, zIndex: 60,
+      transition: held.fall ? `left ${held.fall}ms ease-out, top ${held.fall}ms cubic-bezier(.55, 0, 1, .45)` : "none" }
     : loop && !Number.isNaN(at) ? (() => {
       const { x, y } = spotAt(loop, at);
-      // Turned to its side, "up" is away from the box, so its lift is a move up after the turn.
-      return { left: x - WIDTH / 2, top: y - HEIGHT, transform: `rotate(${side * 90 + Math.floor(at / loop.length) * 360}deg)${lift ? ` translateY(${-lift}px)` : ""}`,
+      return { left: x - WIDTH / 2, top: y - HEIGHT, transform: `rotate(${side * 90 + Math.floor(at / loop.length) * 360}deg)`,
         transformOrigin: `${WIDTH / 2}px ${HEIGHT}px` };
     })() : { visibility: "hidden" };
-  const pet = <div ref={box} className={`cx-pet side-${side}${falling ? " is-falling" : ""}${ride ? ` is-riding ride-${ride.mode}` : ""}${home ? " is-home" : ""}`}
-    style={{ ...placement, ...(falling ? { transition: `transform ${falling}ms cubic-bezier(.55, 0, 1, .45)` } : {}) }}>
+  const pet = <div ref={box} className={`cx-pet side-${side}${held ? " is-held" : ""}${ride ? ` is-riding ride-${ride.mode}` : ""}${home ? " is-home" : ""}`}
+    style={placement}>
     {bubble ? <span className="cx-pet-bubble" role="status">{bubble}</span> : null}
     {busy ? <span className="cx-pet-spinner" aria-hidden="true">{SPINNER[spin]}</span> : null}
     {floaters.map((item) => <span key={item.id} className="cx-pet-float" style={{ left: item.offset }} aria-hidden="true">{item.text}</span>)}
     <button type="button" className={`cx-pet-body is-${shown}${asleep ? " is-asleep" : ""}${pose.walking ? " is-walking" : ""}${job !== "none" ? ` is-${job}` : ""}`}
       aria-label={`Bit the pet: ${asleep ? "napping" : LINES[shown]}${percent !== null ? ` Context ${percent}%.` : ""}`}
-      title={asleep ? "Napping. Click to wake" : `${LINES[shown]}${percent !== null ? ` · ${percent}% context` : ""}\nClick to pet · double-click to feed · drag it around the box, or away from it to lift it`}
-      onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}
+      title={asleep ? "Napping. Click to wake" : `${LINES[shown]}${percent !== null ? ` · ${percent}% context` : ""}\nClick to pet · double-click to feed · drag it anywhere on the screen`}
+      onPointerDown={onPointerDown}
       onClick={() => {
         if (drag.current?.moved) return;
         window.clearTimeout(clickTimer.current);
@@ -799,9 +792,9 @@ export function ChatPet({ mood, context, onHide }: {
       <Prop job={asleep || ride ? "none" : job} step={step} tick={tick} />
     </button>
   </div>;
-  const house = loop ? <div className="cx-pet-house-spot" style={{ left: houseLeft(loop), top: -HOUSE_H }}>
+  const house = loop ? <div className="cx-pet-house-spot" style={housePlace(loop)}>
     <House home={home} asleep={asleep} onKnock={() => { if (!wake()) goHome(false); }} />
   </div> : null;
-  // Aboard the pointer it lives on the page itself, so no panel's edge clips it.
-  return <>{house}{ride && typeof document !== "undefined" ? createPortal(pet, document.body) : pet}</>;
+  // Aboard the pointer or carried, it lives on the page itself, so no panel's edge clips it.
+  return <>{house}{(ride || held) && typeof document !== "undefined" ? createPortal(pet, document.body) : pet}</>;
 }
