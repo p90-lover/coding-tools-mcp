@@ -803,6 +803,94 @@ export async function dismissChatGptTemporaryChatOnboarding(page: Page): Promise
   return true;
 }
 
+/**
+ * ChatGPT's Chat | Work switch on a new chat (a group labelled "Composer mode" whose two buttons
+ * carry aria-pressed). Work runs Codex agents on the account's Codex quota, not this chat, so a Web
+ * GPT turn must always run in Chat. Inside a conversation the switch is gone and Work shows as the
+ * composer's own label, "Work with ChatGPT" (Chat's reads "Ask ChatGPT").
+ */
+const chatGptComposerModeSwitch = (page: Page): Locator => page
+  .locator('[role="group"][aria-label="Composer mode"]')
+  .filter({ visible: true })
+  .last();
+const CHATGPT_WORK_COMPOSER_LABEL = /^Work with ChatGPT$/i;
+
+/**
+ * ChatGPT can offer to move a chat to Work/Codex and apply it by itself unless it is declined in
+ * time. Any visible dialog, alert or status naming Work or Codex with a switch-style action counts.
+ */
+const chatGptWorkModeOffer = (page: Page): Locator => page
+  .locator('[role="dialog"], [role="alertdialog"], [role="alert"], [role="status"]')
+  .filter({ visible: true })
+  .filter({ hasText: /\b(Work|Codex)\b/ })
+  .filter({ hasText: /\b(switch|switching|move|moving|try|use|open|continue)\b/i })
+  .last();
+const CHATGPT_WORK_OFFER_DECLINE = /^(Not now|No thanks|Stay in Chat|Keep chatting|Keep using Chat|Continue in Chat|Stay|Cancel|Dismiss|Maybe later|Close)$/i;
+
+function chatGptWorkModeError(message: string): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(message, {
+    status: 409, errorType: "invalid_request_error", code: "chatgpt_work_mode", retryable: true,
+  });
+}
+
+/** A locator built for a guard check, or undefined where the page cannot build one (no such UI). */
+function guardLocator(build: () => Locator): Locator | undefined {
+  try { return build(); } catch { return undefined; }
+}
+
+/** The composer currently on screen, for the Work-mode check during a turn. */
+const visibleChatGptComposer = (page: Page): Locator | undefined => guardLocator(() => page
+  .locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true }).first());
+
+/** Declines ChatGPT's offer to switch this chat to Work/Codex, if one is showing. */
+export async function declineChatGptWorkModeOffer(page: Page): Promise<boolean> {
+  const offer = guardLocator(() => chatGptWorkModeOffer(page));
+  if (!offer || !await offer.isVisible().catch(() => false)) return false;
+  const decline = offer.getByRole("button", { name: CHATGPT_WORK_OFFER_DECLINE }).first();
+  if (!await decline.isVisible().catch(() => false)) return false;
+  await decline.click({ force: true }).catch(() => undefined);
+  return true;
+}
+
+/** Whether the composer the bridge would type into is Work mode's. */
+export async function isChatGptWorkComposer(composer: Locator | undefined): Promise<boolean> {
+  if (!composer || typeof composer.getAttribute !== "function") return false;
+  const label = await composer.getAttribute("aria-label").catch(() => null);
+  return Boolean(label && CHATGPT_WORK_COMPOSER_LABEL.test(label.trim()));
+}
+
+/**
+ * Puts a new chat in Chat mode: declines a pending Work offer, and if the switch shows Work pressed,
+ * presses Chat and waits until Chat reads pressed. Returns whether it switched (the composer is then
+ * a different element). Throws when ChatGPT stays in Work, so a turn never runs on Codex quota.
+ */
+export async function ensureChatGptChatMode(page: Page, timeoutMs = 5_000): Promise<boolean> {
+  await declineChatGptWorkModeOffer(page);
+  const modeSwitch = guardLocator(() => chatGptComposerModeSwitch(page));
+  if (!modeSwitch || !await modeSwitch.isVisible().catch(() => false)) return false;
+  const work = modeSwitch.getByRole("button", { name: /^Work$/ }).first();
+  if (await work.getAttribute("aria-pressed").catch(() => null) !== "true") return false;
+  const chat = modeSwitch.getByRole("button", { name: /^Chat$/ }).first();
+  await chat.click({ force: true });
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await chat.getAttribute("aria-pressed").catch(() => null) === "true") return true;
+    await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
+  }
+  throw chatGptWorkModeError("ChatGPT stayed in Work mode, which runs Codex on your Codex quota instead of this chat. Switch the ChatGPT tab to Chat and retry the turn.");
+}
+
+/**
+ * During a turn: declines a Work offer before it applies itself, and stops the turn if the chat has
+ * already moved to Work, instead of letting its answer run on the account's Codex quota.
+ */
+export async function throwIfChatGptWorkMode(page: Page, composer = visibleChatGptComposer(page)): Promise<void> {
+  await declineChatGptWorkModeOffer(page);
+  if (await isChatGptWorkComposer(composer)) {
+    throw chatGptWorkModeError("ChatGPT moved this chat to Work mode, which runs Codex on your Codex quota instead of this chat. The bridge stopped the turn; retry it to start a new Chat-mode chat.");
+  }
+}
+
 type ChatGptTextScope = Pick<Locator, "getByText" | "getByTestId">;
 
 const chatGptSubscriptionFailureAlert = (page: Page): Locator => page
@@ -2629,6 +2717,13 @@ export class ChatGptBrowserWorker {
     if (!useSavedChats && await dismissChatGptTemporaryChatOnboarding(page)) {
       await captureDiagnostic?.("temporary-chat-onboarding-dismissed");
     }
+    // A new chat can open in Work, which runs Codex on the account's Codex quota: switch it to Chat
+    // (its composer is then another element) and never type into Work's composer.
+    if (await ensureChatGptChatMode(page)) {
+      await captureDiagnostic?.("work-mode-switched-to-chat");
+      composer = await this.activeComposer(page);
+    }
+    await throwIfChatGptWorkMode(page, composer);
     await captureDiagnostic?.("composer-ready");
     await throwIfChatGptSessionFailureAlert(page);
     await assertAuthenticatedChatGptPage(page);
@@ -2712,6 +2807,7 @@ export class ChatGptBrowserWorker {
       if (progress && progress.lastToolBatchRevision > initialToolBatchRevision) return "mcp_tool_call";
       await throwIfChatGptSessionFailureAlert(page);
       await throwIfChatGptRateLimitDialog(page);
+      await throwIfChatGptWorkMode(page);
       // Until the new response is bound, last() can still be a historical failed answer.
       // Response errors are checked against the bound current turn in the observation loops.
       let evidence: ChatGptSubmissionEvidence | undefined;
@@ -4680,6 +4776,11 @@ export class ChatGptBrowserWorker {
         // another conversation, typing the continuation would post into the user's own chat.
         await diagnostics.capture(page, "retained-conversation-moved");
         throw chatGptRetainedConversationUnavailableError();
+      } else if (await isChatGptWorkComposer(await this.activeComposer(page))) {
+        // A retained chat that ChatGPT moved to Work would run on Codex quota: release it, and the
+        // turn starts again on a new Chat-mode chat.
+        await diagnostics.capture(page, "retained-conversation-work-mode");
+        throw chatGptRetainedConversationUnavailableError();
       }
       // A retained lease proves the connector binding, not the current model selection.
       // Reconcile the live control before every submission, including retained continuations.
@@ -4961,6 +5062,8 @@ export class ChatGptBrowserWorker {
         }
         await throwIfChatGptSessionFailureAlert(page);
         await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
+        // ChatGPT's offer to move the chat to Work applies itself unless declined in time.
+        await throwIfChatGptWorkMode(page);
 
         if (mode.localTools && await resolveChatGptToolConfirmation(
           page,
