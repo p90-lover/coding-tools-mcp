@@ -761,6 +761,32 @@ export function AgentOrchestratorSurface({ language, setError }: {
       })().catch(() => { settledRuns.current.delete(key); });
     }
   }, [missions, workspaceId]);
+  // The same orphans in projects that are not open: the effect above reads only the open project's
+  // runs, so after a restart a card elsewhere whose turn had already failed (a quota error, its host
+  // gone) kept saying "running" until that project was opened. Each other project is swept once per
+  // app session: a card still marked running with nothing driving it is observed, which records how
+  // its turn ended. Nothing is resumed here; that waits for the project to be opened, as above.
+  const sweptWorkspaces = useRef(new Set<string>());
+  useEffect(() => {
+    if (!workspaceReady) return;
+    for (const item of workspaces) {
+      if (item.id === workspaceId || sweptWorkspaces.current.has(item.id)) continue;
+      sweptWorkspaces.current.add(item.id);
+      void (async () => {
+        const current = await moduleCall("runs", { workspaceId: item.id }).catch(() => null);
+        const runs = Array.isArray(current?.runs) ? current.runs as AoMission[] : [];
+        for (const mission of runs) {
+          const running = mission.nodes.filter((node) => node.state === "running");
+          if (mission.cancelled || !running.length) continue;
+          const status = await moduleCall("run_status", { workspaceId: item.id, runId: mission.id }).catch(() => null);
+          if (!status || status.driven !== false || ["starting", "running"].includes(String(status.status))) continue;
+          for (const node of running) {
+            await moduleCall("observe", { workspaceId: item.id, runId: mission.id, nodeId: node.id }).catch(() => undefined);
+          }
+        }
+      })();
+    }
+  }, [workspaceReady, workspaces, workspaceId]);
 
   /** The project the loaded board belongs to; the board state itself does not say. */
   const boardWorkspace = useRef("");

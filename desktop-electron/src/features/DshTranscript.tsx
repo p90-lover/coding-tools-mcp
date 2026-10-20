@@ -12,7 +12,7 @@ import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 
 import { ChatMarkdown } from "./ChatMarkdown";
 import { AnsweredRecord, ApprovedMark, EditDiff, StreamingMarkdown } from "./ChatToolParts";
 import {
-  dshActivity, dshDuration, dshItemDetail, dshLiveTitle, dshProcessTitle, dshSegments, dshThinkSummary, dshToolTitle,
+  dshActivity, dshDuration, dshItemDetail, dshLiveTitle, dshProcessTitle, dshQuietNote, dshSegments, dshThinkSummary, dshToolTitle,
   tidyTimeline, type ChatLiveItem, type ChatStep, type ChatTurn, type DshActivity,
 } from "./ao-chat";
 
@@ -242,8 +242,11 @@ function DshAgent({ step, useWork, answer }: { step: ChatStep; useWork: UseStepW
 }
 
 /** RunningStatus: a hairline over the whale's tail and "Deep diving for 1m 4s ···", in DeepSeek blue. */
-function DshRunning({ since, divider }: { since?: number; divider: boolean }) {
+function DshRunning({ since, divider, heardAt }: { since?: number; divider: boolean; heardAt?: number }) {
   const now = useNow(true);
+  // A long turn can go quiet for many minutes (a slow model request): say how long, so a quiet turn
+  // does not look frozen, and say plainly when it has been quiet as long as a stuck one.
+  const quietNote = dshQuietNote(heardAt, now);
   return <div className="dsh-running" role="status" aria-live="polite">
     {divider ? <span className="dsh-running-divider" aria-hidden="true" /> : null}
     <span className="dsh-running-content">
@@ -251,7 +254,7 @@ function DshRunning({ since, divider }: { since?: number; divider: boolean }) {
         <span className="dsh-whale-animated" />
         <svg className="dsh-whale-still" width="100%" height="100%" viewBox="0 0 16 16" fill="none"><path d={WHALE} stroke="currentColor" strokeWidth={1} /></svg>
       </span>
-      <span className="dsh-shimmer is-deep">{since ? `Deep diving for ${dshDuration(now - since)} ···` : "Deep diving"}</span>
+      <span className="dsh-shimmer is-deep">{since ? `Deep diving for ${dshDuration(now - since)}${quietNote} ···` : `Deep diving${quietNote}`}</span>
     </span>
   </div>;
 }
@@ -280,6 +283,8 @@ export function DshTurnWork({ turn, live, expanded, useWork }: DshTurnWorkProps)
   if (live) ENDED.delete(turn.key);
   else if (turn.startedAtMs && !ENDED.has(turn.key) && WATCHED.has(turn.key)) ENDED.set(turn.key, Date.now());
   if (live) WATCHED.add(turn.key);
+  // The newest sign of life across the turn's working cards.
+  const heardAt = Math.max(0, ...steps.map((step) => step.working?.heardAtMs ?? 0)) || undefined;
   if (!steps.length) return live ? <DshRunning since={turn.startedAtMs} divider={false} /> : null;
   const alwaysOpen = live || failed || stopped;
   const open = alwaysOpen || (chosen ?? expanded);
@@ -300,6 +305,6 @@ export function DshTurnWork({ turn, live, expanded, useWork }: DshTurnWorkProps)
     {steps.filter((step) => step.error).map((step) => <div key={`error:${step.key}`} className="dsh-turn-error">
       <span className="dsh-turn-error-title">This turn failed</span><span className="dsh-turn-error-message">{step.error}</span>
     </div>)}
-    {live ? <DshRunning since={turn.startedAtMs} divider /> : null}
+    {live ? <DshRunning since={turn.startedAtMs} divider heardAt={heardAt} /> : null}
   </div>;
 }

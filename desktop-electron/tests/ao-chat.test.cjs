@@ -1204,3 +1204,22 @@ test("a single-model chat's card is named by its model, a team's by its role", (
   assert.equal(name("single"), "Model<cpa/cline-pass/deepseek-v4.1-flash>");
   assert.equal(name("team"), "Single assistant");
 });
+
+test("a quiet running turn says how long it has been quiet, and that it may be stuck past the stall time", () => {
+  const now = 10_000_000;
+  assert.equal(chat.dshQuietNote(undefined, now), "", "no sign of life yet: nothing added");
+  assert.equal(chat.dshQuietNote(now - 30_000, now), "", "the first minute stays plain");
+  assert.equal(chat.dshQuietNote(now - 182_000, now), " · quiet for 3m 2s");
+  assert.equal(chat.dshQuietNote(now - chat.STALL_MS, now), ` · nothing new for ${chat.dshDuration(chat.STALL_MS)}, may be stuck`);
+});
+
+test("a working AO card's last sign of life comes from its activity time, for last heard and the quiet note", () => {
+  const card = node("w", "planner", "running", { receipt: { started_at_ms: 1_000 } });
+  const quiet = chat.chatWorkingDetail(card, { activity: "running", activity_at_ms: 600_000 }, 900_000);
+  assert.equal(quiet.heardAtMs, 600_000);
+  assert.match(quiet.detail, /last heard 5m ago/);
+  assert.equal(quiet.stalled, false);
+  assert.equal(chat.chatWorkingDetail(card, { activity: "running", activity_at_ms: 1_000 }, 1_000 + chat.STALL_MS).stalled, true,
+    "quiet as long as a stuck card");
+  assert.equal(chat.chatWorkingDetail(card, { activity: "running" }, 900_000).heardAtMs, undefined, "never heard: nothing to show");
+});

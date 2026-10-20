@@ -1481,6 +1481,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
                   output: currentTurn ? publicText(observed.liveOutput ?? observed.answer) : "",
                   // The role's reasoning, tool calls and messages, as Codex shows them while it works.
                   timeline: currentTurn ? publicTimeline(observed.timeline) : [],
+                  // When the turn last did anything (a message, a step, streamed thinking; provider
+                  // retry notices excluded). The chat shows "last heard" and "May be stuck" from it.
+                  activity_at_ms: currentTurn && Number.isFinite(observed.lastActivityAt) ? observed.lastActivityAt : null,
                   error: publicText(observed.error, 500) };
               }
             } else {
