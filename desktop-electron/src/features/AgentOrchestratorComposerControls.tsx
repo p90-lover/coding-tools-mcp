@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { KeyboardEvent, ReactNode } from "react";
 import { Caret, Icon } from "../icons";
 import {
-  capabilityText, contextText, harnessLabel, parseTokens, rememberCpaProviders, routeTuning,
+  capabilityText, contextText, harnessLabel, parseTokens, rememberCpaProviders, routeTuning, EFFORTS,
   NATIVE_HARNESS, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, WEB_ROUTE, WEB_TIERS, isWebModel, modelLabel, modelShortLabel, nativePermission, webTier, workerRoute, withTuning,
   type AoHarness, type AoModelCapabilities, type AoModelCatalog, type AoModelLoader, type AoRoute, type AoTeam,
 } from "./AgentOrchestratorRoleEditor";
@@ -30,14 +30,20 @@ const defaultWindow = (route: AoRoute, capability: AoModelCapabilities | undefin
   return Math.max(context.min, Math.min(DEFAULT_CONTEXT_WINDOW, context.max ?? DEFAULT_CONTEXT_WINDOW));
 };
 /**
- * The effort a chat starts on when its model lists efforts but no "auto": sent without one, CPA had
- * nothing to serve DeepSeek V4.1 Flash (None/Low/High/Max) and the chip read "Auto" anyway. Medium,
- * else High, else the lowest real one; None only when it is all there is. A picked effort, a model
- * that takes Auto or names its own effort ("…-flash-high"), and WebGPT (its tier is its effort) keep theirs.
+ * The effort a chat starts on when its CPA model lists efforts but no "auto": sent without one, CPA
+ * had nothing to serve DeepSeek V4.1 Flash (None/Low/High/Max) and the chip read "Auto" anyway.
+ * Medium, else High, else the lowest real one by EFFORTS' order (catalogs keep the provider's order);
+ * None only when it is all there is. A picked effort, a model that takes Auto or names its own effort
+ * ("…-flash-high"), WebGPT (its tier is its effort) and a harness's own models (they run at their
+ * own default) keep theirs. The launch applies the same start (agent-orchestrator-workflow's
+ * startEffort), so a message sent before the model list loads gets it too.
  */
 const startEffort = (route: AoRoute, efforts: readonly string[] | undefined) => {
-  if (route.effort || !efforts?.length || efforts.includes("auto") || isWebModel(route.model) || ownEffort(route.model)) return null;
-  return ["medium", "high"].find(effort => efforts.includes(effort)) ?? efforts.find(effort => effort !== "none") ?? efforts[0];
+  const viaCpa = route.model.startsWith("cpa/") || route.harness_id === NATIVE_HARNESS && !isWebModel(route.model);
+  if (!viaCpa || route.effort || !efforts?.length || efforts.includes("auto") || isWebModel(route.model) || ownEffort(route.model)) return null;
+  const rank = (effort: string) => { const index = (EFFORTS as readonly string[]).indexOf(effort); return index < 0 ? EFFORTS.length : index; };
+  const real = efforts.filter(effort => effort !== "none").sort((a, b) => rank(a) - rank(b));
+  return ["medium", "high"].find(effort => efforts.includes(effort)) ?? real[0] ?? efforts[0];
 };
 
 export type ComposerControlsProps = {

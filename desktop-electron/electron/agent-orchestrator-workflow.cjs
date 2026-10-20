@@ -143,6 +143,20 @@ const GATEWAY_AGENTS = new Set(["claude-code", "codex", "opencode", "agy"]);
 // Gateway agents whose own model catalogs are not CPA or WebGPT models; they list only CPA models.
 const CPA_ONLY_AGENTS = new Set(["claude-code", "opencode"]);
 const webModel = (model) => WEB_TIERS.includes(model) || LUNA_TIERS.includes(model);
+const EFFORT_RANK = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+/**
+ * The effort a CPA model with none picked starts on when it lists efforts but no "auto" (the
+ * composer's startEffort): sent without one, CPA had nothing to serve DeepSeek V4.1 Flash
+ * (None/Low/High/Max). Medium, else High, else the lowest real one by rank (catalogs keep the
+ * provider's order), None only when it is all there is. A model naming its own effort keeps it.
+ */
+function startEffort(model, efforts) {
+  if (!Array.isArray(efforts) || !efforts.length || efforts.includes("auto")) return null;
+  if (/chatgpt-web\//.test(model) || /[-(](minimal|low|medium|high|xhigh|max)\)?$/i.test(model)) return null;
+  const rank = (effort) => { const index = EFFORT_RANK.indexOf(effort); return index < 0 ? EFFORT_RANK.length : index; };
+  const real = efforts.filter((effort) => effort !== "none").sort((a, b) => rank(a) - rank(b));
+  return ["medium", "high"].find((effort) => efforts.includes(effort)) ?? real[0] ?? efforts[0];
+}
 
 const webTierName = (model) => {
   // "light" is what ChatGPT's effort picker calls Instant (the runtime's own name for it too).
@@ -322,9 +336,22 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       return tokens >= setting.min ? tokens : null;
     } catch { return null; }
   }
+  /**
+   * The effort a CPA card with none set starts with (startEffort), from the same cached catalog, so a
+   * message sent before the composer's model list loaded still names one. Null leaves it unset.
+   */
+  async function defaultEffort(workspaceId, node) {
+    if (node.route.effort || !node.route.model.startsWith(CPA_MODEL_PREFIX)) return null;
+    try {
+      const catalog = await models({ harness: node.route.harness_id, workspaceId });
+      const baseModel = node.route.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
+      return startEffort(node.route.model, (catalog.capabilities?.[node.route.model] ?? catalog.capabilities?.[baseModel])?.efforts);
+    } catch { return null; }
+  }
   /** The AO spawn arguments for a card, without its prompt; throws when the route cannot be honored. */
-  function aoLaunchArgs(workspaceId, node, plain, contextDefault = null) {
+  function aoLaunchArgs(workspaceId, node, plain, contextDefault = null, effortDefault = null) {
     const contextWindow = node.route.context_window ?? contextDefault;
+    const effort = node.route.effort ?? effortDefault;
     const agent = externalAgent(node);
     const profile = node.route.native_permission_profile ?? node.route.permission_profile;
     if ((node.route.approval_policy !== undefined || node.route.native_permission_profile !== undefined) && (!["claude-code", "codex"].includes(agent)
@@ -341,10 +368,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     // A provider plugin's model goes by its bare name: any saved suffix is dropped, none is added.
     const verbatim = Boolean(viaCpa) && verbatimModel(viaCpa);
     let wireModel = verbatim ? viaCpa.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "") : viaCpa;
-    if (viaCpa && node.route.effort && !verbatim) {
-      if (!tuningEfforts.has(node.route.effort)) throw new Error("Choose a supported CPA reasoning level");
+    if (viaCpa && effort && !verbatim) {
+      if (!tuningEfforts.has(effort)) throw new Error("Choose a supported CPA reasoning level");
       // The suffix is session-local; the saved mission model and account remain unchanged.
-      wireModel = viaCpa.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "") + "(" + node.route.effort + ")";
+      wireModel = viaCpa.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "") + "(" + effort + ")";
     }
     const agentModel = wireModel && agent === "opencode" ? `openai/${wireModel}` : wireModel ?? node.route.model;
     return { workspaceId, agent, model: agentModel, name: node.settings?.name || "AO worker",
@@ -452,7 +479,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     };
     const busy = deferred();
     if (busy) return busy;
-    const args = aoLaunchArgs(workspaceId, node, plain, await defaultContextWindow(workspaceId, node));
+    const args = aoLaunchArgs(workspaceId, node, plain, ...await Promise.all([defaultContextWindow(workspaceId, node), defaultEffort(workspaceId, node)]));
     if (warm.has(key)) return { ok: true, warmed: true };
     const busyNow = deferred();
     if (busyNow) return busyNow;
@@ -1080,7 +1107,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       warmDeferred.delete(workspaceId);
       try {
         await checkRoute();
-        const launch = aoLaunchArgs(workspaceId, node, plain, await defaultContextWindow(workspaceId, node));
+        const launch = aoLaunchArgs(workspaceId, node, plain, ...await Promise.all([defaultContextWindow(workspaceId, node), defaultEffort(workspaceId, node)]));
         launchStarted = now();
         // A single-model follow-up continues the chat's live session as its next turn: no new
         // session, worktree or replayed prompt, and the agent keeps what it already read and ran.
