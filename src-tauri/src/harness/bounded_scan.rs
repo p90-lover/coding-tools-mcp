@@ -218,7 +218,11 @@ fn git_value(root: &Path, args: &[&str], started: Instant) -> HarnessResult<Opti
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x08000000 | 0x00000200);
     }
-    let mut child = match cmd.spawn() {
+    let spawned = {
+        let _gate = super::resource_lease::spawn_gate();
+        cmd.spawn()
+    };
+    let mut child = match spawned {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(failure("BASELINE_SCAN_INCOMPLETE", "Git could not start")),

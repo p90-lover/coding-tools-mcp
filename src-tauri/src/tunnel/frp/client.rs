@@ -335,9 +335,11 @@ pub async fn spawn_frpc(
         crate::tunnel::cloudflare::apply_proxy_env(&mut cmd, &settings.proxy);
     }
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|err| AppError::Message(format!("启动 frpc 失败: {err}")))?;
+    let spawned = {
+        let _gate = crate::harness::resource_lease::spawn_gate();
+        cmd.spawn()
+    };
+    let mut child = spawned.map_err(|err| AppError::Message(format!("启动 frpc 失败: {err}")))?;
     let pid = child.id();
     if let Some(pid) = pid {
         if let Err(error) = write_managed_frpc_pid(workspace_id, pid, &frpc) {

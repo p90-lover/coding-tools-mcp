@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
     path::Path,
+    sync::{RwLock, RwLockReadGuard},
     time::{Duration, Instant},
 };
 
@@ -14,9 +15,26 @@ use std::{
 /// a clone that copies the descriptor table, and `O_CLOEXEC` closes the copies only at exec), so
 /// a lease released just before can still read as held for that moment. Callers that saw a
 /// command finish and started the next one were refused at random under parallel spawning.
-/// A genuinely running owner is still refused, this much later.
+/// A genuinely running owner is still refused, this much later. The app's own spawns no longer
+/// leave such copies (`spawn_gate`); this patience covers a spawn made outside it.
 const TRANSIENT_HOLD: Duration = Duration::from_millis(250);
 const RETRY_EVERY: Duration = Duration::from_millis(10);
+
+/// Child spawns share this gate; a lease attempt takes it alone.
+static SPAWN_GATE: RwLock<()> = RwLock::new(());
+
+/// Held around every child spawn in this process (shared, so spawns never wait on each other).
+///
+/// `spawn()` returns only once the child has exec'd (or failed to), and exec closes the lease's
+/// `O_CLOEXEC` descriptors the child inherited. So while a lease attempt holds the gate alone, no
+/// child of this process holds a copy of a released lease, and a lease just released is free at
+/// once. On a loaded macOS runner a sibling's spawn outlived the 250 ms patience and a command
+/// that had finished still refused the next one as `PROJECT_WRITE_BUSY`.
+pub fn spawn_gate() -> RwLockReadGuard<'static, ()> {
+    SPAWN_GATE
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 #[derive(Debug)]
 pub struct ResourceLease {
@@ -36,7 +54,14 @@ impl ResourceLease {
             .map_err(|e| HarnessError::new("RESOURCE_LEASE_UNAVAILABLE", e.to_string()))?;
         let deadline = Instant::now() + patience;
         loop {
-            match Self::try_acquire(&directory, &root)? {
+            // Alone at the gate for one attempt only: spawns wait microseconds, never the retry sleep.
+            let attempt = {
+                let _alone = SPAWN_GATE
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                Self::try_acquire(&directory, &root)?
+            };
+            match attempt {
                 Some(lease) => return Ok(lease),
                 None if Instant::now() < deadline => std::thread::sleep(RETRY_EVERY),
                 None => return Err(HarnessError::new("PROJECT_WRITE_BUSY", "An owned operation is still using this project or an overlapping directory. Poll its existing command; independent projects and read-only monitoring remain available.")),
@@ -113,6 +138,30 @@ mod tests {
             .expect_err("a running owner keeps the project");
         assert_eq!(error.code(), "PROJECT_WRITE_BUSY");
         assert!(started.elapsed() >= Duration::from_millis(40));
+    }
+
+    #[test]
+    fn a_lease_attempt_waits_out_a_spawn_in_progress_and_spawns_never_wait_on_each_other() {
+        let (_base, store, root) = fixture();
+        // A spawn is in progress on another thread (its child may still hold descriptor copies).
+        let spawning = spawn_gate();
+        // Spawns share the gate: a second one is never held up by the first.
+        let started = Instant::now();
+        drop(spawn_gate());
+        assert!(started.elapsed() < Duration::from_millis(50));
+        let attempt = std::thread::spawn(move || {
+            let started = Instant::now();
+            let lease = ResourceLease::acquire(&store, &root);
+            (lease.is_ok(), started.elapsed())
+        });
+        std::thread::sleep(Duration::from_millis(80));
+        drop(spawning);
+        let (acquired, waited) = attempt.join().expect("lease attempt");
+        assert!(acquired, "the lease is free once the spawn has finished");
+        assert!(
+            waited >= Duration::from_millis(60),
+            "the attempt waited for the spawn: {waited:?}"
+        );
     }
 
     #[test]

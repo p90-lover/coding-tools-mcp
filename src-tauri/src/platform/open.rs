@@ -12,6 +12,7 @@ pub fn open_path_in_file_manager(path: &std::path::Path) -> AppResult<()> {
 
     #[cfg(target_os = "windows")]
     {
+        let _gate = crate::harness::resource_lease::spawn_gate();
         Command::new("explorer")
             .arg(path)
             .spawn()
@@ -21,6 +22,7 @@ pub fn open_path_in_file_manager(path: &std::path::Path) -> AppResult<()> {
 
     #[cfg(target_os = "macos")]
     {
+        let _gate = crate::harness::resource_lease::spawn_gate();
         Command::new("open")
             .arg(path)
             .spawn()
@@ -30,6 +32,7 @@ pub fn open_path_in_file_manager(path: &std::path::Path) -> AppResult<()> {
 
     #[cfg(target_os = "linux")]
     {
+        let _gate = crate::harness::resource_lease::spawn_gate();
         Command::new("xdg-open")
             .arg(path)
             .spawn()
@@ -56,6 +59,7 @@ pub fn open_url(url: &str) -> AppResult<()> {
     #[cfg(target_os = "windows")]
     {
         // `start` needs an empty window title when the URL may contain `&`.
+        let _gate = crate::harness::resource_lease::spawn_gate();
         Command::new("cmd")
             .args(["/C", "start", "", url])
             .spawn()
@@ -65,6 +69,7 @@ pub fn open_url(url: &str) -> AppResult<()> {
 
     #[cfg(target_os = "macos")]
     {
+        let _gate = crate::harness::resource_lease::spawn_gate();
         Command::new("open")
             .arg(url)
             .spawn()
@@ -74,6 +79,7 @@ pub fn open_url(url: &str) -> AppResult<()> {
 
     #[cfg(target_os = "linux")]
     {
+        let _gate = crate::harness::resource_lease::spawn_gate();
         Command::new("xdg-open")
             .arg(url)
             .spawn()
