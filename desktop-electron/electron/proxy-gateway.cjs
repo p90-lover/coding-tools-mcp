@@ -303,13 +303,17 @@ function portHeld(port) {
   });
 }
 
-// The process listening on a local port and its command line, or null (unknown, or not Windows).
-// Asynchronous: it is asked only after a bind failed, and must not block the main process.
+// The process holding a local port (listening on it, or only bound to it) and its command line, or
+// null (unknown, or not Windows). Asynchronous: it is asked only after a bind failed, and must not
+// block the main process.
 function windowsPortOwner(port) {
   if (process.platform !== "win32" || !Number.isInteger(port) || port < 1) return Promise.resolve(null);
   const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT || "C:\\Windows";
   const powershell = path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-  const script = `$c = Get-NetTCPConnection -State Listen -LocalPort ${port} -ErrorAction SilentlyContinue | Select-Object -First 1; `
+  // Not only listeners: the 0.7.0-rc.26 relay seen live held 17894 bound but not listening (state 0,
+  // missing from netstat), which a `-State Listen` lookup never found. Its own local socket has no
+  // remote end, unlike a client's connection to the port.
+  const script = `$c = Get-NetTCPConnection -LocalPort ${port} -ErrorAction SilentlyContinue | Where-Object { $_.RemotePort -eq 0 } | Select-Object -First 1; `
     + "if ($c) { $p = Get-CimInstance Win32_Process -Filter \"ProcessId=$($c.OwningProcess)\"; "
     + "[pscustomobject]@{ pid = [int]$c.OwningProcess; commandLine = [string]$p.CommandLine } | ConvertTo-Json -Compress }";
   return new Promise((resolve) => {
