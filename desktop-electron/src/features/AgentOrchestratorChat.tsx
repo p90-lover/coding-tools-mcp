@@ -933,24 +933,40 @@ export function AgentOrchestratorChat({
   // In steer mode a queued message (the agent was waiting on a request, or still starting) is
   // steered in as soon as the agent can take it, not held until the whole turn ends. A steer that
   // still finds it waiting comes back to the queue; the backend waits up to half a minute each time.
-  // A steer that fails outright is not retried: the message waits for the turn to end instead.
+  // A steer that fails outright (a refused send, a timeout) is tried again after 15 s, 30 s, then
+  // every minute while the agent works. Giving up after one failure parked the message until the
+  // whole turn ended, an hour on a long turn, so a typed "keep going" looked ignored.
   const steeringQueue = useRef(false);
-  const steerFailed = useRef(false);
-  useEffect(() => { steerFailed.current = false; }, [accepts, steering, selectedTaskId]);
+  const steerRetry = useRef({ attempts: 0, until: 0 });
+  const steerRetryTimer = useRef<number | undefined>(undefined);
+  const [steerRetryTick, setSteerRetryTick] = useState(0);
+  useEffect(() => {
+    steerRetry.current = { attempts: 0, until: 0 };
+    window.clearTimeout(steerRetryTimer.current);
+  }, [accepts, steering, selectedTaskId]);
+  useEffect(() => () => window.clearTimeout(steerRetryTimer.current), []);
   useEffect(() => {
     const task = selectedTaskId, [next, ...rest] = queueOf(task);
     if (!task || !next || accepts || !steering || awaitingAnswer || next.goal || next.what !== "Message"
-      || busy || sending || steeringQueue.current || steerFailed.current || !windowFocused) return;
+      || busy || sending || steeringQueue.current || Date.now() < steerRetry.current.until || !windowFocused) return;
     steeringQueue.current = true;
     setQueue(task, rest);
     void deliver(next.message, undefined, false).then((sent) => {
       const here = alive.current && composing.current.taskId === task;
-      if (sent) { if (here && !queueOf(task).length) setCard(null); return; }
-      steerFailed.current = true;
+      if (sent) {
+        steerRetry.current = { attempts: 0, until: 0 };
+        if (here && !queueOf(task).length) setCard(null);
+        return;
+      }
+      const attempts = steerRetry.current.attempts + 1;
+      const wait = attempts === 1 ? 15_000 : attempts === 2 ? 30_000 : 60_000;
+      steerRetry.current = { attempts, until: Date.now() + wait };
+      window.clearTimeout(steerRetryTimer.current);
+      steerRetryTimer.current = window.setTimeout(() => setSteerRetryTick((value) => value + 1), wait);
       setQueue(task, [next, ...queueOf(task)]);
-      if (here) say("Queued", "The message couldn't be steered in; it's sent when the current turn finishes.", next.message);
+      if (here) say("Queued", `The message couldn't be steered in yet; trying again in ${wait / 1000} s (or it's sent when the turn finishes).`, next.message);
     }).finally(() => { steeringQueue.current = false; });
-  }, [queueVersion, selectedTaskId, accepts, steering, awaitingAnswer, busy, sending, windowFocused]);
+  }, [queueVersion, selectedTaskId, accepts, steering, awaitingAnswer, busy, sending, windowFocused, steerRetryTick]);
   /**
    * Sends a command's message now when the chat is free, steers it into the working agent when it
    * can be steered (never a goal), and otherwise queues it for when the current turn finishes.
