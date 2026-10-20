@@ -566,15 +566,6 @@ export function AgentOrchestratorSurface({ language, setError }: {
     if (approvalSeen.current.size > 500) approvalSeen.current.delete(approvalSeen.current.keys().next().value!);
     return approvalSeen.current.get(key)!;
   };
-  // A request the "Approve for me" reviewer is still checking is not shown (awaiting_review), and
-  // neither is one the app is answering for the person right after (approvalAnsweredForYou): a card
-  // then only flashed up, offering a click that arrived after the answer.
-  const shownApprovals = pendingApprovalsHere.filter((approval) => !approval.awaiting_review && !approvalAnsweredForYou(approval,
-    selectedRun?.nodes.find((node) => node.id === approval.nodeId)?.route as { approval_policy?: string; approvals_reviewer?: string } | undefined,
-    Date.now() - seenAt(approval), Boolean(selectedRun?.nodes.some((node) => node.role === "approver")))).map((approval) => {
-    const note = dependencyInstallNote(approval.command, dependencyLinks?.workspaceId === workspaceId ? dependencyLinks.links : null);
-    return note ? { ...approval, dependencyNote: note } : approval;
-  });
   const [runtimePolicies, setRuntimePolicies] = useState<Record<string, RuntimePermissionPolicy>>({});
   const [runTaskId, setRunTaskId] = useState("");
   const [workerParentId, setWorkerParentId] = useState("");
@@ -983,6 +974,17 @@ export function AgentOrchestratorSurface({ language, setError }: {
   }, [workspaceId]);
 
   const selectedRun = missions.find((mission) => mission.id === selectedRunId);
+  // A request the "Approve for me" reviewer is still checking is not shown (awaiting_review), and
+  // neither is one the app is answering for the person right after (approvalAnsweredForYou): a card
+  // then only flashed up, offering a click that arrived after the answer. It reads selectedRun, so it
+  // comes after it: declared above it, the first pending approval threw "Cannot access … before
+  // initialization" while rendering and blanked the whole window.
+  const shownApprovals = pendingApprovalsHere.filter((approval) => !approval.awaiting_review && !approvalAnsweredForYou(approval,
+    selectedRun?.nodes.find((node) => node.id === approval.nodeId)?.route as { approval_policy?: string; approvals_reviewer?: string } | undefined,
+    Date.now() - seenAt(approval), Boolean(selectedRun?.nodes.some((node) => node.role === "approver")))).map((approval) => {
+    const note = dependencyInstallNote(approval.command, dependencyLinks?.workspaceId === workspaceId ? dependencyLinks.links : null);
+    return note ? { ...approval, dependencyNote: note } : approval;
+  });
   const currentRun = () => mounted.current && selection.current.workspaceId === workspaceId && selection.current.runId === selectedRunId;
   const savedMissionTeam = savedTeams.find(item => item.id === selectedRun?.team?.id) ?? team;
   const missionTeam = missionTeamId ? savedTeams.find(item => item.id === missionTeamId) ?? null : team;
