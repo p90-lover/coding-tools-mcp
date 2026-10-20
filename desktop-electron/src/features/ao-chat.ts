@@ -1105,13 +1105,44 @@ export type ChatAttachment = {
 /** A sent message's attachment, as chatMessageWithAttachments wrote it. */
 export type ChatSentAttachment = { image: boolean; name: string; path?: string };
 
+/** Text selected in an earlier answer and added to the chat, with the person's optional comment. */
+export type ChatAnnotation = { text: string; comment: string };
+// Codex's own wording for response annotations (its prompt builder), so an agent reads them as it
+// would from Codex: numbered selections, each comment addressed, cited inline by number.
+const ANNOTATIONS_HEAD = "# Response annotations:";
+const ANNOTATIONS_RULE = "Each item contains text selected from an earlier Codex response and may include a user comment. Treat items as "
+  + "Annotation 1, Annotation 2, and so on in array order. Use every selection as context and address every comment. For every annotation "
+  + "you address, include its inline directive `:codex-annotation{index=\"N\"}`, where N is its one-based array position (for example, "
+  + "`:codex-annotation{index=\"1\"}`). Do not use unstructured annotation labels.";
+const ANNOTATIONS_BLOCK = /^# Response annotations:\n[^\n]*\n<response-annotations>\n([^\n]*)\n<\/response-annotations>\n*/;
+
+/** The message with its annotations in front, as Codex sends them. */
+export function chatMessageWithAnnotations(message: string, annotations: ChatAnnotation[]): string {
+  if (!annotations.length) return message;
+  const items = JSON.stringify(annotations.map((item) => ({ text: item.text, annotation: item.comment, source: "chat-response" })));
+  return `${ANNOTATIONS_HEAD}\n${ANNOTATIONS_RULE}\n<response-annotations>\n${items}\n</response-annotations>\n\n${message}`.trimEnd();
+}
+
 /**
  * A sent message split back into what the person typed and what they attached, so the chat shows
- * the attachments as cards and image thumbnails (as Claude Code does) instead of their paths.
+ * the attachments as cards and image thumbnails (as Claude Code does) instead of their paths, and
+ * its annotations as a chip instead of the block the agent reads.
  */
-export function chatMessageParts(message: string): { text: string; attachments: ChatSentAttachment[] } {
+export function chatMessageParts(message: string): { text: string; attachments: ChatSentAttachment[]; annotations?: ChatAnnotation[] } {
   const attachments: ChatSentAttachment[] = [];
   const name = (file: string) => file.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || file;
+  let annotations: ChatAnnotation[] | undefined;
+  const block = ANNOTATIONS_BLOCK.exec(message);
+  if (block) {
+    try {
+      const items: unknown = JSON.parse(block[1]);
+      if (Array.isArray(items)) {
+        annotations = items.filter((item): item is { text: string; annotation?: string } => typeof item?.text === "string")
+          .map((item) => ({ text: item.text, comment: typeof item.annotation === "string" ? item.annotation : "" }));
+        message = message.slice(block[0].length);
+      }
+    } catch { /* not ours: the message shows as it was sent */ }
+  }
   const text = message
     .replace(/(^|\n)Attached file `([^`\n]+)`:\n```\n[\s\S]*?\n```(?=\n|$)/g, (_match, lead: string, file: string) => {
       attachments.push({ image: false, name: file });
@@ -1122,7 +1153,7 @@ export function chatMessageParts(message: string): { text: string; attachments: 
       return lead;
     })
     .trim();
-  return { text, attachments };
+  return annotations?.length ? { text, attachments, annotations } : { text, attachments };
 }
 
 export function chatMessageWithAttachments(message: string, attachments: ChatAttachment[]): string {

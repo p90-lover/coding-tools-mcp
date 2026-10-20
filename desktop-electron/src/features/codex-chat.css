@@ -1186,3 +1186,41 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-turn-stats.is-dsh { gap: 6px; }
 .cx-turn-stats.is-dsh span { padding: 2px 9px; border: 1px solid var(--ao-line); border-radius: 999px; }
 .cx-turn-stats.is-dsh span::before { content: none; }
+/* Annotations (ChatAnnotations.tsx), as Codex draws them: a segmented "Add to chat" bar over the
+   selected words, a pill for an optional comment, a numbered blue badge where each one ends, and
+   the composer's "N annotations" chip with its list. */
+.cx-selection-bar { position: fixed; z-index: 70; display: flex; width: fit-content; max-width: 100%; overflow: hidden; border: 1px solid color-mix(in srgb, var(--ao-line, #e4eaf1) 70%, transparent);
+  border-radius: 8px; background: var(--color-bg-primary, #fff); box-shadow: 0 10px 15px -3px rgb(0 0 0 / 10%), 0 4px 6px -4px rgb(0 0 0 / 10%); animation: cx-annotation-in .12s ease-out; }
+.cx-selection-bar button { height: 28px; padding: 0 10px; border: 0; background: transparent; color: var(--color-text-primary, #1f1e1d); font: inherit; font-size: 13px; white-space: nowrap; cursor: pointer; }
+.cx-selection-bar button:hover { background: var(--cx-hover, rgb(0 0 0 / 5%)); }
+.cx-selection-bar button + button { border-left: 1px solid var(--ao-line, #e4eaf1); }
+.cx-annotation-editor { position: fixed; z-index: 70; display: flex; align-items: center; gap: 8px; width: 294px; max-width: calc(100vw - 16px); height: 36px; padding: 4px 6px 4px 12px;
+  border-radius: 12px; background: var(--color-bg-primary, #fff); box-shadow: 0 0 0 .5px var(--ao-line, #e4eaf1), 0 20px 25px -5px rgb(0 0 0 / 12%), 0 8px 10px -6px rgb(0 0 0 / 10%); animation: cx-annotation-in .12s ease-out; }
+.cx-annotation-editor input { flex: 1; min-width: 0; border: 0; outline: none; background: transparent; color: var(--color-text-primary, #1f1e1d); font: inherit; font-size: 13px; }
+.cx-annotation-editor input::placeholder { color: var(--ao-muted, #748198); }
+.cx-annotation-editor button { display: grid; place-items: center; flex: none; width: 24px; height: 24px; border: 0; border-radius: 50%; background: var(--color-text-primary, #1f1e1d); color: var(--color-bg-primary, #fff); cursor: pointer; }
+.cx-annotation-mark { position: fixed; z-index: 60; display: grid; place-items: center; min-width: 16px; height: 16px; padding: 0 4px; margin: -8px 0 0 3px; border-radius: 999px;
+  background: #2f80ed; color: #fff; font-size: 10px; font-weight: 700; line-height: 1; pointer-events: none; box-shadow: 0 0 0 2px var(--color-bg-primary, #fff); }
+::highlight(cx-annotation) { background-color: color-mix(in srgb, #2f80ed 24%, transparent); }
+.cx-annotation-ref { display: inline-grid; place-items: center; min-width: 15px; height: 15px; padding: 0 4px; margin: 0 2px; border-radius: 999px; vertical-align: 2px;
+  background: #2f80ed; color: #fff; font-size: 10px; font-weight: 700; line-height: 1; }
+.cx-annotation-chip { display: inline-flex; align-items: center; height: 26px; margin-bottom: 6px; border: 1px solid var(--ao-line, #e4eaf1); border-radius: 8px; overflow: hidden; font-size: 12px; }
+.cx-annotation-chip button { display: inline-flex; align-items: center; gap: 6px; height: 100%; padding: 0 8px; border: 0; background: transparent; color: var(--color-text-primary, #1f1e1d); font: inherit; cursor: pointer; }
+.cx-annotation-chip button:hover { background: var(--cx-hover, rgb(0 0 0 / 5%)); }
+.cx-annotation-chip .cx-annotation-clear { padding: 0 7px; color: var(--ao-muted, #748198); }
+.cx-annotation-list { position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 5; display: grid; gap: 2px; width: min(300px, 100%); max-height: 260px; margin: 0; padding: 8px; overflow: auto;
+  list-style: none; border: 1px solid var(--ao-line, #e4eaf1); border-radius: 10px; background: var(--color-bg-primary, #fff); box-shadow: 0 10px 24px rgb(0 0 0 / 12%); animation: cx-annotation-in .12s ease-out; }
+.cx-annotation-list li { display: flex; align-items: flex-start; gap: 6px; padding: 4px; border-radius: 6px; font-size: 12px; }
+.cx-annotation-list li:hover { background: var(--cx-hover, rgb(0 0 0 / 4%)); }
+.cx-annotation-number { flex: none; color: var(--ao-muted, #748198); }
+.cx-annotation-body { display: grid; flex: 1; min-width: 0; gap: 2px; }
+.cx-annotation-body small { color: var(--ao-muted, #748198); font-size: 11px; }
+.cx-annotation-quote { display: -webkit-box; overflow: hidden; color: var(--color-text-primary, #1f1e1d); -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.cx-annotation-comment { color: var(--ao-muted, #748198); font-style: italic; }
+.cx-annotation-body input { width: 100%; padding: 3px 6px; border: 1px solid var(--ao-line, #e4eaf1); border-radius: 6px; background: transparent; color: inherit; font: inherit; }
+.cx-annotation-list li > button { display: grid; place-items: center; flex: none; width: 22px; height: 22px; border: 0; border-radius: 5px; background: transparent; color: var(--ao-muted, #748198); cursor: pointer; }
+.cx-annotation-list li > button:hover { background: var(--cx-hover, rgb(0 0 0 / 6%)); color: var(--color-text-primary, #1f1e1d); }
+.cx-sent-annotations { display: inline-flex; align-items: center; gap: 6px; align-self: flex-end; height: 24px; margin-bottom: 4px; padding: 0 8px; border: 1px solid var(--ao-line, #e4eaf1);
+  border-radius: 8px; color: var(--ao-muted, #748198); font-size: 12px; cursor: default; }
+@keyframes cx-annotation-in { from { opacity: 0; transform: translateY(2px); } }
+@media (prefers-reduced-motion: reduce) { .cx-selection-bar, .cx-annotation-editor, .cx-annotation-list { animation: none; } }

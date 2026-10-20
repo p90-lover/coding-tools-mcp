@@ -6,6 +6,7 @@ import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type Approv
 import { ChatMarkdown } from "./ChatMarkdown";
 import { ChatWorkbench, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
 import { ChatBranchBar } from "./ChatBranchBar";
+import { AnnotationTray, SelectionAnnotator, SentAnnotations, type DraftAnnotation } from "./ChatAnnotations";
 import { ChatContextMeter } from "./ChatContextMeter";
 import { ChatPet } from "./ChatPet";
 import { ChatTurnStats } from "./ChatTurnStats";
@@ -14,7 +15,7 @@ import { AnsweredRecord, ApprovedMark, EditDiff, StreamingMarkdown } from "./Cha
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
-  CHAT_DEFAULT_TITLE, GOAL_SUMMARY, chatAcceptsMessage, chatDuration, chatList, chatMessageWithAttachments, chatRunOpen,
+  CHAT_DEFAULT_TITLE, GOAL_SUMMARY, chatAcceptsMessage, chatDuration, chatList, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
   activitySummary, groupTimeline, mergeTimeline, tidyTimeline,
@@ -39,6 +40,9 @@ const CHAT_QUEUES = new Map<string, QueuedChatMessage[]>();
 const CHAT_DRAFTS = new Map<string, string>();
 /** Each chat's unsent attachments, kept alongside its draft so a file never rides into another chat. */
 const CHAT_ATTACHMENTS = new Map<string, ChatAttachment[]>();
+// Each chat's unsent annotations (words selected in its answers), kept like its attachments.
+const CHAT_ANNOTATIONS = new Map<string, DraftAnnotation[]>();
+let annotationIds = 0;
 /** The cards panel's dragged width (px), kept on this computer. */
 const CARDS_WIDTH_KEY = "coding-tools:ao:cards-panel-width";
 /** Whether the chat's pet is shown ("off" hides it), kept on this computer. */
@@ -430,6 +434,7 @@ function SentMessage({ text }: { text: string }) {
           <span className="cx-sent-file-name">{item.name}</span>
         </button>)}
     </div> : null}
+    {parts.annotations?.length ? <SentAnnotations annotations={parts.annotations} /> : null}
     {parts.text ? <div className="cx-bubble"><p>{parts.text}</p></div> : null}
     {open ? <div className="cx-lightbox" role="dialog" aria-label="Image preview" onClick={() => setOpen(null)}>
       <img src={open} alt="" onClick={(event) => event.stopPropagation()} />
@@ -555,6 +560,15 @@ export function AgentOrchestratorChat({
   const [sending, setSending] = useState(false);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [attachNote, setAttachNote] = useState("");
+  // Words selected in this chat's answers and added to the next message (ChatAnnotations).
+  const [annotations, setAnnotations] = useState<DraftAnnotation[]>([]);
+  const addAnnotation = (text: string) => {
+    const id = ++annotationIds;
+    setAnnotations((current) => [...current, { id, text, comment: "" }]);
+    return id;
+  };
+  const commentAnnotation = (id: number, comment: string) =>
+    setAnnotations((current) => current.map((item) => item.id === id ? { ...item, comment } : item));
   const [slashIndex, setSlashIndex] = useState(0);
   const [showStructure, setShowStructure] = useState(false);
   // Whether a finished turn's work (its steps and their messages) shows unfolded. Single-model chats
@@ -717,11 +731,14 @@ export function AgentOrchestratorChat({
     if (draftOwner.current === selectedTaskId) return;
     if (draft) CHAT_DRAFTS.set(draftOwner.current, draft); else CHAT_DRAFTS.delete(draftOwner.current);
     if (attachments.length) CHAT_ATTACHMENTS.set(draftOwner.current, attachments); else CHAT_ATTACHMENTS.delete(draftOwner.current);
+    if (annotations.length) CHAT_ANNOTATIONS.set(draftOwner.current, annotations); else CHAT_ANNOTATIONS.delete(draftOwner.current);
     setDraft(CHAT_DRAFTS.get(selectedTaskId) ?? "");
     setAttachments(CHAT_ATTACHMENTS.get(selectedTaskId) ?? []);
+    setAnnotations(CHAT_ANNOTATIONS.get(selectedTaskId) ?? []);
     setAttachNote("");
     CHAT_DRAFTS.delete(selectedTaskId);
     CHAT_ATTACHMENTS.delete(selectedTaskId);
+    CHAT_ANNOTATIONS.delete(selectedTaskId);
     draftOwner.current = selectedTaskId;
   }, [selectedTaskId]);
   // Messages a rewound chat carries as context ahead of its first message; the composer holds only
@@ -759,7 +776,7 @@ export function AgentOrchestratorChat({
   const steering = !accepts && steerOn && steerable && Boolean(steer && selectedTaskId);
   // Otherwise a message typed while the chat runs waits and is sent when the turn finishes, as in Codex.
   const queueing = !accepts && !steering && runOpen && Boolean(selectedTaskId);
-  const canSend = !busy && !sending && Boolean(draft.trim() || attachments.length) && (accepts || steering || queueing);
+  const canSend = !busy && !sending && Boolean(draft.trim() || attachments.length || annotations.length) && (accepts || steering || queueing);
   const slash = chatSlashMatches(draft, { chat: Boolean(selectedTaskId), run: Boolean(latest), open: runOpen });
 
   // What a command shows above the composer (its result, or why it couldn't run).
@@ -788,7 +805,7 @@ export function AgentOrchestratorChat({
         // Or its turn had hung, or sat in a long command that would have kept it from reading the
         // message, and was stopped: the message goes as the same agent's next turn once it settles.
         setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what: "Message", message }));
-        if (current()) { setDraft(""); setAttachments([]); setAttachNote(""); }
+        if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
         if (here()) {
           say(steered === "restart" ? "Restarting" : steered === "interrupt" ? "Interrupting" : "Queued", steered === "restart"
             ? "The agent had stopped responding, so its turn was stopped; your message is sent as the next turn."
@@ -805,7 +822,7 @@ export function AgentOrchestratorChat({
       if (fromComposer && CHAT_DRAFTS.get(owner.taskId) === owner.draft) CHAT_DRAFTS.delete(owner.taskId);
       if (fromComposer && CHAT_ATTACHMENTS.get(owner.taskId) === owner.attachments) CHAT_ATTACHMENTS.delete(owner.taskId);
       if (current()) {
-        setDraft(""); setTitle(""); setAttachments([]); setAttachNote("");
+        setDraft(""); setTitle(""); setAttachments([]); setAnnotations([]); setAttachNote("");
         if (!selectedTaskId) setCarried(null);
       }
       if (here()) setAtBottom(true);
@@ -821,12 +838,12 @@ export function AgentOrchestratorChat({
     const command = attachments.length ? null : chatSlashParse(draft);
     if (command) { await runCommand(command.name, command.arg); return; }
     if (!canSend) return;
-    const message = chatMessageWithAttachments(draft, attachments);
+    const message = chatMessageWithAnnotations(chatMessageWithAttachments(draft, attachments), annotations);
     const text = commands?.planMode ? planMessage(message) : message;
     if (queueing) {
       // Several messages typed during one turn go together, in order.
       setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what: "Message", message: text }));
-      setDraft(""); setAttachments([]); setAttachNote("");
+      setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote("");
       say("Queued", `It's sent when the current turn finishes.${latest && runOpen && stop ? " Send /stop to end the turn now." : ""}`, text);
       return;
     }
@@ -1402,6 +1419,8 @@ export function AgentOrchestratorChat({
             return <AgentOrchestratorApproval key={JSON.stringify([approval.nodeId, approval.approval_id])} approval={approval} busy={busy} approve={approve} actor={actor} />;
           })}
         </div> : null}
+        {/* Outside the chat box's form: its comment box submits on Enter, and that must not send the message. */}
+        {selectedTaskId ? <SelectionAnnotator root={scroller} annotations={annotations} onAdd={addAnnotation} onComment={commentAnnotation} /> : null}
         <form className="cx-composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}
           onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
           onDrop={(event) => { if (event.dataTransfer.files.length) { event.preventDefault(); void addFiles(event.dataTransfer.files); } }}>
@@ -1424,6 +1443,8 @@ export function AgentOrchestratorChat({
               <button type="button" aria-label="Drop the earlier messages" onClick={() => setCarried(null)}>×</button>
             </span>
           </div> : null}
+          <AnnotationTray annotations={annotations} onComment={commentAnnotation}
+            onRemove={(id) => setAnnotations((current) => current.filter((item) => item.id !== id))} onClear={() => setAnnotations([])} />
           {attachments.length || attachNote ? <div className="cx-attachments">
             {/* As Claude Code shows them: an image as its thumbnail, a file as its name; where it lives
                 is on hover, and a click shows it in its folder. */}
