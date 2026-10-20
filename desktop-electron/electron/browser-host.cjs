@@ -48,7 +48,10 @@ const HIDDEN_TURN_VIEWPORT = Object.freeze({ width: 800, height: 600 });
 const TURN_HEARTBEAT_SWEEP_MS = 5_000;
 const TURN_HEARTBEAT_TIMEOUT_MS = 60_000;
 const TURN_TAB_BOOTSTRAP_TIMEOUT_MS = 120_000;
-const RETAINED_TURN_TAB_TTL_MS = 30 * 60 * 1000;
+// A finished turn's tab (and its saved ChatGPT chat) is kept this long for the next round of the same
+// task, then let go and the chat deleted. 30 minutes left finished task chats in the user's ChatGPT
+// history for half an hour; a later round simply starts a new chat with the task's context.
+const RETAINED_TURN_TAB_TTL_MS = 10 * 60 * 1000;
 const BROWSER_NAVIGATION_TIMEOUT_MS = 60_000;
 const CHATGPT_AUTH_SESSION_TIMEOUT_MS = 5_000;
 // The open page's own session request (the fallback when Cloudflare answers the app's request)

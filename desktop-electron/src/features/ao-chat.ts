@@ -651,8 +651,28 @@ export const RESTART_INTERRUPTED = /process ended before it finished \(the app r
 
 type ResumeCandidate = {
   cancelled: boolean; paused?: boolean; execution_mode?: string;
-  nodes: { state: string; receipt?: { error?: string | null } | null; history?: unknown[] }[];
+  nodes: { state: string; receipt?: { error?: string | null; started_at_ms?: number | null } | null; history?: unknown[] }[];
 };
+
+/**
+ * A restart resumes only work that was going on recently. On 2026-10-20 a restart revived an
+ * 11-day-old test mission (its reviewer was still "pending" from Oct 9): its workers re-ran and the
+ * chat said "Working for 264h". A run whose newest card start (current or earlier attempt) is older
+ * than this was abandoned, not interrupted.
+ */
+export const RESTART_RESUME_WINDOW_MS = 24 * 60 * 60_000;
+
+/** The newest time any card of the run started, current receipts and earlier attempts alike (0: none). */
+function newestStart(mission: ResumeCandidate): number {
+  let newest = 0;
+  for (const node of mission.nodes) {
+    newest = Math.max(newest, Number(node.receipt?.started_at_ms) || 0);
+    for (const entry of node.history ?? []) {
+      newest = Math.max(newest, Number((entry as { started_at_ms?: unknown } | null)?.started_at_ms) || 0);
+    }
+  }
+  return newest;
+}
 
 /**
  * How a chat that no loop in this app session is driving picks up after an app restart, or null
@@ -662,9 +682,13 @@ type ResumeCandidate = {
  * team's loop recovers its interrupted workers itself. Teams resume too: before, re-entering a
  * project after a restart left a team chat stuck with its next cards never started.
  */
-export function restartResume(mission: ResumeCandidate): "retry" | "continue" | null {
+export function restartResume(mission: ResumeCandidate, now = Date.now()): "retry" | "continue" | null {
   // A chat stopped or paused on purpose stays that way.
   if (mission.cancelled || mission.paused) return null;
+  // Abandoned long ago, not interrupted by this restart. A run whose cards never started has no
+  // age to judge by and still resumes.
+  const newest = newestStart(mission);
+  if (newest && now - newest > RESTART_RESUME_WINDOW_MS) return null;
   const restarted = mission.nodes.filter(node => ["held", "failed"].includes(node.state)
     && RESTART_INTERRUPTED.test(String(node.receipt?.error || "")));
   // Held for any other reason (an approval, a failure to inspect) is the person's call; a reserved
@@ -707,13 +731,30 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
     step.working = { ...working, ...(live?.activity ? { activity: live.activity } : {}),
       ...(timeline.length ? { timeline } : {}) };
     // A retried card's new attempt starts empty; until it writes, its earlier reply stays readable.
-    const earlier = node.history?.[node.history.length - 1]?.answer;
-    if (!step.text && earlier?.trim() && !timeline.some((item) => item.kind === "message")) {
-      step.text = `Earlier attempt:\n\n${earlier}`;
+    const earlier = latestHistoryAnswer(node);
+    if (!step.text && earlier && !timeline.some((item) => item.kind === "message")) {
+      step.text = `${earlierLabel(node)}\n\n${earlier}`;
     }
+  } else if (!step.text && node.state !== "finished") {
+    // A review that sent the work back resets the reviewer to pending for its next round, and its
+    // verdict moves to history. The chat showed nothing for it: the latest response, the one the
+    // workers are now acting on, vanished until the reviewer answered again.
+    const earlier = latestHistoryAnswer(node);
+    if (earlier) step.text = `${earlierLabel(node)}\n\n${earlier}`;
   }
   return step;
 }
+
+/** The newest answer a card gave in an earlier attempt or round (a retry or rework moves it to history). */
+function latestHistoryAnswer(node: ChatNode): string | undefined {
+  for (let index = (node.history?.length ?? 0) - 1; index >= 0; index -= 1) {
+    const answer = node.history?.[index]?.answer?.trim();
+    if (answer) return answer;
+  }
+  return undefined;
+}
+
+const earlierLabel = (node: ChatNode) => (node.role === "reviewer" || node.role === "approver" || node.role === "sub_reviewer" ? "Last review:" : "Earlier attempt:");
 
 /** A DeepSeek model, whose turns show as DeepSeek Harness (dsh) shows them. */
 export const isDeepSeekModel = (model?: string | null) => /deepseek/i.test(model ?? "");
@@ -936,7 +977,8 @@ export function chatTurns(runs: ChatRun[], description: string | undefined, opti
   const turns: ChatTurn[] = runs.map((run) => {
     const index = run.restarts_run_id || run.replaces_run_id ? -1 : messageIndex++;
     const steps = chatNodeOrder(run.nodes)
-      .filter((node) => node.state !== "pending" || node.receipt)
+      // A pending card shows once it has done something: a receipt, or an earlier round's answer.
+      .filter((node) => node.state !== "pending" || node.receipt || latestHistoryAnswer(node))
       .map((node) => chatStep(run, node, options, now));
     // A single-model run's one card answers the message itself, as a solo orchestrator's does.
     const closing = run.solo || run.execution_mode === "single"
