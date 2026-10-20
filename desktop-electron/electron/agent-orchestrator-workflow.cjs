@@ -2870,18 +2870,25 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    */
   function scheduleAutoRetry(workspaceId, runId, executable, state) {
     if (!chatPreferences.get().autoRetry) return;
-    const timer = setTimer(() => {
-      void (async () => {
-        const key = runKey(workspaceId, runId);
-        if (state.stopped || backgroundRuns.get(key) !== state) return;
-        const saved = await runs({ workspaceId, runId });
-        const mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
-        if (!autoRetryAllowed(mission)) return;
-        logger?.info?.("ao.auto_retry_restart", { attempts: Math.max(0, ...mission.nodes.map(node => node.history?.length ?? 0)) });
-        await startRun({ workspaceId, runId, executable });
-      })().catch(error => logger?.warn?.("ao.auto_retry_restart_failed", { message: publicText(error?.message || error, 200) }));
-    }, AUTO_RETRY_PAUSE_MS);
-    timer?.unref?.();
+    const key = runKey(workspaceId, runId);
+    const current = () => !state.stopped && backgroundRuns.get(key) === state;
+    const mission = async () => (await runs({ workspaceId, runId })).runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
+    void (async () => {
+      const failed = await mission();
+      if (!current() || !autoRetryAllowed(failed)) return;
+      // The same growing pause as autoRetryStep: 10 s before the second try, 20 s before the third.
+      const held = failed.nodes.find(node => node.state === "held" && node.role !== "retry") ?? failed.nodes.find(node => node.state === "held");
+      const attempt = (held?.history?.length ?? 0) + 1;
+      const timer = setTimer(() => {
+        void (async () => {
+          const latest = await mission();
+          if (!current() || !autoRetryAllowed(latest)) return;
+          logger?.info?.("ao.auto_retry_restart", { attempt });
+          await startRun({ workspaceId, runId, executable });
+        })().catch(error => logger?.warn?.("ao.auto_retry_restart_failed", { message: publicText(error?.message || error, 200) }));
+      }, AUTO_RETRY_PAUSE_MS * attempt);
+      timer?.unref?.();
+    })().catch(error => logger?.warn?.("ao.auto_retry_restart_failed", { message: publicText(error?.message || error, 200) }));
   }
   /** Whether a run's background grant can start nothing more: every turn started, or its hour over. */
   function grantSpent(grant) {

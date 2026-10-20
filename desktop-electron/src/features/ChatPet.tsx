@@ -39,6 +39,8 @@ const HEIGHT = ROWS * CELL_H;
 const HOUSE_W = 24 * PIXEL_W;
 const HOUSE_H = 11 * PIXEL_H;
 const HOUSE_GAP = 6;
+/** On the top edge (no room beside the box), this far in from its right end. */
+const HOUSE_INSET = 18;
 /** The entrance plays once per window, as the CLI plays one once per version. */
 let entrancePlayed = false;
 /** Claude Code's working spinner, cycled over Clawd's head while the agent works. */
@@ -180,8 +182,9 @@ const REST: Pose = { look: 0, arms: "down", walking: false, sit: false };
 const pick = <T,>(items: readonly T[]) => items[Math.floor(Math.random() * items.length)]!;
 const WORK: readonly Job[] = ["laptop", "laptop", "search", "build", "carry"];
 
-/** The box's outline as one loop: its size, and the spot and side at a distance around it. */
-type Loop = { width: number; height: number; length: number };
+/** The box's outline as one loop: its size, and the spot and side at a distance around it.
+ *  `beside`: there is room for the house beside the box's right side inside the chat surface. */
+type Loop = { width: number; height: number; length: number; beside: boolean };
 function spotAt(loop: Loop, at: number): { x: number; y: number; side: 0 | 1 | 2 | 3 } {
   const { width: w, height: h, length } = loop;
   const s = ((at % length) + length) % length;
@@ -190,8 +193,16 @@ function spotAt(loop: Loop, at: number): { x: number; y: number; side: 0 | 1 | 2
   if (s < 2 * w + h) return { x: w - (s - w - h), y: h, side: 2 };
   return { x: 0, y: h - (s - 2 * w - h), side: 3 };
 }
-/** Where the house stands, relative to the box: just outside its right side, floor at its bottom. */
-const housePlace = (loop: Loop) => ({ left: loop.width + HOUSE_GAP, top: loop.height - HOUSE_H });
+/**
+ * Where the house stands, relative to the box: just outside its right side, floor at its bottom.
+ * When the chat surface (which clips) leaves no room there, as in a narrow window, it stands on the
+ * box's top edge near the right end instead.
+ */
+const housePlace = (loop: Loop) => loop.beside
+  ? { left: loop.width + HOUSE_GAP, top: loop.height - HOUSE_H }
+  : { left: Math.max(0, loop.width - HOUSE_W - HOUSE_INSET), top: -HOUSE_H };
+/** How far down the house its door's middle is (the door is rows 6 to 10 of its 11). */
+const DOOR_Y = 8.5 * PIXEL_H;
 /** `along` (a distance from the top-left corner, under one lap) on the lap nearest `near`. */
 const nearLap = (loop: Loop, along: number, near: number) => along + Math.round((near - along) / loop.length) * loop.length;
 
@@ -281,14 +292,23 @@ export function ChatPet({ mood, context, onHide }: {
     const parent = box.current?.parentElement;
     if (!parent) return undefined;
     composer.current = parent;
+    // The nearest surface around the box that clips what stands outside it (the chat's workflow pane).
+    let clip: HTMLElement | null = parent.parentElement;
+    while (clip && getComputedStyle(clip).overflowX === "visible") clip = clip.parentElement;
     const measure = () => {
       const width = parent.offsetWidth, height = parent.offsetHeight;
-      if (width > 0 && height > 0) setLoop({ width, height, length: 2 * (width + height) });
+      if (width <= 0 || height <= 0) return;
+      const room = (clip ? clip.getBoundingClientRect().right : window.innerWidth) - parent.getBoundingClientRect().right;
+      const beside = room >= HOUSE_GAP + HOUSE_W;
+      setLoop((current) => current && current.width === width && current.height === height && current.beside === beside
+        ? current : { width, height, length: 2 * (width + height), beside });
     };
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(parent);
-    return () => observer.disconnect();
+    // The room beside the box changes with the window as well as with the box itself.
+    window.addEventListener("resize", measure);
+    return () => { observer.disconnect(); window.removeEventListener("resize", measure); };
   }, []);
   // First placement: the saved fraction of the way round, else near the top-right corner.
   useEffect(() => {
@@ -330,19 +350,27 @@ export function ChatPet({ mood, context, onHide }: {
     return rects.some((found) => found.left < frame.left + right && found.right > frame.left + left
       && found.top < frame.top + bottom && found.bottom > frame.top + top);
   };
-  /** Where Clawd stands to go into its house: halfway down the box's right side, at its door. */
+  /** Where Clawd stands to go into its house: at its door. Beside the box that is on the right side,
+   *  level with the door (the house stands on the box's bottom, so a tall box puts it low); on the
+   *  top edge, behind the house's middle. */
   const homeSpot = () => {
     const current = loopNow.current;
-    return current ? nearLap(current, current.width + current.height / 2, atNow.current) : atNow.current;
+    if (!current) return atNow.current;
+    const place = housePlace(current);
+    const along = current.beside
+      ? current.width + Math.max(0, Math.min(current.height, place.top + DOOR_Y))
+      : place.left + HOUSE_W / 2;
+    return nearLap(current, along, atNow.current);
   };
   /** Whether standing at `spot` would leave it half behind the house: it only stops there to go in.
-   *  That is the right side beside the house, and the top edge's right end when the house is taller
-   *  than the box and stands up past its top. */
+   *  Beside the box that is the right side next to the house, and the top edge's right end when the
+   *  house is taller than the box and stands up past its top; on the top edge, the house's span. */
   const inHouse = (spot: number) => {
     const current = loopNow.current;
     if (!current) return false;
     const { x, y, side } = spotAt(current, spot);
-    const top = housePlace(current).top;
+    const { left, top } = housePlace(current);
+    if (!current.beside) return side === 0 && x > left - WIDTH / 2 && x < left + HOUSE_W + WIDTH / 2;
     return (side === 1 && y > top - WIDTH / 2) || (side === 0 && top < 0 && x > current.width - WIDTH / 2 - HOUSE_GAP);
   };
   /** The nearest spot to `spot` that covers no button. */
@@ -447,8 +475,9 @@ export function ChatPet({ mood, context, onHide }: {
     homeNow.current = false;
     setHome(false);
     if (!walkOut || still || !loopNow.current) return;
-    // Back up the right side and along the top, clear of the house.
-    walkTo(freeNear(atNow.current - (loopNow.current.height / 2 + 1.5 * WIDTH)), STROLL, () => { play("jump"); remember(); wander(); });
+    // Back the way it came, clear of the house: up the right side and along the top, or back along the top.
+    const { y, side } = spotAt(loopNow.current, atNow.current);
+    walkTo(freeNear(atNow.current - (side === 1 ? y + 1.5 * WIDTH : HOUSE_W / 2 + WIDTH)), STROLL, () => { play("jump"); remember(); wander(); });
   };
   // Nothing running for a while: it goes home to sleep. Any touch, or the agent starting, wakes it.
   const poke = () => {
@@ -719,22 +748,25 @@ export function ChatPet({ mood, context, onHide }: {
   };
 
   const onPointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    if (event.button !== 0 || drag.current) return;
+    // Still falling from the last drop: a press now would cancel nothing and could leave it in the
+    // air (the landing is its own timer), so it lands first.
+    if (event.button !== 0 || drag.current || heldNow.current) return;
     // Picked up mid-walk or mid-job: it stops where it is and goes where it is carried.
     cancelPlans();
     setJob("none");
-    window.clearTimeout(fallTimer.current);
     drag.current = { moved: false, x: event.clientX, y: event.clientY, lastX: event.clientX, lastY: event.clientY };
     // The window follows the drag: carried off the box, Clawd moves onto the page itself, and the
-    // button it was picked up by is no longer the one under the pointer.
-    const move = (moved: PointerEvent) => dragMove(moved.clientX, moved.clientY);
+    // button it was picked up by is no longer the one under the pointer. Only the pointer that
+    // picked it up counts: a second finger or a pen neither moves nor drops it.
+    const id = event.pointerId;
+    const move = (moved: PointerEvent) => { if (moved.pointerId === id) dragMove(moved.clientX, moved.clientY); };
     const end = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", up);
       dragEnd.current = null;
     };
-    const up = () => { end(); dragDrop(); };
+    const up = (released: PointerEvent) => { if (released.pointerId !== id) return; end(); dragDrop(); };
     dragEnd.current = end;
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);

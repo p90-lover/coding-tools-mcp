@@ -5077,7 +5077,8 @@ test("\"Retry automatically\" also restarts a chat whose run ended on an error, 
     const controls = [], timers = [];
     let lost = false;
     const workflow = createAgentOrchestratorWorkflow({
-      setTimer: (fn, ms) => { if (ms === 10_000) timers.push(fn); return { unref() {} }; },
+      // Only the auto-retry pauses (10 s per attempt); other timers are not this test's.
+      setTimer: (fn, ms) => { if ([10_000, 20_000, 30_000].includes(ms)) timers.push({ fn, ms }); return { unref() {} }; },
       findCodexExecutable: () => process.execPath,
       resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
       cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
@@ -5111,10 +5112,20 @@ test("\"Retry automatically\" also restarts a chat whose run ended on an error, 
   await settle(100);
   first.fail();
   for (let tries = 0; tries < 200 && !first.timers.length; tries++) await settle(10);
-  assert.equal(first.timers.length, 1, "a restart is scheduled after the pause");
-  first.timers[0]();
+  assert.deepEqual(first.timers.map(timer => timer.ms), [10_000], "a restart is scheduled after the first pause");
+  first.timers[0].fn();
   for (let tries = 0; tries < 200 && !first.controls.length; tries++) await settle(10);
   assert.deepEqual(first.controls, ["retry"]);
+
+  // A second failure waits longer, as autoRetryStep's countdown does.
+  const second = setup([{}]);
+  await second.workflow.call("chat_auto_retry", { enabled: true });
+  await second.workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  await settle(100);
+  second.fail();
+  for (let tries = 0; tries < 200 && !second.timers.length; tries++) await settle(10);
+  assert.deepEqual(second.timers.map(timer => timer.ms), [20_000], "the pause grows with each attempt");
+  second.mission.nodes[0].state = "finished";
 
   // Its third retry already used: the limit holds, and the step waits for the person.
   const spent = setup([{}, {}, {}]);
@@ -5122,9 +5133,8 @@ test("\"Retry automatically\" also restarts a chat whose run ended on an error, 
   await spent.workflow.call("start_run", { workspaceId: "ws", runId: "run" });
   await settle(100);
   spent.fail();
-  for (let tries = 0; tries < 200 && !spent.timers.length; tries++) await settle(10);
-  spent.timers[0]?.();
-  await settle(200);
+  await settle(300);
+  assert.deepEqual(spent.timers, [], "no restart is scheduled past the limit");
   assert.deepEqual(spent.controls, [], "no retry past the limit");
   spent.mission.nodes[0].state = "finished";
 });
