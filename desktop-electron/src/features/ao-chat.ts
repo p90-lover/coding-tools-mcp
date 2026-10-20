@@ -807,7 +807,8 @@ export function earlierRounds(node: ChatNode, shownLatest = false): ChatStepRoun
   return history.flatMap((entry, index) => {
     const text = entry?.answer?.trim() || entry?.error?.trim();
     if (!text || (shownLatest && index === latestAnswered)) return [];
-    const verdict = entry?.verdict || (!entry?.answer?.trim() && entry?.error ? "failed" : undefined);
+    // A round that answered and then failed (the answer kept, the error set) still failed.
+    const verdict = entry?.verdict || (entry?.error?.trim() ? "failed" : undefined);
     return [{ label: `${noun} ${index + 1}`, text, ...(verdict ? { verdict } : {}) }];
   });
 }
@@ -1045,7 +1046,7 @@ export function chatTurns(runs: ChatRun[], description: string | undefined, opti
     const index = run.restarts_run_id || run.replaces_run_id ? -1 : messageIndex++;
     const steps = chatNodeOrder(run.nodes)
       // A pending card shows once it has done something: a receipt, or an earlier round's answer.
-      .filter((node) => node.state !== "pending" || node.receipt || latestHistoryAnswer(node))
+      .filter((node) => node.state !== "pending" || node.receipt || earlierRounds(node).length)
       .map((node) => chatStep(run, node, options, now));
     // A single-model run's one card answers the message itself, as a solo orchestrator's does.
     const closing = run.solo || run.execution_mode === "single"

@@ -1262,7 +1262,7 @@ test("starting a mission whose card is held retries that card first", async () =
 });
 
 function heldMissionWorld({ history = [], error = "ChatGPT did not confirm that the prompt was sent" } = {}) {
-  const world = { reads: 0, controls: [], grants: 0, held: false };
+  const world = { reads: 0, controls: [], controlBodies: [], grants: 0, held: false };
   world.requestHeadless = async (endpoint, body) => {
     if (endpoint === "/api/v1/ao/read") {
       world.reads += 1;
@@ -1272,7 +1272,7 @@ function heldMissionWorld({ history = [], error = "ChatGPT did not confirm that 
         nodes: [{ id: "lead", role: "planner", state: world.held ? "held" : "pending", route: { model: "chatgpt-web/high", provider_id: "chatgpt-web" },
           history, receipt: world.held ? { error } : null }] }] };
     }
-    if (endpoint === "/api/v1/ao/control") { world.controls.push(body.action); world.held = false; return { ok: true, run: { id: "r1", workspace_id: "ws-1", nodes: [] } }; }
+    if (endpoint === "/api/v1/ao/control") { world.controls.push(body.action); world.controlBodies.push(body); world.held = false; return { ok: true, run: { id: "r1", workspace_id: "ws-1", nodes: [] } }; }
     if (endpoint === "/api/v1/ao/grant") { world.grants += 1; return { ok: true, run: { id: "r1", workspace_id: "ws-1" }, grant: { executable_sha256: "a".repeat(64) } }; }
     if (endpoint === "/api/v1/tools/call") return { operation: { state: "completed", result: { ok: true, revision: 1, workspace_id: "ws-1", steps: [], task: { id: "task-1", title: "T", description: "d" } } } };
     throw new Error(`stop at ${endpoint}`);
@@ -1335,7 +1335,38 @@ test("with Retry automatically on, a step that lost the local proxy waits and is
   offset = 31_000;
   await until(() => world.controls.length > 0);
   assert.deepEqual(world.controls, ["retry"]);
+  assert.equal(world.controlBodies[0].node_id ?? world.controlBodies[0].nodeId, "lead", "a team retries only the failed card");
   assert.equal(asked, 0);
+});
+
+test("a lost connection is retried even on a card with many finished rounds, but never a sign-in failure", async () => {
+  const proxy = "proxyconnect tcp: dial tcp 127.0.0.1:17891: connectex: No connection could be made";
+  for (const [error, retried] of [[proxy, true], [`API error 503: auth_unavailable ${proxy}`, false]]) {
+    // Six finished review cycles are no failed connections.
+    const world = heldMissionWorld({ error, history: Array.from({ length: 6 }, () => ({ answer: "CHANGES_REQUIRED", verdict: "CHANGES_REQUIRED" })) });
+    let offset = 0;
+    const states = [];
+    const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/Codex/codex.exe",
+      fetchImpl: async () => { throw new Error("no helper"); },
+      webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
+      onRunState: (update) => states.push(String(update?.detail ?? "")),
+      now: () => Date.now() + offset,
+      resolveHarness: async () => ({ expected_sha256: "a".repeat(64), executable: path.resolve("codex.exe") }) });
+    await workflow.call("chat_auto_retry", { enabled: true });
+    await workflow.call("start_run", { workspaceId: "ws-1", runId: "r1" });
+    await until(() => world.reads >= 2);
+    if (retried) {
+      await until(() => states.some(detail => /lost its connection/.test(detail)));
+      offset = 31_000;
+      await until(() => world.controls.length > 0);
+      assert.deepEqual(world.controls, ["retry"]);
+    } else {
+      offset = 31_000;
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      assert.ok(!states.some(detail => /lost its connection/.test(detail)), "a sign-in failure is not a lost connection");
+      assert.ok(!world.controls.length, "a sign-in failure is not retried as a lost connection");
+    }
+  }
 });
 
 test("the helper stops retrying a card that already failed three times", async () => {

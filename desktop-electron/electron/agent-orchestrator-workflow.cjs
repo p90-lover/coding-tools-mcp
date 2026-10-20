@@ -2578,8 +2578,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const NETWORK_OUTAGE = /proxyconnect|ERR_PROXY|ECONNREFUSED|connectex|Unable to connect|upstream fetch failed|fetch failed|Browser is not ready|API error 5\d\d|Retrying Claude, attempt/i;
   const OUTAGE_RETRY_LIMIT = 5;
   const OUTAGE_RETRY_PAUSE_MS = 30_000;
+  // Connection retries per card, counted apart from its history: a reviewer's history also holds
+  // every finished review cycle, which is no failure.
+  const outageAttempts = new Map(); // `${runId}:${nodeId}` -> connection retries made
   function outageRetryStep(mission, node) {
-    const attempt = (node.history?.length ?? 0) + 1;
+    const attempt = (outageAttempts.get(`${mission.id}:${node.id}`) ?? 0) + 1;
     if (attempt > OUTAGE_RETRY_LIMIT) return null;
     const key = `outage:${mission.id}:${node.id}:${attempt}`;
     if (!autoRetrySeen.has(key)) {
@@ -2604,12 +2607,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function recoverHeld(workspaceId, mission, state = {}) {
     const held = mission.nodes.filter(node => node.state === "held");
     if (!held.length || mission.cancelled) return null;
+    // A sign-in or account-pool failure (some arrive as a 5xx) is the person's, never a lost connection.
     const outage = chatPreferences.get().autoRetry
-      ? held.find(node => node.role !== "retry" && NETWORK_OUTAGE.test(String(node.receipt?.error || ""))) : null;
+      ? held.find(node => node.role !== "retry" && NETWORK_OUTAGE.test(String(node.receipt?.error || ""))
+        && !POOL_EXHAUSTED.test(String(node.receipt?.error || ""))) : null;
     const outageRetry = outage ? outageRetryStep(mission, outage) : null;
     if (outageRetry?.retry) {
-      const team = mission.execution_mode !== "single" && outage.role === "worker";
-      await controlRun({ workspaceId, runId: mission.id, action: team ? "retry_auto" : "retry", ...(team ? { nodeId: outage.id } : {}) });
+      // A team retries the one failed card: an unscoped retry re-queues every held or failed card
+      // (workers a review set aside too), and retry_auto refuses a worker with two attempts already.
+      // A single-model run has the one card, retried as its other recoveries retry it.
+      const single = mission.execution_mode === "single";
+      await controlRun({ workspaceId, runId: mission.id, action: "retry", ...(single ? {} : { nodeId: outage.id }) });
+      outageAttempts.set(`${mission.id}:${outage.id}`, outageRetry.attempt);
+      if (outageAttempts.size > 500) outageAttempts.delete(outageAttempts.keys().next().value);
       logger?.info?.("ao.outage_retried", { attempt: outageRetry.attempt, role: outage.role });
       return { changed: true, retried: true, detail: `Retrying ${outageRetry.name} after a lost connection (attempt ${outageRetry.attempt} of ${OUTAGE_RETRY_LIMIT})` };
     }

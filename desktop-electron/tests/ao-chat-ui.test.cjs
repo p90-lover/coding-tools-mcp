@@ -441,6 +441,12 @@ test("a reviewer keeps every earlier cycle, oldest first and folded, not only th
   assert.deepEqual(chat.earlierRounds(reviewer, true).map((round) => round.label), ["Cycle 1", "Cycle 2"]);
   // A worker's retries are attempts.
   assert.equal(chat.earlierRounds({ ...reviewer, role: "worker" })[0].label, "Attempt 1");
+  // A round that answered and then failed still shows as failed.
+  assert.equal(chat.earlierRounds({ ...reviewer, history: [{ answer: "Half a review", error: "fetch failed" }] })[0].verdict, "failed");
+  // A pending card whose only earlier rounds failed still shows, with them.
+  const failedOnly = { ...reviewer, history: [{ error: "Browser is not ready" }] };
+  const turn = chat.chatTurns([{ id: "r1", execution_mode: "team", nodes: [failedOnly] }], "Review it")[0];
+  assert.equal(turn?.steps?.[0]?.earlier?.[0]?.verdict, "failed");
   // Each round is folded under its label and verdict.
   const html = renderToStaticMarkup(React.createElement(toolParts.EarlierRounds, { rounds: all }));
   assert.equal((html.match(/<details class="cx-step-round">/g) || []).length, 3);
