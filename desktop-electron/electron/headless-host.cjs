@@ -11,6 +11,8 @@ const CONTROL_SCHEMA = 1;
 const CONTROL_PROTOCOL_VERSION = 1;
 const START_TIMEOUT_MS = 20_000;
 const REQUEST_TIMEOUT_MS = 30_000;
+// Waits before sending a request again that the headless service turned away as full.
+const CAPACITY_RETRY_MS = [100, 250, 600];
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_STARTUP_STDERR_BYTES = 4096;
 
@@ -379,18 +381,25 @@ class HeadlessHost {
   async request(pathname, body = null, options = {}) {
     const control = await this.ensureStarted();
     const method = options.method || (body == null ? "GET" : "POST");
-    try {
-      return await requestJson({
-        endpoint: control.endpoint,
-        token: control.token,
-        localUiToken: options.localConfirmation === true ? control.uiToken : null,
-        pathname,
-        method,
-        body,
-        timeout: options.timeout ?? REQUEST_TIMEOUT_MS,
-      });
-    } catch (error) {
-      throw new Error(safeErrorMessage(error));
+    // Admission is refused before any work runs ("HEADLESS_CAPACITY: request admission is full",
+    // seen on Activity in a burst of chat polls after a project switch), so the same request is
+    // safe to send again after a short wait, POST included.
+    for (const wait of [...CAPACITY_RETRY_MS, null]) {
+      try {
+        return await requestJson({
+          endpoint: control.endpoint,
+          token: control.token,
+          localUiToken: options.localConfirmation === true ? control.uiToken : null,
+          pathname,
+          method,
+          body,
+          timeout: options.timeout ?? REQUEST_TIMEOUT_MS,
+        });
+      } catch (error) {
+        const message = safeErrorMessage(error);
+        if (wait === null || !message.includes("HEADLESS_CAPACITY")) throw new Error(message);
+        await sleep(wait);
+      }
     }
   }
 
