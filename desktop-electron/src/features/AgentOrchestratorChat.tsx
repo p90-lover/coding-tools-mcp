@@ -1398,7 +1398,10 @@ export function AgentOrchestratorChat({
                 {item.preview ? <img src={item.preview} alt={item.name} /> : <span aria-hidden="true">{item.image ? "🖼" : "📄"}</span>}
                 <span className="cx-attachment-name">{item.name}</span>
               </button>
-              <button type="button" className="cx-attachment-remove" aria-label={`Remove ${item.name}`} onClick={() => setAttachments((current) => current.filter((_, at) => at !== index))}>×</button>
+              <button type="button" className="cx-attachment-remove" aria-label={`Remove ${item.name}`} data-tip={`Remove ${item.name}`}
+                onClick={() => setAttachments((current) => current.filter((_, at) => at !== index))}>
+                <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 2l6 6M8 2l-6 6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /></svg>
+              </button>
             </span>)}
             {attachNote ? <span className="cx-attach-note" role="status">{attachNote}</span> : null}
           </div> : null}

@@ -339,9 +339,9 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 /* A sent message's attachments above its bubble, as Claude Code shows them: image thumbnails that
    open full size, and file cards that show the file in its folder. */
 .cx-sent-attachments { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; max-width: 82%; margin-bottom: 4px; }
-.cx-sent-image { display: inline-flex; align-items: center; justify-content: center; width: 120px; height: 120px; padding: 0; overflow: hidden;
-  border: 1px solid var(--ao-line); border-radius: 12px; background: var(--cx-tray); color: var(--ao-muted); font-size: 11px; cursor: zoom-in; }
-.cx-sent-image img { width: 100%; height: 100%; object-fit: cover; }
+.cx-sent-image { display: inline-flex; align-items: center; justify-content: center; width: 120px; height: 110px; padding: 0; overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--color-text-primary) 12%, transparent); border-radius: 12px; background: var(--cx-tray); color: var(--ao-muted); font-size: 11px; cursor: zoom-in; }
+.cx-sent-image img { width: 100%; height: 100%; object-fit: contain; }
 .cx-sent-image:disabled { cursor: default; }
 .cx-sent-image span { padding: 6px; overflow: hidden; text-overflow: ellipsis; overflow-wrap: anywhere; }
 .cx-sent-image:hover:not(:disabled) { border-color: color-mix(in srgb, var(--color-text-primary) 25%, transparent); }
@@ -573,13 +573,27 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-attachment-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .cx-attachment-remove { flex: none; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: var(--ao-muted); cursor: pointer; }
 .cx-attachment-remove:hover, .cx-attachment-open:not(:disabled):hover { background: var(--cx-hover); }
-/* An image shows as its thumbnail, as Claude Code's chat box does; its name is on hover. */
-.cx-attachment.is-image { width: 72px; height: 72px; padding: 0; overflow: hidden; }
-.cx-attachment.is-image .cx-attachment-open { width: 100%; padding: 0; }
-.cx-attachment.is-image img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* An image shows as Claude Code's chat box shows one: a 120x110 card, the whole image fitted on a
+   light tray behind a hairline and 12px corners. Its remove button appears only on hover, a white
+   circle sitting on the card's top-right corner, with a dark "Remove <name>" tip above it. */
+.cx-attachments:has(.is-image) { gap: 12px; padding-top: 8px; }
+.cx-attachment.is-image { width: 120px; height: 110px; padding: 0; border: 1px solid color-mix(in srgb, var(--color-text-primary) 12%, transparent);
+  border-radius: 12px; background: var(--cx-tray); }
+.cx-attachment.is-image .cx-attachment-open { width: 100%; height: 100%; padding: 0; overflow: hidden; border-radius: 11px; }
+.cx-attachment.is-image .cx-attachment-open:not(:disabled):hover { background: transparent; }
+.cx-attachment.is-image img { display: block; width: 100%; height: 100%; object-fit: contain; }
 .cx-attachment.is-image .cx-attachment-name { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
-.cx-attachment.is-image .cx-attachment-remove { position: absolute; top: 3px; right: 3px; width: 18px; height: 18px; border-radius: 50%;
-  background: color-mix(in srgb, var(--color-bg-primary, #fff) 85%, transparent); box-shadow: 0 0 0 1px var(--ao-line); line-height: 18px; }
+.cx-attachment.is-image .cx-attachment-remove { position: absolute; z-index: 2; top: -8px; right: -8px; display: inline-grid; place-items: center;
+  width: 20px; height: 20px; border: 1px solid color-mix(in srgb, var(--color-text-primary) 15%, transparent); border-radius: 50%;
+  background: var(--color-bg-primary, #fff); color: color-mix(in srgb, var(--color-text-primary) 75%, transparent);
+  box-shadow: 0 1px 3px rgb(0 0 0 / .12); opacity: 0; transition: opacity 120ms ease; }
+.cx-attachment.is-image:is(:hover, :focus-within) .cx-attachment-remove { opacity: 1; }
+.cx-attachment.is-image .cx-attachment-remove:hover { background: var(--color-bg-primary, #fff); color: var(--color-text-primary); }
+.cx-attachment-remove[data-tip]::after { content: attr(data-tip); position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+  padding: 4px 8px; border-radius: 6px; background: #1f1f1f; color: #fff; font-size: 12px; font-weight: 500; line-height: 16px; white-space: nowrap;
+  pointer-events: none; opacity: 0; transition: opacity 120ms ease; }
+.cx-attachment-remove[data-tip]:hover::after { opacity: 1; }
+@media (prefers-reduced-motion: reduce) { .cx-attachment.is-image .cx-attachment-remove, .cx-attachment-remove[data-tip]::after { transition: none; } }
 .cx-attach-note { color: var(--ao-amber); font-size: 12px; }
 .cx-slash { position: absolute; z-index: 40; bottom: calc(100% + 6px); left: 0; right: 0; max-height: 280px; margin: 0; padding: 4px; overflow: auto;
   border: 1px solid var(--ao-line); border-radius: 12px; background: var(--color-bg-primary); box-shadow: 0 10px 30px rgb(0 0 0 / 14%); list-style: none; }
