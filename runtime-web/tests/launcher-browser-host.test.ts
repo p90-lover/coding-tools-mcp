@@ -306,6 +306,41 @@ test("launcher turn control preserves explicit user cancellation as a terminal s
   }
 });
 
+test("a turn start waits for the launcher to load its tab, and the turn's abort ends the wait", async () => {
+  // The launcher answers only once the tab has loaded ChatGPT (10, 30 and 60 s windows on a busy
+  // machine). The 5 s it used to get failed WebGPT compaction handoffs while the tab went on loading.
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* drain request */ }
+    setTimeout(() => {
+      if (response.destroyed) return;
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end('{"ok":true,"surfaceId":"launcher_surface_id_0123456789AB","reused":false,"connectorBound":false}\n');
+    }, 8_000);
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server has no port");
+    const path = descriptorFile(`http://127.0.0.1:${address.port}`);
+    await expect(notifyLauncherTurn(path, { phase: "start", traceId: "slowstart123", helperPid: process.pid }))
+      .resolves.toEqual({ surfaceId: "launcher_surface_id_0123456789AB", reused: false, connectorBound: false });
+    const turn = new AbortController();
+    const started = Date.now();
+    setTimeout(() => turn.abort(), 100);
+    const error = await notifyLauncherTurn(path, { phase: "start", traceId: "abortstart12", helperPid: process.pid }, undefined, turn.signal)
+      .catch(cause => cause);
+    expect(error).toBeInstanceOf(DOMException);
+    expect((error as DOMException).name).toBe("AbortError");
+    expect(Date.now() - started).toBeLessThan(5_000);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+}, 20_000);
+
 test("launcher turn control preserves a missing retained conversation as a typed signal", async () => {
   const server = createServer(async (request, response) => {
     for await (const _chunk of request) { /* drain request */ }

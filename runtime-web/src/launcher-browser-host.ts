@@ -495,7 +495,12 @@ export type LauncherTurnActivity =
       connectorBound?: boolean;
     };
 
-export const LAUNCHER_TURN_START_TIMEOUT_MS = 5_000;
+/**
+ * A start opens the turn's tab and loads ChatGPT in it, with 10, 30 and 60 s load windows inside a
+ * 120 s budget (the launcher's TURN_TAB_BOOTSTRAP_TIMEOUT_MS). Giving up after 5 s failed every turn
+ * on a busy machine, WebGPT compaction handoffs included, while the tab went on loading.
+ */
+export const LAUNCHER_TURN_START_TIMEOUT_MS = 125_000;
 export const LAUNCHER_TURN_HEARTBEAT_INTERVAL_MS = 10_000;
 export const LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS = 5_000;
 export const LAUNCHER_TURN_END_TIMEOUT_MS = 15_000;
@@ -730,6 +735,8 @@ export async function notifyLauncherTurn(
     : activity.phase === "heartbeat"
       ? LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS
       : LAUNCHER_TURN_START_TIMEOUT_MS,
+  /** The turn's own abort: a cancelled turn stops waiting for its start at once. */
+  signal?: AbortSignal,
 ): Promise<{
   surfaceId?: string;
   reused?: boolean;
@@ -739,6 +746,9 @@ export async function notifyLauncherTurn(
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const forward = () => controller.abort(signal?.reason);
+  if (signal?.aborted) forward();
+  else signal?.addEventListener("abort", forward, { once: true });
   try {
     const response = await fetch(`${descriptor.control.endpoint}/v1/turn/${activity.phase}`, {
       method: "POST",
@@ -791,9 +801,11 @@ export async function notifyLauncherTurn(
   } catch (error) {
     if (error instanceof LauncherBrowserTurnCancelledError
       || error instanceof LauncherRetainedConversationUnavailableError) throw error;
+    if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     throw new Error(`Launcher browser control channel failed: ${error instanceof Error ? error.message : String(error)}`);
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener("abort", forward);
   }
 }
 
