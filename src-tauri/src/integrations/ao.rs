@@ -1448,7 +1448,9 @@ pub fn prompt_for_node(data: &AppData, run: &Run, node_id: &str) -> AppResult<St
         .find(|task| task.id == node.task_id && task.workspace_id == run.workspace_id)
         .ok_or_else(|| fail("AO task not found"))?;
     if run.execution_mode == ExecutionMode::Single {
-        let mut prompt = format!("Single assistant task: {}\nWorkspace: {}\nComplete the requested task yourself and report the result and verification. Do not spawn or delegate to other agents; there are no team planning or review stages.\n\nTask: {}\n{}\n", run.id, run.workspace_id, task.title, task.description);
+        // "Do not spawn or delegate to other agents" here kept every chat agent from ever using the
+        // subagents the user set up (Runtime > Subagents): they are the one sanctioned way to delegate.
+        let mut prompt = format!("Single assistant task: {}\nWorkspace: {}\nComplete the requested task and report the result and verification. There are no team planning or review stages. Do not start other agent processes yourself; when the app's subagent tools are available (subagent_list, subagent_start), you may hand a self-contained part of the work to one of the user's subagents and use its report (subagent_result).\n\nTask: {}\n{}\n", run.id, run.workspace_id, task.title, task.description);
         if !node.settings.instructions.is_empty() {
             prompt.push_str(&format!(
                 "\nInstructions:\n{}\n",
@@ -4174,6 +4176,16 @@ mod tests {
                 "route":{"harness_id":"codex-native","provider_id":"chatgpt-web","account_id":"chatgpt-web","model":"chatgpt-web/high","permission_profile":":read-only"}}]
         })).unwrap();
         let revision = create(&mut data, 1, run).unwrap().revision;
+        // A single chat may hand work to the user's subagents; it was told never to delegate.
+        let single = data
+            .ao_runs
+            .iter()
+            .find(|run| run.id == "single")
+            .unwrap()
+            .clone();
+        let prompt = prompt_for_node(&data, &single, "only").unwrap();
+        assert!(prompt.contains("subagent_start") && prompt.contains("subagent_result"));
+        assert!(!prompt.contains("Do not spawn or delegate"));
         reserve(
             &mut data,
             "qa",
