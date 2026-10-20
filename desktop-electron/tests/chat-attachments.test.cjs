@@ -5,7 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { saveChatAttachment } = require("../electron/chat-attachments.cjs");
+const { readImagePreview, saveChatAttachment } = require("../electron/chat-attachments.cjs");
 
 test("a pasted screenshot is saved where the agent can open it, under a dated folder and a safe name", async () => {
   // Seen live: a pasted image was refused ("images need their file path, which isn't available here").
@@ -30,4 +30,21 @@ test("only kinds a model reads, with content, up to 20 MB, are saved", async () 
     const pdf = await saveChatAttachment(root, { name: "", type: "application/pdf", bytes: Uint8Array.of(37, 80) });
     assert.match(path.basename(pdf), /^pasted-[0-9a-f]{8}\.pdf$/, "a nameless clipboard file gets a name of the app's choosing");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a sent image's thumbnail is read as a data: URL, only for a real image file", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ct-preview-"));
+  try {
+    const png = path.join(root, "shot.png");
+    fs.writeFileSync(png, Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]));
+    assert.match(await readImagePreview(png), /^data:image\/png;base64,iVBORw0KGgo/);
+    const disguised = path.join(root, "secret.png");
+    fs.writeFileSync(disguised, "not an image");
+    await assert.rejects(readImagePreview(disguised), /not an image/, "the bytes decide, not the name");
+    await assert.rejects(readImagePreview(path.join(root, "gone.png")), /no longer exists/);
+    await assert.rejects(readImagePreview("shot.png"), /absolute/);
+    await assert.rejects(readImagePreview(root), /no longer exists/, "a folder is not a file");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

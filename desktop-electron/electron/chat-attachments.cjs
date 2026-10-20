@@ -30,4 +30,29 @@ async function saveChatAttachment(root, input, now = new Date()) {
   return file;
 }
 
-module.exports = { ATTACHMENT_BYTES, ATTACHMENT_TYPES, saveChatAttachment };
+/** An image's kind from its first bytes, so a file named .png that is not one is never shown. */
+function imageType(head) {
+  if (head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47) return "image/png";
+  if (head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return "image/jpeg";
+  if (head.subarray(0, 4).toString("latin1") === "GIF8") return "image/gif";
+  if (head.subarray(0, 4).toString("latin1") === "RIFF" && head.subarray(8, 12).toString("latin1") === "WEBP") return "image/webp";
+  return null;
+}
+
+/**
+ * An attached image as a data: URL for its thumbnail in the chat (the page may show data: images
+ * only). Only an existing image file up to 20 MB, recognized by its bytes; anything else is refused.
+ */
+async function readImagePreview(file) {
+  if (typeof file !== "string" || file.length > 4096 || !path.isAbsolute(file)) throw new Error("Choose an absolute file path");
+  const resolved = path.resolve(file);
+  const stat = await fs.promises.stat(resolved).catch(() => null);
+  if (!stat?.isFile()) throw new Error("This file no longer exists");
+  if (stat.size > ATTACHMENT_BYTES) throw new Error("The image is larger than 20 MB");
+  const bytes = await fs.promises.readFile(resolved);
+  const type = imageType(bytes.subarray(0, 12));
+  if (!type) throw new Error("This file is not an image");
+  return `data:${type};base64,${bytes.toString("base64")}`;
+}
+
+module.exports = { ATTACHMENT_BYTES, ATTACHMENT_TYPES, readImagePreview, saveChatAttachment };

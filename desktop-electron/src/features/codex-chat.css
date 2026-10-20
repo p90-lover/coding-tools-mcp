@@ -359,6 +359,24 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-live-item.kind-steer .cx-user { width: 100%; }
 .cx-bubble { max-width: 82%; padding: 10px 14px; border-radius: 18px; background: var(--cx-bubble); }
 .cx-bubble p { margin: 0; font-size: 14px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* A sent message's attachments above its bubble, as Claude Code shows them: image thumbnails that
+   open full size, and file cards that show the file in its folder. */
+.cx-sent-attachments { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; max-width: 82%; margin-bottom: 4px; }
+.cx-sent-image { display: inline-flex; align-items: center; justify-content: center; width: 120px; height: 110px; padding: 0; overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--color-text-primary) 12%, transparent); border-radius: 12px; background: var(--cx-tray); color: var(--ao-muted); font-size: 11px; cursor: zoom-in; }
+.cx-sent-image img { width: 100%; height: 100%; object-fit: contain; }
+.cx-sent-image:disabled { cursor: default; }
+.cx-sent-image span { padding: 6px; overflow: hidden; text-overflow: ellipsis; overflow-wrap: anywhere; }
+.cx-sent-image:hover:not(:disabled) { border-color: color-mix(in srgb, var(--color-text-primary) 25%, transparent); }
+.cx-sent-file { display: inline-flex; align-items: center; gap: 10px; width: 220px; min-height: 52px; padding: 8px 12px; border: 1px solid var(--ao-line);
+  border-radius: 12px; background: var(--cx-tray); color: var(--color-text-primary); font: inherit; text-align: left; cursor: pointer; }
+.cx-sent-file:disabled { cursor: default; }
+.cx-sent-file-icon { flex: none; display: inline-grid; place-items: center; width: 28px; height: 32px; border-radius: 6px; background: var(--cx-active); color: var(--ao-muted); font-size: 9px; font-weight: 600; }
+.cx-sent-file-name { min-width: 0; overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.cx-lightbox { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 32px; background: rgb(0 0 0 / .72); cursor: zoom-out; }
+.cx-lightbox img { max-width: 100%; max-height: 100%; border-radius: 8px; box-shadow: 0 12px 40px rgb(0 0 0 / .4); cursor: default; }
+.cx-lightbox-close { position: absolute; top: 16px; right: 16px; width: 32px; height: 32px; border: 0; border-radius: 50%; background: rgb(255 255 255 / .16);
+  color: #fff; font-size: 20px; line-height: 1; cursor: pointer; }
 .cx-stamp { color: var(--ao-muted); font-size: 11px; }
 .cx-msg-actions { display: flex; gap: 2px; opacity: 0; transition: opacity var(--duration-micro, 140ms); }
 .cx-user:hover .cx-msg-actions, .cx-answer:hover .cx-msg-actions, .cx-msg-actions:focus-within { opacity: 1; }
@@ -569,20 +587,70 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .ao-workflow .cx-branch-chip > svg { flex: none; }
 .ao-workflow .cx-branch-chip > span:nth-of-type(1) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ao-workflow .cx-branch-note { display: inline-flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ao-workflow .cx-branch-popup { width: min(400px, calc(100vw - 40px)); padding: 10px; }
-.ao-workflow .cx-branch-list { max-height: 320px; margin: 8px 0 0; padding: 0; overflow: auto; list-style: none; }
-.ao-workflow .cx-branch-list li { border-radius: 8px; font-size: 13px; }
-.ao-workflow .cx-branch-list li.cx-branch-empty { padding: 6px 8px; }
-.ao-workflow .cx-branch-list li.is-in-use { background: var(--cx-hover); }
-.ao-workflow .cx-branch-option { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border: 0; border-radius: 8px; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-.ao-workflow .cx-branch-option:hover:not(:disabled) { background: var(--cx-hover); }
-.ao-workflow .cx-branch-option:disabled { cursor: default; opacity: .55; }
+/* The branch picker: frosted glass over the chat, springing up from its chip, rows fading in. */
+.ao-workflow .cx-branch-popup {
+  display: flex; flex-direction: column; width: min(460px, calc(100vw - 40px)); max-height: min(70vh, 560px); padding: 0; overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--claude-line, #e4e1da) 70%, transparent); border-radius: 16px;
+  background: color-mix(in srgb, var(--claude-surface, #fff) 74%, transparent); color: var(--claude-text, #1f1e1d);
+  -webkit-backdrop-filter: blur(22px) saturate(1.6); backdrop-filter: blur(22px) saturate(1.6);
+  box-shadow: 0 22px 60px rgb(24 22 18 / 20%), 0 2px 8px rgb(24 22 18 / 8%), inset 0 1px 0 rgb(255 255 255 / 45%);
+  transform-origin: bottom left; animation: cx-glass-in .26s cubic-bezier(.2, .9, .25, 1.05) both;
+}
+/* Not the popover's generic header row (a flex title bar) nor its search-last order. */
+.ao-workflow .cx-branch-popup .cx-branch-head { display: block; margin: 0; }
+.ao-workflow .cx-branch-popup .cx-branch-search { order: 0; }
+.ao-workflow .cx-branch-head { position: relative; padding: 14px 16px 12px; border-bottom: 1px solid color-mix(in srgb, var(--claude-line, #e4e1da) 60%, transparent);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--claude-accent, #d97757) 12%, transparent), transparent 70%); }
+/* A slow sheen across the header, the "glass" catching light once as it opens. */
+.ao-workflow .cx-branch-head::after { content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(105deg, transparent 30%, rgb(255 255 255 / 28%) 48%, transparent 66%); background-size: 250% 100%;
+  animation: cx-glass-sheen 1.4s ease-out .1s both; }
+.ao-workflow .cx-branch-head-title { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 14px; }
+.ao-workflow .cx-branch-head-title strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.ao-workflow .cx-branch-head-line { display: flex; flex-wrap: wrap; gap: 4px 10px; margin: 6px 0 0; color: var(--claude-text-2, #73726c); font-size: 12px; }
+.ao-workflow .cx-branch-head-line .is-dirty { color: var(--ao-amber, #b7791f); font-weight: 500; }
+.ao-workflow .cx-branch-head-line .is-clean { color: var(--ao-green, #2f855a); }
+.ao-workflow .cx-branch-head-line.is-secondary { margin-top: 4px; opacity: .8; }
+.ao-workflow .cx-branch-head-commit { display: flex; align-items: baseline; gap: 8px; min-width: 0; margin: 6px 0 0; font-size: 12px; color: var(--claude-text-2, #73726c); }
+.ao-workflow .cx-branch-head-commit > span { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ao-workflow .cx-branch-popup code { flex: none; padding: 0 5px; border-radius: 5px; background: color-mix(in srgb, var(--claude-text, #1f1e1d) 7%, transparent);
+  font-family: var(--claude-mono, ui-monospace, monospace); font-size: 11px; }
+.ao-workflow .cx-branch-search { margin: 10px 12px 4px; width: auto; border-radius: 10px; background: color-mix(in srgb, var(--claude-surface, #fff) 60%, transparent); }
+.ao-workflow .cx-branch-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 2px 6px 8px; overscroll-behavior: contain; }
+.ao-workflow .cx-branch-group h4 { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 6px; margin: 0; padding: 8px 10px 4px;
+  background: color-mix(in srgb, var(--claude-surface, #fff) 82%, transparent); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+  color: var(--claude-text-2, #73726c); font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.ao-workflow .cx-branch-group h4 span { font-weight: 500; opacity: .7; }
+.ao-workflow .cx-branch-list { margin: 0; padding: 0; list-style: none; }
+.ao-workflow .cx-branch-list li { border-radius: 10px; font-size: 13px; animation: cx-glass-row .32s cubic-bezier(.2, .8, .2, 1) both; animation-delay: calc(var(--row, 0) * 16ms + 40ms); }
+.ao-workflow .cx-branch-list li.is-in-use { background: color-mix(in srgb, var(--claude-accent, #d97757) 10%, transparent); }
+.ao-workflow .cx-branch-option { display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 10px; border: 0; border-radius: 10px; background: transparent; color: inherit;
+  font: inherit; text-align: left; cursor: pointer; transition: background-color .16s ease, transform .16s ease; }
+.ao-workflow .cx-branch-option:hover:not(:disabled) { background: color-mix(in srgb, var(--claude-text, #1f1e1d) 6%, transparent); transform: translateX(2px); }
+.ao-workflow .cx-branch-option:focus-visible { outline: 2px solid var(--claude-accent, #d97757); outline-offset: -2px; }
+.ao-workflow .cx-branch-option:disabled { cursor: default; opacity: .6; }
 .ao-workflow .cx-branch-list li.is-in-use .cx-branch-option:disabled { opacity: 1; }
-.ao-workflow .cx-branch-error { margin: 8px 0 0; padding: 6px 8px; border-radius: 8px; background: var(--ao-danger-soft, #fdecea); color: var(--ao-danger, #b42318); font-size: 12px; }
-.ao-workflow .cx-branch-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ao-workflow .cx-branch-tags { display: inline-flex; flex: none; align-items: center; gap: 6px; color: var(--ao-muted); font-size: 11.5px; }
-.ao-workflow .cx-branch-tags em { padding: 0 6px; border-radius: 6px; background: var(--claude-accent-soft, #eef3ff); color: var(--color-text-primary); font-style: normal; }
-.ao-workflow .cx-branch-empty { color: var(--ao-muted); }
+.ao-workflow .cx-branch-error { margin: 6px 12px 0; padding: 6px 8px; border-radius: 8px; background: var(--ao-danger-soft, #fdecea); color: var(--ao-danger, #b42318); font-size: 12px; }
+.ao-workflow .cx-branch-main { display: flex; flex: 1 1 auto; flex-direction: column; gap: 1px; min-width: 0; }
+.ao-workflow .cx-branch-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.ao-workflow .cx-branch-sub { display: flex; align-items: baseline; gap: 6px; min-width: 0; color: var(--claude-text-2, #73726c); font-size: 11.5px; }
+.ao-workflow .cx-branch-sub > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ao-workflow .cx-branch-tags { display: inline-flex; flex: none; align-items: center; gap: 5px; color: var(--claude-text-2, #73726c); font-size: 11px; }
+.ao-workflow .cx-branch-tags em { padding: 1px 7px; border-radius: 999px; background: var(--claude-accent-soft, #f6e8e1); color: var(--claude-text, #1f1e1d); font-style: normal; }
+.ao-workflow .cx-branch-pill { padding: 1px 7px; border: 1px solid color-mix(in srgb, var(--claude-line, #e4e1da) 80%, transparent); border-radius: 999px; font-size: 11px; white-space: nowrap; }
+.ao-workflow .cx-branch-pill.is-faint { opacity: .65; }
+.ao-workflow .cx-branch-versus { font-variant-numeric: tabular-nums; color: var(--claude-text, #1f1e1d); }
+.ao-workflow .cx-branch-versus.is-even { color: var(--claude-text-2, #73726c); }
+.ao-workflow .cx-branch-age { min-width: 26px; text-align: right; font-variant-numeric: tabular-nums; }
+.ao-workflow .cx-branch-empty { margin: 8px 10px; color: var(--ao-muted); }
+@keyframes cx-glass-in { from { opacity: 0; transform: translateY(10px) scale(.96); filter: blur(6px); } to { opacity: 1; transform: none; filter: none; } }
+@keyframes cx-glass-row { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@keyframes cx-glass-sheen { from { background-position: 120% 0; } to { background-position: -40% 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .ao-workflow .cx-branch-popup, .ao-workflow .cx-branch-list li, .ao-workflow .cx-branch-head::after { animation: none; }
+  .ao-workflow .cx-branch-option { transition: none; }
+  .ao-workflow .cx-branch-option:hover:not(:disabled) { transform: none; }
+}
 .ao-workflow .cx-composer .ao-mode-switch { gap: 0; padding: 0; border: 0; background: transparent; }
 .ao-workflow .cx-composer .ao-mode-switch button { height: 30px; padding: 0 6px; border-radius: 8px; color: var(--ao-muted); font-size: 13px; }
 .ao-workflow .cx-composer .ao-mode-switch button.is-active { background: transparent; box-shadow: none; color: var(--color-text-primary); }
@@ -601,13 +669,27 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-attachment-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .cx-attachment-remove { flex: none; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: var(--ao-muted); cursor: pointer; }
 .cx-attachment-remove:hover, .cx-attachment-open:not(:disabled):hover { background: var(--cx-hover); }
-/* An image shows as its thumbnail, as Claude Code's chat box does; its name is on hover. */
-.cx-attachment.is-image { width: 72px; height: 72px; padding: 0; overflow: hidden; }
-.cx-attachment.is-image .cx-attachment-open { width: 100%; padding: 0; }
-.cx-attachment.is-image img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* An image shows as Claude Code's chat box shows one: a 120x110 card, the whole image fitted on a
+   light tray behind a hairline and 12px corners. Its remove button appears only on hover, a white
+   circle sitting on the card's top-right corner, with a dark "Remove <name>" tip above it. */
+.cx-attachments:has(.is-image) { gap: 12px; padding-top: 8px; }
+.cx-attachment.is-image { width: 120px; height: 110px; padding: 0; border: 1px solid color-mix(in srgb, var(--color-text-primary) 12%, transparent);
+  border-radius: 12px; background: var(--cx-tray); }
+.cx-attachment.is-image .cx-attachment-open { width: 100%; height: 100%; padding: 0; overflow: hidden; border-radius: 11px; }
+.cx-attachment.is-image .cx-attachment-open:not(:disabled):hover { background: transparent; }
+.cx-attachment.is-image img { display: block; width: 100%; height: 100%; object-fit: contain; }
 .cx-attachment.is-image .cx-attachment-name { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
-.cx-attachment.is-image .cx-attachment-remove { position: absolute; top: 3px; right: 3px; width: 18px; height: 18px; border-radius: 50%;
-  background: color-mix(in srgb, var(--color-bg-primary, #fff) 85%, transparent); box-shadow: 0 0 0 1px var(--ao-line); line-height: 18px; }
+.cx-attachment.is-image .cx-attachment-remove { position: absolute; z-index: 2; top: -8px; right: -8px; display: inline-grid; place-items: center;
+  width: 20px; height: 20px; border: 1px solid color-mix(in srgb, var(--color-text-primary) 15%, transparent); border-radius: 50%;
+  background: var(--color-bg-primary, #fff); color: color-mix(in srgb, var(--color-text-primary) 75%, transparent);
+  box-shadow: 0 1px 3px rgb(0 0 0 / .12); opacity: 0; transition: opacity 120ms ease; }
+.cx-attachment.is-image:is(:hover, :focus-within) .cx-attachment-remove { opacity: 1; }
+.cx-attachment.is-image .cx-attachment-remove:hover { background: var(--color-bg-primary, #fff); color: var(--color-text-primary); }
+.cx-attachment-remove[data-tip]::after { content: attr(data-tip); position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+  padding: 4px 8px; border-radius: 6px; background: #1f1f1f; color: #fff; font-size: 12px; font-weight: 500; line-height: 16px; white-space: nowrap;
+  pointer-events: none; opacity: 0; transition: opacity 120ms ease; }
+.cx-attachment-remove[data-tip]:hover::after { opacity: 1; }
+@media (prefers-reduced-motion: reduce) { .cx-attachment.is-image .cx-attachment-remove, .cx-attachment-remove[data-tip]::after { transition: none; } }
 .cx-attach-note { color: var(--ao-amber); font-size: 12px; }
 .cx-slash { position: absolute; z-index: 40; bottom: calc(100% + 6px); left: 0; right: 0; max-height: 280px; margin: 0; padding: 4px; overflow: auto;
   border: 1px solid var(--ao-line); border-radius: 12px; background: var(--color-bg-primary); box-shadow: 0 10px 30px rgb(0 0 0 / 14%); list-style: none; }
@@ -864,22 +946,33 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-browser-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--ao-green, #2e9d5b); animation: cx-pulse 1.6s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) { .cx-browser-chip, .cx-browser-dot { animation: none; } }
 
-/* Bit, the chat's pet (ChatPet.tsx): perched on the chat box's top edge, dragged along it. */
-.cx-pet { position: absolute; bottom: 100%; z-index: 2; width: 48px; height: 44px; margin-bottom: -6px; pointer-events: none; }
-.cx-pet-body { pointer-events: auto; display: block; width: 48px; height: 42px; padding: 0; border: 0; background: transparent; cursor: grab; touch-action: none; }
+/* Bit, the chat's pet (ChatPet.tsx): Clawd perched on the chat box's top edge at its right end (the
+   left end holds the branch chip), dragged along it. 18×7 pixels at 3×. */
+.cx-pet { position: absolute; bottom: 100%; z-index: 2; width: 54px; height: 21px; margin-bottom: 0; pointer-events: none; }
+.cx-pet-body { pointer-events: auto; display: block; width: 54px; height: 21px; padding: 0; border: 0; background: transparent; cursor: grab; touch-action: none; }
 .cx-pet-body:active { cursor: grabbing; }
 .cx-pet-body:focus-visible { outline: 2px solid var(--ao-blue); outline-offset: 2px; border-radius: 6px; }
-.cx-pet-body svg { display: block; }
-.cx-pet-body.is-working svg, .cx-pet-body.is-idle svg { animation: cx-pet-bob 1.2s ease-in-out infinite; }
+.cx-pet-body svg { display: block; transform-origin: 50% 100%; }
+/* Working, its legs walk (ChatPet's step); idle, it bobs. */
+.cx-pet-body.is-idle svg { animation: cx-pet-bob 1.6s ease-in-out infinite; }
 .cx-pet-body.is-asleep svg { animation: cx-pet-breathe 3s ease-in-out infinite; }
+/* Walking, each step lifts it a pixel (ChatPet moves the box itself along the edge). */
+.cx-pet-body.is-walking svg { animation: cx-pet-step .28s ease-in-out infinite; }
 .cx-pet-body.is-hop svg { animation: cx-pet-hop .45s ease; }
 .cx-pet-body.is-shake svg { animation: cx-pet-shake .4s ease 3; }
-.cx-pet-bubble { position: absolute; bottom: 46px; left: 24px; transform: translateX(-50%); padding: 3px 9px; border: 1px solid var(--ao-line); border-radius: 8px;
+.cx-pet-body.is-spin svg { animation: cx-pet-spin .6s ease-in-out; }
+.cx-pet-body.is-bounce svg { animation: cx-pet-bounce .42s cubic-bezier(.3, 1.6, .5, 1); }
+.cx-pet-bubble { position: absolute; bottom: 26px; right: 0; padding: 3px 9px; border: 1px solid var(--ao-line); border-radius: 8px;
   background: var(--color-bg-primary, #fff); color: var(--color-text-primary, inherit); font-size: 12px; line-height: 1.4; white-space: nowrap; }
-.cx-pet-float { position: absolute; bottom: 30px; font-size: 13px; animation: cx-pet-rise 1.1s ease-out forwards; }
+.cx-pet-float { position: absolute; bottom: 18px; font-size: 13px; animation: cx-pet-rise 1.1s ease-out forwards; }
+@media (prefers-reduced-motion: reduce) { .cx-pet-body svg { animation: none !important; } }
 @keyframes cx-pet-bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
 @keyframes cx-pet-breathe { 0%, 100% { transform: scaleY(1); } 50% { transform: scaleY(.95); } }
-@keyframes cx-pet-hop { 0%, 100% { transform: translateY(0); } 40% { transform: translateY(-16px); } }
+@keyframes cx-pet-hop { 0%, 100% { transform: translateY(0) scale(1, 1); } 15% { transform: translateY(0) scale(1.12, .82); }
+  45% { transform: translateY(-18px) scale(.92, 1.1); } 85% { transform: translateY(0) scale(1.1, .88); } }
+@keyframes cx-pet-step { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-1.5px); } }
+@keyframes cx-pet-spin { 0%, 100% { transform: scaleX(1); } 50% { transform: scaleX(-1); } }
+@keyframes cx-pet-bounce { 0%, 100% { transform: scale(1, 1); } 35% { transform: scale(1.14, .8); } 70% { transform: scale(.94, 1.1); } }
 @keyframes cx-pet-shake { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-3px); } 75% { transform: translateX(3px); } }
 @keyframes cx-pet-rise { to { transform: translateY(-36px); opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .cx-pet-body svg, .cx-pet-float { animation: none !important; } }
@@ -917,42 +1010,138 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-overview-usage b { overflow: hidden; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .cx-overview-usage small { color: var(--ao-muted); font-size: 11.5px; }
 @media (prefers-reduced-motion: reduce) { .cx-overview-tasks i { animation: none; } }
-/* DeepSeek models show as DeepSeek Harness does (DshStyle): quiet 13px rows "Bash · cmd", a blue
-   "Deep diving for 12s ···" while running, and two stats pills. */
-.cx-turn.is-dsh { --cx-dsh-row: rgb(129 133 140); --cx-dsh-row-hover: rgb(97 102 107); --cx-dsh-blue: rgb(65 118 230); }
-:root[data-theme="dark"] .cx-turn.is-dsh, .ao-workflow[data-theme="dark"] .cx-turn.is-dsh { --cx-dsh-row: rgb(173 178 184); --cx-dsh-row-hover: rgb(207 211 214); }
-.cx-turn.is-dsh .cx-live-item { font-size: 13px; color: var(--cx-dsh-row); }
-.cx-turn.is-dsh .cx-live-item:hover { color: var(--cx-dsh-row-hover); }
-.cx-turn.is-dsh .cx-live-label + .cx-live-text::before { content: "·"; margin: 0 6px 0 2px; opacity: .7; }
-.cx-turn.is-dsh .cx-tool-dot { display: none; }
-.cx-turn.is-dsh .cx-diff-count { font-family: var(--claude-mono, ui-monospace, monospace); font-size: 11px; }
-.cx-turn.is-dsh .cx-diff-count .is-add, .cx-turn.is-dsh .cx-diff-count .is-del { color: inherit; }
-.cx-turn.is-dsh .cx-tool:hover .cx-diff-count .is-add, .cx-turn.is-dsh details[open] .cx-diff-count .is-add { color: var(--ao-green, #2e9d5b); }
-.cx-turn.is-dsh .cx-tool:hover .cx-diff-count .is-del, .cx-turn.is-dsh details[open] .cx-diff-count .is-del { color: var(--ao-red, #c0392b); }
-.cx-turn.is-dsh .cx-dsh-diving { color: var(--cx-dsh-blue); font-size: 12px; }
-.cx-turn.is-dsh .cx-group .cx-live { max-height: min(400px, 50vh); overflow-y: auto;
-  mask-image: linear-gradient(transparent, #000 24px, #000 calc(100% - 24px), transparent); }
-/* dsh's response style (packages/client/ui-theme design-platform.css): 14/22 body text in the
-   system stack, the user's words in a DeepSeek-blue bubble (20px, 70% wide), the answer as plain
-   Markdown with no bubble, blue links, and 12px code cards. The agent's own messages between its
-   steps read as body text, not as the quiet 13px grey of its process rows. */
-.cx-turn.is-dsh { --cx-dsh-text: #0f1115; --cx-dsh-text-2: #61666b; --cx-dsh-link: #4176e6; --cx-dsh-bubble: #edf3fe;
-  --cx-dsh-code: #f9fafb; --cx-dsh-line: rgb(0 0 0 / 8%); }
-:root[data-theme="dark"] .cx-turn.is-dsh, .ao-workflow[data-theme="dark"] .cx-turn.is-dsh { --cx-dsh-text: #f9fafb; --cx-dsh-text-2: #cfd3d6;
-  --cx-dsh-link: #7aaaff; --cx-dsh-bubble: #2c2c2e; --cx-dsh-code: #1b1b1c; --cx-dsh-line: rgb(255 255 255 / 10%); }
-.cx-turn.is-dsh .cx-md, .cx-turn.is-dsh .cx-bubble p { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-  font-size: 14px; line-height: 22px; color: var(--cx-dsh-text); }
-.cx-turn.is-dsh .cx-live-item.kind-message { font-size: 14px; color: var(--cx-dsh-text); }
-.cx-turn.is-dsh .cx-user:not(.cx-steer) .cx-bubble { max-width: 70%; padding: 10px 16px; border-radius: 20px; background: var(--cx-dsh-bubble); }
-.cx-turn.is-dsh .cx-md a { color: var(--cx-dsh-link); }
-.cx-turn.is-dsh .cx-md blockquote { color: var(--cx-dsh-text-2); }
-.cx-turn.is-dsh .cx-md code { background: var(--cx-dsh-code); font-family: "SF Mono", "JetBrains Mono", "Fira Code", Consolas, monospace; }
-.cx-turn.is-dsh .cx-code { border: 1px solid var(--cx-dsh-line); border-radius: 12px; background: var(--cx-dsh-code); }
-.cx-turn.is-dsh .cx-answer-meta > span:first-child { color: var(--cx-dsh-text); }
-/* dsh's DiffBlock: a light 8% tint and a 3px bar on the changed line's left, in a 16px card. */
-.cx-turn.is-dsh .cx-edit-diff { border-radius: 16px; }
-.cx-turn.is-dsh .cx-edit-diff tr.is-add { background: color-mix(in srgb, #22c55e 8%, transparent); box-shadow: inset 3px 0 0 #22c55e; }
-.cx-turn.is-dsh .cx-edit-diff tr.is-del { background: color-mix(in srgb, #ec1313 8%, transparent); box-shadow: inset 3px 0 0 #ec1313; }
+/* A DeepSeek model's turn, as DeepSeek Harness's web client draws one (DshTranscript.tsx; its
+   ui-chat, ui-tool, ui-primitives and ui-theme stylesheets, MIT License, Copyright (c) 2026
+   DeepSeek). The colors are its design-platform tokens, light then dark. */
+.cx-turn.is-dsh {
+  --dsh-primary: rgb(15 17 21); --dsh-secondary: rgb(97 102 107); --dsh-tertiary: rgb(129 133 140); --dsh-caption: rgb(173 178 184);
+  --dsh-shimmer: rgb(0 0 0 / .3); --dsh-border-l1: rgb(0 0 0 / .04); --dsh-border-l2: rgb(0 0 0 / .1);
+  --dsh-code-bg: rgb(249 250 251); --dsh-bubble: rgb(237 243 254); --dsh-bg: var(--color-bg-primary);
+  --dsh-error: rgb(236 19 19); --dsh-success: rgb(34 197 94); --dsh-warn: rgb(221 134 41);
+  --dsh-deep: color-mix(in srgb, rgb(65 118 230) 70%, rgb(23 37 84));
+  --dsh-deep-shimmer: color-mix(in srgb, rgb(65 118 230) 30%, rgb(23 37 84));
+  --dsh-mono: "SF Mono", "JetBrains Mono", "Fira Code", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+  gap: 12px; font-size: 14px;
+}
+:root[data-theme="dark"] .cx-turn.is-dsh, .ao-workflow[data-theme="dark"] .cx-turn.is-dsh {
+  --dsh-primary: rgb(249 250 251); --dsh-secondary: rgb(207 211 214); --dsh-tertiary: rgb(173 178 184); --dsh-caption: rgb(129 133 140);
+  --dsh-shimmer: rgb(255 255 255 / .45); --dsh-border-l1: rgb(255 255 255 / .06); --dsh-border-l2: rgb(255 255 255 / .12);
+  --dsh-code-bg: rgb(27 27 28); --dsh-bubble: rgb(44 44 46); --dsh-error: rgb(242 90 90);
+  --dsh-deep: color-mix(in srgb, rgb(86 134 254) 55%, rgb(173 178 184));
+  --dsh-deep-shimmer: color-mix(in srgb, rgb(147 197 253) 65%, rgb(122 170 255));
+}
+/* User message: a 20px-round bubble, 10/16 padding, 14/22 text. */
+.cx-turn.is-dsh .cx-user { gap: 6px; }
+.cx-turn.is-dsh .cx-bubble { max-width: min(70.2%, 82%); padding: 10px 16px; border-radius: 20px; background: var(--dsh-bubble); color: var(--dsh-primary); }
+.cx-turn.is-dsh .cx-bubble p { font-size: 14px; line-height: 22px; }
+/* The reply: full-width 14/24 narration in the primary label color. */
+.cx-turn.is-dsh .cx-answer, .cx-turn.is-dsh .dsh-reply { color: var(--dsh-primary); font-size: 14px; line-height: 24px; }
+.dsh-turn-work, .dsh-process, .dsh-flow { display: flex; flex-direction: column; min-width: 0; }
+.dsh-flow > * + * { margin-top: 6px; }
+.dsh-process > * + * { margin-top: 6px; }
+/* "Completed in 1m 4s ⌄": 33px, a hairline under it, 16px clear of what follows. */
+.dsh-turn-process { box-sizing: border-box; display: flex; align-items: center; width: 100%; min-width: 0; height: 33px; padding: 0 0 8px; margin-bottom: 16px;
+  border: 0; border-bottom: .5px solid var(--dsh-border-l2); background: none; color: var(--dsh-tertiary); font: inherit; font-size: 14px; text-align: left;
+  cursor: pointer; transition: color 100ms ease; }
+.dsh-turn-process:disabled { cursor: default; }
+.dsh-turn-process:hover:not(:disabled) { color: var(--dsh-secondary); }
+.dsh-turn-process-label { min-width: 0; overflow: hidden; line-height: 24px; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-num { font-family: var(--dsh-mono); font-variant-numeric: tabular-nums; }
+.dsh-turn-process-chevron { display: inline-flex; flex: none; margin-left: 4px; transition: transform 100ms ease; }
+.dsh-turn-process[data-open] .dsh-turn-process-chevron { transform: rotate(180deg); }
+/* DisclosureRow: [16px leading] 6 [title 13/24] 8 [2px dot] 8 [summary]. */
+.dsh-row-root { display: flex; flex-direction: column; width: 100%; min-width: 0; }
+.dsh-row { position: relative; display: flex; align-items: center; height: 24px; min-width: 0; overflow: hidden; color: var(--dsh-tertiary); transition: color 100ms ease; }
+.dsh-row[data-expandable] { cursor: pointer; }
+.dsh-row:hover { color: var(--dsh-secondary); }
+.dsh-row:focus-visible { outline: 1.5px solid var(--dsh-deep); outline-offset: 2px; border-radius: 4px; }
+.dsh-leading { position: relative; display: inline-flex; flex: none; align-items: center; justify-content: center; width: 16px; height: 16px; margin-right: 6px; color: inherit; }
+.dsh-leading svg { width: 14px; height: 14px; }
+.dsh-icon-idle { display: inline-flex; transition: opacity 100ms ease; }
+.dsh-chevron-hover { position: absolute; inset: 0; display: inline-flex; align-items: center; justify-content: center; opacity: 0; transition: opacity 100ms ease; }
+.dsh-row:hover .dsh-icon-idle { opacity: 0; }
+.dsh-row:hover .dsh-chevron-hover { opacity: 1; }
+.dsh-row-text { display: flex; align-items: center; flex: 1 1 auto; min-width: 0; }
+.dsh-title { flex: none; font-size: 13px; font-weight: 400; line-height: 24px; color: inherit; }
+.dsh-sep { flex: none; width: 2px; height: 2px; margin: 0 8px; border-radius: 1px; background: var(--dsh-caption); }
+.dsh-summary { flex: 0 1 auto; min-width: 0; overflow: hidden; font-size: 13px; line-height: 24px; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-summary.is-error { color: var(--dsh-error); }
+.dsh-summary.is-stopped { color: var(--dsh-warn); }
+.dsh-suffix { flex: none; margin-left: 4px; font-size: 13px; line-height: 24px; white-space: nowrap; }
+.dsh-diff-stat { margin-left: 10px; font-family: var(--dsh-mono); font-size: 11px; transform: translateY(.5px); }
+.dsh-row:is(:hover, [aria-expanded="true"]) .dsh-diff-stat .is-add { color: var(--dsh-success); }
+.dsh-row:is(:hover, [aria-expanded="true"]) .dsh-diff-stat .is-del { color: var(--dsh-error); }
+/* A Think row stays one 24px line until opened; its thought indents under the title. */
+.dsh-think-body { min-width: 0; padding: 4px 0 4px 22px; color: var(--dsh-secondary); font-size: 13px; line-height: 20px; }
+.dsh-think-body .cx-md { font-size: 13px; line-height: 20px; }
+.dsh-think[data-open] > .dsh-row { position: sticky; top: 0; z-index: 1; background: var(--dsh-bg); }
+/* Tool bodies: a 4px indent, the code-block surface, a 0.5px l1 hairline, 16px corners. */
+.dsh-body { display: flex; flex-direction: column; }
+.dsh-terminal, .dsh-io, .dsh-diff { margin: 4px 0 4px 4px; border: .5px solid var(--dsh-border-l1); border-radius: 16px; background: var(--dsh-code-bg);
+  font-family: var(--dsh-mono); font-size: 12px; line-height: 18px; overflow: hidden; }
+.dsh-terminal-cmd { padding: 10px 16px; border-bottom: .5px solid var(--dsh-border-l2); color: var(--dsh-secondary); white-space: pre-wrap; overflow-wrap: anywhere; }
+.dsh-terminal-out, .dsh-diff pre { margin: 0; max-height: 224px; overflow: auto; padding: 10px 16px; color: var(--dsh-secondary); white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+.dsh-diff-path { padding: 8px 16px 0; color: var(--dsh-tertiary); }
+.dsh-diff .is-add { color: var(--dsh-success); }
+.dsh-diff .is-del { color: var(--dsh-error); }
+/* The numbered diff (ChatToolParts' EditDiff) inside dsh's card: dsh's DiffBlock tint and 3px bar. */
+.dsh-diff .cx-edit-diff { max-height: 224px; border: 0; border-radius: 0; background: transparent; }
+.dsh-diff .cx-edit-diff table { font-family: var(--dsh-mono); }
+.dsh-diff .cx-edit-diff tr.is-add { background: color-mix(in srgb, var(--dsh-success) 8%, transparent); box-shadow: inset 3px 0 0 var(--dsh-success); }
+.dsh-diff .cx-edit-diff tr.is-del { background: color-mix(in srgb, var(--dsh-error) 8%, transparent); box-shadow: inset 3px 0 0 var(--dsh-error); }
+.dsh-diff .cx-edit-diff .cx-edit-code { color: var(--dsh-secondary); }
+.dsh-diff .cx-edit-diff .cx-edit-num { color: var(--dsh-tertiary); }
+.dsh-io { display: flex; flex-direction: column; }
+.dsh-io-section { display: grid; grid-template-columns: max-content 1fr; column-gap: 14px; align-items: baseline; max-height: 150px; overflow-y: auto; padding: 12px 16px; }
+.dsh-io-label { position: sticky; top: 0; align-self: start; color: var(--dsh-caption); }
+.dsh-io-divider { flex: none; height: .5px; background: var(--dsh-border-l2); }
+.dsh-io-text { min-width: 0; color: var(--dsh-secondary); white-space: pre-wrap; word-break: break-word; }
+.dsh-io-text[data-error] { color: var(--dsh-error); }
+/* A team card's row opens on its own work, indented under its title. */
+.dsh-agent-body { display: flex; flex-direction: column; gap: 6px; padding: 4px 0 4px 22px; min-width: 0; }
+/* A process group: its kind of work's icon turns into a chevron on hover or while open. */
+.dsh-group { min-width: 0; }
+.dsh-group-title { display: flex; align-items: center; gap: 6px; max-width: 100%; padding: 0; border: 0; background: none; color: var(--dsh-tertiary);
+  font: inherit; font-size: 14px; line-height: 24px; text-align: left; cursor: pointer; transition: color 100ms ease; }
+.dsh-group-title:hover { color: var(--dsh-secondary); }
+.dsh-group-title[aria-expanded="true"] { padding-bottom: 8px; }
+.dsh-group-leading { position: relative; display: inline-flex; flex: none; align-items: center; justify-content: center; width: 16px; height: 16px; }
+.dsh-group-leading svg { width: 14px; height: 14px; }
+.dsh-group-icon, .dsh-group-chevron { position: absolute; inset: 0; display: inline-flex; align-items: center; justify-content: center; transition: opacity 100ms ease; }
+.dsh-group-chevron { opacity: 0; }
+.dsh-group-title:is(:hover, :focus-visible, [aria-expanded="true"]) .dsh-group-icon { opacity: 0; }
+.dsh-group-title:is(:hover, :focus-visible, [aria-expanded="true"]) .dsh-group-chevron { opacity: 1; }
+.dsh-group-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-group-body { max-height: min(400px, 50vh); overflow-y: auto; scrollbar-gutter: stable; }
+.dsh-group-body.fade-top { mask-image: linear-gradient(to bottom, transparent 0, #000 24px, #000 100%); }
+.dsh-group-body.fade-bottom { mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 24px), transparent 100%); }
+.dsh-group-body.fade-top.fade-bottom { mask-image: linear-gradient(to bottom, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%); }
+/* Running: a sweep of lighter text across the row (TextShimmer), and the blue "Deep diving" line. */
+.dsh-shimmer { background: linear-gradient(105deg, currentColor 0 40%, var(--dsh-shimmer) 50%, currentColor 60% 100%); background-size: 300% 100%;
+  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; animation: dsh-shimmer 1.5s steps(48, end) .3s infinite; }
+.dsh-shimmer .dsh-sep { background: currentColor; }
+@keyframes dsh-shimmer { 0% { background-position: 100% 0; } 66.6667%, 100% { background-position: 0 0; } }
+.dsh-running { display: flex; flex-direction: column; align-items: flex-start; color: var(--dsh-deep); font-size: 12px; line-height: 22px; }
+.dsh-running .dsh-shimmer { --dsh-shimmer: var(--dsh-deep-shimmer); font-variant-numeric: tabular-nums; }
+.dsh-running-divider { display: block; width: 100%; height: .5px; margin: 8px 0 10px; background: color-mix(in srgb, var(--dsh-border-l1) 75%, var(--dsh-border-l2)); }
+.dsh-running-content { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.dsh-whale { position: relative; display: inline-flex; flex: none; width: 14px; height: 14px; overflow: hidden; contain: strict; }
+.dsh-whale-animated { display: none; position: absolute; inset: 0; }
+@supports (mask-image: url("")) {
+  @media (prefers-reduced-motion: no-preference) and (forced-colors: none) {
+    .dsh-whale-animated { display: block; background: currentColor; mask: url("./dsh-running-whale.png") center / 100% 100% no-repeat; will-change: transform; }
+    .dsh-whale-still { display: none; }
+  }
+}
+.dsh-hint { margin: 0; color: var(--dsh-tertiary); font-size: 13px; line-height: 18px; }
+/* "This turn failed": the error title in red, its message in the secondary color. */
+.dsh-turn-error { display: flex; flex-wrap: wrap; gap: 0 6px; padding: 2px 0; font-size: 13px; line-height: 20px; overflow-wrap: anywhere; }
+.dsh-turn-error-title { color: var(--dsh-error); font-weight: 600; }
+.dsh-turn-error-message { color: var(--dsh-secondary); }
+@media (prefers-reduced-motion: reduce) {
+  .dsh-shimmer { animation: none; background: none; -webkit-text-fill-color: currentColor; }
+  .dsh-row, .dsh-icon-idle, .dsh-chevron-hover, .dsh-group-title, .dsh-group-icon, .dsh-group-chevron, .dsh-turn-process, .dsh-turn-process-chevron { transition: none; }
+}
 .cx-turn-stats.is-dsh { gap: 6px; }
 .cx-turn-stats.is-dsh span { padding: 2px 9px; border: 1px solid var(--ao-line); border-radius: 999px; }
 .cx-turn-stats.is-dsh span::before { content: none; }

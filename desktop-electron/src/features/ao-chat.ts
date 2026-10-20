@@ -710,33 +710,169 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
 /** A DeepSeek model, whose turns show as DeepSeek Harness (dsh) shows them. */
 export const isDeepSeekModel = (model?: string | null) => /deepseek/i.test(model ?? "");
 
-const READ_TOOL = /^(read|view|cat|list|ls|open|file)/i;
-const SEARCH_TOOL = /^(grep|glob|search|find|rg)/i;
-/** One work item's kind as DeepSeek Harness groups them. */
-function dshCategory(item: ChatLiveItem): "read" | "search" | "run" | "edit" | "think" | "tool" {
-  if (item.kind === "reasoning") return "think";
-  if (item.kind === "command") return "run";
+// DeepSeek Harness (deepseek-ai/deepseek-harness, packages/client/ui-chat and ui-tool) words and
+// groups a turn's work as below; the labels are its English locale's, unchanged.
+
+/** A work kind as DeepSeek Harness ranks a group's work (process-activity.ts). */
+export type DshActivity = "read" | "readImage" | "search" | "write" | "edit" | "commands" | "code"
+  | "webSearch" | "webFetch" | "subagents" | "plan" | "questions" | "tools";
+
+/** The tool a row names, without an MCP server prefix: "mcp__coding-tools__read_file" → "read_file". */
+export const dshToolName = (item: ChatLiveItem) => (item.label || item.text || "").replace(/^mcp__[\w-]+__/, "").trim().split(/\s/)[0].toLowerCase();
+
+/** DeepSeek Harness's activity for a tool, extended to the app's MCP tools and AO's own kinds. */
+export function dshActivity(item: ChatLiveItem): DshActivity {
+  if (item.kind === "command") return "commands";
   if (item.kind === "edit") return "edit";
-  const name = (item.label || item.text || "").replace(/^mcp__[\w-]+__/, "");
-  return SEARCH_TOOL.test(name) ? "search" : READ_TOOL.test(name) ? "read" : "tool";
+  const name = dshToolName(item);
+  if (["read", "read_file", "view", "cat", "open_file"].includes(name)) return "read";
+  if (name === "read_image" || name === "view_image") return "readImage";
+  if (["grep", "glob", "rg", "find", "search", "list_dir", "ls", "search_text", "search_files", "find_files"].includes(name)
+    || name.endsWith("_inspect") || name.startsWith("search_")) return "search";
+  if (["write", "write_file", "create_file"].includes(name)) return "write";
+  if (["edit", "apply_patch", "edit_file", "str_replace", "multi_edit", "multiedit"].includes(name)) return "edit";
+  if (["bash", "pwsh", "shell", "exec_command", "write_stdin", "read_output", "kill_command"].includes(name)
+    || name.startsWith("terminal_")) return "commands";
+  if (name === "run_code") return "code";
+  if (name === "web_search") return "webSearch";
+  if (name === "web_fetch" || name === "fetch") return "webFetch";
+  if (name === "subagent" || name.startsWith("subagent_") || name === "task" || name === "agent") return "subagents";
+  if (["todo_write", "todowrite", "update_plan", "create_goal", "update_goal", "get_goal"].includes(name)) return "plan";
+  if (["ask_user_question", "request_user_input", "askuserquestion"].includes(name)) return "questions";
+  return "tools";
 }
-const DSH_DONE = { read: "read files", search: "searched code", run: "ran commands", edit: "edited files", think: "thought", tool: "used tools" } as const;
-const DSH_NOW = { read: "Reading files", search: "Searching code", run: "Running commands", edit: "Editing files", think: "Thinking", tool: "Using tools" } as const;
+
+const DSH_DONE: Record<DshActivity, string> = {
+  read: "Read files", readImage: "Read images", write: "Wrote files", search: "Searched code", edit: "Edited files",
+  commands: "Ran commands", code: "Ran code", webSearch: "Searched the web", webFetch: "Visited web pages",
+  subagents: "Coordinated subagents", plan: "Updated the plan", questions: "Asked questions", tools: "Called tools",
+};
+const DSH_NOW: Record<DshActivity | "thinking", string> = {
+  thinking: "Analyzing the request", read: "Reading files", readImage: "Reading images", write: "Writing files",
+  search: "Searching code", edit: "Editing files", commands: "Running commands", code: "Running code",
+  webSearch: "Searching the web", webFetch: "Visiting web pages", subagents: "Coordinating subagents",
+  plan: "Updating the plan", questions: "Waiting for your action", tools: "Calling tools",
+};
+const DSH_WORK = new Set(["tool", "command", "edit"]);
+const DSH_DETAIL_MAX = 160;
+
+/** A row's one-line detail, at most 160 characters (DeepSeek Harness's live detail bound). */
+function dshDetail(text: string): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length <= DSH_DETAIL_MAX ? flat : `${flat.slice(0, DSH_DETAIL_MAX - 1).trimEnd()}…`;
+}
 
 /**
- * A group's heading as DeepSeek Harness words it: while live, what the latest step is doing
- * ("Running commands"); once done, the kinds of work it did, at most three and no counts ("Read
- * files, searched code and ran commands"). Thinking alone reads "Thought".
+ * A finished group's heading (step-process.ts): its top three kinds of work by number of calls,
+ * ties in order of first appearance, without counts: "Ran commands", "Read files and ran
+ * commands", "Ran commands, read files, edited files", then ", etc." past three. A group that
+ * only thought reads "Analysis completed".
  */
-export function dshActivityTitle(items: ChatLiveItem[], live: boolean): string {
-  if (!items.length) return live ? "Working" : "Worked";
-  if (live) return DSH_NOW[dshCategory(items[items.length - 1])];
-  const kinds = [...new Set(items.map(dshCategory))];
-  const work = kinds.filter((kind) => kind !== "think");
-  const words = (work.length ? work : kinds).map((kind) => DSH_DONE[kind]);
-  const shown = words.slice(0, 3);
-  const text = shown.length > 1 ? `${shown.slice(0, -1).join(", ")} and ${shown[shown.length - 1]}` : shown[0];
-  return `${text[0].toUpperCase()}${text.slice(1)}${words.length > 3 ? ", etc." : ""}`;
+export function dshProcessTitle(items: ChatLiveItem[]): string {
+  const counts = new Map<DshActivity, number>();
+  for (const item of items) {
+    if (!DSH_WORK.has(item.kind)) continue;
+    const kind = dshActivity(item);
+    counts.set(kind, (counts.get(kind) ?? 0) + 1);
+  }
+  // Array.prototype.sort is stable, so equal counts keep their first-appearance order.
+  const ranked = [...counts].sort((a, b) => b[1] - a[1]).map(([kind]) => kind);
+  const labels = ranked.slice(0, 3).map((kind) => DSH_DONE[kind]);
+  if (!labels.length) return "Analysis completed";
+  const continuation = (label: string) => label.charAt(0).toLowerCase() + label.slice(1);
+  if (labels.length === 1) return labels[0];
+  if (labels.length === 2) return `${labels[0]} and ${continuation(labels[1])}`;
+  const title = [labels[0], ...labels.slice(1).map(continuation)].join(", ");
+  return ranked.length > 3 ? `${title}, etc.` : title;
+}
+
+/** What a row's detail is: the agent's own words, else its command, path or query. */
+export function dshItemDetail(item: ChatLiveItem): string {
+  if (item.description) return dshDetail(item.description);
+  if (item.kind === "edit") return dshDetail((item.files ?? []).map((file) => file.path).join(", "));
+  try {
+    const args = item.input ? JSON.parse(item.input) as Record<string, unknown> : {};
+    for (const key of ["command", "cmd", "file_path", "path", "pattern", "query", "url", "prompt", "description"]) {
+      const value = args[key];
+      if (typeof value === "string" && value.trim()) return dshDetail(value);
+    }
+  } catch { /* arguments that are not JSON fall back to the row's own text */ }
+  return dshDetail(item.kind === "command" ? item.text : dshToolName(item) || item.text);
+}
+
+/**
+ * A running group's heading (ChatGroupSeat's live title): what its newest unfinished call does and
+ * that call's detail, "Running commands · npm test"; with no call running, its latest thought,
+ * "Analyzing the request · <the thought's last paragraph>".
+ */
+export function dshLiveTitle(items: ChatLiveItem[]): { activity: DshActivity | "thinking"; label: string } {
+  const running = [...items].reverse().find((item) => DSH_WORK.has(item.kind) && !/complet|done|success|fail|error|reject|denied|cancel/i.test(item.status));
+  if (running) {
+    const activity = dshActivity(running);
+    const detail = dshItemDetail(running);
+    return { activity, label: detail ? `${DSH_NOW[activity]} · ${detail}` : DSH_NOW[activity] };
+  }
+  const thought = [...items].reverse().find((item) => item.kind === "reasoning" && item.text.trim());
+  const paragraph = thought?.text.split(/\r?\n[\t ]*\r?\n/).map((part) => dshDetail(part.replaceAll("**", ""))).filter(Boolean).at(-1) ?? "";
+  return { activity: "thinking", label: paragraph ? `${DSH_NOW.thinking} · ${paragraph}` : DSH_NOW.thinking };
+}
+
+/**
+ * A Think row's one line (ReasoningRow.tsx): a finished thought's first line; a streaming one's
+ * newest completed paragraph's first line, so the line advances a paragraph at a time. `**` dropped.
+ */
+export function dshThinkSummary(text: string, running: boolean): string {
+  const firstLine = (value: string) => { const newline = value.indexOf("\n"); return newline === -1 ? value : value.slice(0, newline); };
+  if (!running) return firstLine(text).replaceAll("**", "").trim();
+  let summary = "";
+  let start = 0;
+  const separator = /\r?\n(?:[\t ]*\r?\n)+/g;
+  for (;;) {
+    const next = separator.exec(text);
+    const end = next === null ? text.length : next.index + next[0].indexOf("\n");
+    const newline = text.indexOf("\n", start);
+    if (newline !== -1 && newline <= end) {
+      const candidate = text.slice(start, newline).trim();
+      if (candidate) summary = candidate;
+    }
+    if (next === null) return summary.replaceAll("**", "");
+    start = next.index + next[0].length;
+  }
+}
+
+/** A run's length as DeepSeek Harness writes it: "4s", "1m 4s", "1h 2m 4s"; never under a second. */
+export function dshDuration(ms: number): string {
+  const total = Math.max(1, Math.floor(ms / 1000));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor(total / 60) % 60;
+  return `${hours ? `${hours}h ` : ""}${total >= 60 ? `${minutes}m ` : ""}${total % 60}s`;
+}
+
+/** A tool row's title (ui-tool tool-call-model.ts): its variant's word, or the tool's own. */
+export function dshToolTitle(item: ChatLiveItem): string {
+  const name = dshToolName(item);
+  if (item.kind === "command") return "Bash";
+  if (name === "pwsh") return "Pwsh";
+  if (name === "read_image" || name === "view_image") return "Read image";
+  if (name === "web_fetch" || name === "fetch") return "Fetch";
+  const activity = dshActivity(item);
+  return ({ read: "Read", search: "Search", webSearch: "Search", write: "Write", edit: "Edit", commands: "Bash", code: "Code" } as Partial<Record<DshActivity, string>>)[activity] ?? "Tool call";
+}
+
+/**
+ * A turn's work as DeepSeek Harness lays it out (process-groups.ts): thinking and tool calls run
+ * together into one process group, and a reply or a message the user steered in stands on its own
+ * between groups.
+ */
+export function dshSegments(items: ChatLiveItem[]): ChatLiveSegment[] {
+  const segments: ChatLiveSegment[] = [];
+  for (const item of items) {
+    const last = segments.at(-1);
+    if (item.kind === "message" || item.kind === "steer") segments.push({ kind: "item", item });
+    else if (last?.kind === "group") last.items.push(item);
+    else segments.push({ kind: "group", key: item.id, items: [item] });
+  }
+  return segments;
 }
 
 /** The chat pet's mood (ChatPet.tsx). */
@@ -960,6 +1096,29 @@ export type ChatAttachment = {
 };
 
 /** Attachments appended to the message: a file path agents read themselves, or a small text file inline. */
+/** A sent message's attachment, as chatMessageWithAttachments wrote it. */
+export type ChatSentAttachment = { image: boolean; name: string; path?: string };
+
+/**
+ * A sent message split back into what the person typed and what they attached, so the chat shows
+ * the attachments as cards and image thumbnails (as Claude Code does) instead of their paths.
+ */
+export function chatMessageParts(message: string): { text: string; attachments: ChatSentAttachment[] } {
+  const attachments: ChatSentAttachment[] = [];
+  const name = (file: string) => file.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || file;
+  const text = message
+    .replace(/(^|\n)Attached file `([^`\n]+)`:\n```\n[\s\S]*?\n```(?=\n|$)/g, (_match, lead: string, file: string) => {
+      attachments.push({ image: false, name: file });
+      return lead;
+    })
+    .replace(/(^|\n)Attached (image|file): ([^\n]+)(?=\n|$)/g, (_match, lead: string, kind: string, file: string) => {
+      attachments.push({ image: kind === "image", name: name(file.trim()), path: file.trim() });
+      return lead;
+    })
+    .trim();
+  return { text, attachments };
+}
+
 export function chatMessageWithAttachments(message: string, attachments: ChatAttachment[]): string {
   const blocks = attachments.map((item) => item.path
     ? `${item.image ? "Attached image" : "Attached file"}: ${item.path}`

@@ -41,6 +41,8 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   // A chat attachment with no path (a pasted screenshot) saved for the agent to open; its path.
   saveAttachment: (input) => ipcRenderer.invoke("launcher:save-attachment", input),
   revealFile: (file) => ipcRenderer.invoke("launcher:reveal-file", file),
+  // An attached image as a data: URL, for its thumbnail in a sent message.
+  attachmentPreview: (file) => ipcRenderer.invoke("launcher:attachment-preview", file),
   showChatWindow: (input) => ipcRenderer.invoke("launcher:chat-window", input),
   projectRemote: (folder) => ipcRenderer.invoke("launcher:project-remote", folder),
   projectBranch: (folder) => ipcRenderer.invoke("launcher:project-branch", folder),
