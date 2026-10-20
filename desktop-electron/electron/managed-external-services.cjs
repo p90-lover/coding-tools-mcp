@@ -379,6 +379,23 @@ function createManagedExternalServicesController({
     cpaConnectionCache = { at: now, value };
     return value && { ...value };
   }
+  // Whatever can install, repair, start, stop, reconfigure or re-key a component forgets the
+  // remembered connection before it starts and again when it ends (failed or not), so nobody is
+  // handed CPA's old state or old key once it has changed.
+  function forgettingCpaConnection(change) {
+    return (...args) => {
+      cpaConnectionCache = null;
+      let result;
+      try {
+        result = change(...args);
+      } finally {
+        if (!result || typeof result.then !== "function") cpaConnectionCache = null;
+      }
+      return result && typeof result.then === "function"
+        ? result.finally(() => { cpaConnectionCache = null; })
+        : result;
+    };
+  }
 
   function loopbackRequest(serviceId) {
     if (RETIRED_SERVICE_IDS.has(serviceId)) throw new Error(`${serviceId} service is retired`);
@@ -427,11 +444,11 @@ function createManagedExternalServicesController({
 
   return Object.freeze({
     snapshot: combinedSnapshot,
-    configure,
+    configure: forgettingCpaConnection(configure),
     inspect,
-    start,
-    stop,
-    restart,
+    start: forgettingCpaConnection(start),
+    stop: forgettingCpaConnection(stop),
+    restart: forgettingCpaConnection(restart),
     runtimeEnvironment: () => {
       const mesh = buildLoopbackMesh(combinedSnapshot().services);
       persistLoopbackMesh(meshPath, mesh);
@@ -453,9 +470,9 @@ function createManagedExternalServicesController({
     upstreamConfiguration,
     cpaConnection,
     loopbackRequest,
-    installManagedComponent,
-    repairManagedComponent,
-    setManagedComponentCredential,
+    installManagedComponent: forgettingCpaConnection(installManagedComponent),
+    repairManagedComponent: forgettingCpaConnection(repairManagedComponent),
+    setManagedComponentCredential: forgettingCpaConnection(setManagedComponentCredential),
     managedComponentsSnapshot: () => {
       const snapshot = managedController.snapshot();
       return {
