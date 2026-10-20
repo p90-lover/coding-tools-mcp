@@ -96,6 +96,10 @@ struct ThreadState {
     /// what a Native Codex card is doing, as it does for AO cards. Each label is short and redacted.
     #[serde(skip)]
     steps: Vec<StepItem>,
+    /// The step that started right after `answer` was written, when the answer is a note from
+    /// before the turn's latest steps; the chat places it there instead of after them.
+    #[serde(skip)]
+    answer_before_step: Option<String>,
 }
 
 /// One tool step of a turn: its item id, Codex's item type, its status, and a short label.
@@ -145,8 +149,46 @@ fn step_label(item: &Value) -> String {
         _ => String::new(),
     };
     let mut label = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    crate::tools::history::redact_text(&mut label);
+    redact_label(&mut label);
     bounded(&label, MAX_STEP_LABEL)
+}
+
+/// Removes the credentials a command line can carry. `history::redact_text` was written for
+/// checkpoint notes and misses `--api-key VALUE` flags, `GH_TOKEN=value` variables (no word break
+/// before TOKEN), `Authorization: Basic …` headers and bare keys such as `sk-…`. Labels leave the
+/// bridge in `status`, which an MCP caller reads without any further filtering.
+fn redact_label(label: &mut String) {
+    static PATTERNS: std::sync::OnceLock<[regex::Regex; 4]> = std::sync::OnceLock::new();
+    let [flag, variable, header, key] = PATTERNS.get_or_init(|| {
+        [
+            regex::Regex::new(
+                r#"(?i)(--?(?:[a-z0-9]+[-_])*(?:api[-_]?key|access[-_]?key|token|secret|password|passwd|auth|authorization|credentials?|private[-_]?key))(?:\s*=\s*|\s+)(?:"[^"]*"|'[^']*'|\S+)"#,
+            )
+            .expect("credential flag regex"),
+            regex::Regex::new(
+                r#"(?i)\b([a-z0-9_]*(?:api_?key|access_?key|token|secret|password|passwd))\s*=\s*(?:"[^"]*"|'[^']*'|\S+)"#,
+            )
+            .expect("credential variable regex"),
+            regex::Regex::new(
+                r#"(?i)\b((?:proxy-)?authorization|x-api-key)\s*:\s*(?:(?:basic|bearer|token|digest)\s+)?[^\s"']+"#,
+            )
+            .expect("credential header regex"),
+            regex::Regex::new(
+                r"\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35})",
+            )
+            .expect("credential key regex"),
+        ]
+    });
+    crate::tools::history::redact_text(label);
+    let mut redacted = flag.replace_all(label, "${1} [REDACTED]").into_owned();
+    redacted = variable
+        .replace_all(&redacted, "${1}=[REDACTED]")
+        .into_owned();
+    redacted = header
+        .replace_all(&redacted, "${1}: [REDACTED]")
+        .into_owned();
+    redacted = key.replace_all(&redacted, "[REDACTED]").into_owned();
+    *label = redacted;
 }
 
 /// One agentMessage item of the current turn.
@@ -167,6 +209,7 @@ impl ThreadState {
     fn clear_messages(&mut self) {
         self.messages.clear();
         self.tool_step = false;
+        self.answer_before_step = None;
         self.answer.clear();
         self.answer_truncated = false;
     }
@@ -1027,7 +1070,8 @@ impl Hub {
             "stop_reason":memory.stop_reason,"threads":memory.threads.values().map(|t|json!({"id":t.id,"status":t.status,"turn_id":t.turn_id,
                 "activity":t.activity,"activity_at_ms":t.activity_at_ms,"last_event_at_ms":t.last_event_at_ms,"started_at_ms":t.started_at_ms,"effective_policy":t.effective_policy,
                 "steps":t.steps.iter().filter(|step| t.turn_id.as_deref() == Some(step.turn.as_str()))
-                    .map(|step| json!({"id":step.id,"kind":step.kind,"status":step.status,"label":step.label})).collect::<Vec<_>>()})).collect::<Vec<_>>(),
+                    .map(|step| json!({"id":step.id,"kind":step.kind,"status":step.status,"label":step.label})).collect::<Vec<_>>(),
+                "answer_before_step":t.answer_before_step})).collect::<Vec<_>>(),
             "requested_sandbox":match bridge.options.permission_profile.as_str() {":workspace"=>json!("workspace-write"),":read-only"=>json!("read-only"),":danger-full-access"=>json!("danger-full-access"),_=>Value::Null},
             "permission_profile":bridge.options.permission_profile,
             "approval_policy":bridge.approval_policy(),"approvals_reviewer":bridge.approvals_reviewer(),
@@ -2109,8 +2153,13 @@ fn apply_notification(memory: &mut Memory, method: &str, params: &Value) {
                     !matches!(kind, "agentMessage" | "reasoning" | "userMessage")
                 }) =>
         {
-            thread.tool_step = true;
             let item = &params["item"];
+            // The first step after a message: the answer so far was said before it.
+            if !thread.tool_step && !thread.messages.is_empty() {
+                thread.answer_before_step =
+                    item["id"].as_str().filter(|s| token(s)).map(str::to_owned);
+            }
+            thread.tool_step = true;
             if let (Some(turn), Some(id), Some(kind)) = (
                 thread.turn_id.clone(),
                 item["id"].as_str().filter(|s| token(s)),
@@ -2627,6 +2676,88 @@ mod tests {
             bad[key] = value;
             assert!(command_approval_details(&root, &bad).is_none());
         }
+    }
+
+    #[test]
+    fn native_step_labels_carry_no_credentials() {
+        let label =
+            |command: &str| step_label(&json!({"type":"commandExecution","command":command}));
+        assert_eq!(
+            label("tool --api-key sk-secret123456 --verbose"),
+            "tool --api-key [REDACTED] --verbose"
+        );
+        assert_eq!(
+            label("deploy --github-token=abc123 --password 'p w'"),
+            "deploy --github-token [REDACTED] --password [REDACTED]"
+        );
+        assert_eq!(
+            label("$env:GH_TOKEN='abc123'; gh pr list"),
+            "$env:GH_TOKEN=[REDACTED]; gh pr list"
+        );
+        assert_eq!(
+            label(r#"curl -H "Authorization: Basic dXNlcjpwYXNz" https://example.test"#),
+            r#"curl -H "Authorization: [REDACTED]" https://example.test"#
+        );
+        assert_eq!(
+            label("echo sk-proj-abcdefgh12345 ghp_abcdefghijklmnopqrstuvwx"),
+            "echo [REDACTED] [REDACTED]"
+        );
+        // What only looks like a credential flag is kept.
+        assert_eq!(
+            label("git log --author simon --token-file .git/x"),
+            "git log --author simon --token-file .git/x"
+        );
+    }
+
+    #[test]
+    fn native_bridge_records_the_step_that_followed_the_answer() {
+        let mut memory = Memory::default();
+        memory.threads.insert(
+            "owned".into(),
+            ThreadState {
+                id: "owned".into(),
+                status: "inProgress".into(),
+                turn_id: Some("t".into()),
+                ..Default::default()
+            },
+        );
+        let notify = |memory: &mut Memory, method: &str, item: Value| {
+            apply_notification(
+                memory,
+                method,
+                &json!({"threadId":"owned","turnId":"t","item":item}),
+            );
+        };
+        notify(
+            &mut memory,
+            "item/completed",
+            json!({"id":"a","type":"agentMessage","text":"Running the tests now","phase":"commentary"}),
+        );
+        assert_eq!(memory.threads["owned"].answer_before_step, None);
+        notify(
+            &mut memory,
+            "item/started",
+            json!({"id":"c1","type":"commandExecution","command":"npm test"}),
+        );
+        notify(
+            &mut memory,
+            "item/started",
+            json!({"id":"c2","type":"commandExecution","command":"npm run lint"}),
+        );
+        assert_eq!(
+            memory.threads["owned"].answer_before_step.as_deref(),
+            Some("c1"),
+            "the note was said before the first command, not the latest"
+        );
+        assert_eq!(memory.threads["owned"].answer, "Running the tests now");
+        // A message after the steps is a new answer, after all of them.
+        notify(
+            &mut memory,
+            "item/completed",
+            json!({"id":"b","type":"agentMessage","text":"All green"}),
+        );
+        assert_eq!(memory.threads["owned"].answer_before_step, None);
+        assert_eq!(memory.threads["owned"].answer, "All green");
     }
 
     #[test]

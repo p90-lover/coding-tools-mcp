@@ -1877,6 +1877,46 @@ test("activity reports each working card's runtime and current step without adva
   assert.ok(calls.every((endpoint) => endpoint === "/api/v1/ao/read" || endpoint === "/api/v1/ao/harness/status"), "read-only calls only");
 });
 
+test("a Native Codex card's steps show in order, its note before the command it announced, its edits by name", async () => {
+  const native = { id: "w1", role: "reviewer", state: "running", route: { harness_id: "codex-native", provider_id: "chatgpt-web", model: "chatgpt-web/high" },
+    receipt: { status: "submitted", thread_id: "thread-1", started_at_ms: 1_000 } };
+  const steps = [
+    { id: "e1", kind: "fileChange", status: "completed", label: "app.ts, readme.md" },
+    { id: "c1", kind: "commandExecution", status: "running", label: "npm test" },
+    { id: "m1", kind: "mcpToolCall", status: "running", label: "coding-tools: read_file" },
+  ];
+  let thread = { id: "thread-1", turn_id: "turn-1", activity: "running a command", steps, answer_before_step: "c1" };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [native] }] };
+      if (endpoint === "/api/v1/ao/harness/status") return { ok: true, status: { connected: true, live_output: "Running the tests now", threads: [thread] } };
+      throw new Error(`unexpected ${endpoint}`);
+    },
+    confirm: async () => true,
+  });
+  // Each read settles the refresh the one before left in flight, then one with the current thread.
+  const read = async () => {
+    for (let pass = 0; pass < 2; pass++) {
+      await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    return (await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" })).nodes.w1.timeline;
+  };
+  const timeline = await read();
+  assert.deepEqual(timeline.map(item => [item.kind, item.label ?? "", item.text]), [
+    ["tool", "Edited", "app.ts, readme.md"],
+    ["message", "", "Running the tests now"],
+    ["command", "", "npm test"],
+    ["tool", "read_file", "coding-tools: read_file"],
+  ], "the note sits before the command it was said before; an edit names its files");
+  // A note whose first later step the bridge already dropped came before every kept step.
+  thread = { ...thread, answer_before_step: "gone" };
+  assert.deepEqual((await read()).map(item => item.kind), ["message", "tool", "command", "tool"]);
+  // Text written after the steps follows them.
+  thread = { ...thread, answer_before_step: null };
+  assert.deepEqual((await read()).map(item => item.kind), ["tool", "command", "tool", "message"]);
+});
+
 test("a finished AO card's work is read back for the chat (turn_timeline), redacted, with labels, details and full reasoning", async () => {
   const asked = [];
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna" };
