@@ -245,6 +245,36 @@ test("primary browser initialization keeps its view offscreen but visible until 
   ]);
 });
 
+test("a new turn tab that misses its first idle-document window is retried instead of failing the turn", async () => {
+  // Seen live: "Browser idle document did not commit within 10000ms" failed a Web GPT turn as
+  // browser_page while the machine was busy; turn tabs had one window, the primary view several.
+  const { loadIdleSurfaceWithRetries } = require("../electron/browser-host.cjs");
+  let currentUrl = "about:blank";
+  let loads = 0;
+  const retries = [];
+  const contents = new EventEmitter();
+  contents.isDestroyed = () => false;
+  contents.getURL = () => currentUrl;
+  contents.stop = () => {};
+  contents.loadURL = (url) => {
+    loads += 1;
+    if (loads === 1) return new Promise(() => {});
+    currentUrl = url;
+    queueMicrotask(() => contents.emit("did-finish-load"));
+    return Promise.resolve();
+  };
+  await loadIdleSurfaceWithRetries(contents, [5, 50], (attempt, timeoutMs) => retries.push([attempt, timeoutMs]));
+  assert.equal(currentUrl, IDLE_BROWSER_URL);
+  assert.deepEqual(retries, [[1, 5]]);
+  // Every window missed: the last timeout is the turn's error.
+  const stuck = new EventEmitter();
+  stuck.isDestroyed = () => false;
+  stuck.getURL = () => "about:blank";
+  stuck.stop = () => {};
+  stuck.loadURL = () => new Promise(() => {});
+  await assert.rejects(loadIdleSurfaceWithRetries(stuck, [5, 10]), /did not commit within 10ms/);
+});
+
 test("a primary view that misses its first idle-document window is retried, then owns its descriptor", async () => {
   // Seen live: on a busy machine every start missed the 10 s window; the timeout stopped the load,
   // nothing retried it, and the launcher never wrote its ownership descriptor.
