@@ -601,7 +601,10 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           ...(typeof input.description === "string" ? { reason: utf8Prefix(input.description, 500) } : {}),
           // The tool's own name when AO has it; otherwise its summary ("PowerShell") rather than ACP's "other".
           tool: String(detail.toolName || (detail.toolKind && detail.toolKind !== "other" ? detail.toolKind : activity.summary) || "tool").slice(0, 80),
-          summary: utf8Prefix(String(activity.summary || ""), 500), turn_id: typeof activity.turnId === "string" ? activity.turnId : undefined,
+          // An approval AO holds outside a turn has no turnId: the key is left out, since the IPC
+          // response schema refuses an undefined value ("pending_approvals[0].turn_id must be a JSON
+          // value") and the whole status read failed with it.
+          summary: utf8Prefix(String(activity.summary || ""), 500), ...(typeof activity.turnId === "string" ? { turn_id: activity.turnId } : {}),
           decisions,
         };
       })
@@ -644,7 +647,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           ...(detail.inputMode === "url" && typeof detail.url === "string" && /^https?:\/\//i.test(detail.url) ? { url: utf8Prefix(detail.url, 2000) } : {}),
           fields, tool: "AskUserQuestion", summary: text(activity.summary, 500),
           ...(typeof activity.createdAt === "string" ? { since: activity.createdAt } : {}),
-          turn_id: typeof activity.turnId === "string" ? activity.turnId : undefined, decisions: [],
+          ...(typeof activity.turnId === "string" ? { turn_id: activity.turnId } : {}), decisions: [],
         };
       });
   }

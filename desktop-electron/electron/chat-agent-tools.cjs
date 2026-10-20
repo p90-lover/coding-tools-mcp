@@ -84,7 +84,24 @@ const AGENT_TOOLS = new Set([
   "git_status", "git_diff", "git_log", "git_show", "git_blame",
   "view_image", "image_info", "compare_images",
   "update_plan", "get_plan", "get_current_time", "tool_search", "server_info",
+  "show_in_chat",
 ]);
+// The app's own agent tool (not headless's): brings a pane of the chat forward for the user. Seen
+// live: an agent asked to "open the browser and keep checking" started it, but nothing showed in
+// the chat, since the panel opens by itself only for a server process.
+const SHOW_TOOL_DEFS = Object.freeze([{
+  name: "show_in_chat", title: "Show a pane in the chat",
+  description: "Bring the chat's Terminal or Preview pane in front of the user. Use it when the user asks to see something you "
+    + "started: pane \"terminal\" with the command_id exec_command returned shows that command's live output; pane \"preview\" shows "
+    + "the page you opened with preview_open. It only shows what already runs; it starts nothing.",
+  inputSchema: {
+    type: "object", additionalProperties: false, required: ["pane"],
+    properties: {
+      pane: { type: "string", enum: ["terminal", "preview"] },
+      command_id: { type: "string", description: "For the terminal: the command to show (from exec_command)" },
+    },
+  },
+}]);
 // Opt-in: commands start in the worktree but are not confined to it.
 const TERMINAL_TOOLS = new Set([
   "exec_command", "write_stdin", "read_output", "kill_command", "kill_session", "check_exec_environment",
@@ -732,7 +749,8 @@ function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview
     + (groups.includes("terminal")
       ? "Start a dev server or any long-running process with exec_command and a short yield_time_ms, and leave it running: "
         + "it keeps running in the background, the user watches its output in the chat's Terminal pane, and you read "
-        + "more of it with read_output. "
+        + "more of it with read_output. When the user asks to see a process or a page, call show_in_chat (pane \"terminal\" "
+        + "with its command_id, or \"preview\") so it comes forward in the chat. "
       : "")
     + (groups.includes("preview")
       ? "preview_open opens a page your dev server serves on this machine (localhost, 127.0.0.1 or [::1] only) in this "
@@ -1039,8 +1057,9 @@ function createChatAgentTools({
   async function listTools(entry) {
     const catalog = await requestHeadless(`/api/v1/tools/catalog?workspace_id=${encodeURIComponent(entry.workspaceId)}`, null, { method: "GET" });
     // The preview's tools are the app's own, not headless's.
-    const own = [...(allowed(entry, "preview") ? PREVIEW_TOOL_DEFS : []), ...(allowed(entry, "subagents") ? SUBAGENT_TOOL_DEFS : [])];
-    return [...(Array.isArray(catalog?.tools) ? catalog.tools : []).filter((tool) => !PREVIEW_TOOLS.has(tool?.name) && !SUBAGENT_TOOLS.has(tool?.name)), ...own]
+    const own = [...(allowed(entry, "preview") ? PREVIEW_TOOL_DEFS : []), ...(allowed(entry, "subagents") ? SUBAGENT_TOOL_DEFS : []), ...SHOW_TOOL_DEFS];
+    return [...(Array.isArray(catalog?.tools) ? catalog.tools : [])
+      .filter((tool) => !PREVIEW_TOOLS.has(tool?.name) && !SUBAGENT_TOOLS.has(tool?.name) && tool?.name !== "show_in_chat"), ...own]
       .filter((tool) => typeof tool?.name === "string" && groupOf(tool.name) && allowed(entry, groupOf(tool.name)))
       // outputSchema is left out: clients would validate structuredContent against it, and the
       // agent gains nothing from it.
@@ -1272,6 +1291,32 @@ function createChatAgentTools({
     return toolResult(name, args, result);
   }
 
+  /**
+   * show_in_chat: records what the chat should bring forward; the side panel reads it with the
+   * session's commands (processes) and opens that pane, the Terminal on that command.
+   */
+  let showSequence = 0;
+  function showInChat(entry, given) {
+    const pane = given.pane;
+    if (pane !== "terminal" && pane !== "preview") return failedCall("pane must be \"terminal\" or \"preview\"");
+    let commandId = null;
+    if (pane === "terminal" && given.command_id !== undefined) {
+      commandId = typeof given.command_id === "string" ? given.command_id : "";
+      if (!entry.commands.has(commandId)) {
+        return failedCall("No command with that command_id runs in this chat: start it with exec_command first, then show its command_id.");
+      }
+    }
+    if (pane === "preview") {
+      const page = previews?.state?.(entry.aoSession);
+      if (!page?.url || page.url === "about:blank") return failedCall("Nothing is open in this chat's browser yet: open the page with preview_open first.");
+    }
+    showSequence += 1;
+    entry.showRequest = { id: `show-${showSequence}`, pane, ...(commandId ? { commandId } : {}), at: now() };
+    const what = pane === "preview" ? "the Preview pane with your page"
+      : commandId ? `the Terminal pane on \`${entry.commands.get(commandId).cmd}\`` : "the Terminal pane";
+    return { content: [{ type: "text", text: `Showing ${what} in the chat (it appears within a few seconds).` }] };
+  }
+
   async function callTool(entry, params) {
     const name = params?.name;
     if (typeof name !== "string" || !name || name.length > 128) return failedCall("A tool name is required");
@@ -1282,6 +1327,7 @@ function createChatAgentTools({
     const stopped = unavailable(entry, name, signal);
     if (stopped) return stopped;
     const given = params.arguments && typeof params.arguments === "object" && !Array.isArray(params.arguments) ? params.arguments : {};
+    if (name === "show_in_chat") return showInChat(entry, given);
     // Subagents are the app's own (subagents.cjs): no worktree is needed to start or read one.
     if (group === "subagents") {
       const found = await Promise.resolve().then(() => sessionWorkspace?.(entry.aoSession, entry.workspaceId)).catch(() => null);
@@ -1889,7 +1935,9 @@ function createChatAgentTools({
         const commands = [...entry.commands.values()].sort((left, right) => right.startedAt - left.startedAt);
         // A running command is asked about once per listing; finished ones stay as they ended.
         for (const command of commands) if (command.status === "running") await readCommand(entry, command, "stdout", Number.MAX_SAFE_INTEGER).catch(() => undefined);
-        out.push({ sessionId, agent: entry.agent, commands: commands.map(({ id, cmd, workdir, startedAt, status, exitCode, user }) => ({ id, cmd, workdir, startedAt, status, exitCode, user: user === true })) });
+        out.push({ sessionId, agent: entry.agent, commands: commands.map(({ id, cmd, workdir, startedAt, status, exitCode, user }) => ({ id, cmd, workdir, startedAt, status, exitCode, user: user === true })),
+          // What the agent asked the chat to bring forward (show_in_chat), newest only.
+          ...(entry.showRequest ? { show: { ...entry.showRequest } } : {}) });
       }
       return out;
     },

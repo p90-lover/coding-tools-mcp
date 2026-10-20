@@ -25,6 +25,8 @@ type Command = {
   source?: "app" | "agent"; output?: string; background?: boolean;
 };
 const isAgentShell = (command: Command | undefined) => command?.source === "agent";
+/** A pane the agent asked the chat to bring forward (its show_in_chat tool), newest per session. */
+type ShowRequest = { id: string; pane: "terminal" | "preview"; commandId?: string; at?: number };
 /** Still running: an app command, an agent's command mid-call, or one it left running in the background. */
 const isLive = (command: Command | undefined) => command?.status === "running" || command?.status === "background";
 // Commands that start something which keeps serving: dev servers, file servers, watchers.
@@ -59,6 +61,9 @@ function rememberPage(sessionId: string, url: string, title: string) {
  * Terminal only while the panel is closed, never taking the place of what the user looks at.
  */
 export function autoOpenTab(fresh: string[], open: boolean): WorkbenchTab | null {
+  // The agent asked to show a pane (show_in_chat, `show:<id>:<pane>`): that pane, open or not.
+  const shown = fresh.filter((item) => item.startsWith("show:")).at(-1);
+  if (shown) return shown.endsWith(":preview") ? "preview" : "terminal";
   if (fresh.some((item) => item.startsWith("page:"))) return "preview";
   return !open && fresh.length ? "terminal" : null;
 }
@@ -130,9 +135,12 @@ export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen
         // Asked again on every tick, so a command that turns out to be long-running (a server) can
         // open the pane later even though it was too young to the first time it was seen.
         const at = Date.now();
-        const commands = ((processes.sessions as { commands: Command[] }[] | undefined) ?? [])
-          .flatMap((session) => session.commands).filter((command) => !command.user && opensTerminal(command, at)).map((command) => `cmd:${command.id}`);
-        const fresh = [...pages, ...commands].filter((item) => !seen.current.has(item));
+        const listed = (processes.sessions as { commands: Command[]; show?: ShowRequest }[] | undefined) ?? [];
+        const commands = listed.flatMap((session) => session.commands).filter((command) => !command.user && opensTerminal(command, at)).map((command) => `cmd:${command.id}`);
+        // What the agent asked the chat to show (show_in_chat), whatever the process is.
+        const shows = listed.map((session) => session.show).filter((show): show is ShowRequest => Boolean(show?.id))
+          .map((show) => `show:${show.id}:${show.pane}`);
+        const fresh = [...pages, ...commands, ...shows].filter((item) => !seen.current.has(item));
         for (const item of fresh) seen.current.add(item);
         // What was already there when the chat opened does not open the panel by itself.
         const newChat = startsNewChat(sessionIds, polled.current);
@@ -501,6 +509,7 @@ function TerminalPane({ sessionId, workspaceId }: { sessionId: string; workspace
   const offsets = useRef({ stdout: 0, stderr: 0 });
   const screen = useRef<HTMLPreElement>(null);
   const pinned = useRef(true);
+  const shownRequest = useRef("");
 
   useEffect(() => {
     let live = true;
@@ -509,12 +518,24 @@ function TerminalPane({ sessionId, workspaceId }: { sessionId: string; workspace
       if (document.visibilityState !== "visible") return;
       void paneCall("chat_processes", { sessionIds: [sessionId], ...(workspaceId ? { workspaceId } : {}) }).then((result) => {
         if (!live) return;
+        const listed = (result.sessions as { commands: Command[]; show?: ShowRequest }[] | undefined)?.[0];
         // What still runs comes first (a dev server started long ago above the newest one-off
         // commands), newest first within each.
-        const found = [...(((result.sessions as { commands: Command[] }[] | undefined)?.[0]?.commands) ?? [])]
+        const found = [...(listed?.commands ?? [])]
           .sort((left, right) => Number(isLive(right)) - Number(isLive(left)));
         setCommands(found);
         setNow(Date.now());
+        // The agent asked to show one command here (show_in_chat): it is the one shown, finished or not.
+        const show: ShowRequest | undefined = listed?.show;
+        if (show?.pane === "terminal" && show.commandId && show.id !== shownRequest.current) {
+          const wanted = found.find((command) => command.id === show.commandId);
+          if (wanted) {
+            shownRequest.current = show.id;
+            setSelected(wanted.id);
+            if (!isLive(wanted)) setShowHistory(true);
+            return;
+          }
+        }
         // First choice: a running app the agent started (not the user's own shell), then anything
         // live. With nothing running nothing is picked: a finished tool call is not the app.
         setSelected((current) => (found.some((command) => command.id === current) ? current
