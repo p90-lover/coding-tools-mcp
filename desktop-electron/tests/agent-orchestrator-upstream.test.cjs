@@ -1053,4 +1053,13 @@ test("the context meter keeps its reading through a steer's zero snapshot, and d
   assert.deepEqual([zeroed.contextUsed, zeroed.inputTokens, zeroed.totalTokens], [172_000, 6_160_000, 6_230_900], "the totals never go down");
   const after = steadyContext(readings, "s4", { contextUsed: 173_000, contextWindow: 400000, inputTokens: 1, outputTokens: 1, cachedTokens: 0, totalTokens: 2 }, null);
   assert.equal(after.totalTokens, 6_230_900, "the held totals were saved, so a later small report does not lose them either");
+  // Seen live: 362.9k that really went down to 90.2k (just under a quarter) was held at 362.9k.
+  steadyContext(readings, "s5", { contextUsed: 362_936, contextWindow: 400000, totalTokens: 932_660 }, null);
+  assert.equal(steadyContext(readings, "s5", { contextUsed: 90_157, contextWindow: 400000, totalTokens: 932_660 }, null).contextUsed, 90_157,
+    "a real smaller context comes through");
+  assert.equal(steadyContext(readings, "s5", { contextUsed: 900, contextWindow: 400000, totalTokens: 932_660 }, null).contextUsed, 90_157,
+    "the near-nothing snapshot is still held");
+  steadyContext(readings, "s6", { contextUsed: 400_000, contextWindow: 400000 }, null);
+  assert.equal(steadyContext(readings, "s6", { contextUsed: 40_000, contextWindow: 400000 }, null).contextUsed, 40_000,
+    "a large real drop below a quarter, but not near nothing, comes through");
 });

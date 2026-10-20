@@ -1739,11 +1739,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
  * the last one with no compaction in between is that snapshot, so the last reading stands; a
  * compaction (compactedAt moved) is a real drop. readings: id -> { usage, compactedAt }.
  */
+// The largest context reading still taken for the zero-input opening snapshot below.
+const SNAPSHOT_CONTEXT_TOKENS = 32_768;
 function steadyContext(readings, id, usage, compactedAt) {
   const previous = readings.get(id);
   const used = Number(usage?.contextUsed), before = Number(previous?.usage?.contextUsed);
+  // The snapshot reads as next to nothing; a real smaller context does not. Seen live: a session at
+  // 362.9k that really went down to 90.2k (just under a quarter) was held at 362.9k for good.
   if (usage && previous && previous.compactedAt === compactedAt && Number.isFinite(before) && before > 0
-    && (!Number.isFinite(used) || used < before / 4)) {
+    && (!Number.isFinite(used) || used < Math.min(before / 4, SNAPSHOT_CONTEXT_TOKENS))) {
     const held = { ...usage, contextUsed: before, contextWindow: usage.contextWindow || previous.usage.contextWindow };
     // The same snapshot zeroes the token counts too (the meter read In 0 · Out 0 · Total 0 beside a
     // $6.40 cost): a count it reports as nothing keeps the last reading's.

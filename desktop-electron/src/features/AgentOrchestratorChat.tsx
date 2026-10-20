@@ -1452,7 +1452,10 @@ export function AgentOrchestratorChat({
             <input ref={picker} type="file" multiple hidden onChange={(event) => { if (event.target.files) void addFiles(event.target.files); event.target.value = ""; }} />
             {composer ? <AgentOrchestratorComposerControls {...composer} permissions={permissions} busy={busy || sending} /> : permissions}
             <span className="cx-head-spacer" />
-            {selectedTaskId ? <ChatContextMeter sessionId={agentSessions[0]?.id} agentLabel={agentSessions[0]?.label} model={agentSessions[0]?.model}
+            {selectedTaskId ? <ChatContextMeter sessionId={agentSessions[0]?.id}
+              previousSessionIds={agentSessions.slice(1).filter((session) => session.model === agentSessions[0]?.model
+                && session.label.split(" · ")[0] === agentSessions[0]?.label.split(" · ")[0]).map((session) => session.id)}
+              agentLabel={agentSessions[0]?.label} model={agentSessions[0]?.model}
               launchedWindow={agentSessions[0]?.contextWindow} nextWindow={composer?.route?.context_window}
               canCompact={Boolean(commands && accepts)} onCompact={() => void runCommand("compact")} onFraction={setContextShare} /> : null}
             <button type="button" className="cx-icon-button cx-mic" aria-label="Voice input" title="Voice input isn't available yet" disabled>
