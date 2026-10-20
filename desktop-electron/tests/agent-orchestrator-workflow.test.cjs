@@ -4902,3 +4902,54 @@ test("a reviewer's deny tells the agent why, and that the user did not refuse it
   assert.equal(allowed, "allow");
   assert.equal(none, "", "an allowed call needs no explanation");
 });
+test("parallel tool requests are reviewed at the same time, and a repeat of one reuses its verdict", async () => {
+  // Reviews ran one after another (up to 25 s each), and a request that arrived meanwhile waited for
+  // the whole pass; an agent re-running the same command waited for a fresh review every time.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "allow", kind: "allow_once", label: "Allow Once" }, { id: "reject", kind: "reject_once", label: "Deny" }];
+  const ask = (id, command) => ({ approval_id: id, source: "ao", kind: "command", command, tool: "Bash", decisions });
+  let pending = [ask("a", "python tools/a.py"), ask("b", "python tools/b.py"), ask("c", "python tools/c.py")];
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+    { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const resolved = [];
+  let inFlight = 0, most = 0, reviews = 0;
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
+      // CPA's catalog read also asks for its accounts and owners; only completions are reviews.
+      if (!String(url).endsWith("/chat/completions")) return { ok: false, status: 404, json: async () => ({}) };
+      reviews++; inFlight++; most = Math.max(most, inFlight);
+      await new Promise(resolve => setTimeout(resolve, 80));
+      inFlight--;
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"allow","reason":"a project script"}' } }] }) };
+    },
+    requestHeadless: async (endpoint) => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: pending }),
+      resolveApproval: async (_session, requestId, decisionId) => {
+        resolved.push([requestId, decisionId]);
+        pending = pending.filter(approval => approval.approval_id !== requestId);
+        return { ok: true };
+      },
+    },
+    confirm: async () => true,
+  });
+  await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  try {
+    for (let tries = 0; tries < 300 && resolved.length < 3; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(resolved.map(([id]) => id).sort(), ["a", "b", "c"]);
+    assert.ok(most >= 2, `reviews overlapped (at most ${most} at once)`);
+    assert.equal(reviews, 3);
+    // The agent runs the first command again: same request, same folder, same rules.
+    pending = [ask("a2", "python tools/a.py")];
+    for (let tries = 0; tries < 300 && resolved.length < 4; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(resolved.at(-1), ["a2", "allow"]);
+    assert.equal(reviews, 3, "the repeat reused the earlier verdict instead of asking the reviewer again");
+  } finally {
+    mission.nodes[0].state = "finished";
+  }
+});

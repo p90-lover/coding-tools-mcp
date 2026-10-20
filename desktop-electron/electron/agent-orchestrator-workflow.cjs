@@ -2103,6 +2103,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const REVIEW_TRIES = 3;
   const REVIEW_RETRY_MS = 4_000;
   const reviewFailures = new Map(); // approval_id -> { tries, at }
+  // An agent runs the same command again and again (a test, a status check), and each time waited
+  // seconds for a fresh review of it. A verdict is reused for REVIEW_REUSE_MS when the review would
+  // see exactly the same thing: the prompt holds the request, the folder, the approver's rules and
+  // any script it runs, and the reviewer answers at temperature 0. "ask" is never reused.
+  const REVIEW_REUSE_MS = 10 * 60_000;
+  const reviewedPrompts = new Map(); // sha256(models + prompt) -> { action, reason, at }
   async function askApprover({ approver, mission, approval }) {
     const { baseUrl, key } = connection();
     const all = reviewerModels(approver, (await models()).models);
@@ -2129,6 +2135,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       "allow: clearly safe and needed for the task. deny: destructive, outside the workspace, secret-touching or unrelated. ask: anything unclear.",
       scripts.length ? "Judge a command that runs a local script by the script's contents shown above." : "",
     ].filter(Boolean).join("\n");
+    const promptKey = createHash("sha256").update(JSON.stringify([all, prompt])).digest("hex");
+    const earlier = reviewedPrompts.get(promptKey);
+    if (earlier && now() - earlier.at < REVIEW_REUSE_MS) {
+      logger?.info?.("ao.approval_review_reused", { action: earlier.action, tool: String(approval.tool ?? approval.kind ?? "").slice(0, 80) });
+      return { action: earlier.action, reason: earlier.reason };
+    }
     let failure = null;
     for (const model of candidates) {
       const left = deadline - now();
@@ -2149,6 +2161,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // The reason otherwise lived only in the run's latest note, so a wrong deny could not be traced.
         logger?.info?.("ao.approval_reviewed", { model, action: decision.action, tool: String(approval.tool ?? approval.kind ?? "").slice(0, 80),
           folder: Boolean(folder), reason: publicText(reason, 200) });
+        if (decision.action !== "ask") {
+          reviewedPrompts.delete(promptKey);
+          reviewedPrompts.set(promptKey, { action: decision.action, reason, at: now() });
+          if (reviewedPrompts.size > 300) reviewedPrompts.delete(reviewedPrompts.keys().next().value);
+        }
         return { action: decision.action, reason };
       } catch (error) {
         failure = error;
@@ -2183,8 +2200,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // Not reviewed yet: the reviewer answers it within its budget, or passes it to the person then.
     return Boolean(advice) && advice.action === "ask";
   }
+  // Requests being screened now. Each new request is screened as soon as a pass sees it, a few at
+  // a time: a pass used to review requests one after another and the next pass waited for it, so
+  // three parallel tool calls took up to three review budgets (75 s) and a request that arrived
+  // meanwhile sat behind all of them while the agent stood still.
+  const REVIEW_CONCURRENCY = 4;
+  const screening = new Set(); // approval_id
   async function screenApprovals(workspaceId, runId, mission, active, observed) {
-    let note = null;
+    const jobs = [];
     for (const [index, result] of observed.entries()) {
       // A team's Command approver screens its workers (until it approves, requests wait for the
       // person); otherwise a card set to "Approve for me" has its AO tool requests reviewed and
@@ -2196,71 +2219,88 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // So is a plan (ExitPlanMode): its "allow once" choice switches Claude to asking before every
         // edit, which flooded the reviewer and the person, and the reviewer never saw the plan.
         const screened = !["question", "plan"].includes(approval?.kind) && (approval?.kind === "command" || approval?.source === "ao");
-        if (!screened || !approval.approval_id || approverAdvice.has(approval.approval_id)) continue;
+        if (!screened || !approval.approval_id || approverAdvice.has(approval.approval_id) || screening.has(approval.approval_id)) continue;
         const failed = reviewFailures.get(approval.approval_id);
         if (failed && now() - failed.at < REVIEW_RETRY_MS) continue;
-        const request = describeRequest(approval);
-        // The command advisor must not decide from a truncated command or permission scope.
-        const incomplete = request.length >= 1500 || JSON.stringify(approval.permissions ?? {}).length > 800;
-        // An app agent tool's safety comes from its endpoint (worktree confinement, protected paths), not
-        // from reading its arguments, so a long patch is no reason to ask.
-        let advice = routineAppTool(approval.tool)
-          ? { action: "allow", reason: routineAppTool(approval.tool) }
-          : routineAppCommand(approval)
-          ? { action: "allow", reason: routineAppCommand(approval) }
-          : incomplete
-          ? { action: "ask", reason: "Inspect the complete native command and requested permission scope yourself" }
-          : hardDenied(request)
-            ? { action: "deny", reason: "Blocked by the command approver's safety rules" }
-              // A shell line counts only from the agent's own shell tool; the app's exec_command
-              // (an MCP tool with a command) keeps going to the reviewer and the app's confirm.
-              : approval.kind === "command" && !/^mcp__/.test(String(approval.tool ?? "")) && routineCommand(approval.command)
-                ? { action: "allow", reason: routineCommand(approval.command) }
-                // A reviewer that cannot answer is asked again (see REVIEW_TRIES); only then does the
-                // request go to the person, and its card says why.
-                : await askApprover({ approver, mission, approval }).catch((error) => ({ action: "failed", error }));
-        if (advice.action === "failed") {
-          const tries = (reviewFailures.get(approval.approval_id)?.tries ?? 0) + 1;
-          const why = publicText(advice.error?.message || advice.error, 160);
-          logger?.warn?.("ao.approval_review_failed", { tries, tool: String(approval.tool ?? approval.kind ?? "").slice(0, 80), reason: why });
-          if (tries < REVIEW_TRIES) {
-            reviewFailures.set(approval.approval_id, { tries, at: now() });
-            if (reviewFailures.size > 500) reviewFailures.delete(reviewFailures.keys().next().value);
-            note = `The reviewer could not answer yet (${why}); trying again`;
-            continue;
-          }
-          advice = { action: "ask", reason: `The command reviewer could not answer after ${tries} tries (${why}); check it yourself` };
-        }
-        reviewFailures.delete(approval.approval_id);
-        const offered = approval.request?.availableDecisions;
-        if (Array.isArray(offered) && advice.action !== "ask"
-          && !offered.includes(advice.action === "allow" ? "accept" : "decline")) {
-          advice = { action: "ask", reason: "This native request requires a typed offered decision from you" };
-        }
-        approverAdvice.set(approval.approval_id, advice);
-        if (approverAdvice.size > 500) approverAdvice.delete(approverAdvice.keys().next().value);
-        // Each answer stands alone: one the person gave first (or any failure to send it) never
-        // skips the requests after it in this pass; the request just goes to the person.
-        if (approval.source === "ao" && approver.settings?.auto_decide === true && advice.action !== "ask") {
-          const decision = aoDecision(approval, advice.action === "allow");
-          const why = advice.action === "deny" ? reviewerDenial(advice.reason) : "";
-          if (!decision) note = `Reviewer suggests ${advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
-          else if (await harnessService().resolveApproval(approval.thread_id, approval.approval_id, decision, why).then(() => true, () => false)) {
-            note = `Reviewer ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
-          } else approverAdvice.set(approval.approval_id, { action: "ask", unsent: advice.action, reason: `The reviewer's answer could not be sent (${advice.action}: ${advice.reason}); check it yourself` });
-        } else if (approver.settings?.auto_decide === true && advice.action !== "ask") {
-          const sent = await requestHeadless("/api/v1/ao/harness/approval", {
-            workspace_id: workspaceId, run_id: runId, node_id: active[index].id, approval_id: approval.approval_id,
-            allow: advice.action === "allow", confirm: false, approver_reason: advice.reason || advice.action, approver_request: request,
-          }).then(() => true, () => false);
-          if (sent) note = `Command approver ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
-          else approverAdvice.set(approval.approval_id, { action: "ask", unsent: advice.action, reason: `The command approver's answer could not be sent (${advice.action}: ${advice.reason}); check it yourself` });
-        } else {
-          note = `Command approver suggests ${advice.action === "ask" ? "checking it yourself" : advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
-        }
+        if (screening.size + jobs.length >= REVIEW_CONCURRENCY) break;
+        jobs.push({ approver, node: active[index], approval });
       }
     }
+    let note = null;
+    await Promise.all(jobs.map(async (job) => {
+      screening.add(job.approval.approval_id);
+      try {
+        const said = await screenOne(workspaceId, runId, mission, job);
+        if (said) note = said;
+      } finally {
+        screening.delete(job.approval.approval_id);
+      }
+    }));
     return note;
+  }
+  /** Screens and, with auto-decide, answers one request; returns the run's note about it, if any. */
+  async function screenOne(workspaceId, runId, mission, { approver, node, approval }) {
+    const request = describeRequest(approval);
+    // The command advisor must not decide from a truncated command or permission scope.
+    const incomplete = request.length >= 1500 || JSON.stringify(approval.permissions ?? {}).length > 800;
+    // An app agent tool's safety comes from its endpoint (worktree confinement, protected paths), not
+    // from reading its arguments, so a long patch is no reason to ask.
+    let advice = routineAppTool(approval.tool)
+      ? { action: "allow", reason: routineAppTool(approval.tool) }
+      : routineAppCommand(approval)
+      ? { action: "allow", reason: routineAppCommand(approval) }
+      : incomplete
+      ? { action: "ask", reason: "Inspect the complete native command and requested permission scope yourself" }
+      : hardDenied(request)
+        ? { action: "deny", reason: "Blocked by the command approver's safety rules" }
+          // A shell line counts only from the agent's own shell tool; the app's exec_command
+          // (an MCP tool with a command) keeps going to the reviewer and the app's confirm.
+          : approval.kind === "command" && !/^mcp__/.test(String(approval.tool ?? "")) && routineCommand(approval.command)
+            ? { action: "allow", reason: routineCommand(approval.command) }
+            // A reviewer that cannot answer is asked again (see REVIEW_TRIES); only then does the
+            // request go to the person, and its card says why.
+            : await askApprover({ approver, mission, approval }).catch((error) => ({ action: "failed", error }));
+    if (advice.action === "failed") {
+      const tries = (reviewFailures.get(approval.approval_id)?.tries ?? 0) + 1;
+      const why = publicText(advice.error?.message || advice.error, 160);
+      logger?.warn?.("ao.approval_review_failed", { tries, tool: String(approval.tool ?? approval.kind ?? "").slice(0, 80), reason: why });
+      if (tries < REVIEW_TRIES) {
+        reviewFailures.set(approval.approval_id, { tries, at: now() });
+        if (reviewFailures.size > 500) reviewFailures.delete(reviewFailures.keys().next().value);
+        return `The reviewer could not answer yet (${why}); trying again`;
+      }
+      advice = { action: "ask", reason: `The command reviewer could not answer after ${tries} tries (${why}); check it yourself` };
+    }
+    reviewFailures.delete(approval.approval_id);
+    const offered = approval.request?.availableDecisions;
+    if (Array.isArray(offered) && advice.action !== "ask"
+      && !offered.includes(advice.action === "allow" ? "accept" : "decline")) {
+      advice = { action: "ask", reason: "This native request requires a typed offered decision from you" };
+    }
+    approverAdvice.set(approval.approval_id, advice);
+    if (approverAdvice.size > 500) approverAdvice.delete(approverAdvice.keys().next().value);
+    // Each answer stands alone: one the person gave first (or any failure to send it) never
+    // touches the other requests; this one just goes to the person.
+    if (approval.source === "ao" && approver.settings?.auto_decide === true && advice.action !== "ask") {
+      const decision = aoDecision(approval, advice.action === "allow");
+      const why = advice.action === "deny" ? reviewerDenial(advice.reason) : "";
+      if (!decision) return `Reviewer suggests ${advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
+      if (await harnessService().resolveApproval(approval.thread_id, approval.approval_id, decision, why).then(() => true, () => false)) {
+        return `Reviewer ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
+      }
+      approverAdvice.set(approval.approval_id, { action: "ask", unsent: advice.action, reason: `The reviewer's answer could not be sent (${advice.action}: ${advice.reason}); check it yourself` });
+      return null;
+    }
+    if (approver.settings?.auto_decide === true && advice.action !== "ask") {
+      const sent = await requestHeadless("/api/v1/ao/harness/approval", {
+        workspace_id: workspaceId, run_id: runId, node_id: node.id, approval_id: approval.approval_id,
+        allow: advice.action === "allow", confirm: false, approver_reason: advice.reason || advice.action, approver_request: request,
+      }).then(() => true, () => false);
+      if (sent) return `Command approver ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
+      approverAdvice.set(approval.approval_id, { action: "ask", unsent: advice.action, reason: `The command approver's answer could not be sent (${advice.action}: ${advice.reason}); check it yourself` });
+      return null;
+    }
+    return `Command approver suggests ${advice.action === "ask" ? "checking it yourself" : advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
   }
 
   // "Approve for me" and "Full access" never leave the agent stuck on a request nobody answers: one
@@ -2615,14 +2655,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const attention = forPerson ? "pending_approval" : marks.some(mark => mark.kind === "needs_input") ? "needs_input" : null;
         if (attention) state.detail = attention === "pending_approval" ? "Waiting for your tool approval" : "An AO worker needs input on the Board";
         else if (waiting.length) state.detail = "The reviewer is checking the agent's request";
-        // Reviewing runs beside the loop, one pass at a time: the loop kept reporting and launching
-        // while a slow reviewer took up to minutes, and the chat showed nothing meanwhile.
-        if (waiting.length && !state.screening) {
-          state.screening = true;
+        // Reviewing runs beside the loop: the loop kept reporting and launching while a slow reviewer
+        // took up to minutes, and the chat showed nothing meanwhile. Every tick may start the review
+        // of a request that just arrived; one already under review is skipped (screenApprovals).
+        if (waiting.length) {
           void screenApprovals(workspaceId, runId, mission, waiting.map(mark => mark.node), waiting.map(mark => ({ pending_approvals: mark.pending })))
             .then(note => { if (note) state.detail = note; },
-              error => { state.detail = "Command approver unavailable: " + publicText(error?.message || error, 200); })
-            .finally(() => { state.screening = false; });
+              error => { state.detail = "Command approver unavailable: " + publicText(error?.message || error, 200); });
         }
         if (waiting.length && !state.autoAnswering) {
           state.autoAnswering = true;
