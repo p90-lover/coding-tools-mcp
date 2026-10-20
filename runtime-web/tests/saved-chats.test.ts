@@ -185,6 +185,8 @@ function retainedTurnWorker(useSavedChats: boolean, diagnostics: string) {
       action(new AbortController().signal)
     ),
     prepareChatSurface: async () => { actions.push("prepare"); },
+    // The retained chat is still in Chat mode: its composer is ChatGPT's ordinary one.
+    activeComposer: async () => ({ getAttribute: async () => "Ask ChatGPT" }),
     selectModelAndEffort: async (_page: unknown, model: string, effort: string) => {
       actions.push("effort");
       resolveChatGptWebModelMode(model, effort, capabilities);
