@@ -9016,3 +9016,41 @@ test("after a restart the app resumes interrupted chats in every project, with n
   assert.deepEqual(retrying.started.sort(), ["live", "r1"]);
   retrying.workflow.dispose();
 });
+test("a reviewer's deny tells the agent why, and that the user did not refuse it", async () => {
+  // Claude Code reported every such deny as "User refused permission to run tool"; the agent then
+  // guessed the person had refused and why.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "allow", kind: "allow_once", label: "Allow Once" }, { id: "reject", kind: "reject_once", label: "Deny" }];
+  async function answered(verdict) {
+    const request = { approval_id: "req", source: "ao", kind: "command", command: "python tools/migrate.py --apply", tool: "Bash", decisions };
+    const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+      { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+    const resolved = [];
+    const workflow = createAgentOrchestratorWorkflow({
+      findCodexExecutable: () => process.execPath,
+      resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+      cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+      fetchImpl: async (url) => String(url).endsWith("/models")
+        ? { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) }
+        : { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(verdict) } }] }) },
+      requestHeadless: async (endpoint) => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+      aoHarness: {
+        observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: resolved.length ? [] : [request] }),
+        resolveApproval: async (_session, _requestId, decisionId, message) => { resolved.push([decisionId, message]); return { ok: true }; },
+      },
+      confirm: async () => true,
+    });
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 200 && !resolved.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    mission.nodes[0].state = "finished";
+    return resolved;
+  }
+  const [[denied, why]] = await answered({ action: "deny", reason: "reads a file outside the project" });
+  assert.equal(denied, "reject");
+  assert.match(why, /not by the user/);
+  assert.match(why, /reads a file outside the project/);
+  const [[allowed, none]] = await answered({ action: "allow", reason: "reads the project's own files" });
+  assert.equal(allowed, "allow");
+  assert.equal(none, "", "an allowed call needs no explanation");
+});
