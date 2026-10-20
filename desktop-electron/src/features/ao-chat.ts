@@ -364,7 +364,7 @@ export function chatDuration(ms: number): string {
  * step and when it was last heard. Stalled when nothing has been heard for STALL_MS, or the turn
  * has still not started after that long.
  */
-export function chatWorkingDetail(node: ChatNode, live: ChatActivity | undefined, now: number, describe?: (node: ChatNode, run?: ChatRun) => string, run?: ChatRun): { detail: string; stalled: boolean } {
+export function chatWorkingDetail(node: ChatNode, live: ChatActivity | undefined, now: number, describe?: (node: ChatNode, run?: ChatRun) => string, run?: ChatRun): { detail: string; stalled: boolean; heardAtMs?: number } {
   const started = live?.started_at_ms ?? node.receipt?.started_at_ms ?? null;
   const heard = live?.last_event_at_ms || live?.activity_at_ms || null;
   const parts = [describe?.(node, run) ?? ""];
@@ -372,7 +372,7 @@ export function chatWorkingDetail(node: ChatNode, live: ChatActivity | undefined
   if (live?.activity) parts.push(heard ? `${live.activity} (last heard ${chatDuration(now - heard)} ago)` : live.activity);
   const quietSince = heard ?? started;
   const stalled = Boolean(quietSince && now - quietSince >= STALL_MS && (heard || live?.turn_started === false));
-  return { detail: parts.filter(Boolean).join(" · "), stalled };
+  return { detail: parts.filter(Boolean).join(" · "), stalled, ...(heard ? { heardAtMs: heard } : {}) };
 }
 
 export type TaskLifecycleView = {
@@ -622,7 +622,7 @@ export type ChatStep = {
   verdict?: string;
   error?: string;
   /** For a working card: runtime, current step and when it was last heard. */
-  working?: { detail: string; stalled: boolean; activity?: string; timeline?: ChatLiveItem[] };
+  working?: { detail: string; stalled: boolean; activity?: string; timeline?: ChatLiveItem[]; heardAtMs?: number };
   startedAtMs?: number;
   /** The card ran in an AO session, so its finished work can be read back (turn_timeline). */
   hasWork?: boolean;
@@ -852,6 +852,18 @@ export function dshDuration(ms: number): string {
   const hours = Math.floor(total / 3600);
   const minutes = Math.floor(total / 60) % 60;
   return `${hours ? `${hours}h ` : ""}${total >= 60 ? `${minutes}m ` : ""}${total % 60}s`;
+}
+
+/**
+ * What a running turn's "Deep diving" line adds once the turn has gone quiet: nothing for the first
+ * minute, "quiet for 3m 2s" after, and a plain "may be stuck" once it has been quiet as long as a
+ * stuck card (STALL_MS). A long model request can be silent for minutes; without this the turn
+ * looked frozen.
+ */
+export function dshQuietNote(heardAtMs: number | undefined, now: number): string {
+  const quiet = heardAtMs ? now - heardAtMs : 0;
+  if (quiet >= STALL_MS) return ` · nothing new for ${dshDuration(quiet)}, may be stuck`;
+  return quiet >= 60_000 ? ` · quiet for ${dshDuration(quiet)}` : "";
 }
 
 /** A tool row's title (ui-tool tool-call-model.ts): its variant's word, or the tool's own. */
