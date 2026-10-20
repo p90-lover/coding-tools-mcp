@@ -35,7 +35,7 @@ function tempTree() {
 
 function fixture({ enabled = () => true, desktop = () => false, terminal = () => false, results = {}, workspaces = null, confirm = async () => true, root = null, worktreesRoot = null,
   minAnswerMs = 0, answerClock = undefined, sandbox = null, subagents = null, statePath = null, autoAnswerMs = undefined, blockedCommand = undefined, now = undefined,
-  wakeups = null } = {}) {
+  wakeups = null, rewriteCommand = undefined } = {}) {
   const calls = [];
   const asked = [];
   const confirmations = [];
@@ -44,6 +44,7 @@ function fixture({ enabled = () => true, desktop = () => false, terminal = () =>
     // A fake confirm answers at once; the quick-answer check has its own test.
     minAnswerMs, ...(answerClock ? { answerClock } : {}),
     ...(autoAnswerMs !== undefined ? { autoAnswerMs } : {}), ...(blockedCommand ? { blockedCommand } : {}), ...(now ? { now } : {}),
+    ...(rewriteCommand ? { rewriteCommand } : {}),
     confirm: async (request) => { confirmations.push(request); return confirm(request); },
     sessionWorkspace: async (id, workspaceId) => {
       asked.push(id);
@@ -1886,4 +1887,30 @@ test("Ask for approval: a prompt is never answered for the person", async () => 
     assert.equal(ran.isError, true);
     assert.match(ran.content[0].text, /could not be asked/);
   } finally { await tools.close?.(); tree.cleanup?.(); }
+});
+
+test("with RTK on, exec_command runs and is confirmed as rtk's compact command, whichever agent sent it", async () => {
+  const tree = tempTree();
+  const rewritten = [];
+  const { tools, calls, confirmations } = fixture({ root: tree.root, terminal: () => true,
+    rewriteCommand: (command) => { rewritten.push(command); return command === "git status" ? '"C:\\rtk\\rtk.exe" git status' : null; } });
+  try {
+    const { url, auth } = await session(tools);
+    await callTool(url, auth, "exec_command", { cmd: "git status" });
+    assert.equal(calls.at(-1).body.arguments.cmd, '"C:\\rtk\\rtk.exe" git status', "the compact command is what runs");
+    assert.ok(JSON.stringify(confirmations.at(-1) ?? {}).includes("rtk.exe"), "and what the person is asked about");
+    await callTool(url, auth, "exec_command", { cmd: "echo hi" });
+    assert.equal(calls.at(-1).body.arguments.cmd, "echo hi", "a command rtk has nothing for runs as written");
+    assert.deepEqual(rewritten, ["git status", "echo hi"]);
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("a failing RTK rewrite never stops a command", async () => {
+  const tree = tempTree();
+  const { tools, calls } = fixture({ root: tree.root, terminal: () => true, rewriteCommand: () => { throw new Error("rtk crashed"); } });
+  try {
+    const { url, auth } = await session(tools);
+    assert.equal((await callTool(url, auth, "exec_command", { cmd: "git status" })).isError, false);
+    assert.equal(calls.at(-1).body.arguments.cmd, "git status");
+  } finally { await tools.close(); tree.cleanup(); }
 });

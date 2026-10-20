@@ -41,6 +41,8 @@ import type {
   LauncherState,
   OperationState,
   RefreshPart,
+  RtkGain,
+  RtkStatus,
   Surface,
 } from "./types";
 
@@ -776,6 +778,7 @@ function LauncherShell({
                 <SidebarItem active={surface === "agent-orchestrator-teams"} icon="orchestrator" label="Orchestrator Team" onClick={() => navigateSurface("agent-orchestrator-teams")} />
                 <SidebarItem active={surface === "subagents"} icon="orchestrator" label="Subagents" onClick={() => navigateSurface("subagents")} />
                 <SidebarItem active={surface === "activity"} icon="activity" label={copy.activity} onClick={() => navigateSurface("activity")} />
+                <SidebarItem active={surface === "rtk"} icon="activity" label="RTK" onClick={() => navigateSurface("rtk")} />
                 <SidebarItem
                   active={surface === "instant-mcp"}
                   icon="mcp"
@@ -957,6 +960,9 @@ function LauncherShell({
             ))}
             {keepAlive("subagents", () => (
               <SubagentsSurface active={surface === "subagents"} setError={setError} />
+            ))}
+            {keepAlive("rtk", () => (
+              <RtkSurface active={surface === "rtk"} enabled={snapshot.state.rtkEnabled !== false} setError={setError} updateState={updateState} />
             ))}
             {keepAlive("agent-orchestrator-original", () => (
               <AgentOrchestratorOriginalSurface openMissions={() => navigateSurface("agent-orchestrator")} />
@@ -2375,6 +2381,80 @@ function SettingsSurface({
           </small>
         </span>
       </div>
+    </ContentSurface>
+  );
+}
+
+/**
+ * Runtime > RTK: the person's installed rtk (github.com/rtk-ai/rtk), which compacts the output of the
+ * shell commands chat agents run. Shows whether it is found and on, what it covers, and its own
+ * savings report (`rtk gain`); installs it with winget when it is missing.
+ */
+function RtkSurface({ active, enabled, setError, updateState }: {
+  active: boolean;
+  enabled: boolean;
+  setError: (error: string | null) => void;
+  updateState: (state: LauncherState) => void;
+}) {
+  const [status, setStatus] = useState<RtkStatus | null>(null);
+  const [gain, setGain] = useState<RtkGain | null>(null);
+  const [installing, setInstalling] = useState(false);
+  const [note, setNote] = useState("");
+  const refresh = useCallback(async () => {
+    try {
+      const next = await api!.rtkStatus();
+      setStatus(next);
+      setGain(next.installed ? await api!.rtkGain() : null);
+    } catch (cause) {
+      setError(messageOf(cause));
+    }
+  }, [setError]);
+  useEffect(() => { if (active) void refresh(); }, [active, enabled, refresh]);
+  const install = async () => {
+    setInstalling(true);
+    setNote("Installing rtk with winget…");
+    try {
+      const result = await api!.rtkInstall();
+      setStatus(result.status);
+      setNote(result.status.installed ? `rtk ${result.status.version} is installed.`
+        : `winget finished (exit ${result.code ?? "?"}) without a usable rtk. ${result.output.split(/\r?\n/).slice(-2).join(" ")}`);
+      if (result.status.installed) setGain(await api!.rtkGain());
+    } catch (cause) {
+      setNote("");
+      setError(messageOf(cause));
+    } finally {
+      setInstalling(false);
+    }
+  };
+  const found = status?.installed ? `rtk ${status.version} · ${status.path}` : status ? "Not installed" : "Checking…";
+  return (
+    <ContentSurface narrow title="RTK" subtitle="Compacts the output of the shell commands chat agents run, so the model reads a fraction of it: git, ls, cat, grep, tests and 100+ more (github.com/rtk-ai/rtk).">
+      <SectionHeading label="Agents" />
+      <div className="settings-list">
+        <SettingRow body={status?.installed
+          ? "On: every command a chat agent runs through Coding Tools' terminal goes through rtk first, whatever its harness, and Claude Code's own Bash tool gets rtk's hook in its session (new Claude Code sessions after the app restarts). Your own agent settings are never changed."
+          : "Install rtk to turn this on. Until then agents' commands run as written."}
+          label="Use RTK for agents' commands">
+          <Switch checked={enabled} disabled={!status?.installed}
+            onChange={(checked) => void api!.setPreference("rtkEnabled", checked).then(updateState).catch((cause) => setError(messageOf(cause)))} />
+        </SettingRow>
+        <SettingRow body={status?.installed ? `Version ${status.version} or later of ${status.minimum ?? "0.23.0"} is needed; this one works.` : note || `Install it from its own release with ${status?.installCommand ?? "winget install rtk-ai.rtk"}.`}
+          flushAfter label={found}>
+          <div className="inline-actions">
+            {!status?.installed ? <PrimaryButton disabled={installing || !status} onClick={() => void install()}>{installing ? "Installing…" : "Install rtk"}</PrimaryButton> : null}
+            <SecondaryButton disabled={installing} onClick={() => void refresh()}>Check again</SecondaryButton>
+          </div>
+        </SettingRow>
+      </div>
+      <SectionHeading label="Covered" />
+      <div className="settings-list">
+        <SettingRow body="exec_command from any harness (Claude Code, Codex, OpenCode, Antigravity…) is rewritten before it is reviewed, so an approval is for the command that runs. Approve for me judges it as the command rtk wraps." label="Coding Tools terminal tool"><span className="rtk-chip">{enabled && status?.installed ? "on" : "off"}</span></SettingRow>
+        <SettingRow body="rtk's PreToolUse hook (rtk hook claude) in each Claude Code session's own settings, so its built-in Bash tool's commands are compacted too." label="Claude Code Bash tool"><span className="rtk-chip">{enabled && status?.installed ? "on" : "off"}</span></SettingRow>
+        <SettingRow body="Their own shells are not hooked yet; their commands through Coding Tools' terminal are." flushAfter label="Codex, OpenCode and other harnesses' built-in shells"><span className="rtk-chip">terminal only</span></SettingRow>
+      </div>
+      <SectionHeading label="Savings" />
+      {gain?.available && gain.text ? <pre className="rtk-gain">{gain.text}</pre>
+        : <p className="surface-empty-note">{status?.installed ? "No savings recorded yet: rtk reports them once agents have run commands through it." : "rtk reports its savings here once it is installed."}</p>}
     </ContentSurface>
   );
 }

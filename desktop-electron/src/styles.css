@@ -2989,3 +2989,9 @@ code {
 
 /* A menu's down arrow (icons.tsx Caret): centred on its row, never squeezed by the text beside it. */
 .ui-caret { flex: none; align-self: center; display: block; opacity: .7; }
+
+/* Runtime > RTK (App.tsx RtkSurface). */
+.rtk-chip { display: inline-block; padding: 2px 10px; border: 1px solid var(--line, rgba(31, 30, 29, .15)); border-radius: 999px; font-size: 12px; color: var(--muted, #6b6a66); white-space: nowrap; }
+.rtk-gain { margin: 0; padding: 14px 16px; overflow: auto; max-height: 420px; border: 1px solid var(--line, rgba(31, 30, 29, .15)); border-radius: 10px;
+  background: var(--surface-2, rgba(31, 30, 29, .03)); font: 12px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace; white-space: pre; }
+.surface-empty-note { color: var(--muted, #6b6a66); font-size: 13px; }
