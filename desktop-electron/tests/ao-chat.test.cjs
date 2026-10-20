@@ -1223,3 +1223,28 @@ test("a working AO card's last sign of life comes from its activity time, for la
     "quiet as long as a stuck card");
   assert.equal(chat.chatWorkingDetail(card, { activity: "running" }, 900_000).heardAtMs, undefined, "never heard: nothing to show");
 });
+test("a restart resumes recent work only: an 11-day-old mission with a pending card stays put", () => {
+  const now = Date.parse("2026-10-20T14:30:00Z");
+  const oct9 = Date.parse("2026-10-09T14:22:31Z");
+  const team = (nodes) => ({ cancelled: false, execution_mode: "team", nodes });
+  // The revived mission: planner finished and reviewer pending since Oct 9.
+  const old = team([node("p", "planner", "finished", { receipt: { started_at_ms: oct9 } }),
+    node("r", "reviewer", "pending", { history: [{ started_at_ms: oct9 + 3_600_000 }] })]);
+  assert.equal(chat.restartResume(old, now), null, "abandoned long ago, not interrupted");
+  const recent = team([node("p", "planner", "finished", { receipt: { started_at_ms: now - 3_600_000 } }), node("r", "reviewer", "pending")]);
+  assert.equal(chat.restartResume(recent, now), "continue", "an hour-old mission still picks up");
+  const longRun = team([node("w", "worker", "running", { receipt: { started_at_ms: now - 20 * 3_600_000 } })]);
+  assert.equal(chat.restartResume(longRun, now), "continue", "a long mission inside the window still resumes");
+  assert.equal(chat.restartResume(team([node("q", "planner", "pending")]), now), "continue", "never started: no age to judge, still resumes");
+});
+
+test("a reviewer reset to pending by its own rework still shows its last review", () => {
+  const verdict = "CHANGES_REQUIRED: both workers must redo their evidence.";
+  const reviewer = node("r", "reviewer", "pending", { history: [{ answer: "older review" }, { answer: verdict }] });
+  const turns = chat.chatTurns([run("run1", "t1", [node("p", "planner", "finished", { receipt: { answer: "plan" } }), reviewer], { execution_mode: "team" })], "do it", { now: 0 });
+  const step = turns[0].steps.find((item) => item.role === "reviewer");
+  assert.ok(step, "the pending reviewer is not dropped from the turn");
+  assert.equal(step.text, `Last review:\n\n${verdict}`, "its newest verdict, labelled as a review");
+  const worker = node("w", "worker", "held", { history: [{ answer: "first try" }] });
+  assert.equal(chat.chatTurns([run("run2", "t1", [worker])], "x", { now: 0 })[0].steps[0].text, "Earlier attempt:\n\nfirst try");
+});
