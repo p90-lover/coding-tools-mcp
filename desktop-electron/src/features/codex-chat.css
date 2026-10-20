@@ -408,6 +408,17 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-step-body { margin: 2px 0 8px 22px; color: var(--color-text-primary); }
 .cx-step-detail { margin: 0 0 4px; color: var(--ao-muted); font-size: 12px; overflow-wrap: anywhere; }
 .cx-step-error { margin: 0; color: var(--ao-red); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* A card's earlier rounds (a reviewer's past cycles), folded: a one-line summary each, opening on its answer. */
+.cx-step-earlier { display: grid; gap: 2px; margin: 0 0 8px; }
+.cx-step-round > summary { display: flex; align-items: center; gap: 8px; padding: 2px 0; color: var(--ao-muted); font-size: 12px; cursor: pointer; list-style: none; }
+.cx-step-round > summary::-webkit-details-marker { display: none; }
+.cx-step-round > summary::before { content: "›"; display: inline-block; width: 10px; transition: transform .12s; }
+.cx-step-round[open] > summary::before { transform: rotate(90deg); }
+.cx-step-round > summary:hover { color: var(--color-text-primary); }
+.cx-step-round-verdict { padding: 0 6px; border-radius: 6px; background: color-mix(in srgb, var(--ao-muted) 14%, transparent); font-size: 11px; line-height: 16px; text-transform: none; }
+.cx-step-round-verdict.is-changes_required, .cx-step-round-verdict.is-failed { background: color-mix(in srgb, var(--ao-red) 12%, transparent); color: var(--ao-red); }
+.cx-step-round-verdict.is-approved { background: color-mix(in srgb, #16a34a 14%, transparent); color: #15803d; }
+.cx-step-round > :not(summary) { margin: 4px 0 8px 18px; padding-left: 10px; border-left: 2px solid var(--ao-line); }
 /* A working role's live turn: thinking, tool calls and streamed text, newest last. */
 .cx-live { display: grid; gap: 6px; margin: 4px 0 6px; padding: 0 0 0 10px; list-style: none; border-left: 1px solid var(--ao-line); }
 .cx-live-item { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; min-width: 0; color: var(--ao-muted); font-size: 13px; }

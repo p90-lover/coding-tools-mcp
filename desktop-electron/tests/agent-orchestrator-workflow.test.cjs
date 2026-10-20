@@ -1315,6 +1315,29 @@ test("a card interrupted by an app restart is retried directly, without asking t
   assert.equal(asked, 0);
 });
 
+test("with Retry automatically on, a step that lost the local proxy waits and is retried without asking the helper", async () => {
+  // Seen live: ProxyBridge restarted, CPA answered "proxyconnect tcp ... 127.0.0.1:17891 ... refused"
+  // for three minutes, and a team chat stopped on its failed steps.
+  const world = heldMissionWorld({ error: "API error 500: Post \"https://daily-cloudcode-pa.googleapis.com/...\": proxyconnect tcp: dial tcp 127.0.0.1:17891: connectex: No connection could be made" });
+  let asked = 0, offset = 0;
+  const states = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/Codex/codex.exe",
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
+    fetchImpl: async () => { asked += 1; throw new Error("the helper must not be asked"); },
+    webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
+    onRunState: (update) => states.push(String(update?.detail ?? "")),
+    now: () => Date.now() + offset,
+    resolveHarness: async () => ({ expected_sha256: "a".repeat(64), executable: path.resolve("codex.exe") }) });
+  await workflow.call("chat_auto_retry", { enabled: true });
+  await workflow.call("start_run", { workspaceId: "ws-1", runId: "r1" });
+  await until(() => states.some(detail => /lost its connection/.test(detail)));
+  assert.deepEqual(world.controls, [], "it waits first");
+  offset = 31_000;
+  await until(() => world.controls.length > 0);
+  assert.deepEqual(world.controls, ["retry"]);
+  assert.equal(asked, 0);
+});
+
 test("the helper stops retrying a card that already failed three times", async () => {
   const world = heldMissionWorld({ history: [{}, {}] });
   let asked = 0;

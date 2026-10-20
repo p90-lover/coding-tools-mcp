@@ -16,7 +16,7 @@ export type ChatNode = {
   /** `thread_id` is the card's AO session id when its harness is an AO agent ("ao:…"). */
   receipt?: { answer?: string; error?: string; verdict?: string; started_at_ms?: number; thread_id?: string };
   /** Earlier attempts' receipts, oldest first (a retry moves the last receipt here). */
-  history?: { answer?: string }[];
+  history?: { answer?: string; verdict?: string; error?: string }[];
 };
 
 /** One AO agent session of a chat, for its Preview and Terminal panes. */
@@ -670,7 +670,10 @@ export type ChatStep = {
   startedAtMs?: number;
   /** The card ran in an AO session, so its finished work can be read back (turn_timeline). */
   hasWork?: boolean;
+  /** Its earlier rounds (a reviewer's cycles, a retried card's attempts), oldest first, shown folded. */
+  earlier?: ChatStepRound[];
 };
+export type ChatStepRound = { label: string; text: string; verdict?: string };
 
 export type ChatTurn = {
   key: string;
@@ -784,7 +787,29 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
     const earlier = latestHistoryAnswer(node);
     if (earlier) step.text = `${earlierLabel(node)}\n\n${earlier}`;
   }
+  const rounds = earlierRounds(node, Boolean(step.text?.startsWith(earlierLabel(node))));
+  if (rounds.length) step.earlier = rounds;
   return step;
+}
+
+const REVIEW_CARD_ROLES = new Set<ChatNode["role"]>(["reviewer", "approver", "sub_reviewer"]);
+/**
+ * A card's earlier rounds, oldest first: a reviewer's past cycles (each verdict and why), a retried
+ * card's past attempts. Only the newest was ever shown ("Last review:"), and only until the card
+ * answered again, so how a review got where it is could not be followed. `shownLatest` leaves out
+ * the newest answered round when the step's own text already shows it.
+ */
+export function earlierRounds(node: ChatNode, shownLatest = false): ChatStepRound[] {
+  const history = node.history ?? [];
+  let latestAnswered = -1;
+  for (let index = history.length - 1; index >= 0; index -= 1) if (history[index]?.answer?.trim()) { latestAnswered = index; break; }
+  const noun = REVIEW_CARD_ROLES.has(node.role) ? "Cycle" : "Attempt";
+  return history.flatMap((entry, index) => {
+    const text = entry?.answer?.trim() || entry?.error?.trim();
+    if (!text || (shownLatest && index === latestAnswered)) return [];
+    const verdict = entry?.verdict || (!entry?.answer?.trim() && entry?.error ? "failed" : undefined);
+    return [{ label: `${noun} ${index + 1}`, text, ...(verdict ? { verdict } : {}) }];
+  });
 }
 
 /** The newest answer a card gave in an earlier attempt or round (a retry or rework moves it to history). */
