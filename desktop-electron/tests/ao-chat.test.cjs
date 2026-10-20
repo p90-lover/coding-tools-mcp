@@ -13,17 +13,70 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 const node = (id, role, state, extra = {}) => ({ id, role, state, x: 0, ...extra });
 const run = (id, taskId, nodes, extra = {}) => ({ id, project_id: taskId, cancelled: false, nodes, ...extra });
 
-test("a DeepSeek model's work is headed as DeepSeek Harness heads it: what it is doing live, the kinds of work once done", () => {
+test("a DeepSeek model's work is grouped and worded as DeepSeek Harness does it", () => {
   const item = (kind, extra = {}) => ({ id: `${kind}${Math.random()}`, kind, status: "completed", text: "", ...extra });
   assert.equal(chat.isDeepSeekModel("cpa/cline-pass/deepseek-v4.1-flash"), true);
   assert.equal(chat.isDeepSeekModel("cpa/cline-pass/glm-5.3-flash"), false);
-  assert.equal(chat.dshActivityTitle([item("tool", { label: "Read" }), item("command", { text: "npm test" })], true), "Running commands", "live: the latest step");
-  assert.equal(chat.dshActivityTitle([item("tool", { label: "Read" }), item("tool", { label: "Grep" }), item("command"), item("reasoning")], false),
-    "Read files, searched code and ran commands", "done: the kinds of work, no counts, thinking left out");
-  assert.equal(chat.dshActivityTitle([item("tool", { label: "Read" }), item("tool", { label: "Grep" }), item("command"), item("edit")], false),
-    "Read files, searched code and ran commands, etc.", "more than three kinds");
-  assert.equal(chat.dshActivityTitle([item("reasoning")], false), "Thought", "thinking alone");
-  assert.equal(chat.dshActivityTitle([item("tool", { text: "mcp__coding-tools__list_dir" })], false), "Read files", "an MCP read tool by its own name");
+  // step-process.ts: the top three kinds by number of calls, ties by first appearance, no counts.
+  const read = item("tool", { text: "mcp__coding-tools__read_file" });
+  assert.equal(chat.dshProcessTitle([read, item("command"), item("command"), item("reasoning")]), "Ran commands and read files", "most calls first, thinking left out");
+  assert.equal(chat.dshProcessTitle([read, item("tool", { label: "Grep" }), item("command")]), "Read files, searched code, ran commands", "a tie keeps first appearance");
+  assert.equal(chat.dshProcessTitle([read, item("tool", { label: "Grep" }), item("command"), item("edit")]), "Read files, searched code, ran commands, etc.", "past three kinds");
+  assert.equal(chat.dshProcessTitle([item("reasoning")]), "Analysis completed", "thinking alone");
+  assert.equal(chat.dshProcessTitle([item("command"), item("command"), item("command"), read, read]), "Ran commands and read files",
+    "a repeated call counts each time (each call is its own row now)");
+  // process-activity.ts: the app's MCP tools land in DeepSeek Harness's own kinds.
+  assert.equal(chat.dshActivity(item("tool", { text: "mcp__coding-tools__exec_command" })), "commands");
+  assert.equal(chat.dshActivity(item("tool", { text: "mcp__coding-tools__list_dir" })), "search");
+  assert.equal(chat.dshActivity(item("tool", { text: "mcp__coding-tools__apply_patch" })), "edit");
+  assert.equal(chat.dshActivity(item("tool", { text: "mcp__coding-tools__browser_open" })), "tools");
+  // ui-tool's row titles.
+  assert.equal(chat.dshToolTitle(item("command", { text: "npm test" })), "Bash");
+  assert.equal(chat.dshToolTitle(read), "Read");
+  assert.equal(chat.dshToolTitle(item("tool", { text: "mcp__coding-tools__exec_command" })), "Bash");
+  assert.equal(chat.dshToolTitle(item("tool", { text: "web_fetch" })), "Fetch");
+  assert.equal(chat.dshToolTitle(item("tool", { text: "mcp__coding-tools__browser_open" })), "Tool call");
+  // A row's detail: the agent's own words, else the command, path or query from its arguments.
+  assert.equal(chat.dshItemDetail(item("command", { text: "npm test", description: "Check backend health" })), "Check backend health");
+  assert.equal(chat.dshItemDetail(item("tool", { text: "read_file", input: JSON.stringify({ path: "src/app.ts" }) })), "src/app.ts");
+  assert.equal(chat.dshItemDetail(item("command", { text: "x".repeat(400) })).length, 160, "bounded to 160 characters");
+});
+
+test("a sent message splits back into its text and its attachments, for cards and thumbnails", () => {
+  const sent = chat.chatMessageWithAttachments("look at this", [
+    { name: "image-de5e4a0a.png", image: true, path: "G:\\AppData\\Coding Tools\\chat-attachments\\2026-10-20\\image-de5e4a0a.png" },
+    { name: "notes.txt", text: "a\n```\nb" },
+    { name: "spec.pdf", path: "C:/docs/spec.pdf" },
+  ]);
+  const parts = chat.chatMessageParts(sent);
+  assert.equal(parts.text, "look at this");
+  // Inline text files come first (read before the path lines), then the files sent by path, in order.
+  assert.deepEqual(plain(parts.attachments), [
+    { image: false, name: "notes.txt" },
+    { image: true, name: "image-de5e4a0a.png", path: "G:\\AppData\\Coding Tools\\chat-attachments\\2026-10-20\\image-de5e4a0a.png" },
+    { image: false, name: "spec.pdf", path: "C:/docs/spec.pdf" },
+  ]);
+  assert.deepEqual(plain(chat.chatMessageParts("Attached image: C:\\a.png")), { text: "", attachments: [{ image: true, name: "a.png", path: "C:\\a.png" }] });
+  assert.deepEqual(plain(chat.chatMessageParts("I said Attached image: inline")), { text: "I said Attached image: inline", attachments: [] }, "only a line of its own");
+});
+
+test("a DeepSeek turn's live heading, Think line and durations read as DeepSeek Harness's", () => {
+  const item = (kind, extra = {}) => ({ id: `${kind}${Math.random()}`, kind, status: "completed", text: "", ...extra });
+  assert.equal(chat.dshLiveTitle([item("reasoning", { text: "x" }), item("command", { status: "running", text: "npm test" })]).label, "Running commands · npm test");
+  assert.equal(chat.dshLiveTitle([item("command"), item("reasoning", { text: "First idea.\n\n**Second** idea" })]).label,
+    "Analyzing the request · Second idea", "no call running: the latest thought's last paragraph, ** dropped");
+  // ReasoningRow.tsx: settled, the first line; streaming, the newest completed paragraph's first line.
+  assert.equal(chat.dshThinkSummary("**Checking health**\nmore", false), "Checking health");
+  assert.equal(chat.dshThinkSummary("Let me check health.\nok\n\nNow the configs\nstill typing", true), "Now the configs");
+  assert.equal(chat.dshThinkSummary("Still on the first line", true), "", "nothing until a line completes");
+  // formatRunDuration: "4s", "1m 4s", "1h 0m 4s", never under a second.
+  assert.equal(chat.dshDuration(400), "1s");
+  assert.equal(chat.dshDuration(64_000), "1m 4s");
+  assert.equal(chat.dshDuration(3_604_000), "1h 0m 4s");
+  // process-groups.ts: thinking and calls run together; a reply or a steered message stands alone.
+  const segments = chat.dshSegments([item("reasoning"), item("command"), item("message"), item("edit"), item("steer"), item("tool")]);
+  assert.deepEqual(plain(segments.map((segment) => segment.kind === "group" ? `group:${segment.items.length}` : segment.item.kind)),
+    ["group:2", "message", "group:1", "steer", "group:1"]);
 });
 
 test("the stats line counts the latest turn and the failed or stopped attempts right before it, on every model they used", () => {
@@ -1001,7 +1054,7 @@ test("a queued message survives an unmount while its delivery fails", async () =
   assert.deepEqual(plain(queues.get("task-a")), [next]);
 });
 
-test("a turn's activity drops answered approvals, counts a call made again and again, and folds runs of calls and thinking", () => {
+test("a turn's activity drops answered approvals, keeps every tool call, and folds runs of calls and thinking", () => {
   const items = [
     { id: "1", kind: "reasoning", status: "completed", text: "Let me wait for the tests" },
     { id: "2", kind: "tool", status: "completed", label: "MCP", text: "mcp__coding-tools__read_output" },
@@ -1016,14 +1069,84 @@ test("a turn's activity drops answered approvals, counts a call made again and a
     { id: "11", kind: "edit", status: "completed", text: "a.ts", files: [] },
   ];
   const tidy = chat.tidyTimeline(items);
-  assert.deepEqual([...tidy.map((item) => item.id)], ["1", "2", "7", "8", "9", "10", "11"], "answered approvals drop; a denied or timed-out one stays; a repeated call keeps its first id");
-  assert.equal(tidy[1].count, 3, "three read_output calls are one row");
-  assert.equal(tidy[1].status, "running", "the row keeps the latest call's state");
+  assert.deepEqual([...tidy.map((item) => item.id)], ["1", "2", "4", "6", "7", "8", "9", "10", "11"],
+    "answered approvals drop; a denied or timed-out one stays; each read_output call keeps its own row");
   const segments = chat.groupTimeline(tidy);
   assert.deepEqual([...segments.map((segment) => segment.kind === "group" ? `group:${segment.items.length}` : segment.item.id)],
-    ["group:2", "7", "8", "group:1", "10", "11"]);
-  assert.equal(chat.activitySummary(segments[0].items), "read_output ×3 · 1 thought");
-  assert.equal(chat.activitySummary([{ id: "c", kind: "command", status: "completed", text: "ls", count: 2 }]), "Ran 2 commands");
+    ["group:4", "7", "8", "group:1", "10", "11"]);
+  assert.equal(chat.activitySummary(segments[0].items), "read_output ×3 · 1 thought", "the folded line still tallies them");
+  const ls = { id: "c", kind: "command", status: "completed", text: "ls" };
+  assert.equal(chat.activitySummary([ls, { ...ls, id: "d" }]), "Ran 2 commands");
+});
+
+test("an answered request is no row of its own: its answer shows on the call it let run", () => {
+  const tidy = chat.tidyTimeline([
+    { id: "1", kind: "command", status: "completed", text: "python diag.py" },
+    { id: "2", kind: "approval", status: "completed", text: "PowerShell", approval: "Allowed by the reviewer: reads the project's own database" },
+    { id: "3", kind: "tool", status: "completed", label: "MCP", text: "exec_command" },
+    { id: "4", kind: "approval", status: "completed", text: "exec_command", approval: "Allowed by Approve for me" },
+    { id: "5", kind: "approval", status: "rejected", text: "git push", approval: "Denied by the reviewer: pushes" },
+    { id: "6", kind: "approval", status: "pending", text: "rm -rf", approval: "Allowed" },
+  ]);
+  assert.deepEqual([...tidy.map((item) => [item.id, item.approval ?? null])], [
+    ["1", "Allowed by the reviewer: reads the project's own database"], ["3", "Allowed by Approve for me"],
+    ["5", "Denied by the reviewer: pushes"]], "allowed answers fold into their calls; a denial keeps its row; a pending one waits");
+});
+
+test("an edit's diff is numbered from its hunk header, old lines on the left and new on the right", () => {
+  const rows = (diff) => [...chat.numberedDiff(diff).map((line) => [line.kind, line.old ?? null, line.new ?? null, line.text])];
+  assert.deepEqual(rows("@@ -98,4 +98,4 @@\n line 97\n-line 98\n+changed 98\n line 99\n line 100"), [
+    ["ctx", 98, 98, "line 97"], ["del", 99, null, "line 98"], ["add", null, 99, "changed 98"], ["ctx", 100, 100, "line 99"], ["ctx", 101, 101, "line 100"]]);
+  assert.deepEqual(rows("--- a.py\n+++ a.py\n@@ -0,0 +1,2 @@\n+one\n+two"), [["add", null, 1, "one"], ["add", null, 2, "two"]],
+    "a new file counts from line 1 and its file header is left out");
+  assert.deepEqual(rows("-old\n+new"), [["del", null, null, "old"], ["add", null, null, "new"]], "a snippet edit has no place to number from");
+  assert.deepEqual(rows("@@ -1,1 +1,1 @@\n-a\n+b\n@@ -9,1 +9,1 @@\n-c\n+d").map((row) => row[0]), ["del", "add", "hunk", "del", "add"],
+    "a later hunk shows as a separator");
+});
+
+test("Approve for me keeps a command's card off the screen while it is answered, never a question's", () => {
+  const auto = { approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  assert.equal(chat.approvalAnsweredForYou({ kind: "command" }, auto, 1000), true);
+  assert.equal(chat.approvalAnsweredForYou({ kind: "permission" }, { approval_policy: "never" }, 1000), true, "full access too");
+  assert.equal(chat.approvalAnsweredForYou({ kind: "question" }, auto, 1000), false, "a question is the person's");
+  assert.equal(chat.approvalAnsweredForYou({ kind: "plan" }, auto, 1000), false, "so is a plan");
+  assert.equal(chat.approvalAnsweredForYou({ kind: "command" }, auto, chat.SELF_ANSWER_GRACE_MS), false, "one still waiting after the grace shows");
+  assert.equal(chat.approvalAnsweredForYou({ kind: "command" }, { approval_policy: "on-request" }, 1000), false, "Ask me always shows");
+  assert.equal(chat.approvalAnsweredForYou({ kind: "command" }, auto, 1000, true), false, "a team's Command approver decides, so its card shows");
+});
+
+test("a refresh that found nothing new keeps the runs and activity objects already held", () => {
+  const run = (id, revision, state = "running") => ({ id, revision, cancelled: false, nodes: [{ id: "n", state }] });
+  const held = [run("a", 3), run("b", 7)];
+  assert.equal(chat.keepRevisions(held, [run("a", 3), run("b", 7)]), held, "same revisions and states: the same array");
+  const moved = chat.keepRevisions(held, [run("a", 4), run("b", 7)]);
+  assert.notEqual(moved, held);
+  assert.equal(moved[1], held[1], "an unchanged run keeps its object");
+  assert.equal(moved[0].revision, 4, "a new revision comes through");
+  assert.notEqual(chat.keepRevisions(held, [run("a", 3, "finished"), run("b", 7)])[0], held[0], "a card that moved without a new revision still shows");
+
+  const item = (id, text, status = "completed") => ({ id, kind: "message", status, text });
+  const frames = { "r:n": { activity: "working", timeline: [item("1", "hello"), item("2", "wor", "running")] } };
+  const copy = JSON.parse(JSON.stringify(frames));
+  assert.equal(chat.mergeActivityFrames(frames, copy), frames, "an IPC copy of the same frame keeps the held map");
+  const grown = chat.mergeActivityFrames(frames, { "r:n": { activity: "working", timeline: [item("1", "hello"), item("2", "world", "running")] } });
+  assert.notEqual(grown, frames);
+  assert.equal(grown["r:n"].timeline[0], frames["r:n"].timeline[0], "the unchanged item keeps its object, so its row skips");
+  assert.equal(grown["r:n"].timeline[1].text, "world", "the growing message comes through");
+  assert.equal(chat.mergeActivityFrames(frames, {})["r:n"], undefined, "a card that stopped working drops out");
+});
+
+test("a card's timeline keeps the steps that fell out of the newest poll, and a new attempt starts over", () => {
+  const item = (id) => ({ id, kind: "tool", status: "completed", text: `call ${id}` });
+  const seen = [item("1"), item("2"), item("3")];
+  const ids = (items) => [...items.map((entry) => entry.id)];
+  assert.deepEqual(ids(chat.mergeTimeline(null, seen)), ["1", "2", "3"]);
+  // The poll window moved on: 1 and 2 are no longer in it, 3 changed state and 4 is new.
+  const later = chat.mergeTimeline(seen, [{ ...item("3"), status: "running" }, item("4")]);
+  assert.deepEqual(ids(later), ["1", "2", "3", "4"]);
+  assert.equal(later[2].status, "running", "an item still in the window takes its latest state");
+  // A retry reuses the card's key; its first poll shares nothing with the old attempt.
+  assert.deepEqual(ids(chat.mergeTimeline(later, [item("9")])), ["9"]);
 });
 
 test("a single-model chat's card is named by its model, a team's by its role", () => {

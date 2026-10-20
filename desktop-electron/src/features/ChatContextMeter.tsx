@@ -31,6 +31,8 @@ export type ContextBreakdown = {
   used: number; window: number | null; free: number | null;
   categories: { id: string; label: string; tokens: number }[];
   counts: { messages: number; toolCalls: number }; sinceCompaction: boolean; complete: boolean;
+  /** When the agent last compacted on its own, from its history (AO's compactedAt covers only /compact). */
+  compactedAt?: string | null;
 };
 export type ChatContextSnapshot = {
   controller: string | null; usage: Usage | null; rateLimits: RateLimits | null; compactedAt: string | null;
@@ -74,8 +76,6 @@ function checkedLabel(at: number | null, now = Date.now()): string {
 
 /** "deepseek-v4.1-flash" from "cpa/cline-pass/deepseek-v4.1-flash". */
 const modelName = (model?: string) => (model ? model.slice(model.lastIndexOf("/") + 1) : "");
-/** The legend's short names; the full ones are on hover. */
-const SHORT_CATEGORY: Record<string, string> = { system: "System", tools: "Tool calls", messages: "Messages" };
 
 const tone = (fraction: number | null) => (fraction === null ? "unknown" : fraction >= 0.85 ? "high" : fraction >= 0.6 ? "mid" : "low");
 
@@ -123,31 +123,37 @@ export function contextGrid(categories: { id: string; tokens: number }[], window
 
 type Segment = { id: string; label: string; tokens: number };
 
+/** Claude Code's order and names for the parts of the window it lists. */
+const CC_ROWS: { id: string; label: string }[] = [
+  { id: "messages", label: "Messages" }, { id: "tools", label: "Tool calls & results" },
+  { id: "system", label: "System prompt & tools" }, { id: "used", label: "In use" },
+];
+const share = (tokens: number, scale: number) => `${((tokens / scale) * 100).toFixed(1)}%`;
+
 /**
- * The window as one stacked bar: each part of the context (system and tools, messages, or only
- * "used" when the agent reports a total) a segment, the rest free. It sweeps in when the panel
- * opens; pointing at a segment or its legend chip lifts both.
+ * The window as Claude Code's Context card draws it: "53% used" over "526.6k / 1M", one thin bar
+ * of the parts, then a row per part (a colored square, its name, its tokens and share), free space
+ * last. Pointing at a row lifts its segment.
  */
-function ContextBar({ segments, scale, estimated }: { segments: Segment[]; scale: number; estimated: string | null }) {
+function ContextRows({ segments, scale, used, estimated }: { segments: Segment[]; scale: number; used: number; estimated: string | null }) {
   const [focus, setFocus] = useState("");
-  const used = segments.reduce((sum, segment) => sum + segment.tokens, 0);
-  const free = Math.max(0, scale - used);
-  const parts = [...segments.filter((segment) => segment.tokens > 0), ...(free > 0 ? [{ id: "free", label: "Free", tokens: free }] : [])];
-  const share = (tokens: number) => `${((tokens / scale) * 100).toFixed(tokens / scale < 0.1 ? 1 : 0)}%`;
-  return <div className={`cx-ctx-stack${focus ? " has-focus" : ""}`} onPointerLeave={() => setFocus("")}>
-    <div className="cx-ctx-track" role="img" aria-label={parts.map((part) => `${part.label} ${tokensShort(part.tokens)}`).join(", ")}>
-      {parts.map((part) => <span key={part.id} className={`is-${part.id}${focus === part.id ? " is-focus" : ""}`}
-        style={{ flexBasis: `${(part.tokens / scale) * 100}%` }} title={`${part.label} · ${tokensShort(part.tokens)} · ${share(part.tokens)}`}
-        onPointerEnter={() => setFocus(part.id)} />)}
+  const parts = CC_ROWS.map((row) => ({ ...row, tokens: segments.find((segment) => segment.id === row.id)?.tokens ?? 0 }))
+    .filter((part) => part.tokens > 0);
+  const free = Math.max(0, scale - parts.reduce((sum, part) => sum + part.tokens, 0));
+  return <div className={`cx-ctx-cc${focus ? " has-focus" : ""}`} onPointerLeave={() => setFocus("")}>
+    <div className="cx-ctx-cc-head"><b>{Math.round((used / scale) * 100)}% used</b><span>{tokensShort(used)} / {tokensShort(scale)}</span></div>
+    <div className="cx-ctx-cc-bar" role="img" aria-label={[...parts, { id: "free", label: "Free space", tokens: free }].map((part) => `${part.label} ${tokensShort(part.tokens)}`).join(", ")}>
+      {parts.map((part) => <span key={part.id} className={`is-${part.id}${focus === part.id ? " is-focus" : ""}`} style={{ flexBasis: `${(part.tokens / scale) * 100}%` }} />)}
     </div>
-    <ul className="cx-ctx-legend">
-      {parts.map((part) => <li key={part.id} className={focus === part.id ? "is-focus" : undefined} onPointerEnter={() => setFocus(part.id)}
-        title={part.id !== "free" && estimated ? estimated : undefined}>
-        <i className={`is-${part.id}`} aria-hidden="true" />{part.label}<b>{tokensShort(part.tokens)}</b>
+    <ul className="cx-ctx-cc-rows">
+      {[...parts, { id: "free", label: "Free space", tokens: free }].map((part) => <li key={part.id} className={focus === part.id ? "is-focus" : undefined}
+        onPointerEnter={() => setFocus(part.id)} title={part.id !== "free" && estimated ? estimated : undefined}>
+        <i className={`is-${part.id}`} aria-hidden="true" /><span>{part.label}</span><b>{tokensShort(part.tokens)}</b><em>{share(part.tokens, scale)}</em>
       </li>)}
     </ul>
   </div>;
 }
+
 
 export function ChatContextMeter({ sessionId, agentLabel, model, launchedWindow, nextWindow, canCompact, onCompact, onFraction }: {
   sessionId?: string;
@@ -180,7 +186,10 @@ export function ChatContextMeter({ sessionId, agentLabel, model, launchedWindow,
     const read = () => void getCodingToolsClient().apps.call({ moduleId: "agent-orchestrator", operation: "chat_context", arguments: { sessionIds: [sessionId] } })
       .then((outer) => {
         const sessions = (outer.result as { sessions?: Record<string, ChatContextSnapshot> } | undefined)?.sessions;
-        if (live) setSnapshot(sessions?.[sessionId] ?? null);
+        // A reply without this session is a read that failed (AO busy or restarting, a timeout),
+        // not a session with no context: the last reading stays instead of the meter emptying.
+        const next = sessions?.[sessionId];
+        if (live && next) setSnapshot(next);
       })
       .catch(() => undefined);
     read();
@@ -211,11 +220,13 @@ export function ChatContextMeter({ sessionId, agentLabel, model, launchedWindow,
     return () => { live = false; window.clearInterval(timer); target?.removeEventListener("click", onOpen); };
   }, [onCpaCodex, onCpaCline]);
 
-  // The category split reads the chat's history, so only while the panel is open.
+  // The category split reads the chat's history, so only while the panel is open. The last split
+  // stays across openings and failed reads: clearing it on every open showed only "Used" until a
+  // read landed, and for good when one failed.
   const [detail, setBreakdown] = useState<ContextBreakdown | null>(null);
   const isOpen = Boolean(open);
+  useEffect(() => { setBreakdown(null); }, [sessionId]);
   useEffect(() => {
-    setBreakdown(null);
     if (!isOpen || !sessionId) return undefined;
     let live = true;
     // Each read can page through thousands of timeline entries: one at a time, and none while hidden.
@@ -226,7 +237,7 @@ export function ChatContextMeter({ sessionId, agentLabel, model, launchedWindow,
       void getCodingToolsClient().apps.call({ moduleId: "agent-orchestrator", operation: "chat_context", arguments: { sessionIds: [sessionId], detail: true } })
         .then((outer) => {
           const session = (outer.result as { sessions?: Record<string, ChatContextSnapshot> } | undefined)?.sessions?.[sessionId];
-          if (live) setBreakdown(session?.breakdown ?? null);
+          if (live && session?.breakdown) setBreakdown(session.breakdown);
         })
         .catch(() => undefined)
         .finally(() => { pending = false; });
@@ -285,7 +296,9 @@ export function ChatContextMeter({ sessionId, agentLabel, model, launchedWindow,
 
   // An agent can report more in use than its window; the bar then measures against the larger figure.
   const scale = usage?.contextWindow ? Math.max(usage.contextWindow, breakdown?.used ?? 0, usage.contextUsed ?? 0) : null;
-  const estimated = breakdown ? `Estimated from ${breakdown.counts.messages} messages and ${breakdown.counts.toolCalls} tool calls${breakdown.sinceCompaction ? " since the last compaction" : ""}${breakdown.complete ? "" : " (the most recent ones)"}; the agent reports only its total.` : null;
+  // AO's own record of a /compact, else the agent's own compaction found in the history (breakdown).
+  const compactedAt = snapshot?.compactedAt || breakdown?.compactedAt || null;
+  const estimated = breakdown ?`Estimated from ${breakdown.counts.messages} messages and ${breakdown.counts.toolCalls} tool calls${breakdown.sinceCompaction ? " since the last compaction" : ""}${breakdown.complete ? "" : " (the most recent ones)"}; the agent reports only its total.` : null;
 
   return <>
     <button ref={button} type="button" className={`cx-icon-button cx-context-meter is-${tone(fraction)}`} aria-label={label} title={label}
@@ -315,13 +328,11 @@ export function ChatContextMeter({ sessionId, agentLabel, model, launchedWindow,
           })() : null}
         </header>
         {!sessionId || !usage ? <p className="cx-ctx-empty">{!sessionId ? "No agent yet" : "Waiting for the agent's first reply"}</p> : <>
-          <div className="cx-ctx-hero">
-            <b className={`is-${tone(fraction)}`}>{fraction === null ? tokensShort(usage.contextUsed) : `${Math.round(fraction * 100)}%`}</b>
-            <span>{fraction === null ? "tokens in context" : <>{tokensShort(usage.contextUsed)} <em>of</em> {tokensShort(usage.contextWindow)} used</>}</span>
-          </div>
-          {scale ? <ContextBar scale={scale} estimated={estimated}
-            segments={breakdown ? breakdown.categories.map((category) => ({ id: category.id, label: SHORT_CATEGORY[category.id] ?? category.label, tokens: category.tokens }))
-              : [{ id: "used", label: "Used", tokens: usage.contextUsed ?? 0 }]} /> : null}
+          {scale ? <ContextRows scale={scale} used={usage.contextUsed ?? 0} estimated={estimated}
+            segments={breakdown ? breakdown.categories.map((category) => ({ id: category.id, label: category.label, tokens: category.tokens }))
+              : [{ id: "used", label: "In use", tokens: usage.contextUsed ?? 0 }]} />
+            : <div className="cx-ctx-cc-head"><b>{tokensShort(usage.contextUsed)}</b><span>tokens in context</span></div>}
+          {scale && !breakdown ? <p className="cx-ctx-meta">Reading the split from the chat's history…</p> : null}
           {pendingWindow ? <p className="cx-ctx-meta"><span className="is-pending">Next run {tokensShort(pendingWindow)}</span></p> : null}
           {/* The conversation's spend as a short list, the cached share beside the input it saved:
               five equal tiles left each number too narrow to read. */}
@@ -376,10 +387,10 @@ export function ChatContextMeter({ sessionId, agentLabel, model, launchedWindow,
             {server.name}</li>)}</ul>
         </section> : null}
         <footer className="cx-ctx-foot">
-          <span title={snapshot?.compactedAt ? new Date(snapshot.compactedAt).toLocaleString() : undefined}>{snapshot?.compactedAt ? `Compacted ${agoLabel(Date.parse(snapshot.compactedAt), false)}` : "Never compacted"}
+          <span title={compactedAt ? new Date(compactedAt).toLocaleString() : undefined}>{compactedAt ? `Compacted ${agoLabel(Date.parse(compactedAt), false)}` : "Never compacted"}
             {overridden ? <span title={`The agent's own report says ${tokensShort(reported?.contextWindow ?? null)}`}> · launched at {tokensShort(launched!)}</span> : null}</span>
           <button type="button" disabled={!canCompact} title={canCompact ? "Summarize the history to free context (/compact)" : "Compact works once the chat is not running"}
-            onClick={() => { setOpen(null); onCompact(); }}>Compact</button>
+            onClick={() => { setOpen(null); onCompact(); }}>Compact session</button>
         </footer>
       </div>
     </FloatingLayer> : null}

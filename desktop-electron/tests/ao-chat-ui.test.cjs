@@ -23,8 +23,10 @@ const menu = load("ChatMenu.tsx");
 const client = { getCodingToolsClient: () => ({ apps: { call: async () => ({ result: { sessions: {} } }) } }) };
 const meter = load("ChatContextMeter.tsx", { "./ao-chat": chat, "./ChatMenu": menu, "./AgentOrchestratorRoleEditor": roles,
   "../api/client": client, "./cpa-usage": load("cpa-usage.ts", { "../api/client": client }) });
+const toolParts = load("ChatToolParts.tsx", { "./ao-chat": chat, "./ChatMarkdown": markdown });
+const dsh = load("DshTranscript.tsx", { "./ao-chat": chat, "./ChatMarkdown": markdown, "./ChatToolParts": toolParts });
 const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null, Caret: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
-  "./ChatContextMeter": meter,
+  "./ChatContextMeter": meter, "./DshTranscript": dsh, "./ChatToolParts": toolParts,
   "./ChatPet": load("ChatPet.tsx", { "./ao-chat": chat }),
   "./ChatTurnStats": load("ChatTurnStats.tsx", { "./ao-chat": chat, "../api/client": client }),
   "./codex-prompts": load("codex-prompts.ts"),
@@ -36,6 +38,36 @@ const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "../icons": { 
   // The side panel opens on demand; the chat only needs its auto-open hook to exist here.
   "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => {} },
   "./ChatThreadList": load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu }) });
+
+test("a DeepSeek turn renders as DeepSeek Harness's: flat rows and Deep diving while it runs, Completed once it ends", () => {
+  const timeline = [
+    { id: "r1", kind: "reasoning", status: "completed", text: "**Let me check health.**\nThen the configs." },
+    { id: "c1", kind: "command", status: "completed", text: "curl /healthz", description: "Check backend health", output: "ok" },
+    { id: "e1", kind: "edit", status: "completed", text: "", files: [{ path: "src/_recovery_state.py", additions: 28, deletions: 0, diff: "+a" }] },
+    { id: "t1", kind: "tool", status: "running", text: "mcp__coding-tools__read_file", input: JSON.stringify({ path: "README.md" }) },
+  ];
+  const step = { key: "s", nodeId: "n", role: "planner", name: "DeepSeek V4.1 Flash", detail: "", state: "running", startedAtMs: Date.now() - 64_000,
+    working: { detail: "", stalled: false, timeline } };
+  const turn = { key: "k", runId: "run", steps: [step], status: "running", solo: false, startedAtMs: Date.now() - 64_000 };
+  const useWork = (item) => item.working?.timeline ?? null;
+  const running = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn, live: true, expanded: false, useWork }));
+  assert.match(running, /dsh-title">Think<\/span><span class="dsh-sep"[^>]*><\/span><span class="dsh-summary">Let me check health\.<\/span>/, "a Think row with its first line, ** dropped");
+  assert.match(running, />Bash<\/span><span class="dsh-sep"[^>]*><\/span><span class="dsh-summary">Check backend health</, "a Bash row with the agent's words");
+  assert.match(running, />Edit<\/span>.*src\/_recovery_state\.py.*\+28<\/span> <span class="is-del">-0</, "an Edit row with its path and totals");
+  assert.match(running, /dsh-row-text dsh-shimmer"><span class="dsh-title">Read<\/span>.*README\.md/, "the running call shimmers");
+  assert.match(running, /Deep diving for 1m [45]s ···/, "the running status, with its clock");
+  assert.doesNotMatch(running, /dsh-group-title|dsh-turn-process/, "a running turn stays flat, without a Completed header");
+  // The same turn, seen ending: it took 1m 4s. A turn ended before the chat saw it says only "Completed".
+  const settled = (key) => ({ ...turn, key, status: "done", steps: [{ ...step, state: "finished", working: undefined, hasWork: true }] });
+  const doneWork = () => timeline.map((item) => ({ ...item, status: "completed" }));
+  const done = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn: settled("k"), live: false, expanded: true, useWork: doneWork }));
+  assert.match(done, /dsh-turn-process-label">Completed in <span class="dsh-num">1m [45]s<\/span>/, "a turn seen ending is headed with its time");
+  assert.match(done, /dsh-group-label">Ran commands, edited files, read files</, "its work grouped under the kinds it did");
+  assert.doesNotMatch(done, /Deep diving/);
+  const earlier = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn: settled("older"), live: false, expanded: false, useWork: doneWork }));
+  assert.match(earlier, /dsh-turn-process-label">Completed<\/span>/, "an earlier turn says Completed");
+  assert.doesNotMatch(earlier, /dsh-group/, "and stays folded until opened");
+});
 
 test("every new card starts with instructions and an expected output for its role", () => {
   const team = roles.defaultTeam("workspace", roles.workerRoute(roles.DEFAULT_WORKER_HARNESS, roles.DEFAULT_WORKER_MODEL));
@@ -228,6 +260,20 @@ test("the side panel opens on an Overview of the chat: environment, context, cha
   for (const heading of ["Environment", "Context", "Changes", "Background tasks", "Usage"]) assert.match(html, new RegExp(`<h4>${heading}`), heading);
   assert.match(html, /glm-5\.3-flash/, "the model by its own name");
   assert.match(html, /Today<\/button>/, "usage can switch between today, 7 and 30 days");
+});
+
+test("the Terminal pane opens for a server or the project's app launcher, never for a one-off tool call", () => {
+  // Seen live: every `git status` and `ls` the agent ran opened the pane beside the chat.
+  const workbench = load("ChatWorkbench.tsx", { "../api/client": client, "../icons": { Icon: () => null } });
+  const now = 1_000_000;
+  const command = (cmd, extra = {}) => ({ id: "c", cmd, workdir: ".", startedAt: now - 2000, status: "running", exitCode: null, source: "agent", ...extra });
+  assert.equal(workbench.opensTerminal(command("git status --short | head -80"), now), false, "a one-off call does not");
+  assert.equal(workbench.opensTerminal(command("aiTemp\\run_app.cmd"), now), true, "the user's app launcher does");
+  assert.equal(workbench.opensTerminal(command("npm run dev"), now), true, "a dev server does");
+  assert.equal(workbench.opensTerminal(command("pytest -q", { status: "background", background: true }), now), true, "one left in the background does");
+  assert.equal(workbench.opensTerminal(command("pytest -q", { startedAt: now - 61_000 }), now), false, "a long test run does not");
+  assert.equal(workbench.opensTerminal(command("scripts/start-server.ps1"), now), true, "nor does it miss a start-server script");
+  assert.equal(workbench.opensTerminal(command("npm run dev", { status: "exited", exitCode: 0 }), now), false, "an ended command never does");
 });
 
 test("an agent's new page brings the Preview pane forward, even over the Terminal its dev server opened", () => {

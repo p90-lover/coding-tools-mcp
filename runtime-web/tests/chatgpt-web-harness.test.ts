@@ -361,7 +361,8 @@ describe("ChatGPT outer-native harness v4", () => {
       browserStarts += 1;
       expect(turn.capabilities.localToolsEnabled).toBe(true);
       const prepared = await turn.prepare();
-      expect(prepared.text).toContain("<codex_context_json>");
+      // A first message goes as the person's own prompt and its turn-token line, not the contract.
+      expect(prepared.text).not.toContain("<codex_context_json>");
       expect(prepared.text).toMatch(/turn_token turn_[A-Za-z0-9_-]+/);
       const answer = "Canonical metadata accepted";
       turn.onTextDelta(answer);
@@ -2495,7 +2496,8 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(turn.capabilities.localToolsEnabled).toBe(true);
       const prepared = await turn.prepare();
       try {
-        expect(prepared.text).toContain("For local work required by the task, use the attached Codex Native tools directly");
+        // The person's prompt and its turn-token line; the token alone binds the native tools.
+        expect(prepared.text).not.toContain("<codex_context_json>");
         expect(prepared.text).not.toContain("with no Codex Native bridge");
         const token = prepared.text.match(/turn_token (turn_[A-Za-z0-9_-]+)/)?.[1];
         if (!token) throw new Error("turn token missing from compiled Pro prompt");

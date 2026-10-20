@@ -75,31 +75,104 @@ export type ChatActivity = {
 export type ChatLiveItem = {
   id: string; kind: string; status: string; text: string; label?: string;
   description?: string; input?: string; output?: string;
-  /** The same call made this many times in a row (tidyTimeline). */
-  count?: number;
   /** For kind "edit": the files it changed (Claude Code's "Edited <file> +12 −3"). */
   files?: ChatEditedFile[];
+  /**
+   * On a kind "approval" item, who answered the request ("Allowed by the reviewer: …"); on a tool
+   * call, the answer that let it run, folded in by tidyTimeline.
+   */
+  approval?: string;
 };
 /**
- * A turn's activity as it reads: requests "Approve for me" (or the user) already answered drop
- * out, since every tool call left a second "Approval <tool>" row under it, and the same call made
- * again and again ("read_output" while a test runs) is one row with a count. A request that timed
- * out or was cancelled (AO labels those) still shows.
+ * A turn's activity as it reads. A request "Approve for me" (or the user) allowed is no row of its
+ * own (every tool call left a second "Approval <tool>" row under it): its answer goes on the tool
+ * call before it, which shows who let it run. A request that was denied, timed out or cancelled
+ * (AO labels those) keeps its row. Every tool call keeps its own row: calls to the same tool ran
+ * different commands, and folding them into one row with a count showed only the last call's input
+ * and output.
  */
 export function tidyTimeline(items: ChatLiveItem[]): ChatLiveItem[] {
   const out: ChatLiveItem[] = [];
   for (const item of items) {
-    if (item.kind === "approval" && !item.label && !/reject|denied|declin/i.test(item.status)) continue;
-    const last = out.at(-1);
-    if (last && (item.kind === "tool" || item.kind === "command") && last.kind === item.kind && last.label === item.label
-      && last.text === item.text && (last.description ?? "") === (item.description ?? "")) {
-      // The row keeps the first call's id: it keys the row (and its group), so one the user opened stays open.
-      out[out.length - 1] = { ...item, id: last.id, count: (last.count ?? 1) + 1 };
-      continue;
+    const answered = item.kind === "approval" && !item.label && !/reject|denied|declin/i.test(item.status);
+    if (!answered) { out.push(item); continue; }
+    if (!item.approval || /pending/i.test(item.status)) continue;
+    // ACP asks after the call it is about, so the answer belongs to the nearest call still without one.
+    for (let at = out.length - 1; at >= 0; at -= 1) {
+      const call = out[at];
+      if (!["tool", "command", "edit"].includes(call.kind)) continue;
+      if (!call.approval) out[at] = { ...call, approval: item.approval };
+      break;
     }
-    out.push(item);
   }
   return out;
+}
+
+/**
+ * `next` runs with each unchanged run (same id and revision) kept as the object already held, and
+ * `previous` itself when nothing changed, so a refresh that found nothing new re-renders nothing.
+ * A run push used to replace every run with a fresh copy several times a second while a model
+ * streamed, and the chat rebuilt all its turns each time.
+ */
+export function keepRevisions<T extends { id: string; revision?: number; cancelled?: boolean; nodes?: { id: string; state: string }[] }>(previous: T[], next: T[]): T[] {
+  const held = new Map(previous.map((run) => [run.id, run]));
+  // The cards' states are checked too, so a store that moved a card without a new revision still shows it.
+  const cards = (run: T) => (run.nodes ?? []).map((node) => `${node.id}:${node.state}`).join(",");
+  let same = previous.length === next.length;
+  const merged = next.map((run, index) => {
+    const old = held.get(run.id);
+    const keep = old && typeof run.revision === "number" && old.revision === run.revision
+      && old.cancelled === run.cancelled && cards(old) === cards(run) ? old : run;
+    if (keep !== previous[index]) same = false;
+    return keep;
+  });
+  return same ? previous : merged;
+}
+
+const sameValue = (a: unknown, b: unknown) => a === b || (typeof a === "object" && a !== null && typeof b === "object" && b !== null
+  && JSON.stringify(a) === JSON.stringify(b));
+/** A timeline item with the same content as `old` (an IPC copy of it) keeps `old`, so its memoized row skips. */
+function keepItem(old: ChatLiveItem | undefined, next: ChatLiveItem): ChatLiveItem {
+  if (!old) return next;
+  const keys = new Set([...Object.keys(old), ...Object.keys(next)]) as Set<keyof ChatLiveItem>;
+  for (const key of keys) if (!sameValue(old[key], next[key])) return next;
+  return old;
+}
+/**
+ * The chat's activity frames after a poll: each card's frame, and each item of its timeline, that
+ * did not change keeps the object already held, and `current` itself when nothing changed. This
+ * replaced comparing the whole frame map as JSON twice per poll, which with long streaming messages
+ * cost more than the redraw it saved, and redrew every row when any one of them changed.
+ */
+export function mergeActivityFrames(current: Record<string, ChatActivity>, next: Record<string, ChatActivity>): Record<string, ChatActivity> {
+  let same = Object.keys(current).length === Object.keys(next).length;
+  const merged: Record<string, ChatActivity> = {};
+  for (const [key, frame] of Object.entries(next)) {
+    const old = current[key];
+    if (!old) { merged[key] = frame; same = false; continue; }
+    const oldItems = new Map((old.timeline ?? []).map((item) => [item.id, item]));
+    const timeline = frame.timeline?.map((item) => keepItem(oldItems.get(item.id), item));
+    const timelineSame = (timeline?.length ?? -1) === (old.timeline?.length ?? -1)
+      && (timeline ?? []).every((item, index) => item === old.timeline![index]);
+    const restSame = (Object.keys({ ...old, ...frame }) as (keyof ChatActivity)[])
+      .every((field) => field === "timeline" || sameValue(old[field], frame[field]));
+    merged[key] = restSame && timelineSame ? old : { ...frame, ...(timeline ? { timeline: timelineSame ? old.timeline : timeline } : {}) };
+    if (merged[key] !== old) same = false;
+  }
+  return same ? current : merged;
+}
+
+/**
+ * A card's turn as the chat keeps it: a poll carries only the newest items, so the ones seen in
+ * earlier polls that have since fallen out of that window stay in front of it, and a long turn
+ * keeps every step instead of only its last few. A poll sharing no item with what is kept is a new
+ * attempt of the card (a retry keeps its key), which starts over.
+ */
+export function mergeTimeline(known: ChatLiveItem[] | null | undefined, latest: ChatLiveItem[]): ChatLiveItem[] {
+  if (!known?.length) return latest;
+  const fresh = new Set(latest.map((item) => item.id));
+  const earlier = known.filter((item) => !fresh.has(item.id));
+  return earlier.length === known.length ? latest : [...earlier, ...latest];
 }
 
 /** A stretch of a turn: a message, steer or edit on its own, or a run of tool calls and thinking. */
@@ -120,13 +193,13 @@ export function groupTimeline(items: ChatLiveItem[]): ChatLiveSegment[] {
 
 /** "Ran 2 commands, read_output ×7, search_text · 3 thoughts": what a folded group did. */
 export function activitySummary(items: ChatLiveItem[]): string {
-  const commands = items.filter((item) => item.kind === "command").reduce((sum, item) => sum + (item.count ?? 1), 0);
+  const commands = items.filter((item) => item.kind === "command").length;
   const thoughts = items.filter((item) => item.kind === "reasoning").length;
   const tools = new Map<string, number>();
   for (const item of items) {
     if (item.kind !== "tool") continue;
     const name = item.text.replace(/^mcp__[\w-]+__/, "").replace(/\s+/g, " ").trim().slice(0, 40) || item.label || "tool";
-    tools.set(name, (tools.get(name) ?? 0) + (item.count ?? 1));
+    tools.set(name, (tools.get(name) ?? 0) + 1);
   }
   const named = [...tools].sort((a, b) => b[1] - a[1]);
   const parts = [
@@ -167,6 +240,58 @@ export function chatApprovalMode(route?: { approval_policy?: string; approvals_r
   if (!route?.approval_policy) return "Default";
   if (route.approval_policy === "never") return "Full access, no prompts";
   return route.approvals_reviewer === "auto_review" ? "Approve for me" : "Ask me";
+}
+
+/** One line of an edit's diff as the chat draws it: old and new line numbers, the change and its text. */
+export type ChatDiffLine = { kind: "add" | "del" | "ctx" | "hunk"; text: string; old?: number; new?: number };
+/**
+ * An edit's diff as rows with line numbers, as Claude Code shows a change: "@@ -a,b +c,d @@"
+ * starts the numbering, removed lines count on the old side, added on the new, context on both.
+ * A diff without a hunk header (a snippet edit, which has no place in the file) keeps its lines
+ * unnumbered. The file header (`---`/`+++`) is left out: the row above names the file.
+ */
+export function numberedDiff(text: string): ChatDiffLine[] {
+  const lines: ChatDiffLine[] = [];
+  let oldLine: number | undefined;
+  let newLine: number | undefined;
+  for (const raw of text.split("\n")) {
+    const line = raw.replace(/\r$/, "");
+    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+    if (hunk) {
+      // A later hunk after a gap shows as a separator; the first one only starts the count.
+      if (lines.length) lines.push({ kind: "hunk", text: "⋯" });
+      // "-0,0" (nothing on that side) counts from line 1 for the lines that follow.
+      oldLine = Math.max(1, Number(hunk[1])); newLine = Math.max(1, Number(hunk[2]));
+      continue;
+    }
+    if (/^(?:--- |\+\+\+ )/.test(line)) continue;
+    const step = (value: number | undefined) => (value === undefined ? undefined : value + 1);
+    if (line.startsWith("+")) { lines.push({ kind: "add", text: line.slice(1), new: newLine }); newLine = step(newLine); }
+    else if (line.startsWith("-")) { lines.push({ kind: "del", text: line.slice(1), old: oldLine }); oldLine = step(oldLine); }
+    else { lines.push({ kind: "ctx", text: line.startsWith(" ") ? line.slice(1) : line, old: oldLine, new: newLine }); oldLine = step(oldLine); newLine = step(newLine); }
+  }
+  return lines;
+}
+
+/** How long a request the app answers by itself stays off the screen before its card shows anyway. */
+export const SELF_ANSWER_GRACE_MS = 30_000;
+/**
+ * Whether a pending request's card stays hidden because the app answers it for the person: on a
+ * card set to "Approve for me" or "Full access" a command or tool request is reviewed and answered
+ * at once, so a card would only flash up and offer a click that arrives after the answer. A
+ * question or a plan is the person's and always shows; so does a request still waiting after the
+ * grace period (an answer that could not be sent), so nothing sits hidden. In a team with a
+ * Command approver the card's own reviewer stands aside, so its requests always show.
+ */
+export function approvalAnsweredForYou(
+  approval: { kind?: string },
+  route: { approval_policy?: string; approvals_reviewer?: string } | null | undefined,
+  waitingMs: number,
+  teamHasApprover = false,
+): boolean {
+  if (approval.kind === "question" || approval.kind === "plan" || teamHasApprover) return false;
+  const answersForYou = route?.approvals_reviewer === "auto_review" || route?.approval_policy === "never";
+  return answersForYou && waitingMs < SELF_ANSWER_GRACE_MS;
 }
 
 /** The folders new worktrees share with the project (`shared`, a link) or get as hard-link farms (`farmed`). */
@@ -585,33 +710,169 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
 /** A DeepSeek model, whose turns show as DeepSeek Harness (dsh) shows them. */
 export const isDeepSeekModel = (model?: string | null) => /deepseek/i.test(model ?? "");
 
-const READ_TOOL = /^(read|view|cat|list|ls|open|file)/i;
-const SEARCH_TOOL = /^(grep|glob|search|find|rg)/i;
-/** One work item's kind as DeepSeek Harness groups them. */
-function dshCategory(item: ChatLiveItem): "read" | "search" | "run" | "edit" | "think" | "tool" {
-  if (item.kind === "reasoning") return "think";
-  if (item.kind === "command") return "run";
+// DeepSeek Harness (deepseek-ai/deepseek-harness, packages/client/ui-chat and ui-tool) words and
+// groups a turn's work as below; the labels are its English locale's, unchanged.
+
+/** A work kind as DeepSeek Harness ranks a group's work (process-activity.ts). */
+export type DshActivity = "read" | "readImage" | "search" | "write" | "edit" | "commands" | "code"
+  | "webSearch" | "webFetch" | "subagents" | "plan" | "questions" | "tools";
+
+/** The tool a row names, without an MCP server prefix: "mcp__coding-tools__read_file" → "read_file". */
+export const dshToolName = (item: ChatLiveItem) => (item.label || item.text || "").replace(/^mcp__[\w-]+__/, "").trim().split(/\s/)[0].toLowerCase();
+
+/** DeepSeek Harness's activity for a tool, extended to the app's MCP tools and AO's own kinds. */
+export function dshActivity(item: ChatLiveItem): DshActivity {
+  if (item.kind === "command") return "commands";
   if (item.kind === "edit") return "edit";
-  const name = (item.label || item.text || "").replace(/^mcp__[\w-]+__/, "");
-  return SEARCH_TOOL.test(name) ? "search" : READ_TOOL.test(name) ? "read" : "tool";
+  const name = dshToolName(item);
+  if (["read", "read_file", "view", "cat", "open_file"].includes(name)) return "read";
+  if (name === "read_image" || name === "view_image") return "readImage";
+  if (["grep", "glob", "rg", "find", "search", "list_dir", "ls", "search_text", "search_files", "find_files"].includes(name)
+    || name.endsWith("_inspect") || name.startsWith("search_")) return "search";
+  if (["write", "write_file", "create_file"].includes(name)) return "write";
+  if (["edit", "apply_patch", "edit_file", "str_replace", "multi_edit", "multiedit"].includes(name)) return "edit";
+  if (["bash", "pwsh", "shell", "exec_command", "write_stdin", "read_output", "kill_command"].includes(name)
+    || name.startsWith("terminal_")) return "commands";
+  if (name === "run_code") return "code";
+  if (name === "web_search") return "webSearch";
+  if (name === "web_fetch" || name === "fetch") return "webFetch";
+  if (name === "subagent" || name.startsWith("subagent_") || name === "task" || name === "agent") return "subagents";
+  if (["todo_write", "todowrite", "update_plan", "create_goal", "update_goal", "get_goal"].includes(name)) return "plan";
+  if (["ask_user_question", "request_user_input", "askuserquestion"].includes(name)) return "questions";
+  return "tools";
 }
-const DSH_DONE = { read: "read files", search: "searched code", run: "ran commands", edit: "edited files", think: "thought", tool: "used tools" } as const;
-const DSH_NOW = { read: "Reading files", search: "Searching code", run: "Running commands", edit: "Editing files", think: "Thinking", tool: "Using tools" } as const;
+
+const DSH_DONE: Record<DshActivity, string> = {
+  read: "Read files", readImage: "Read images", write: "Wrote files", search: "Searched code", edit: "Edited files",
+  commands: "Ran commands", code: "Ran code", webSearch: "Searched the web", webFetch: "Visited web pages",
+  subagents: "Coordinated subagents", plan: "Updated the plan", questions: "Asked questions", tools: "Called tools",
+};
+const DSH_NOW: Record<DshActivity | "thinking", string> = {
+  thinking: "Analyzing the request", read: "Reading files", readImage: "Reading images", write: "Writing files",
+  search: "Searching code", edit: "Editing files", commands: "Running commands", code: "Running code",
+  webSearch: "Searching the web", webFetch: "Visiting web pages", subagents: "Coordinating subagents",
+  plan: "Updating the plan", questions: "Waiting for your action", tools: "Calling tools",
+};
+const DSH_WORK = new Set(["tool", "command", "edit"]);
+const DSH_DETAIL_MAX = 160;
+
+/** A row's one-line detail, at most 160 characters (DeepSeek Harness's live detail bound). */
+function dshDetail(text: string): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length <= DSH_DETAIL_MAX ? flat : `${flat.slice(0, DSH_DETAIL_MAX - 1).trimEnd()}…`;
+}
 
 /**
- * A group's heading as DeepSeek Harness words it: while live, what the latest step is doing
- * ("Running commands"); once done, the kinds of work it did, at most three and no counts ("Read
- * files, searched code and ran commands"). Thinking alone reads "Thought".
+ * A finished group's heading (step-process.ts): its top three kinds of work by number of calls,
+ * ties in order of first appearance, without counts: "Ran commands", "Read files and ran
+ * commands", "Ran commands, read files, edited files", then ", etc." past three. A group that
+ * only thought reads "Analysis completed".
  */
-export function dshActivityTitle(items: ChatLiveItem[], live: boolean): string {
-  if (!items.length) return live ? "Working" : "Worked";
-  if (live) return DSH_NOW[dshCategory(items[items.length - 1])];
-  const kinds = [...new Set(items.map(dshCategory))];
-  const work = kinds.filter((kind) => kind !== "think");
-  const words = (work.length ? work : kinds).map((kind) => DSH_DONE[kind]);
-  const shown = words.slice(0, 3);
-  const text = shown.length > 1 ? `${shown.slice(0, -1).join(", ")} and ${shown[shown.length - 1]}` : shown[0];
-  return `${text[0].toUpperCase()}${text.slice(1)}${words.length > 3 ? ", etc." : ""}`;
+export function dshProcessTitle(items: ChatLiveItem[]): string {
+  const counts = new Map<DshActivity, number>();
+  for (const item of items) {
+    if (!DSH_WORK.has(item.kind)) continue;
+    const kind = dshActivity(item);
+    counts.set(kind, (counts.get(kind) ?? 0) + 1);
+  }
+  // Array.prototype.sort is stable, so equal counts keep their first-appearance order.
+  const ranked = [...counts].sort((a, b) => b[1] - a[1]).map(([kind]) => kind);
+  const labels = ranked.slice(0, 3).map((kind) => DSH_DONE[kind]);
+  if (!labels.length) return "Analysis completed";
+  const continuation = (label: string) => label.charAt(0).toLowerCase() + label.slice(1);
+  if (labels.length === 1) return labels[0];
+  if (labels.length === 2) return `${labels[0]} and ${continuation(labels[1])}`;
+  const title = [labels[0], ...labels.slice(1).map(continuation)].join(", ");
+  return ranked.length > 3 ? `${title}, etc.` : title;
+}
+
+/** What a row's detail is: the agent's own words, else its command, path or query. */
+export function dshItemDetail(item: ChatLiveItem): string {
+  if (item.description) return dshDetail(item.description);
+  if (item.kind === "edit") return dshDetail((item.files ?? []).map((file) => file.path).join(", "));
+  try {
+    const args = item.input ? JSON.parse(item.input) as Record<string, unknown> : {};
+    for (const key of ["command", "cmd", "file_path", "path", "pattern", "query", "url", "prompt", "description"]) {
+      const value = args[key];
+      if (typeof value === "string" && value.trim()) return dshDetail(value);
+    }
+  } catch { /* arguments that are not JSON fall back to the row's own text */ }
+  return dshDetail(item.kind === "command" ? item.text : dshToolName(item) || item.text);
+}
+
+/**
+ * A running group's heading (ChatGroupSeat's live title): what its newest unfinished call does and
+ * that call's detail, "Running commands · npm test"; with no call running, its latest thought,
+ * "Analyzing the request · <the thought's last paragraph>".
+ */
+export function dshLiveTitle(items: ChatLiveItem[]): { activity: DshActivity | "thinking"; label: string } {
+  const running = [...items].reverse().find((item) => DSH_WORK.has(item.kind) && !/complet|done|success|fail|error|reject|denied|cancel/i.test(item.status));
+  if (running) {
+    const activity = dshActivity(running);
+    const detail = dshItemDetail(running);
+    return { activity, label: detail ? `${DSH_NOW[activity]} · ${detail}` : DSH_NOW[activity] };
+  }
+  const thought = [...items].reverse().find((item) => item.kind === "reasoning" && item.text.trim());
+  const paragraph = thought?.text.split(/\r?\n[\t ]*\r?\n/).map((part) => dshDetail(part.replaceAll("**", ""))).filter(Boolean).at(-1) ?? "";
+  return { activity: "thinking", label: paragraph ? `${DSH_NOW.thinking} · ${paragraph}` : DSH_NOW.thinking };
+}
+
+/**
+ * A Think row's one line (ReasoningRow.tsx): a finished thought's first line; a streaming one's
+ * newest completed paragraph's first line, so the line advances a paragraph at a time. `**` dropped.
+ */
+export function dshThinkSummary(text: string, running: boolean): string {
+  const firstLine = (value: string) => { const newline = value.indexOf("\n"); return newline === -1 ? value : value.slice(0, newline); };
+  if (!running) return firstLine(text).replaceAll("**", "").trim();
+  let summary = "";
+  let start = 0;
+  const separator = /\r?\n(?:[\t ]*\r?\n)+/g;
+  for (;;) {
+    const next = separator.exec(text);
+    const end = next === null ? text.length : next.index + next[0].indexOf("\n");
+    const newline = text.indexOf("\n", start);
+    if (newline !== -1 && newline <= end) {
+      const candidate = text.slice(start, newline).trim();
+      if (candidate) summary = candidate;
+    }
+    if (next === null) return summary.replaceAll("**", "");
+    start = next.index + next[0].length;
+  }
+}
+
+/** A run's length as DeepSeek Harness writes it: "4s", "1m 4s", "1h 2m 4s"; never under a second. */
+export function dshDuration(ms: number): string {
+  const total = Math.max(1, Math.floor(ms / 1000));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor(total / 60) % 60;
+  return `${hours ? `${hours}h ` : ""}${total >= 60 ? `${minutes}m ` : ""}${total % 60}s`;
+}
+
+/** A tool row's title (ui-tool tool-call-model.ts): its variant's word, or the tool's own. */
+export function dshToolTitle(item: ChatLiveItem): string {
+  const name = dshToolName(item);
+  if (item.kind === "command") return "Bash";
+  if (name === "pwsh") return "Pwsh";
+  if (name === "read_image" || name === "view_image") return "Read image";
+  if (name === "web_fetch" || name === "fetch") return "Fetch";
+  const activity = dshActivity(item);
+  return ({ read: "Read", search: "Search", webSearch: "Search", write: "Write", edit: "Edit", commands: "Bash", code: "Code" } as Partial<Record<DshActivity, string>>)[activity] ?? "Tool call";
+}
+
+/**
+ * A turn's work as DeepSeek Harness lays it out (process-groups.ts): thinking and tool calls run
+ * together into one process group, and a reply or a message the user steered in stands on its own
+ * between groups.
+ */
+export function dshSegments(items: ChatLiveItem[]): ChatLiveSegment[] {
+  const segments: ChatLiveSegment[] = [];
+  for (const item of items) {
+    const last = segments.at(-1);
+    if (item.kind === "message" || item.kind === "steer") segments.push({ kind: "item", item });
+    else if (last?.kind === "group") last.items.push(item);
+    else segments.push({ kind: "group", key: item.id, items: [item] });
+  }
+  return segments;
 }
 
 /** The chat pet's mood (ChatPet.tsx). */
@@ -835,6 +1096,29 @@ export type ChatAttachment = {
 };
 
 /** Attachments appended to the message: a file path agents read themselves, or a small text file inline. */
+/** A sent message's attachment, as chatMessageWithAttachments wrote it. */
+export type ChatSentAttachment = { image: boolean; name: string; path?: string };
+
+/**
+ * A sent message split back into what the person typed and what they attached, so the chat shows
+ * the attachments as cards and image thumbnails (as Claude Code does) instead of their paths.
+ */
+export function chatMessageParts(message: string): { text: string; attachments: ChatSentAttachment[] } {
+  const attachments: ChatSentAttachment[] = [];
+  const name = (file: string) => file.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || file;
+  const text = message
+    .replace(/(^|\n)Attached file `([^`\n]+)`:\n```\n[\s\S]*?\n```(?=\n|$)/g, (_match, lead: string, file: string) => {
+      attachments.push({ image: false, name: file });
+      return lead;
+    })
+    .replace(/(^|\n)Attached (image|file): ([^\n]+)(?=\n|$)/g, (_match, lead: string, kind: string, file: string) => {
+      attachments.push({ image: kind === "image", name: name(file.trim()), path: file.trim() });
+      return lead;
+    })
+    .trim();
+  return { text, attachments };
+}
+
 export function chatMessageWithAttachments(message: string, attachments: ChatAttachment[]): string {
   const blocks = attachments.map((item) => item.path
     ? `${item.image ? "Attached image" : "Attached file"}: ${item.path}`

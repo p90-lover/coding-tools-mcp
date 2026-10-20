@@ -8,7 +8,9 @@
 // the counted parts are a floor and the remainder a ceiling; the panel says it is an estimate.
 
 const PAGE = 200;
-const MIN_PAGE = 20;
+// A page can be cut down to one entry: at 20, a stretch of 20 large tool outputs (a browser tool's
+// page dumps) exceeded the response limit at every size, and the panel showed only "Used".
+const MIN_PAGE = 1;
 const MAX_ENTRIES = 4000;
 // Every refresh of the open panel repeats the read, so it is bounded in requests too.
 const MAX_REQUESTS = 24;
@@ -65,7 +67,12 @@ function contextBreakdown({ messages = [], activities = [], usage, complete = tr
   const used = Number.isFinite(usage?.contextUsed) && usage.contextUsed > 0 ? usage.contextUsed : null;
   if (used === null) return null;
   const window = Number.isFinite(usage?.contextWindow) && usage.contextWindow > 0 ? usage.contextWindow : null;
-  const since = activities.filter(isCompaction).reduce((latest, activity) => Math.max(latest, Number(activity.sequence) || 0), 0);
+  const compactions = activities.filter(isCompaction);
+  const since = compactions.reduce((latest, activity) => Math.max(latest, Number(activity.sequence) || 0), 0);
+  // When the agent compacted on its own (Claude Code's auto-compact): AO sets compactedAt only
+  // for a /compact it was asked for, so the panel said "Never compacted" right after one.
+  const last = compactions.find((activity) => (Number(activity.sequence) || 0) === since);
+  const lastCompactedAt = typeof (last?.createdAt ?? last?.updatedAt) === "string" ? (last.createdAt ?? last.updatedAt) : null;
   const after = (entry) => (Number(entry?.sequence) || 0) > since;
   let messageTokens = 0;
   let messageCount = 0;
@@ -102,6 +109,7 @@ function contextBreakdown({ messages = [], activities = [], usage, complete = tr
     ],
     counts: { messages: messageCount, toolCalls: toolCount },
     sinceCompaction: since > 0,
+    compactedAt: lastCompactedAt,
     complete,
   };
 }

@@ -53,7 +53,7 @@ const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs")
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createGuiUpdateController, guiShellHash } = require("./gui-update.cjs");
 const { combineUpdateControllers, createAppUpdateController, createAutoInstaller, sweepUpdateLeftovers, waitForUpdateApply } = require("./app-update.cjs");
-const { saveChatAttachment } = require("./chat-attachments.cjs");
+const { readImagePreview, saveChatAttachment } = require("./chat-attachments.cjs");
 const { useNativeUpdateTransport } = require("./update.cjs");
 const {
   providerNetworkReady,
@@ -1567,6 +1567,13 @@ function registerIpc({ logger, stateStore }) {
     return { path: await saveChatAttachment(path.join(app.getPath("userData"), "chat-attachments"), input) };
   });
 
+  // An attached image's thumbnail in a sent message, as Claude Code shows one (chat-attachments.cjs:
+  // an image file up to 20 MB, read only).
+  handle("launcher:attachment-preview", async (event, file) => {
+    assertFocusedMainWindow(event, false);
+    return readImagePreview(file);
+  });
+
   // Shows an attached file in the system file manager (its card in the chat box). Only an existing
   // file is accepted, and it is only selected in its folder, never opened or run.
   handle("launcher:reveal-file", async (event, file) => {
@@ -2879,7 +2886,7 @@ async function start() {
     const { createAntigravityReauth } = backendBundles.requireModule(backend, "cpa-antigravity-reauth.cjs");
     const { createAntigravityAuthBrowser } = backendBundles.requireModule(backend, "antigravity-auth-browser.cjs");
     const { createAgentOrchestratorUpstream } = backendBundles.requireModule(backend, "agent-orchestrator-upstream.cjs");
-    const { createChangePulse } = backendBundles.requireModule(backend, "ao-session-events.cjs");
+    const { createChangePulse, createRunChangeFilter } = backendBundles.requireModule(backend, "ao-session-events.cjs");
     const { createAgentOrchestratorWorkflow, resolveAoNativeConnection, aoWebCatalogForModel } = backendBundles.requireModule(backend, "agent-orchestrator-workflow.cjs");
     const { HeadlessHost } = backendBundles.requireModule(backend, "headless-host.cjs");
     const aoDataRoot = process.env.CODING_TOOLS_AO_DATA_DIR
@@ -3062,6 +3069,8 @@ async function start() {
     // message, reasoning or tool call moved) and mission run state, batched per 150 ms.
     aoChangeWatch?.();
     const aoPulse = createChangePulse((payload) => send("launcher:ao-changed", payload));
+    // Only a run whose shown state moved is pushed (an older backend bundle pushes every report).
+    const runChanged = typeof createRunChangeFilter === "function" ? createRunChangeFilter() : () => true;
     const stopAoWatch = agentOrchestratorUpstream.harness.watch((change) => aoPulse.session(change.sessionId));
     aoChangeWatch = () => { stopAoWatch(); aoPulse.stop(); };
     // Chats whose agents outlived the last app run reattach now, not when the AO panel first
@@ -3129,7 +3138,7 @@ async function start() {
       confirmToolRequest,
       onRunState: (update) => {
         mcpEventMonitor.runState(update);
-        aoPulse.run(update.workspaceId, update.runId);
+        if (runChanged(update)) aoPulse.run(update.workspaceId, update.runId);
         noticeAoApproval(update);
       },
     });
