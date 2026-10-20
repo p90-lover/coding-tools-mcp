@@ -1303,6 +1303,20 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
    * tool's output can carry a key). Reasoning keeps its full summary: its first line is the headline,
    * the rest opens under it.
    */
+  /**
+   * Who answered a tool request, as the chat shows it on the call it let run: the card's reviewer
+   * (with its reason), "Approve for me" once the review raised no block, or the person.
+   */
+  function approvalNote(requestId, status) {
+    const advice = approverAdvice.get(requestId);
+    const denied = /reject|denied|declin/i.test(String(status));
+    if (advice && advice.action !== "ask") {
+      return `${advice.action === "allow" ? "Allowed" : "Denied"} by the reviewer${advice.reason ? `: ${advice.reason}` : ""}`;
+    }
+    if (autoAnswered.has(requestId)) return denied ? "Denied by Approve for me's safety rules" : "Allowed by Approve for me";
+    return denied ? "Denied" : "Allowed";
+  }
+
   function publicTimeline(items) {
     // The same bounds the upstream adapter's turnTimeline reads with (TIMELINE_ITEMS and
     // TIMELINE_TEXT_BYTES there): every item it built, and a message or thought uncut.
@@ -1313,6 +1327,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       ...(item.description ? { description: publicText(item.description, 200) } : {}),
       ...(item.input ? { input: publicText(item.input, 1000) } : {}),
       ...(item.output ? { output: publicText(item.output, 2000) } : {}),
+      ...(item.kind === "approval" && typeof item.requestId === "string" ? { approval: publicText(approvalNote(item.requestId, item.status), 240) } : {}),
       // An edit's files: paths, counts, and the changed lines (redacted like any output).
       ...(item.kind === "edit" && Array.isArray(item.files) ? { files: item.files.slice(0, 50).map(file => ({
         path: publicText(file.path, 500), additions: Number(file.additions) || 0, deletions: Number(file.deletions) || 0,
@@ -2114,8 +2129,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (!answersForPerson(node) || autoAnswered.has(id)) continue;
         const since = Date.parse(approval.since ?? "");
         const opened = Math.min(pendingSeen.get(id), Number.isFinite(since) ? since : Infinity);
-        if (at - opened < AUTO_ANSWER_MS) continue;
-        const verdict = ["question", "plan"].includes(approval.kind) ? null : autoVerdict(mission, node, approval);
+        // A question or a plan is the person's: it waits AUTO_ANSWER_MS for them. A command or tool
+        // request the card's own reviewer screens is answered as soon as that review is in ("wait"
+        // until then): its answer after the wait was the same, so the wait only held the agent up,
+        // and a click on its card after the wait failed as "no longer waiting". A team's Command
+        // approver is not the card's reviewer: its requests keep waiting for it or the person.
+        const personal = ["question", "plan"].includes(approval.kind);
+        const reviewedHere = !personal && Boolean(cardApprover(mission, node));
+        if (!reviewedHere && at - opened < AUTO_ANSWER_MS) continue;
+        const verdict = personal ? null : autoVerdict(mission, node, approval);
         if (verdict === "wait") continue;
         autoAnswered.add(id);
         if (autoAnswered.size > 500) autoAnswered.delete(autoAnswered.values().next().value);
@@ -2130,16 +2152,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             const decision = approval.kind === "plan" ? planDecision(approval, node) : aoDecision(approval, !blocked);
             if (!decision) continue;
             await harnessService().resolveApproval(approval.thread_id, id, decision);
-            note = blocked ? "Denied after 20 seconds: blocked by the command approver's safety rules or reviewer"
-              : approval.kind === "plan" ? "Nobody answered in 20 seconds, so the plan was accepted" : "Nobody answered in 20 seconds, so the request was allowed once";
+            note = blocked ? "Denied: blocked by the command approver's safety rules or reviewer"
+              : approval.kind === "plan" ? "Nobody answered in 20 seconds, so the plan was accepted" : "Approve for me allowed the request once";
           } else if (approval.kind === "command") {
             const request = describeRequest(approval);
             const allow = verdict === "allow";
             await requestHeadless("/api/v1/ao/harness/approval", {
               workspace_id: workspaceId, run_id: runId, node_id: node.id, approval_id: id, allow, confirm: false,
-              approver_reason: allow ? "Nobody answered within 20 seconds" : "Blocked by the command approver's safety rules or reviewer", approver_request: request,
+              approver_reason: allow ? "Approve for me: the review raised no block" : "Blocked by the command approver's safety rules or reviewer", approver_request: request,
             });
-            note = allow ? "Nobody answered in 20 seconds, so the command was allowed once" : "Denied after 20 seconds: blocked by the command approver's safety rules or reviewer";
+            note = allow ? "Approve for me allowed the command once" : "Denied: blocked by the command approver's safety rules or reviewer";
           }
           logger?.info?.("ao.auto_answered", { kind: approval.kind, tool: String(approval.tool ?? "").slice(0, 80) });
         } catch (error) {

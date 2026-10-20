@@ -2867,7 +2867,7 @@ async function start() {
     const { createAntigravityReauth } = backendBundles.requireModule(backend, "cpa-antigravity-reauth.cjs");
     const { createAntigravityAuthBrowser } = backendBundles.requireModule(backend, "antigravity-auth-browser.cjs");
     const { createAgentOrchestratorUpstream } = backendBundles.requireModule(backend, "agent-orchestrator-upstream.cjs");
-    const { createChangePulse } = backendBundles.requireModule(backend, "ao-session-events.cjs");
+    const { createChangePulse, createRunChangeFilter } = backendBundles.requireModule(backend, "ao-session-events.cjs");
     const { createAgentOrchestratorWorkflow, resolveAoNativeConnection, aoWebCatalogForModel } = backendBundles.requireModule(backend, "agent-orchestrator-workflow.cjs");
     const { HeadlessHost } = backendBundles.requireModule(backend, "headless-host.cjs");
     const aoDataRoot = process.env.CODING_TOOLS_AO_DATA_DIR
@@ -3049,6 +3049,8 @@ async function start() {
     // message, reasoning or tool call moved) and mission run state, batched per 150 ms.
     aoChangeWatch?.();
     const aoPulse = createChangePulse((payload) => send("launcher:ao-changed", payload));
+    // Only a run whose shown state moved is pushed (an older backend bundle pushes every report).
+    const runChanged = typeof createRunChangeFilter === "function" ? createRunChangeFilter() : () => true;
     const stopAoWatch = agentOrchestratorUpstream.harness.watch((change) => aoPulse.session(change.sessionId));
     aoChangeWatch = () => { stopAoWatch(); aoPulse.stop(); };
     missionWorkflowRuntime?.dispose();
@@ -3108,7 +3110,7 @@ async function start() {
       confirmToolRequest,
       onRunState: (update) => {
         mcpEventMonitor.runState(update);
-        aoPulse.run(update.workspaceId, update.runId);
+        if (runChanged(update)) aoPulse.run(update.workspaceId, update.runId);
         noticeAoApproval(update);
       },
     });

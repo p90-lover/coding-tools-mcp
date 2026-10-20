@@ -14,7 +14,7 @@ import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuSta
 import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, chatAcceptsMessage, chatDuration, chatList, chatMessageWithAttachments, chatRunOpen,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
-  chatStatsSpan, dshActivityTitle, isDeepSeekModel, petMood, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
+  chatStatsSpan, dshActivityTitle, isDeepSeekModel, numberedDiff, petMood, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
   activitySummary, groupTimeline, mergeTimeline, tidyTimeline,
 } from "./ao-chat";
 
@@ -87,15 +87,19 @@ function stepTone(step: ChatStep): string {
  */
 function ReasoningItem({ item }: { item: ChatLiveItem }) {
   const dsh = useContext(DshStyle);
+  const [open, setOpen] = useState(false);
   const lines = item.text.trim().split(/\r?\n/);
   if (!lines[0]) return <span className="cx-live-label">{dsh ? "Think" : item.status === "running" ? "Thinking…" : "Thought"}</span>;
   const label = dsh ? "Think" : item.status === "running" ? "Thinking" : "Thought";
   const headline = lines[0].replace(/^\s*\*\*(.+?)\*\*\s*$/, "$1").replace(/[*_`]/g, "").trim();
   // A model that thinks in one long paragraph shows it as one line, the whole of it a click away.
   const rest = lines.slice(1).join("\n").trim() || (headline.length > 140 ? headline : "");
+  // The body is parsed only while it is open: a long thought streams in on every poll, and parsing
+  // it inside a closed <details> cost the chat its frame rate for nothing anyone saw.
   return rest
-    ? <details className="cx-reasoning"><summary><span className="cx-live-label">{label}</span><span className="cx-live-text">{headline}</span></summary>
-      <div className="cx-reasoning-body"><ChatMarkdown text={rest} /></div></details>
+    ? <details className="cx-reasoning" onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary><span className="cx-live-label">{label}</span><span className="cx-live-text">{headline}</span></summary>
+      {open ? <div className="cx-reasoning-body"><ChatMarkdown text={rest} /></div> : null}</details>
     : <><span className="cx-live-label">{label}</span><span className="cx-live-text">{headline}</span></>;
 }
 
@@ -116,13 +120,29 @@ function toolTone(status: string): "ok" | "failed" | "running" {
   return /complet|done|success/i.test(status) ? "ok" : "running";
 }
 
+/**
+ * A shield on a tool call that needed approval, saying who let it run ("Allowed by the reviewer:
+ * …"): with "Approve for me" no card asks any more, so this is where the answer shows.
+ */
+function ApprovedMark({ text }: { text?: string }) {
+  if (!text) return null;
+  const denied = /^Denied/.test(text);
+  return <span className={`cx-approved${denied ? " is-denied" : ""}`} title={text} aria-label={text} role="img">
+    <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+      <path d="M8 1.5 13 3.4v4.2c0 3-2.1 5.6-5 6.9-2.9-1.3-5-3.9-5-6.9V3.4L8 1.5Z" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+      {denied ? <path d="m6 6 4 4m0-4-4 4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+        : <path d="m5.6 8.1 1.7 1.7 3.2-3.4" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />}
+    </svg>
+  </span>;
+}
+
 /** A tool call as Claude Code shows it: a dot, its name and one line, opening on what it ran and got back. */
 function ToolItem({ item }: { item: ChatLiveItem }) {
   const tone = toolTone(item.status);
   const dsh = useContext(DshStyle);
   const name = item.kind === "command" ? (dsh ? "Bash" : tone === "running" ? "Running" : "Ran") : item.label ?? item.kind.replace(/_/g, " ");
   const head = <><span className="cx-tool-dot" aria-hidden="true" /><span className="cx-live-label">{name}</span>
-    <span className="cx-live-text">{toolHeadline(item)}</span></>;
+    <span className="cx-live-text">{toolHeadline(item)}</span><ApprovedMark text={item.approval} /></>;
   const opens = item.kind === "command" || item.input || item.output;
   return opens
     ? <details className={`cx-tool tone-${tone}`}><summary>{head}</summary>
@@ -142,6 +162,21 @@ function DiffCount({ additions, deletions }: { additions: number; deletions: num
   return <span className="cx-diff-count"><span className="is-add">+{additions}</span> <span className="is-del">−{deletions}</span></span>;
 }
 
+/**
+ * An edit's changed lines as Claude Code shows them: old and new line numbers in two columns, then
+ * the line with its +/− mark; unchanged lines around the change give it its place. Parsed once per
+ * diff text, since a poll rebuilds the row every second.
+ */
+function EditDiff({ diff }: { diff: string }) {
+  const lines = useMemo(() => numberedDiff(diff), [diff]);
+  return <div className="cx-edit-diff"><table><tbody>{lines.map((line, index) => line.kind === "hunk"
+    ? <tr key={index} className="is-hunk"><td colSpan={3}>{line.text}</td></tr>
+    : <tr key={index} className={`is-${line.kind}`}>
+      <td className="cx-edit-num">{line.old ?? ""}</td><td className="cx-edit-num">{line.new ?? ""}</td>
+      <td className="cx-edit-code"><span className="cx-edit-mark" aria-hidden="true">{line.kind === "add" ? "+" : line.kind === "del" ? "−" : " "}</span>{line.text}</td>
+    </tr>)}</tbody></table></div>;
+}
+
 /** A file edit as Claude Code shows one: "Edited <file> +12 −3", opening on the changed lines. */
 function EditItem({ item }: { item: ChatLiveItem }) {
   const files = item.files ?? [];
@@ -151,14 +186,13 @@ function EditItem({ item }: { item: ChatLiveItem }) {
   const dsh = useContext(DshStyle);
   const head = <><span className="cx-tool-dot" aria-hidden="true" /><span className="cx-live-label">{dsh ? "Edit" : item.label ?? "Edited"}</span>
     <span className="cx-live-text" title={files.map((file) => file.path).join("\n")}>{files.length === 1 ? fileName(files[0].path) : `${files.length} files`}</span>
-    <DiffCount additions={additions} deletions={deletions} /></>;
+    <DiffCount additions={additions} deletions={deletions} /><ApprovedMark text={item.approval} /></>;
   if (!files.some((file) => file.diff)) return <div className={`cx-tool tone-${tone}`}><div className="cx-tool-row">{head}</div></div>;
   return <details className={`cx-tool cx-edit tone-${tone}`}><summary>{head}</summary>
     <div className="cx-tool-body">
       {files.map((file) => <section key={file.path} className="cx-edit-file">
         {files.length > 1 ? <header><span title={file.path}>{fileName(file.path)}</span><DiffCount additions={file.additions} deletions={file.deletions} /></header> : null}
-        {file.diff ? <pre className="cx-diff"><code>{file.diff.split("\n").map((line, index) =>
-          <span key={index} className={line.startsWith("+") ? "is-add" : line.startsWith("-") ? "is-del" : undefined}>{line}{"\n"}</span>)}</code></pre> : null}
+        {file.diff ? <EditDiff diff={file.diff} /> : null}
       </section>)}
     </div></details>;
 }
@@ -193,15 +227,40 @@ export const DshStyle = createContext(false);
 export const COMPACT_ACTIVITY_KEY = "coding-tools:ao:compact-activity";
 
 /** A row redraws only when what it shows changed: a poll rebuilds every item object each second. */
+// An edit's files arrive as new objects with every poll (IPC copies them), so they compare by content.
+const sameFiles = (a: ChatLiveItem["files"], b: ChatLiveItem["files"]) => a === b || (Boolean(a) && Boolean(b) && a!.length === b!.length
+  && a!.every((file, index) => file.path === b![index].path && file.additions === b![index].additions
+    && file.deletions === b![index].deletions && file.diff === b![index].diff));
 const sameLiveItem = (a: ChatLiveItem, b: ChatLiveItem) => a === b || (a.id === b.id && a.kind === b.kind && a.status === b.status
-  && a.text === b.text && a.label === b.label && a.description === b.description
-  && a.input === b.input && a.output === b.output && a.files === b.files);
+  && a.text === b.text && a.label === b.label && a.description === b.description && a.approval === b.approval
+  && a.input === b.input && a.output === b.output && sameFiles(a.files, b.files));
 const LiveRow = memo(LiveRowView, (prev, next) => sameLiveItem(prev.item, next.item));
+
+// How often a message that is still streaming redraws. A fast model (200+ tokens a second) grew
+// its text on every poll, and each change parsed the whole message as Markdown again.
+const STREAM_REDRAW_MS = 250;
+/** `text` as shown: while `live`, at most once per STREAM_REDRAW_MS (always its latest); then as it is. */
+function useThrottledText(text: string, live: boolean): string {
+  const [shown, setShown] = useState(text);
+  const last = useRef(0);
+  useEffect(() => {
+    if (!live) { setShown(text); return undefined; }
+    const wait = STREAM_REDRAW_MS - (Date.now() - last.current);
+    if (wait <= 0) { last.current = Date.now(); setShown(text); return undefined; }
+    const timer = window.setTimeout(() => { last.current = Date.now(); setShown(text); }, wait);
+    return () => window.clearTimeout(timer);
+  }, [text, live]);
+  return live ? shown : text;
+}
+
+function StreamingMarkdown({ text, live }: { text: string; live: boolean }) {
+  return <ChatMarkdown text={useThrottledText(text, live)} />;
+}
 
 function LiveRowView({ item }: { item: ChatLiveItem }) {
   return <li className={`cx-live-item kind-${item.kind} is-${item.status || "done"}`}>
     {item.kind === "steer" ? <div className="cx-user cx-steer"><div className="cx-bubble"><p>{item.text}</p></div></div>
-      : item.kind === "message" ? <ChatMarkdown text={item.text} />
+      : item.kind === "message" ? <StreamingMarkdown text={item.text} live={item.status === "running"} />
       : item.kind === "reasoning" ? <ReasoningItem item={item} />
       : item.kind === "edit" ? <EditItem item={item} />
       : item.kind === "command" || item.kind === "tool" ? <ToolItem item={item} />
@@ -1202,7 +1261,6 @@ export function AgentOrchestratorChat({
                 <div className="cx-card-actions"><button className="button-primary" type="button" disabled={busy} onClick={() => retryStart(latest.id)}>Retry failed step</button></div>
               </div>
             ) : null}
-            {approvals.map(approval => <AgentOrchestratorApproval key={JSON.stringify([approval.nodeId, approval.approval_id])} approval={approval} busy={busy} approve={approve} />)}
           </div>
           {!atBottom ? <button type="button" className="cx-to-bottom" aria-label="Scroll to the latest message"
             onClick={() => { setAtBottom(true); scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" }); }}>↓</button> : null}
@@ -1307,6 +1365,12 @@ export function AgentOrchestratorChat({
             ? <p className="cx-route-note" role="status">This turn is running on <b>{running}</b>; your next message uses <b>{picked}</b>.</p> : null;
         })()}
         {selectedTaskId ? <ChatBranchBar workspaceId={projectId} sessionId={agentSessions[0]?.id} /> : null}
+        {/* A request waiting on the person sits right above the chat box, as wide as it, as DeepSeek
+            Harness shows its approval panel: in the thread it took the thread's own margins and sat
+            out of line with the box, scrolled away with the transcript. */}
+        {approvals.length ? <div className={`cx-approval-dock${isDeepSeekModel(latest?.nodes.find((node) => node.role === "planner")?.route?.model) ? " is-dsh" : ""}`}>
+          {approvals.map(approval => <AgentOrchestratorApproval key={JSON.stringify([approval.nodeId, approval.approval_id])} approval={approval} busy={busy} approve={approve} />)}
+        </div> : null}
         <form className="cx-composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}
           onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
           onDrop={(event) => { if (event.dataTransfer.files.length) { event.preventDefault(); void addFiles(event.dataTransfer.files); } }}>

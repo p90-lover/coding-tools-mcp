@@ -77,16 +77,89 @@ export type ChatLiveItem = {
   description?: string; input?: string; output?: string;
   /** For kind "edit": the files it changed (Claude Code's "Edited <file> +12 −3"). */
   files?: ChatEditedFile[];
+  /**
+   * On a kind "approval" item, who answered the request ("Allowed by the reviewer: …"); on a tool
+   * call, the answer that let it run, folded in by tidyTimeline.
+   */
+  approval?: string;
 };
 /**
- * A turn's activity as it reads: requests "Approve for me" (or the user) already answered drop
- * out, since every tool call left a second "Approval <tool>" row under it. A request that timed
- * out or was cancelled (AO labels those) still shows. Every tool call keeps its own row: calls to
- * the same tool ran different commands, and folding them into one row with a count showed only the
- * last call's input and output.
+ * A turn's activity as it reads. A request "Approve for me" (or the user) allowed is no row of its
+ * own (every tool call left a second "Approval <tool>" row under it): its answer goes on the tool
+ * call before it, which shows who let it run. A request that was denied, timed out or cancelled
+ * (AO labels those) keeps its row. Every tool call keeps its own row: calls to the same tool ran
+ * different commands, and folding them into one row with a count showed only the last call's input
+ * and output.
  */
 export function tidyTimeline(items: ChatLiveItem[]): ChatLiveItem[] {
-  return items.filter((item) => item.kind !== "approval" || Boolean(item.label) || /reject|denied|declin/i.test(item.status));
+  const out: ChatLiveItem[] = [];
+  for (const item of items) {
+    const answered = item.kind === "approval" && !item.label && !/reject|denied|declin/i.test(item.status);
+    if (!answered) { out.push(item); continue; }
+    if (!item.approval || /pending/i.test(item.status)) continue;
+    // ACP asks after the call it is about, so the answer belongs to the nearest call still without one.
+    for (let at = out.length - 1; at >= 0; at -= 1) {
+      const call = out[at];
+      if (!["tool", "command", "edit"].includes(call.kind)) continue;
+      if (!call.approval) out[at] = { ...call, approval: item.approval };
+      break;
+    }
+  }
+  return out;
+}
+
+/**
+ * `next` runs with each unchanged run (same id and revision) kept as the object already held, and
+ * `previous` itself when nothing changed, so a refresh that found nothing new re-renders nothing.
+ * A run push used to replace every run with a fresh copy several times a second while a model
+ * streamed, and the chat rebuilt all its turns each time.
+ */
+export function keepRevisions<T extends { id: string; revision?: number; cancelled?: boolean; nodes?: { id: string; state: string }[] }>(previous: T[], next: T[]): T[] {
+  const held = new Map(previous.map((run) => [run.id, run]));
+  // The cards' states are checked too, so a store that moved a card without a new revision still shows it.
+  const cards = (run: T) => (run.nodes ?? []).map((node) => `${node.id}:${node.state}`).join(",");
+  let same = previous.length === next.length;
+  const merged = next.map((run, index) => {
+    const old = held.get(run.id);
+    const keep = old && typeof run.revision === "number" && old.revision === run.revision
+      && old.cancelled === run.cancelled && cards(old) === cards(run) ? old : run;
+    if (keep !== previous[index]) same = false;
+    return keep;
+  });
+  return same ? previous : merged;
+}
+
+const sameValue = (a: unknown, b: unknown) => a === b || (typeof a === "object" && a !== null && typeof b === "object" && b !== null
+  && JSON.stringify(a) === JSON.stringify(b));
+/** A timeline item with the same content as `old` (an IPC copy of it) keeps `old`, so its memoized row skips. */
+function keepItem(old: ChatLiveItem | undefined, next: ChatLiveItem): ChatLiveItem {
+  if (!old) return next;
+  const keys = new Set([...Object.keys(old), ...Object.keys(next)]) as Set<keyof ChatLiveItem>;
+  for (const key of keys) if (!sameValue(old[key], next[key])) return next;
+  return old;
+}
+/**
+ * The chat's activity frames after a poll: each card's frame, and each item of its timeline, that
+ * did not change keeps the object already held, and `current` itself when nothing changed. This
+ * replaced comparing the whole frame map as JSON twice per poll, which with long streaming messages
+ * cost more than the redraw it saved, and redrew every row when any one of them changed.
+ */
+export function mergeActivityFrames(current: Record<string, ChatActivity>, next: Record<string, ChatActivity>): Record<string, ChatActivity> {
+  let same = Object.keys(current).length === Object.keys(next).length;
+  const merged: Record<string, ChatActivity> = {};
+  for (const [key, frame] of Object.entries(next)) {
+    const old = current[key];
+    if (!old) { merged[key] = frame; same = false; continue; }
+    const oldItems = new Map((old.timeline ?? []).map((item) => [item.id, item]));
+    const timeline = frame.timeline?.map((item) => keepItem(oldItems.get(item.id), item));
+    const timelineSame = (timeline?.length ?? -1) === (old.timeline?.length ?? -1)
+      && (timeline ?? []).every((item, index) => item === old.timeline![index]);
+    const restSame = (Object.keys({ ...old, ...frame }) as (keyof ChatActivity)[])
+      .every((field) => field === "timeline" || sameValue(old[field], frame[field]));
+    merged[key] = restSame && timelineSame ? old : { ...frame, ...(timeline ? { timeline: timelineSame ? old.timeline : timeline } : {}) };
+    if (merged[key] !== old) same = false;
+  }
+  return same ? current : merged;
 }
 
 /**
@@ -167,6 +240,58 @@ export function chatApprovalMode(route?: { approval_policy?: string; approvals_r
   if (!route?.approval_policy) return "Default";
   if (route.approval_policy === "never") return "Full access, no prompts";
   return route.approvals_reviewer === "auto_review" ? "Approve for me" : "Ask me";
+}
+
+/** One line of an edit's diff as the chat draws it: old and new line numbers, the change and its text. */
+export type ChatDiffLine = { kind: "add" | "del" | "ctx" | "hunk"; text: string; old?: number; new?: number };
+/**
+ * An edit's diff as rows with line numbers, as Claude Code shows a change: "@@ -a,b +c,d @@"
+ * starts the numbering, removed lines count on the old side, added on the new, context on both.
+ * A diff without a hunk header (a snippet edit, which has no place in the file) keeps its lines
+ * unnumbered. The file header (`---`/`+++`) is left out: the row above names the file.
+ */
+export function numberedDiff(text: string): ChatDiffLine[] {
+  const lines: ChatDiffLine[] = [];
+  let oldLine: number | undefined;
+  let newLine: number | undefined;
+  for (const raw of text.split("\n")) {
+    const line = raw.replace(/\r$/, "");
+    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+    if (hunk) {
+      // A later hunk after a gap shows as a separator; the first one only starts the count.
+      if (lines.length) lines.push({ kind: "hunk", text: "⋯" });
+      // "-0,0" (nothing on that side) counts from line 1 for the lines that follow.
+      oldLine = Math.max(1, Number(hunk[1])); newLine = Math.max(1, Number(hunk[2]));
+      continue;
+    }
+    if (/^(?:--- |\+\+\+ )/.test(line)) continue;
+    const step = (value: number | undefined) => (value === undefined ? undefined : value + 1);
+    if (line.startsWith("+")) { lines.push({ kind: "add", text: line.slice(1), new: newLine }); newLine = step(newLine); }
+    else if (line.startsWith("-")) { lines.push({ kind: "del", text: line.slice(1), old: oldLine }); oldLine = step(oldLine); }
+    else { lines.push({ kind: "ctx", text: line.startsWith(" ") ? line.slice(1) : line, old: oldLine, new: newLine }); oldLine = step(oldLine); newLine = step(newLine); }
+  }
+  return lines;
+}
+
+/** How long a request the app answers by itself stays off the screen before its card shows anyway. */
+export const SELF_ANSWER_GRACE_MS = 30_000;
+/**
+ * Whether a pending request's card stays hidden because the app answers it for the person: on a
+ * card set to "Approve for me" or "Full access" a command or tool request is reviewed and answered
+ * at once, so a card would only flash up and offer a click that arrives after the answer. A
+ * question or a plan is the person's and always shows; so does a request still waiting after the
+ * grace period (an answer that could not be sent), so nothing sits hidden. In a team with a
+ * Command approver the card's own reviewer stands aside, so its requests always show.
+ */
+export function approvalAnsweredForYou(
+  approval: { kind?: string },
+  route: { approval_policy?: string; approvals_reviewer?: string } | null | undefined,
+  waitingMs: number,
+  teamHasApprover = false,
+): boolean {
+  if (approval.kind === "question" || approval.kind === "plan" || teamHasApprover) return false;
+  const answersForYou = route?.approvals_reviewer === "auto_review" || route?.approval_policy === "never";
+  return answersForYou && waitingMs < SELF_ANSWER_GRACE_MS;
 }
 
 /** The folders new worktrees share with the project (`shared`, a link) or get as hard-link farms (`farmed`). */

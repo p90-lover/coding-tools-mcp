@@ -1,9 +1,19 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const http = require("node:http");
-const { createAoSessionEvents, createChangePulse, parseSseFrames, sessionChange } = require("../electron/ao-session-events.cjs");
+const { createAoSessionEvents, createChangePulse, createRunChangeFilter, parseSseFrames, sessionChange } = require("../electron/ao-session-events.cjs");
 
 const frame = (seq, body) => `id: ${seq}\nevent: ${body.type}\ndata: ${JSON.stringify({ seq, ...body })}\n\n`;
+
+test("a run's state is pushed only when what the renderer shows of it moved", () => {
+  const changed = createRunChangeFilter();
+  const report = (extra = {}) => ({ workspaceId: "w", runId: "r", status: "running", detail: "working", stopped: false, attention: null, fingerprint: "a:running", ...extra });
+  assert.equal(changed(report()), true, "the first report is news");
+  assert.equal(changed(report()), false, "the run loop's next pass with nothing new is not");
+  assert.equal(changed(report({ fingerprint: "a:finished" })), true, "a card that moved is");
+  assert.equal(changed(report({ fingerprint: "a:finished", attention: "pending_approval" })), true, "so is a request waiting");
+  assert.equal(changed(report({ runId: "other" })), true, "each run is tracked on its own");
+});
 
 test("SSE frames split on blank lines; comments and partial frames wait", () => {
   const { frames, rest } = parseSseFrames(":\n\nid: 4\r\nevent: session_updated\r\ndata: {\"a\":1}\r\n\r\nid: 5\ndata: {\"b\"");

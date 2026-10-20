@@ -210,6 +210,19 @@ test("the side panel opens on an Overview of the chat: environment, context, cha
   assert.match(html, /Today<\/button>/, "usage can switch between today, 7 and 30 days");
 });
 
+test("the Terminal pane opens for a server or a long run, never for a one-off tool call", () => {
+  // Seen live: every `git status` and `ls` the agent ran opened the pane beside the chat.
+  const workbench = load("ChatWorkbench.tsx", { "../api/client": client, "../icons": { Icon: () => null } });
+  const now = 1_000_000;
+  const command = (cmd, extra = {}) => ({ id: "c", cmd, workdir: ".", startedAt: now - 2000, status: "running", exitCode: null, source: "agent", ...extra });
+  assert.equal(workbench.opensTerminal(command("git status --short | head -80"), now), false, "a one-off call does not");
+  assert.equal(workbench.opensTerminal(command("aiTemp\\run_app.cmd"), now), true, "the user's app launcher does");
+  assert.equal(workbench.opensTerminal(command("npm run dev"), now), true, "a dev server does");
+  assert.equal(workbench.opensTerminal(command("pytest -q", { status: "background", background: true }), now), true, "one left in the background does");
+  assert.equal(workbench.opensTerminal(command("pytest -q", { startedAt: now - 61_000 }), now), true, "anything still running after a minute does");
+  assert.equal(workbench.opensTerminal(command("npm run dev", { status: "exited", exitCode: 0 }), now), false, "an ended command never does");
+});
+
 test("an agent's new page brings the Preview pane forward, even over the Terminal its dev server opened", () => {
   // Seen live: the agent started its dev server (the Terminal opened), then preview_open'd the page,
   // and the panel stayed on the Terminal: the user never saw the browser.

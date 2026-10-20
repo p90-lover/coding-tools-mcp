@@ -180,7 +180,10 @@ export function ChatContextMeter({ sessionId, agentLabel, model, launchedWindow,
     const read = () => void getCodingToolsClient().apps.call({ moduleId: "agent-orchestrator", operation: "chat_context", arguments: { sessionIds: [sessionId] } })
       .then((outer) => {
         const sessions = (outer.result as { sessions?: Record<string, ChatContextSnapshot> } | undefined)?.sessions;
-        if (live) setSnapshot(sessions?.[sessionId] ?? null);
+        // A reply without this session is a read that failed (AO busy or restarting, a timeout),
+        // not a session with no context: the last reading stays instead of the meter emptying.
+        const next = sessions?.[sessionId];
+        if (live && next) setSnapshot(next);
       })
       .catch(() => undefined);
     read();

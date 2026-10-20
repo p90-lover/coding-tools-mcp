@@ -765,6 +765,29 @@ test("a reasoning item carries the model's summary text (AO keeps it in detail.t
   assert.match(item.text, /^\*\*Inspecting the register route\*\*/);
 });
 
+test("observes of one session that overlap share one conversation read; later ones read again", async () => {
+  let reads = 0;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => {
+      if (!endpoint.includes("/conversation")) return { session: { id: "s", mode: "chat", status: "working" } };
+      reads += 1;
+      await gate;
+      return { turns: [{ id: "t", state: "running" }], messages: [{ id: "m", turnId: "t", sequence: 1, role: "assistant", text: `read ${reads}` }], activities: [] };
+    },
+  });
+  // The run loop, the activity poll and the approvals poll asking at the same moment.
+  const together = Promise.all([upstream.observe("s"), upstream.observe("s"), upstream.observe("s")]);
+  await new Promise(setImmediate);
+  release();
+  const observed = await together;
+  assert.equal(reads, 1, "one read served all three");
+  assert.deepEqual([...observed.map((entry) => entry.liveOutput)], ["read 1", "read 1", "read 1"]);
+  await upstream.observe("s");
+  assert.equal(reads, 2, "a landed read is never reused: the next observe reads afresh");
+});
+
 test("an ACP edit opens on its changed lines, not the whole file, and a long message is not cut at 4 KB", async () => {
   // As AO stored it live: the whole file before and after, and a patch marking every line changed.
   const lines = Array.from({ length: 200 }, (_, at) => `line ${at}`);
@@ -781,7 +804,8 @@ test("an ACP edit opens on its changed lines, not the whole file, and a long mes
   });
   const [edit, message] = JSON.parse(JSON.stringify((await upstream.observe("s")).timeline));
   assert.equal(edit.kind, "edit");
-  assert.equal(edit.files[0].diff, "-line 100\n+changed 100");
+  assert.equal(edit.files[0].diff, ["@@ -98,7 +98,7 @@", " line 97", " line 98", " line 99", "-line 100", "+changed 100",
+    " line 101", " line 102", " line 103"].join("\n"), "one numbered hunk with 3 context lines, as Claude Code shows it");
   assert.equal(message.text, answer, "the whole answer, its closing code span included");
 });
 
@@ -942,4 +966,11 @@ test("the context meter keeps its reading through a steer's zero snapshot, and d
   const snapshot = steadyContext(readings, "s3", { contextUsed: 0, contextWindow: 400000, inputTokens: 0, outputTokens: 0, cachedTokens: 0, totalTokens: 0, cost: 6.41 }, null);
   assert.deepEqual([snapshot.contextUsed, snapshot.inputTokens, snapshot.outputTokens, snapshot.cachedTokens, snapshot.totalTokens, snapshot.cost],
     [300000, 13_000_000, 100_000, 12_000_000, 13_100_000, 6.41], "the zeroed counts keep the last reading's; what it does report (cost) comes through");
+  // Seen live: 43% and 171.9k of context beside In 0 · Out 0 · Cached 0 · Total 0. The context
+  // reading held (no steer drop), but an ACP prompt's own zero usage replaced the running totals.
+  steadyContext(readings, "s4", { contextUsed: 171_900, contextWindow: 400000, inputTokens: 6_160_000, outputTokens: 70_900, cachedTokens: 6_000_000, totalTokens: 6_230_900 }, null);
+  const zeroed = steadyContext(readings, "s4", { contextUsed: 172_000, contextWindow: 400000, inputTokens: 0, outputTokens: 0, cachedTokens: 0, totalTokens: 0 }, null);
+  assert.deepEqual([zeroed.contextUsed, zeroed.inputTokens, zeroed.totalTokens], [172_000, 6_160_000, 6_230_900], "the totals never go down");
+  const after = steadyContext(readings, "s4", { contextUsed: 173_000, contextWindow: 400000, inputTokens: 1, outputTokens: 1, cachedTokens: 0, totalTokens: 2 }, null);
+  assert.equal(after.totalTokens, 6_230_900, "the held totals were saved, so a later small report does not lose them either");
 });

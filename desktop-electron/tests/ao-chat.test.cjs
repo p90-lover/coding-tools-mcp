@@ -1026,6 +1026,63 @@ test("a turn's activity drops answered approvals, keeps every tool call, and fol
   assert.equal(chat.activitySummary([ls, { ...ls, id: "d" }]), "Ran 2 commands");
 });
 
+test("an answered request is no row of its own: its answer shows on the call it let run", () => {
+  const tidy = chat.tidyTimeline([
+    { id: "1", kind: "command", status: "completed", text: "python diag.py" },
+    { id: "2", kind: "approval", status: "completed", text: "PowerShell", approval: "Allowed by the reviewer: reads the project's own database" },
+    { id: "3", kind: "tool", status: "completed", label: "MCP", text: "exec_command" },
+    { id: "4", kind: "approval", status: "completed", text: "exec_command", approval: "Allowed by Approve for me" },
+    { id: "5", kind: "approval", status: "rejected", text: "git push", approval: "Denied by the reviewer: pushes" },
+    { id: "6", kind: "approval", status: "pending", text: "rm -rf", approval: "Allowed" },
+  ]);
+  assert.deepEqual([...tidy.map((item) => [item.id, item.approval ?? null])], [
+    ["1", "Allowed by the reviewer: reads the project's own database"], ["3", "Allowed by Approve for me"],
+    ["5", "Denied by the reviewer: pushes"]], "allowed answers fold into their calls; a denial keeps its row; a pending one waits");
+});
+
+test("an edit's diff is numbered from its hunk header, old lines on the left and new on the right", () => {
+  const rows = (diff) => [...chat.numberedDiff(diff).map((line) => [line.kind, line.old ?? null, line.new ?? null, line.text])];
+  assert.deepEqual(rows("@@ -98,4 +98,4 @@\n line 97\n-line 98\n+changed 98\n line 99\n line 100"), [
+    ["ctx", 98, 98, "line 97"], ["del", 99, null, "line 98"], ["add", null, 99, "changed 98"], ["ctx", 100, 100, "line 99"], ["ctx", 101, 101, "line 100"]]);
+  assert.deepEqual(rows("--- a.py\n+++ a.py\n@@ -0,0 +1,2 @@\n+one\n+two"), [["add", null, 1, "one"], ["add", null, 2, "two"]],
+    "a new file counts from line 1 and its file header is left out");
+  assert.deepEqual(rows("-old\n+new"), [["del", null, null, "old"], ["add", null, null, "new"]], "a snippet edit has no place to number from");
+  assert.deepEqual(rows("@@ -1,1 +1,1 @@\n-a\n+b\n@@ -9,1 +9,1 @@\n-c\n+d").map((row) => row[0]), ["del", "add", "hunk", "del", "add"],
+    "a later hunk shows as a separator");
+});
+
+test("Approve for me keeps a command's card off the screen while it is answered, never a question's", () => {
+  const auto = { approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  assert.equal(chat.approvalAnsweredForYou({ kind: "command" }, auto, 1000), true);
+  assert.equal(chat.approvalAnsweredForYou({ kind: "permission" }, { approval_policy: "never" }, 1000), true, "full access too");
+  assert.equal(chat.approvalAnsweredForYou({ kind: "question" }, auto, 1000), false, "a question is the person's");
+  assert.equal(chat.approvalAnsweredForYou({ kind: "plan" }, auto, 1000), false, "so is a plan");
+  assert.equal(chat.approvalAnsweredForYou({ kind: "command" }, auto, chat.SELF_ANSWER_GRACE_MS), false, "one still waiting after the grace shows");
+  assert.equal(chat.approvalAnsweredForYou({ kind: "command" }, { approval_policy: "on-request" }, 1000), false, "Ask me always shows");
+  assert.equal(chat.approvalAnsweredForYou({ kind: "command" }, auto, 1000, true), false, "a team's Command approver decides, so its card shows");
+});
+
+test("a refresh that found nothing new keeps the runs and activity objects already held", () => {
+  const run = (id, revision, state = "running") => ({ id, revision, cancelled: false, nodes: [{ id: "n", state }] });
+  const held = [run("a", 3), run("b", 7)];
+  assert.equal(chat.keepRevisions(held, [run("a", 3), run("b", 7)]), held, "same revisions and states: the same array");
+  const moved = chat.keepRevisions(held, [run("a", 4), run("b", 7)]);
+  assert.notEqual(moved, held);
+  assert.equal(moved[1], held[1], "an unchanged run keeps its object");
+  assert.equal(moved[0].revision, 4, "a new revision comes through");
+  assert.notEqual(chat.keepRevisions(held, [run("a", 3, "finished"), run("b", 7)])[0], held[0], "a card that moved without a new revision still shows");
+
+  const item = (id, text, status = "completed") => ({ id, kind: "message", status, text });
+  const frames = { "r:n": { activity: "working", timeline: [item("1", "hello"), item("2", "wor", "running")] } };
+  const copy = JSON.parse(JSON.stringify(frames));
+  assert.equal(chat.mergeActivityFrames(frames, copy), frames, "an IPC copy of the same frame keeps the held map");
+  const grown = chat.mergeActivityFrames(frames, { "r:n": { activity: "working", timeline: [item("1", "hello"), item("2", "world", "running")] } });
+  assert.notEqual(grown, frames);
+  assert.equal(grown["r:n"].timeline[0], frames["r:n"].timeline[0], "the unchanged item keeps its object, so its row skips");
+  assert.equal(grown["r:n"].timeline[1].text, "world", "the growing message comes through");
+  assert.equal(chat.mergeActivityFrames(frames, {})["r:n"], undefined, "a card that stopped working drops out");
+});
+
 test("a card's timeline keeps the steps that fell out of the newest poll, and a new attempt starts over", () => {
   const item = (id) => ({ id, kind: "tool", status: "completed", text: `call ${id}` });
   const seen = [item("1"), item("2"), item("3")];
