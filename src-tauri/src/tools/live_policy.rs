@@ -326,13 +326,16 @@ mod tests {
             c.args(["-c", "read live_policy_fixture"]);
             c
         };
-        let child = command
-            .kill_on_drop(true)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
+        let child = {
+            let _gate = crate::harness::resource_lease::spawn_gate();
+            command
+                .kill_on_drop(true)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+        }
+        .unwrap();
         let session = ctx.sessions.insert(ExecSession::new_with_mode(child, true));
         let mut policy = ctx.for_request().unwrap().policy;
         policy.approval_mode = "ask".into();

@@ -104,7 +104,10 @@ pub(super) fn run(
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000);
     }
-    let mut child = command.spawn()?;
+    let mut child = {
+        let _gate = crate::harness::resource_lease::spawn_gate();
+        command.spawn()
+    }?;
     let job = match process::assign(&child) {
         Ok(j) => j,
         Err(e) => {

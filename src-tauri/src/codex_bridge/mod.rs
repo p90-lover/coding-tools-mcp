@@ -812,9 +812,11 @@ impl Hub {
         std::fs::create_dir_all(&temp).map_err(|_| "Cannot prepare dedicated aiTemp directory")?;
         let mut command = native_child_command(&options, &temp, private_cpa_key.as_deref(), ao_web);
         OwnedProcess::configure(&mut command);
-        let mut child = command
-            .spawn()
-            .map_err(|_| "Cannot start selected native executable")?;
+        let spawned = {
+            let _gate = crate::harness::resource_lease::spawn_gate();
+            command.spawn()
+        };
+        let mut child = spawned.map_err(|_| "Cannot start selected native executable")?;
         let input = child.stdin.take().ok_or("Native stdin unavailable")?;
         let output = child.stdout.take().ok_or("Native stdout unavailable")?;
         let process = OwnedProcess::attach(child)?;
