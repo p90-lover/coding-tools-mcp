@@ -78,6 +78,28 @@ test("annotations go out in Codex's format and come back as a chip, with the mes
   assert.equal(chat.chatMessageParts("# Response annotations:\nnot ours").text, "# Response annotations:\nnot ours", "text that only looks like one stays as written");
 });
 
+test("copying, exporting or rewinding an annotated message gives readable quotes, not the agent's block", () => {
+  const sent = chat.chatMessageWithAnnotations("look at these", [{ text: "merge   gates", comment: "why both?" }, { text: "the installer", comment: "" }]);
+  assert.equal(chat.chatMessageReadable(sent), 'Annotations:\n1. "merge gates" — why both?\n2. "the installer"\n\nlook at these');
+  assert.equal(chat.chatMessageReadable("plain"), "plain");
+  const turns = [{ user: { text: sent }, steps: [], final: null }];
+  assert.doesNotMatch(chat.chatMarkdown("Chat", turns), /response-annotations|codex-annotation/, "the exported conversation reads as the person wrote it");
+});
+
+test("queued annotated messages join into one block numbered across both, and a join past the limit stays two messages", () => {
+  const first = chat.chatMessageWithAnnotations("first", [{ text: "a", comment: "one" }]);
+  const second = chat.chatMessageWithAnnotations("second", [{ text: "b", comment: "" }, { text: "c", comment: "three" }]);
+  const queue = chat.chatQueueAdd([{ what: "Message", message: first }], { what: "Message", message: second });
+  assert.equal(queue.length, 1);
+  assert.equal((queue[0].message.match(/# Response annotations:/g) ?? []).length, 1, "one block, not two each counting from 1");
+  const parts = plain(chat.chatMessageParts(queue[0].message));
+  assert.deepEqual(parts.annotations, [{ text: "a", comment: "one" }, { text: "b", comment: "" }, { text: "c", comment: "three" }]);
+  assert.equal(parts.text, "first\n\nsecond");
+  const big = "x".repeat(6000);
+  const apart = chat.chatQueueAdd([{ what: "Message", message: big }], { what: "Message", message: big });
+  assert.equal(apart.length, 2, "two messages that together pass 8,192 characters are sent one after the other");
+});
+
 test("a DeepSeek turn's live heading, Think line and durations read as DeepSeek Harness's", () => {
   const item = (kind, extra = {}) => ({ id: `${kind}${Math.random()}`, kind, status: "completed", text: "", ...extra });
   assert.equal(chat.dshLiveTitle([item("reasoning", { text: "x" }), item("command", { status: "running", text: "npm test" })]).label, "Running commands · npm test");

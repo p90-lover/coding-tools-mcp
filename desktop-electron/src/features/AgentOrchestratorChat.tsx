@@ -15,7 +15,7 @@ import { AnsweredRecord, ApprovedMark, EditDiff, StreamingMarkdown } from "./Cha
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
-  CHAT_DEFAULT_TITLE, GOAL_SUMMARY, chatAcceptsMessage, chatDuration, chatList, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen,
+  CHAT_DEFAULT_TITLE, GOAL_SUMMARY, chatAcceptsMessage, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
   activitySummary, groupTimeline, mergeTimeline, tidyTimeline,
@@ -214,7 +214,7 @@ const LiveRow = memo(LiveRowView, (prev, next) => sameLiveItem(prev.item, next.i
 function LiveRowView({ item }: { item: ChatLiveItem }) {
   return <li className={`cx-live-item kind-${item.kind} is-${item.status || "done"}`}>
     {item.answered ? <AnsweredRecord question={item.answered.question} answer={item.answered.answer} />
-      : item.kind === "steer" ? <div className="cx-user cx-steer"><div className="cx-bubble"><p>{item.text}</p></div></div>
+      : item.kind === "steer" ? <div className="cx-user cx-steer"><div className="cx-bubble"><p>{chatMessageReadable(item.text)}</p></div></div>
       : item.kind === "message" ? <StreamingMarkdown text={item.text} live={item.status === "running"} />
       : item.kind === "reasoning" ? <ReasoningItem item={item} />
       : item.kind === "edit" ? <EditItem item={item} />
@@ -561,10 +561,15 @@ export function AgentOrchestratorChat({
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [attachNote, setAttachNote] = useState("");
   // Words selected in this chat's answers and added to the next message (ChatAnnotations).
-  const [annotations, setAnnotations] = useState<DraftAnnotation[]>([]);
-  const addAnnotation = (text: string) => {
+  // Ones kept when this chat was last left (another view, another chat) come back with it.
+  const [annotations, setAnnotations] = useState<DraftAnnotation[]>(() => {
+    const kept = CHAT_ANNOTATIONS.get(selectedTaskId) ?? [];
+    CHAT_ANNOTATIONS.delete(selectedTaskId);
+    return kept;
+  });
+  const addAnnotation = (text: string, anchor?: DraftAnnotation["anchor"]) => {
     const id = ++annotationIds;
-    setAnnotations((current) => [...current, { id, text, comment: "" }]);
+    setAnnotations((current) => [...current, { id, text, comment: "", ...(anchor ? { anchor } : {}) }]);
     return id;
   };
   const commentAnnotation = (id: number, comment: string) =>
@@ -723,8 +728,14 @@ export function AgentOrchestratorChat({
   // Each chat keeps its own unsent draft, as Codex does (the new-chat composer is "" here): opening
   // another chat puts this one's draft aside and brings that chat's back.
   const draftOwner = useRef(selectedTaskId);
-  const composing = useRef({ taskId: selectedTaskId, draft, attachments });
-  composing.current = { taskId: selectedTaskId, draft, attachments };
+  const composing = useRef({ taskId: selectedTaskId, draft, attachments, annotations });
+  composing.current = { taskId: selectedTaskId, draft, attachments, annotations };
+  // Leaving the chat view (the Mission Board, the structure view) unmounts this chat without
+  // changing chats: its unsent annotations are kept for when it comes back.
+  useEffect(() => () => {
+    const { taskId, annotations: kept } = composing.current;
+    if (kept.length) CHAT_ANNOTATIONS.set(taskId, kept);
+  }, []);
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   useEffect(() => {
@@ -794,7 +805,9 @@ export function AgentOrchestratorChat({
   const deliver = async (message: string, goal?: string, fromComposer = true) => {
     const owner = composing.current;
     const here = () => alive.current && composing.current.taskId === owner.taskId;
-    const current = () => fromComposer && here() && composing.current.draft === owner.draft && composing.current.attachments === owner.attachments;
+    // Only what was sent is cleared: a draft, file or annotation added while it was sending stays.
+    const current = () => fromComposer && here() && composing.current.draft === owner.draft && composing.current.attachments === owner.attachments
+      && composing.current.annotations === owner.annotations;
     setSending(true);
     try {
       // A steer the turn outran (it ended first) is sent as an ordinary follow-up instead; a goal is never steered.
@@ -811,7 +824,7 @@ export function AgentOrchestratorChat({
             ? "The agent had stopped responding, so its turn was stopped; your message is sent as the next turn."
             : steered === "interrupt" ? "A command was still running, so it was stopped; the same agent gets your message next, with everything it already knows."
             : steered === "starting" ? "The agent is still starting; your message is steered in once it can take it."
-            : "The agent is waiting for an answer to its request; your message is steered in once that is answered.", message);
+            : "The agent is waiting for an answer to its request; your message is steered in once that is answered.", chatMessageReadable(message));
         }
         return true;
       }
@@ -834,17 +847,25 @@ export function AgentOrchestratorChat({
   };
 
   const submit = async () => {
-    // A whole draft that is a command runs it, even while the chat is working (/status, /goal pause).
-    const command = attachments.length ? null : chatSlashParse(draft);
+    // A whole draft that is a command runs it, even while the chat is working (/status, /goal pause);
+    // with files or annotations attached it is a message, so they go with it as shown.
+    const command = attachments.length || annotations.length ? null : chatSlashParse(draft);
     if (command) { await runCommand(command.name, command.arg); return; }
     if (!canSend) return;
-    const message = chatMessageWithAnnotations(chatMessageWithAttachments(draft, attachments), annotations);
-    const text = commands?.planMode ? planMessage(message) : message;
+    // The annotation block goes outermost (after plan mode's wrapper), where the chat reads it back
+    // as a chip; inside the wrapper the sent bubble showed its JSON.
+    const body = chatMessageWithAttachments(draft, attachments);
+    const text = chatMessageWithAnnotations(commands?.planMode ? planMessage(body) : body, annotations);
+    // The chat sends at most 8,192 characters; long selections could pass that and the send failed.
+    if (text.length > CHAT_MESSAGE_LIMIT) {
+      say("Too long", `This message is ${text.length.toLocaleString()} characters with its annotations; the limit is ${CHAT_MESSAGE_LIMIT.toLocaleString()}. Remove an annotation or select less.`);
+      return;
+    }
     if (queueing) {
       // Several messages typed during one turn go together, in order.
       setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what: "Message", message: text }));
       setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote("");
-      say("Queued", `It's sent when the current turn finishes.${latest && runOpen && stop ? " Send /stop to end the turn now." : ""}`, text);
+      say("Queued", `It's sent when the current turn finishes.${latest && runOpen && stop ? " Send /stop to end the turn now." : ""}`, chatMessageReadable(text));
       return;
     }
     await deliver(text);
@@ -927,7 +948,7 @@ export function AgentOrchestratorChat({
     return "queued";
   };
   // The messages /rewind can go back to, oldest first, with the turn each one opened.
-  const rewindPoints = turns.flatMap((turn, turnIndex) => turn.user ? [{ turnIndex, messageIndex: turn.messageIndex ?? turnIndex, text: turn.user.text }] : []);
+  const rewindPoints = turns.flatMap((turn, turnIndex) => turn.user ? [{ turnIndex, messageIndex: turn.messageIndex ?? turnIndex, text: chatMessageReadable(turn.user.text) }] : []);
   // Delete message: the turn whose message waits for the in-chat confirmation, or null. A message
   // goes with its reply and the steers sent during its turn; the agent's files stay as they are.
   const [deleting, setDeleting] = useState<number | null>(null);
@@ -1156,7 +1177,7 @@ export function AgentOrchestratorChat({
     return <article key={turn.key} className={`cx-turn${dsh ? " is-dsh" : ""}`}>
               {turn.user ? <div className="cx-user">
                 <SentMessage text={turn.user.text} />
-                <MessageActions text={turn.user.text}>
+                <MessageActions text={chatMessageReadable(turn.user.text)}>
                   {thread ? <button type="button" title="Fork from here" aria-label="Fork from this message" onClick={() => thread.fork(turn.messageIndex ?? turnIndex)}>⑂</button> : null}
                   {thread?.rewind ? <button type="button" title="Rewind: edit this message in a new chat" aria-label="Rewind to this message" onClick={() => thread.rewind?.(turn.messageIndex ?? turnIndex)}>↶</button> : null}
                   {thread?.deleteMessage ? <button type="button" title={deleteBlocked || (deletion(turn) ? "Delete this message and its reply" : notYet)} aria-label="Delete this message"

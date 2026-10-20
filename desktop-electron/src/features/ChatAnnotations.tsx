@@ -7,15 +7,25 @@ import type { ChatAnnotation } from "./ao-chat";
 // The composer shows "N annotations" (hover for the list, edit or remove each), and the message
 // goes out with them in Codex's own format (chatMessageWithAnnotations).
 
-/** An annotation not sent yet; `id` ties it to its live range in the transcript. */
-export type DraftAnnotation = ChatAnnotation & { id: number };
+/**
+ * An annotation not sent yet. `id` ties it to its live range; `anchor` says where its words are (the
+ * nth answer in the transcript, character offsets in it), so the range is found again after the
+ * transcript re-renders, or when the chat is left and opened again.
+ */
+export type DraftAnnotation = ChatAnnotation & { id: number; anchor?: { answer: number; start: number; end: number } };
 
 // The selected words of each annotation as a live DOM Range, by id: they draw its highlight and
-// place its number. Outside React state, since a Range is a live DOM object.
+// place its number. Outside React state, since a Range is a live DOM object. Entries outlive a chat
+// switch (their annotations come back with the chat) and are rebuilt from anchors when stale.
 const RANGES = new Map<number, Range>();
 const HIGHLIGHT = "cx-annotation";
 /** The longest selection kept; a whole answer selected is still context, not a quote to resend. */
 const MAX_TEXT = 4000;
+/**
+ * What an answer is: the turn's final answer, a DeepSeek reply, or an agent message in the live
+ * work list. The person's own messages, reasoning, tool output and status text are not answers.
+ */
+const ANSWER = ".cx-answer, .dsh-reply, .cx-live-item.kind-message";
 
 type Highlights = { set(name: string, value: unknown): void; delete(name: string): void };
 const highlightApi = (): { registry: Highlights; Highlight: new (...ranges: Range[]) => unknown } | null => {
@@ -24,21 +34,58 @@ const highlightApi = (): { registry: Highlights; Highlight: new (...ranges: Rang
   return registry && Highlight ? { registry, Highlight } : null;
 };
 
-/** Whether a node is answer text the person may annotate: in the thread, not a control or the composer. */
-function annotatable(root: HTMLElement, node: Node | null) {
+/** The answer a node belongs to, inside the transcript, or null (controls never count). */
+function answerOf(root: HTMLElement, node: Node | null): Element | null {
   const element = node instanceof Element ? node : node?.parentElement;
-  return Boolean(element && root.contains(element) && !element.closest("textarea, input, button, .cx-composer, .cx-annotation-ui"));
+  if (!element || !root.contains(element) || element.closest("textarea, input, button, .cx-annotation-ui")) return null;
+  const answer = element.closest(ANSWER);
+  return answer && root.contains(answer) ? answer : null;
+}
+
+/** A range over characters [start, end) of an element's text. */
+function rangeAt(container: Element, start: number, end: number): Range | null {
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  const range = document.createRange();
+  let seen = 0, began = false;
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const length = node.textContent?.length ?? 0;
+    if (!began && start <= seen + length) { range.setStart(node, start - seen); began = true; }
+    if (began && end <= seen + length) { range.setEnd(node, end - seen); return range; }
+    seen += length;
+  }
+  return null;
+}
+
+/** The annotation's words as a live range: the one made when it was added, or one found again. */
+function rangeFor(root: HTMLElement, item: DraftAnnotation): Range | null {
+  const kept = RANGES.get(item.id);
+  if (kept && !kept.collapsed && kept.startContainer.isConnected && root.contains(kept.startContainer)) return kept;
+  if (!item.anchor) return null;
+  const answers = [...root.querySelectorAll(ANSWER)];
+  const quote = item.text.replace(/\s+/g, " ").trim();
+  const matches = (range: Range | null) => Boolean(range && range.toString().replace(/\s+/g, " ").trim() === quote);
+  // Where it was, then anywhere in that answer, then in any answer (the transcript may have grown).
+  let found = answers[item.anchor.answer] ? rangeAt(answers[item.anchor.answer], item.anchor.start, item.anchor.end) : null;
+  if (!matches(found)) {
+    found = null;
+    for (const answer of [answers[item.anchor.answer], ...answers].filter(Boolean)) {
+      const at = answer.textContent?.indexOf(item.text) ?? -1;
+      if (at >= 0) { found = rangeAt(answer, at, at + item.text.length); break; }
+    }
+  }
+  if (found) RANGES.set(item.id, found);
+  return found;
 }
 
 export function SelectionAnnotator({ root, annotations, onAdd, onComment }: {
   /** The transcript the person selects in. */
   root: RefObject<HTMLElement | null>;
   annotations: DraftAnnotation[];
-  /** Adds the selected text as an annotation and returns its id. */
-  onAdd: (text: string) => number;
+  /** Adds the selected text as an annotation (with where it is) and returns its id. */
+  onAdd: (text: string, anchor?: DraftAnnotation["anchor"]) => number;
   onComment: (id: number, comment: string) => void;
 }) {
-  const [offer, setOffer] = useState<{ text: string; range: Range } | null>(null);
+  const [offer, setOffer] = useState<{ text: string; range: Range; anchor?: DraftAnnotation["anchor"] } | null>(null);
   const [editing, setEditing] = useState<{ id: number; draft: string } | null>(null);
   // Bumped when anything moves (a scroll, a resize, the transcript growing): positions are read again.
   const [, setLayout] = useState(0);
@@ -50,8 +97,16 @@ export function SelectionAnnotator({ root, annotations, onAdd, onComment }: {
       if (!area || !selection || selection.isCollapsed || !selection.rangeCount) { setOffer(null); return; }
       const range = selection.getRangeAt(0);
       const text = selection.toString().trim();
-      if (!text || !annotatable(area, range.startContainer) || !annotatable(area, range.endContainer)) { setOffer(null); return; }
-      setOffer({ text: text.slice(0, MAX_TEXT), range: range.cloneRange() });
+      // Words from one answer only: a selection running into a message of yours, a tool call or
+      // another turn would be sent to the agent as text it had written.
+      const answer = answerOf(area, range.startContainer);
+      if (!text || !answer || answerOf(area, range.endContainer) !== answer) { setOffer(null); return; }
+      const before = document.createRange();
+      before.setStart(answer, 0);
+      before.setEnd(range.startContainer, range.startOffset);
+      const start = before.toString().length;
+      const anchor = { answer: [...area.querySelectorAll(ANSWER)].indexOf(answer), start, end: start + range.toString().length };
+      setOffer({ text: text.slice(0, MAX_TEXT), range: range.cloneRange(), anchor });
     };
     const onUp = (event: MouseEvent) => {
       if (event.target instanceof Element && event.target.closest(".cx-annotation-ui")) return;
@@ -69,13 +124,18 @@ export function SelectionAnnotator({ root, annotations, onAdd, onComment }: {
     };
   }, [root]);
 
-  // The added words stay highlighted, and positions follow the transcript as it scrolls and grows.
+  // The added words stay highlighted (ranges found again after a re-render), and positions follow
+  // the transcript as it scrolls and grows.
   useEffect(() => {
-    const ids = new Set(annotations.map((item) => item.id));
-    for (const id of RANGES.keys()) if (!ids.has(id)) RANGES.delete(id);
+    const area = root.current;
     const api = highlightApi();
-    const live = annotations.map((item) => RANGES.get(item.id)).filter((range): range is Range => Boolean(range && !range.collapsed));
-    if (api) { if (live.length) api.registry.set(HIGHLIGHT, new api.Highlight(...live)); else api.registry.delete(HIGHLIGHT); }
+    if (!area || !api) return;
+    const live = annotations.map((item) => rangeFor(area, item)).filter((range): range is Range => Boolean(range));
+    if (live.length) api.registry.set(HIGHLIGHT, new api.Highlight(...live)); else api.registry.delete(HIGHLIGHT);
+  });
+  useEffect(() => {
+    // Kept ranges are bounded: the oldest go first (a gone one is found again from its anchor).
+    if (RANGES.size > 200) for (const id of [...RANGES.keys()].slice(0, RANGES.size - 200)) RANGES.delete(id);
     setLayout((value) => value + 1);
   }, [annotations]);
   useEffect(() => {
@@ -103,7 +163,7 @@ export function SelectionAnnotator({ root, annotations, onAdd, onComment }: {
 
   const add = () => {
     if (!offer) return;
-    const id = onAdd(offer.text);
+    const id = onAdd(offer.text, offer.anchor && offer.anchor.answer >= 0 ? offer.anchor : undefined);
     RANGES.set(id, offer.range);
     window.getSelection()?.removeAllRanges();
     setOffer(null);
@@ -117,15 +177,16 @@ export function SelectionAnnotator({ root, annotations, onAdd, onComment }: {
 
   // Each annotation's number sits at the end of its words, as in Codex.
   const marks = annotations.flatMap((item, index) => {
-    const range = RANGES.get(item.id);
-    if (!range || range.collapsed || !range.startContainer.isConnected) return [];
+    const range = rangeFor(area, item);
+    if (!range) return [];
     const rects = range.getClientRects();
     const last = rects[rects.length - 1];
     return last && visible(last) ? [{ id: item.id, number: index + 1, x: last.right, y: last.top + last.height / 2 }] : [];
   });
   const offerRect = offer?.range.getBoundingClientRect();
-  const editRange = editing ? RANGES.get(editing.id) : undefined;
-  const editRect = editRange && !editRange.collapsed ? editRange.getBoundingClientRect() : undefined;
+  const editItem = editing ? annotations.find((item) => item.id === editing.id) : undefined;
+  const editRange = editItem ? rangeFor(area, editItem) : null;
+  const editRect = editRange ? editRange.getBoundingClientRect() : undefined;
   const host = area.closest(".ao-workflow") ?? document.body;
   const clampX = (x: number, width: number) => Math.max(8, Math.min(window.innerWidth - width - 8, x));
 

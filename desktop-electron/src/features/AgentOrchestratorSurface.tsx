@@ -11,7 +11,7 @@ import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "
 import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
-import { GOAL_SUMMARY, approvalAnsweredForYou, chatArchived, chatList, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessagesFromDescription, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
+import { GOAL_SUMMARY, approvalAnsweredForYou, chatArchived, chatList, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
 import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { createLatestConfigQueue } from "./ao-config";
 import {
@@ -1558,8 +1558,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
     const messages = chatMessagesFromDescription(await loadDescription(taskId));
     if (!Number.isInteger(upTo) || upTo < 0 || upTo >= messages.length) return;
     // Earlier messages keep the steers sent during their turns; the chosen one is just what was typed.
-    const earlier = messages.slice(0, upTo).flatMap((message) => [message.text, ...(message.steers ?? []).map((steer) => steer.text)]);
-    setChatSeed({ key: crypto.randomUUID(), workspaceId, title: `${taskName(taskId)} (rewound)`.slice(0, 240), text: messages[upTo].text,
+    const earlier = messages.slice(0, upTo).flatMap((message) => [message.text, ...(message.steers ?? []).map((steer) => steer.text)]).map(chatMessageReadable);
+    setChatSeed({ key: crypto.randomUUID(), workspaceId, title: `${taskName(taskId)} (rewound)`.slice(0, 240), text: chatMessageReadable(messages[upTo].text),
       ...(earlier.length ? { context: earlier } : {}) });
     setPendingChat(null); setInspectedId(""); setDraftTeam(null); setSheet("");
     setChatTaskId(""); setView("chat");
@@ -1569,7 +1569,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     const messages = chatMessagesFromDescription(await loadDescription(taskId));
     const kept = upTo === undefined ? messages : messages.slice(0, upTo === "first" ? 1 : upTo + 1);
     if (!kept.length) return;
-    await sendChat({ title: `Fork of ${taskName(taskId)}`.slice(0, 240), message: kept.map((message) => message.text).join("\n\n").slice(0, 8192) });
+    await sendChat({ title: `Fork of ${taskName(taskId)}`.slice(0, 240), message: kept.map((message) => chatMessageReadable(message.text)).join("\n\n").slice(0, 8192) });
   })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
   // Delete message (confirmed in the chat): the message and its reply leave this chat. The chat
   // names the runs its turn showed (the first is the one the message started); the bridge hides
@@ -1606,7 +1606,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
   // composer holds this chat's messages; you pick that project's team or model and send.
   const continueInProject = (taskId: string, targetWorkspaceId: string) => void (async () => {
     const messages = chatMessagesFromDescription(await loadDescription(taskId));
-    const text = messages.map((message) => message.text).join("\n\n").slice(0, 8192);
+    const text = messages.map((message) => chatMessageReadable(message.text)).join("\n\n").slice(0, 8192);
     setChatSeed({ key: crypto.randomUUID(), workspaceId: targetWorkspaceId, title: `${taskName(taskId)} (continued)`.slice(0, 240), text });
     setPendingChat(null); setInspectedId(""); setDraftTeam(null); setSheet("");
     if (targetWorkspaceId === workspaceId) { setChatTaskId(""); setView("chat"); } else chooseWorkspace(targetWorkspaceId);
