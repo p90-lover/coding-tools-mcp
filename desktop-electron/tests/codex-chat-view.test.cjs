@@ -367,7 +367,8 @@ test("rewind puts only the chosen message in the composer, with the earlier ones
   const read = (name) => fs.readFileSync(path.resolve(__dirname, "../src/features", name), "utf8");
   const surface = read("AgentOrchestratorSurface.tsx");
   const rewind = surface.slice(surface.indexOf("const rewindChat = "), surface.indexOf("// Fork: a new chat starting"));
-  assert.ok(rewind.includes("text: messages[upTo].text"), "the composer holds just the chosen message");
+  // Just the chosen message, as the person reads it (annotations as quotes, not the agent's block).
+  assert.ok(rewind.includes("text: chatMessageReadable(messages[upTo].text)"), "the composer holds just the chosen message");
   assert.ok(rewind.includes("context: earlier"), "the messages before it go along as context");
   const chat = read("AgentOrchestratorChat.tsx");
   assert.ok(chat.includes("setCarried(seed.context?.length ? seed.context : null)"));
