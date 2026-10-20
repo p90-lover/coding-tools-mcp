@@ -1973,6 +1973,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     /^git\s+(?:status|diff|log|show|branch|rev-parse)(?:\s+[\w./:=-]+)*$/i,
     // Where the shell is: prints the current folder and changes nothing (cmd's bare `cd` included).
     /^(?:pwd|cd|Get-Location|gl)$/i,
+    // AO's own progress report: the worker role tells every card to file it (checkpoint, needs input,
+    // stuck, done with its verdict); it only updates this session's status for the orchestrator. Seen
+    // live: the reviewer card's "ao report --done" got the model reviewer's "ask" and the team waited
+    // on the person for its verdict.
+    /^ao(?:\.cmd|\.exe)?\s+report(?:\s+--(?:done|checkpoint|needs-input|stuck|note|artifact|pr-created|pr-reviewed)(?:[=\s]+(?:"[^"\n]*"|'[^'\n]*'|[\w./:#-]+))?)+$/i,
   ];
   /** Why `command` is a routine project command "Approve for me" may run, or null. */
   function routineCommand(command) {

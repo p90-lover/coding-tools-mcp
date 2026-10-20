@@ -19,7 +19,18 @@ test("Approve for me runs routine project commands without asking: lockfile inst
     "node --version", "git status", "git diff --stat",
     // Where the shell is: prints the folder, changes nothing (the user's tool check waited on a bare `cd`).
     "pwd", "cd", "Get-Location",
+    // AO's own progress report (a team's reviewer waited on the person for its verdict).
+    "ao report --done --note \"Reviewer verdict: APPROVED (verify).\"",
+    "ao report --checkpoint --note 'tests pass'", "ao report --needs-input --note \"which port?\"",
+    "ao.exe report --done --note \"done\" --artifact dist/app.zip --pr-created 42",
   ]) assert.ok(routineCommand(command), `routine: ${command}`);
+});
+
+test("only AO's report subcommand is routine, and only as one plain command line", () => {
+  for (const command of [
+    "ao session claim-pr 12", "ao report --done --note \"x\" ; rm -rf /", "ao report --done --note \"x\" > log.txt",
+    "ao report --done --note \"x\" | tee out", "ao report --bogus", "ao report --done --note \"$(whoami)\"",
+  ]) assert.equal(routineCommand(command), null, `not routine: ${JSON.stringify(command)}`);
 });
 
 test("anything that adds, reaches out or escapes still goes to the reviewer", () => {
