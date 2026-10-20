@@ -60,11 +60,39 @@ function observeHarness(context) {
   const helpers = source.slice(source.indexOf("  async function chatHostGone"), source.indexOf("  // Mission-owned AO calls."));
   const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
   const states = source.match(/const TERMINAL_TURN_STATES = .*;/)[0];
-  return vm.runInNewContext(states + helpers + identity + "({" + method + "})", {
+  // These fixtures change AO's state and read it back at once: no shared read unless a test asks
+  // for the app's real window (tailFreshMs).
+  const shared = helpers.replace(/const TAIL_FRESH_MS = \d+;/, `const TAIL_FRESH_MS = ${Number(context.tailFreshMs ?? 0)};`);
+  return vm.runInNewContext(states + shared + identity + "({" + method + "})", {
     Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"),
     agentTools: null, observeTui: async () => { throw new Error("not a TUI fixture"); }, ...context,
   });
 }
+
+test("callers reading one session's conversation at once share one read, and a read serves for a moment", async () => {
+  // Seen live: a busy chat's tail (~500-700 KB) was read twice a second by the chat, the mission
+  // controller and the approval screen each: 58 MB a minute through the main process.
+  let reads = 0;
+  const upstream = observeHarness({ tailFreshMs: 900,
+    internalApi: async (_method, endpoint) => {
+      if (endpoint.endsWith("/conversation?limit=100&includePending=1")) {
+        reads += 1;
+        await new Promise(resolve => setTimeout(resolve, 20));
+        return { turns: [{ id: "t", state: "running" }], messages: [] };
+      }
+      return { session: { id: "s", mode: "chat", status: "working" } };
+    },
+  });
+  const [first, second] = await Promise.all([upstream.observe("s"), upstream.observe("s")]);
+  assert.equal(first.turnState, "running");
+  assert.equal(second.turnState, "running");
+  assert.equal(reads, 1, "two callers at once, one read");
+  await upstream.observe("s");
+  assert.equal(reads, 1, "a read moments ago serves the next caller");
+  await new Promise(resolve => setTimeout(resolve, 950));
+  await upstream.observe("s");
+  assert.equal(reads, 2, "then it is read again");
+});
 
 test("chat hosts that outlived the app are counted by whether their loopback address still answers", async () => {
   const vm = require("node:vm");
