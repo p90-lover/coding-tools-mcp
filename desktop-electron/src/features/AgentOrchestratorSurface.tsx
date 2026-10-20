@@ -526,8 +526,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [singleRoute, setSingleRoute] = useState<AoRoute>(newChatRoute);
   // A model, effort, window or permission picked in the composer is the next new chat's too, from
   // the moment it is picked: only a sent message kept it before, so a New chat (or another task)
-  // opened right after picking went back to the old model.
-  const pickSingleRoute = (route: AoRoute) => { setSingleRoute(route); rememberChatRoute(route); };
+  // opened right after picking went back to the old model. Only the person's picks are kept: the
+  // composer fitting an opened chat's route to its model (`adjusted`) is that chat's, and keeping it
+  // made a rewind or a new chat start on the old chat's model, effort and window.
+  const pickSingleRoute = (route: AoRoute, adjusted = false) => { setSingleRoute(route); if (!adjusted) rememberChatRoute(route); };
   const hydratedComposer = useRef("");
   // The New mission sheet's team choice (#254); the composer keeps its own (composerTeamId).
   const [missionTeamId, setMissionTeamId] = useState("");
@@ -1475,7 +1477,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
           ...execution, ...executableArg(), ...(input.goal ? { goal: input.goal } : {}) });
         if (result.cancelled) throw new Error("Message start cancelled; no new attempt confirmed.");
         if (!current()) { resolve(); return; }
-        if (composerMode === "single") rememberChatRoute(singleRoute);
+        // The route is not kept here: picks are kept as they are made, and a follow-up in an older
+        // chat runs on that chat's route, which must not become the next new chat's (or a rewind's).
         await Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]);
         if (!current()) { resolve(); return; }
         const taskId = String(result.taskId);
