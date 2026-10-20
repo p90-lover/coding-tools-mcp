@@ -386,6 +386,25 @@ class BrowserTurnCancelledError extends Error {
   }
 }
 
+/**
+ * Loads the idle document, retrying only a timeout with longer windows. A busy machine can miss
+ * the first 10 s (seen for the primary view for a day, and for new turn tabs: "Browser idle
+ * document did not commit within 10000ms" failed a Web GPT turn as browser_page). The timeout
+ * stops the load, so nothing else would retry it.
+ */
+async function loadIdleSurfaceWithRetries(contents, attempts, onRetry) {
+  for (const [attempt, timeoutMs] of attempts.entries()) {
+    try {
+      await loadCommittedBrowserSurface(contents, IDLE_BROWSER_URL, timeoutMs);
+      return;
+    } catch (error) {
+      const timedOut = /did not commit within/.test(error instanceof Error ? error.message : String(error));
+      if (!timedOut || attempt === attempts.length - 1) throw error;
+      onRetry?.(attempt + 1, timeoutMs);
+    }
+  }
+}
+
 function loadCommittedBrowserSurface(
   contents,
   url,
@@ -588,20 +607,13 @@ class BrowserHost {
     this.view.setBounds(this.hiddenTurnBounds());
     this.view.setVisible(true);
     try {
-      // A busy machine can miss the first window (seen: every start for a day missed 10 s). The
-      // timeout stops the load, so nothing else would retry it and the launcher stayed without its
-      // ownership descriptor: retry only a timeout, with longer windows.
-      const attempts = this.bootstrapAttemptsMs ?? PRIMARY_VIEW_BOOTSTRAP_ATTEMPTS_MS;
-      for (const [attempt, timeoutMs] of attempts.entries()) {
-        try {
-          await loadCommittedBrowserSurface(this.view.webContents, IDLE_BROWSER_URL, timeoutMs);
-          break;
-        } catch (error) {
-          const timedOut = /did not commit within/.test(error instanceof Error ? error.message : String(error));
-          if (!timedOut || attempt === attempts.length - 1) throw error;
-          this.logger.warn("browser.initialization_retry", { attempt: attempt + 1, timeoutMs });
-        }
-      }
+      // A busy machine can miss the first window (seen: every start for a day missed 10 s), and
+      // the launcher then stayed without its ownership descriptor.
+      await loadIdleSurfaceWithRetries(
+        this.view.webContents,
+        this.bootstrapAttemptsMs ?? PRIMARY_VIEW_BOOTSTRAP_ATTEMPTS_MS,
+        (attempt, timeoutMs) => this.logger.warn("browser.initialization_retry", { attempt, timeoutMs }),
+      );
       if (browserInteractionModeFor(this) === "automatic") await this.markOwnedSurface();
     } finally {
       this.syncViewVisibility();
@@ -749,7 +761,13 @@ class BrowserHost {
     this.bindShellZoomShortcuts(view.webContents);
     this.bindTurnContents(tab);
     try {
-      await loadCommittedBrowserSurface(view.webContents, IDLE_BROWSER_URL);
+      // A new turn tab gets the primary view's retries: one 10 s window failed turns as
+      // browser_page on a busy machine. The windows fit the tab's 120 s bootstrap budget.
+      await loadIdleSurfaceWithRetries(
+        view.webContents,
+        this.bootstrapAttemptsMs ?? PRIMARY_VIEW_BOOTSTRAP_ATTEMPTS_MS,
+        (attempt, timeoutMs) => this.logger.warn("browser.tab_initialization_retry", { tabId: tab.id, traceId: tab.traceId, attempt, timeoutMs }),
+      );
       await this.markTurnTabSurface(tab);
       tab.initializingSurface = false;
     } catch (error) {
@@ -3457,6 +3475,7 @@ module.exports = {
   isChatGptCloudflareChallengeResponse,
   isTemporaryChatUrl,
   loadCommittedBrowserSurface,
+  loadIdleSurfaceWithRetries,
   MANUAL_SUBMIT_TIMEOUT_MS,
   MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS,
   navigationErrorForLog,
