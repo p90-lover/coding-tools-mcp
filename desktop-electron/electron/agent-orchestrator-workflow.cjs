@@ -2565,9 +2565,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (autoRetrySeen.size > 500) autoRetrySeen.delete(autoRetrySeen.keys().next().value);
     }
     const wait = AUTO_RETRY_PAUSE_MS * attempt - (now() - autoRetrySeen.get(key));
-    if (wait > 0) return { detail: `Retrying automatically in ${Math.ceil(wait / 1000)}s (attempt ${attempt} of ${AUTO_RETRY_LIMIT})` };
+    // `waiting`: the run must keep going until the pause is over (driveRun), or nothing retries it.
+    if (wait > 0) return { waiting: true, detail: `Retrying automatically in ${Math.ceil(wait / 1000)}s (attempt ${attempt} of ${AUTO_RETRY_LIMIT})` };
     autoRetrySeen.delete(key);
     return { retry: true, attempt };
+  }
+  /**
+   * Whether "Retry automatically" may restart a single chat whose drive ended on an error (a launch
+   * that timed out throws out of driveRun before recoverHeld sees the held card): on, a held step,
+   * within the attempt limit, and not a failure only the person can fix.
+   */
+  function autoRetryAllowed(mission) {
+    if (!chatPreferences.get().autoRetry || !mission || mission.cancelled || mission.paused || mission.execution_mode !== "single") return false;
+    if (mission.nodes.some(node => ["running", "reserved"].includes(node.state))) return false;
+    const node = mission.nodes.find(entry => entry.state === "held" && entry.role !== "retry") ?? mission.nodes.find(entry => entry.state === "held");
+    return Boolean(node) && !POOL_EXHAUSTED.test(String(node.receipt?.error || "")) && (node.history?.length ?? 0) + 1 <= AUTO_RETRY_LIMIT;
   }
   /** chat_auto_retry: reads the "Retry automatically" preference, or sets it with `enabled`. */
   function chatAutoRetry({ enabled } = {}) {
@@ -2593,7 +2605,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           logger?.info?.("ao.auto_retried", { attempt: auto.attempt });
           return { changed: true, retried: true, detail: `Retrying the failed step automatically (attempt ${auto.attempt} of ${AUTO_RETRY_LIMIT})` };
         }
-        if (auto?.detail) return { detail: auto.detail };
+        if (auto?.detail) return { detail: auto.detail, ...(auto.waiting ? { waiting: true } : {}) };
         return { detail: "Single model failed; inspect the saved answer and retry explicitly." };
       }
       await controlRun({ workspaceId, runId: mission.id, action: "retry" });
@@ -2814,6 +2826,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           reportRun(workspaceId, runId, state, mission, failed ? "error" : null); return;
         }
         const running = mission.nodes.some(node => ["running", "reserved"].includes(node.state));
+        // "Retry automatically" is counting down to the next attempt: the run keeps going until it
+        // fires. It used to stop here on the first pass, so the countdown never ended and the
+        // failed step waited for a click after all.
+        if (!running && helped?.waiting && !mission.paused) {
+          state.status = "held";
+          reportRun(workspaceId, runId, state, mission, null);
+          await pause();
+          continue;
+        }
         if (!running && !mission.paused && !mission.nodes.some(node => node.state === "pending" && parentsReady(mission, node))) {
           state.status = "held";
           state.detail ||= mission.nodes.some(node => node.role === "worker" && node.state === "pending" && blockedByFailure(mission, node))
@@ -2839,7 +2860,28 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     } catch (error) {
       state.status = "held"; state.detail = publicText(error?.message || error, 500);
       reportRun(workspaceId, runId, state, null, state.stopped ? null : "error");
+      if (!state.stopped) scheduleAutoRetry(workspaceId, runId, executable, state);
     } finally { state.driving = false; }
+  }
+  /**
+   * A drive that ended on an error left its failed step held with nothing to retry it. With "Retry
+   * automatically" on, the run starts again after the pause (startRun retries a held card), within
+   * the same attempt limit; a later click, stop or new drive of the run wins over the timer.
+   */
+  function scheduleAutoRetry(workspaceId, runId, executable, state) {
+    if (!chatPreferences.get().autoRetry) return;
+    const timer = setTimer(() => {
+      void (async () => {
+        const key = runKey(workspaceId, runId);
+        if (state.stopped || backgroundRuns.get(key) !== state) return;
+        const saved = await runs({ workspaceId, runId });
+        const mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
+        if (!autoRetryAllowed(mission)) return;
+        logger?.info?.("ao.auto_retry_restart", { attempts: Math.max(0, ...mission.nodes.map(node => node.history?.length ?? 0)) });
+        await startRun({ workspaceId, runId, executable });
+      })().catch(error => logger?.warn?.("ao.auto_retry_restart_failed", { message: publicText(error?.message || error, 200) }));
+    }, AUTO_RETRY_PAUSE_MS);
+    timer?.unref?.();
   }
   /** Whether a run's background grant can start nothing more: every turn started, or its hour over. */
   function grantSpent(grant) {
