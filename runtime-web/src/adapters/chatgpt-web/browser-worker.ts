@@ -1855,6 +1855,23 @@ export class ChatGptVisibleTraceTracker {
   }
 }
 
+/**
+ * The redesigned agent turn collapses its steps into "Worked for …" as soon as it finishes, so the
+ * sentence written just before the last tool call may never be followed by another step that would
+ * mark it as commentary. Text still shown as the answer when ChatGPT called a tool belongs before
+ * that tool; append it as the next commentary slot, where the DOM classifier would later put it.
+ */
+export function withChatGptToolBoundaryNarration(
+  blocks: ChatGptVisibleTraceBlock[],
+  narration: string | undefined,
+): ChatGptVisibleTraceBlock[] {
+  if (!narration) return blocks;
+  const normalize = (text: string) => text.replace(/\s+/g, " ").trim();
+  const target = normalize(narration);
+  if (blocks.some(block => block.kind === "commentary" && normalize(block.text) === target)) return blocks;
+  return [...blocks, { kind: "commentary", text: narration, complete: true }];
+}
+
 export function isChatGptTraceControl(block: ChatGptVisibleTraceBlock): boolean {
   if (block.kind !== "status") return false;
   const text = block.text.replace(/\s+/g, " ").trim();
@@ -4031,8 +4048,17 @@ export class ChatGptBrowserWorker {
         statusContainers: HTMLElement[],
       ): { commentaryRoots: HTMLElement[]; answerRoots: HTMLElement[] } => {
         const firstStatusContainer = statusContainers[0];
+        // The redesigned agent turn has no status containers: every message is an assistant-message
+        // root in one `in_progress` group, each step opened by an activity header. While the group
+        // is in progress, Markdown followed by a later root or activity header was written before a
+        // tool step, which is Codex commentary; the final answer is the last thing in the group.
         const commentary = markdownRoots.filter(candidate => (
-          candidate.closest("[data-streaming-response-status]") !== null
+          [...(candidate.closest('[data-talvt-turn-state="in_progress"]')?.querySelectorAll(
+            '[data-markdown-text-style="assistant-message"], [class*="group/activity-header"]',
+          ) ?? [])].some(step => step !== candidate && !candidate.contains(step)
+            // 4 is Node.DOCUMENT_POSITION_FOLLOWING, inlined to keep this function standalone.
+            && Boolean(candidate.compareDocumentPosition(step) & 4))
+          || candidate.closest("[data-streaming-response-status]") !== null
           // Chain-of-thought components carry reasoning, never the final answer, so containment is
           // a position-independent commentary signal. Position alone cannot separate "commentary
           // between two status containers" from "answer between two tool calls".
@@ -4241,9 +4267,22 @@ export class ChatGptBrowserWorker {
           ?? candidate.closest<HTMLElement>("[data-item-anchor]")
           ?? candidate;
       };
+      const activityHeaderSelector = '[class*="group/activity-header"]';
       const traceText = (candidate: HTMLElement): string => {
         const ariaLabel = candidate.getAttribute("aria-label")?.trim();
         if (ariaLabel) return ariaLabel;
+        if (candidate.matches(activityHeaderSelector)) {
+          // The live title is rendered twice: an aria-hidden shimmer copy and the readable text.
+          // Read only the latter, and drop the "Worked for 21s" toggle a finished step collapses to.
+          const parts: string[] = [];
+          const walker = document.createTreeWalker(candidate, NodeFilter.SHOW_TEXT);
+          for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+            if (!node.parentElement?.closest('[aria-hidden="true"]')) parts.push(node.textContent ?? "");
+          }
+          const title = (parts.join(" ").replace(/\s+/g, " ").trim()
+            || candidate.innerText.replace(/\s+/g, " ").trim());
+          return /^(?:Worked|Thought) for\b/.test(title) ? "" : title;
+        }
         // Animated ChatGPT action counters visually split a phrase around the changing number, so
         // `innerText` can become `Searching websites\n3`. The button's screen-reader label already
         // carries the stable semantic phrase (`Searching 3 websites`) without enclosing unrelated
@@ -4275,7 +4314,7 @@ export class ChatGptBrowserWorker {
         return false;
       };
       root.querySelectorAll<HTMLElement>(
-        'button, [role="status"], [aria-busy="true"], [data-testid*="cot"], [data-testid*="reason"], [data-testid*="thought"]',
+        `button, [role="status"], [aria-busy="true"], [data-testid*="cot"], [data-testid*="reason"], [data-testid*="thought"], ${activityHeaderSelector}`,
       ).forEach(candidate => {
         if (completionActionSet.has(candidate)) return;
         if (overlapsRenderedAnswer(candidate) || overlapsCommentary(candidate)) return;
@@ -5017,6 +5056,8 @@ export class ChatGptBrowserWorker {
       let capturedResponse = false;
       const sentAt = Date.now();
       const visibleTrace = new ChatGptVisibleTraceTracker();
+      // Answer text visible when ChatGPT called a tool was written before that tool: commentary.
+      let toolBoundaryNarration: string | undefined;
       const markdownBuffer = new ChatGptMarkdownBuffer();
       const checkpointStream = turn.captureLunaCheckpoint
         ? new ChatGptLunaCheckpointStream()
@@ -5142,6 +5183,9 @@ export class ChatGptBrowserWorker {
             externalProgressSnapshot.lastToolBatchRevision,
             snapshot.visibleText,
           );
+          if (snapshot.mutableProjection && snapshot.visibleText.trim()) {
+            toolBoundaryNarration = snapshot.visibleText.trim();
+          }
           await turn.externalProgress.acknowledgeToolBatch(externalProgressSnapshot.lastToolBatchRevision);
         }
         const externalProgressLive = chatGptExternalProgressSuppressesDomHealth(
@@ -5172,7 +5216,11 @@ export class ChatGptBrowserWorker {
               return throwMarkdownConsistencyError(error);
             }
           })();
-          for (const trace of visibleTrace.observe(snapshot.traceBlocks, snapshot.completionActionVisible)) {
+          if (toolBoundaryNarration !== undefined && snapshot.visibleText.trim() !== toolBoundaryNarration) {
+            toolBoundaryNarration = undefined;
+          }
+          const traceBlocks = withChatGptToolBoundaryNarration(snapshot.traceBlocks, toolBoundaryNarration);
+          for (const trace of visibleTrace.observe(traceBlocks, snapshot.completionActionVisible)) {
             if (trace.kind === "commentary") turn.onCommentary?.(trace.text, trace.continuation === true);
             else turn.onReasoningSummary?.(trace.text, trace.continuation === true);
           }

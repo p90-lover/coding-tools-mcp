@@ -3847,6 +3847,31 @@ test("the shipped commentary classifier separates answer Markdown from reasoning
 
   // A turn with no status container at all is entirely answer.
   expect(answerFor('<div class="markdown">ONLY ANSWER</div>')).toBe("ONLY ANSWER");
+
+  // The redesigned agent turn: one in-progress group, an activity header per step, every message
+  // an assistant-message root. Text written before a later step is commentary; the last is answer.
+  const agentAnswerFor = (html: string): string => {
+    const document = createDocument(`<body>${html}</body>`);
+    const roots = Array.from(document.body.querySelectorAll('[data-markdown-text-style="assistant-message"]'));
+    return selectChatGptAnswerRoots(roots, []).answerRoots
+      .map(root => (root.textContent ?? "").trim())
+      .filter(Boolean)
+      .join(" | ");
+  };
+  const header = (title: string) => `<div class="group/activity-header inline-flex"><span>${title}</span></div>`;
+  const message = (text: string) => `<div><div data-markdown-text-style="assistant-message">${text}</div></div>`;
+  expect(agentAnswerFor(
+    `<div data-talvt-turn-state="in_progress">${header("Listing files")}${message("I will list the folder.")}`
+    + `${header("Reading README")}${message("NOW THE ANSWER")}</div>`,
+  )).toBe("NOW THE ANSWER");
+  // Narration followed only by the next step's activity header is already commentary.
+  expect(agentAnswerFor(
+    `<div data-talvt-turn-state="in_progress">${message("Checking git next.")}${header("Reviewing log")}</div>`,
+  )).toBe("");
+  // Once ChatGPT marks the group complete, what it still shows is the answer.
+  expect(agentAnswerFor(
+    `<div data-talvt-turn-state="complete">${header("Worked for 21s")}${message("FINAL ONE")}${message("FINAL TWO")}</div>`,
+  )).toBe("FINAL ONE | FINAL TWO");
 });
 
 test("embedded chart hydration cannot replace Markdown answer content with renderer UI", () => {
