@@ -1,6 +1,7 @@
 /* Claude-style chat: the warm palette, reading column, quiet tool lines and soft motion of the
    Claude desktop app's Code tab, for Single and Team chats. Loaded after codex-chat.css and scoped to
-   the chat surface, so the thread list and the rest of the orchestrator keep their own look.
+   the chat surface and its thread list (Claude's bg-100 canvas and bg-200 sidebar), so the rest of
+   the orchestrator keeps its own look.
    Popovers drawn outside the chat (ChatMenu's FloatingLayer) copy the palette variables set here. */
 
 /* ---------- Palette ---------- */
@@ -78,6 +79,33 @@
 /* The window's drag strip sits above the chat in the same column: paint it the chat's background. */
 .ao-workflow .ao-main:has(> .ao-stage > .cx-chat) { background: #faf9f5; }
 .ao-workflow[data-theme="dark"] .ao-main:has(> .ao-stage > .cx-chat) { background: #262624; }
+
+/* Beside a chat, the thread list is Claude's sidebar: its bg-200 a step deeper than the bg-100
+   canvas, with the same warm hovers, instead of the orchestrator's cool grey (and white behind). */
+.ao-workflow:has(> .ao-main > .ao-stage > .cx-chat) { background: #faf9f5; }
+.ao-workflow:has(> .ao-main > .ao-stage > .cx-chat) > .cx-threads {
+  --cx-sidebar: #f5f4ed;
+  --cx-hover: rgb(31 30 29 / 5%);
+  --cx-active: rgb(31 30 29 / 8%);
+  --color-text-primary: #141413;
+  --ao-muted: #73726c;
+  --ao-line: rgb(31 30 29 / 15%);
+  border-right-color: rgb(31 30 29 / 9%);
+  background: #f5f4ed;
+  color: #141413;
+}
+.ao-workflow[data-theme="dark"]:has(> .ao-main > .ao-stage > .cx-chat) { background: #262624; }
+.ao-workflow[data-theme="dark"]:has(> .ao-main > .ao-stage > .cx-chat) > .cx-threads {
+  --cx-sidebar: #1f1e1d;
+  --cx-hover: rgb(250 249 245 / 6%);
+  --cx-active: rgb(250 249 245 / 10%);
+  --color-text-primary: #faf9f5;
+  --ao-muted: #a6a39a;
+  --ao-line: rgb(222 220 209 / 15%);
+  border-right-color: rgb(222 220 209 / 9%);
+  background: #1f1e1d;
+  color: #faf9f5;
+}
 
 /* ---------- Header ---------- */
 .ao-workflow .cx-chat .cx-thread-head h2 { font-weight: 500; letter-spacing: -0.005em; }
