@@ -254,15 +254,19 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     "      params: {\"reasoning.summary\": \"auto\"}",
     "debug: false",
     "request-log: false",
-    "logging-to-file: true",
+    // No main.log: it took ~10 MB every two days, half of it warnings nobody reads. CPA then logs
+    // to its output, which the launcher discards for a persistent CPA. Failed requests still leave
+    // their error-*.log (error-logs-max-files).
+    "logging-to-file: false",
     "usage-statistics-enabled: true",
     ...cpaLongRunYamlLines(),
     "",
   ].join("\n");
   if (!savedSource.trim()) return generated;
   const managed = (yaml.parse ?? yaml.load)(generated);
-  // User settings survive restarts; listener, credentials and bundled plugin paths stay managed.
-  const owned = ["host", "port", "auth-dir", "api-keys", "proxy-url", "remote-management", "plugins"];
+  // User settings survive restarts; listener, credentials, bundled plugin paths and file logging
+  // stay managed (an older build saved logging-to-file: true).
+  const owned = ["host", "port", "auth-dir", "api-keys", "proxy-url", "remote-management", "plugins", "logging-to-file"];
   const retained = Object.fromEntries(Object.entries(saved).filter(([key]) => !owned.includes(key)));
   const merged = {
     ...managed, ...retained,
@@ -271,6 +275,18 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
   };
   if (saved.oauth) merged.oauth = { ...saved.oauth, "auth-dir": authDirectory };
   return (yaml.stringify ?? yaml.dump)(merged);
+}
+
+/** Removes the main.log files (current and rotated) CPA wrote before file logging was turned off. */
+function removeOldMainLogs(state) {
+  const logDirectory = path.join(state, "logs");
+  let names = [];
+  try { names = fs.readdirSync(logDirectory); } catch { return; }
+  for (const name of names) {
+    if (/^main(-[\w.-]+)?\.log$/.test(name)) {
+      try { fs.rmSync(path.join(logDirectory, name), { force: true }); } catch {}
+    }
+  }
 }
 
 function run(homeValue, stateValue) {
@@ -297,6 +313,7 @@ function run(homeValue, stateValue) {
     String(process.env.CODING_TOOLS_CPA_OUTBOUND_PROXY_URL || ""),
   ));
   if (process.platform !== "win32") fs.chmodSync(configPath, 0o600);
+  removeOldMainLogs(state);
 
   const child = spawn(executable, ["--config", configPath, "--no-browser"], {
     cwd: state,
@@ -352,5 +369,6 @@ module.exports = {
   prepare,
   run,
   runtimeConfiguration,
+  removeOldMainLogs,
   installBundledCommandCodePlugin,
 };

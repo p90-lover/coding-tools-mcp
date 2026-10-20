@@ -12,7 +12,7 @@ import { ChatContextMeter } from "./ChatContextMeter";
 import { ChatPet } from "./ChatPet";
 import { ChatTurnStats } from "./ChatTurnStats";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
-import { AnsweredRecord, ApprovedMark, EditDiff, StreamingMarkdown } from "./ChatToolParts";
+import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, StreamingMarkdown } from "./ChatToolParts";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
@@ -45,14 +45,44 @@ function AutoRetryToggle({ disabled, onRetryNow }: { disabled: boolean; onRetryN
     call({}).then((value) => { if (live) setOn(value); }, () => { if (live) setOn(false); });
     return () => { live = false; };
   }, []);
+  // A switch, not a checkbox: the box and its words wrapped onto two lines beside the button.
   return <label className="cx-auto-retry" title="A failed step runs again by itself, up to three times with a growing pause; account or sign-in failures still wait for you">
-    <input type="checkbox" checked={on === true} disabled={disabled || on === null} onChange={(event) => {
+    <input type="checkbox" role="switch" checked={on === true} disabled={disabled || on === null} onChange={(event) => {
       const next = event.target.checked;
       setOn(next);
       call({ enabled: next }).then((value) => { setOn(value); if (value) onRetryNow(); }, () => setOn(!next));
     }} />
-    Retry automatically
+    <span className="cx-switch" aria-hidden="true" />
+    <span>Retry automatically</span>
   </label>;
+}
+
+/**
+ * What a chat shows when a step failed and waits for the person: which step, why (its own error,
+ * which the DeepSeek transcript then leaves out of that turn), Retry and the automatic-retry switch.
+ * It said only "A step failed" and a stock sentence, with the reason printed above it in the turn.
+ */
+function FailedStepCard({ step, notice, busy, onRetry }: {
+  step?: { name?: string; error?: string }; notice?: string; busy: boolean; onRetry: () => void;
+}) {
+  const reason = notice || step?.error || "The step stopped before it finished.";
+  return <section className="cx-card tone-error cx-fail-card" aria-labelledby="cx-fail-title">
+    <svg className="cx-fail-icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" /><path d="M12 7.5v5.5M12 16.4v.1" />
+    </svg>
+    <div className="cx-fail-body">
+      <p className="cx-fail-title" id="cx-fail-title">Step failed{step?.name ? <span className="cx-fail-step">{step.name}</span> : null}</p>
+      <p className="cx-fail-reason">{reason}</p>
+      <div className="cx-card-actions">
+        <button className="button-primary" type="button" disabled={busy} onClick={onRetry}>
+          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M3 12a9 9 0 1 0 2.6-6.4L3 8" /><path d="M3 3v5h5" /></svg>
+          Retry step
+        </button>
+        <AutoRetryToggle disabled={busy} onRetryNow={onRetry} />
+      </div>
+      <p className="cx-fail-hint">Or stop this chat and send a follow-up.</p>
+    </div>
+  </section>;
 }
 /** An image attachment's thumbnail URL, where the page can make one. */
 const previewOf = (file: File): string | undefined => (typeof URL !== "undefined" && URL.createObjectURL ? URL.createObjectURL(file) : undefined);
@@ -319,7 +349,7 @@ function StepRow({ step, runId, loadWork }: { step: ChatStep; runId: string; loa
   const open = chosen ?? Boolean(step.error || step.working?.timeline?.length);
   const work = useStepWork(step, runId, open, loadWork);
   const compact = useContext(CompactActivity);
-  const body = step.error || step.text || (work?.length || step.hasWork ? "work" : "");
+  const body = step.error || step.text || (work?.length || step.hasWork || step.earlier?.length ? "work" : "");
   return <li className={`cx-step tone-${stepTone(step)}`}>
     <button type="button" className="cx-step-head" aria-expanded={open} disabled={!body && !step.working} onClick={() => setOpen(!open)}
       title={step.working?.detail || undefined}>
@@ -336,6 +366,8 @@ function StepRow({ step, runId, loadWork }: { step: ChatStep; runId: string; loa
       {step.working && !compact ? <p className="cx-step-detail">{step.working.detail}</p> : null}
       {work?.length ? <LiveTimeline items={work} live={Boolean(step.working)} /> : null}
       {/* A held or failed card keeps the reply it gave: the error says why, the reply stays readable. */}
+      {/* Its earlier rounds first, folded (oldest first), then where it stands now. */}
+      <EarlierRounds rounds={step.earlier} />
       {step.error ? <p className="cx-step-error">{step.error}</p> : null}
       {step.text ? <ChatMarkdown text={step.text} /> : null}
     </div> : null}
@@ -367,7 +399,8 @@ type WorkGroupProps = { turn: ChatTurn; idle?: boolean; expanded?: boolean; load
 /** A turn still being worked on: its steps change on every update, so it always re-renders. */
 const liveTurn = (turn: ChatTurn) => turn.status === "running" || turn.status === "queued"
   || turn.steps.some((step) => step.working) || Boolean(turn.final?.working);
-const stepShape = (step: ChatStep) => [step.key, step.name, step.detail, step.state, step.verdict ?? "", step.error ?? "", step.text ?? "", step.hasWork ?? false];
+const stepShape = (step: ChatStep) => [step.key, step.name, step.detail, step.state, step.verdict ?? "", step.error ?? "", step.text ?? "", step.hasWork ?? false,
+  (step.earlier ?? []).map((round) => `${round.label}:${round.verdict ?? ""}`).join(",")];
 /** What a finished turn's work shows; equal shapes render the same rows. */
 const workShape = (turn: ChatTurn) => JSON.stringify([turn.runId, turn.status, turn.startedAtMs ?? 0, turn.steps.map(stepShape), turn.final ? stepShape(turn.final) : null]);
 
@@ -386,7 +419,7 @@ export function sameWork(prev: WorkGroupProps, next: WorkGroupProps): boolean {
 const WorkGroup = memo(WorkGroupView, sameWork);
 /** A DeepSeek turn's work (DshTranscript), skipped on re-render by the same check as WorkGroup. */
 const DshWork = memo(DshTurnWork, (prev: DshTurnWorkProps, next: DshTurnWorkProps) => prev.live === next.live
-  && prev.useWork === next.useWork && sameWork({ turn: prev.turn, expanded: prev.expanded }, { turn: next.turn, expanded: next.expanded }));
+  && prev.useWork === next.useWork && prev.errorShownBelow === next.errorShownBelow && sameWork({ turn: prev.turn, expanded: prev.expanded }, { turn: next.turn, expanded: next.expanded }));
 
 function WorkGroupView({ turn, idle = false, expanded = false, loadWork }: WorkGroupProps) {
   const working = turn.steps.find((step) => step.working);
@@ -1222,6 +1255,10 @@ export function AgentOrchestratorChat({
   const attachmentAccess = useMemo(() => ({ preview: attachmentPreview, reveal: revealFile }), [attachmentPreview, revealFile]);
   // One work reader per run for DeepSeek turns, kept across renders so a finished turn stays memoized.
   const dshReaders = useMemo(() => new Map<string, UseStepWork>(), [loadWork]);
+  // A failed step waiting for the person: the card shows its error, so its turn does not repeat it.
+  const recovering = Boolean(latest && chat?.status === "attention");
+  const failedTurn = recovering ? turns.findLast((turn) => turn.runId === latest?.id) : undefined;
+  const failedStep = failedTurn ? [...failedTurn.steps, ...(failedTurn.final ? [failedTurn.final] : [])].find((step) => step.error) : undefined;
   const threadTurns = useMemo(() => turns.map((turn, turnIndex) => {
     // A turn on a DeepSeek model shows as DeepSeek Harness shows one (DshTranscript); others as Claude Code.
     const dsh = isDeepSeekModel(chatRuns.find((run) => run.id === turn.runId)?.nodes.find((node) => node.role === "planner")?.route?.model);
@@ -1250,7 +1287,8 @@ export function AgentOrchestratorChat({
                   <span className="cx-stamp">Steered · {steer.stamp} UTC</span>
                 </div>) : null}
               {dsh && readWork
-                ? <DshWork key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} live={!idle && liveTurn(turn)} expanded={showWork} useWork={readWork} />
+                ? <DshWork key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} live={!idle && liveTurn(turn)} expanded={showWork} useWork={readWork}
+                  errorShownBelow={turn === failedTurn} />
                 : <WorkGroup key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} idle={idle} expanded={showWork} loadWork={loadWork} />}
               {turn.final && !(dsh && turn.final.working) ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`}>
                 {/* DeepSeek Harness names no agent above its reply; a team's verdict still shows. */}
@@ -1260,6 +1298,8 @@ export function AgentOrchestratorChat({
                     {turn.final.verdict ? <span className={`cx-verdict is-${turn.final.verdict.toLowerCase()}`}>{turn.final.verdict}</span> : null}
                     {turn.final.detail ? <span className="cx-answer-detail">{turn.final.detail}</span> : null}
                   </div>}
+                {/* A finished reviewer becomes the answer; its earlier cycles stay above it (DeepSeek's row shows them). */}
+                {dsh ? null : <EarlierRounds rounds={turn.final.earlier} />}
                 <ChatMarkdown text={turn.final.text ?? ""} />
                 <MessageActions text={turn.final.text ?? ""}>
                   {restart && turn.runId && turn.runId === latest?.id && !runOpen ? <button type="button" title="Retry" aria-label="Retry this mission" disabled={busy} onClick={() => restart(turn.runId)}>↻</button> : null}
@@ -1270,7 +1310,7 @@ export function AgentOrchestratorChat({
               {turn.status === "stopped" && !dsh ? <p className="cx-note">Stopped</p> : null}
               {turn.solo ? <p className="cx-note">Answered by the orchestrator alone; no workers ran.</p> : null}
             </article>;
-  }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy]);
+  }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn]);
 
   return (<Attachments.Provider value={attachmentAccess}><CompactActivity.Provider value={compactActivity}>
     <div className={`cx-chat${showStructure && structure ? " has-structure" : ""}`}>
@@ -1365,14 +1405,7 @@ export function AgentOrchestratorChat({
                 <div className="cx-card-actions"><button className="button-primary" type="button" disabled={busy} onClick={() => retryStart(latest.id)}>{notice ? "Retry" : "Start"}</button></div>
               </div>
             ) : null}
-            {latest && chat?.status === "attention" ? (
-              <div className="cx-card tone-error">
-                <strong>A step failed</strong>
-                <p>{notice || "The recovery helper retries failed steps up to three times. Retry now, or send a follow-up once you stop this chat."}</p>
-                <div className="cx-card-actions"><button className="button-primary" type="button" disabled={busy} onClick={() => retryStart(latest.id)}>Retry failed step</button>
-                  <AutoRetryToggle disabled={busy} onRetryNow={() => retryStart(latest.id)} /></div>
-              </div>
-            ) : null}
+            {recovering && latest ? <FailedStepCard step={failedStep} notice={notice} busy={busy} onRetry={() => retryStart(latest.id)} /> : null}
           </div>
           {!atBottom ? <button type="button" className="cx-to-bottom" aria-label="Scroll to the latest message"
             onClick={() => { setAtBottom(true); scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" }); }}>↓</button> : null}

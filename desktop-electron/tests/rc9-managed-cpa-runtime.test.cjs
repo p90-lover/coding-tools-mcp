@@ -30,7 +30,7 @@ test("managed CPA keeps saved user settings and extra plugin registrations while
     fs.writeFileSync(path.join(state, "config.yaml"), JSON.stringify({
       host: "0.0.0.0", port: 9999, "auth-dir": "/old/auth", "api-keys": ["old-key"],
       "proxy-url": "http://old.invalid", "remote-management": { "allow-remote": true, "secret-key": "old-secret" },
-      "disable-cooling": true, "request-retry": 8, debug: true,
+      "disable-cooling": true, "request-retry": 8, debug: true, "logging-to-file": true,
       "claude-api-key": [{ "api-key": "provider-fixture", "base-url": "https://provider.example" }],
       oauth: { "auth-dir": "/old/oauth", providers: { custom: { enabled: true } } },
       plugins: { enabled: false, dir: "/old/plugins", configs: {
@@ -55,9 +55,29 @@ test("managed CPA keeps saved user settings and extra plugin registrations while
     assert.equal(config["disable-cooling"], true);
     assert.equal(config["request-retry"], 8);
     assert.equal(config.debug, true);
+    assert.equal(config["logging-to-file"], false, "an older build's saved file logging is turned off");
     assert.equal(config["claude-api-key"][0]["api-key"], "provider-fixture");
     assert.equal(config.oauth["auth-dir"], path.join(state, "auth"));
     assert.equal(config.oauth.providers.custom.enabled, true);
+  } finally { fs.rmSync(state, { recursive: true, force: true }); }
+});
+
+test("managed CPA writes no main.log and removes the ones an older build left", () => {
+  const { runtimeConfiguration, removeOldMainLogs } = require("../electron/cpa-managed.cjs");
+  const yaml = globalThis.Bun?.YAML ?? require("js-yaml");
+  const state = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "cpa-config-logs-"));
+  try {
+    const config = (yaml.parse ?? yaml.load)(runtimeConfiguration(state, "m".repeat(36), "p".repeat(36)));
+    assert.equal(config["logging-to-file"], false);
+    assert.equal(config["request-log"], false);
+    const logs = path.join(state, "logs");
+    for (const name of ["main.log", "main-2026-10-18T02-24-10.083.log", "error-v1-chat-completions-2026-10-20T23-06-07.log"]) {
+      fs.writeFileSync(path.join(logs, name), "x\n");
+    }
+    removeOldMainLogs(state);
+    // A failed request's error log is kept: it is written only when one fails.
+    assert.deepEqual(fs.readdirSync(logs), ["error-v1-chat-completions-2026-10-20T23-06-07.log"]);
+    removeOldMainLogs(path.join(state, "missing"));
   } finally { fs.rmSync(state, { recursive: true, force: true }); }
 });
 

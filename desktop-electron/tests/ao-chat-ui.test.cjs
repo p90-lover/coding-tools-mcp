@@ -428,3 +428,28 @@ test("the pet is Claude Code's Clawd: the CLI's glyphs, poses and frame-by-frame
   assert.match(html, /class="cx-clawd" style="width:72px;height:48px"/);
   assert.match(html, /<svg class="cx-clawd-glyphs" viewBox="0 0 18 12" width="72" height="48"/);
 });
+
+test("a reviewer keeps every earlier cycle, oldest first and folded, not only the last review", () => {
+  const reviewer = { id: "rev", role: "reviewer", state: "pending", x: 0, history: [
+    { answer: "Worker 1's listing is truncated.", verdict: "CHANGES_REQUIRED" },
+    { error: "Browser is not ready; open Browser and check the ChatGPT session" },
+    { answer: "Still truncated near the static directory.", verdict: "CHANGES_REQUIRED" }] };
+  const all = JSON.parse(JSON.stringify(chat.earlierRounds(reviewer)));
+  assert.deepEqual(all.map((round) => [round.label, round.verdict]),
+    [["Cycle 1", "CHANGES_REQUIRED"], ["Cycle 2", "failed"], ["Cycle 3", "CHANGES_REQUIRED"]]);
+  // The step's own text already shows the newest answered cycle ("Last review:"): it is not repeated.
+  assert.deepEqual(chat.earlierRounds(reviewer, true).map((round) => round.label), ["Cycle 1", "Cycle 2"]);
+  // A worker's retries are attempts.
+  assert.equal(chat.earlierRounds({ ...reviewer, role: "worker" })[0].label, "Attempt 1");
+  // A round that answered and then failed still shows as failed.
+  assert.equal(chat.earlierRounds({ ...reviewer, history: [{ answer: "Half a review", error: "fetch failed" }] })[0].verdict, "failed");
+  // A pending card whose only earlier rounds failed still shows, with them.
+  const failedOnly = { ...reviewer, history: [{ error: "Browser is not ready" }] };
+  const turn = chat.chatTurns([{ id: "r1", execution_mode: "team", nodes: [failedOnly] }], "Review it")[0];
+  assert.equal(turn?.steps?.[0]?.earlier?.[0]?.verdict, "failed");
+  // Each round is folded under its label and verdict.
+  const html = renderToStaticMarkup(React.createElement(toolParts.EarlierRounds, { rounds: all }));
+  assert.equal((html.match(/<details class="cx-step-round">/g) || []).length, 3);
+  assert.doesNotMatch(html, /<details[^>]* open/, "folded by default");
+  assert.match(html, /<summary><span>Cycle 1<\/span><span class="cx-step-round-verdict is-changes_required">CHANGES REQUIRED<\/span><\/summary>/);
+});

@@ -10,6 +10,7 @@ const { createAoWorkspaceBoard } = require("./agent-orchestrator-workspace.cjs")
 const { readCpaCatalog, collectMissionAccounting } = require("./agent-orchestrator-accounting.cjs");
 const { createAoSessionEvents } = require("./ao-session-events.cjs");
 const { createAoDependencyLinks } = require("./ao-dependency-links.cjs");
+const { createDaemonLogFilter } = require("./ao-daemon-log.cjs");
 const { readContextBreakdown } = require("./ao-context-breakdown.cjs");
 const { withAgentShellCommands, CONVERSATION_LIMITS: AGENT_SHELL_CONVERSATION_LIMITS } = require("./chat-agent-shell.cjs");
 const { windowsChildEnvironment, systemEnvironment } = require("./chat-sandbox.cjs");
@@ -32,7 +33,8 @@ const EDIT_DIFF_BYTES = 6000;
 const TIMELINE_TEXT_BYTES = 64 * 1024;
 // The most items a turn's timeline carries: a finished turn's read-back pages in up to 6 × 60.
 const TIMELINE_ITEMS = 400;
-const DAEMON_LOG_BYTES = 8 * 1024 * 1024;
+// How much of AO's recent meaningful output stays in memory.
+const DAEMON_LINES_CHARS = 64 * 1024;
 
 /**
  * Lines one text change added and removed, as a "+56 −26" count and a short diff: the lines the
@@ -156,32 +158,17 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   let error = null;
   let logTail = "";
   /**
-   * AO's output on disk, beside its data. Only ao.db outlived a daemon before, and it records that
-   * a controller ended, not why, so a turn lost across a restart could not be traced. Rotates once
-   * at DAEMON_LOG_BYTES; a log that cannot be written never stops AO.
+   * AO's recent meaningful output (no debug lines or quick polls, see ao-daemon-log.cjs), in memory
+   * only. AO's output never goes to disk: logs/ao-daemon.log took about 65 MB a day, nearly all of
+   * it the chat's conversation polls. When AO exits, the error carries the last of these lines.
    */
-  function openDaemonLog(pid) {
-    const file = path.join(dataRoot, "logs", "ao-daemon.log");
-    let stream = null;
-    let written = 0;
-    const open = () => {
-      try {
-        fs.mkdirSync(path.dirname(file), { recursive: true });
-        try { written = fs.statSync(file).size; } catch { written = 0; }
-        if (written >= DAEMON_LOG_BYTES) { fs.renameSync(file, `${file}.1`); written = 0; }
-        stream = fs.createWriteStream(file, { flags: "a" });
-        stream.on("error", () => { stream = null; });
-      } catch { stream = null; }
-    };
-    const write = (data) => {
-      if (!stream) return;
-      written += Buffer.byteLength(data);
-      stream.write(data);
-      if (written >= DAEMON_LOG_BYTES) { stream.end(); open(); }
-    };
-    open();
-    write(`--- ao-daemon pid ${pid} started at ${new Date().toISOString()}\n`);
-    return { write, close: () => { stream?.end(); stream = null; } };
+  let daemonLines = "";
+  const keepDaemonLines = (text) => { daemonLines = (daemonLines + text).slice(-DAEMON_LINES_CHARS); };
+  /** Removes the log files an older build wrote. */
+  function removeOldDaemonLogs() {
+    for (const name of ["ao-daemon.log", "ao-daemon.log.1"]) {
+      try { fs.rmSync(path.join(dataRoot, "logs", name), { force: true }); } catch {}
+    }
   }
   let missionSelection = null;
   let originalPath = "/";
@@ -1384,16 +1371,23 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         logTail = "";
         // A new daemon may know its projects differently; workspaces bind again.
         forgetProject();
-        const daemonLog = openDaemonLog(currentChild.pid);
-        for (const output of [child.stdout, child.stderr]) output.on("data", (chunk) => {
-          logTail = (logTail + chunk.toString()).slice(-16384);
-          daemonLog.write(chunk);
+        daemonLines = "";
+        removeOldDaemonLogs();
+        const daemonOutput = [child.stdout, child.stderr].map((output) => {
+          const filter = createDaemonLogFilter(keepDaemonLines);
+          output.on("data", (chunk) => {
+            logTail = (logTail + chunk.toString()).slice(-16384);
+            filter.push(chunk);
+          });
+          return filter;
         });
         child.once("error", (cause) => { if (child === currentChild && startupGeneration === lifecycleGeneration) { error = cause.message; state = "error"; } });
         child.once("exit", (code) => {
-          daemonLog.write(`--- ao-daemon pid ${currentChild.pid} exited (${code}) at ${new Date().toISOString()}\n`);
-          daemonLog.close();
-          if (child === currentChild && startupGeneration === lifecycleGeneration) { state = "error"; error = `AO exited (${code})`; }
+          for (const filter of daemonOutput) filter.flush();
+          if (child === currentChild && startupGeneration === lifecycleGeneration) {
+            state = "error";
+            error = `AO exited (${code})${daemonLines ? `: ${daemonLines.trimEnd().slice(-600)}` : ""}`;
+          }
         });
         const deadline = Date.now() + 30000;
         while (Date.now() < deadline) {

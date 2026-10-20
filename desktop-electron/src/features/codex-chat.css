@@ -408,6 +408,17 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-step-body { margin: 2px 0 8px 22px; color: var(--color-text-primary); }
 .cx-step-detail { margin: 0 0 4px; color: var(--ao-muted); font-size: 12px; overflow-wrap: anywhere; }
 .cx-step-error { margin: 0; color: var(--ao-red); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* A card's earlier rounds (a reviewer's past cycles), folded: a one-line summary each, opening on its answer. */
+.cx-step-earlier { display: grid; gap: 2px; margin: 0 0 8px; }
+.cx-step-round > summary { display: flex; align-items: center; gap: 8px; padding: 2px 0; color: var(--ao-muted); font-size: 12px; cursor: pointer; list-style: none; }
+.cx-step-round > summary::-webkit-details-marker { display: none; }
+.cx-step-round > summary::before { content: "›"; display: inline-block; width: 10px; transition: transform .12s; }
+.cx-step-round[open] > summary::before { transform: rotate(90deg); }
+.cx-step-round > summary:hover { color: var(--color-text-primary); }
+.cx-step-round-verdict { padding: 0 6px; border-radius: 6px; background: color-mix(in srgb, var(--ao-muted) 14%, transparent); font-size: 11px; line-height: 16px; text-transform: none; }
+.cx-step-round-verdict.is-changes_required, .cx-step-round-verdict.is-failed { background: color-mix(in srgb, var(--ao-red) 12%, transparent); color: var(--ao-red); }
+.cx-step-round-verdict.is-approved { background: color-mix(in srgb, #16a34a 14%, transparent); color: #15803d; }
+.cx-step-round > :not(summary) { margin: 4px 0 8px 18px; padding-left: 10px; border-left: 2px solid var(--ao-line); }
 /* A working role's live turn: thinking, tool calls and streamed text, newest last. */
 .cx-live { display: grid; gap: 6px; margin: 4px 0 6px; padding: 0 0 0 10px; list-style: none; border-left: 1px solid var(--ao-line); }
 .cx-live-item { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; min-width: 0; color: var(--ao-muted); font-size: 13px; }
@@ -521,10 +532,33 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-card-actions { display: flex; gap: 8px; }
 .cx-card-actions button { height: 30px; padding: 0 14px; border: 0; border-radius: 15px; background: var(--color-text-primary); color: var(--color-bg-primary); font-size: 12px; font-weight: 600; cursor: pointer; }
 .cx-card-actions button:disabled { cursor: default; opacity: .4; }
-/* "Retry automatically" beside the failed step's Retry button. */
 .cx-card-actions { align-items: center; }
-.cx-auto-retry { display: inline-flex; align-items: center; gap: 6px; margin-left: 4px; color: var(--color-text-secondary); font-size: 12px; cursor: pointer; user-select: none; }
-.cx-auto-retry input { margin: 0; cursor: pointer; }
+/* The failed-step card (FailedStepCard): an alert mark beside which step failed, why, and the way on. */
+.cx-fail-card { grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 0 12px;
+  background: color-mix(in srgb, var(--ao-red) 4%, var(--color-bg-primary)); }
+.cx-fail-icon { margin-top: 2px; fill: none; stroke: var(--ao-red); stroke-width: 2; stroke-linecap: round; }
+.cx-fail-body { display: grid; gap: 2px; min-width: 0; }
+.cx-card p.cx-fail-title { font-weight: 600; }
+.cx-fail-step { margin-left: 8px; padding-left: 8px; border-left: 1px solid var(--ao-line); color: var(--color-text-secondary); font-weight: 400; }
+.cx-card p.cx-fail-reason { color: var(--color-text-secondary); white-space: pre-wrap; }
+.cx-fail-card .cx-card-actions { flex-wrap: wrap; gap: 8px 16px; margin-top: 10px; }
+.cx-fail-card .cx-card-actions button { display: inline-flex; align-items: center; gap: 6px; }
+.cx-fail-card .cx-card-actions button svg { fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.cx-card p.cx-fail-hint { margin-top: 6px; color: var(--color-text-secondary); font-size: 12px; }
+/* "Retry automatically": a switch beside Retry, its words on one line. */
+.cx-auto-retry { position: relative; display: inline-flex; align-items: center; gap: 8px; color: var(--color-text-secondary); font-size: 12px;
+  white-space: nowrap; cursor: pointer; user-select: none; }
+.cx-auto-retry input[type="checkbox"] { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; }
+.cx-switch { position: relative; flex: 0 0 auto; width: 28px; height: 16px; border-radius: 8px;
+  background: color-mix(in srgb, var(--color-text-primary) 22%, transparent); transition: background .15s; }
+.cx-switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 2px rgb(0 0 0 / 25%); transition: transform .15s; }
+.cx-auto-retry input:checked + .cx-switch { background: var(--ao-blue); }
+.cx-auto-retry input:checked + .cx-switch::after { transform: translateX(12px); }
+.cx-auto-retry input:focus-visible + .cx-switch { outline: 2px solid var(--ao-blue); outline-offset: 2px; }
+.cx-auto-retry input:disabled + .cx-switch { opacity: .5; }
+.cx-auto-retry:has(input:disabled) { cursor: default; }
+@media (prefers-reduced-motion: reduce) { .cx-switch, .cx-switch::after { transition: none; } }
 .cx-to-bottom { position: sticky; bottom: 12px; left: 50%; display: grid; place-items: center; width: 32px; height: 32px; margin: -44px auto 12px; border: 1px solid var(--ao-line);
   border-radius: 50%; background: var(--color-bg-primary); box-shadow: 0 4px 14px rgb(0 0 0 / 12%); color: var(--color-text-primary); cursor: pointer; }
 

@@ -2581,6 +2581,32 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const node = mission.nodes.find(entry => entry.state === "held" && entry.role !== "retry") ?? mission.nodes.find(entry => entry.state === "held");
     return Boolean(node) && !POOL_EXHAUSTED.test(String(node.receipt?.error || "")) && (node.history?.length ?? 0) + 1 <= AUTO_RETRY_LIMIT;
   }
+  // A step that failed because the way out was down for a moment: the local proxy every CPA model
+  // and the ChatGPT browser go through (seen live: ProxyBridge restarted, and for three minutes CPA
+  // answered "proxyconnect ... 127.0.0.1:17891 ... refused" / "Unable to connect", Claude Code spent
+  // its ten retries, the WebGPT reviewer said "Browser is not ready", and a team chat stopped). With
+  // "Retry automatically" on it runs again by itself, single model or team, with pauses long enough
+  // to outlast a restart (30 s more each time, about 7.5 minutes in all).
+  const NETWORK_OUTAGE = /proxyconnect|ERR_PROXY|ECONNREFUSED|connectex|Unable to connect|upstream fetch failed|fetch failed|Browser is not ready|API error 5\d\d|Retrying Claude, attempt/i;
+  const OUTAGE_RETRY_LIMIT = 5;
+  const OUTAGE_RETRY_PAUSE_MS = 30_000;
+  // Connection retries per card, counted apart from its history: a reviewer's history also holds
+  // every finished review cycle, which is no failure.
+  const outageAttempts = new Map(); // `${runId}:${nodeId}` -> connection retries made
+  function outageRetryStep(mission, node) {
+    const attempt = (outageAttempts.get(`${mission.id}:${node.id}`) ?? 0) + 1;
+    if (attempt > OUTAGE_RETRY_LIMIT) return null;
+    const key = `outage:${mission.id}:${node.id}:${attempt}`;
+    if (!autoRetrySeen.has(key)) {
+      autoRetrySeen.set(key, now());
+      if (autoRetrySeen.size > 500) autoRetrySeen.delete(autoRetrySeen.keys().next().value);
+    }
+    const name = node.settings?.name || node.role;
+    const wait = OUTAGE_RETRY_PAUSE_MS * attempt - (now() - autoRetrySeen.get(key));
+    if (wait > 0) return { waiting: true, detail: `${name} lost its connection (the local proxy or the browser was down); retrying in ${Math.ceil(wait / 1000)}s (attempt ${attempt} of ${OUTAGE_RETRY_LIMIT})` };
+    autoRetrySeen.delete(key);
+    return { retry: true, attempt, name };
+  }
   /** chat_auto_retry: reads the "Retry automatically" preference, or sets it with `enabled`. */
   function chatAutoRetry({ enabled } = {}) {
     if (enabled !== undefined) {
@@ -2593,6 +2619,23 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function recoverHeld(workspaceId, mission, state = {}) {
     const held = mission.nodes.filter(node => node.state === "held");
     if (!held.length || mission.cancelled) return null;
+    // A sign-in or account-pool failure (some arrive as a 5xx) is the person's, never a lost connection.
+    const outage = chatPreferences.get().autoRetry
+      ? held.find(node => node.role !== "retry" && NETWORK_OUTAGE.test(String(node.receipt?.error || ""))
+        && !POOL_EXHAUSTED.test(String(node.receipt?.error || ""))) : null;
+    const outageRetry = outage ? outageRetryStep(mission, outage) : null;
+    if (outageRetry?.retry) {
+      // A team retries the one failed card: an unscoped retry re-queues every held or failed card
+      // (workers a review set aside too), and retry_auto refuses a worker with two attempts already.
+      // A single-model run has the one card, retried as its other recoveries retry it.
+      const single = mission.execution_mode === "single";
+      await controlRun({ workspaceId, runId: mission.id, action: "retry", ...(single ? {} : { nodeId: outage.id }) });
+      outageAttempts.set(`${mission.id}:${outage.id}`, outageRetry.attempt);
+      if (outageAttempts.size > 500) outageAttempts.delete(outageAttempts.keys().next().value);
+      logger?.info?.("ao.outage_retried", { attempt: outageRetry.attempt, role: outage.role });
+      return { changed: true, retried: true, detail: `Retrying ${outageRetry.name} after a lost connection (attempt ${outageRetry.attempt} of ${OUTAGE_RETRY_LIMIT})` };
+    }
+    if (outageRetry?.detail) return { waiting: true, detail: outageRetry.detail };
     if (mission.execution_mode === "single") {
       // The app restarted under the turn: nothing about the step failed, so it runs again (once
       // per attempt budget) instead of waiting for an explicit retry.
@@ -2819,6 +2862,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           if (helped?.changed) continue;
         }
         reportRun(workspaceId, runId, state, mission, attention);
+        // A failed step waiting out its automatic-retry pause: keep watching it. The loop stopped here
+        // ("No card is ready"), and the retry it announced ("Retrying automatically in 10s") never came.
+        if (helped?.waiting && !mission.paused && !mission.cancelled) {
+          state.status = "held";
+          await pause();
+          continue;
+        }
         if (missionSettled(mission)) {
           const failed = mission.nodes.some(node => node.state === "failed");
           state.status = failed ? "failed" : mission.cancelled ? "held" : "finished";
@@ -2826,15 +2876,6 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           reportRun(workspaceId, runId, state, mission, failed ? "error" : null); return;
         }
         const running = mission.nodes.some(node => ["running", "reserved"].includes(node.state));
-        // "Retry automatically" is counting down to the next attempt: the run keeps going until it
-        // fires. It used to stop here on the first pass, so the countdown never ended and the
-        // failed step waited for a click after all.
-        if (!running && helped?.waiting && !mission.paused) {
-          state.status = "held";
-          reportRun(workspaceId, runId, state, mission, null);
-          await pause();
-          continue;
-        }
         if (!running && !mission.paused && !mission.nodes.some(node => node.state === "pending" && parentsReady(mission, node))) {
           state.status = "held";
           state.detail ||= mission.nodes.some(node => node.role === "worker" && node.state === "pending" && blockedByFailure(mission, node))
