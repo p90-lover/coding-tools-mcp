@@ -120,6 +120,28 @@ test("the page size grows back after a page that fits, and the read stops at its
   assert.ok(queries.length <= 24, `bounded at ${queries.length} requests`);
 });
 
+test("a stretch of huge tool outputs is read one entry at a time instead of losing the split", async () => {
+  // Seen live: the panel opened on a single "Used" bar; 20 browser-tool page dumps passed the
+  // response limit at every page size down to the old floor of 20.
+  const breakdown = await readContextBreakdown(async (query) => {
+    if (Number(/limit=(\d+)/.exec(query)[1]) > 1) throw new Error("AO response exceeds the handler limit");
+    return { messages: [message(9, "a".repeat(40))], activities: [], hasMoreBefore: false };
+  }, { contextUsed: 1_000, contextWindow: 10_000 });
+  assert.equal(byId(breakdown).messages, 10, "the split is there, from one-entry pages");
+});
+
+test("the agent's own compaction is dated from its history, as AO dates only a /compact", () => {
+  const breakdown = contextBreakdown({
+    messages: [message(9, "after")],
+    activities: [{ sequence: 3, activityKind: "system", detail: { event: "compaction" }, createdAt: "2026-10-20T00:30:00Z" },
+      { sequence: 6, activityKind: "system", detail: { event: "compaction" }, createdAt: "2026-10-20T00:41:00Z" }],
+    usage: { contextUsed: 1_000, contextWindow: 10_000 },
+  });
+  assert.equal(breakdown.sinceCompaction, true);
+  assert.equal(breakdown.compactedAt, "2026-10-20T00:41:00Z", "the latest one");
+  assert.equal(contextBreakdown({ messages: [], activities: [], usage: { contextUsed: 10 } }).compactedAt, null);
+});
+
 test("only an oversized response is retried smaller; an outage fails at once", async () => {
   let calls = 0;
   await assert.rejects(readContextBreakdown(async () => { calls += 1; throw new Error("The operation was aborted due to timeout"); },
