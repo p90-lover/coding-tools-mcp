@@ -50,6 +50,11 @@ export interface CompileChatGptWebPromptOptions {
 
 /** Codex's own blocks in the user role (environment, AGENTS.md, aborted turns), not the person's words. */
 const CODEX_USER_BLOCK = /^\s*(<[a-z_]+[\s>]|# AGENTS\.md instructions)/;
+/**
+ * A /goal continuation: Codex starts the turn itself and this block is its instruction (the
+ * objective, how to keep going, and when to call update_goal), so it is sent as the prompt.
+ */
+const GOAL_TURN = /^\s*<codex_internal_context source="goal">[\s\S]*<\/codex_internal_context>\s*$/;
 
 /**
  * The person's prompt exactly as they typed it in Codex, with its images, and one line carrying the
@@ -66,11 +71,14 @@ export function compilePlainChatGptWebPrompt(
   if (messages.some(message => message.role === "assistant" || message.role === "toolResult" || message.role === "agentMessage")) return undefined;
   const texts: string[] = [];
   const images: ChatGptWebPromptImage[] = [];
+  let goal = false;
   for (const message of messages) {
     if (message.role !== "user") continue;
     const parts: CodexContentPart[] = typeof message.content === "string" ? [{ type: "text", text: message.content }] : message.content;
     const text = parts.flatMap(part => part.type === "text" ? [part.text] : []).join("\n").trim();
-    if (CODEX_USER_BLOCK.test(text)) continue;
+    const goalTurn = GOAL_TURN.test(text);
+    if (CODEX_USER_BLOCK.test(text) && !goalTurn) continue;
+    goal ||= goalTurn;
     if (text) texts.push(text);
     for (const part of parts) {
       if (part.type !== "image" || isOnePixelPngDataUrl(part.imageUrl) || images.length >= CHATGPT_MAX_INPUT_IMAGES) continue;
@@ -78,8 +86,12 @@ export function compilePlainChatGptWebPrompt(
     }
   }
   if (!texts.length && !images.length) return undefined;
+  // A goal turn names update_goal, which ChatGPT reaches like any Codex tool, through codex_tool_call.
+  const tokenLine = goal
+    ? `(turn_token ${turnToken} — pass it to Codex tools; call update_goal through codex_tool_call)`
+    : `(turn_token ${turnToken} — pass it to Codex tools)`;
   // A handle copied from an earlier turn would bind to a finished turn, as in the full context.
-  return { text: `${withoutRetiredTurnHandles(texts.join("\n\n"))}\n\n(turn_token ${turnToken} — pass it to Codex tools)`, images };
+  return { text: `${withoutRetiredTurnHandles(texts.join("\n\n"))}\n\n${tokenLine}`, images };
 }
 
 export const CHATGPT_BIGGER_CONTEXT_PARTS = 3 as const;
