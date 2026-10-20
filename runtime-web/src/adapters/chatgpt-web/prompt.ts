@@ -40,6 +40,46 @@ export interface CompileChatGptWebPromptOptions {
    * reads or mutates ChatGPT's DOM. Completion is accepted only through the bound Zero Risk MCP tools.
    */
   manualControl?: true;
+  /**
+   * Send the person's own prompt as they typed it in Codex, plus one line carrying the turn token,
+   * instead of the transport contract and JSON context, whenever the ChatGPT conversation already
+   * holds everything else (see compilePlainChatGptWebPrompt).
+   */
+  plainPrompt?: boolean;
+}
+
+/** Codex's own blocks in the user role (environment, AGENTS.md, aborted turns), not the person's words. */
+const CODEX_USER_BLOCK = /^\s*(<[a-z_]+[\s>]|# AGENTS\.md instructions)/;
+
+/**
+ * The person's prompt exactly as they typed it in Codex, with its images, and one line carrying the
+ * turn token the Codex Native tools require. Only when the messages being sent are the person's own:
+ * their first message, or what follows the last reply in a retained ChatGPT conversation. Any
+ * assistant reply, tool result or other agent's message means the ChatGPT conversation does not
+ * hold that history, so the full contract is sent instead (undefined). Codex's own developer
+ * and user-role context blocks are left out.
+ */
+export function compilePlainChatGptWebPrompt(
+  messages: readonly CodexMessage[],
+  turnToken: string,
+): CompiledChatGptWebPrompt | undefined {
+  if (messages.some(message => message.role === "assistant" || message.role === "toolResult" || message.role === "agentMessage")) return undefined;
+  const texts: string[] = [];
+  const images: ChatGptWebPromptImage[] = [];
+  for (const message of messages) {
+    if (message.role !== "user") continue;
+    const parts: CodexContentPart[] = typeof message.content === "string" ? [{ type: "text", text: message.content }] : message.content;
+    const text = parts.flatMap(part => part.type === "text" ? [part.text] : []).join("\n").trim();
+    if (CODEX_USER_BLOCK.test(text)) continue;
+    if (text) texts.push(text);
+    for (const part of parts) {
+      if (part.type !== "image" || isOnePixelPngDataUrl(part.imageUrl) || images.length >= CHATGPT_MAX_INPUT_IMAGES) continue;
+      images.push({ ref: `codex-input-image-${images.length + 1}`, imageUrl: part.imageUrl, ...(part.detail ? { detail: part.detail } : {}) });
+    }
+  }
+  if (!texts.length && !images.length) return undefined;
+  // A handle copied from an earlier turn would bind to a finished turn, as in the full context.
+  return { text: `${withoutRetiredTurnHandles(texts.join("\n\n"))}\n\n(turn_token ${turnToken} — pass it to Codex tools)`, images };
 }
 
 export const CHATGPT_BIGGER_CONTEXT_PARTS = 3 as const;
@@ -460,6 +500,11 @@ export function compileChatGptWebPrompt(
   }
   if (!mode.localTools && turnToken !== undefined) {
     throw new Error("A read-only ChatGPT Web effort must not receive a local-tool capability token");
+  }
+  if (options?.plainPrompt && !manualControl && !parsed._compactionRequest && mode.localTools && turnToken
+    && !captureLunaCheckpoint && !multipartEnabled && !parsed.options.outputFormat) {
+    const plain = compilePlainChatGptWebPrompt(parsed.context.messages, turnToken);
+    if (plain) return plain;
   }
   const system = parsed.context.systemPrompt ?? [];
   const sharedContract = [
