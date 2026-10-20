@@ -16,10 +16,14 @@ import type { PetMood } from "./ao-chat";
 
 // Where it was left, as a fraction of the way around the box from the top-left corner.
 const POSITION_KEY = "coding-tools:ao:pet-around";
-// How far out from the box's edge it was lifted (px), and the most it can be: dragged away from the
-// edge it stays there, standing on nothing, and walks round the box at that distance.
+// How far out from the box's edge it is held while dragged (px), and the most it can be. Let go, it
+// falls back onto the box: it never stays standing on nothing. LIFT_KEY is where an older build kept
+// that height (it then hovered up to 160 px off the box after every restart); it is only cleared now.
 const LIFT_KEY = "coding-tools:ao:pet-lift";
 const MAX_LIFT = 160;
+// The drop back onto the box: how long the fall takes, from at most how high above the top edge.
+const FALL_MS = 420;
+const MAX_FALL = 400;
 const NAP_MS = 45_000;
 const CHEER_MS = 6_000;
 // Claude Code draws Clawd with block characters, each quadrant half a terminal cell: pixels about
@@ -192,8 +196,10 @@ export function ChatPet({ mood, context, onHide }: {
   // never wrapped, so every lap keeps turning the same way at the corners.
   const [at, setAt] = useState(Number.NaN);
   const [lift, setLift] = useState(() => {
-    try { const saved = Number(localStorage.getItem(LIFT_KEY)); return saved > 0 ? Math.min(MAX_LIFT, saved) : 0; } catch { return 0; }
+    try { localStorage.removeItem(LIFT_KEY); } catch { /* nothing saved */ }
+    return 0;
   });
+  const [falling, setFalling] = useState(false);
   const liftNow = useRef(lift);
   liftNow.current = lift;
   const [loop, setLoop] = useState<Loop | null>(null);
@@ -211,7 +217,7 @@ export function ChatPet({ mood, context, onHide }: {
   const [motion, setMotion] = useState("");
   const [floaters, setFloaters] = useState<Floater[]>([]);
   const [fed, setFed] = useState(0);
-  const drag = useRef<{ moved: boolean; x: number; y: number } | null>(null);
+  const drag = useRef<{ moved: boolean; x: number; y: number; lastX: number; lastY: number } | null>(null);
   const pointer = useRef({ x: 0, y: 0 });
   const lastPlay = useRef(0);
   const clickTimer = useRef<number | undefined>(undefined);
@@ -278,7 +284,6 @@ export function ChatPet({ mood, context, onHide }: {
     if (!current || Number.isNaN(atNow.current)) return;
     try {
       localStorage.setItem(POSITION_KEY, String((((atNow.current % current.length) + current.length) % current.length) / current.length));
-      localStorage.setItem(LIFT_KEY, String(Math.round(liftNow.current)));
     } catch { /* the spot still applies now */ }
   };
 
@@ -638,7 +643,7 @@ export function ChatPet({ mood, context, onHide }: {
     // Picked up mid-walk or mid-job: it stops where it is and goes where it is carried.
     cancelPlans();
     setJob("none");
-    drag.current = { moved: false, x: event.clientX, y: event.clientY };
+    drag.current = { moved: false, x: event.clientX, y: event.clientY, lastX: event.clientX, lastY: event.clientY };
     event.currentTarget.setPointerCapture(event.pointerId);
   };
   const onPointerMove = (event: ReactPointerEvent<HTMLButtonElement>) => {
@@ -652,6 +657,8 @@ export function ChatPet({ mood, context, onHide }: {
       setPose(REST);
     }
     if (!state.moved) return;
+    state.lastX = event.clientX;
+    state.lastY = event.clientY;
     const spot = nearestSpot(event.clientX, event.clientY);
     atNow.current = spot;
     setAt(spot);
@@ -664,15 +671,38 @@ export function ChatPet({ mood, context, onHide }: {
     const state = drag.current;
     drag.current = null;
     if (!state?.moved) { if (!asleepNow.current) wander(); return; }
-    // Dropped on a button: it hops off to the nearest free spot. Lifted clear of the edge it covers
-    // none of the buttons along it, so it stays where it was let go.
-    const free = liftNow.current > HEIGHT ? atNow.current : freeNear(atNow.current);
-    if (free !== atNow.current) walkTo(free, SCURRY * DASH, remember);
-    else remember();
-    say("Wheee", 900);
-    play("hop");
-    poke();
-    wander();
+    // Let go, it falls straight down onto the box's top edge under where it was dropped (the user:
+    // it stayed hovering off the box, drawn sideways when held beside it). It starts the fall from
+    // the height it was let go at, then hops off any button it landed on.
+    const current = loopNow.current;
+    const frame = composer.current?.getBoundingClientRect();
+    const falls = Boolean(current && frame);
+    if (current && frame) {
+      const x = Math.max(WIDTH / 2, Math.min(current.width - WIDTH / 2, state.lastX - frame.left));
+      const landing = nearLap(current, x, atNow.current);
+      const height = Math.max(0, Math.min(MAX_FALL, Math.round(frame.top - state.lastY - HEIGHT / 2)));
+      atNow.current = landing;
+      setAt(landing);
+      liftNow.current = height;
+      setLift(height);
+      say("Wheee", 900);
+      window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+        setFalling(true);
+        liftNow.current = 0;
+        setLift(0);
+      }));
+    } else {
+      liftNow.current = 0;
+      setLift(0);
+    }
+    later(falls ? FALL_MS : 0, () => {
+      setFalling(false);
+      play("hop");
+      poke();
+      const free = freeNear(atNow.current);
+      if (free !== atNow.current) walkTo(free, SCURRY * DASH, () => { remember(); wander(); });
+      else { remember(); wander(); }
+    });
   };
 
   const percent = context === null ? null : Math.round(context * 100);
@@ -689,7 +719,7 @@ export function ChatPet({ mood, context, onHide }: {
         transformOrigin: `${WIDTH / 2}px ${HEIGHT}px` };
     })() : { visibility: "hidden" };
   const bedStyle = { "--bed-dx": `${bed.side * BED_GAP}px` } as CSSProperties;
-  const pet = <div ref={box} className={`cx-pet side-${side}${ride ? ` is-riding ride-${ride.mode}` : ""}${bed.phase !== "none" ? ` bed-${bed.phase}` : ""}`}
+  const pet = <div ref={box} className={`cx-pet side-${side}${falling ? " is-falling" : ""}${ride ? ` is-riding ride-${ride.mode}` : ""}${bed.phase !== "none" ? ` bed-${bed.phase}` : ""}`}
     style={{ ...placement, ...bedStyle }}>
     {bed.phase !== "none" ? <BedFrame side={bed.side} /> : null}
     {bubble ? <span className="cx-pet-bubble" role="status">{bubble}</span> : null}
