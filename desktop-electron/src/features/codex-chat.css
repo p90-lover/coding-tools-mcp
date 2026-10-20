@@ -917,6 +917,7 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-goal.is-active .cx-goal-state { color: var(--ao-blue); }
 .cx-goal.is-achieved .cx-goal-state { color: var(--ao-green); }
 .cx-goal.is-stalled .cx-goal-state, .cx-goal.is-limited .cx-goal-state { color: var(--ao-amber); }
+.cx-wakeup-glyph { flex: 0 0 auto; color: var(--ao-blue); font-size: 13px; line-height: 1; }
 .cx-goal-objective { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--color-text-primary); text-overflow: ellipsis; white-space: nowrap; }
 .cx-goal-meta, .cx-goal-note { flex: 0 0 auto; color: var(--ao-muted); }
 .cx-goal-note { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

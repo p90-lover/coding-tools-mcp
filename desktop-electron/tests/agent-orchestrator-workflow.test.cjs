@@ -2768,6 +2768,118 @@ test("a team's goal round continues on the chat's team; an achieved, failed, sto
   await assert.rejects(workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" }), /No goal is currently set/);
 });
 
+// ---- schedule_wakeup ----
+
+/** A chat whose Single agent (AO session "sess-1") just finished run r1, with a clock and timers the test drives. */
+function wakeChat({ goal = false } = {}) {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Ship", description: "watch CI", state: "in_progress", clauses: [] }], runs: [
+    { id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+      nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { thread_id: "sess-1", answer: goal ? "GOAL: CONTINUE" : "Waiting on CI." } }] }] });
+  const clock = { at: 1_000_000 };
+  const timers = new Map();
+  let next = 0;
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/codex.exe",
+    resolveHarness: async () => { throw new Error("stop before the background loop"); }, now: () => clock.at,
+    setTimer: (fn, ms) => { next += 1; timers.set(next, { fn, at: clock.at + ms }); return next; }, clearTimer: (id) => timers.delete(id) });
+  /** Moves the clock and runs every timer due by then (and those they arm). */
+  const advance = async (ms) => {
+    clock.at += ms;
+    for (let pass = 0; pass < 10; pass++) {
+      const due = [...timers].filter(([, timer]) => timer.at <= clock.at);
+      if (!due.length) return;
+      for (const [id, timer] of due) { timers.delete(id); timer.fn(); }
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  };
+  return { world, workflow, route, advance, timers };
+}
+const wakeupOf = async (workflow) => (await workflow.call("runs", { workspaceId: "ws-1" })).wakeups["task-1"];
+
+test("a wake-up sends the chat the agent's note after its minutes, on the same Single model", async () => {
+  const { world, workflow, route, advance } = wakeChat();
+  const scheduled = await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 10, reason: "see whether CI run 42 passed" });
+  assert.equal(scheduled.taskId, "task-1");
+  assert.equal(scheduled.dueAt, 1_000_000 + 10 * 60_000);
+  const pending = await wakeupOf(workflow);
+  assert.equal(pending.reason, "see whether CI run 42 passed");
+  assert.equal(pending.runId, "r1", "the run that asked owns it");
+  const before = world.updates.length;
+  await advance(9 * 60_000);
+  assert.equal(world.updates.length, before, "nothing before its time");
+  await advance(60_000);
+  assert.equal(world.updates.length, before + 1, "one follow-up turn");
+  assert.deepEqual(world.updates.at(-1).single_route, route, "the same Single model, so the agent's session continues");
+  assert.match(world.edits.at(-1).description, /Wake-up: 10 minutes ago you asked to be woken[\s\S]*Your note: see whether CI run 42 passed[\s\S]*schedule_wakeup again/);
+  assert.equal(await wakeupOf(workflow), undefined, "it is spent");
+});
+
+test("a wake-up is dropped when the chat moved on, cancelled by the user, and refused for an unknown session", async () => {
+  let { world, workflow, advance } = wakeChat();
+  await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 5, reason: "check the build" });
+  // The user wrote first: their turn has the floor.
+  world.runs.push({ id: "r2", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false, nodes: [] });
+  const before = world.updates.length;
+  await advance(5 * 60_000);
+  assert.equal(world.updates.length, before, "no follow-up after a newer message");
+  assert.equal(await wakeupOf(workflow), undefined);
+
+  ({ world, workflow, advance } = wakeChat());
+  const { id } = (await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 5, reason: "check the build" }), await wakeupOf(workflow));
+  assert.equal((await workflow.call("chat_wakeup", { workspaceId: "ws-1", taskId: "task-1", action: "cancel", id })).cancelled, true);
+  const quiet = world.updates.length;
+  await advance(5 * 60_000);
+  assert.equal(world.updates.length, quiet, "a cancelled wake-up sends nothing");
+
+  await assert.rejects(workflow.scheduleWakeup({ workspaceId: "ws-1", session: "someone-else", minutes: 5, reason: "x" }), /not one of this project's chats/);
+  await assert.rejects(workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 0, reason: "x" }), /minutes must be a whole number/);
+  await assert.rejects(workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 5, reason: "  " }), /reason must say/);
+});
+
+test("a goal waits for its agent's wake-up instead of starting the next round at once", async () => {
+  const { world, workflow, advance } = wakeChat({ goal: true });
+  const route = world.runs[0].nodes[0].route;
+  await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "ship", goal: "ship", executionMode: "single", singleRoute: route });
+  // The goal's first round is the chat's newest run; its agent asks to be woken, then the round settles.
+  const round = { id: "g1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { thread_id: "sess-1", answer: "GOAL: CONTINUE — CI runs" } }] };
+  world.runs.push(round);
+  await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 3, reason: "CI result" });
+  const before = world.updates.length;
+  await workflow.goalAfterRun("ws-1", "g1", "finished", null);
+  assert.equal(world.updates.length, before, "no new round while the agent sleeps");
+  await advance(3 * 60_000);
+  assert.equal(world.updates.length, before + 1, "the wake-up continues the chat");
+  assert.match(world.edits.at(-1).description, /Your note: CI result/);
+});
+
+const { createWakeupStore, wakeupAction, wakePrompt, cleanWakeup } = require("../electron/chat-wakeups.cjs");
+
+test("wake-ups are kept per chat in a file, and a due one sends, waits or drops", () => {
+  const file = path.join(require("node:os").tmpdir(), `ct-wakeups-${crypto.randomUUID()}.json`);
+  try {
+    const store = createWakeupStore({ file, now: () => 60_000 });
+    const first = store.set("ws-1", "task-1", { minutes: 2, reason: " CI ", session: "s", runId: "r1" });
+    assert.equal(first.reason, "CI");
+    assert.equal(first.dueAt, 180_000);
+    const again = createWakeupStore({ file });
+    assert.equal(again.get("ws-1", "task-1").id, first.id, "it survives a restart");
+    assert.deepEqual(again.all().map((item) => [item.workspaceId, item.taskId]), [["ws-1", "task-1"]]);
+    assert.equal(again.clear("ws-1", "task-1", "another-id"), false, "only the wake-up named is cleared");
+    assert.equal(again.clear("ws-1", "task-1", first.id), true);
+    assert.equal(createWakeupStore({ file }).get("ws-1", "task-1"), null);
+  } finally { fs.rmSync(file, { force: true }); }
+  assert.throws(() => cleanWakeup({ minutes: 721, reason: "x" }), /1 to 720/);
+  assert.throws(() => cleanWakeup({ minutes: 1.5, reason: "x" }), /whole number/);
+  const wakeup = { runId: "r1", minutes: 5, reason: "CI", scheduledAt: 0 };
+  assert.equal(wakeupAction(wakeup, { active: true, latestRunId: "r1", working: false }), "send");
+  assert.equal(wakeupAction(wakeup, { active: true, latestRunId: "r1", working: true }), "wait", "the turn that asked is still finishing");
+  assert.equal(wakeupAction(wakeup, { active: true, latestRunId: "r2", working: false }), "drop", "someone wrote since");
+  assert.equal(wakeupAction(wakeup, { active: false, latestRunId: "r1", working: false }), "drop", "archived or deleted");
+  assert.match(wakePrompt(wakeup, 6 * 60_000), /^Wake-up: 6 minutes ago[\s\S]*Your note: CI/);
+});
+
 test("/compact replaces a long chat's context with Codex's handoff summary; /diff reads the git tool", async () => {
   const long = "Fix the login flow.\n\n" + "Follow-up: more detail. ".repeat(120);
   const world = chatWorld({ tasks: [{ id: "task-1", title: "Login", description: long, state: "in_progress", clauses: [] }], runs: [] });

@@ -4,6 +4,7 @@ const { createHash, randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { DEFAULT_GOAL_ROUNDS, goalPrompt, goalVerdict, closingAnswers, cleanObjective, createGoalStore } = require("./chat-goals.cjs");
+const { wakePrompt, wakeupAction, createWakeupStore } = require("./chat-wakeups.cjs");
 const { chatDescriptionWithout, createChatEditStore } = require("./chat-edits.cjs");
 const { createChatArchiveStore } = require("./chat-archive.cjs");
 const { normalizedAuthFile } = require("./cpa-oauth-adapter.cjs");
@@ -219,8 +220,10 @@ function delayToMilliseconds(value, unit) {
   }
   return ms;
 }
-function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, logger = null }) {
   const goals = createGoalStore({ file: goalsFile, now });
+  // Chats whose agent asked to be woken later (schedule_wakeup, chat-wakeups.cjs).
+  const wakeups = createWakeupStore({ file: wakeupsFile, now });
   // Deleted chat messages: their runs are hidden from the chat, and the next follow-up starts afresh.
   const chatEdits = createChatEditStore({ file: chatEditsFile });
   // When each chat was archived, and how many days it stays before moving to "deleted" (archivedChats).
@@ -245,6 +248,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   function reportRun(workspaceId, runId, state, mission, attention = null) {
     // A settled round of a chat with a goal decides what the goal does next.
     if (["finished", "failed", "held"].includes(state.status)) void goalAfterRun(workspaceId, runId, state.status, attention).catch(() => undefined);
+    // A wake-up that came due while its chat's turn was still running fires once that turn settles
+    // (not while it is held on the user: their answer comes first).
+    if (["finished", "failed"].includes(state.status)) void wakeupAfterRun(workspaceId, runId).catch(() => undefined);
     if (!onRunState) return;
     try {
       onRunState({
@@ -3220,14 +3226,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
   // The next round runs as the last one did: the same Single model route, or the chat's team.
   const SINGLE_ROUTE_FIELDS = ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile", "approval_policy", "approvals_reviewer", "effort", "context_window"];
+  /** How a chat's next turn the app sends itself runs: on `route` when one was picked, else as `previous` did (its Single route, or the chat's team). */
+  const followUpSelection = (previous, route = null) => (route && typeof route === "object"
+    ? { executionMode: "single", singleRoute: { ...route } }
+    : previous?.execution_mode === "single" && previous.nodes?.[0]?.route
+      ? { executionMode: "single", singleRoute: Object.fromEntries(Object.entries(previous.nodes[0].route).filter(([name, value]) => SINGLE_ROUTE_FIELDS.includes(name) && value !== undefined && value !== null)) }
+      : {});
   async function continueGoal(id, task, goal, previous) {
     const round = goal.round + 1;
     // A model picked while the goal ran (chat_goal "route") takes over from the next round on.
-    const selection = goal.route && typeof goal.route === "object"
-      ? { executionMode: "single", singleRoute: { ...goal.route } }
-      : previous?.execution_mode === "single" && previous.nodes?.[0]?.route
-        ? { executionMode: "single", singleRoute: Object.fromEntries(Object.entries(previous.nodes[0].route).filter(([name, value]) => SINGLE_ROUTE_FIELDS.includes(name) && value !== undefined && value !== null)) }
-        : {};
+    const selection = followUpSelection(previous, goal.route);
     goals.update(id, task, { round, note: "" });
     try {
       // Started in the background: a failed start settles the run, which marks the goal stalled.
@@ -3264,6 +3272,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const verdict = goalVerdict(closingAnswers(mission));
       if (verdict === "achieved") { goals.update(workspaceId, task, { status: "achieved", note: "" }); return; }
       if (goal.round >= goal.rounds) { goals.update(workspaceId, task, { status: "limited", note: `Stopped after ${goal.rounds} rounds; /goal resume allows more` }); return; }
+      // The agent asked to be woken later (schedule_wakeup): the goal goes on when it wakes, not now.
+      if (wakeups.get(workspaceId, task)?.runId === runId) return;
       await continueGoal(workspaceId, task, goal, mission);
     } finally { goalChecks.delete(guard); }
   }
@@ -3288,6 +3298,100 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const latest = saved.runs.filter(run => run.project_id === task).at(-1);
     await continueGoal(id, task, goals.get(id, task), latest);
     return { ok: true, goal: goals.get(id, task) };
+  }
+
+  // ---- Wake-ups (schedule_wakeup, chat-wakeups.cjs) ----
+
+  // A wake-up that could not fire (AO not ready yet after a restart) is tried again a while later.
+  const WAKE_RETRY_MS = 60_000, WAKE_RETRIES = 10, WAKE_RESTORE_MS = 30_000;
+  const wakeTimers = new Map();
+  const wakeFailures = new Map();
+  const waking = new Set();
+  let wakeupsDisposed = false;
+  const wakeKey = (workspaceId, taskId) => JSON.stringify([workspaceId, taskId]);
+  function disarmWakeup(workspaceId, taskId) {
+    const key = wakeKey(workspaceId, taskId);
+    if (wakeTimers.has(key)) clearTimer(wakeTimers.get(key));
+    wakeTimers.delete(key);
+  }
+  function armWakeup(workspaceId, taskId, delay = null) {
+    disarmWakeup(workspaceId, taskId);
+    const wakeup = wakeups.get(workspaceId, taskId);
+    if (wakeupsDisposed || !wakeup) return;
+    const key = wakeKey(workspaceId, taskId);
+    const handle = setTimer(() => {
+      wakeTimers.delete(key);
+      void fireWakeup(workspaceId, taskId, wakeup.id);
+    }, Math.min(2_147_483_647, Math.max(1, delay ?? wakeup.dueAt - now())));
+    handle?.unref?.();
+    wakeTimers.set(key, handle);
+  }
+  /** A due wake-up sends its chat the follow-up, waits for the chat's running turn, or is dropped (wakeupAction). */
+  async function fireWakeup(workspaceId, taskId, id) {
+    const key = wakeKey(workspaceId, taskId);
+    const wakeup = wakeups.get(workspaceId, taskId);
+    if (wakeupsDisposed || !wakeup || wakeup.id !== id || waking.has(key)) return;
+    if (wakeup.dueAt > now()) { armWakeup(workspaceId, taskId); return; }
+    waking.add(key);
+    try {
+      const saved = await runs({ workspaceId });
+      const chatRuns = saved.runs.filter(run => run.project_id === taskId);
+      const latest = chatRuns.at(-1);
+      const action = wakeupAction(wakeup, {
+        active: chatRuns.length > 0 && taskLifecycle(saved, taskId).visibility === "active",
+        latestRunId: latest?.id ?? null, working: chatWorking(workspaceId, taskId, saved.runs),
+      });
+      // It fires when that turn settles (wakeupAfterRun), or at the next look should the settle be missed.
+      if (action === "wait") { wakeups.update(workspaceId, taskId, { due: true }); armWakeup(workspaceId, taskId, WAKE_RETRY_MS); return; }
+      wakeups.clear(workspaceId, taskId, id);
+      wakeFailures.delete(id);
+      if (action !== "send") { logger?.info?.("ao.wakeup.dropped", { workspaceId, taskId }); return; }
+      const result = await chatSend({ workspaceId, taskId, message: wakePrompt(wakeup, now()), ...followUpSelection(latest), deferStart: true });
+      logger?.info?.("ao.wakeup.sent", { workspaceId, taskId, minutes: wakeup.minutes, ok: result?.ok !== false });
+    } catch (error) {
+      const failures = (wakeFailures.get(id) ?? 0) + 1;
+      wakeFailures.set(id, failures);
+      logger?.warn?.("ao.wakeup.failed", { workspaceId, taskId, failures, error: String(error?.message || error).slice(0, 200) });
+      if (failures >= WAKE_RETRIES || !wakeups.get(workspaceId, taskId)) { wakeups.clear(workspaceId, taskId, id); wakeFailures.delete(id); }
+      else armWakeup(workspaceId, taskId, WAKE_RETRY_MS);
+    } finally { waking.delete(key); }
+  }
+  // When a chat's turn settles, a wake-up that came due while it ran fires now.
+  async function wakeupAfterRun(workspaceId, runId) {
+    const due = Object.values(wakeups.forWorkspace(workspaceId)).filter(wakeup => wakeup.due || wakeup.dueAt <= now());
+    for (const wakeup of due) {
+      if (wakeup.runId === runId) await fireWakeup(workspaceId, wakeup.taskId, wakeup.id);
+    }
+  }
+  /**
+   * schedule_wakeup from a chat agent (chat-agent-tools.cjs): its AO `session` is woken in `minutes`
+   * with its `reason`. The chat is the one whose run holds that session; its newest run owns the wake-up.
+   */
+  async function scheduleWakeup({ workspaceId, session, minutes, reason } = {}) {
+    const id = clean(workspaceId, 128), thread = clean(session, 256);
+    const saved = await runs({ workspaceId: id });
+    const holds = node => node.receipt?.thread_id === thread || (node.history || []).some(entry => entry?.thread_id === thread);
+    const run = saved.runs.filter(entry => entry.workspace_id === id && (entry.nodes || []).some(holds)).at(-1);
+    if (!run?.project_id) throw new Error("This session is not one of this project's chats, so it cannot be woken later");
+    const latest = saved.runs.filter(entry => entry.project_id === run.project_id).at(-1);
+    if (latest?.id !== run.id) throw new Error("A newer message was sent in this chat since this turn began; answer it instead of scheduling a wake-up");
+    const wakeup = wakeups.set(id, run.project_id, { minutes, reason, session: thread, runId: run.id });
+    wakeFailures.delete(wakeup.id);
+    armWakeup(id, run.project_id);
+    return { ok: true, taskId: run.project_id, dueAt: wakeup.dueAt, minutes: wakeup.minutes };
+  }
+  // chat_wakeup: the user cancels the chat's wake-up.
+  function chatWakeup({ workspaceId, taskId, action, id } = {}) {
+    const workspace = clean(workspaceId, 128), task = clean(taskId, 128);
+    if (action !== "cancel") throw new Error("Choose cancel");
+    disarmWakeup(workspace, task);
+    return { ok: true, cancelled: wakeups.clear(workspace, task, id ? clean(id, 128) : null) };
+  }
+  // Wake-ups saved before a restart: an overdue one fires shortly after the app is back.
+  function restoreWakeups() {
+    for (const { workspaceId, taskId, wakeup } of wakeups.all()) {
+      if (typeof workspaceId === "string" && typeof taskId === "string") armWakeup(workspaceId, taskId, Math.max(WAKE_RESTORE_MS, wakeup.dueAt - now()));
+    }
   }
 
   // Codex's own compaction instruction (codex-rs core/src/tasks/compact.rs).
@@ -3770,6 +3874,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     toolsWaits.clear();
     for (const timer of scheduleTimers.values()) clearTimer(timer);
     scheduleTimers.clear();
+    // Saved wake-ups stay on disk and are armed again by the next app.
+    wakeupsDisposed = true;
+    for (const timer of wakeTimers.values()) clearTimer(timer);
+    wakeTimers.clear();
     // Warm sessions' expiry, re-warms and deferred task edits all reach AO through this backend's
     // harness, which would start a stopped daemon again.
     for (const entry of warm.values()) if (entry.timer) clearTimeout(entry.timer);
@@ -3807,10 +3915,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "runs": {
         const saved = await runs(args);
         // The runs of deleted chat messages stay in AO's history but are not shown in their chat.
-        return { ...saved, runs: chatEdits.visible(clean(args.workspaceId, 128), saved.runs), goals: goals.forWorkspace(clean(args.workspaceId, 128)) };
+        return { ...saved, runs: chatEdits.visible(clean(args.workspaceId, 128), saved.runs), goals: goals.forWorkspace(clean(args.workspaceId, 128)),
+          wakeups: wakeups.forWorkspace(clean(args.workspaceId, 128)) };
       }
       case "chat_delete_message": return chatDeleteMessage(args);
       case "chat_goal": return chatGoal(args);
+      case "chat_wakeup": return chatWakeup(args);
       case "compact_chat": return compactChat(args);
       case "chat_diff": return chatDiff(args);
       case "update_run": return updateRun(args);
@@ -3857,7 +3967,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     { id: "subagent", role: "worker", route, settings: { name } }, true);
   /** Whether the command approver's safety rules block this request text whatever anyone answers. */
   const blockedRequest = (text) => hardDenied(text);
-  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, routineCommand, routineAppTool, routineAppCommand, blockedRequest, recommendedAnswer, subagentLaunchArgs });
+  restoreWakeups();
+  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scheduleWakeup, routineCommand, routineAppTool, routineAppCommand, blockedRequest, recommendedAnswer, subagentLaunchArgs });
 }
 
 module.exports = { createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
