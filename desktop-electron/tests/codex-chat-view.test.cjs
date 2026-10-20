@@ -349,6 +349,19 @@ test("after an app restart a running AO card is still steered, though the page i
   assert.deepEqual(JSON.parse(JSON.stringify(steered)), [{ taskId: "t", message: "have you done it?" }]);
 });
 
+test("a failed step's card names the step and its error, and its turn leaves the error to the card", () => {
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
+  const dsh = fs.readFileSync(path.resolve(__dirname, "../src/features/DshTranscript.tsx"), "utf8");
+  const card = source.slice(source.indexOf("function FailedStepCard"), source.indexOf("/** An image attachment's thumbnail URL"));
+  assert.ok(card.includes("notice || step?.error ||"), "the reason is the run's notice, else the step's own error");
+  assert.ok(card.includes("<span className=\"cx-fail-step\">{step.name}</span>"), "the card names the step");
+  assert.ok(source.includes("<FailedStepCard step={failedStep} notice={notice}"));
+  assert.ok(source.includes("errorShownBelow={turn === failedTurn}") && source.includes("prev.errorShownBelow === next.errorShownBelow"),
+    "the failed turn is told, and its memo sees the change");
+  assert.ok(dsh.includes("{errorShownBelow ? null : steps.filter((step) => step.error)"), "the DeepSeek turn drops its own copy of the error");
+  assert.ok(source.includes("<input type=\"checkbox\" role=\"switch\""), "automatic retry is a switch");
+});
+
 test("each chat has its own queue: queuing in another chat never replaces one, and the view closing keeps them", () => {
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
   // The store lives at module level, outside the component, keyed by the chat's task id.
@@ -359,7 +372,9 @@ test("each chat has its own queue: queuing in another chat never replaces one, a
   assert.ok(queue.includes("sentWhileFree.current"), "one item per finished turn, never two into the same free spell");
   assert.ok(queue.includes("setDraft((typed) => (typed.trim() ? `${typed}\\n\\n${next.message}` : next.message))"), "a queued message that can't be sent goes back into the composer, after what is typed");
   assert.ok(queue.includes("deliver(next.message, next.goal, false)") && queue.includes("deliver(next.message, undefined, false)"), "a background send leaves the composer alone");
-  assert.ok(queue.includes("steerFailed.current = true") && queue.includes("|| steerFailed.current ||"), "a steer that fails is not retried in a loop");
+  // A failed steer waits a growing pause (15 s, 30 s, 60 s) before the next try, never a loop.
+  assert.ok(queue.includes("steerRetry.current = { attempts, until: Date.now() + wait }") && queue.includes("Date.now() < steerRetry.current.until"),
+    "a steer that fails is not retried in a loop");
   assert.ok(source.includes("setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what, message,"), "commands queue in their own chat too");
 });
 

@@ -223,6 +223,10 @@
 .ao-workflow .cx-chat .ao-msg-question { border-color: var(--claude-line); }
 .ao-workflow .cx-chat .cx-card.tone-error { border-color: color-mix(in srgb, var(--ao-red) 35%, var(--claude-line)); }
 .ao-workflow .cx-chat .cx-card p { font-size: 14px; }
+/* The failed-step card: a faint red wash over the raised card, the reason quieter, the hint small. */
+.ao-workflow .cx-chat .cx-fail-card { background: color-mix(in srgb, var(--ao-red) 5%, var(--claude-raised)); }
+.ao-workflow .cx-chat .cx-card p.cx-fail-reason { color: var(--claude-text-2); font-size: 13.5px; }
+.ao-workflow .cx-chat .cx-card p.cx-fail-hint { font-size: 12px; }
 .ao-workflow .cx-chat .ao-msg-meta { margin-bottom: 6px; color: var(--claude-text-2); font-size: 12px; font-weight: 500; }
 .ao-workflow .cx-chat .ao-hint { color: var(--claude-text-2); font-size: 12px; }
 .ao-workflow .cx-chat .ao-msg-approval pre, .ao-workflow .cx-chat .ao-msg-plan .ao-plan { border: 1px solid var(--claude-line-soft); border-radius: 8px;
