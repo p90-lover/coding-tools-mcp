@@ -1154,6 +1154,22 @@ test("an answered request is no row of its own: its answer shows on the call it 
     ["5", "Denied by the reviewer: pushes"]], "allowed answers fold into their calls; a denial keeps its row; a pending one waits");
 });
 
+test("a call the reviewer denied shows its verdict, not the adapter's stock refusal", () => {
+  const refused = "User refused permission to run tool";
+  const tidy = chat.tidyTimeline([
+    { id: "1", kind: "command", status: "failed", text: "$txt=[IO.File]::ReadAllText($p)", output: refused },
+    { id: "2", kind: "approval", status: "completed", text: "PowerShell", approval: "Denied by the reviewer: reads a file outside the project" },
+    { id: "3", kind: "command", status: "failed", text: "git push", output: `Error: ${refused}` },
+    { id: "4", kind: "approval", status: "rejected", text: "git push", approval: "Denied by Approve for me's safety rules" },
+    { id: "5", kind: "command", status: "failed", text: "rm -rf build", output: refused },
+    { id: "6", kind: "approval", status: "completed", text: "PowerShell", approval: "Denied" },
+  ]);
+  assert.deepEqual([...tidy.map((item) => [item.id, item.output ?? null])], [
+    ["1", "Denied by the reviewer: reads a file outside the project"],
+    ["3", "Denied by Approve for me's safety rules"], ["4", null],
+    ["5", refused]], "a folded or kept denial replaces the stock line; the person's own deny keeps it");
+});
+
 test("an edit's diff is numbered from its hunk header, old lines on the left and new on the right", () => {
   const rows = (diff) => [...chat.numberedDiff(diff).map((line) => [line.kind, line.old ?? null, line.new ?? null, line.text])];
   assert.deepEqual(rows("@@ -98,4 +98,4 @@\n line 97\n-line 98\n+changed 98\n line 99\n line 100"), [

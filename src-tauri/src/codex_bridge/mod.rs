@@ -92,6 +92,61 @@ struct ThreadState {
     last_event_at_ms: u64,
     /// When the thread was opened (Unix ms), so a turn that never starts shows how long it waited.
     started_at_ms: u64,
+    /// The turn's recent tool steps (a command, a file change, a tool call), so the chat can show
+    /// what a Native Codex card is doing, as it does for AO cards. Each label is short and redacted.
+    #[serde(skip)]
+    steps: Vec<StepItem>,
+}
+
+/// One tool step of a turn: its item id, Codex's item type, its status, and a short label.
+#[derive(Clone, Default)]
+struct StepItem {
+    turn: String,
+    id: String,
+    kind: String,
+    status: String,
+    label: String,
+}
+
+/// Tool steps kept per thread (the oldest go first); a label is cut to this many bytes.
+const MAX_STEP_ITEMS: usize = 40;
+const MAX_STEP_LABEL: usize = 160;
+
+/// A step's one-line label: the command, the files changed, the tool, or the search query.
+fn step_label(item: &Value) -> String {
+    let text = match item["type"].as_str().unwrap_or("") {
+        "commandExecution" => match &item["command"] {
+            Value::String(command) => command.clone(),
+            Value::Array(parts) => parts
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" "),
+            _ => String::new(),
+        },
+        "fileChange" => item["changes"]
+            .as_array()
+            .map(|changes| {
+                changes
+                    .iter()
+                    .filter_map(|change| change["path"].as_str())
+                    .map(|path| path.rsplit(['/', '\\']).next().unwrap_or(path))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default(),
+        "mcpToolCall" => match (item["server"].as_str(), item["tool"].as_str()) {
+            (Some(server), Some(tool)) => format!("{server}: {tool}"),
+            (None, Some(tool)) => tool.to_owned(),
+            _ => String::new(),
+        },
+        "dynamicToolCall" => item["tool"].as_str().unwrap_or_default().to_owned(),
+        "webSearch" => item["query"].as_str().unwrap_or_default().to_owned(),
+        _ => String::new(),
+    };
+    let mut label = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    crate::tools::history::redact_text(&mut label);
+    bounded(&label, MAX_STEP_LABEL)
 }
 
 /// One agentMessage item of the current turn.
@@ -970,7 +1025,9 @@ impl Hub {
             "lifetime_unbounded":bridge.options.lifetime_seconds==0,
             "replay_retention_seconds":LEDGER_RETENTION.as_secs(),"replay_capacity":MAX_LEDGER,
             "stop_reason":memory.stop_reason,"threads":memory.threads.values().map(|t|json!({"id":t.id,"status":t.status,"turn_id":t.turn_id,
-                "activity":t.activity,"activity_at_ms":t.activity_at_ms,"last_event_at_ms":t.last_event_at_ms,"started_at_ms":t.started_at_ms,"effective_policy":t.effective_policy})).collect::<Vec<_>>(),
+                "activity":t.activity,"activity_at_ms":t.activity_at_ms,"last_event_at_ms":t.last_event_at_ms,"started_at_ms":t.started_at_ms,"effective_policy":t.effective_policy,
+                "steps":t.steps.iter().filter(|step| t.turn_id.as_deref() == Some(step.turn.as_str()))
+                    .map(|step| json!({"id":step.id,"kind":step.kind,"status":step.status,"label":step.label})).collect::<Vec<_>>()})).collect::<Vec<_>>(),
             "requested_sandbox":match bridge.options.permission_profile.as_str() {":workspace"=>json!("workspace-write"),":read-only"=>json!("read-only"),":danger-full-access"=>json!("danger-full-access"),_=>Value::Null},
             "permission_profile":bridge.options.permission_profile,
             "approval_policy":bridge.approval_policy(),"approvals_reviewer":bridge.approvals_reviewer(),
@@ -2053,6 +2110,45 @@ fn apply_notification(memory: &mut Memory, method: &str, params: &Value) {
                 }) =>
         {
             thread.tool_step = true;
+            let item = &params["item"];
+            if let (Some(turn), Some(id), Some(kind)) = (
+                thread.turn_id.clone(),
+                item["id"].as_str().filter(|s| token(s)),
+                item["type"].as_str(),
+            ) {
+                let status = if method == "item/started" {
+                    "running".to_owned()
+                } else {
+                    match item["status"].as_str() {
+                        Some("failed" | "declined") => "failed",
+                        _ => "completed",
+                    }
+                    .to_owned()
+                };
+                let label = step_label(item);
+                if let Some(index) = thread
+                    .steps
+                    .iter()
+                    .position(|step| step.id == id && step.turn == turn)
+                {
+                    let step = &mut thread.steps[index];
+                    step.status = status;
+                    if !label.is_empty() {
+                        step.label = label;
+                    }
+                } else {
+                    thread.steps.push(StepItem {
+                        turn,
+                        id: id.to_owned(),
+                        kind: kind.to_owned(),
+                        status,
+                        label,
+                    });
+                    if thread.steps.len() > MAX_STEP_ITEMS {
+                        thread.steps.remove(0);
+                    }
+                }
+            }
         }
         _ => {}
     }
@@ -2531,6 +2627,79 @@ mod tests {
             bad[key] = value;
             assert!(command_approval_details(&root, &bad).is_none());
         }
+    }
+
+    #[test]
+    fn native_bridge_lists_the_turns_tool_steps_with_short_labels() {
+        let mut memory = Memory::default();
+        memory.threads.insert(
+            "owned".into(),
+            ThreadState {
+                id: "owned".into(),
+                status: "inProgress".into(),
+                turn_id: Some("t".into()),
+                ..Default::default()
+            },
+        );
+        let notify = |memory: &mut Memory, method: &str, item: Value| {
+            apply_notification(
+                memory,
+                method,
+                &json!({"threadId":"owned","turnId":"t","item":item}),
+            );
+        };
+        notify(
+            &mut memory,
+            "item/started",
+            json!({"id":"c1","type":"commandExecution","command":"Get-ChildItem   -Force\n."}),
+        );
+        notify(
+            &mut memory,
+            "item/started",
+            json!({"id":"e1","type":"fileChange","changes":[{"path":"C:\\repo\\src\\app.ts"},{"path":"docs/readme.md"}]}),
+        );
+        notify(
+            &mut memory,
+            "item/completed",
+            json!({"id":"c1","type":"commandExecution","status":"failed"}),
+        );
+        notify(
+            &mut memory,
+            "item/started",
+            json!({"id":"m1","type":"mcpToolCall","server":"coding-tools","tool":"read_file"}),
+        );
+        let steps = &memory.threads["owned"].steps;
+        assert_eq!(steps.len(), 3);
+        assert_eq!(
+            (
+                steps[0].kind.as_str(),
+                steps[0].status.as_str(),
+                steps[0].label.as_str()
+            ),
+            ("commandExecution", "failed", "Get-ChildItem -Force ."),
+            "one step per item, updated on completion, whitespace folded"
+        );
+        assert_eq!(steps[1].label, "app.ts, readme.md", "file names only");
+        assert_eq!(steps[2].label, "coding-tools: read_file");
+        // A long command is cut; a step of another turn is not reported as this turn's.
+        notify(
+            &mut memory,
+            "item/started",
+            json!({"id":"c2","type":"commandExecution","command":"x".repeat(500)}),
+        );
+        assert_eq!(memory.threads["owned"].steps[3].label.len(), MAX_STEP_LABEL);
+        for index in 0..MAX_STEP_ITEMS {
+            notify(
+                &mut memory,
+                "item/started",
+                json!({"id":format!("n{index}"),"type":"webSearch","query":"q"}),
+            );
+        }
+        assert_eq!(
+            memory.threads["owned"].steps.len(),
+            MAX_STEP_ITEMS,
+            "bounded"
+        );
     }
 
     #[test]
