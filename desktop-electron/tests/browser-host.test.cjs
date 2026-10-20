@@ -1758,6 +1758,28 @@ test("an uninitialized browser surface is reaped instead of remaining as a gray 
   }]]);
 });
 
+test("a tab its start is still loading is held to the bootstrap deadline, not the helper heartbeat", () => {
+  // ChatGPT's page loaded (bootstrapReady) but the start has not returned, so no helper has
+  // heartbeated: a load past 60 s was reaped as a lost heartbeat just before its lease went out.
+  const tab = {
+    id: "tab-loading", traceId: "trace_loading", helperPid: 555, status: "running", loading: true,
+    bootstrapReady: true, initializingSurface: true, bootstrapDeadlineAt: 120_000, lastHeartbeatAt: 0,
+    view: { webContents: { isDestroyed: () => false, close() {} } },
+  };
+  const warnings = [];
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    turnTabs: new Map([[tab.id, tab]]), closedTurnOwners: new Map(), selectedTabId: tab.id,
+    window: { contentView: { removeChildView() {} } }, syncViewVisibility() {}, snapshot: () => ({ tabs: [] }),
+    publishState() {}, writeDescriptor() {}, logger: { warn: (event, detail) => warnings.push([event, detail.evidence]) },
+  });
+  fixture.lastTurnSweepAt = 89_000;
+  BrowserHost.prototype.reapExpiredTurnTabs.call(fixture, 90_000);
+  assert.equal(fixture.turnTabs.size, 1, "still loading inside its 120 s budget");
+  fixture.lastTurnSweepAt = 119_000; // sweeps 5 s apart; a longer gap reads as a suspended machine
+  BrowserHost.prototype.reapExpiredTurnTabs.call(fixture, 120_000);
+  assert.deepEqual(warnings, [["browser.orphan_turn_reaped", "browser_surface_bootstrap_timeout"]]);
+});
+
 test("removing the final turn tab keeps the descriptor-owned idle host attached offscreen", () => {
   const calls = [];
   const hiddenBounds = { x: 1201, y: 801, width: 1200, height: 800 };

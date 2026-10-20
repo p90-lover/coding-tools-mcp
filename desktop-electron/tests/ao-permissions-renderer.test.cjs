@@ -507,6 +507,12 @@ test("a model that lists efforts but no Auto starts on one it takes, as an adjus
   assert.equal(view.routes.at(-1).effort, "medium");
   view = await load({ "cpa/deepseek-v4.1-flash": { efforts: ["none", "low"] } });
   assert.equal(view.routes.at(-1).effort, "low", "never None unless it is all there is");
+  view = await load({ "cpa/deepseek-v4.1-flash": { efforts: ["max", "low"] } });
+  assert.equal(view.routes.at(-1).effort, "low", "the lowest by rank, not the catalog's first");
+  view = await load({ "cpa/deepseek-v4.1-flash": { efforts: ["low", "minimal"] } });
+  assert.equal(view.routes.at(-1).effort, "minimal");
+  view = await load({ "gpt-5.5": { efforts: ["low", "high"] } }, { ...route, harness_id: "ao:codex", model: "gpt-5.5" });
+  assert.deepEqual(view.routes, [], "a harness's own model runs at its own default");
   view = await load({ "cpa/deepseek-v4.1-flash": { efforts: ["low", "high", "auto"] } });
   assert.deepEqual(view.routes, [], "a model that takes Auto stays on it");
   view = await load({ "cpa/deepseek-v4.1-flash": { efforts: [] } });

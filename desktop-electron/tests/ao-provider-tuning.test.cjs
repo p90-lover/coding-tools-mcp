@@ -120,8 +120,10 @@ test("CPA effort becomes exactly one session-local wire suffix and context is fo
     assert.deepEqual(input.gateway, { provider: "cpa", model: "gpt-5.5(high)" });
     assert.equal(input.contextWindow, 262144);
     assert.equal(input.effort, undefined, "foreign model is not checked as native-agent effort");
+    // A card left blank on a model without "auto" starts on a real effort (High: there is no
+    // Medium), so a send made before the composer's list loaded still names one.
     const untuned = await dispatched(agent, "cpa/gpt-5.5", {});
-    assert.equal(untuned.gateway.model, "gpt-5.5");
+    assert.equal(untuned.gateway.model, "gpt-5.5(high)");
     assert.equal(untuned.contextWindow, 262144, "a card left blank starts with the model's full known window");
   }
   const own = await dispatched("codex", "own-model", { effort: "high", context_window: 131072 });
@@ -149,8 +151,23 @@ test("Cline DeepSeek V4.1 Flash lists native efforts and forwards them unchanged
       assert.equal(input.effort, undefined);
     }
     await assert.rejects(dispatched(agent, "cpa/" + id, { effort: "xhigh" }, catalog), /reasoning.*not.*support/i);
-    assert.equal((await dispatched(agent, "cpa/" + id, {}, catalog)).gateway.model, id);
+    assert.equal((await dispatched(agent, "cpa/" + id, {}, catalog)).gateway.model, id + "(high)",
+      "None/Low/High/Max has no Auto: a blank card starts on High, not on no effort CPA cannot serve");
   }
+});
+
+test("a blank CPA card's start effort follows the effort rank, and Auto or a model's own effort is left alone", async () => {
+  const levels = (...efforts) => efforts.map(effort => ({ effort }));
+  const catalog = [{ slug: "rank-a", supported_reasoning_levels: levels("max", "low") },
+    { slug: "rank-b", supported_reasoning_levels: levels("low", "medium", "high") },
+    { slug: "takes-auto", supported_reasoning_levels: levels("low", "high", "auto") },
+    { slug: "gemini-3.8-flash-high", supported_reasoning_levels: levels("low", "high") }];
+  const wire = async (model, tuning = {}) => (await dispatched("claude-code", "cpa/" + model, tuning, catalog)).gateway.model;
+  assert.equal(await wire("rank-a"), "rank-a(low)", "the lowest by rank, not the catalog's first");
+  assert.equal(await wire("rank-b"), "rank-b(medium)");
+  assert.equal(await wire("rank-b", { effort: "high" }), "rank-b(high)", "a picked effort is kept");
+  assert.equal(await wire("takes-auto"), "takes-auto");
+  assert.equal(await wire("gemini-3.8-flash-high"), "gemini-3.8-flash-high", "the id names its own effort");
 });
 
 test("every provider plugin's model reaches CPA by its bare name, by namespace or by the provider CPA names", async () => {
