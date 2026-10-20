@@ -220,15 +220,16 @@ export function AgentOrchestratorComposerControls({
       <ChipMenu heading="Harness" popupClass="ao-tuning-popup" className="is-logo" ariaLabel={`Harness: ${harnessName}`} disabled={busy || isWebModel(route.model)}
         title={isWebModel(route.model) ? `${harnessName} · WebGPT runs only on Native Codex` : `${harnessName} · the agent that runs this chat`}
         label={<HarnessLogo harnessId={route.harness_id} label={harnessName} />}>
-        {(close) => <div role="radiogroup" aria-label="Harnesses">
+        {(close) => <div role="radiogroup" aria-label="Harnesses" className="ao-harness-list">
           {harnesses.map(item => <Option key={item.id} picked={item.id === route.harness_id} disabled={busy || !item.runnable} onPick={() => {
             // Each harness starts on an explicit model; one without a known model shows "Choose a model".
             const model = item.id === NATIVE_HARNESS ? WEB_ROUTE.model : item.id === DEFAULT_WORKER_HARNESS ? DEFAULT_WORKER_MODEL : "";
             if (item.id !== route.harness_id) onRouteChange(withTuning(workerRoute(item.id, model, nativePermission(route)), route));
             close();
           }}>
-            <span className="ao-harness-option"><HarnessLogo harnessId={item.id} label={item.label} size={18} /><strong>{item.label}</strong></span>
-            {!item.runnable ? <small>not installed</small> : item.authStatus === "unauthorized" ? <small>sign in</small> : item.chat === false ? <small>terminal</small> : null}
+            {/* One line per harness: its logo, its name, and a short state tag at the end. */}
+            <span className="ao-harness-option"><HarnessLogo harnessId={item.id} label={item.label} size={18} /><strong>{item.label}</strong>
+              {!item.runnable ? <small>not installed</small> : item.authStatus === "unauthorized" ? <small>sign in</small> : null}</span>
           </Option>)}
           {!harnesses.length ? <p role="status">No agents found yet.</p> : null}
         </div>}

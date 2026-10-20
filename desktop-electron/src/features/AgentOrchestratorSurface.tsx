@@ -524,6 +524,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [composerTeamId, setComposerTeamId] = useState("");
   const [composerMode, setComposerMode] = useState<"single" | "team">("single");
   const [singleRoute, setSingleRoute] = useState<AoRoute>(newChatRoute);
+  // A model, effort, window or permission picked in the composer is the next new chat's too, from
+  // the moment it is picked: only a sent message kept it before, so a New chat (or another task)
+  // opened right after picking went back to the old model.
+  const pickSingleRoute = (route: AoRoute) => { setSingleRoute(route); rememberChatRoute(route); };
   const hydratedComposer = useRef("");
   // The New mission sheet's team choice (#254); the composer keeps its own (composerTeamId).
   const [missionTeamId, setMissionTeamId] = useState("");
@@ -1184,7 +1188,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
         if (applied.cancelled) throw new Error("Permission application cancelled; existing policy is unchanged.");
         await loadMissions(workspaceId);
       }
-      setSingleRoute({ ...chosen.route });
+      pickSingleRoute({ ...chosen.route });
       return "Selected for the next Single attempt. Running attempts and shared app grants are unchanged; runtime acknowledgement is still required.";
     }
     if (!selectedSetup) throw new Error("Selected saved team unavailable; refresh before applying.");
@@ -2138,7 +2142,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
                 working={Boolean(selectedRun && chatTaskId && selectedRun.project_id === chatTaskId && ["starting", "running"].includes(autoStatus))}
                 openStructure={(runId) => { setSelectedRunId(runId); setView("overview"); }}
                 approvals={selectedRun && chatTaskId && selectedRun.project_id === chatTaskId ? shownApprovals : []}
-                composer={{ mode: composerMode, onModeChange: setComposerMode, route: singleRoute, onRouteChange: setSingleRoute,
+                composer={{ mode: composerMode, onModeChange: setComposerMode, route: singleRoute, onRouteChange: pickSingleRoute,
                   harnesses, loadModels, teams: savedTeams, teamId: composerTeamId, onTeamChange: setComposerTeamId }}
                 onOpenTeam={openTeam}
                 onOpenMissionBoard={() => { setSheet(""); setView("board"); }}

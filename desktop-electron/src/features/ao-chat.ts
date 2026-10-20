@@ -97,21 +97,42 @@ export type ChatLiveItem = {
  */
 export function tidyTimeline(items: ChatLiveItem[]): ChatLiveItem[] {
   const out: ChatLiveItem[] = [];
+  // ACP asks after the call it is about, so an answer belongs to the nearest call before it.
+  const nearestCall = () => {
+    for (let at = out.length - 1; at >= 0; at -= 1) if (["tool", "command", "edit"].includes(out[at].kind)) return at;
+    return -1;
+  };
   for (const item of items) {
     // One the person answered stays as its own row, shown as Claude Code shows an answered question.
     if (item.answered) { out.push(item); continue; }
     const answered = item.kind === "approval" && !item.label && !/reject|denied|declin/i.test(item.status);
-    if (!answered) { out.push(item); continue; }
-    if (!item.approval || /pending/i.test(item.status)) continue;
-    // ACP asks after the call it is about, so the answer belongs to the nearest call still without one.
-    for (let at = out.length - 1; at >= 0; at -= 1) {
-      const call = out[at];
-      if (!["tool", "command", "edit"].includes(call.kind)) continue;
-      if (!call.approval) out[at] = { ...call, approval: item.approval };
-      break;
+    if (!answered) {
+      // A denial that keeps its own row still explains the refusal on the call it refused.
+      if (item.kind === "approval") explainRefusal(out, nearestCall(), item.approval);
+      out.push(item);
+      continue;
     }
+    if (!item.approval || /pending/i.test(item.status)) continue;
+    const at = nearestCall();
+    if (at < 0 || out[at].approval) continue;
+    out[at] = { ...out[at], approval: item.approval };
+    explainRefusal(out, at, item.approval);
   }
   return out;
+}
+
+// claude-agent-acp answers every denied request with this one line, whoever denied it and why.
+const STOCK_REFUSAL = /^(?:Error: )?User refused permission to run tool\.?$/i;
+
+/**
+ * A call the reviewer or "Approve for me" denied shows their verdict ("Denied by the reviewer: …")
+ * where the adapter's stock "User refused permission to run tool" stood: nobody refused it by hand.
+ * The person's own deny is a bare "Denied", and that stock line is true for it, so it stays.
+ */
+function explainRefusal(out: ChatLiveItem[], at: number, approval: string | undefined) {
+  if (at < 0 || !approval || !/^Denied\b./.test(approval)) return;
+  const call = out[at];
+  if (STOCK_REFUSAL.test((call.output ?? "").trim())) out[at] = { ...call, output: approval };
 }
 
 /**
@@ -197,6 +218,27 @@ export function groupTimeline(items: ChatLiveItem[]): ChatLiveSegment[] {
   return segments;
 }
 
+/**
+ * A tool call's title as one short phrase: a path argument reads by its last part, as Codex shows it
+ * ("Read C:/Users/…/skills/using-ao/commands/report.md" → "Read report.md"), and a title still too
+ * long ends in "…". Cut at a fixed length, the path read "…/coding-tools/ski" in the folded line.
+ */
+export function shortToolTitle(text: string): string {
+  const plain = text.replace(/^mcp__[\w-]+__/, "").replace(/\s+/g, " ").trim();
+  // The whole path token, relative ones included ("src/features/ao-chat.ts", "frontend\vite.config.ts"),
+  // becomes its last part; a URL keeps its address.
+  const named = plain.replace(/(^|[\s"'`(])([^\s"'`()]*[\\/][^\s"'`()]*)/g, (match, lead: string, token: string) => {
+    if (token.includes("://")) return match;
+    const last = token.split(/[\\/]+/).filter(Boolean).pop();
+    return last ? lead + last : match;
+  });
+  if (named.length <= 40) return named;
+  // Cut at the last word that fits, so a word is never left half-shown.
+  const head = named.slice(0, 40);
+  const space = named[40] === " " ? 40 : head.lastIndexOf(" ");
+  return `${(space >= 20 ? head.slice(0, space) : head.slice(0, 39)).trimEnd()}…`;
+}
+
 /** "Ran 2 commands, read_output ×7, search_text · 3 thoughts": what a folded group did. */
 export function activitySummary(items: ChatLiveItem[]): string {
   const commands = items.filter((item) => item.kind === "command").length;
@@ -204,7 +246,7 @@ export function activitySummary(items: ChatLiveItem[]): string {
   const tools = new Map<string, number>();
   for (const item of items) {
     if (item.kind !== "tool") continue;
-    const name = item.text.replace(/^mcp__[\w-]+__/, "").replace(/\s+/g, " ").trim().slice(0, 40) || item.label || "tool";
+    const name = shortToolTitle(item.text) || item.label || "tool";
     tools.set(name, (tools.get(name) ?? 0) + 1);
   }
   const named = [...tools].sort((a, b) => b[1] - a[1]);
@@ -651,8 +693,28 @@ export const RESTART_INTERRUPTED = /process ended before it finished \(the app r
 
 type ResumeCandidate = {
   cancelled: boolean; paused?: boolean; execution_mode?: string;
-  nodes: { state: string; receipt?: { error?: string | null } | null; history?: unknown[] }[];
+  nodes: { state: string; receipt?: { error?: string | null; started_at_ms?: number | null } | null; history?: unknown[] }[];
 };
+
+/**
+ * A restart resumes only work that was going on recently. On 2026-10-20 a restart revived an
+ * 11-day-old test mission (its reviewer was still "pending" from Oct 9): its workers re-ran and the
+ * chat said "Working for 264h". A run whose newest card start (current or earlier attempt) is older
+ * than this was abandoned, not interrupted.
+ */
+export const RESTART_RESUME_WINDOW_MS = 24 * 60 * 60_000;
+
+/** The newest time any card of the run started, current receipts and earlier attempts alike (0: none). */
+function newestStart(mission: ResumeCandidate): number {
+  let newest = 0;
+  for (const node of mission.nodes) {
+    newest = Math.max(newest, Number(node.receipt?.started_at_ms) || 0);
+    for (const entry of node.history ?? []) {
+      newest = Math.max(newest, Number((entry as { started_at_ms?: unknown } | null)?.started_at_ms) || 0);
+    }
+  }
+  return newest;
+}
 
 /**
  * How a chat that no loop in this app session is driving picks up after an app restart, or null
@@ -662,9 +724,13 @@ type ResumeCandidate = {
  * team's loop recovers its interrupted workers itself. Teams resume too: before, re-entering a
  * project after a restart left a team chat stuck with its next cards never started.
  */
-export function restartResume(mission: ResumeCandidate): "retry" | "continue" | null {
+export function restartResume(mission: ResumeCandidate, now = Date.now()): "retry" | "continue" | null {
   // A chat stopped or paused on purpose stays that way.
   if (mission.cancelled || mission.paused) return null;
+  // Abandoned long ago, not interrupted by this restart. A run whose cards never started has no
+  // age to judge by and still resumes.
+  const newest = newestStart(mission);
+  if (newest && now - newest > RESTART_RESUME_WINDOW_MS) return null;
   const restarted = mission.nodes.filter(node => ["held", "failed"].includes(node.state)
     && RESTART_INTERRUPTED.test(String(node.receipt?.error || "")));
   // Held for any other reason (an approval, a failure to inspect) is the person's call; a reserved
@@ -707,13 +773,30 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
     step.working = { ...working, ...(live?.activity ? { activity: live.activity } : {}),
       ...(timeline.length ? { timeline } : {}) };
     // A retried card's new attempt starts empty; until it writes, its earlier reply stays readable.
-    const earlier = node.history?.[node.history.length - 1]?.answer;
-    if (!step.text && earlier?.trim() && !timeline.some((item) => item.kind === "message")) {
-      step.text = `Earlier attempt:\n\n${earlier}`;
+    const earlier = latestHistoryAnswer(node);
+    if (!step.text && earlier && !timeline.some((item) => item.kind === "message")) {
+      step.text = `${earlierLabel(node)}\n\n${earlier}`;
     }
+  } else if (!step.text && node.state !== "finished") {
+    // A review that sent the work back resets the reviewer to pending for its next round, and its
+    // verdict moves to history. The chat showed nothing for it: the latest response, the one the
+    // workers are now acting on, vanished until the reviewer answered again.
+    const earlier = latestHistoryAnswer(node);
+    if (earlier) step.text = `${earlierLabel(node)}\n\n${earlier}`;
   }
   return step;
 }
+
+/** The newest answer a card gave in an earlier attempt or round (a retry or rework moves it to history). */
+function latestHistoryAnswer(node: ChatNode): string | undefined {
+  for (let index = (node.history?.length ?? 0) - 1; index >= 0; index -= 1) {
+    const answer = node.history?.[index]?.answer?.trim();
+    if (answer) return answer;
+  }
+  return undefined;
+}
+
+const earlierLabel = (node: ChatNode) => (node.role === "reviewer" || node.role === "approver" || node.role === "sub_reviewer" ? "Last review:" : "Earlier attempt:");
 
 /** A DeepSeek model, whose turns show as DeepSeek Harness (dsh) shows them. */
 export const isDeepSeekModel = (model?: string | null) => /deepseek/i.test(model ?? "");
@@ -936,7 +1019,8 @@ export function chatTurns(runs: ChatRun[], description: string | undefined, opti
   const turns: ChatTurn[] = runs.map((run) => {
     const index = run.restarts_run_id || run.replaces_run_id ? -1 : messageIndex++;
     const steps = chatNodeOrder(run.nodes)
-      .filter((node) => node.state !== "pending" || node.receipt)
+      // A pending card shows once it has done something: a receipt, or an earlier round's answer.
+      .filter((node) => node.state !== "pending" || node.receipt || latestHistoryAnswer(node))
       .map((node) => chatStep(run, node, options, now));
     // A single-model run's one card answers the message itself, as a solo orchestrator's does.
     const closing = run.solo || run.execution_mode === "single"

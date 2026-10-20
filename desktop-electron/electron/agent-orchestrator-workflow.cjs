@@ -135,10 +135,11 @@ const LUNA_TIERS = ["chatgpt-web/luna", "chatgpt-web/think"];
 // AO harness models shown as "cpa/<model>" run that CPA pool model through the local gateway.
 const CPA_MODEL_PREFIX = "cpa/";
 // Agents AO's daemon can point at the CPA gateway, each through its own launch variables
-// (Claude Code: ANTHROPIC_*, Codex: a CPA-only CODEX_HOME, opencode: OPENAI_*). agy is not one:
-// its gateway mode sends its tools only for Gemini ids it knows itself, none of which CPA serves
-// under that name, so a CPA model on agy can chat but cannot read or write files.
-const GATEWAY_AGENTS = new Set(["claude-code", "codex", "opencode"]);
+// (Claude Code: ANTHROPIC_*, Codex: a CPA-only CODEX_HOME, opencode: OPENAI_*, agy:
+// AGY_LLM_GATEWAY_*). Every harness offers every pool model except WebGPT (the user's rule):
+// agy listed none, since its own catalog is empty without a Google sign-in. Its gateway mode sends
+// its tools only for Gemini ids it knows, so another model on agy can chat but not touch files.
+const GATEWAY_AGENTS = new Set(["claude-code", "codex", "opencode", "agy"]);
 // Gateway agents whose own model catalogs are not CPA or WebGPT models; they list only CPA models.
 const CPA_ONLY_AGENTS = new Set(["claude-code", "opencode"]);
 const webModel = (model) => WEB_TIERS.includes(model) || LUNA_TIERS.includes(model);
@@ -220,8 +221,29 @@ function delayToMilliseconds(value, unit) {
   }
   return ms;
 }
-function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, logger = null }) {
+/**
+ * The chat's own preferences that outlive a restart: today only autoRetry (a failed single-model
+ * step is retried by itself, chatAutoRetry). Kept in memory when no file is given (tests).
+ */
+function createChatPreferences(file) {
+  let saved = {};
+  try { if (file) saved = JSON.parse(fs.readFileSync(file, "utf8")) || {}; } catch { saved = {}; }
+  return {
+    get: () => ({ autoRetry: saved.autoRetry === true }),
+    set(change) {
+      saved = { ...saved, ...change };
+      if (!file) return;
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      const temp = `${file}.${process.pid}.tmp`;
+      fs.writeFileSync(temp, `${JSON.stringify(saved)}\n`);
+      fs.renameSync(temp, file);
+    },
+  };
+}
+
+function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, logger = null }) {
   const goals = createGoalStore({ file: goalsFile, now });
+  const chatPreferences = createChatPreferences(chatPreferencesFile);
   // Chats whose agent asked to be woken later (schedule_wakeup, chat-wakeups.cjs).
   const wakeups = createWakeupStore({ file: wakeupsFile, now });
   // Deleted chat messages: their runs are hidden from the chat, and the next follow-up starts afresh.
@@ -721,7 +743,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const slash = model.indexOf("/");
     const unqualifiedOpenCode = agent === "opencode" && !viaCpa
       && (slash < 0 || !model.slice(0, slash).trim() || !model.slice(slash + 1).trim());
-    if (GATEWAY_AGENTS.has(agent) && !claudeFixedWindow && !unqualifiedOpenCode && (!limit || limit >= 4096)) {
+    // agy's gateway variables carry no window, so it takes no context-window setting.
+    if (GATEWAY_AGENTS.has(agent) && agent !== "agy" && !claudeFixedWindow && !unqualifiedOpenCode && (!limit || limit >= 4096)) {
       capabilities.contextWindow = { min: 4096, max: Math.min(2000000, limit || 2000000), kind: "context" };
       capabilities.contextReason = limit
         ? "Client context declaration, not a larger provider limit. Client version/model applicability is checked again at launch."
@@ -979,6 +1002,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   }
 
   // Native Codex runs WebGPT/CPA routes in-process; every other worker harness is AO's own.
+  // Harnesses AO names by their command: the picker shows the product's full name (the user: "show
+  // the agy in full name").
+  const HARNESS_NAMES = { agy: "Antigravity" };
   async function harnesses() {
     const native = { id: "codex-native", label: "Native Codex", runnable: true, installed: true, authStatus: "configured" };
     try {
@@ -986,7 +1012,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       const catalog = await recentHarnessCatalog();
       // While AO is still checking some agents the list is incomplete; the notice makes the page ask again.
       const checking = catalog.filter(item => item.checking).length;
-      return { ok: true, harnesses: [native, ...catalog.map(item => ({ id: `ao:${item.id}`, label: item.label,
+      return { ok: true, harnesses: [native, ...catalog.map(item => ({ id: `ao:${item.id}`, label: HARNESS_NAMES[item.id] ?? item.label,
         installed: item.installed, authStatus: item.authStatus, chat: item.chat, runnable: item.installed }))],
         ...(checking ? { notice: `Still checking ${checking} agent CLI${checking === 1 ? "" : "s"}…` } : {}) };
     } catch (error) {
@@ -1396,8 +1422,24 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     if (advice && advice.action !== "ask") {
       return `${advice.action === "allow" ? "Allowed" : "Denied"} by the reviewer${advice.reason ? `: ${advice.reason}` : ""}`;
     }
-    if (autoAnswered.has(requestId)) return denied ? "Denied by Approve for me's safety rules" : "Allowed by Approve for me";
+    // AO records a deny as "completed" like any answer, so the verdict sent is what says it was denied.
+    if (autoAnswered.has(requestId)) return denied || autoAnswered.get(requestId) === "deny" ? "Denied by Approve for me's safety rules" : "Allowed by Approve for me";
     return denied ? "Denied" : "Allowed";
+  }
+
+  /**
+   * A Native Codex thread's recent tool steps (codex_bridge `steps`: Codex item type, status and a
+   * short redacted label) as timeline items the chat already draws for AO cards. Before, a WebGPT
+   * reviewer showed only "running a command" with nothing under it.
+   */
+  function nativeStepTimeline(steps) {
+    const kind = { commandExecution: "command", fileChange: "edit", mcpToolCall: "tool", dynamicToolCall: "tool", webSearch: "tool" };
+    return (Array.isArray(steps) ? steps : []).filter(step => step && kind[step.kind]).map(step => ({
+      id: step.id, kind: kind[step.kind], status: step.status === "running" ? "running" : step.status === "failed" ? "failed" : "completed",
+      text: step.label || "",
+      ...(step.kind === "webSearch" ? { label: "Web search" } : step.kind === "mcpToolCall" || step.kind === "dynamicToolCall"
+        ? { label: String(step.label || "tool").split(": ").pop() } : {}),
+    }));
   }
 
   function publicTimeline(items) {
@@ -1500,6 +1542,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
                 step: publicText(thread?.activity || "working", 120), output: publicText(status.live_output || thread?.answer || thread?.output),
                 error: publicText(status.live_error || thread?.error, 500),
                 activity_at_ms: thread?.activity_at_ms || null, last_event_at_ms: thread?.last_event_at_ms || null,
+                // What a Native Codex card is doing (its commands, edits and tools), as AO cards show it.
+                timeline: publicTimeline(nativeStepTimeline(thread?.steps)),
                 started_at_ms: base.started_at_ms ?? (thread?.started_at_ms || null) };
             }
             const latest = await savedNode(id, run, node.id);
@@ -1978,15 +2022,47 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     /^git\s+(?:status|diff|log|show|branch|rev-parse)(?:\s+[\w./:=-]+)*$/i,
     // Where the shell is: prints the current folder and changes nothing (cmd's bare `cd` included).
     /^(?:pwd|cd|Get-Location|gl)$/i,
+    // AO's own progress report: the worker role tells every card to file it (checkpoint, needs input,
+    // stuck, done with its verdict); it only updates this session's status for the orchestrator. Seen
+    // live: the reviewer card's "ao report --done" got the model reviewer's "ask" and the team waited
+    // on the person for its verdict.
+    /^ao(?:\.cmd|\.exe)?\s+report(?:\s+--(?:done|checkpoint|needs-input|stuck|note|artifact|pr-created|pr-reviewed)(?:[=\s]+(?:"[^"\n]*"|'[^'\n]*'|[\w./:#-]+))?)+$/i,
+    // A PowerShell exit-status check agents append after a command (the stuck report above ended in
+    // `; if ($?) { "exit ok" } else { "exit fail" }`): it only prints a fixed word.
+    /^if\s*\(\s*\$\?\s*\)\s*\{\s*(?:"[\w .-]*"|'[\w .-]*')\s*\}(?:\s*else\s*\{\s*(?:"[\w .-]*"|'[\w .-]*')\s*\})?$/i,
+    /^(?:echo\s+|Write-Output\s+)?\$LASTEXITCODE$/i,
   ];
+  /**
+   * A command line split at its "&&" and ";" chains, never inside a quoted argument (an ao report's
+   * note "Review complete; tests passed" is one argument). Null when a quote is left open.
+   */
+  function commandChain(text) {
+    const segments = [];
+    let current = "", quote = null;
+    for (let at = 0; at < text.length; at += 1) {
+      const char = text[at];
+      if (quote) { if (char === quote) quote = null; current += char; continue; }
+      if (char === "\"" || char === "'") { quote = char; current += char; continue; }
+      if (char === ";" || (char === "&" && text[at + 1] === "&")) {
+        segments.push(current.trim());
+        current = "";
+        if (char === "&") at += 1;
+        continue;
+      }
+      current += char;
+    }
+    if (quote) return null;
+    segments.push(current.trim());
+    return segments.filter(Boolean);
+  }
   /** Why `command` is a routine project command "Approve for me" may run, or null. */
   function routineCommand(command) {
     const text = String(command ?? "").trim();
     // One plain command line: no redirects, pipes, subshells, backgrounding or newlines; "&&" and
     // ";" only between commands that are each routine.
     if (!text || text.length > 400 || /[|<>`\n\r]|\$\(|(^|[^&])&([^&]|$)/.test(text)) return null;
-    const segments = text.split(/\s*(?:&&|;)\s*/).filter(Boolean);
-    if (!segments.length) return null;
+    const segments = commandChain(text);
+    if (!segments?.length) return null;
     for (const segment of segments) {
       if (!ROUTINE_SEGMENT.some((pattern) => pattern.test(segment))) return null;
       // Stay inside the project: relative paths only, no parent hops, drives or UNC.
@@ -2259,7 +2335,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const AUTO_ANSWER_MS = 20_000;
   const NO_ANSWER_TEXT = "No answer from the user within 20 seconds; use your best judgment and continue.";
   const pendingSeen = new Map(); // approval_id -> when it was first seen waiting
-  const autoAnswered = new Set();
+  const autoAnswered = new Map(); // approval_id -> the verdict sent ("allow", "deny"; null for a question or plan)
   const answersForPerson = (node) => node?.route?.approvals_reviewer === "auto_review" || node?.route?.approval_policy === "never";
   /** The answer a question gets when nobody answers it: each field's recommended choice. */
   function recommendedAnswer(approval) {
@@ -2325,8 +2401,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (!reviewedHere && at - opened < AUTO_ANSWER_MS) continue;
         const verdict = personal ? null : autoVerdict(mission, node, approval);
         if (verdict === "wait") continue;
-        autoAnswered.add(id);
-        if (autoAnswered.size > 500) autoAnswered.delete(autoAnswered.values().next().value);
+        autoAnswered.set(id, verdict);
+        if (autoAnswered.size > 500) autoAnswered.delete(autoAnswered.keys().next().value);
         try {
           if (approval.source === "ao" && approval.kind === "question") {
             const answer = recommendedAnswer(approval);
@@ -2405,6 +2481,38 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       (node.role === "worker" && node.state === "pending" && blockedByFailure(mission, node)));
   }
 
+  // "Retry automatically" (the chat's failed-step card): a failed single-model step runs again by
+  // itself, a few times with a growing pause, unless its failure is one a retry cannot fix (the
+  // account pool or a sign-in). The user: a launch that timed out waited for a click.
+  const AUTO_RETRY_LIMIT = 3;
+  const AUTO_RETRY_PAUSE_MS = 10_000;
+  const autoRetrySeen = new Map(); // `${runId}:${nodeId}:${attempt}` -> when this failure was first seen
+  function autoRetryStep(mission, held) {
+    const node = held.find(entry => entry.role !== "retry") ?? held[0];
+    if (!node) return null;
+    const error = String(node.receipt?.error || "");
+    if (POOL_EXHAUSTED.test(error)) return { detail: "This failure needs you (the account pool or a sign-in); automatic retry does not help it" };
+    const attempt = (node.history?.length ?? 0) + 1;
+    if (attempt > AUTO_RETRY_LIMIT) return { detail: `Retried automatically ${AUTO_RETRY_LIMIT} times; inspect the saved answer and retry explicitly` };
+    const key = `${mission.id}:${node.id}:${attempt}`;
+    if (!autoRetrySeen.has(key)) {
+      autoRetrySeen.set(key, now());
+      if (autoRetrySeen.size > 500) autoRetrySeen.delete(autoRetrySeen.keys().next().value);
+    }
+    const wait = AUTO_RETRY_PAUSE_MS * attempt - (now() - autoRetrySeen.get(key));
+    if (wait > 0) return { detail: `Retrying automatically in ${Math.ceil(wait / 1000)}s (attempt ${attempt} of ${AUTO_RETRY_LIMIT})` };
+    autoRetrySeen.delete(key);
+    return { retry: true, attempt };
+  }
+  /** chat_auto_retry: reads the "Retry automatically" preference, or sets it with `enabled`. */
+  function chatAutoRetry({ enabled } = {}) {
+    if (enabled !== undefined) {
+      if (typeof enabled !== "boolean") throw new Error("Choose on or off");
+      chatPreferences.set({ autoRetry: enabled });
+    }
+    return { ok: true, autoRetry: chatPreferences.get().autoRetry };
+  }
+
   async function recoverHeld(workspaceId, mission, state = {}) {
     const held = mission.nodes.filter(node => node.state === "held");
     if (!held.length || mission.cancelled) return null;
@@ -2413,7 +2521,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // per attempt budget) instead of waiting for an explicit retry.
       const interrupted = held.find(node => RESTART_INTERRUPTED.test(String(node.receipt?.error || ""))
         && (node.history?.length ?? 0) < HELPER_ATTEMPT_LIMIT);
-      if (!interrupted) return { detail: "Single model failed; inspect the saved answer and retry explicitly." };
+      if (!interrupted) {
+        const auto = chatPreferences.get().autoRetry ? autoRetryStep(mission, held) : null;
+        if (auto?.retry) {
+          await controlRun({ workspaceId, runId: mission.id, action: "retry" });
+          logger?.info?.("ao.auto_retried", { attempt: auto.attempt });
+          return { changed: true, retried: true, detail: `Retrying the failed step automatically (attempt ${auto.attempt} of ${AUTO_RETRY_LIMIT})` };
+        }
+        if (auto?.detail) return { detail: auto.detail };
+        return { detail: "Single model failed; inspect the saved answer and retry explicitly." };
+      }
       await controlRun({ workspaceId, runId: mission.id, action: "retry" });
       return { changed: true, retried: true, detail: "The app restarted while this step was running; it continues" };
     }
@@ -3779,7 +3896,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const id=clean(workspaceId,128),task=clean(taskId,128);
     const detail=await board({workspaceId:id,taskId:task});
     if (!detail.task) throw new Error("The selected task was not found");
-    if (visibility !== "active" && !await confirm({message:`${visibility === "deleted" ? "Delete" : "Archive"} "${detail.task.title}"?`,
+    if (visibility !== "active" && !await (confirmRecoverable ?? confirm)({message:`${visibility === "deleted" ? "Delete" : "Archive"} "${detail.task.title}"?`,
       detail:"Stop only this task's owned work and cancel its delayed start. Original input and history remain recoverable."})) return {ok:true,cancelled:true};
     clearSchedule(id,task);
     const queued=configurationJobs.get(JSON.stringify([id,task]));
@@ -3886,6 +4003,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "chat_delete_message": return chatDeleteMessage(args);
       case "chat_goal": return chatGoal(args);
       case "chat_wakeup": return chatWakeup(args);
+      case "chat_auto_retry": return chatAutoRetry(args);
       case "compact_chat": return compactChat(args);
       case "chat_diff": return chatDiff(args);
       case "update_run": return updateRun(args);

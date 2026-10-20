@@ -1124,6 +1124,22 @@ test("a turn's activity drops answered approvals, keeps every tool call, and fol
   assert.equal(chat.activitySummary([ls, { ...ls, id: "d" }]), "Ran 2 commands");
 });
 
+test("a tool title with a path reads by its file name in the folded line, never cut mid-word", () => {
+  // Seen live on a team card: "Read C:/Users/simon/.ao/coding-tools/ski" (a 40-character cut).
+  assert.equal(chat.shortToolTitle("Read C:/Users/simon/.ao/coding-tools/skills/using-ao/commands/report.md"), "Read report.md");
+  assert.equal(chat.shortToolTitle("Read C:\\Users\\simon\\.ao\\coding-tools\\skills"), "Read skills");
+  assert.equal(chat.shortToolTitle("mcp__coding-tools__read_output"), "read_output");
+  // Relative paths read by their file too, never glued to their first folder (review: "Read srcao-chat.ts").
+  assert.equal(chat.shortToolTitle("Read src/features/ao-chat.ts"), "Read ao-chat.ts");
+  assert.equal(chat.shortToolTitle("Read frontend\\vite.config.ts"), "Read vite.config.ts");
+  assert.equal(chat.shortToolTitle("Edit \"desktop-electron/src/App.tsx\""), "Edit \"App.tsx\"");
+  assert.equal(chat.shortToolTitle("Fetch https://example.com/docs"), "Fetch https://example.com/docs", "a URL keeps its address");
+  assert.equal(chat.shortToolTitle("Search for every place the context meter reads its session usage"),
+    "Search for every place the context meter…");
+  const read = (id, path) => ({ id, kind: "tool", status: "completed", text: `Read ${path}` });
+  assert.equal(chat.activitySummary([read("a", "C:/x/skills/a.md"), read("b", "C:/y/b.md")]), "Read a.md, Read b.md");
+});
+
 test("an answered request is no row of its own: its answer shows on the call it let run", () => {
   const tidy = chat.tidyTimeline([
     { id: "1", kind: "command", status: "completed", text: "python diag.py" },
@@ -1136,6 +1152,22 @@ test("an answered request is no row of its own: its answer shows on the call it 
   assert.deepEqual([...tidy.map((item) => [item.id, item.approval ?? null])], [
     ["1", "Allowed by the reviewer: reads the project's own database"], ["3", "Allowed by Approve for me"],
     ["5", "Denied by the reviewer: pushes"]], "allowed answers fold into their calls; a denial keeps its row; a pending one waits");
+});
+
+test("a call the reviewer denied shows its verdict, not the adapter's stock refusal", () => {
+  const refused = "User refused permission to run tool";
+  const tidy = chat.tidyTimeline([
+    { id: "1", kind: "command", status: "failed", text: "$txt=[IO.File]::ReadAllText($p)", output: refused },
+    { id: "2", kind: "approval", status: "completed", text: "PowerShell", approval: "Denied by the reviewer: reads a file outside the project" },
+    { id: "3", kind: "command", status: "failed", text: "git push", output: `Error: ${refused}` },
+    { id: "4", kind: "approval", status: "rejected", text: "git push", approval: "Denied by Approve for me's safety rules" },
+    { id: "5", kind: "command", status: "failed", text: "rm -rf build", output: refused },
+    { id: "6", kind: "approval", status: "completed", text: "PowerShell", approval: "Denied" },
+  ]);
+  assert.deepEqual([...tidy.map((item) => [item.id, item.output ?? null])], [
+    ["1", "Denied by the reviewer: reads a file outside the project"],
+    ["3", "Denied by Approve for me's safety rules"], ["4", null],
+    ["5", refused]], "a folded or kept denial replaces the stock line; the person's own deny keeps it");
 });
 
 test("an edit's diff is numbered from its hunk header, old lines on the left and new on the right", () => {
@@ -1222,4 +1254,29 @@ test("a working AO card's last sign of life comes from its activity time, for la
   assert.equal(chat.chatWorkingDetail(card, { activity: "running", activity_at_ms: 1_000 }, 1_000 + chat.STALL_MS).stalled, true,
     "quiet as long as a stuck card");
   assert.equal(chat.chatWorkingDetail(card, { activity: "running" }, 900_000).heardAtMs, undefined, "never heard: nothing to show");
+});
+test("a restart resumes recent work only: an 11-day-old mission with a pending card stays put", () => {
+  const now = Date.parse("2026-10-20T14:30:00Z");
+  const oct9 = Date.parse("2026-10-09T14:22:31Z");
+  const team = (nodes) => ({ cancelled: false, execution_mode: "team", nodes });
+  // The revived mission: planner finished and reviewer pending since Oct 9.
+  const old = team([node("p", "planner", "finished", { receipt: { started_at_ms: oct9 } }),
+    node("r", "reviewer", "pending", { history: [{ started_at_ms: oct9 + 3_600_000 }] })]);
+  assert.equal(chat.restartResume(old, now), null, "abandoned long ago, not interrupted");
+  const recent = team([node("p", "planner", "finished", { receipt: { started_at_ms: now - 3_600_000 } }), node("r", "reviewer", "pending")]);
+  assert.equal(chat.restartResume(recent, now), "continue", "an hour-old mission still picks up");
+  const longRun = team([node("w", "worker", "running", { receipt: { started_at_ms: now - 20 * 3_600_000 } })]);
+  assert.equal(chat.restartResume(longRun, now), "continue", "a long mission inside the window still resumes");
+  assert.equal(chat.restartResume(team([node("q", "planner", "pending")]), now), "continue", "never started: no age to judge, still resumes");
+});
+
+test("a reviewer reset to pending by its own rework still shows its last review", () => {
+  const verdict = "CHANGES_REQUIRED: both workers must redo their evidence.";
+  const reviewer = node("r", "reviewer", "pending", { history: [{ answer: "older review" }, { answer: verdict }] });
+  const turns = chat.chatTurns([run("run1", "t1", [node("p", "planner", "finished", { receipt: { answer: "plan" } }), reviewer], { execution_mode: "team" })], "do it", { now: 0 });
+  const step = turns[0].steps.find((item) => item.role === "reviewer");
+  assert.ok(step, "the pending reviewer is not dropped from the turn");
+  assert.equal(step.text, `Last review:\n\n${verdict}`, "its newest verdict, labelled as a review");
+  const worker = node("w", "worker", "held", { history: [{ answer: "first try" }] });
+  assert.equal(chat.chatTurns([run("run2", "t1", [worker])], "x", { now: 0 })[0].steps[0].text, "Earlier attempt:\n\nfirst try");
 });

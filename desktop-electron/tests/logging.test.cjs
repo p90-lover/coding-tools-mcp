@@ -46,6 +46,14 @@ test("failed launcher IPC calls are written to runtime activity", async () => {
     event: "launcher.ipc_failed",
     detail: { channel: "launcher:test", message: "visible failure" },
   }]);
+
+  // An app-module call names its module and operation, never its arguments.
+  errors.length = 0;
+  await assert.rejects(registered.handler({}, { moduleId: "agent-orchestrator", operation: "activity", arguments: { secret: "x" } }));
+  assert.deepEqual(errors[0].detail, { channel: "launcher:test", module: "agent-orchestrator", operation: "activity", message: "visible failure" });
+  errors.length = 0;
+  await assert.rejects(registered.handler({}, { moduleId: "a b c", operation: "x".repeat(80) }));
+  assert.deepEqual(errors[0].detail, { channel: "launcher:test", message: "visible failure" }, "only plain identifiers are logged");
 });
 
 test("launcher activity restores valid records from the previous process", () => {

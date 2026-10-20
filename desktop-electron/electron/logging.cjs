@@ -245,8 +245,14 @@ function registerLoggedIpc(ipcMain, logger, channel, handler) {
     try {
       return await handler(event, ...args);
     } catch (error) {
+      // An app-module call names its module and operation (identifiers only, never its arguments):
+      // without them Activity's "AO run not found" or focus refusals could not be traced to a caller.
+      const call = args[0] && typeof args[0] === "object" ? args[0] : null;
+      const name = (value) => (typeof value === "string" && /^[\w.:-]{1,64}$/.test(value) ? value : undefined);
       logger.error("launcher.ipc_failed", {
         channel,
+        ...(name(call?.moduleId) ? { module: call.moduleId } : {}),
+        ...(name(call?.operation) ? { operation: call.operation } : {}),
         message: error instanceof Error ? error.message : String(error),
       });
       throw error;
