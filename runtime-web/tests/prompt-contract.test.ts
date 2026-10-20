@@ -575,3 +575,42 @@ test("keeps large contexts intact in the inline text envelope", () => {
   expect(compiled.text).not.toContain("sha256");
   expect(compiled.text).not.toContain("SHA-256");
 });
+
+test("plain prompts send the person's own words and one turn-token line when ChatGPT holds the rest", () => {
+  const token = "turn_12345678901234567890123456789012";
+  const capabilities = { localToolsEnabled: true, solAvailable: true, proAvailable: true };
+  const image = "data:image/png;base64," + "A".repeat(200);
+  const first: CodexParsedRequest = {
+    ...request("high"),
+    context: {
+      systemPrompt: ["preserve-system"],
+      messages: [
+        { role: "developer", content: "<permissions instructions>sandbox</permissions instructions>", timestamp: 1 },
+        { role: "user", content: "# AGENTS.md instructions for G:\\repo\n\nbe careful", timestamp: 2 },
+        { role: "user", content: "<environment_context>\n<cwd>G:\\repo</cwd>\n</environment_context>", timestamp: 3 },
+        { role: "user", content: [{ type: "text", text: "fix the login bug on /register" }, { type: "image", imageUrl: image }], timestamp: 4 },
+      ],
+    },
+  };
+  const plain = compileChatGptWebPrompt(first, capabilities, token, { plainPrompt: true });
+  expect(plain.text).toBe(`fix the login bug on /register\n\n(turn_token ${token} — pass it to Codex tools)`);
+  expect(plain.images.map(item => item.imageUrl)).toEqual([image]);
+  expect(plain.text).not.toContain("codex_context_json");
+
+  // A retained conversation's next message: only what follows the last reply, still plain.
+  const resumed = compileChatGptWebPrompt({ ...first, context: { messages: [
+    { role: "user", content: "now add a test, not turn_abcdefghijklmnopqrstuvwxyz0123", timestamp: 5 },
+  ] } }, capabilities, token, { plainPrompt: true });
+  expect(resumed.text).toBe(`now add a test, not [retired turn handle]\n\n(turn_token ${token} — pass it to Codex tools)`);
+
+  // History the ChatGPT conversation does not hold (an earlier reply) still goes as the full contract.
+  const unretained = compileChatGptWebPrompt({ ...first, context: { systemPrompt: ["preserve-system"], messages: [
+    ...first.context.messages,
+    { role: "assistant", content: [{ type: "text", text: "fixed" }], timestamp: 5 },
+    { role: "user", content: "and the other one", timestamp: 6 },
+  ] } }, capabilities, token, { plainPrompt: true });
+  expect(unretained.text).toContain("<codex_context_json>");
+
+  // Off unless asked, and never for a read-only effort, which has no token.
+  expect(compileChatGptWebPrompt(first, capabilities, token).text).toContain("<codex_context_json>");
+});

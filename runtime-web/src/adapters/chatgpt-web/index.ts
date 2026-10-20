@@ -434,6 +434,8 @@ export function createChatGptWebAdapter(
         : undefined;
       return {
         captureLunaCheckpoint,
+        // ChatGPT gets the person's own prompt, not the transport contract, when it holds the rest.
+        plainPrompt: true,
         ...(experimentalMultipartParts !== undefined
           ? { experimentalMultipartParts }
           : {}),
