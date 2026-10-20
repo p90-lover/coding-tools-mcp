@@ -512,12 +512,13 @@
 .cdx-card { --cdx-text: var(--color-text-primary); --cdx-secondary: color-mix(in srgb, var(--color-text-primary) 62%, transparent);
   --cdx-tertiary: color-mix(in srgb, var(--color-text-primary) 45%, transparent); --cdx-line: var(--ao-line);
   --cdx-surface: color-mix(in srgb, var(--color-text-primary) 3%, var(--color-bg-primary)); --cdx-code: color-mix(in srgb, var(--color-text-primary) 6%, var(--color-bg-primary));
-  display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--cdx-line); border-radius: 24px; background: var(--cdx-surface);
-  color: var(--cdx-text); font-size: 14px; outline: none; }
+  /* Codex's approval card (pending-request-item-panel): its chat font size, the composer's radius. */
+  display: flex; flex-direction: column; min-width: 0; overflow: hidden; border: 1px solid var(--cdx-line); border-radius: 16px; background: var(--cdx-surface);
+  color: var(--cdx-text); font-size: 13px; line-height: 18px; outline: none; }
 .cdx-card:focus-visible { box-shadow: 0 0 0 2px color-mix(in srgb, var(--ao-blue, #2f6fdd) 45%, transparent); }
 .cdx-body { display: flex; flex-direction: column; gap: 8px; padding: 16px 16px 12px; min-width: 0; }
-.cdx-kind { color: var(--cdx-secondary); font-size: 13px; }
-.cdx-title { color: var(--cdx-text); font-weight: 500; line-height: 20px; overflow-wrap: anywhere; }
+.cdx-kind { color: var(--cdx-secondary); font-size: 12px; line-height: 16px; }
+.cdx-title { color: var(--cdx-text); font-weight: 500; line-height: 18px; overflow-wrap: anywhere; }
 .cdx-question-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .cdx-progress { display: inline-flex; flex: none; align-items: center; gap: 2px; color: var(--cdx-tertiary); font-size: 12px; font-variant-numeric: tabular-nums; }
 .cdx-icon { display: inline-grid; width: 20px; height: 20px; place-items: center; padding: 0; border: 0; border-radius: 6px; background: transparent; color: inherit; cursor: pointer; }
@@ -528,18 +529,18 @@
 .cdx-link { color: var(--ao-blue, #2f6fdd); overflow-wrap: anywhere; }
 .cdx-command { position: relative; }
 .cdx-command pre { max-height: 320px; margin: 0; padding: 8px 10px; overflow: auto; border-radius: 6px; background: var(--cdx-code); color: var(--cdx-tertiary);
-  font: 500 12.5px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
-.cdx-command.is-collapsed pre { max-height: 132px; overflow: hidden; -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); }
+  font: 500 12px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cdx-command.is-collapsed pre { max-height: 96px; overflow: hidden; -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); }
 .cdx-expand { margin-top: 4px; padding: 0; border: 0; background: transparent; color: var(--cdx-secondary); font-size: 12px; cursor: pointer; }
 .cdx-expand:hover { color: var(--cdx-text); }
-.cdx-row { display: grid; grid-template-columns: 64px 1fr; gap: 8px; font-size: 13px; }
+.cdx-row { display: grid; grid-template-columns: 56px 1fr; gap: 8px; font-size: 12px; line-height: 16px; }
 .cdx-row > span { color: var(--cdx-tertiary); }
 .cdx-row > p { margin: 0; color: var(--cdx-secondary); overflow-wrap: anywhere; }
 .cdx-options { display: flex; flex-direction: column; gap: 2px; margin-top: 2px; }
-.cdx-option { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 6px 8px; border: 0; border-radius: 12px; background: transparent;
-  color: var(--cdx-text); font: inherit; font-size: 14px; text-align: left; cursor: pointer; }
+.cdx-option { display: flex; align-items: center; gap: 8px; min-height: 28px; padding: 4px 8px; border: 0; border-radius: 8px; background: transparent;
+  color: var(--cdx-text); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
 .cdx-option:hover, .cdx-option.is-selected { background: color-mix(in srgb, var(--cdx-text) 5%, transparent); }
-.cdx-option-mark { display: inline-grid; flex: none; width: 20px; height: 20px; place-items: center; border: 1px solid var(--cdx-line); border-radius: 2px;
+.cdx-option-mark { display: inline-grid; flex: none; width: 18px; height: 18px; place-items: center; border: 1px solid var(--cdx-line); border-radius: 2px;
   background: color-mix(in srgb, var(--cdx-text) 5%, transparent); color: var(--cdx-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
 .cdx-option.is-selected .cdx-option-mark { border-color: var(--cdx-text); background: var(--cdx-text); color: var(--color-bg-primary); }
 .cdx-option-label { font-weight: 500; }
@@ -547,8 +548,9 @@
 .cdx-badge { flex: none; padding: 0 6px; border-radius: 6px; background: color-mix(in srgb, var(--ao-blue, #2f6fdd) 12%, transparent); color: var(--ao-blue, #2f6fdd); font-size: 11px; line-height: 18px; }
 .cdx-input { width: 100%; min-height: 32px; padding: 6px 10px; border: 1px solid var(--cdx-line); border-radius: 12px; background: var(--color-bg-primary); color: var(--cdx-text); font: inherit; }
 .cdx-input:focus { border-color: color-mix(in srgb, var(--cdx-text) 35%, transparent); outline: none; }
-.cdx-foot { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 8px 16px 16px; }
-.cdx-button { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border: 1px solid transparent; border-radius: 999px;
+/* Codex's footer: px-3 pb-3 with gap-2, composer-size buttons. */
+.cdx-foot { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 0 12px 12px; }
+.cdx-button { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 1px solid transparent; border-radius: 999px;
   font: inherit; font-size: 13px; font-weight: 500; cursor: pointer; }
 .cdx-button:disabled { opacity: .45; cursor: default; }
 .cdx-button.is-primary { background: var(--cdx-text); color: var(--color-bg-primary); }
