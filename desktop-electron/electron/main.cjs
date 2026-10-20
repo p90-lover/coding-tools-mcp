@@ -93,6 +93,7 @@ const {
   safeRead,
   scheduleFullIpcAfterPaint,
 } = require("./launcher-ready-path.cjs");
+const { createRendererWatchdog } = require("./renderer-watchdog.cjs");
 const { actUpstream } = require("./upstream-actions.cjs");
 const {
   createStateStore,
@@ -955,14 +956,15 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
   // A crashed renderer left a blank window while this process kept the single-instance lock, so
   // launching the app again only woke the dead window: it "could not be launched back". The page
   // is reloaded instead; after three crashes in two minutes the whole app restarts.
+  // The same recovery serves a page that went blank or hung without its renderer dying
+  // (renderer-watchdog.cjs): those left the window black until the app was restarted by hand.
   const rendererCrashes = [];
-  window.webContents.on("render-process-gone", (_event, details) => {
-    if (mainWindow === window) registerHost?.setSurfaceActive(false);
-    logger.warn("launcher.renderer_gone", { reason: details?.reason, exitCode: details?.exitCode });
-    if (quitting || window.isDestroyed() || details?.reason === "clean-exit") return;
+  const recoverRenderer = (reason) => {
+    if (quitting || window.isDestroyed()) return;
     const at = Date.now();
     while (rendererCrashes.length && at - rendererCrashes[0] > 120_000) rendererCrashes.shift();
     rendererCrashes.push(at);
+    logger.info("launcher.renderer_recovering", { reason, recent: rendererCrashes.length });
     const reload = () => {
       if (window.isDestroyed() || quitting) return;
       void loadRenderer(window).catch((error) => logger.warn("launcher.renderer_reload_failed", {
@@ -975,8 +977,17 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
       return;
     }
     setTimeout(reload, 500);
+  };
+  window.webContents.on("render-process-gone", (_event, details) => {
+    if (mainWindow === window) registerHost?.setSurfaceActive(false);
+    logger.warn("launcher.renderer_gone", { reason: details?.reason, exitCode: details?.exitCode });
+    if (details?.reason === "clean-exit") return;
+    recoverRenderer("gone");
   });
-  window.on("unresponsive", () => logger.warn("launcher.renderer_unresponsive", {}));
+  // A blank page (#root left empty by a render error), a hung renderer, and the page's console
+  // errors (logged, so a blank window says why).
+  const watchdog = createRendererWatchdog({ window, logger, recover: recoverRenderer });
+  window.on("closed", () => watchdog.dispose());
   window.on("closed", () => {
     if (mainWindow === window) {
       mainWindow = null;
