@@ -1978,6 +1978,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // live: the reviewer card's "ao report --done" got the model reviewer's "ask" and the team waited
     // on the person for its verdict.
     /^ao(?:\.cmd|\.exe)?\s+report(?:\s+--(?:done|checkpoint|needs-input|stuck|note|artifact|pr-created|pr-reviewed)(?:[=\s]+(?:"[^"\n]*"|'[^'\n]*'|[\w./:#-]+))?)+$/i,
+    // A PowerShell exit-status check agents append after a command (the stuck report above ended in
+    // `; if ($?) { "exit ok" } else { "exit fail" }`): it only prints a fixed word.
+    /^if\s*\(\s*\$\?\s*\)\s*\{\s*(?:"[\w .-]*"|'[\w .-]*')\s*\}(?:\s*else\s*\{\s*(?:"[\w .-]*"|'[\w .-]*')\s*\})?$/i,
+    /^(?:echo\s+|Write-Output\s+)?\$LASTEXITCODE$/i,
   ];
   /** Why `command` is a routine project command "Approve for me" may run, or null. */
   function routineCommand(command) {

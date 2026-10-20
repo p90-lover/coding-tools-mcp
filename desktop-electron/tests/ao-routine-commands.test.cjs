@@ -23,6 +23,9 @@ test("Approve for me runs routine project commands without asking: lockfile inst
     "ao report --done --note \"Reviewer verdict: APPROVED (verify).\"",
     "ao report --checkpoint --note 'tests pass'", "ao report --needs-input --note \"which port?\"",
     "ao.exe report --done --note \"done\" --artifact dist/app.zip --pr-created 42",
+    // The exact request that held the reviewer: the report plus an exit-status check.
+    "ao report --done --note \"Reviewer verdict: APPROVED (verify).\" ; if ($?) { \"exit ok\" } else { \"exit fail\" }",
+    "npm test; echo $LASTEXITCODE",
   ]) assert.ok(routineCommand(command), `routine: ${command}`);
 });
 
@@ -30,6 +33,7 @@ test("only AO's report subcommand is routine, and only as one plain command line
   for (const command of [
     "ao session claim-pr 12", "ao report --done --note \"x\" ; rm -rf /", "ao report --done --note \"x\" > log.txt",
     "ao report --done --note \"x\" | tee out", "ao report --bogus", "ao report --done --note \"$(whoami)\"",
+    "if ($?) { Remove-Item x }", "rm -rf /; if ($?) { \"ok\" }",
   ]) assert.equal(routineCommand(command), null, `not routine: ${JSON.stringify(command)}`);
 });
 
