@@ -147,7 +147,8 @@ test('Windows package smoke selects the configured Electron Builder artifact exa
     .replaceAll('${arch}', 'x64')
     .replaceAll('${ext}', 'exe');
   assert.equal(expectedInstaller, `Coding.Tools_${manifest.version}_win_x64.exe`);
-  assert.match(manifest.version, /^0\.7\.0-rc\.\d+$/);
+  // A release version: the 0.7.0 release candidates, then the stable 0.8.0 and on.
+  assert.match(manifest.version, /^\d+\.\d+\.\d+(?:-rc\.\d+)?$/);
   for (const required of [
     'function artifactNameFor(osName, arch, extension)',
     'artifact(artifactNameFor("win", process.arch, "exe"), "Windows installer")',
