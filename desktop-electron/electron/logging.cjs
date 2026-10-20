@@ -141,8 +141,57 @@ function readRecent(filePath) {
   }
 }
 
+// Log lines are written in batches this often, off the main thread.
+const LOG_FLUSH_MS = 250;
+
 function createLogger({ filePath, publish }) {
   const records = readRecent(filePath);
+  // Every line used to make, check the size of and append to the file synchronously on the main
+  // process's thread. On a saturated hard disk (seen live: a queue of 30-40 requests on the drive
+  // holding the app's data) each line held the main process for up to seconds, and every IPC call
+  // waited behind it (a 13.9 s round trip). Lines now go out in batches, asynchronously; whatever
+  // is still queued when the process exits is written synchronously then.
+  let pending = [];
+  let flushing = null;
+  let timer = null;
+  let ready = false;
+  let size = null;
+
+  async function flush() {
+    timer = null;
+    if (flushing || !pending.length) return;
+    const lines = pending.join("");
+    pending = [];
+    flushing = (async () => {
+      try {
+        if (!ready) { await fs.promises.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 }); ready = true; }
+        if (size === null) size = (await fs.promises.stat(filePath).catch(() => null))?.size ?? 0;
+        if (size >= MAX_LOG_BYTES) {
+          await fs.promises.rm(`${filePath}.1`, { force: true });
+          renameAtomicFile(filePath, `${filePath}.1`);
+          size = 0;
+        }
+        await fs.promises.appendFile(filePath, lines, { mode: 0o600 });
+        size += Buffer.byteLength(lines);
+      } catch {}
+    })();
+    try { await flushing; } finally {
+      flushing = null;
+      if (pending.length && !timer) schedule();
+    }
+  }
+  function schedule() {
+    timer = setTimeout(() => { void flush(); }, LOG_FLUSH_MS);
+    timer.unref?.();
+  }
+  process.once("exit", () => {
+    if (!pending.length) return;
+    try {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+      fs.appendFileSync(filePath, pending.join(""), { mode: 0o600 });
+    } catch {}
+    pending = [];
+  });
 
   const append = (level, event, detail = {}) => {
     const record = {
@@ -153,15 +202,8 @@ function createLogger({ filePath, publish }) {
     };
     records.push(record);
     if (records.length > MAX_MEMORY_RECORDS) records.splice(0, records.length - MAX_MEMORY_RECORDS);
-    try {
-      fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
-      const stat = fs.statSync(filePath, { throwIfNoEntry: false });
-      if (stat && stat.size >= MAX_LOG_BYTES) {
-        fs.rmSync(`${filePath}.1`, { force: true });
-        renameAtomicFile(filePath, `${filePath}.1`);
-      }
-      fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, { mode: 0o600 });
-    } catch {}
+    pending.push(`${JSON.stringify(record)}\n`);
+    if (!timer && !flushing) schedule();
     publish?.(record);
     return record;
   };
@@ -172,6 +214,8 @@ function createLogger({ filePath, publish }) {
     warn: (event, detail) => append("warning", event, detail),
     error: (event, detail) => append("error", event, detail),
     recent: (limit = 150) => records.slice(-Math.max(1, Math.min(300, limit))),
+    /** Writes every queued line now (tests, and before a deliberate quit). */
+    flush: async () => { if (timer) { clearTimeout(timer); timer = null; } while (flushing || pending.length) { if (flushing) await flushing; else await flush(); } },
     filePath,
   };
 }

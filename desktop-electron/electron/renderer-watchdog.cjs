@@ -11,7 +11,11 @@
 
 const CHECK_MS = 15_000;
 const GRACE_MS = 20_000;
-const UNRESPONSIVE_MS = 15_000;
+// How long a window may stay unresponsive before it counts as hung. Measured live: on the drive
+// holding the app (an overloaded hard disk, with memory paging), the window stalled 15-18 s and
+// then recovered by itself; at 15 s it would have been crashed and reloaded, losing what was open.
+// An endless loop never recovers, so a minute still catches it.
+const UNRESPONSIVE_MS = 60_000;
 const ERRORS_PER_MINUTE = 20;
 // Why a page counts as blank: no #root content. -1 (no #root) is a page that is not the app's.
 const ROOT_PROBE = "(() => { const root = document.getElementById(\"root\"); return root ? root.childElementCount : -1; })()";
