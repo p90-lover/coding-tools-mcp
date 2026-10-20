@@ -438,6 +438,29 @@ test("observe lists the agent's parked tool requests with AO's offered decisions
   await assert.rejects(upstream.resolveApproval("s", "req-1", ""), /offered decision/);
 });
 
+// Seen live: "IPC_RESPONSE_SCHEMA_INVALID: $.result.status.pending_approvals[0].turn_id must be a JSON
+// value": a request AO held outside a turn carried turn_id: undefined, and the whole status read failed.
+test("a request AO holds outside a turn has no turn_id key, so the status read passes the IPC schema", async () => {
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {
+      turns: [{ id: "t", state: "running" }], messages: [],
+      activities: [
+        { id: "a1", sequence: 2, activityKind: "approval", status: "pending", requestId: "req-1", summary: "Bash",
+          detail: { toolKind: "execute", toolName: "Bash", input: { command: "dir" }, decisions: [{ id: "allow", kind: "allow_once" }] } },
+        { id: "a2", sequence: 3, activityKind: "user_input", status: "pending", requestId: "q-1", summary: "Which?",
+          detail: { message: "Which?", schema: { properties: { pick: { type: "string" } } } } },
+      ],
+    } : { session: { id: "s", mode: "chat", status: "working" } },
+  });
+  const observed = await upstream.observe("s");
+  assert.equal(observed.approvals.length, 2);
+  for (const item of observed.approvals) assert.ok(!Object.hasOwn(item, "turn_id"), `${item.approval_id} has no turn_id key`);
+  const { snapshotJsonPayload } = require("../electron/ipc-schema.cjs");
+  if (typeof snapshotJsonPayload === "function") {
+    assert.doesNotThrow(() => snapshotJsonPayload({ status: { pending_approvals: observed.approvals } }, "IPC_RESPONSE_SCHEMA_INVALID", { rejectSensitiveKeys: true }));
+  }
+});
+
 // Seen live: AO's ACP approval for the app's exec_command had no toolName (subjectKind "mcp_tool",
 // toolKind "other"); the name was only the summary. The input was dropped, so "Approve for me"'s
 // reviewer saw no command, answered "ask", and the chat waited on the person for a bare `cd`.
