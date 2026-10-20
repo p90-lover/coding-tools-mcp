@@ -23,9 +23,10 @@ const menu = load("ChatMenu.tsx");
 const client = { getCodingToolsClient: () => ({ apps: { call: async () => ({ result: { sessions: {} } }) } }) };
 const meter = load("ChatContextMeter.tsx", { "./ao-chat": chat, "./ChatMenu": menu, "./AgentOrchestratorRoleEditor": roles,
   "../api/client": client, "./cpa-usage": load("cpa-usage.ts", { "../api/client": client }) });
-const dsh = load("DshTranscript.tsx", { "./ao-chat": chat, "./ChatMarkdown": markdown });
+const toolParts = load("ChatToolParts.tsx", { "./ao-chat": chat, "./ChatMarkdown": markdown });
+const dsh = load("DshTranscript.tsx", { "./ao-chat": chat, "./ChatMarkdown": markdown, "./ChatToolParts": toolParts });
 const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null, Caret: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
-  "./ChatContextMeter": meter, "./DshTranscript": dsh,
+  "./ChatContextMeter": meter, "./DshTranscript": dsh, "./ChatToolParts": toolParts,
   "./ChatPet": load("ChatPet.tsx", { "./ao-chat": chat }),
   "./ChatTurnStats": load("ChatTurnStats.tsx", { "./ao-chat": chat, "../api/client": client }),
   "./codex-prompts": load("codex-prompts.ts"),
@@ -259,6 +260,20 @@ test("the side panel opens on an Overview of the chat: environment, context, cha
   for (const heading of ["Environment", "Context", "Changes", "Background tasks", "Usage"]) assert.match(html, new RegExp(`<h4>${heading}`), heading);
   assert.match(html, /glm-5\.3-flash/, "the model by its own name");
   assert.match(html, /Today<\/button>/, "usage can switch between today, 7 and 30 days");
+});
+
+test("the Terminal pane opens for a server or the project's app launcher, never for a one-off tool call", () => {
+  // Seen live: every `git status` and `ls` the agent ran opened the pane beside the chat.
+  const workbench = load("ChatWorkbench.tsx", { "../api/client": client, "../icons": { Icon: () => null } });
+  const now = 1_000_000;
+  const command = (cmd, extra = {}) => ({ id: "c", cmd, workdir: ".", startedAt: now - 2000, status: "running", exitCode: null, source: "agent", ...extra });
+  assert.equal(workbench.opensTerminal(command("git status --short | head -80"), now), false, "a one-off call does not");
+  assert.equal(workbench.opensTerminal(command("aiTemp\\run_app.cmd"), now), true, "the user's app launcher does");
+  assert.equal(workbench.opensTerminal(command("npm run dev"), now), true, "a dev server does");
+  assert.equal(workbench.opensTerminal(command("pytest -q", { status: "background", background: true }), now), true, "one left in the background does");
+  assert.equal(workbench.opensTerminal(command("pytest -q", { startedAt: now - 61_000 }), now), false, "a long test run does not");
+  assert.equal(workbench.opensTerminal(command("scripts/start-server.ps1"), now), true, "nor does it miss a start-server script");
+  assert.equal(workbench.opensTerminal(command("npm run dev", { status: "exited", exitCode: 0 }), now), false, "an ended command never does");
 });
 
 test("an agent's new page brings the Preview pane forward, even over the Terminal its dev server opened", () => {

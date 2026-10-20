@@ -10,13 +10,14 @@ import { ChatContextMeter } from "./ChatContextMeter";
 import { ChatPet } from "./ChatPet";
 import { ChatTurnStats } from "./ChatTurnStats";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
+import { ApprovedMark, EditDiff, StreamingMarkdown } from "./ChatToolParts";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, chatAcceptsMessage, chatDuration, chatList, chatMessageWithAttachments, chatRunOpen,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
-  activitySummary, groupTimeline, tidyTimeline,
+  activitySummary, groupTimeline, mergeTimeline, tidyTimeline,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -87,6 +88,7 @@ function stepTone(step: ChatStep): string {
  * "**Inspecting the register route**") as one progress line, the rest a click away.
  */
 function ReasoningItem({ item }: { item: ChatLiveItem }) {
+  const [open, setOpen] = useState(false);
   const lines = item.text.trim().split(/\r?\n/);
   const running = item.status === "running";
   if (!lines[0]) return <span className="cx-live-label">{running ? "Thinking…" : "Thought"}</span>;
@@ -98,9 +100,12 @@ function ReasoningItem({ item }: { item: ChatLiveItem }) {
   const rest = running
     ? (lines.length > 1 || headline.length > 140 ? item.text.trim() : "")
     : lines.slice(1).join("\n").trim() || (headline.length > 140 ? headline : "");
+  // The body is parsed only while it is open: a long thought streams in on every poll, and parsing
+  // it inside a closed <details> cost the chat its frame rate for nothing anyone saw.
   return rest
-    ? <details className="cx-reasoning"><summary><span className="cx-live-label">{label}</span><span className="cx-live-text">{headline}</span></summary>
-      <div className="cx-reasoning-body"><ChatMarkdown text={rest} /></div></details>
+    ? <details className="cx-reasoning" onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary><span className="cx-live-label">{label}</span><span className="cx-live-text">{headline}</span></summary>
+      {open ? <div className="cx-reasoning-body"><ChatMarkdown text={rest} /></div> : null}</details>
     : <><span className="cx-live-label">{label}</span><span className="cx-live-text">{headline}</span></>;
 }
 
@@ -126,7 +131,7 @@ function ToolItem({ item }: { item: ChatLiveItem }) {
   const tone = toolTone(item.status);
   const name = item.kind === "command" ? (tone === "running" ? "Running" : "Ran") : item.label ?? item.kind.replace(/_/g, " ");
   const head = <><span className="cx-tool-dot" aria-hidden="true" /><span className="cx-live-label">{name}</span>
-    <span className="cx-live-text">{toolHeadline(item)}</span>{item.count && item.count > 1 ? <span className="cx-tool-count">×{item.count}</span> : null}</>;
+    <span className="cx-live-text">{toolHeadline(item)}</span><ApprovedMark text={item.approval} /></>;
   const opens = item.kind === "command" || item.input || item.output;
   return opens
     ? <details className={`cx-tool tone-${tone}`}><summary>{head}</summary>
@@ -154,14 +159,13 @@ function EditItem({ item }: { item: ChatLiveItem }) {
   const deletions = files.reduce((sum, file) => sum + file.deletions, 0);
   const head = <><span className="cx-tool-dot" aria-hidden="true" /><span className="cx-live-label">{item.label ?? "Edited"}</span>
     <span className="cx-live-text" title={files.map((file) => file.path).join("\n")}>{files.length === 1 ? fileName(files[0].path) : `${files.length} files`}</span>
-    <DiffCount additions={additions} deletions={deletions} /></>;
+    <DiffCount additions={additions} deletions={deletions} /><ApprovedMark text={item.approval} /></>;
   if (!files.some((file) => file.diff)) return <div className={`cx-tool tone-${tone}`}><div className="cx-tool-row">{head}</div></div>;
   return <details className={`cx-tool cx-edit tone-${tone}`}><summary>{head}</summary>
     <div className="cx-tool-body">
       {files.map((file) => <section key={file.path} className="cx-edit-file">
         {files.length > 1 ? <header><span title={file.path}>{fileName(file.path)}</span><DiffCount additions={file.additions} deletions={file.deletions} /></header> : null}
-        {file.diff ? <pre className="cx-diff"><code>{file.diff.split("\n").map((line, index) =>
-          <span key={index} className={line.startsWith("+") ? "is-add" : line.startsWith("-") ? "is-del" : undefined}>{line}{"\n"}</span>)}</code></pre> : null}
+        {file.diff ? <EditDiff diff={file.diff} /> : null}
       </section>)}
     </div></details>;
 }
@@ -190,15 +194,19 @@ export const CompactActivity = createContext(true);
 export const COMPACT_ACTIVITY_KEY = "coding-tools:ao:compact-activity";
 
 /** A row redraws only when what it shows changed: a poll rebuilds every item object each second. */
+// An edit's files arrive as new objects with every poll (IPC copies them), so they compare by content.
+const sameFiles = (a: ChatLiveItem["files"], b: ChatLiveItem["files"]) => a === b || (Boolean(a) && Boolean(b) && a!.length === b!.length
+  && a!.every((file, index) => file.path === b![index].path && file.additions === b![index].additions
+    && file.deletions === b![index].deletions && file.diff === b![index].diff));
 const sameLiveItem = (a: ChatLiveItem, b: ChatLiveItem) => a === b || (a.id === b.id && a.kind === b.kind && a.status === b.status
-  && a.text === b.text && a.label === b.label && a.description === b.description && a.count === b.count
-  && a.input === b.input && a.output === b.output && a.files === b.files);
+  && a.text === b.text && a.label === b.label && a.description === b.description && a.approval === b.approval
+  && a.input === b.input && a.output === b.output && sameFiles(a.files, b.files));
 const LiveRow = memo(LiveRowView, (prev, next) => sameLiveItem(prev.item, next.item));
 
 function LiveRowView({ item }: { item: ChatLiveItem }) {
   return <li className={`cx-live-item kind-${item.kind} is-${item.status || "done"}`}>
     {item.kind === "steer" ? <div className="cx-user cx-steer"><div className="cx-bubble"><p>{item.text}</p></div></div>
-      : item.kind === "message" ? <ChatMarkdown text={item.text} />
+      : item.kind === "message" ? <StreamingMarkdown text={item.text} live={item.status === "running"} />
       : item.kind === "reasoning" ? <ReasoningItem item={item} />
       : item.kind === "edit" ? <EditItem item={item} />
       : item.kind === "command" || item.kind === "tool" ? <ToolItem item={item} />
@@ -251,7 +259,8 @@ type LoadWork = (runId: string, nodeId: string) => Promise<ChatLiveItem[]>;
 function useStepWork(step: ChatStep, runId: string, wanted: boolean, loadWork?: LoadWork): ChatLiveItem[] | null {
   const live = step.working?.timeline;
   const [, setLoaded] = useState(0);
-  if (live?.length) { CHAT_WORK.set(step.key, live); CHAT_WORK_LIVE.add(step.key); }
+  // A poll carries only the turn's newest items; the ones before them stay (mergeTimeline).
+  if (live?.length) { CHAT_WORK.set(step.key, mergeTimeline(CHAT_WORK.get(step.key), live)); CHAT_WORK_LIVE.add(step.key); }
   const known = CHAT_WORK.get(step.key) ?? null;
   const settled = !step.working;
   useEffect(() => {
@@ -260,7 +269,7 @@ function useStepWork(step: ChatStep, runId: string, wanted: boolean, loadWork?: 
     let current = true;
     void loadWork(runId, step.nodeId).then((items) => {
       if (!items.length) return;
-      CHAT_WORK.set(step.key, items);
+      CHAT_WORK.set(step.key, mergeTimeline(CHAT_WORK.get(step.key), items));
       if (current) setLoaded((count) => count + 1);
     }).catch(() => undefined);
     return () => { current = false; };
@@ -1261,7 +1270,6 @@ export function AgentOrchestratorChat({
                 <div className="cx-card-actions"><button className="button-primary" type="button" disabled={busy} onClick={() => retryStart(latest.id)}>Retry failed step</button></div>
               </div>
             ) : null}
-            {approvals.map(approval => <AgentOrchestratorApproval key={JSON.stringify([approval.nodeId, approval.approval_id])} approval={approval} busy={busy} approve={approve} />)}
           </div>
           {!atBottom ? <button type="button" className="cx-to-bottom" aria-label="Scroll to the latest message"
             onClick={() => { setAtBottom(true); scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" }); }}>↓</button> : null}
@@ -1366,6 +1374,12 @@ export function AgentOrchestratorChat({
             ? <p className="cx-route-note" role="status">This turn is running on <b>{running}</b>; your next message uses <b>{picked}</b>.</p> : null;
         })()}
         {selectedTaskId ? <ChatBranchBar workspaceId={projectId} sessionId={agentSessions[0]?.id} /> : null}
+        {/* A request waiting on the person sits right above the chat box, as wide as it, as DeepSeek
+            Harness shows its approval panel: in the thread it took the thread's own margins and sat
+            out of line with the box, scrolled away with the transcript. */}
+        {approvals.length ? <div className={`cx-approval-dock${isDeepSeekModel(latest?.nodes.find((node) => node.role === "planner")?.route?.model) ? " is-dsh" : ""}`}>
+          {approvals.map(approval => <AgentOrchestratorApproval key={JSON.stringify([approval.nodeId, approval.approval_id])} approval={approval} busy={busy} approve={approve} />)}
+        </div> : null}
         <form className="cx-composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}
           onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
           onDrop={(event) => { if (event.dataTransfer.files.length) { event.preventDefault(); void addFiles(event.dataTransfer.files); } }}>

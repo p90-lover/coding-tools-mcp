@@ -1,0 +1,59 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ChatMarkdown } from "./ChatMarkdown";
+import { numberedDiff } from "./ao-chat";
+
+// Parts of a chat turn both transcripts draw: the Claude Code one (AgentOrchestratorChat) and the
+// DeepSeek Harness one (DshTranscript), so a fix to one is a fix to both.
+
+/**
+ * A shield on a tool call that needed approval, saying who let it run ("Allowed by the reviewer:
+ * …"): with "Approve for me" no card asks any more, so this is where the answer shows.
+ */
+export function ApprovedMark({ text }: { text?: string }) {
+  if (!text) return null;
+  const denied = /^Denied/.test(text);
+  return <span className={`cx-approved${denied ? " is-denied" : ""}`} title={text} aria-label={text} role="img">
+    <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+      <path d="M8 1.5 13 3.4v4.2c0 3-2.1 5.6-5 6.9-2.9-1.3-5-3.9-5-6.9V3.4L8 1.5Z" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+      {denied ? <path d="m6 6 4 4m0-4-4 4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+        : <path d="m5.6 8.1 1.7 1.7 3.2-3.4" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />}
+    </svg>
+  </span>;
+}
+
+/**
+ * An edit's changed lines as Claude Code shows them: old and new line numbers in two columns, then
+ * the line with its +/− mark; unchanged lines around the change give it its place. Parsed once per
+ * diff text, since a poll rebuilds the row every second.
+ */
+export function EditDiff({ diff }: { diff: string }) {
+  const lines = useMemo(() => numberedDiff(diff), [diff]);
+  return <div className="cx-edit-diff"><table><tbody>{lines.map((line, index) => line.kind === "hunk"
+    ? <tr key={index} className="is-hunk"><td colSpan={3}>{line.text}</td></tr>
+    : <tr key={index} className={`is-${line.kind}`}>
+      <td className="cx-edit-num">{line.old ?? ""}</td><td className="cx-edit-num">{line.new ?? ""}</td>
+      <td className="cx-edit-code"><span className="cx-edit-mark" aria-hidden="true">{line.kind === "add" ? "+" : line.kind === "del" ? "−" : " "}</span>{line.text}</td>
+    </tr>)}</tbody></table></div>;
+}
+
+// How often a message that is still streaming redraws. A fast model (200+ tokens a second) grew
+// its text on every poll, and each change parsed the whole message as Markdown again.
+const STREAM_REDRAW_MS = 250;
+/** `text` as shown: while `live`, at most once per STREAM_REDRAW_MS (always its latest); then as it is. */
+function useThrottledText(text: string, live: boolean): string {
+  const [shown, setShown] = useState(text);
+  const last = useRef(0);
+  useEffect(() => {
+    if (!live) { setShown(text); return undefined; }
+    const wait = STREAM_REDRAW_MS - (Date.now() - last.current);
+    if (wait <= 0) { last.current = Date.now(); setShown(text); return undefined; }
+    const timer = window.setTimeout(() => { last.current = Date.now(); setShown(text); }, wait);
+    return () => window.clearTimeout(timer);
+  }, [text, live]);
+  return live ? shown : text;
+}
+
+/** A message as Markdown, redrawn at most every STREAM_REDRAW_MS while it still streams. */
+export function StreamingMarkdown({ text, live }: { text: string; live: boolean }) {
+  return <ChatMarkdown text={useThrottledText(text, live)} />;
+}

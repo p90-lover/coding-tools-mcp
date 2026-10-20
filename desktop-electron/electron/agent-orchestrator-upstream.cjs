@@ -27,14 +27,25 @@ const API_OPERATIONS = Object.freeze({
 
 // How much of an edit's diff a chat timeline item carries (it is polled with every working card).
 const EDIT_DIFF_BYTES = 6000;
+// How much of a message or a thought a timeline item carries. At 4 KB a long answer stopped
+// mid-word, and a cut inside a code span or fence broke how the rest of it rendered.
+const TIMELINE_TEXT_BYTES = 64 * 1024;
+// The most items a turn's timeline carries: a finished turn's read-back pages in up to 6 × 60.
+const TIMELINE_ITEMS = 400;
 const DAEMON_LOG_BYTES = 8 * 1024 * 1024;
 
 /**
  * Lines one text change added and removed, as a "+56 −26" count and a short diff: the lines the
  * two versions share at the start and end are trimmed, and what is left on each side is the
  * change. Linear in the text, which a poll can afford; a full diff could not be.
+ *
+ * With `whole` (both texts are the whole file, as an ACP edit carries them) the diff is one
+ * unified hunk with DIFF_CONTEXT unchanged lines on each side and an "@@ -a,b +c,d @@" header, so
+ * the chat can number its lines as Claude Code does. A snippet edit (Edit's old_string) has no
+ * place in the file to number from, so its diff stays bare.
  */
-function lineChange(before, after) {
+const DIFF_CONTEXT = 3;
+function lineChange(before, after, whole = false) {
   const old = before === "" ? [] : String(before).split(/\r?\n/);
   const next = after === "" ? [] : String(after).split(/\r?\n/);
   let start = 0;
@@ -43,8 +54,17 @@ function lineChange(before, after) {
   while (end < old.length - start && end < next.length - start && old[old.length - 1 - end] === next[next.length - 1 - end]) end += 1;
   const removed = old.slice(start, old.length - end);
   const added = next.slice(start, next.length - end);
-  return { additions: added.length, deletions: removed.length,
-    diff: [...removed.map(line => `-${line}`), ...added.map(line => `+${line}`)].join("\n") };
+  const changed = [...removed.map(line => `-${line}`), ...added.map(line => `+${line}`)];
+  if (!whole || !changed.length) return { additions: added.length, deletions: removed.length, diff: changed.join("\n") };
+  const from = Math.max(0, start - DIFF_CONTEXT);
+  const before_ = old.slice(from, start);
+  const after_ = old.slice(old.length - end, old.length - end + DIFF_CONTEXT);
+  // A side with no lines starts at 0, as git writes "-0,0" for a new file.
+  const range = (count) => `${count ? from + 1 : from},${count}`;
+  const oldCount = before_.length + removed.length + after_.length;
+  const newCount = before_.length + added.length + after_.length;
+  return { additions: added.length, deletions: removed.length, diff: [`@@ -${range(oldCount)} +${range(newCount)} @@`,
+    ...before_.map(line => ` ${line}`), ...changed, ...after_.map(line => ` ${line}`)].join("\n") };
 }
 
 // Where a single-repo project's chats work (AO's ProjectConfig.workspaceMode).
@@ -355,13 +375,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       }
     }
   }
-  // Only the one message still streaming gets this budget; finished items keep 4 KB so the
-  // 40-item frame the chat polls every second stays small.
-  const LIVE_MESSAGE_BYTES = 32 * 1024;
   /**
    * The current turn as a Codex-style transcript: assistant messages, reasoning and tool calls
-   * in AO sequence order. Bounded to the newest 40 items so a long turn stays a small IPC frame;
-   * the prompt (user message) is left out because the chat already shows it.
+   * in AO sequence order. A live poll reads only the session's newest items (conversationTail) and
+   * the chat keeps the earlier ones it saw; a finished turn read back here keeps every item AO
+   * paged in. The prompt (user message) is left out because the chat already shows it.
    */
   function turnTimeline(conversation, turnId, turnOver = false) {
     if (typeof turnId !== "string") return [];
@@ -369,18 +387,18 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       ...(Array.isArray(conversation?.messages) ? conversation.messages : [])
         .filter(message => message.turnId === turnId && message.role === "assistant" && typeof message.text === "string" && message.text.trim())
         .map(message => ({ id: String(message.id), sequence: Number(message.sequence) || 0, kind: "message",
-          // The answer being written is read as it streams: a 4 KB cut froze it until the turn ended.
-          status: message.streaming && !turnOver ? "running" : "completed",
-          text: utf8Prefix(message.text.trim(), message.streaming && !turnOver ? LIVE_MESSAGE_BYTES : 4096) })),
+          // Streaming or finished, a message keeps up to TIMELINE_TEXT_BYTES: a 4 KB cut froze the
+          // live answer until the turn ended, and cut a finished one mid-word.
+          status: message.streaming && !turnOver ? "running" : "completed", text: utf8Prefix(message.text.trim(), TIMELINE_TEXT_BYTES) })),
       ...(Array.isArray(conversation?.activities) ? conversation.activities : [])
         .filter(activity => activity.turnId === turnId && typeof activity.activityKind === "string")
         .map(activity => activity.activityKind === "system" && activity.detail?.event === "steer" && typeof activity.detail.text === "string"
           // AO records a steer as a system row tagged event "steer"; it is the user's own words.
           ? { id: String(activity.id), sequence: Number(activity.sequence) || 0, kind: "steer", status: "completed",
-            text: utf8Prefix(activity.detail.text.trim(), 4096) }
+            text: utf8Prefix(activity.detail.text.trim(), TIMELINE_TEXT_BYTES) }
           : timelineActivity(activity)),
     ];
-    return items.sort((a, b) => a.sequence - b.sequence).slice(-40);
+    return items.sort((a, b) => a.sequence - b.sequence).slice(-TIMELINE_ITEMS);
   }
   /**
    * A finished turn's transcript, read back from AO for the chat's folded "Worked" row. AO keeps
@@ -444,8 +462,17 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   function editedFiles(activity, detail, input) {
     if (activity.activityKind === "file_change") {
       const files = (Array.isArray(detail.files) ? detail.files : []).filter(file => typeof file?.path === "string").slice(0, 50)
-        .map(file => ({ path: utf8Prefix(file.path, 500), additions: Number(file.additions) || 0, deletions: Number(file.deletions) || 0,
-          ...(typeof file.patch === "string" && file.patch ? { diff: utf8Prefix(file.patch, EDIT_DIFF_BYTES) } : {}) }));
+        .map(file => {
+          // An ACP edit's file carries the whole file before and after, and AO's patch from them
+          // marked every line removed and re-added, so a two-line change opened onto the whole
+          // file in red. The changed lines come from the two texts instead; AO's patch is the
+          // fallback (Codex's real git diff has no texts).
+          // A new file has no oldText: all of it is added, numbered from line 1.
+          const diff = typeof file.newText === "string" && (typeof file.oldText === "string" || file.oldText == null)
+            ? lineChange(file.oldText ?? "", file.newText, true).diff : typeof file.patch === "string" ? file.patch : "";
+          return { path: utf8Prefix(file.path, 500), additions: Number(file.additions) || 0, deletions: Number(file.deletions) || 0,
+            ...(diff ? { diff: utf8Prefix(diff, EDIT_DIFF_BYTES) } : {}) };
+        });
       return files.length ? { label: "Edited", files } : null;
     }
     if (activity.activityKind !== "mcp_tool") return null;
@@ -453,7 +480,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     const diffs = (Array.isArray(detail.content) ? detail.content : [])
       .map(entry => entry?.type === "diff" ? entry : entry?.diff && typeof entry.diff === "object" ? entry.diff : null)
       .filter(entry => entry && typeof entry.path === "string" && typeof entry.newText === "string");
-    let changes = diffs.map(entry => ({ path: entry.path, before: typeof entry.oldText === "string" ? entry.oldText : null, after: entry.newText }));
+    // ACP's diff content is the whole file before and after; the input fallbacks below are snippets.
+    let changes = diffs.map(entry => ({ path: entry.path, before: typeof entry.oldText === "string" ? entry.oldText : null, after: entry.newText, whole: true }));
     const path = typeof input.file_path === "string" ? input.file_path : typeof input.path === "string" ? input.path : "";
     if (!changes.length && path && (/^(Edit|MultiEdit|Write|NotebookEdit|str_replace_based_edit_tool)$/i.test(toolName) || detail.toolKind === "edit")) {
       if (typeof input.old_string === "string" && typeof input.new_string === "string") changes = [{ path, before: input.old_string, after: input.new_string }];
@@ -464,7 +492,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (!changes.length) return null;
     const byPath = new Map();
     for (const change of changes.slice(0, 50)) {
-      const counted = lineChange(change.before ?? "", change.after);
+      const counted = lineChange(change.before ?? "", change.after, change.whole === true);
       const file = byPath.get(change.path) ?? { path: utf8Prefix(change.path, 500), additions: 0, deletions: 0, diff: "" };
       file.additions += counted.additions;
       file.deletions += counted.deletions;
@@ -494,8 +522,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     // summary is only the word "Reasoning".
     if (activity.activityKind === "reasoning") {
       const text = typeof detail.text === "string" ? detail.text.trim() : "";
-      // While the model thinks, its newest thought is the progress to show; once done, the opening.
-      return { ...base, kind: "reasoning", text: base.status === "running" ? utf8Suffix(text, 4096) : utf8Prefix(text, 4096) };
+      // While the model thinks, its newest thought is the progress to show; once done, all of it.
+      return { ...base, kind: "reasoning", text: base.status === "running" ? utf8Suffix(text, 4096) : utf8Prefix(text, TIMELINE_TEXT_BYTES) };
     }
     // A request nobody answered: AO marks it resolved by the provider when its 30-minute wait runs
     // out, or when the turn ends first. The agent then only says it was "blocked by permissions",
@@ -511,7 +539,10 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (activity.activityKind === "system" && detail.event === "provider.failure" && typeof detail.text === "string" && detail.text.trim()) {
       return { ...base, kind: "system", text: utf8Prefix(`${summary ? `${summary} ` : ""}${detail.text.trim()}`, 400) };
     }
-    return { ...base, kind: activity.activityKind.slice(0, 32), text: utf8Prefix(summary || activity.activityKind, 400) };
+    // An answered request keeps AO's request id: the workflow knows whether its reviewer (or "Approve
+    // for me") answered it, and the chat shows that on the tool call it let run.
+    const request = activity.activityKind === "approval" && typeof activity.requestId === "string" ? { requestId: activity.requestId.slice(0, 200) } : {};
+    return { ...base, kind: activity.activityKind.slice(0, 32), text: utf8Prefix(summary || activity.activityKind, 400), ...request };
   }
   /**
    * The session's tool requests waiting on an answer (Claude Code's ACP permission requests, parked
@@ -601,18 +632,44 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   // after: the observe() read count when AO answered the resume }.
   const provisionRetried = new Map();
   let observeReads = 0;
+  // One session read in flight serves every observe() of that session that asks meanwhile. The run
+  // loop, the chat's activity poll and the approvals poll each observed the same session, several
+  // times a second while a fast model streamed, and each read pulled up to 900 KB of conversation
+  // and parsed it on the main thread; the chat lagged behind the model. A read is shared only while
+  // in flight (a landed one is never reused), and any write this module sends drops it (see
+  // internalApi), so an observe after a send, steer or interrupt reads what followed it.
+  const sharedReads = new Map(); // session id -> { read, promise }
+  /**
+   * The session record and conversation tail observe() reads, fetched once per session while in
+   * flight. `read` is the observe count when the fetch began, so a read taken before a resume
+   * answered still counts as earlier than it (see provisionRetried), whichever observe picks it up.
+   */
+  function sharedObserveRead(id) {
+    const hit = sharedReads.get(id);
+    if (hit) return hit;
+    const entry = { read: ++observeReads, promise: null };
+    const forget = () => { if (sharedReads.get(id) === entry) sharedReads.delete(id); };
+    entry.promise = (async () => {
+      const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`);
+      if (record?.session?.mode === "tui") return { record, conversation: null };
+      return { record, conversation: await conversationTail(id) };
+    })().finally(forget);
+    sharedReads.set(id, entry);
+    return entry;
+  }
   const CHAT_RETRY_PAUSE_MS = 2000;
   /** The longest prefix of `text` that is at most `maxBytes` of UTF-8 (AO limits prompts in bytes). */
   function utf8Prefix(text, maxBytes) {
     const value = String(text);
-    if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
-    let end = Math.min(value.length, maxBytes);
-    while (end > 0 && Buffer.byteLength(value.slice(0, end), "utf8") > maxBytes) end = Math.floor(end * 0.95);
-    while (end < value.length && Buffer.byteLength(value.slice(0, end + 1), "utf8") <= maxBytes) end += 1;
-    // Never end on the first half of a surrogate pair.
-    const last = value.charCodeAt(end - 1);
-    if (end > 0 && last >= 0xd800 && last <= 0xdbff) end -= 1;
-    return value.slice(0, end);
+    if (value.length <= maxBytes / 3 || Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+    // Cut the bytes, then step back off any continuation byte so no character is split (a
+    // surrogate pair is one 4-byte sequence in UTF-8, so it is never halved either). The earlier
+    // character-by-character search measured a growing slice per character: with 64 KB of
+    // Chinese text that was thousands of scans per field on every poll.
+    const bytes = Buffer.from(value, "utf8");
+    let cut = Math.max(0, maxBytes);
+    while (cut > 0 && (bytes[cut] & 0xc0) === 0x80) cut -= 1;
+    return bytes.toString("utf8", 0, cut);
   }
   /** The longest suffix of `text` that is at most `maxBytes` of UTF-8: the newest part of live text. */
   function utf8Suffix(text, maxBytes) {
@@ -629,6 +686,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
 
   // Mission-owned AO calls. The run grant already covers them, so no extra dialog.
   async function internalApi(method, endpoint, body) {
+    // A write may change what a session read in flight is about to return (sharedObserveRead).
+    if (method !== "GET") sharedReads.clear();
     await start();
     const result = await requestApi(method, endpoint, body === undefined ? undefined : JSON.stringify(body));
     if (!result.ok) throw new Error(aoErrorMessage(result));
@@ -821,10 +880,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return created;
     },
     async observe(id, expectedTurn) {
-      const read = ++observeReads;
-      const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`);
+      const shared = sharedObserveRead(id);
+      const read = shared.read;
+      const { record, conversation } = await shared.promise;
       if (record?.session?.mode === "tui") return observeTui(id, record.session.status, record.session.activity);
-      const [session, conversation] = [record, await conversationTail(id)];
+      const session = record;
       const turns = Array.isArray(conversation?.turns) ? conversation.turns : [];
       // A follow-up sent into a live session is pinned to its own turn: until AO shows it, the
       // previous, completed turn must not be read as this card's answer.
@@ -1657,12 +1717,22 @@ function steadyContext(readings, id, usage, compactedAt) {
     }
     return held;
   }
-  if (usage && Number.isFinite(used) && used > 0) {
+  // The token counts are the session's running totals, which never go down. An older AO replaced
+  // them with each ACP prompt's own (zero for one that reported none) while the context reading
+  // stayed put, so the meter showed 43% beside In 0 · Out 0 · Total 0 and saved that as the last
+  // good reading. A count lower than the last one is kept at the last one.
+  let steady = usage;
+  if (usage && previous) {
+    for (const key of ["inputTokens", "outputTokens", "cachedTokens", "totalTokens"]) {
+      if (Number(previous.usage[key]) > (Number(steady[key]) || 0)) steady = { ...steady, [key]: previous.usage[key] };
+    }
+  }
+  if (steady && Number.isFinite(used) && used > 0) {
     readings.delete(id);
-    readings.set(id, { usage, compactedAt });
+    readings.set(id, { usage: steady, compactedAt });
     if (readings.size > 64) readings.delete(readings.keys().next().value);
   }
-  return usage;
+  return steady;
 }
 
 module.exports = { steadyContext, agentCatalog, createAgentOrchestratorUpstream, createAgentInventory, API_OPERATIONS };

@@ -147,4 +147,25 @@ function createChangePulse(publish, { windowMs = 150, now = Date.now, setTimer =
   };
 }
 
-module.exports = { createAoSessionEvents, createChangePulse, parseSseFrames, sessionChange };
+/**
+ * Which run-state reports are news for the renderer. The run loop reports its run on every pass
+ * (each observe, or every 500 ms), and every report pushed a change that made the renderer read
+ * the workspace's runs and rebuild the chat, several times a second while a model streamed. A
+ * report goes out only when what the renderer shows of the run moved: its status, detail,
+ * attention, stop flag or its cards' states (the fingerprint). Its polls still catch anything else.
+ */
+function createRunChangeFilter({ limit = 256 } = {}) {
+  const last = new Map(); // "workspace:run" -> what the renderer last heard
+  return function changed(update) {
+    const key = `${update?.workspaceId}:${update?.runId}`;
+    const seen = JSON.stringify([update?.status ?? null, update?.detail ?? null, update?.attention ?? null,
+      update?.stopped === true, update?.fingerprint ?? null]);
+    if (last.get(key) === seen) return false;
+    last.delete(key);
+    last.set(key, seen);
+    if (last.size > limit) last.delete(last.keys().next().value);
+    return true;
+  };
+}
+
+module.exports = { createAoSessionEvents, createChangePulse, createRunChangeFilter, parseSseFrames, sessionChange };

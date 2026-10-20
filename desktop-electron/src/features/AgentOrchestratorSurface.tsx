@@ -11,7 +11,7 @@ import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "
 import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
-import { GOAL_SUMMARY, chatArchived, chatList, chatMarkdown, chatMessagesFromDescription, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
+import { GOAL_SUMMARY, approvalAnsweredForYou, chatArchived, chatList, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessagesFromDescription, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
 import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { createLatestConfigQueue } from "./ao-config";
 import {
@@ -553,10 +553,20 @@ export function AgentOrchestratorSurface({ language, setError }: {
     }).catch(() => undefined);
     return () => { live = false; };
   }, [wantsDependencyLinks, workspaceId, pendingApprovals.length]);
-  // A request the "Approve for me" reviewer is still checking is not shown as a question: the run's
-  // status line says it is being reviewed, and only an "ask" (or a reviewer that cannot answer)
-  // comes to the person.
-  const shownApprovals = pendingApprovalsHere.filter((approval) => !approval.awaiting_review).map((approval) => {
+  // When each request was first seen (the poll runs every 3 s, so render time is close enough).
+  const approvalSeen = useRef(new Map<string, number>());
+  const seenAt = (approval: AoApproval) => {
+    const key = `${approval.nodeId}:${approval.approval_id}`;
+    if (!approvalSeen.current.has(key)) approvalSeen.current.set(key, Date.now());
+    if (approvalSeen.current.size > 500) approvalSeen.current.delete(approvalSeen.current.keys().next().value!);
+    return approvalSeen.current.get(key)!;
+  };
+  // A request the "Approve for me" reviewer is still checking is not shown (awaiting_review), and
+  // neither is one the app is answering for the person right after (approvalAnsweredForYou): a card
+  // then only flashed up, offering a click that arrived after the answer.
+  const shownApprovals = pendingApprovalsHere.filter((approval) => !approval.awaiting_review && !approvalAnsweredForYou(approval,
+    selectedRun?.nodes.find((node) => node.id === approval.nodeId)?.route as { approval_policy?: string; approvals_reviewer?: string } | undefined,
+    Date.now() - seenAt(approval), Boolean(selectedRun?.nodes.some((node) => node.role === "approver")))).map((approval) => {
     const note = dependencyInstallNote(approval.command, dependencyLinks?.workspaceId === workspaceId ? dependencyLinks.links : null);
     return note ? { ...approval, dependencyNote: note } : approval;
   });
@@ -923,11 +933,14 @@ export function AgentOrchestratorSurface({ language, setError }: {
       reading = true;
       void moduleCall("runs", { workspaceId }).then((current) => {
         if (live && Array.isArray(current.runs)) {
-          setMissions(current.runs as AoMission[]);
-          setGoals(chatGoals(current));
-          setTeam(current.team as AoTeam | null ?? null);
-          setSavedTeams(aoSavedTeams(current));
-          setTaskLifecycle((current.task_lifecycle as TaskLifecycleView[]) || []);
+          // What did not change keeps its object, so a refresh that found nothing new redraws nothing.
+          setMissions((previous) => keepRevisions(previous, current.runs as AoMission[]));
+          const goals = chatGoals(current), team = current.team as AoTeam | null ?? null, saved = aoSavedTeams(current);
+          const lifecycle = (current.task_lifecycle as TaskLifecycleView[]) || [];
+          setGoals((previous) => JSON.stringify(previous) === JSON.stringify(goals) ? previous : goals);
+          setTeam((previous) => JSON.stringify(previous) === JSON.stringify(team) ? previous : team);
+          setSavedTeams((previous) => JSON.stringify(previous) === JSON.stringify(saved) ? previous : saved);
+          setTaskLifecycle((previous) => JSON.stringify(previous) === JSON.stringify(lifecycle) ? previous : lifecycle);
         }
       }).catch(() => {}).finally(() => { reading = false; });
     };
@@ -1195,8 +1208,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
         if (nextStatus !== "idle") {
           const current = await moduleCall("runs", { workspaceId, runId: selectedRunId });
           if (live && Array.isArray(current.runs)) {
-            setMissions((previous) => previous.map((run) =>
-              (current.runs as AoMission[]).find((fresh) => fresh.id === run.id) ?? run));
+            setMissions((previous) => keepRevisions(previous, previous.map((run) =>
+              (current.runs as AoMission[]).find((fresh) => fresh.id === run.id) ?? run)));
           }
         }
       } catch (cause) { if (live) setError(cause instanceof Error ? cause.message : String(cause)); }
@@ -1645,7 +1658,13 @@ export function AgentOrchestratorSurface({ language, setError }: {
           // The person's answer to a question the AO agent asked.
           : approval.kind === "question" && approval.source === "ao" ? { answer: reply as JsonObject }
           : typeof (reply as { decisionId?: unknown }).decisionId === "string" ? { decisionId: (reply as { decisionId: string }).decisionId }
-            : { response: reply as JsonObject, threadId: approval.thread_id!, turnId: approval.turn_id! }) });
+            : { response: reply as JsonObject, threadId: approval.thread_id!, turnId: approval.turn_id! }) })
+        // Answered already (by the reviewer, or in another window) before this click arrived: the
+        // card just goes, as the next poll would take it away; it is not an error to report.
+        .catch((cause: unknown) => {
+          if (/CHAT_REQUEST_NOT_PENDING|no longer waiting/.test(cause instanceof Error ? cause.message : String(cause))) return {} as Record<string, unknown>;
+          throw cause;
+        });
       if (!result.cancelled && mounted.current && selection.current.workspaceId === owner.workspaceId && selection.current.runId === owner.runId) {
         setPendingApprovals((current) => current.filter((item) => item.nodeId !== approval.nodeId || item.approval_id !== approval.approval_id));
       }
@@ -1697,21 +1716,23 @@ export function AgentOrchestratorSurface({ language, setError }: {
             return Object.entries(result.nodes ?? {}).map(([nodeId, value]) => [`${runId}:${nodeId}`, value] as const);
           } catch { return []; }
         }));
-        // An unchanged frame keeps the same object, so the surface does not re-render every second.
+        // Unchanged frames and items keep their objects (mergeActivityFrames), so neither the surface
+        // nor an unchanged row re-renders.
         const next = Object.fromEntries(frames.flat());
-        if (live) setChatActivity(current => JSON.stringify(current) === JSON.stringify(next) ? current : next);
+        if (live) setChatActivity(current => mergeActivityFrames(current, next));
       } finally { reading = false; }
     };
     void poll();
     const timer = window.setInterval(() => void poll(), 1000);
-    // Any AO session moving (a role streamed text, started a tool, finished) re-reads at once. The
-    // activity read answers from its last frame while it fetches, so read again once that lands.
+    // An AO session moving (a role streamed text, started a tool, finished) reads again soon. A fast
+    // model moves its session on every pulse (150 ms), and reading at once plus 300 ms later for
+    // each one read the conversation many times a second; a burst now gets one read, 300 ms after
+    // it began (the activity read answers from its last frame while it fetches, so this also
+    // collects the frame the burst's first read started).
     let follow: number | undefined;
     const stopPush = onAoPush((change) => {
-      if (!change.sessions.length) return;
-      void poll();
-      window.clearTimeout(follow);
-      follow = window.setTimeout(() => void poll(), 300);
+      if (!change.sessions.length || follow !== undefined) return;
+      follow = window.setTimeout(() => { follow = undefined; void poll(); }, 300);
     });
     return () => { live = false; window.clearInterval(timer); window.clearTimeout(follow); stopPush(); };
   }, [workspaceId, workingRunIds]);

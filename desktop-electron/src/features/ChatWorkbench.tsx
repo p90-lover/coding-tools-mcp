@@ -64,6 +64,23 @@ export function autoOpenTab(fresh: string[], open: boolean): WorkbenchTab | null
 }
 
 /**
+ * Whether an agent's command is worth bringing the Terminal pane forward for. The pane is for
+ * processes that keep running (a dev server, a watcher), whose output the user follows there; a
+ * one-off tool call (`git status`, `ls`) already shows its command and output in the chat, and
+ * opening the pane for each one took the side of the screen for nothing. Called on every poll
+ * (about every 4 s) with the poll's time, for commands the agent (not the user) started.
+ * A command has `status` ("running", "background" when the agent left it running in the background,
+ * or an ended state), `startedAt` (ms), `background` and `source` ("app" for exec_command, "agent"
+ * for its own shell tool).
+ */
+export function opensTerminal(command: Command, _now: number): boolean {
+  // A server process (isServerProcess), or a project's own app launcher (the user's run_app.cmd).
+  return isLive(command) && (isServerProcess(command) || APP_LAUNCHER.test(String(command.cmd ?? "")));
+}
+// A script that starts the project's app: run_app.cmd, start-app.ps1, run_server.bat and the like.
+const APP_LAUNCHER = /(?:^|[\\/\s])(?:run|start)[_-]?(?:app|server|dev)\b/i;
+
+/**
  * Whether a poll of `sessionIds` starts over for another chat (none of its sessions was polled
  * before), so what its agents already did when it was opened does not open the panel by itself.
  * A session joining the same chat (a new agent, a restarted one) is not a new chat: what it does
@@ -110,9 +127,11 @@ export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen
         });
         const pages = Object.entries((previews.previews as Record<string, PreviewState> | undefined) ?? {})
           .filter(([, state]) => state.url && state.url !== "about:blank").map(([id, state]) => `page:${id}:${new URL(state.url).origin}`);
+        // Asked again on every tick, so a command that turns out to be long-running (a server) can
+        // open the pane later even though it was too young to the first time it was seen.
+        const at = Date.now();
         const commands = ((processes.sessions as { commands: Command[] }[] | undefined) ?? [])
-          .flatMap((session) => session.commands).filter((command) => isLive(command) && !command.user && isServerProcess(command))
-          .map((command) => `cmd:${command.id}`);
+          .flatMap((session) => session.commands).filter((command) => !command.user && opensTerminal(command, at)).map((command) => `cmd:${command.id}`);
         const fresh = [...pages, ...commands].filter((item) => !seen.current.has(item));
         for (const item of fresh) seen.current.add(item);
         // What was already there when the chat opened does not open the panel by itself.

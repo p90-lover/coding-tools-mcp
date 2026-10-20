@@ -10,6 +10,7 @@
  */
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { ChatMarkdown } from "./ChatMarkdown";
+import { ApprovedMark, EditDiff, StreamingMarkdown } from "./ChatToolParts";
 import {
   dshActivity, dshDuration, dshItemDetail, dshLiveTitle, dshProcessTitle, dshSegments, dshThinkSummary, dshToolTitle,
   tidyTimeline, type ChatLiveItem, type ChatStep, type ChatTurn, type DshActivity,
@@ -140,8 +141,8 @@ function DshTool({ item }: { item: ChatLiveItem }) {
   const removed = files.reduce((sum, file) => sum + file.deletions, 0);
   const settled = tone === "error" || tone === "stopped";
   const suffix = <>
-    {item.count && item.count > 1 ? <span className="dsh-suffix">×{item.count}</span> : null}
     {!settled && files.length ? <span className="dsh-suffix dsh-diff-stat"><span className="is-add">+{added}</span> <span className="is-del">-{removed}</span></span> : null}
+    <ApprovedMark text={item.approval} />
   </>;
   const expandable = item.kind === "command" || activity === "commands" || Boolean(item.input || item.output) || files.some((file) => file.diff);
   return <DshRow className="dsh-tool" icon={ACTIVITY_ICON[activity]} title={title} summary={summary} suffix={suffix}
@@ -155,8 +156,8 @@ function DshTool({ item }: { item: ChatLiveItem }) {
         : files.some((file) => file.diff)
           ? files.map((file) => <div key={file.path} className="dsh-diff">
             {files.length > 1 ? <div className="dsh-diff-path">{file.path}</div> : null}
-            <pre>{(file.diff ?? "").split("\n").map((line, index) =>
-              <span key={index} className={line.startsWith("+") ? "is-add" : line.startsWith("-") ? "is-del" : undefined}>{line}{"\n"}</span>)}</pre>
+            {/* Numbered as Claude Code numbers a change; dsh's tint and bar come from its CSS. */}
+            {file.diff ? <EditDiff diff={file.diff} /> : null}
           </div>)
           : <div className="dsh-io">
             {item.input ? <div className="dsh-io-section"><span className="dsh-io-label">IN</span><span className="dsh-io-text">{prettyJson(item.input)}</span></div> : null}
@@ -170,7 +171,7 @@ function DshTool({ item }: { item: ChatLiveItem }) {
 
 function DshItem({ item }: { item: ChatLiveItem }) {
   if (item.kind === "reasoning") return <DshThink item={item} />;
-  if (item.kind === "message") return <div className="dsh-reply"><ChatMarkdown text={item.text} /></div>;
+  if (item.kind === "message") return <div className="dsh-reply"><StreamingMarkdown text={item.text} live={item.status === "running"} /></div>;
   if (item.kind === "steer") return <div className="cx-user cx-steer"><div className="cx-bubble"><p>{item.text}</p></div></div>;
   return <DshTool item={item} />;
 }

@@ -51,6 +51,11 @@ test("upstream AO gateway runs trusted UI requests automatically and blocks untr
 
 
 /** The real observe() with its helpers, run against a fake AO API. */
+// The module-level bounds and line diff the timeline helpers read (EDIT_DIFF_BYTES to lineChange).
+function timelineBounds(source) {
+  return source.slice(source.indexOf("// How much of an edit's diff"), source.indexOf("// Where a single-repo project's chats work"));
+}
+
 function observeHarness(context) {
   const vm = require("node:vm");
   const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
@@ -60,7 +65,7 @@ function observeHarness(context) {
   const helpers = source.slice(source.indexOf("  async function chatHostGone"), source.indexOf("  // Mission-owned AO calls."));
   const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
   const states = source.match(/const TERMINAL_TURN_STATES = .*;/)[0];
-  return vm.runInNewContext(states + helpers + identity + "({" + method + "})", {
+  return vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + method + "})", {
     Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"),
     agentTools: null, observeTui: async () => { throw new Error("not a TUI fixture"); }, ...context,
   });
@@ -523,7 +528,7 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
   const calls = [];
   let resumeOk = true;
   let status = "exited";
-  const upstream = vm.runInNewContext(states + helpers + identity + "({" + methods + "})", {
+  const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
     Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), Date, Math, Number, Promise, agentTools: null,
     internalApi: async (method, endpoint) => {
       calls.push([method, endpoint]);
@@ -558,7 +563,7 @@ test("a resumed chat gets the app's tools again, and an AO that refuses them sti
   let refuseServers = false;
   let status = "exited";
   const servers = [{ name: "coding-tools", type: "http", url: "http://127.0.0.1:1/mcp/ws/k", headers: { Authorization: "Bearer fixture" } }];
-  const upstream = vm.runInNewContext(states + helpers + identity + "({" + methods + "})", {
+  const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
     Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), Date, Math, Number, Promise,
     agentTools: { renew: async id => id === "chat-1" ? { servers } : null },
     internalApi: async (method, endpoint, body) => {
@@ -594,7 +599,7 @@ test("reopening a released chat and sending at once resumes its agent once, and 
   const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
   const states = source.match(/const TERMINAL_TURN_STATES = .*;/)[0];
   let status = "exited", resuming = false, resumes = 0, renewals = 0;
-  const upstream = vm.runInNewContext(states + helpers + identity + "({" + methods + "})", {
+  const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
     Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), Date, Math, Number, Promise,
     agentTools: { renew: async () => { renewals += 1; return null; } },
     internalApi: async (method, endpoint) => {
@@ -791,6 +796,50 @@ test("a reasoning item carries the model's summary text (AO keeps it in detail.t
   assert.match(item.text, /^\*\*Inspecting the register route\*\*/);
 });
 
+test("observes of one session that overlap share one conversation read; later ones read again", async () => {
+  let reads = 0;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => {
+      if (!endpoint.includes("/conversation")) return { session: { id: "s", mode: "chat", status: "working" } };
+      reads += 1;
+      await gate;
+      return { turns: [{ id: "t", state: "running" }], messages: [{ id: "m", turnId: "t", sequence: 1, role: "assistant", text: `read ${reads}` }], activities: [] };
+    },
+  });
+  // The run loop, the activity poll and the approvals poll asking at the same moment.
+  const together = Promise.all([upstream.observe("s"), upstream.observe("s"), upstream.observe("s")]);
+  await new Promise(setImmediate);
+  release();
+  const observed = await together;
+  assert.equal(reads, 1, "one read served all three");
+  assert.deepEqual([...observed.map((entry) => entry.liveOutput)], ["read 1", "read 1", "read 1"]);
+  await upstream.observe("s");
+  assert.equal(reads, 2, "a landed read is never reused: the next observe reads afresh");
+});
+
+test("an ACP edit opens on its changed lines, not the whole file, and a long message is not cut at 4 KB", async () => {
+  // As AO stored it live: the whole file before and after, and a patch marking every line changed.
+  const lines = Array.from({ length: 200 }, (_, at) => `line ${at}`);
+  const before = lines.join("\r\n"), after = before.replace("line 100", "changed 100");
+  const answer = `${"word ".repeat(1200)}\`_complete_oauth_in_page\` returns None.`;
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.includes("/conversation") ? {
+      turns: [{ id: "t", state: "running" }],
+      messages: [{ id: "m", turnId: "t", sequence: 2, role: "assistant", text: answer }],
+      activities: [{ id: "e", turnId: "t", sequence: 1, activityKind: "file_change", status: "completed", summary: "Edit",
+        detail: { files: [{ path: "C:\\app\\Accounts.tsx", status: "modified", additions: 1, deletions: 1, oldText: before, newText: after,
+          patch: ["--- C:\\app\\Accounts.tsx", "+++ C:\\app\\Accounts.tsx", ...lines.map(line => `-${line}`), ...lines.map(line => `+${line}`)].join("\n") }] } }],
+    } : { session: { id: "s", mode: "chat", status: "working" } },
+  });
+  const [edit, message] = JSON.parse(JSON.stringify((await upstream.observe("s")).timeline));
+  assert.equal(edit.kind, "edit");
+  assert.equal(edit.files[0].diff, ["@@ -98,7 +98,7 @@", " line 97", " line 98", " line 99", "-line 100", "+changed 100",
+    " line 101", " line 102", " line 103"].join("\n"), "one numbered hunk with 3 context lines, as Claude Code shows it");
+  assert.equal(message.text, answer, "the whole answer, its closing code span included");
+});
+
 test("live text past 4 KB keeps moving: the streaming answer stays whole and running reasoning keeps its newest part", async () => {
   const answer = `Start of the answer.\n${"a".repeat(9000)}\nEnd so far.`;
   const thought = `First thought.\n${"t".repeat(9000)}\nNewest thought: checking lifecycle.py`;
@@ -809,8 +858,7 @@ test("live text past 4 KB keeps moving: the streaming answer stays whole and run
   assert.equal(byId.m.text, answer.trim(), "the streaming answer is not frozen at 4 KB");
   assert.ok(byId.r1.text.endsWith("Newest thought: checking lifecycle.py"), "running reasoning keeps its newest part");
   assert.ok(Buffer.byteLength(byId.r1.text) <= 4096);
-  assert.ok(byId.r0.text.startsWith("First thought."), "finished reasoning keeps its opening for the folded row");
-  assert.ok(Buffer.byteLength(byId.r0.text) <= 4096);
+  assert.equal(byId.r0.text, thought, "finished reasoning is kept whole (up to 64 KB), its opening heading the folded row");
 });
 
 test("a tool call carries its description, arguments and output, so its row can open on them as Claude Code's do", async () => {
@@ -970,4 +1018,11 @@ test("the context meter keeps its reading through a steer's zero snapshot, and d
   const snapshot = steadyContext(readings, "s3", { contextUsed: 0, contextWindow: 400000, inputTokens: 0, outputTokens: 0, cachedTokens: 0, totalTokens: 0, cost: 6.41 }, null);
   assert.deepEqual([snapshot.contextUsed, snapshot.inputTokens, snapshot.outputTokens, snapshot.cachedTokens, snapshot.totalTokens, snapshot.cost],
     [300000, 13_000_000, 100_000, 12_000_000, 13_100_000, 6.41], "the zeroed counts keep the last reading's; what it does report (cost) comes through");
+  // Seen live: 43% and 171.9k of context beside In 0 · Out 0 · Cached 0 · Total 0. The context
+  // reading held (no steer drop), but an ACP prompt's own zero usage replaced the running totals.
+  steadyContext(readings, "s4", { contextUsed: 171_900, contextWindow: 400000, inputTokens: 6_160_000, outputTokens: 70_900, cachedTokens: 6_000_000, totalTokens: 6_230_900 }, null);
+  const zeroed = steadyContext(readings, "s4", { contextUsed: 172_000, contextWindow: 400000, inputTokens: 0, outputTokens: 0, cachedTokens: 0, totalTokens: 0 }, null);
+  assert.deepEqual([zeroed.contextUsed, zeroed.inputTokens, zeroed.totalTokens], [172_000, 6_160_000, 6_230_900], "the totals never go down");
+  const after = steadyContext(readings, "s4", { contextUsed: 173_000, contextWindow: 400000, inputTokens: 1, outputTokens: 1, cachedTokens: 0, totalTokens: 2 }, null);
+  assert.equal(after.totalTokens, 6_230_900, "the held totals were saved, so a later small report does not lose them either");
 });
