@@ -821,6 +821,38 @@ describe("trusted Codex task environment continuity", () => {
     });
   });
 
+  // Seen live: an old Codex task switched to a Web model compacted before its "keep going". The
+  // replacement history put this turn's environment, a kept older message and the compaction
+  // ahead of Codex Desktop's time/page context and the instruction, so nothing was adjacent.
+  function resolvePreTurnCompaction(environment = environmentXml, compactionTurnId = rolloutTurnId) {
+    const { codexHome, request } = resumedRootFixture();
+    const turn = { internal_chat_message_metadata_passthrough: { turn_id: rolloutTurnId } };
+    (request._rawBody as { input: unknown[] }).input = [
+      { type: "message", id: "msg_world", role: "user", ...turn, content: [
+        { type: "input_text", text: "# AGENTS.md instructions\n\n<INSTRUCTIONS>Use the repository tools.</INSTRUCTIONS>" },
+        { type: "input_text", text: environment },
+      ] },
+      { type: "message", id: "msg_kept", role: "user", internal_chat_message_metadata_passthrough: { turn_id: "01a13e27-f41e-7db1-8804-670775eca2a0" },
+        content: [{ type: "input_text", text: "go fast" }] },
+      { type: "compaction", id: "cmp_current", encrypted_content: "opaque", internal_chat_message_metadata_passthrough: { turn_id: compactionTurnId } },
+      { type: "message", id: "msg_time", role: "developer", ...turn, content: [{ type: "input_text", text: "<codex_apps_client_time_context></codex_apps_client_time_context>" }] },
+      { type: "message", id: "msg_page", role: "user", ...turn, content: [{ type: "input_text", text: "<external_codex_apps_open_page>{\"page_id\":null}</external_codex_apps_open_page>" }] },
+      { type: "message", id: "msg_page_rules", role: "developer", ...turn, content: [{ type: "input_text", text: "<codex_apps_open_page_instructions></codex_apps_open_page_instructions>" }] },
+      { type: "message", id: "msg_instruction", role: "user", ...turn, content: [{ type: "input_text", text: "keep going" }] },
+    ];
+    return new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request);
+  }
+
+  test("a compaction Codex ran before the turn's instruction resolves from the current rollout, matching its claim", () => {
+    expect(resolvePreTurnCompaction().cwd).toBe(root);
+    // The claim must agree with the rollout's authority; a different cwd is refused, not trusted.
+    const elsewhere = environmentXml.replaceAll(root, resolve(root, ".."));
+    expect(() => resolvePreTurnCompaction(elsewhere)).toThrow(/conflicts with its current Codex rollout/);
+    // Only a compaction stamped with this exact turn counts; another turn's keeps the old refusal.
+    expect(() => resolvePreTurnCompaction(environmentXml, "01a13e27-f41e-7db1-8804-670775eca2a0"))
+      .toThrow(/missing cwd in trusted Codex environment context/);
+  });
+
   test.skipIf(process.platform !== "win32")("resumed Windows tasks accept the same indexed rollout with either path namespace", () => {
     for (const namespaceHome of [false, true]) for (const namespaceRollout of [false, true]) {
       const { codexHome, request, rolloutPath } = resumedRootFixture();

@@ -260,6 +260,35 @@ function newChatUrlFor(host) {
  * Null means the page holds no conversation this turn owns, so it must not be continued: the
  * tab shows the user's history sidebar and could now be one of the user's own chats.
  */
+/** The saved chat a bridge turn ended on (the uuid of its /c/<uuid>), or null outside saved chats. */
+function ownedSavedConversationId(value, useSavedChats) {
+  if (!useSavedChats) return null;
+  const location = retainedConversationLocation(value, true);
+  return location ? location.slice("/c/".length) : null;
+}
+
+const CONVERSATION_DELETE_TIMEOUT_MS = 8_000;
+
+/**
+ * Deletes one saved chat from inside its own ChatGPT page, as ChatGPT's Delete menu does (hide it
+ * from history with is_visible: false). The page's session token is read and used in the page and
+ * never returned. Only a /c/<uuid> id the bridge recorded for its own turn is ever passed here.
+ */
+function deleteConversationScript(conversationId) {
+  if (!/^[0-9a-f-]{36}$/.test(conversationId)) throw new Error("Not a ChatGPT conversation id");
+  return `(async (id) => {
+    const session = await fetch("/api/auth/session", { credentials: "include" }).then((r) => r.ok ? r.json() : null).catch(() => null);
+    const token = session && typeof session.accessToken === "string" ? session.accessToken : "";
+    if (!token) return { ok: false, reason: "no ChatGPT session" };
+    const response = await fetch("/backend-api/conversation/" + id, {
+      method: "PATCH", credentials: "include",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+      body: JSON.stringify({ is_visible: false }),
+    });
+    return { ok: response.ok, status: response.status };
+  })(${JSON.stringify(conversationId)})`;
+}
+
 function retainedConversationLocation(value, useSavedChats) {
   let parsed;
   try {
@@ -1818,6 +1847,35 @@ class BrowserHost {
     return this.snapshot();
   }
 
+  /** Deletes the saved chat a released tab's turn wrote in, then closes the tab's page. */
+  deleteOwnedConversation(tab) {
+    const contents = tab.view.webContents;
+    const log = (event, details) => this.logger[event === "browser.conversation_deleted" ? "info" : "warn"](event, {
+      tabId: tab.id, traceId: tab.traceId, ...details,
+    });
+    let origin = null;
+    try { origin = new URL(contents.getURL()).origin; } catch {}
+    // Only on chatgpt.com: the request is relative to the page, and a tab moved elsewhere skips it.
+    if (origin !== CHATGPT_ORIGIN) {
+      log("browser.conversation_delete_skipped", { reason: "tab is not on chatgpt.com" });
+      contents.close();
+      return Promise.resolve();
+    }
+    let timer;
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(() => resolve({ ok: false, reason: "timeout" }), CONVERSATION_DELETE_TIMEOUT_MS);
+    });
+    return Promise.race([contents.executeJavaScript(deleteConversationScript(tab.ownedConversation), true), timeout])
+      .then((result) => log(result?.ok ? "browser.conversation_deleted" : "browser.conversation_delete_failed", {
+        ...(result?.status ? { status: result.status } : {}), ...(result?.reason ? { reason: result.reason } : {}),
+      }))
+      .catch((error) => log("browser.conversation_delete_failed", { reason: String(error?.message || error).slice(0, 200) }))
+      .finally(() => {
+        clearTimeout(timer);
+        if (!contents.isDestroyed()) contents.close();
+      });
+  }
+
   removeTurnTab(tab, abortRunning) {
     if (!this.turnTabs.has(tab.id)) return;
     this.turnTabs.delete(tab.id);
@@ -1840,7 +1898,15 @@ class BrowserHost {
       tab.status = "aborted";
     }
     try { this.window.contentView.removeChildView(tab.view); } catch {}
-    if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close();
+    if (!tab.view.webContents.isDestroyed()) {
+      // A saved chat the bridge wrote in is deleted when its tab is let go, so saved chats leave no
+      // history behind; the hidden page closes once ChatGPT answered (or after a bounded wait).
+      if (tab.ownedConversation && tab.interactionMode !== "manual" && useSavedChatsFor(this)) {
+        this.deleteOwnedConversation(tab);
+      } else {
+        tab.view.webContents.close();
+      }
+    }
     if (this.selectedTabId === tab.id) {
       this.selectedTabId = [...this.turnTabs.keys()].at(-1) || "home";
       const homeContents = this.view?.webContents;
@@ -2667,6 +2733,12 @@ class BrowserHost {
     const retainedLocation = status === "completed" && retain && !tab.view.webContents.isDestroyed()
       ? retainedConversationLocation(tab.view.webContents.getURL(), useSavedChatsFor(this))
       : null;
+    // The saved chat this turn wrote in, recorded now while the bridge still drives the tab, so its
+    // release deletes this chat (as a Temporary Chat would vanish) and never a page the user opened.
+    if (!tab.view.webContents.isDestroyed() && typeof tab.view.webContents.getURL === "function") {
+      tab.ownedConversation = ownedSavedConversationId(tab.view.webContents.getURL(), useSavedChatsFor(this))
+        ?? tab.ownedConversation ?? null;
+    }
     if (status === "completed" && retain && !retainedLocation) {
       this.logger.warn("browser.tab_retention_refused", { tabId: tab.id, traceId, reason: "no owned conversation page" });
     }
@@ -3379,6 +3451,8 @@ module.exports = {
   BrowserHost,
   BrowserTurnCancelledError,
   CHATGPT_VIEWPORT_CSS,
+  deleteConversationScript,
+  ownedSavedConversationId,
   IDLE_BROWSER_URL,
   isChatGptCloudflareChallengeResponse,
   isTemporaryChatUrl,
