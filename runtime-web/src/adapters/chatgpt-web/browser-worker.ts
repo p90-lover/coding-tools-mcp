@@ -132,6 +132,9 @@ const CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS = 10_000;
 export const CHATGPT_CONNECTOR_MENU_ROW_SELECTOR = '.__menu-item[tabindex="0"], [data-mention-list-scroll-area] button[data-list-navigation-item]';
 export const CHATGPT_CONNECTOR_PILL_SELECTOR = '[data-id^="plugin:"][data-keyword], [data-prompt-link-href^="app://"][data-prompt-link-label][contenteditable="false"]';
 const CHATGPT_SEND_BUTTON_SELECTOR = 'button[data-testid="send-button"], button[aria-label="Send"]';
+// Older composers tagged their any-file input; the redesign leaves it untagged beside image-only ones.
+export const CHATGPT_FILE_INPUT_SELECTOR = 'input[data-testid="upload-photos-input"], '
+  + 'input[type="file"]:not([accept]), input[type="file"][accept=""]';
 const CHATGPT_SMOKE_TEXT = "Reply with exactly: CODEX WEB GPT READY";
 const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
 /**
@@ -3932,7 +3935,9 @@ export class ChatGptBrowserWorker {
     if (files.length === 0) return;
     const composer = await this.activeComposer(page);
     const composerForm = composer.locator("xpath=ancestor::form[1]");
-    const input = page.locator('input[data-testid="upload-photos-input"]');
+    // The redesigned composer dropped the upload-photos-input test id. Its form still holds several
+    // hidden file inputs; only the one without an accept filter takes the Markdown prompt file.
+    const input = composerForm.locator(CHATGPT_FILE_INPUT_SELECTOR).first();
     await input.waitFor({ state: "attached", timeout: 20_000 });
     await input.setInputFiles(files);
     try {
