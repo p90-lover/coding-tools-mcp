@@ -384,3 +384,20 @@ test("an answer citing an annotation (Codex's :codex-annotation directive) shows
   assert.match(html, /<span class="cx-annotation-ref" title="Your annotation 2">2<\/span>/);
   assert.doesNotMatch(html, /codex-annotation\{/);
 });
+test("archived chats sit in a folder per project, in the list's order, and chats with no project folder under Chats", () => {
+  const list = load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu });
+  const workspaces = [{ id: "macro", name: "clash of clan macro", path: "F:\\clash of clan macro" }, { id: "scratch", name: "Scratch" },
+    { id: "tools", name: "coding-tools-mcp", path: "G:\\Projects\\coding-tools-mcp" }];
+  const chats = [
+    { workspaceId: "tools", taskId: "a", title: "Fix update bugs", visibility: "archived" },
+    { workspaceId: "scratch", taskId: "b", title: "Quick question", visibility: "archived" },
+    { workspaceId: "macro", taskId: "c", title: "Eros account", visibility: "archived" },
+    { workspaceId: "gone", taskId: "d", title: "From a removed project", visibility: "archived" },
+  ];
+  const groups = JSON.parse(JSON.stringify(list.archivedGroups(chats, workspaces)));
+  assert.deepEqual(groups.map((group) => [group.name, group.project, group.chats.map((item) => item.taskId)]), [
+    ["clash of clan macro", true, ["c"]],
+    ["coding-tools-mcp", true, ["a"]],
+    ["Chats", false, ["b", "d"]],
+  ], "a project with no folder, or one no longer listed, has its chats under Chats");
+});

@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { ChatMarkdown } from "./ChatMarkdown";
-import type { ChatTurn } from "./ao-chat";
+import { chatMessageReadable, type ChatTurn } from "./ao-chat";
 
 /**
  * The page shown by "Open in new window": a read-only, live copy of one chat. The window runs no
@@ -10,7 +10,7 @@ import type { ChatTurn } from "./ao-chat";
  */
 function Transcript({ turns }: { turns: ChatTurn[] }) {
   return <>{turns.map((turn) => <section key={turn.key} className="turn">
-    {turn.user ? <div className="user">{turn.user.text}</div> : null}
+    {turn.user ? <div className="user">{chatMessageReadable(turn.user.text)}</div> : null}
     {turn.steps.length ? <ol className="steps">{turn.steps.map((step) => <li key={step.key} className={step.working ? "working" : step.error ? "error" : ""}>
       <span className="step-name">{step.name}</span>
       <span className="step-meta">{step.working ? (step.working.activity || "working…") : step.error ? "failed" : step.verdict || step.state}</span>

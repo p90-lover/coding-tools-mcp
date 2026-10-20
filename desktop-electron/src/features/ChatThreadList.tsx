@@ -91,7 +91,27 @@ export type ThreadListProps = {
   projectRemote?: (folder: string) => Promise<string | null>;
   /** What each project folder is in git, for its row's label (read when the list shows it). */
   projectGit?: (folder: string) => Promise<ThreadProjectGit | null>;
+  /** Archived and deleted chats of every project, and the days an archived chat stays (0: for good). */
+  archivedAll?: { days: number; chats: ArchivedChat[] };
+  restoreArchived?: (workspaceId: string, taskId: string) => void;
+  setArchiveDays?: (days: number) => void;
 };
+
+/** An archived chat of any project; `archivedAt` (ms) is when its days started counting. */
+export type ArchivedChat = { workspaceId: string; taskId: string; title: string; visibility: "archived" | "deleted"; archivedAt?: number };
+const DAY_MS = 86_400_000;
+
+/**
+ * The Archived section's groups: a folder per project in the list's own order, then "Chats" for
+ * chats with no project folder (a project without a folder, or one no longer in the list).
+ */
+export function archivedGroups(chats: ArchivedChat[], workspaces: ThreadWorkspace[]): { key: string; name: string; project: boolean; chats: ArchivedChat[] }[] {
+  const groups = new Map<string, { key: string; name: string; project: boolean; chats: ArchivedChat[] }>();
+  for (const item of workspaces) if (item.path) groups.set(item.id, { key: item.id, name: item.name, project: true, chats: [] });
+  const loose = { key: "chats", name: "Chats", project: false, chats: [] as ArchivedChat[] };
+  for (const chat of chats) (groups.get(chat.workspaceId) ?? loose).chats.push(chat);
+  return [...groups.values(), loose].filter((group) => group.chats.length);
+}
 
 const SHORTCUTS = { rename: "Alt+Ctrl+R", pin: "Alt+Ctrl+P", unread: "Ctrl+Shift+U", archive: "Ctrl+Shift+A" };
 
@@ -488,16 +508,54 @@ export function ChatThreadList(props: ThreadListProps) {
             })}
           </ul>
         </section>
-        {archived.length ? <section className="cx-thread-group">
-          <button type="button" className="cx-archived-toggle" aria-expanded={showArchived} onClick={() => setShowArchived((value) => !value)}>
-            Archived ({archived.length})
-          </button>
-          {showArchived ? <ul>{archived.map((chat) => <li key={chat.taskId} className="cx-thread-row is-archived">
-            <span className="cx-thread-title" title={chat.title}>{chat.title}</span>
-            {chat.visibility === "deleted" ? <span className="cx-thread-badge">Deleted</span> : null}
-            <button type="button" className="cx-restore" disabled={chatBusy(chat.taskId)} onClick={() => actions.lifecycle(chat.taskId, "restore")}>Restore</button>
-          </li>)}</ul> : null}
-        </section> : null}
+        {(() => {
+          // Every project's archived chats once read (archivedAll); until then this project's.
+          const all: ArchivedChat[] = props.archivedAll?.chats ?? archived.map((chat) => ({ workspaceId, taskId: chat.taskId, title: chat.title,
+            visibility: chat.visibility === "deleted" ? "deleted" as const : "archived" as const }));
+          if (!all.length) return null;
+          const days = props.archivedAll?.days ?? 0;
+          const restore = (chat: ArchivedChat) => props.restoreArchived ? props.restoreArchived(chat.workspaceId, chat.taskId) : actions.lifecycle(chat.taskId, "restore");
+          const left = (chat: ArchivedChat) => {
+            if (!days || !chat.archivedAt) return null;
+            const due = chat.archivedAt + days * DAY_MS, remaining = Math.max(0, due - now);
+            const text = remaining < DAY_MS ? "<1d" : `${Math.ceil(remaining / DAY_MS)}d`;
+            return <span className="cx-thread-badge is-quiet" title={`Moves to Recently deleted on ${new Date(due).toLocaleDateString()}`}>{text}</span>;
+          };
+          const archivedRow = (chat: ArchivedChat) => <li key={`${chat.workspaceId}:${chat.taskId}`} className="cx-thread-row is-archived">
+            <span className="cx-thread-title" title={chat.title}>{chat.title || "Untitled chat"}</span>
+            {chat.visibility === "archived" ? left(chat) : null}
+            <button type="button" className="cx-restore" disabled={chatBusy(chat.taskId)} onClick={() => restore(chat)}>Restore</button>
+          </li>;
+          const kept = all.filter((chat) => chat.visibility === "archived"), gone = all.filter((chat) => chat.visibility === "deleted");
+          const toggle = (key: string) => { const next = new Set(collapsed); if (next.has(key)) next.delete(key); else next.add(key); saveCollapsed(next); };
+          return <section className="cx-thread-group">
+            <button type="button" className="cx-archived-toggle" aria-expanded={showArchived} onClick={() => setShowArchived((value) => !value)}>
+              Archived ({kept.length})
+            </button>
+            {showArchived ? <ul className="cx-projects">
+              {/* A folder per project, as in the Projects list, then "Chats" for chats with no project. */}
+              {archivedGroups(kept, workspaces).map((group) => {
+                const key = `archived:${group.key}`, open = !collapsed.has(key);
+                return <li key={group.key}>
+                  <button type="button" className="cx-project" aria-expanded={open} onClick={() => toggle(key)}>
+                    {group.project ? <ChatGlyph name="folder" size={15} /> : <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />}
+                    <span className="cx-thread-title">{group.name}</span>
+                    <span className="cx-archived-count">{group.chats.length}</span>
+                  </button>
+                  {open ? <ul>{group.chats.map(archivedRow)}</ul> : null}
+                </li>;
+              })}
+              {gone.length ? <li>
+                <button type="button" className="cx-project cx-deleted-head" aria-expanded={!collapsed.has("archived:deleted")} onClick={() => toggle("archived:deleted")}>
+                  <Icon name="chevron" width="12" height="12" className={!collapsed.has("archived:deleted") ? "is-open" : undefined} />
+                  <span className="cx-thread-title">Recently deleted</span>
+                  <span className="cx-archived-count">{gone.length}</span>
+                </button>
+                {!collapsed.has("archived:deleted") ? <ul>{gone.map(archivedRow)}</ul> : null}
+              </li> : null}
+            </ul> : null}
+          </section>;
+        })()}
       </nav>
       {hover && !menu ? <FloatingLayer className="cx-hover-card" role="tooltip" style={{ top: hover.top, left: hover.left }}>
         <strong>{hover.chat.title}</strong>
@@ -545,6 +603,14 @@ export function ChatThreadList(props: ThreadListProps) {
             onChange={(event) => saveSettings({ ...settings, keepActiveOnTop: event.target.checked })} />
           <span>Keep running and waiting chats on top</span>
         </label>
+        {props.setArchiveDays ? <label className="cx-popover-row">
+          <span>Move archived chats to Recently deleted after</span>
+          <input type="number" min={0} max={365} key={props.archivedAll?.days ?? 5} defaultValue={props.archivedAll?.days ?? 5} aria-label="Days before archived chats are deleted"
+            onBlur={(event) => { const value = Math.round(Number(event.target.value)); if (value >= 0 && value <= 365 && value !== (props.archivedAll?.days ?? 5)) props.setArchiveDays?.(value); }}
+            onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} />
+          <span>days</span>
+        </label> : null}
+        {props.setArchiveDays ? <p className="cx-popover-hint">0 keeps them archived. Deleted chats can still be restored.</p> : null}
         <p className="cx-popover-hint">Drag chats to reorder them, or press Alt+Shift+↑/↓ on the open chat.</p>
         {manualOrder.length ? <button type="button" className="cx-popover-reset" onClick={() => saveOrder([])}>Reset to newest first</button> : null}
       </FloatingLayer> : null}

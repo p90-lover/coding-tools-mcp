@@ -6,6 +6,8 @@ const SPECS = Object.freeze({
   archive_task: { readOnly: false, description: "Stop and archive exactly one task; preserve recoverable history." },
   delete_task: { readOnly: false, description: "Confirm recoverable logical deletion of exactly one task." },
   restore_task: { readOnly: false, description: "Restore a hidden task without replaying its schedule." },
+  archived_chats: { readOnly: false, description: "List the archived and deleted chats of the given projects; archived chats past their days move to recoverable deletion first." },
+  archive_settings: { readOnly: false, description: "Read or set how many days an archived chat stays before recoverable deletion (0 keeps it)." },
   schedule_start: { readOnly: false, description: "Save and authorize one delayed start while the app remains running." },
   cancel_schedule: { readOnly: false, description: "Revoke the captured task's delayed start." },
   recover_schedule: { readOnly: false, description: "Explicitly cancel or set a new delay for a missed or uncertain start." },
