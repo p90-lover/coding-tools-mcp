@@ -2006,11 +2006,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const REVIEW_BUDGET_MS = 25_000;
   const REVIEWER_DOWN_MS = 10 * 60_000;
   const reviewerDown = new Map(); // model -> until
+  // A review no model answered is tried again on the next passes, REVIEW_RETRY_MS apart, before the
+  // request goes to the person: one 502 from the card's model put a routine command in front of
+  // them while the very next review answered.
+  const REVIEW_TRIES = 3;
+  const REVIEW_RETRY_MS = 4_000;
+  const reviewFailures = new Map(); // approval_id -> { tries, at }
   async function askApprover({ approver, mission, approval }) {
     const { baseUrl, key } = connection();
     const all = reviewerModels(approver, (await models()).models);
-    const up = all.filter(model => !(reviewerDown.get(model) > now()));
-    const candidates = up.length ? up : all;
+    // One that failed lately is tried last, not skipped: Codex's auto-review benched by a single
+    // timeout left only the card's own model for ten minutes.
+    const candidates = [...all.filter(model => !(reviewerDown.get(model) > now())), ...all.filter(model => reviewerDown.get(model) > now())];
     if (!candidates.length) throw new Error("CPA has no model for the command approver");
     const deadline = now() + REVIEW_BUDGET_MS;
     // The folder the agent works in. Without it the reviewer saw only the workspace's id, so it had
@@ -2077,6 +2084,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (["question", "plan"].includes(approval?.kind) || !(approval?.kind === "command" || approval?.source === "ao")) return true;
     const approver = cardApprover(mission, node);
     if (!approver || approver.settings?.auto_decide !== true) return true;
+    // "Approve for me" answers every tool call itself: the reviewer's answer, or after AUTO_ANSWER_MS
+    // the safety rules' (autoVerdict). A request it left at "ask" popped up as a question for those
+    // 20 s anyway, with a desktop notice, and the person raced the automatic answer.
+    if (answersForPerson(node)) return false;
     const advice = approverAdvice.get(approval.approval_id);
     // Not reviewed yet: the reviewer answers it within its budget, or passes it to the person then.
     return Boolean(advice) && advice.action === "ask";
@@ -2095,6 +2106,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // edit, which flooded the reviewer and the person, and the reviewer never saw the plan.
         const screened = !["question", "plan"].includes(approval?.kind) && (approval?.kind === "command" || approval?.source === "ao");
         if (!screened || !approval.approval_id || approverAdvice.has(approval.approval_id)) continue;
+        const failed = reviewFailures.get(approval.approval_id);
+        if (failed && now() - failed.at < REVIEW_RETRY_MS) continue;
         const request = describeRequest(approval);
         // The command advisor must not decide from a truncated command or permission scope.
         const incomplete = request.length >= 1500 || JSON.stringify(approval.permissions ?? {}).length > 800;
@@ -2112,9 +2125,22 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
               // (an MCP tool with a command) keeps going to the reviewer and the app's confirm.
               : approval.kind === "command" && !/^mcp__/.test(String(approval.tool ?? "")) && routineCommand(approval.command)
                 ? { action: "allow", reason: routineCommand(approval.command) }
-                // A reviewer that cannot answer leaves the request to the person, and its card says why.
-                : await askApprover({ approver, mission, approval }).catch((error) => ({ action: "ask",
-                  reason: `The command reviewer could not answer (${publicText(error?.message || error, 160)}); check it yourself` }));
+                // A reviewer that cannot answer is asked again (see REVIEW_TRIES); only then does the
+                // request go to the person, and its card says why.
+                : await askApprover({ approver, mission, approval }).catch((error) => ({ action: "failed", error }));
+        if (advice.action === "failed") {
+          const tries = (reviewFailures.get(approval.approval_id)?.tries ?? 0) + 1;
+          const why = publicText(advice.error?.message || advice.error, 160);
+          logger?.warn?.("ao.approval_review_failed", { tries, tool: String(approval.tool ?? approval.kind ?? "").slice(0, 80), reason: why });
+          if (tries < REVIEW_TRIES) {
+            reviewFailures.set(approval.approval_id, { tries, at: now() });
+            if (reviewFailures.size > 500) reviewFailures.delete(reviewFailures.keys().next().value);
+            note = `The reviewer could not answer yet (${why}); trying again`;
+            continue;
+          }
+          advice = { action: "ask", reason: `The command reviewer could not answer after ${tries} tries (${why}); check it yourself` };
+        }
+        reviewFailures.delete(approval.approval_id);
         const offered = approval.request?.availableDecisions;
         if (Array.isArray(offered) && advice.action !== "ask"
           && !offered.includes(advice.action === "allow" ? "accept" : "decline")) {
@@ -2207,7 +2233,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (!answersForPerson(node) || autoAnswered.has(id)) continue;
         const since = Date.parse(approval.since ?? "");
         const opened = Math.min(pendingSeen.get(id), Number.isFinite(since) ? since : Infinity);
-        if (at - opened < AUTO_ANSWER_MS) continue;
+        // A tool call the reviewer has already answered with "ask" no longer waits for the person
+        // (approvalNeedsPerson shows it to nobody), so its answer is not held back 20 s for them.
+        const reviewed = !["question", "plan"].includes(approval.kind) && approverAdvice.get(id)?.action === "ask";
+        if (!reviewed && at - opened < AUTO_ANSWER_MS) continue;
         const verdict = ["question", "plan"].includes(approval.kind) ? null : autoVerdict(mission, node, approval);
         if (verdict === "wait") continue;
         autoAnswered.add(id);

@@ -27,6 +27,16 @@ type Command = {
 const isAgentShell = (command: Command | undefined) => command?.source === "agent";
 /** Still running: an app command, an agent's command mid-call, or one it left running in the background. */
 const isLive = (command: Command | undefined) => command?.status === "running" || command?.status === "background";
+// Commands that start something which keeps serving: dev servers, file servers, watchers.
+const SERVER_COMMAND = /\b(?:(?:npm|pnpm|yarn|bun)(?:\.cmd)?\s+(?:run\s+)?(?:dev|start|serve|preview|watch)\b|npx\s+(?:vite|next|serve|http-server|live-server)\b|vite(?:\s+(?:dev|serve|preview))?(?:\s|$)|next\s+(?:dev|start)\b|nodemon\b|webpack(?:-dev-server|\s+serve)\b|uvicorn\b|gunicorn\b|flask\s+run\b|manage\.py\s+runserver\b|http\.server\b|php\s+-S\b|rails\s+s(?:erver)?\b|hugo\s+server\b|jekyll\s+serve\b|cargo\s+watch\b|dotnet\s+watch\b|docker(?:-|\s+)compose\s+up\b)/i;
+/**
+ * Whether a command is a server process: the agent left it running in the background, or it starts
+ * a dev or file server. Only those open the side panel by themselves; the agent's one-off commands
+ * (a status poll, a build, a test run) filled the screen with the Terminal while it worked.
+ */
+export function isServerProcess(command: Pick<Command, "cmd" | "status" | "background">): boolean {
+  return command.status === "background" || command.background === true || SERVER_COMMAND.test(String(command.cmd ?? ""));
+}
 
 const TAB_TITLES: Record<WorkbenchTab, string> = { overview: "Overview", preview: "Preview", terminal: "Terminal", changes: "Changes", files: "Files", new: "New tab" };
 const PANEL_WIDTH_KEY = "coding-tools:ao:workbench-width";
@@ -64,8 +74,8 @@ export function startsNewChat(sessionIds: string[], polled: Set<string>): boolea
 }
 
 /**
- * Opens the side panel the first time a chat agent opens a page in its preview or starts a command,
- * as Codex shows the browser or terminal when its agent uses one. A command counts whether it went
+ * Opens the side panel the first time a chat agent opens a page in its preview or starts a server
+ * process (isServerProcess), as Codex shows the browser or terminal when its agent uses one. A command counts whether it went
  * through the app's exec_command or the agent's own shell tool (source "agent"). Each page and command opens it
  * once; closing the panel is respected until the agent does something new (see autoOpenTab).
  */
@@ -101,7 +111,8 @@ export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen
         const pages = Object.entries((previews.previews as Record<string, PreviewState> | undefined) ?? {})
           .filter(([, state]) => state.url && state.url !== "about:blank").map(([id, state]) => `page:${id}:${new URL(state.url).origin}`);
         const commands = ((processes.sessions as { commands: Command[] }[] | undefined) ?? [])
-          .flatMap((session) => session.commands).filter((command) => isLive(command) && !command.user).map((command) => `cmd:${command.id}`);
+          .flatMap((session) => session.commands).filter((command) => isLive(command) && !command.user && isServerProcess(command))
+          .map((command) => `cmd:${command.id}`);
         const fresh = [...pages, ...commands].filter((item) => !seen.current.has(item));
         for (const item of fresh) seen.current.add(item);
         // What was already there when the chat opened does not open the panel by itself.

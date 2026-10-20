@@ -239,6 +239,14 @@ test("an agent's new page brings the Preview pane forward, even over the Termina
   assert.equal(workbench.autoOpenTab(["cmd:c1"], false), "terminal", "a command opens a closed panel on the Terminal");
   assert.equal(workbench.autoOpenTab(["cmd:c1"], true), null, "but never takes the place of what the user looks at");
   assert.equal(workbench.autoOpenTab([], false), null);
+  // Only a server process opens it: the agent's one-off commands (a status poll, a build, a test)
+  // put the Terminal over the chat while it worked.
+  const server = (cmd, extra = {}) => workbench.isServerProcess({ cmd, status: "running", ...extra });
+  for (const cmd of ["npm run dev", "pnpm dev", "yarn start", "npx vite", "next dev -p 3000", "python -m http.server 8000",
+    "uvicorn app:app --reload", "flask run", "python manage.py runserver", "docker compose up"]) assert.equal(server(cmd), true, cmd);
+  for (const cmd of ['$body = \'{}\'; Invoke-RestMethod -Method POST -Uri "http://127.0.0.1:8000/api/actions"', "npm test", "npm run build",
+    "cargo test", "git status", "dir /b", "python tools/poll.py"]) assert.equal(server(cmd), false, cmd);
+  assert.equal(server("python tools/poll.py", { status: "background" }), true, "anything the agent left running in the background");
   const polled = new Set(["ao-1"]);
   assert.equal(workbench.startsNewChat(["ao-2"], polled), true, "another chat starts over");
   assert.equal(workbench.startsNewChat(["ao-1", "ao-3"], polled), false, "an agent joining the same chat does not");

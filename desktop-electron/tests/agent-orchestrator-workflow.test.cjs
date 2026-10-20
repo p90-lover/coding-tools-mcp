@@ -2931,6 +2931,55 @@ test("the reviewer is told the agent's workspace folder, so a path inside it is 
   assert.deepEqual(unknown.resolved, ["yes"]);
 });
 
+test("Approve for me asks a reviewer that failed again before involving the person, and never pops a tool call up", async () => {
+  // Seen live: one 502 from the card's model ("Command approver ... returned HTTP 502; check it
+  // yourself") popped a routine command up with a desktop notice; codex-auto-review had been
+  // benched by a single timeout and was not even tried.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
+  const request = { approval_id: "poll", source: "ao", kind: "command", tool: "PowerShell", command: "python tools/poll.py", summary: "poll", decisions };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+    { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+  let clock = 1_000_000;
+  let failing = new Set(["codex-auto-review", "test-model"]);
+  const asked = [], resolved = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    now: () => clock,
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
+      const model = JSON.parse(init.body).model;
+      asked.push(model);
+      if (failing.has(model)) return { ok: false, status: 502, json: async () => ({}) };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"allow","reason":"reads a status file"}' } }] }) };
+    },
+    requestHeadless: async (endpoint) => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: resolved.length ? [] : [request] }),
+      resolveApproval: async (session, requestId, decisionId) => { resolved.push(decisionId); return { ok: true }; },
+    },
+    confirm: async () => true,
+  });
+  const settle = async (ms) => { for (let tries = 0; tries < ms / 10; tries++) await new Promise(resolve => setTimeout(resolve, 10)); };
+  await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  for (let tries = 0; tries < 100 && asked.length < 2; tries++) await settle(10);
+  await settle(100);
+  assert.deepEqual(resolved, [], "the first pass failed: nothing answered yet");
+  const waiting = JSON.stringify(await workflow.call("run_status", { workspaceId: "ws", runId: "run" }));
+  assert.doesNotMatch(waiting, /check it yourself/, "a failed first review is not handed to the person");
+  // CPA recovers; past the retry gap the next pass asks again, Codex's reviewer first despite its failure.
+  failing = new Set();
+  asked.length = 0;
+  clock += 5_000;
+  for (let tries = 0; tries < 300 && !resolved.length; tries++) await settle(10);
+  assert.deepEqual(resolved, ["yes"], "answered by the reviewer, never by the person");
+  assert.equal(asked[0], "codex-auto-review", "a reviewer that failed lately is still tried, first in its order");
+  mission.nodes[0].state = "finished";
+});
+
 test("Approve for me's 20 s answer never allows what the safety rules or the reviewer would not", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
