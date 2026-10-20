@@ -3409,6 +3409,27 @@ test("a message sent to a hung turn stops it and goes as the next turn instead o
   assert.equal(interrupted.length, 1);
 });
 
+test("a turn whose reasoning stream stopped mid-thought is restarted by a message, not waited on as a running tool", async () => {
+  // Seen live: a DeepSeek turn's "Deep diving" reasoning ended mid-sentence and showed nothing for
+  // 23 minutes; its reasoning row stayed "running", so every steer went to the hung turn.
+  const route = { harness_id: "ao:claude-code", model: "cline-pass/deepseek-v4.1-flash-1017" };
+  const task = { id: "task-1", title: "Play Ero", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  const interrupted = [], steered = [];
+  const timeline = [{ kind: "tool", status: "completed" }, { kind: "reasoning", status: "running", text: "Actually wait. Before making" }];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 23 * 60_000,
+    aoHarness: {
+      observe: async () => ({ turnId: "t1", turnState: interrupted.length ? "interrupted" : "running", status: interrupted.length ? "ready" : "working", lastActivityAt: 1_000_000, timeline, approvals: [] }),
+      steer: async (id, text) => { steered.push([id, text]); return { steered: true }; },
+      interrupt: async id => { interrupted.push(id); },
+    } });
+  const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "the war map is clan_war_map" });
+  assert.equal(result.restarted, true, "a stalled reasoning stream is a hang");
+  assert.deepEqual(interrupted, ["sess-1"]);
+  assert.equal(steered.length, 0, "nothing is handed to a turn that cannot read it");
+});
+
 test("a turn that has only been retrying its model request for minutes is restarted by a message, not given 20 minutes as a running tool", async () => {
   const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
   const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };

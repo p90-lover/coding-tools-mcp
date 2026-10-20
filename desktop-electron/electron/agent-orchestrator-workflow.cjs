@@ -3018,7 +3018,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // agent reads the steer when that call returns.
     const idle = Number.isFinite(waiting?.lastActivityAt) ? now() - waiting.lastActivityAt : 0;
     // A notice (a provider retry's "Retrying Claude, attempt 7 of 10" stays "running") is no tool.
-    const toolRunning = Array.isArray(waiting?.timeline) && waiting.timeline.some(item => item?.status === "running" && !["message", "system"].includes(item.kind));
+    // Nor is the model's reasoning: a stream that stopped mid-thought stays "running" too, so a
+    // DeepSeek turn silent for 23 minutes counted as a long tool call, every steer was handed to
+    // the hung turn (blocking the composer for minutes) and never read.
+    const toolRunning = Array.isArray(waiting?.timeline) && waiting.timeline.some(item => item?.status === "running"
+      && !["message", "system", "reasoning", "thinking"].includes(item.kind));
     if (!toolRunning && idle > STEER_STALL_MS) {
       await stopExternalTurn(card.receipt.thread_id);
       logger?.info?.("ao.steer_restarted_stalled_turn", { idleSeconds: Math.round(idle / 1000) });
