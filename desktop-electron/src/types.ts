@@ -2,7 +2,7 @@ export type Language = "en" | "zh-CN" | "zh-TW" | "ja";
 export type RefreshPart = "ui" | "bridge" | "mcp" | "agent-orchestrator" | "cpa" | "headless" | "backend" | "all" | "app";
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "gpt-browser" | "chatgpt-desktop" | "email" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "agent-orchestrator-teams" | "subagents" | "antigravity-cli" | "providers" | "integrations" | "cpa" | "paseo" | "anneal" | "network" | "proxy-gateway" | "activity" | "settings";
+export type Surface = "browser" | "gpt-browser" | "chatgpt-desktop" | "email" | "register" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "agent-orchestrator-teams" | "subagents" | "antigravity-cli" | "providers" | "integrations" | "cpa" | "paseo" | "anneal" | "network" | "proxy-gateway" | "activity" | "settings";
 
 export type ProviderAuth = "oauth" | "api_key" | "browser_session" | "local_proxy";
 export type ProviderAccountStatus = "pending" | "connected" | "expired" | "error" | "disabled";
@@ -632,6 +632,16 @@ export interface ChatGptDesktopAccount {
   active: boolean;
 }
 
+export interface RegisterStatus {
+  projectRoot: string;
+  origin: string;
+  ready: boolean;
+  owned: boolean;
+  starting: boolean;
+  error: string | null;
+  pid?: number | null;
+}
+
 export interface GptBrowserAccount {
   id: string;
   label: string;
@@ -745,6 +755,14 @@ export type ProjectGit = {
 
 export interface LauncherApi {
   snapshot(): Promise<LauncherSnapshot>;
+  registerStatus(): Promise<RegisterStatus>;
+  configureRegister(projectRoot: string): Promise<RegisterStatus>;
+  startRegister(): Promise<RegisterStatus>;
+  stopRegister(): Promise<RegisterStatus>;
+  reloadRegister(): Promise<RegisterStatus>;
+  setRegisterSurfaceActive(active: boolean): Promise<RegisterStatus>;
+  setRegisterBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<boolean>;
+  onRegisterChanged(listener: (status: RegisterStatus) => void): () => void;
   gptBrowserStatus(): Promise<GptBrowserStatus>;
   addGptBrowserAccount(): Promise<GptBrowserStatus>;
   switchGptBrowserAccount(id: string): Promise<GptBrowserStatus>;

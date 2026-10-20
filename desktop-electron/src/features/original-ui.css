@@ -437,6 +437,13 @@
   color: #991b1b;
 }
 
+.register-surface { height: 100%; min-height: 0; }
+.register-surface .original-ui-hostbar { flex-wrap: wrap; }
+.register-surface .original-ui-hostbar button { min-height: 40px; }
+.register-surface .original-ui-hostbar button:active:not(:disabled) { transform: scale(0.96); }
+.register-surface .original-ui-hostbar button:focus-visible { outline: 2px solid #1d4ed8; outline-offset: 2px; }
+.register-project-path { overflow-wrap: anywhere; }
+
 .cpa-usage-note.is-quiet {
   color: #6b7280;
   font-size: 11px;
