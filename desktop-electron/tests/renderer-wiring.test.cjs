@@ -151,7 +151,7 @@ test("Register native page detaches for launcher reload and crash without stoppi
   const file = ts.createSourceFile("main.cjs", electronMain, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
   const functions = file.statements.filter(ts.isFunctionDeclaration);
   const sourceOf = (name) => functions.find((node) => node.name?.text === name).getText(file);
-  const callbacks = new Map(), calls = [];
+  const callbacks = new Map(), calls = [], recovered = [];
   const collect = (node) => {
     if (ts.isCallExpression(node) && node.expression.getText(file) === "window.webContents.on"
       && ["did-start-navigation", "render-process-gone"].includes(node.arguments[0]?.text)) {
@@ -164,6 +164,8 @@ test("Register native page detaches for launcher reload and crash without stoppi
   const scope = { window, mainWindow: window, URL, isDev: true, process: { env: { VITE_DEV_SERVER_URL: "http://localhost:4318/" } },
     registerHost: { setSurfaceActive: (value) => calls.push(value), shutdown: () => assert.fail("Renderer reload must not stop Register") },
     logger: { warn() {} }, quitting: false, rendererCrashes: [], setTimeout() {},
+    // The crash path and renderer-watchdog.cjs share one recovery (reload, or restart after three).
+    recoverRenderer: (reason) => recovered.push(reason),
   };
   const load = vm.runInNewContext("(" + sourceOf("loadRenderer") + ")", scope);
   await load(window);
@@ -189,6 +191,9 @@ test("Register native page detaches for launcher reload and crash without stoppi
   const crashed = vm.runInNewContext("(" + callbacks.get("render-process-gone") + ")", scope);
   crashed({}, { reason: "crashed", exitCode: 1 });
   assert.deepEqual(calls, [false], "a crashed React renderer cannot run its own detach cleanup");
+  assert.deepEqual(recovered, ["gone"], "and the page is recovered");
+  crashed({}, { reason: "clean-exit", exitCode: 0 });
+  assert.deepEqual(recovered, ["gone"], "a renderer that closed cleanly is not reloaded");
 });
 
 test("In-Process Apps shows only CPA/AO and refuses a stale retired selection", async () => {

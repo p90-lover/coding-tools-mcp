@@ -1941,33 +1941,50 @@ function pruneBrowserDiagnostics(root: string): void {
   }
 }
 
-class ChatGptBrowserDiagnostics {
+/** A checkpoint name or error that means a turn's trail is worth keeping on disk. */
+export function chatGptDiagnosticWarrantsPersistence(checkpoint: string, error?: unknown): boolean {
+  return error !== undefined || /failed|stalled|rebound|timeout|error|abort|cancel/i.test(checkpoint);
+}
+
+const CHATGPT_BROWSER_DIAGNOSTIC_BUFFER_LIMIT = 64;
+
+export class ChatGptBrowserDiagnostics {
   private readonly directory: string;
   private sequence = 0;
   private initialized = false;
+  // "on-failure" keeps a healthy turn's checkpoints in memory: they only matter once the turn
+  // fails, stalls or rebinds, and writing ~20 files per turn was most of the browser's disk churn.
+  private persisting: boolean;
+  private readonly buffered: Array<{ stem: string; json: string }> = [];
 
   constructor(
     private readonly traceId: string,
     private readonly root: string,
     private readonly appName: string,
+    persistence: "always" | "on-failure" = "always",
   ) {
+    this.persisting = persistence === "always";
     if (!/^[A-Za-z0-9_-]{6,128}$/.test(traceId)) {
       throw new Error("ChatGPT browser diagnostic trace id is invalid");
     }
     this.directory = join(this.root, `${traceId}-${randomUUID().slice(0, 8)}`);
   }
 
+  private ensureDirectory(): void {
+    if (this.initialized) return;
+    privateDirectory(this.root);
+    privateDirectory(this.directory);
+    pruneBrowserDiagnostics(this.root);
+    this.initialized = true;
+  }
+
   async capture(page: Page, checkpoint: string, error?: unknown): Promise<void> {
     try {
-      if (!this.initialized) {
-        privateDirectory(this.root);
-        privateDirectory(this.directory);
-        pruneBrowserDiagnostics(this.root);
-        this.initialized = true;
-      }
       const sequence = String(++this.sequence).padStart(2, "0");
       const stem = `${sequence}-${browserDiagnosticCheckpoint(checkpoint)}`;
       const includeScreenshot = process.env.CODEX_CHATGPT_WEB_BROWSER_DIAGNOSTICS === "1";
+      // Screenshot capture is an explicit debugging mode: keep everything it records.
+      if (includeScreenshot || chatGptDiagnosticWarrantsPersistence(checkpoint, error)) this.persisting = true;
       const [screenshotResult, stateResult] = await Promise.allSettled([
         includeScreenshot
           ? page.screenshot({ animations: "disabled", caret: "hide", timeout: 5_000, type: "png" })
@@ -2017,7 +2034,9 @@ class ChatGptBrowserDiagnostics {
             ))
           );
           const composers = [...document.querySelectorAll(composerSelector)].filter(rendered);
-          const assistantTurns = [...document.querySelectorAll(assistantTurnSelector)].filter(rendered);
+          // Only the newest turns matter for a stuck turn; serializing every turn's HTML on a
+          // long chat cost seconds per checkpoint and starved the page's own observation.
+          const assistantTurns = [...document.querySelectorAll(assistantTurnSelector)].filter(rendered).slice(-3);
           const selectedConnectors = composers.flatMap(composer => (
             [...composer.querySelectorAll(connectorPillSelector)]
           ))
@@ -2117,6 +2136,7 @@ class ChatGptBrowserDiagnostics {
       ]);
       const capturedAt = new Date().toISOString();
       if (screenshotResult.status === "fulfilled" && screenshotResult.value) {
+        this.ensureDirectory();
         atomicWriteFile(join(this.directory, `${stem}.png`), screenshotResult.value);
       }
       const captureErrors = Object.fromEntries([
@@ -2133,7 +2153,7 @@ class ChatGptBrowserDiagnostics {
           ),
         ]] : []),
       ]);
-      atomicWriteFile(join(this.directory, `${stem}.json`), `${JSON.stringify({
+      const json = `${JSON.stringify({
         version: 2,
         capturedAt,
         traceId: this.traceId,
@@ -2145,13 +2165,24 @@ class ChatGptBrowserDiagnostics {
           ? { state: sanitizeChatGptBrowserDiagnosticState(stateResult.value) }
           : {}),
         ...(Object.keys(captureErrors).length > 0 ? { captureErrors } : {}),
-      }, null, 2)}\n`);
+      }, null, 2)}\n`;
       if (Object.keys(captureErrors).length > 0) {
         console.warn(
           `[chatgpt-web] browser diagnostic partial capture trace=${this.traceId}`
           + ` checkpoint=${stem} failures=${Object.keys(captureErrors).join(",")}`,
         );
       }
+      if (!this.persisting) {
+        this.buffered.push({ stem, json });
+        if (this.buffered.length > CHATGPT_BROWSER_DIAGNOSTIC_BUFFER_LIMIT) this.buffered.shift();
+        return;
+      }
+      this.ensureDirectory();
+      // The first failure writes the whole trail that led to it, in order.
+      for (const earlier of this.buffered.splice(0)) {
+        atomicWriteFile(join(this.directory, `${earlier.stem}.json`), earlier.json);
+      }
+      atomicWriteFile(join(this.directory, `${stem}.json`), json);
       console.info(`[chatgpt-web] browser diagnostic trace=${this.traceId} checkpoint=${stem} path=${this.directory}`);
     } catch (captureError) {
       console.warn(
@@ -4594,6 +4625,7 @@ export class ChatGptBrowserWorker {
       turn.traceId,
       this.config.browserDiagnosticsPath ?? join(getConfigDir(), "diagnostics", "browser-turns"),
       this.config.appName,
+      "on-failure",
     );
     let turnConnection: Browser | undefined;
     let managedPage: Page | undefined;
