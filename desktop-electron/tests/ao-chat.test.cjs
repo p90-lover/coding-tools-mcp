@@ -1124,6 +1124,17 @@ test("a turn's activity drops answered approvals, keeps every tool call, and fol
   assert.equal(chat.activitySummary([ls, { ...ls, id: "d" }]), "Ran 2 commands");
 });
 
+test("a tool title with a path reads by its file name in the folded line, never cut mid-word", () => {
+  // Seen live on a team card: "Read C:/Users/simon/.ao/coding-tools/ski" (a 40-character cut).
+  assert.equal(chat.shortToolTitle("Read C:/Users/simon/.ao/coding-tools/skills/using-ao/commands/report.md"), "Read report.md");
+  assert.equal(chat.shortToolTitle("Read C:\\Users\\simon\\.ao\\coding-tools\\skills"), "Read skills");
+  assert.equal(chat.shortToolTitle("mcp__coding-tools__read_output"), "read_output");
+  assert.equal(chat.shortToolTitle("Search for every place the context meter reads its session usage"),
+    "Search for every place the context meter…");
+  const read = (id, path) => ({ id, kind: "tool", status: "completed", text: `Read ${path}` });
+  assert.equal(chat.activitySummary([read("a", "C:/x/skills/a.md"), read("b", "C:/y/b.md")]), "Read a.md, Read b.md");
+});
+
 test("an answered request is no row of its own: its answer shows on the call it let run", () => {
   const tidy = chat.tidyTimeline([
     { id: "1", kind: "command", status: "completed", text: "python diag.py" },

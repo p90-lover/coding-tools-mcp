@@ -198,13 +198,28 @@ export function groupTimeline(items: ChatLiveItem[]): ChatLiveSegment[] {
 }
 
 /** "Ran 2 commands, read_output ×7, search_text · 3 thoughts": what a folded group did. */
+/**
+ * A tool call's title as one short phrase: a path argument reads by its last part, as Codex shows it
+ * ("Read C:/Users/…/skills/using-ao/commands/report.md" → "Read report.md"), and a title still too
+ * long ends in "…". Cut at a fixed length, the path read "…/coding-tools/ski" in the folded line.
+ */
+export function shortToolTitle(text: string): string {
+  const plain = text.replace(/^mcp__[\w-]+__/, "").replace(/\s+/g, " ").trim();
+  const named = plain.replace(/(?:[A-Za-z]:)?[\\/][^\s"'`]*[\\/]([^\s"'`\\/]+)/g, "$1");
+  if (named.length <= 40) return named;
+  // Cut at the last word that fits, so a word is never left half-shown.
+  const head = named.slice(0, 40);
+  const space = named[40] === " " ? 40 : head.lastIndexOf(" ");
+  return `${(space >= 20 ? head.slice(0, space) : head.slice(0, 39)).trimEnd()}…`;
+}
+
 export function activitySummary(items: ChatLiveItem[]): string {
   const commands = items.filter((item) => item.kind === "command").length;
   const thoughts = items.filter((item) => item.kind === "reasoning").length;
   const tools = new Map<string, number>();
   for (const item of items) {
     if (item.kind !== "tool") continue;
-    const name = item.text.replace(/^mcp__[\w-]+__/, "").replace(/\s+/g, " ").trim().slice(0, 40) || item.label || "tool";
+    const name = shortToolTitle(item.text) || item.label || "tool";
     tools.set(name, (tools.get(name) ?? 0) + 1);
   }
   const named = [...tools].sort((a, b) => b[1] - a[1]);
