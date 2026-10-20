@@ -554,6 +554,26 @@ test("a turn that only retries its model request shows no new sign of life, so a
   assert.equal((await upstream.observe("s")).lastActivityAt, Date.parse(at(1.5)), "the last real step, not the retry notices after it");
 });
 
+test("observe says when the tool call still running began, so a steer can stop a long one", async () => {
+  const at = minutes => new Date(Date.parse("2026-10-20T04:00:00Z") + minutes * 60_000).toISOString();
+  const conversation = (activities) => observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {
+      turns: [{ id: "t", state: "running", createdAt: at(0), startedAt: at(0) }], messages: [], activities,
+    } : { session: { id: "s", mode: "chat", status: "working" } },
+  });
+  const running = await conversation([
+    { id: "a1", turnId: "t", sequence: 2, activityKind: "mcp_tool", status: "completed", summary: "Read", createdAt: at(1), updatedAt: at(1), detail: {} },
+    { id: "a2", turnId: "t", sequence: 3, activityKind: "mcp_tool", status: "running", summary: "Bash", createdAt: at(2), updatedAt: at(4),
+      detail: { input: { command: "npm test" } } },
+    { id: "r1", turnId: "t", sequence: 4, activityKind: "system", status: "running", summary: "Retrying Claude", createdAt: at(1.5), detail: {} },
+  ]).observe("s");
+  assert.equal(running.toolSince, Date.parse(at(2)), "the running command's start; a finished call and a notice are not tool calls in flight");
+  const idle = await conversation([
+    { id: "a1", turnId: "t", sequence: 2, activityKind: "mcp_tool", status: "completed", summary: "Read", createdAt: at(1), updatedAt: at(1), detail: {} },
+  ]).observe("s");
+  assert.equal(idle.toolSince, undefined, "no tool call in flight");
+});
+
 test("an idle agent is found by its last turn, released with exit-agent, and resumed when its chat continues", async () => {
   const vm = require("node:vm");
   const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");

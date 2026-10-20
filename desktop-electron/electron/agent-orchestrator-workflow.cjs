@@ -2932,6 +2932,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    */
   const STEER_STALL_MS = 3 * 60_000;
   const STEER_STALL_TOOL_MS = 20 * 60_000;
+  // A tool call running this long when a steer arrives is stopped so the agent reads it now.
+  const STEER_TOOL_INTERRUPT_MS = 30_000;
   // "Approve for me" answers a request within 20 s (its reviewer up to 25 s): a steer waits that long.
   const STEER_ANSWER_WAIT_MS = 30_000;
   const STEER_ANSWER_POLL_MS = 750;
@@ -3008,6 +3010,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       logger?.info?.("ao.steer_restarted_stalled_turn", { idleSeconds: Math.round(idle / 1000) });
       return { ok: true, steered: false, waiting: true, restarted: true,
         reason: `The agent had shown nothing for ${Math.round(idle / 60_000)} minutes, so its turn was stopped; your message is sent as the next turn` };
+    }
+    // The model reads a steer only when it next calls the model, after the tool call in flight
+    // returns: a steer typed during a long command (a verification run, a build) waited for it, and
+    // the agent went on with what it had just been told to drop. A call running longer than
+    // STEER_TOOL_INTERRUPT_MS is stopped instead, and the message goes as the next turn of the same
+    // session (continuationCard), so the agent keeps everything it read and ran.
+    const toolFor = toolRunning && Number.isFinite(waiting?.toolSince) ? now() - waiting.toolSince : 0;
+    if (toolFor >= STEER_TOOL_INTERRUPT_MS) {
+      await stopExternalTurn(card.receipt.thread_id);
+      logger?.info?.("ao.steer_interrupted_tool", { runningSeconds: Math.round(toolFor / 1000) });
+      return { ok: true, steered: false, waiting: true, restarted: true, interrupted: true,
+        reason: "A command was still running, so it was stopped; your message goes to the same agent as its next turn" };
     }
     // A chat's session is created in the background (spawn's async): its card runs, with the session,
     // while the agent is still starting, and AO has no controller to steer yet. The message waits

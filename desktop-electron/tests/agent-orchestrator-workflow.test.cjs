@@ -3287,6 +3287,36 @@ test("a turn that has only been retrying its model request for minutes is restar
   assert.equal(steered.length, 0);
 });
 
+test("a steer during a long command stops the command so the same agent reads it next, instead of waiting behind it", async () => {
+  // Seen live on DeepSeek: "verify first", then a steer to change course; the model reads a steer
+  // only when the tool call in flight returns, so the verification ran on as if nothing was said.
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  const steered = [], interrupted = [];
+  const clock = 1_000_000;
+  let toolSince = clock - 45_000;
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => clock,
+    aoHarness: {
+      observe: async () => ({ turnId: "t1", turnState: interrupted.length ? "interrupted" : "running", status: interrupted.length ? "ready" : "working",
+        lastActivityAt: clock - 5_000, toolSince, timeline: [{ kind: "command", status: "running" }], approvals: [] }),
+      steer: async (id, text) => { steered.push([id, text]); return { steered: true }; },
+      interrupt: async id => { interrupted.push(id); },
+    } });
+  const long = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "skip the verification, just fix it" });
+  assert.equal(long.steered, false);
+  assert.equal(long.interrupted, true, "the chat says a command was stopped");
+  assert.equal(long.restarted, true, "the message is queued as the next turn of the same session");
+  assert.deepEqual(interrupted, ["sess-1"], "the command's turn is stopped");
+  assert.equal(steered.length, 0, "nothing is steered behind a command the agent would finish first");
+  interrupted.length = 0;
+  toolSince = clock - 10_000;
+  const quick = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "and then lint" });
+  assert.equal(quick.steered, true, "a command that only just started is left to finish; the steer is read right after");
+  assert.equal(interrupted.length, 0);
+});
+
 test("a run waiting on input reports it steadily, not on and off with each observation tick", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
   const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) },

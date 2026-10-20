@@ -984,9 +984,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           .map(item => item.updatedAt || item.createdAt),
         ...(Array.isArray(conversation?.messages) ? conversation.messages : []).filter(item => item.turnId === turn?.id).map(item => item.updatedAt || item.createdAt)]
         .map(value => Date.parse(value ?? "")).filter(Number.isFinite);
+      // When the oldest tool call still running began: the model reads a steer only once that call
+      // returns, so chat_steer stops one that has run long (a verification run) instead of waiting.
+      const toolStarts = (Array.isArray(conversation?.activities) ? conversation.activities : [])
+        .filter(item => item.turnId === turn?.id && item.status === "running" && ["command", "file_change", "mcp_tool"].includes(item.activityKind))
+        .map(item => Date.parse(item.createdAt ?? "")).filter(Number.isFinite);
       return {
         status, turnId: turn?.id, turnState: turn?.state, error: turn?.errorMessage,
         ...(stamps.length ? { lastActivityAt: Math.max(...stamps) } : {}),
+        ...(toolStarts.length ? { toolSince: Math.min(...toolStarts) } : {}),
         needsInput: status === "needs_input", exited: ["exited", "terminated"].includes(status),
         answer: answer.slice(0, 12000), liveOutput: utf8Prefix(liveOutput, 4096), timeline,
         // A question the agent asked waits like an approval: the chat shows it and the card needs you.
