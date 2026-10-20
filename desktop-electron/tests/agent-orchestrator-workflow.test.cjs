@@ -4913,7 +4913,7 @@ test("parallel tool requests are reviewed at the same time, and a repeat of one 
   const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
     { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
   const resolved = [];
-  let inFlight = 0, most = 0, reviews = 0;
+  let inFlight = 0, most = 0, reviews = 0, lookups = 0;
   const workflow = createAgentOrchestratorWorkflow({
     findCodexExecutable: () => process.execPath,
     resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
@@ -4935,6 +4935,7 @@ test("parallel tool requests are reviewed at the same time, and a repeat of one 
         pending = pending.filter(approval => approval.approval_id !== requestId);
         return { ok: true };
       },
+      sessionWorkspace: async () => { lookups++; return { root: "G:\\Projects\\app" }; },
     },
     confirm: async () => true,
   });
@@ -4944,6 +4945,7 @@ test("parallel tool requests are reviewed at the same time, and a repeat of one 
     assert.deepEqual(resolved.map(([id]) => id).sort(), ["a", "b", "c"]);
     assert.ok(most >= 2, `reviews overlapped (at most ${most} at once)`);
     assert.equal(reviews, 3);
+    assert.equal(lookups, 1, "one lookup of where the agent works served all three reviews");
     // The agent runs the first command again: same request, same folder, same rules.
     pending = [ask("a2", "python tools/a.py")];
     for (let tries = 0; tries < 300 && resolved.length < 4; tries++) await new Promise(resolve => setTimeout(resolve, 10));

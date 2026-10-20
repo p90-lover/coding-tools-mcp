@@ -2109,6 +2109,23 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // any script it runs, and the reviewer answers at temperature 0. "ask" is never reused.
   const REVIEW_REUSE_MS = 10 * 60_000;
   const reviewedPrompts = new Map(); // sha256(models + prompt) -> { action, reason, at }
+  // Where a session's agent works, for its reviews: two to four AO requests each time (the session,
+  // its workspace, the project's folder mode), seconds on a busy AO before the review even started,
+  // and once per request when an agent ran calls in parallel. One lookup is shared for a minute per
+  // session; a failed or empty one is not kept.
+  const SESSION_FOLDER_TTL_MS = 60_000;
+  const sessionFolders = new Map(); // JSON [thread, workspace] -> { at, promise }
+  function sessionFolder(threadId, workspaceId) {
+    const key = JSON.stringify([threadId ?? null, workspaceId ?? null]);
+    const hit = sessionFolders.get(key);
+    if (hit && now() - hit.at < SESSION_FOLDER_TTL_MS) return hit.promise;
+    const entry = { at: now(), promise: Promise.resolve().then(() => harnessService().sessionWorkspace?.(threadId, workspaceId)).catch(() => null) };
+    sessionFolders.delete(key);
+    sessionFolders.set(key, entry);
+    if (sessionFolders.size > 200) sessionFolders.delete(sessionFolders.keys().next().value);
+    void entry.promise.then((where) => { if (!where?.root && sessionFolders.get(key) === entry) sessionFolders.delete(key); });
+    return entry.promise;
+  }
   async function askApprover({ approver, mission, approval }) {
     const { baseUrl, key } = connection();
     const all = reviewerModels(approver, (await models()).models);
@@ -2120,8 +2137,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // The folder the agent works in. Without it the reviewer saw only the workspace's id, so it had
     // to guess whether an absolute path was "outside the workspace": the same `dir` of a project
     // subfolder was denied, then allowed when retried.
-    const where = await Promise.resolve().then(() => harnessService().sessionWorkspace?.(approval.thread_id, mission.workspace_id))
-      .catch(() => null);
+    const where = await sessionFolder(approval.thread_id, mission.workspace_id);
     const folder = typeof where?.projectFolder === "string" ? where.projectFolder : typeof where?.root === "string" ? where.root : null;
     const scripts = reviewScriptExcerpts(approval, folder);
     const prompt = [
