@@ -179,7 +179,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * and `blockedPorts()` the app's own loopback service ports.
  */
 function createChatPreviews({ createView, attachView, detachView, contentSize = () => [VIEWPORT.width, VIEWPORT.height],
-  blockedPorts = () => [], logger = console, now = Date.now } = {}) {
+  blockedPorts = () => [], logger = console, now = Date.now, openContextMenu = null } = {}) {
   if (typeof createView !== "function") throw new Error("createView is required");
   const previews = new Map(); // key -> preview
   let shown = null; // { key, bounds }
@@ -215,11 +215,17 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
     const visible = shown?.key === preview.key;
     // A clipped view can have a 0x0 native surface even when Blink emulates a viewport.
     // Keep background views at real bounds in their own invisible host.
-    attachView?.(preview.view, visible);
+    const moved = attachView?.(preview.view, visible) === true;
     preview.view.setBounds(visible ? shown.bounds : { x: 0, y: 0, ...VIEWPORT });
     const awake = visible || now() - preview.usedAt < IDLE_SLEEP_MS;
     try { contents.setBackgroundThrottling?.(!awake); } catch { /* destroyed */ }
+    // Moved into the other window while already awake (the agent used it within IDLE_SLEEP_MS),
+    // setVisible(true) changed nothing, so the page never drew a frame in its new window: the
+    // pane stayed white while the page underneath still took clicks. A hide-and-show plus an
+    // invalidate makes it paint there; a shown page is invalidated on every placement too.
+    if (moved && awake) preview.view.setVisible?.(false);
     preview.view.setVisible?.(awake);
+    if (awake && (moved || visible)) { try { contents.invalidate?.(); } catch { /* destroyed */ } }
     clearTimeout(preview.sleepTimer);
     preview.sleepTimer = null;
     if (awake && !visible) {
@@ -302,6 +308,18 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
     });
     contents.on("render-process-gone", (_event, details) => {
       remember(preview, preview.console, MAX_CONSOLE, { level: "error", text: `The page crashed (${details?.reason ?? "unknown"})`, source: "preview" });
+    });
+    // Right-click: Chrome's menu for what was clicked (a link, an image, a field, a selection, the
+    // page), with Inspect; a link opens only within the origins this chat opened.
+    contents.on("context-menu", (_event, params) => {
+      try {
+        openContextMenu?.({ contents, params, openLink: (url) => {
+          const allowed = target(url);
+          if (!allowed.url || !preview.origins.has(allowed.origin)) return false;
+          void contents.loadURL(allowed.url).catch(() => undefined);
+          return true;
+        }, canOpen: (url) => { const allowed = target(url); return Boolean(allowed.url && preview.origins.has(allowed.origin)); } });
+      } catch { /* a menu that cannot open leaves the page as it is */ }
     });
     contents.on("dom-ready", () => place(preview));
     contents.on("did-start-loading", () => { preview.loading = true; });
@@ -605,6 +623,12 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
       const y = Math.max(0, Math.round(bounds.y * scale));
       const scaled = { x, y, width: Math.max(0, Math.min(Math.round(bounds.width * scale), (width || Infinity) - x)),
         height: Math.max(0, Math.min(Math.round(bounds.height * scale), (height || Infinity) - y)) };
+      // A slot with no room left (the window's size lagging a resize) would give the page a 0x0
+      // surface it never repaints from: it is taken out of the pane instead, until the next show.
+      if (scaled.width < 2 || scaled.height < 2) {
+        if (shown?.key === key) { shown = null; place(preview); }
+        return false;
+      }
       const previous = shown?.key && shown.key !== key ? previews.get(shown.key) : null;
       shown = { key, bounds: scaled };
       if (previous) place(previous);
@@ -640,8 +664,58 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
 }
 
 
+/**
+ * The preview page's right-click menu, as Chrome builds one for what was clicked: a link (open,
+ * copy address), an image (copy, copy address), an editable field (undo/redo, cut/copy/paste,
+ * select all), selected text (copy), else the page (back, forward, reload, select all); Inspect
+ * last. Each entry is enabled as Chrome would enable it. A link opens only within the origins this
+ * chat opened (canOpen), as every other navigation of the preview does; downloads stay off, so
+ * there is no "Save as".
+ */
+function previewMenuTemplate({ contents, params, openLink, canOpen, clipboard }) {
+  const flags = params?.editFlags ?? {};
+  const history = contents.navigationHistory;
+  const sections = [];
+  if (params?.linkURL) {
+    sections.push([
+      { label: "Open link", enabled: canOpen(params.linkURL), click: () => openLink(params.linkURL) },
+      { label: "Copy link address", enabled: Boolean(clipboard), click: () => clipboard?.writeText(params.linkURL) },
+    ]);
+  }
+  if (params?.mediaType === "image" && params.srcURL) {
+    sections.push([
+      { label: "Copy image", click: () => contents.copyImageAt?.(params.x, params.y) },
+      { label: "Copy image address", enabled: Boolean(clipboard), click: () => clipboard?.writeText(params.srcURL) },
+    ]);
+  }
+  if (params?.isEditable) {
+    sections.push([
+      { label: "Undo", accelerator: "CmdOrCtrl+Z", enabled: flags.canUndo !== false, click: () => contents.undo() },
+      { label: "Redo", accelerator: "CmdOrCtrl+Shift+Z", enabled: flags.canRedo !== false, click: () => contents.redo() },
+    ], [
+      { label: "Cut", accelerator: "CmdOrCtrl+X", enabled: flags.canCut !== false, click: () => contents.cut() },
+      { label: "Copy", accelerator: "CmdOrCtrl+C", enabled: flags.canCopy !== false, click: () => contents.copy() },
+      { label: "Paste", accelerator: "CmdOrCtrl+V", enabled: flags.canPaste !== false, click: () => contents.paste() },
+      { label: "Paste as plain text", accelerator: "CmdOrCtrl+Shift+V", enabled: flags.canPaste !== false, click: () => contents.pasteAndMatchStyle() },
+      { label: "Select all", accelerator: "CmdOrCtrl+A", enabled: flags.canSelectAll !== false, click: () => contents.selectAll() },
+    ]);
+  } else if (params?.selectionText?.trim()) {
+    sections.push([{ label: "Copy", accelerator: "CmdOrCtrl+C", click: () => contents.copy() }]);
+  } else if (!params?.linkURL && params?.mediaType !== "image") {
+    sections.push([
+      { label: "Back", accelerator: "Alt+Left", enabled: Boolean(history?.canGoBack?.()), click: () => history?.goBack?.() },
+      { label: "Forward", accelerator: "Alt+Right", enabled: Boolean(history?.canGoForward?.()), click: () => history?.goForward?.() },
+      { label: "Reload", accelerator: "CmdOrCtrl+R", click: () => contents.reload() },
+    ], [
+      { label: "Select all", accelerator: "CmdOrCtrl+A", click: () => contents.selectAll() },
+    ]);
+  }
+  sections.push([{ label: "Inspect", click: () => contents.inspectElement?.(params?.x ?? 0, params?.y ?? 0) }]);
+  return sections.flatMap((section, index) => (index ? [{ type: "separator" }, ...section] : section));
+}
+
 /** Native hosting shared by the app and the Electron regression fixture. */
-function createNativeChatPreviews({ BaseWindow, WebContentsView, mainWindow, platform = process.platform, ...options }) {
+function createNativeChatPreviews({ BaseWindow, WebContentsView, Menu, clipboard, mainWindow, platform = process.platform, ...options }) {
   let background = null;
   const windows = new WeakSet();
   let previews;
@@ -652,6 +726,12 @@ function createNativeChatPreviews({ BaseWindow, WebContentsView, mainWindow, pla
   };
   previews = createChatPreviews({
     ...options,
+    openContextMenu: Menu ? ({ contents, params, openLink, canOpen }) => {
+      const window = mainWindow();
+      if (!window || window.isDestroyed()) return;
+      const template = previewMenuTemplate({ contents, params, openLink, canOpen, clipboard });
+      if (template.length) Menu.buildFromTemplate(template).popup({ window });
+    } : null,
     createView: (partition) => {
       const window = mainWindow();
       if (!window || window.isDestroyed()) throw new PreviewError("The preview's window has closed.");
@@ -672,11 +752,19 @@ function createNativeChatPreviews({ BaseWindow, WebContentsView, mainWindow, pla
         if (needsSurface) background.showInactive();
       }
       const host = visible ? window : background;
-      if (!host.contentView.children.includes(view)) host.contentView.addChildView(view);
+      // Whether the view changed windows: the caller then makes it paint in its new one.
+      const moved = !host.contentView.children.includes(view);
+      if (moved) host.contentView.addChildView(view);
       if (!windows.has(window)) {
         windows.add(window);
         window.once("closed", closeAll);
+        // Back from the tray, a minimize or a (un)maximize, the renderer reports the same slot, so
+        // nothing re-placed the page and it could come back white: it is placed and repainted here.
+        for (const event of ["restore", "show", "maximize", "unmaximize"]) {
+          window.on(event, () => { try { previews.relayout(); } catch { /* closing */ } });
+        }
       }
+      return moved;
     },
     detachView: (view) => {
       for (const host of [mainWindow(), background]) {
@@ -691,4 +779,4 @@ function createNativeChatPreviews({ BaseWindow, WebContentsView, mainWindow, pla
   return Object.freeze({ ...previews, closeAll });
 }
 
-module.exports = Object.freeze({ PREVIEW_TOOL_DEFS, PREVIEW_TOOLS, createChatPreviews, createNativeChatPreviews, previewTarget, isLoopbackHost });
+module.exports = Object.freeze({ PREVIEW_TOOL_DEFS, PREVIEW_TOOLS, createChatPreviews, createNativeChatPreviews, previewMenuTemplate, previewTarget, isLoopbackHost });
