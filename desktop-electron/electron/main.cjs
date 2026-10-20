@@ -2922,6 +2922,12 @@ async function start() {
     }
     return answer.response === 1;
   };
+  // Archiving or deleting a chat (both undone by Restore) follows the same setting: with the
+  // dialogs turned off, the person's click in the chat is the answer.
+  const confirmRecoverable = async (request) => {
+    if (stateStore.read().confirmAgentToolRequests === false) return true;
+    return confirmAoAction(request);
+  };
   const listHeadlessWorkspaces = async () => {
     const catalog = await headlessHost.request("/api/v1/workspaces", null, { method: "GET" });
     if (!Array.isArray(catalog.workspaces)) throw new Error("Workspace catalog is unavailable");
@@ -3211,6 +3217,7 @@ async function start() {
       aoHarness: agentOrchestratorUpstream.harness,
       confirm: confirmAoAction,
       confirmToolRequest,
+      confirmRecoverable,
       onRunState: (update) => {
         mcpEventMonitor.runState(update);
         if (runChanged(update)) aoPulse.run(update.workspaceId, update.runId);

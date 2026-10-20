@@ -25,9 +25,11 @@ const meter = load("ChatContextMeter.tsx", { "./ao-chat": chat, "./ChatMenu": me
   "../api/client": client, "./cpa-usage": load("cpa-usage.ts", { "../api/client": client }) });
 const toolParts = load("ChatToolParts.tsx", { "./ao-chat": chat, "./ChatMarkdown": markdown });
 const dsh = load("DshTranscript.tsx", { "./ao-chat": chat, "./ChatMarkdown": markdown, "./ChatToolParts": toolParts });
+const clawd = load("Clawd.tsx");
+const pet = load("ChatPet.tsx", { "./ao-chat": chat, "./Clawd": clawd });
 const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null, Caret: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
   "./ChatContextMeter": meter, "./DshTranscript": dsh, "./ChatToolParts": toolParts,
-  "./ChatPet": load("ChatPet.tsx", { "./ao-chat": chat }),
+  "./ChatPet": pet,
   "./ChatTurnStats": load("ChatTurnStats.tsx", { "./ao-chat": chat, "../api/client": client }),
   "./codex-prompts": load("codex-prompts.ts"),
   // The branch bar reads git asynchronously and renders nothing until then, as here; composer
@@ -400,4 +402,29 @@ test("archived chats sit in a folder per project, in the list's order, and chats
     ["coding-tools-mcp", true, ["a"]],
     ["Chats", false, ["b", "d"]],
   ], "a project with no folder, or one no longer listed, has its chats under Chats");
+});
+
+test("the pet is Claude Code's Clawd: the CLI's glyphs, poses and frame-by-frame animations", () => {
+  // The banner pose: " ▐▛███▛█", "▝▜██████▀", " ▝▝   ▝▝ " with the eyes the quadrants the "▛"s leave open.
+  const cells = clawd.clawdCells("default");
+  const row = (r) => cells.filter((cell) => cell.row === r).map((cell) => cell.glyph).join("");
+  assert.equal(row(0), "▐▛███▛█");
+  assert.equal(row(1), "▝▜██████▀");
+  assert.equal(row(2), "▝▝▝▝");
+  const eyes = cells.filter((cell) => cell.row === 0 && cell.glyph === "▛");
+  assert.deepEqual(JSON.parse(JSON.stringify(eyes.map((cell) => [cell.col, cell.background]))), [[2, "#000000"], [6, "#000000"]], "the eyes show the CLI's clawd_background");
+  assert.ok(cells.every((cell) => cell.color === "#d77757" || cell.color === "#000000"), "the CLI's clawd_body orange");
+  // Closed eyes are lids: the background drawn as a lower-quarter bar over the body colour.
+  const lids = clawd.clawdCells({ eyes: "closed", arms: "down", feet: "both" }).filter((cell) => cell.glyph === "▂");
+  assert.deepEqual(JSON.parse(JSON.stringify(lids.map((cell) => [cell.col, cell.color, cell.background]))), [[2, "#000000", "#d77757"], [6, "#000000", "#d77757"]]);
+  // The CLI's animation lengths at 60 ms a frame, and a click picks only those that start in place.
+  const lengths = Object.fromEntries(Object.entries(clawd.ANIMATIONS).map(([name, frames]) => [name, frames.length]));
+  assert.deepEqual(lengths, { jump: 12, look: 11, celebrate: 15, skip: 14, spin: 10, peekaboo: 21, drop: 13, waddle: 19, peek: 20,
+    wink: 6, boop: 11, tap: 14, sneeze: 12, turn: 19, "coin-hop": 14 });
+  assert.equal(clawd.FRAME_MS, 60);
+  assert.deepEqual(JSON.parse(JSON.stringify(clawd.CLICKABLE)), ["jump", "look", "spin", "peekaboo", "drop", "wink", "boop", "tap", "sneeze", "turn", "coin-hop"]);
+  // The pet draws it in its 72×48 clipping box.
+  const html = renderToStaticMarkup(React.createElement(pet.ChatPet, { mood: "idle", context: null, onHide: () => {} }));
+  assert.match(html, /class="cx-clawd" style="width:72px;height:48px"/);
+  assert.match(html, /<svg class="cx-clawd-glyphs" viewBox="0 0 18 12" width="72" height="48"/);
 });
