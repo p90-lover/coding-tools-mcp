@@ -967,7 +967,7 @@ export function chatDescriptionUpTo(description: string | undefined, turnIndex: 
 export function chatMarkdown(title: string, turns: ChatTurn[]): string {
   const parts = [`# ${title}`];
   for (const turn of turns) {
-    if (turn.user) parts.push(`**You:**\n\n${turn.user.text}`);
+    if (turn.user) parts.push(`**You:**\n\n${chatMessageReadable(turn.user.text)}`);
     for (const step of [...turn.steps, ...(turn.final ? [turn.final] : [])]) {
       const body = [step.error ? `Error: ${step.error}` : "", step.text ?? ""].filter(Boolean).join("\n\n");
       if (body) parts.push(`**${step.name}${step.verdict ? ` · ${step.verdict}` : ""}:**\n\n${body}`);
@@ -1059,7 +1059,14 @@ export type QueuedChatMessage = { what: string; message: string; goal?: string }
  */
 export function chatQueueAdd(queue: QueuedChatMessage[], item: QueuedChatMessage): QueuedChatMessage[] {
   const last = queue[queue.length - 1];
-  if (last && item.what === "Message" && last.what === "Message") return [...queue.slice(0, -1), { ...last, message: `${last.message}\n\n${item.message}` }];
+  if (last && item.what === "Message" && last.what === "Message") {
+    // Annotated messages join into one block, numbered across both: two blocks each counting from 1
+    // read as one set of annotations to the agent, and the second showed raw in the chat.
+    const before = chatAnnotationsSplit(last.message), after = chatAnnotationsSplit(item.message);
+    const message = chatMessageWithAnnotations([before.rest.trim(), after.rest.trim()].filter(Boolean).join("\n\n"),
+      [...before.annotations, ...after.annotations]);
+    if (message.length <= CHAT_MESSAGE_LIMIT) return [...queue.slice(0, -1), { ...last, message }];
+  }
   return [...queue, item];
 }
 /** What a command shows above the composer: a few facts, a block of text, or a list to pick from. */
@@ -1128,11 +1135,38 @@ const ANNOTATIONS_RULE = "Each item contains text selected from an earlier Codex
   + "`:codex-annotation{index=\"1\"}`). Do not use unstructured annotation labels.";
 const ANNOTATIONS_BLOCK = /^# Response annotations:\n[^\n]*\n<response-annotations>\n([^\n]*)\n<\/response-annotations>\n*/;
 
+/** The longest message the chat sends (chat_send keeps 8,192 characters and refuses more). */
+export const CHAT_MESSAGE_LIMIT = 8192;
+
 /** The message with its annotations in front, as Codex sends them. */
 export function chatMessageWithAnnotations(message: string, annotations: ChatAnnotation[]): string {
   if (!annotations.length) return message;
   const items = JSON.stringify(annotations.map((item) => ({ text: item.text, annotation: item.comment, source: "chat-response" })));
   return `${ANNOTATIONS_HEAD}\n${ANNOTATIONS_RULE}\n<response-annotations>\n${items}\n</response-annotations>\n\n${message}`.trimEnd();
+}
+
+/** A message's leading annotation block, read back, and the rest of the message after it. */
+export function chatAnnotationsSplit(message: string): { annotations: ChatAnnotation[]; rest: string } {
+  const block = ANNOTATIONS_BLOCK.exec(message);
+  if (!block) return { annotations: [], rest: message };
+  try {
+    const items: unknown = JSON.parse(block[1]);
+    if (!Array.isArray(items)) return { annotations: [], rest: message };
+    const annotations = items.filter((item): item is { text: string; annotation?: string } => typeof item?.text === "string")
+      .map((item) => ({ text: item.text, comment: typeof item.annotation === "string" ? item.annotation : "" }));
+    return { annotations, rest: message.slice(block[0].length) };
+  } catch { return { annotations: [], rest: message }; }
+}
+
+/**
+ * A sent message as a person reads it: its annotations as quoted lines instead of the block the
+ * agent reads. For copying, exporting, and putting a message back in a chat box (rewind, continue).
+ */
+export function chatMessageReadable(message: string): string {
+  const { annotations, rest } = chatAnnotationsSplit(message);
+  if (!annotations.length) return message;
+  const lines = annotations.map((item, index) => `${index + 1}. "${item.text.replace(/\s+/g, " ")}"${item.comment ? ` — ${item.comment}` : ""}`);
+  return [`Annotations:\n${lines.join("\n")}`, rest.trim()].filter(Boolean).join("\n\n");
 }
 
 /**
@@ -1143,18 +1177,9 @@ export function chatMessageWithAnnotations(message: string, annotations: ChatAnn
 export function chatMessageParts(message: string): { text: string; attachments: ChatSentAttachment[]; annotations?: ChatAnnotation[] } {
   const attachments: ChatSentAttachment[] = [];
   const name = (file: string) => file.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || file;
-  let annotations: ChatAnnotation[] | undefined;
-  const block = ANNOTATIONS_BLOCK.exec(message);
-  if (block) {
-    try {
-      const items: unknown = JSON.parse(block[1]);
-      if (Array.isArray(items)) {
-        annotations = items.filter((item): item is { text: string; annotation?: string } => typeof item?.text === "string")
-          .map((item) => ({ text: item.text, comment: typeof item.annotation === "string" ? item.annotation : "" }));
-        message = message.slice(block[0].length);
-      }
-    } catch { /* not ours: the message shows as it was sent */ }
-  }
+  const split = chatAnnotationsSplit(message);
+  const annotations = split.annotations.length ? split.annotations : undefined;
+  message = split.rest;
   const text = message
     .replace(/(^|\n)Attached file `([^`\n]+)`:\n```\n[\s\S]*?\n```(?=\n|$)/g, (_match, lead: string, file: string) => {
       attachments.push({ image: false, name: file });

@@ -6,12 +6,12 @@ import type { Language } from "../types";
 import { AgentOrchestratorOriginalSurface } from "./AgentOrchestratorOriginalSurface";
 import { AgentOrchestratorCanvas, type CanvasNode } from "./AgentOrchestratorCanvas";
 import { AgentOrchestratorChat } from "./AgentOrchestratorChat";
-import { ChatThreadList, type ThreadWorkspace } from "./ChatThreadList";
+import { ChatThreadList, type ArchivedChat, type ThreadWorkspace } from "./ChatThreadList";
 import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "./ProjectEditDialog";
 import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
-import { GOAL_SUMMARY, approvalAnsweredForYou, chatArchived, chatList, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessagesFromDescription, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatWakeup, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
+import { GOAL_SUMMARY, approvalAnsweredForYou, chatArchived, chatList, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatWakeup, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
 import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { createLatestConfigQueue } from "./ao-config";
 import {
@@ -1569,8 +1569,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
     const messages = chatMessagesFromDescription(await loadDescription(taskId));
     if (!Number.isInteger(upTo) || upTo < 0 || upTo >= messages.length) return;
     // Earlier messages keep the steers sent during their turns; the chosen one is just what was typed.
-    const earlier = messages.slice(0, upTo).flatMap((message) => [message.text, ...(message.steers ?? []).map((steer) => steer.text)]);
-    setChatSeed({ key: crypto.randomUUID(), workspaceId, title: `${taskName(taskId)} (rewound)`.slice(0, 240), text: messages[upTo].text,
+    const earlier = messages.slice(0, upTo).flatMap((message) => [message.text, ...(message.steers ?? []).map((steer) => steer.text)]).map(chatMessageReadable);
+    setChatSeed({ key: crypto.randomUUID(), workspaceId, title: `${taskName(taskId)} (rewound)`.slice(0, 240), text: chatMessageReadable(messages[upTo].text),
       ...(earlier.length ? { context: earlier } : {}) });
     setPendingChat(null); setInspectedId(""); setDraftTeam(null); setSheet("");
     setChatTaskId(""); setView("chat");
@@ -1580,7 +1580,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     const messages = chatMessagesFromDescription(await loadDescription(taskId));
     const kept = upTo === undefined ? messages : messages.slice(0, upTo === "first" ? 1 : upTo + 1);
     if (!kept.length) return;
-    await sendChat({ title: `Fork of ${taskName(taskId)}`.slice(0, 240), message: kept.map((message) => message.text).join("\n\n").slice(0, 8192) });
+    await sendChat({ title: `Fork of ${taskName(taskId)}`.slice(0, 240), message: kept.map((message) => chatMessageReadable(message.text)).join("\n\n").slice(0, 8192) });
   })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
   // Delete message (confirmed in the chat): the message and its reply leave this chat. The chat
   // names the runs its turn showed (the first is the one the message started); the bridge hides
@@ -1617,7 +1617,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
   // composer holds this chat's messages; you pick that project's team or model and send.
   const continueInProject = (taskId: string, targetWorkspaceId: string) => void (async () => {
     const messages = chatMessagesFromDescription(await loadDescription(taskId));
-    const text = messages.map((message) => message.text).join("\n\n").slice(0, 8192);
+    const text = messages.map((message) => chatMessageReadable(message.text)).join("\n\n").slice(0, 8192);
     setChatSeed({ key: crypto.randomUUID(), workspaceId: targetWorkspaceId, title: `${taskName(taskId)} (continued)`.slice(0, 240), text });
     setPendingChat(null); setInspectedId(""); setDraftTeam(null); setSheet("");
     if (targetWorkspaceId === workspaceId) { setChatTaskId(""); setView("chat"); } else chooseWorkspace(targetWorkspaceId);
@@ -1824,10 +1824,38 @@ export function AgentOrchestratorSurface({ language, setError }: {
     planMode, setPlanMode,
   };
 
+  // Archived chats of every project, for the list's Archived section (grouped by project there).
+  // Reading them also moves chats archived longer than the set days to "deleted", so it runs when
+  // the list opens, after any chat is archived or restored here, and hourly.
+  const [archivedAll, setArchivedAll] = useState<{ days: number; chats: ArchivedChat[] } | null>(null);
+  const workspaceIds = workspaces.map((item) => item.id).join("\n");
+  const archivedKey = taskLifecycle.map((item) => `${item.task_id}:${item.visibility}`).join(",");
+  const loadArchived = useCallback(async () => {
+    if (!workspaceIds) return;
+    const result = await moduleCall("archived_chats", { workspaceIds: workspaceIds.split("\n") }).catch(() => null);
+    if (result && Array.isArray(result.chats)) setArchivedAll({ days: Number(result.days) || 0, chats: result.chats as ArchivedChat[] });
+  }, [workspaceIds]);
+  useEffect(() => {
+    void loadArchived();
+    const timer = window.setInterval(() => { void loadArchived(); }, 3_600_000);
+    return () => window.clearInterval(timer);
+  }, [loadArchived, archivedKey]);
+  const restoreArchived = (id: string, taskId: string) => void (async () => {
+    if (id === workspaceId) { missionAction(taskId, "restore"); return; }
+    await moduleCall("restore_task", { workspaceId: id, taskId });
+    await loadArchived();
+  })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+  const setArchiveDays = (days: number) => void (async () => {
+    const result = await moduleCall("archive_settings", { days });
+    setArchivedAll((current) => current && { ...current, days: Number(result.days) });
+    await loadArchived();
+  })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+
   return (
     <section className="ao-workflow" aria-label={copy.title} lang={language}>
       <ChatThreadList workspaces={workspaces.map((item) => ({ id: item.id, name: item.name, path: item.path }))} workspaceId={workspaceId} onWorkspace={chooseWorkspace}
         chats={chatList(missions, allTasks, taskLifecycle)} archived={chatArchived(missions, allTasks, taskLifecycle)} selectedTaskId={chatTaskId ?? ""} now={listNow}
+        archivedAll={archivedAll ?? undefined} restoreArchived={restoreArchived} setArchiveDays={setArchiveDays}
         pinned={chatPins} togglePin={togglePin} unread={chatUnread} setUnread={markUnread}
         pinnedProjects={projectPins} toggleProjectPin={toggleProjectPin}
         busyTaskIds={chatBusy} pendingTitle={pendingChat && !pendingChat.taskId ? pendingChat.title : undefined}

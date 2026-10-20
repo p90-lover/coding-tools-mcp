@@ -1225,3 +1225,8 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
   border-radius: 8px; color: var(--ao-muted, #748198); font-size: 12px; cursor: default; }
 @keyframes cx-annotation-in { from { opacity: 0; transform: translateY(2px); } }
 @media (prefers-reduced-motion: reduce) { .cx-selection-bar, .cx-annotation-editor, .cx-annotation-list { animation: none; } }
+/* Archived (ChatThreadList): a folder per project with its count, "Chats" for chats with no
+   project, Recently deleted last; each archived chat shows the days left before it moves there. */
+.cx-archived-count { margin-left: auto; padding-left: 6px; color: var(--ao-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.cx-thread-badge.is-quiet { color: var(--ao-muted); }
+.cx-deleted-head .cx-thread-title { color: var(--ao-muted); }

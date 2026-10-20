@@ -6,6 +6,7 @@ const path = require("node:path");
 const { DEFAULT_GOAL_ROUNDS, goalPrompt, goalVerdict, closingAnswers, cleanObjective, createGoalStore } = require("./chat-goals.cjs");
 const { wakePrompt, wakeupAction, createWakeupStore } = require("./chat-wakeups.cjs");
 const { chatDescriptionWithout, createChatEditStore } = require("./chat-edits.cjs");
+const { createChatArchiveStore } = require("./chat-archive.cjs");
 const { normalizedAuthFile } = require("./cpa-oauth-adapter.cjs");
 
 function clean(value, limit, required = true) {
@@ -219,12 +220,14 @@ function delayToMilliseconds(value, unit) {
   }
   return ms;
 }
-function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, chatEditsFile = null, knownModelsFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, logger = null }) {
   const goals = createGoalStore({ file: goalsFile, now });
   // Chats whose agent asked to be woken later (schedule_wakeup, chat-wakeups.cjs).
   const wakeups = createWakeupStore({ file: wakeupsFile, now });
   // Deleted chat messages: their runs are hidden from the chat, and the next follow-up starts afresh.
   const chatEdits = createChatEditStore({ file: chatEditsFile });
+  // When each chat was archived, and how many days it stays before moving to "deleted" (archivedChats).
+  const archive = createChatArchiveStore({ file: archiveFile, now });
   /** After a message was deleted the agent's session still remembers it, so the chat's next turn must not continue it. */
   const freshSessionRequired = (workspaceId, taskId) => Boolean(taskId) && chatEdits.fresh(workspaceId, taskId);
   // A saved path goes stale when the Codex app updates itself (it replaces bin\<build>\), so a
@@ -3823,9 +3826,44 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           || node.request_key && node.state !== "finished" && node.receipt?.status !== "completed")))) await stopOwned(id,mission);
     }
     const life=await resolveStoppedIntents(id,task,await runs({workspaceId:id}));
-    return lifecycleMutation(id,visibility === "active"
+    const result=await lifecycleMutation(id,visibility === "active"
       ? {operation:"restore_task",task_id:task,expected_revision:life.revision}
       : {operation:"set_visibility",task_id:task,expected_revision:life.revision,visibility});
+    // An archived chat counts its days from now; a restored or deleted one stops counting.
+    if (visibility === "archived") archive.archived(id,task); else archive.forget(id,task);
+    return result;
+  }
+  /**
+   * The archived and deleted chats of the given projects, for the chat list's Archived section.
+   * Archived chats whose days are up (archive.days(), default 5) move to the recoverable "deleted"
+   * state first: no confirmation, since nothing is erased and Restore still brings them back.
+   */
+  async function archivedChats({ workspaceIds } = {}) {
+    if (!Array.isArray(workspaceIds) || workspaceIds.length > 100) throw new Error("Choose the projects to list");
+    const chats=[];
+    for (const id of [...new Set(workspaceIds.map(value=>clean(value,128)))]) {
+      let saved;
+      try { saved=await runs({workspaceId:id}); } catch { continue; }
+      // A chat is a task with runs; a board task that never ran is not one.
+      const chatTasks=new Set(saved.runs.map(run=>run.project_id));
+      for (const life of saved.task_lifecycle ?? []) {
+        if (!chatTasks.has(life.task_id) || !["archived","deleted"].includes(life.visibility)) continue;
+        let visibility=life.visibility;
+        if (visibility === "archived" && archive.due(id,life.task_id)) {
+          try {
+            await lifecycleMutation(id,{operation:"set_visibility",task_id:life.task_id,expected_revision:life.revision,visibility:"deleted"});
+            archive.forget(id,life.task_id);
+            visibility="deleted";
+            logger?.info?.("ao.archived_chat_deleted",{days:archive.days()});
+          } catch (error) {
+            logger?.warn?.("ao.archived_chat_delete_failed",{message:publicText(error?.message||error,200)});
+          }
+        }
+        chats.push({ workspaceId:id, taskId:life.task_id, title:String(life.title||""), visibility,
+          ...(visibility === "archived" ? { archivedAt:archive.since(id,life.task_id) } : {}) });
+      }
+    }
+    return { ok:true, days:archive.days(), chats };
   }
   function dispose() {
     schedulerDisposed = true;
@@ -3906,6 +3944,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "archive_task": return visibilityAction(args, "archived");
       case "delete_task": return visibilityAction(args, "deleted");
       case "restore_task": return visibilityAction(args, "active");
+      case "archived_chats": return archivedChats(args);
+      case "archive_settings": return { ok: true, days: args?.days === undefined ? archive.days() : archive.setDays(args.days) };
       case "control_run": return controlRun(args);
       case "run_status": return runStatus(args);
       case "approve_harness": return approveAoHarness(args);
