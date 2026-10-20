@@ -110,6 +110,8 @@ function runtimeOwnershipPredatesCurrentBoot(state) {
 }
 
 const DAEMON_LOG_ROTATE_BYTES = 8 * 1024 * 1024;
+// A bridge stderr line that reports a problem (and a stack trace's frames), as opposed to progress.
+const DAEMON_PROBLEM = /\b(?:fail(?:ed|ure|s)?|errors?|exception|refused|rejected|denied|invalid|timed out|timeout|cannot|could not|unavailable|aborted|crash(?:ed)?|warn(?:ing)?|blocked|unexpected)\b|^\s+at\s|ENOSPC|EACCES|ECONN/i;
 
 /**
  * Stand-in for a ChildProcess when the launcher adopts a bridge daemon that a
@@ -715,7 +717,11 @@ class RuntimeSupervisor {
     this.daemonTail?.stop();
     this.daemonTail = new LogTail(this.daemonLogPath, (line) => {
       this.lastChildOutput.daemon = redactText(line).slice(0, 1_000);
-      this.logger.warn("runtime.daemon_stderr", { line });
+      // The bridge narrates every turn on stderr (broker claims, turn stages, diagnostic checkpoints):
+      // 1,700 of those a day were warnings and buried the real failures on the Activity page. A line
+      // that reads as a failure stays a warning; routine progress is info.
+      if (DAEMON_PROBLEM.test(line)) this.logger.warn("runtime.daemon_stderr", { line });
+      else this.logger.info("runtime.daemon_stderr", { line });
     }, position);
   }
 
