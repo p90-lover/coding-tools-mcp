@@ -1138,6 +1138,52 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     } finally { dispatching.delete(key); }
   }
 
+  // A tool call still running after this long, with nothing new from its turn as long, is stuck: a
+  // command waiting on input nobody can type, a hung network call, a server started in the
+  // foreground. Seen live: the agent sat on one for good, since it reads nothing until the call
+  // returns. (A steer stops such a call too; this does it when nobody is watching.)
+  const STUCK_TOOL_MS = 20 * 60_000;
+  const STUCK_POLL_MS = 3_000;
+  const unstuckTurns = new Set(); // session:turn, each stopped at most once
+  /**
+   * Stops a turn stuck on one tool call, and tells a single chat's agent which call it was so it
+   * goes on another way: a follow-up to its own session once the stopped turn settles (it keeps
+   * everything it read and ran). Not when the person has sent something meanwhile, or the agent
+   * waits on a request. A team's card is only stopped: its orchestrator decides what follows.
+   */
+  async function unstickTool(workspaceId, runId, node, observed, mission) {
+    const session = node.receipt?.thread_id;
+    if (!session || !observed?.turnId || observed.approvals?.length || observed.needsInput) return;
+    const at = now();
+    if (!(at - observed.toolSince >= STUCK_TOOL_MS && at - observed.lastActivityAt >= STUCK_TOOL_MS)) return;
+    const key = `${session}:${observed.turnId}`;
+    if (unstuckTurns.has(key)) return;
+    unstuckTurns.add(key);
+    if (unstuckTurns.size > 200) unstuckTurns.delete(unstuckTurns.values().next().value);
+    const call = (observed.timeline ?? []).find(item => item?.status === "running" && ["command", "tool", "edit"].includes(item.kind));
+    const what = publicText(call?.text || call?.label || "a tool call", 200);
+    const minutes = Math.round((at - observed.toolSince) / 60_000);
+    logger?.info?.("ao.stuck_tool_stopped", { minutes, kind: call?.kind ?? "" });
+    await stopExternalTurn(session);
+    const owner = mission ?? (await runs({ workspaceId, runId })).runs.find(run => run.id === runId);
+    const task = owner?.project_id;
+    if (owner?.execution_mode !== "single" || !task) return;
+    let latest = null;
+    for (let tries = 0; tries < 40; tries += 1) {
+      const saved = await runs({ workspaceId });
+      latest = saved.runs.filter(run => run.project_id === task).at(-1);
+      if (!chatWorking(workspaceId, task, saved.runs)) break;
+      await new Promise(resolve => setTimer(resolve, STUCK_POLL_MS));
+    }
+    if (latest?.id !== runId || chatWorking(workspaceId, task, [latest])) return;
+    const route = latest.nodes?.[0]?.route ?? {};
+    const singleRoute = Object.fromEntries(Object.entries(route).filter(([name, value]) => SINGLE_ROUTE_FIELDS.includes(name) && value !== undefined && value !== null));
+    await chatSend({ workspaceId, taskId: task, executionMode: "single", singleRoute, deferStart: true,
+      message: `Your tool call \`${what}\` ran for ${minutes} minutes with no output, so the app stopped it. It will not return: `
+        + "do not run it the same way again. Continue the task another way (give the command a timeout, run a long process in the "
+        + "background and check its output, or use a different command), and say what you changed." });
+  }
+
   const TERMINAL_TURNS = new Set(["completed", "failed", "interrupted", "cancelled", "recovered"]);
   async function observeExternal(workspaceId, runId, node, mission = null) {
     const session = node.receipt?.thread_id;
@@ -1154,6 +1200,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     if (!terminal) {
       // The agent's parked tool requests, answerable from the chat or by the reviewer.
       const pending = aoPending(node, session, observed);
+      void unstickTool(workspaceId, runId, node, observed, mission)
+        .catch(error => logger?.warn?.("ao.stuck_tool_failed", { message: publicText(error?.message || error, 200) }));
       pendingFrames.set(nodeKey(workspaceId, runId, node.id), { at: Date.now(), pending, mission, node });
       if (pendingFrames.size > 500) pendingFrames.delete(pendingFrames.keys().next().value);
       return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: observed.needsInput && !pending.length, session_id: session };
@@ -1386,10 +1434,40 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     return denied ? "Denied" : "Allowed";
   }
 
+  // Claude Code's own words on a call whose permission request was denied. Said of a request the
+  // reviewer or "Approve for me" denied, it blamed the person, who was never asked.
+  const REFUSED_OUTPUT = /refused permission|permission (?:was )?denied|user (?:rejected|declined|denied)/i;
+  /**
+   * Each answered tool request goes on the call it was about (who let it run, or who denied it and
+   * why), not on a row of its own: the call running the same command, else the nearest call before
+   * it with no answer yet (ACP asks after the call it is about). A call the reviewer or "Approve for
+   * me" denied shows their reason instead of "User refused permission to run tool". A request the
+   * person answered (Claude Code's answered record), one AO labels (timed out, cancelled) and one
+   * still pending keep their rows.
+   */
+  function foldApprovals(items) {
+    const out = [];
+    for (const item of items) {
+      const answer = item.kind === "approval" && typeof item.requestId === "string" && !item.label
+        && !personAnswers.has(item.requestId) && !/pending/i.test(String(item.status));
+      if (!answer) { out.push(item); continue; }
+      const open = (call) => ["tool", "command", "edit"].includes(call.kind) && !call.approval;
+      let at = item.subject ? out.findLastIndex(call => open(call) && call.text === item.subject) : -1;
+      if (at < 0) at = out.findLastIndex(open);
+      if (at < 0) { out.push(item); continue; }
+      const note = approvalNote(item.requestId, item.status);
+      const reviewed = approverAdvice.has(item.requestId) || autoAnswered.has(item.requestId);
+      const call = out[at];
+      out[at] = { ...call, approval: note,
+        ...(reviewed && /^Denied/.test(note) && REFUSED_OUTPUT.test(String(call.output ?? "")) ? { output: note } : {}) };
+    }
+    return out;
+  }
+
   function publicTimeline(items) {
     // The same bounds the upstream adapter's turnTimeline reads with (TIMELINE_ITEMS and
     // TIMELINE_TEXT_BYTES there): every item it built, and a message or thought uncut.
-    return (Array.isArray(items) ? items : []).slice(-400).map(item => ({
+    return foldApprovals(Array.isArray(items) ? items : []).slice(-400).map(item => ({
       id: publicText(item.id, 80), kind: publicText(item.kind, 32), status: publicText(item.status, 32),
       // Live text keeps what the upstream read kept: a running thought's newest part, and messages
       // and finished thoughts whole (up to 64 KB).
@@ -1399,7 +1477,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       ...(item.description ? { description: publicText(item.description, 200) } : {}),
       ...(item.input ? { input: publicText(item.input, 1000) } : {}),
       ...(item.output ? { output: publicText(item.output, 2000) } : {}),
-      ...(item.kind === "approval" && typeof item.requestId === "string" ? { approval: publicText(approvalNote(item.requestId, item.status), 240) } : {}),
+      ...(item.kind === "approval" && typeof item.requestId === "string" ? { approval: publicText(approvalNote(item.requestId, item.status), 240) }
+        : item.approval ? { approval: publicText(item.approval, 240) } : {}),
       // The person's own answer, shown as Claude Code shows an answered question (question, then answer).
       ...((item.kind === "approval" || item.kind === "user_input") && typeof item.requestId === "string" && personAnswers.has(item.requestId)
         ? { answered: personAnswers.get(item.requestId) } : {}),
@@ -2242,6 +2321,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const pendingSeen = new Map(); // approval_id -> when it was first seen waiting
   const autoAnswered = new Set();
   const answersForPerson = (node) => node?.route?.approvals_reviewer === "auto_review" || node?.route?.approval_policy === "never";
+  /**
+   * Whether a question or plan the agent put to the person waits for them, with no timer, on a card
+   * that otherwise answers for them ("Approve for me" or "Full access"). Seen live: on Approve for
+   * me, the agent's question got its "recommended" answer after 20 s while the person was still
+   * reading it, and the card vanished under them.
+   */
+  function waitsForPerson(approval, node) {
+    // TODO(human)
+  }
   /** The answer a question gets when nobody answers it: each field's recommended choice. */
   function recommendedAnswer(approval) {
     if (approval.mode === "url") return { action: "decline" };
@@ -2301,6 +2389,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // Command approver has not approved yet has no reviewer here: its requests keep waiting
         // for it or the person.
         const personal = ["question", "plan"].includes(approval.kind);
+        if (personal && waitsForPerson(approval, node)) continue;
         const reviewedHere = !personal && Boolean(cardApprover(mission, node));
         if (reviewedHere && approverAdvice.get(id)?.action === "ask") continue;
         if (!reviewedHere && at - opened < AUTO_ANSWER_MS) continue;

@@ -644,6 +644,29 @@ export type ChatTurn = {
   startedAtMs?: number;
 };
 
+/** A message steered in from this window, shown until the chat's own copy of it arrives. */
+export type SentSteer = ChatSteer & { runId: string };
+
+/**
+ * The steers shown under a turn's message: the ones saved with the chat and those just steered in
+ * here, each once, except any its live timeline already shows where it was sent. A steer showed
+ * only once the chat's text was saved and read back, never in a long chat (its text has no room
+ * left), and any steer in the live timeline hid every other one.
+ */
+export function turnSteers(turn: ChatTurn, sent: readonly SentSteer[]): ChatSteer[] {
+  const live = new Set(turn.steps.flatMap((step) => step.working?.timeline ?? [])
+    .filter((item) => item.kind === "steer").map((item) => item.text.trim()));
+  const shown = new Set<string>();
+  const out: ChatSteer[] = [];
+  for (const steer of [...(turn.user?.steers ?? []), ...sent.filter((entry) => entry.runId === turn.runId)]) {
+    const key = steer.text.trim();
+    if (!key || live.has(key) || shown.has(key)) continue;
+    shown.add(key);
+    out.push({ text: steer.text, stamp: steer.stamp });
+  }
+  return out;
+}
+
 /** The error the main process gives a card whose turn ended only because the app restarted. */
 export const RESTART_INTERRUPTED = /process ended before it finished \(the app restarted\)/;
 

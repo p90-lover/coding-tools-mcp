@@ -564,7 +564,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     // An answered request or question keeps AO's request id: the workflow knows who answered it (its
     // reviewer, "Approve for me" or the person, and what they chose), and the chat shows that.
     const request = (activity.activityKind === "approval" || activity.activityKind === "user_input") && typeof activity.requestId === "string"
-      ? { requestId: activity.requestId.slice(0, 200) } : {};
+      ? { requestId: activity.requestId.slice(0, 200),
+        // The command a request asked to run, as its call's row shows it: the workflow puts the answer
+        // on that call (AO's request names no tool call id).
+        ...(activity.activityKind === "approval" && typeof input.command === "string" && input.command.trim()
+          ? { subject: utf8Prefix(input.command.trim(), 400) } : {}) } : {};
     return { ...base, kind: activity.activityKind.slice(0, 32), text: utf8Prefix(summary || activity.activityKind, 400), ...request };
   }
   /**

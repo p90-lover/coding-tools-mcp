@@ -17,7 +17,7 @@ import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, chatAcceptsMessage, chatDuration, chatList, chatMessageWithAttachments, chatRunOpen,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
-  activitySummary, groupTimeline, mergeTimeline, tidyTimeline,
+  activitySummary, groupTimeline, mergeTimeline, tidyTimeline, turnSteers, type SentSteer,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -769,6 +769,8 @@ export function AgentOrchestratorChat({
   // Another chat's card or goal edit never shows over this one (its queue says so itself, below).
   useEffect(() => { setCard(null); setGoalEditing(null); }, [selectedTaskId]);
   const say = (title: string, text: string, quote?: string) => setCard({ title, text, ...(quote ? { quote } : {}) });
+  // Messages steered from here, shown under their turn at once (see turnSteers).
+  const [sentSteers, setSentSteers] = useState<SentSteer[]>([]);
 
   /**
    * Sends a message the way the composer does: into this chat, or as a new chat. A queued message
@@ -782,6 +784,10 @@ export function AgentOrchestratorChat({
     try {
       // A steer the turn outran (it ended first) is sent as an ordinary follow-up instead; a goal is never steered.
       const steered = !goal && steering && steer && selectedTaskId ? await steer({ taskId: selectedTaskId, message }) : false;
+      if (steered === true && latest?.id) {
+        const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
+        setSentSteers((list) => [...list.slice(-19), { runId: latest.id, text: message, stamp }]);
+      }
       if ((steered === "wait" || steered === "restart" || steered === "interrupt" || steered === "starting") && selectedTaskId) {
         // The agent was found waiting on its own request just now (the page had not seen it yet):
         // steering would cancel that request, so the message waits for the turn like a queued one.
@@ -1149,11 +1155,10 @@ export function AgentOrchestratorChat({
               </div> : null}
               {/* Messages steered into this turn. While it works they show in its live timeline, where
                   they were sent; once it is done, here under the turn's message. */}
-              {turn.user?.steers?.length && !turn.steps.some((step) => step.working?.timeline?.some((item) => item.kind === "steer"))
-                ? turn.user.steers.map((steer, index) => <div key={`steer:${index}`} className="cx-user cx-steer">
-                  <SentMessage text={steer.text} />
-                  <span className="cx-stamp">Steered · {steer.stamp} UTC</span>
-                </div>) : null}
+              {turnSteers(turn, sentSteers).map((steer, index) => <div key={`steer:${index}`} className="cx-user cx-steer">
+                <SentMessage text={steer.text} />
+                <span className="cx-stamp">Steered · {steer.stamp} UTC</span>
+              </div>)}
               {dsh && readWork
                 ? <DshWork key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} live={!idle && liveTurn(turn)} expanded={showWork} useWork={readWork} />
                 : <WorkGroup key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} idle={idle} expanded={showWork} loadWork={loadWork} />}
@@ -1175,7 +1180,7 @@ export function AgentOrchestratorChat({
               {turn.status === "stopped" && !dsh ? <p className="cx-note">Stopped</p> : null}
               {turn.solo ? <p className="cx-note">Answered by the orchestrator alone; no workers ran.</p> : null}
             </article>;
-  }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy]);
+  }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, sentSteers]);
 
   return (<Attachments.Provider value={attachmentAccess}><CompactActivity.Provider value={compactActivity}>
     <div className={`cx-chat${showStructure && structure ? " has-structure" : ""}`}>
