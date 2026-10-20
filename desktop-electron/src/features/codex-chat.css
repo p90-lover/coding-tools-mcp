@@ -878,15 +878,23 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 /* Working, its legs walk (ChatPet's step); idle, it bobs. */
 .cx-pet-body.is-idle svg { animation: cx-pet-bob 1.6s ease-in-out infinite; }
 .cx-pet-body.is-asleep svg { animation: cx-pet-breathe 3s ease-in-out infinite; }
+/* Walking, each step lifts it a pixel (ChatPet moves the box itself along the edge). */
+.cx-pet-body.is-walking svg { animation: cx-pet-step .28s ease-in-out infinite; }
 .cx-pet-body.is-hop svg { animation: cx-pet-hop .45s ease; }
 .cx-pet-body.is-shake svg { animation: cx-pet-shake .4s ease 3; }
+.cx-pet-body.is-spin svg { animation: cx-pet-spin .6s ease-in-out; }
+.cx-pet-body.is-bounce svg { animation: cx-pet-bounce .42s cubic-bezier(.3, 1.6, .5, 1); }
 .cx-pet-bubble { position: absolute; bottom: 26px; right: 0; padding: 3px 9px; border: 1px solid var(--ao-line); border-radius: 8px;
   background: var(--color-bg-primary, #fff); color: var(--color-text-primary, inherit); font-size: 12px; line-height: 1.4; white-space: nowrap; }
 .cx-pet-float { position: absolute; bottom: 18px; font-size: 13px; animation: cx-pet-rise 1.1s ease-out forwards; }
 @media (prefers-reduced-motion: reduce) { .cx-pet-body svg { animation: none !important; } }
 @keyframes cx-pet-bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
 @keyframes cx-pet-breathe { 0%, 100% { transform: scaleY(1); } 50% { transform: scaleY(.95); } }
-@keyframes cx-pet-hop { 0%, 100% { transform: translateY(0); } 40% { transform: translateY(-16px); } }
+@keyframes cx-pet-hop { 0%, 100% { transform: translateY(0) scale(1, 1); } 15% { transform: translateY(0) scale(1.12, .82); }
+  45% { transform: translateY(-18px) scale(.92, 1.1); } 85% { transform: translateY(0) scale(1.1, .88); } }
+@keyframes cx-pet-step { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-1.5px); } }
+@keyframes cx-pet-spin { 0%, 100% { transform: scaleX(1); } 50% { transform: scaleX(-1); } }
+@keyframes cx-pet-bounce { 0%, 100% { transform: scale(1, 1); } 35% { transform: scale(1.14, .8); } 70% { transform: scale(.94, 1.1); } }
 @keyframes cx-pet-shake { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-3px); } 75% { transform: translateX(3px); } }
 @keyframes cx-pet-rise { to { transform: translateY(-36px); opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .cx-pet-body svg, .cx-pet-float { animation: none !important; } }
