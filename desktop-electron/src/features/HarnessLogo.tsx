@@ -1,34 +1,26 @@
 import type { ReactElement } from "react";
+import antigravityLogo from "../assets/harness/antigravity.png";
+import claudeCodeLogo from "../assets/harness/claude-code.png";
+import openaiLogo from "../assets/harness/openai.png";
+import opencodeLogo from "../assets/harness/opencode.png";
 
 // The mark shown beside each harness in the composer, so a harness reads at a glance the way
-// Claude Code's own picker does: Claude's starburst for Claude Code, OpenAI's blossom for the
-// Codex harnesses, Gemini's sparkle for Antigravity, and a lettered badge for any other agent.
+// Claude Code's own picker does. Claude Code, Codex (Native Codex too), Antigravity (agy) and
+// opencode show their own app icons, taken from the installed apps (the hand-drawn marks read as
+// the wrong brands: a Gemini sparkle for Antigravity, an approximate knot for OpenAI); any other
+// agent gets a lettered badge.
 
 type Mark = (size: number) => ReactElement;
 
-const claude: Mark = (size) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
-    <g stroke="#D97757" strokeWidth="2.2" strokeLinecap="round">
-      {Array.from({ length: 12 }, (_, index) => {
-        const angle = (index * Math.PI) / 6;
-        const inner = index % 2 ? 3.2 : 2.2;
-        const outer = index % 2 ? 8.6 : 10.2;
-        return <line key={index} x1={12 + inner * Math.cos(angle)} y1={12 + inner * Math.sin(angle)}
-          x2={12 + outer * Math.cos(angle)} y2={12 + outer * Math.sin(angle)} />;
-      })}
-    </g>
-  </svg>
-);
-
-const openai: Mark = (size) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
-    <g fill="none" stroke="currentColor" strokeWidth="1.7">
-      {[0, 60, 120, 180, 240, 300].map((angle) => (
-        <ellipse key={angle} cx="12" cy="7.6" rx="3.1" ry="5.2" transform={`rotate(${angle} 12 12)`} />
-      ))}
-    </g>
-  </svg>
-);
+/** A brand's own icon; `mono` is a black glyph that turns white on the dark theme. */
+function image(src: string, mono = false): Mark {
+  return (size) => <img src={src} width={size} height={size} alt="" draggable={false}
+    className={mono ? "ao-harness-mark is-mono" : "ao-harness-mark"} />;
+}
+const claudeCodeMark = image(claudeCodeLogo);
+const openaiMark = image(openaiLogo, true);
+const antigravityMark = image(antigravityLogo);
+const opencodeMark = image(opencodeLogo);
 
 const gemini: Mark = (size) => (
   <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
@@ -62,9 +54,11 @@ function badge(label: string): Mark {
 /** The mark for a harness id ("ao:claude-code", "codex-native", …). */
 export function harnessMark(harnessId: string, label: string): Mark {
   const agent = harnessId.replace(/^ao:/, "");
-  if (agent === "claude-code") return claude;
-  if (agent === "codex" || harnessId === "codex-native") return openai;
-  if (agent === "agy" || agent === "gemini" || agent === "antigravity") return gemini;
+  if (agent === "claude-code") return claudeCodeMark;
+  if (agent === "codex" || harnessId === "codex-native") return openaiMark;
+  if (agent === "agy" || agent === "antigravity") return antigravityMark;
+  if (agent === "opencode") return opencodeMark;
+  if (agent === "gemini") return gemini;
   if (agent === "cursor") return cursor;
   return badge(label);
 }
