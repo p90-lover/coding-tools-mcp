@@ -14,6 +14,7 @@ import {
   hasRawChatGptEnvironmentContext,
   unattributedChatGptEnvironmentMessages,
   isChatGptCompactionContinuation,
+  isChatGptPreTurnCompaction,
   MissingTrustedCodexEnvironmentError,
   type ChatGptSandboxPolicy,
   type ChatGptTurnEnvironment,
@@ -156,7 +157,10 @@ export class ChatGptThreadEnvironmentStore {
       if (!(error instanceof MissingTrustedCodexEnvironmentError) || !identity.threadId) throw error;
       const hasCurrentContext = hasCurrentChatGptEnvironmentContext(parsed);
       const lineage = extractChatGptThreadSpawnLineage(parsed);
-      const currentCompaction = hasCurrentContext && isChatGptCompactionContinuation(parsed);
+      // A compaction continuation, or a compaction Codex ran before this turn's own instruction:
+      // either way authority comes only from the current rollout, which the claim must match.
+      const currentCompaction = hasCurrentContext
+        && (isChatGptCompactionContinuation(parsed) || isChatGptPreTurnCompaction(parsed));
       const historicalMessages = hasCurrentContext && !currentCompaction && lineage
         ? unattributedChatGptEnvironmentMessages(parsed) : undefined;
       if (hasCurrentContext && !currentCompaction && !historicalMessages) throw error;

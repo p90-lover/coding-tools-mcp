@@ -286,6 +286,26 @@ export function isChatGptCompactionContinuation(parsed: CodexParsedRequest): boo
     && isAcceptedCompactionContinuation(parsed, identity, revision);
 }
 
+/**
+ * Codex compacted before this turn's instruction (switching an old task to a Web model compacts
+ * its history first). Its replacement history puts this turn's environment, then the kept older
+ * messages, then the compaction itself, ahead of the turn's own context and instruction, so the
+ * environment is never adjacent to the instruction. Recognized only by a server-owned compaction
+ * item stamped with this exact turn; the caller then takes authority from the native rollout and
+ * requires the environment claim to match it, as for a compaction continuation.
+ */
+export function isChatGptPreTurnCompaction(parsed: CodexParsedRequest): boolean {
+  const turnId = extractChatGptTurnIdentity(parsed).turnId;
+  if (!turnId) return false;
+  const body = record(parsed._rawBody);
+  const input = Array.isArray(body?.input) ? body.input : [];
+  return input.some(value => {
+    const item = record(value);
+    return item?.type === "compaction" && typeof item.id === "string" && item.id.length > 0
+      && itemTurnId(item) === turnId;
+  });
+}
+
 /** Parse a claim only: the caller must compare it with this turn's native rollout authority. */
 export function extractChatGptContinuationEnvironmentClaim(parsed: CodexParsedRequest): ChatGptTurnEnvironment {
   const turnId = extractChatGptTurnIdentity(parsed).turnId;
