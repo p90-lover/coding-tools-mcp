@@ -566,6 +566,19 @@ export function AgentOrchestratorSurface({ language, setError }: {
     if (approvalSeen.current.size > 500) approvalSeen.current.delete(approvalSeen.current.keys().next().value!);
     return approvalSeen.current.get(key)!;
   };
+  // A request the "Approve for me" reviewer is still checking is not shown (awaiting_review), and
+  // neither is one the app is answering for the person right after (approvalAnsweredForYou): a card
+  // then only flashed up, offering a click that arrived after the answer.
+  // The run is looked up here, not through `selectedRun`: that const is declared further down, and
+  // reading it while this filter runs during render threw "Cannot access … before initialization"
+  // (the window's render error, every time a request was pending).
+  const approvalRun = missions.find((mission) => mission.id === selectedRunId);
+  const shownApprovals = pendingApprovalsHere.filter((approval) => !approval.awaiting_review && !approvalAnsweredForYou(approval,
+    approvalRun?.nodes.find((node) => node.id === approval.nodeId)?.route as { approval_policy?: string; approvals_reviewer?: string } | undefined,
+    Date.now() - seenAt(approval), Boolean(approvalRun?.nodes.some((node) => node.role === "approver")))).map((approval) => {
+    const note = dependencyInstallNote(approval.command, dependencyLinks?.workspaceId === workspaceId ? dependencyLinks.links : null);
+    return note ? { ...approval, dependencyNote: note } : approval;
+  });
   const [runtimePolicies, setRuntimePolicies] = useState<Record<string, RuntimePermissionPolicy>>({});
   const [runTaskId, setRunTaskId] = useState("");
   const [workerParentId, setWorkerParentId] = useState("");
@@ -974,17 +987,6 @@ export function AgentOrchestratorSurface({ language, setError }: {
   }, [workspaceId]);
 
   const selectedRun = missions.find((mission) => mission.id === selectedRunId);
-  // A request the "Approve for me" reviewer is still checking is not shown (awaiting_review), and
-  // neither is one the app is answering for the person right after (approvalAnsweredForYou): a card
-  // then only flashed up, offering a click that arrived after the answer. It reads selectedRun, so it
-  // comes after it: declared above it, the first pending approval threw "Cannot access … before
-  // initialization" while rendering and blanked the whole window.
-  const shownApprovals = pendingApprovalsHere.filter((approval) => !approval.awaiting_review && !approvalAnsweredForYou(approval,
-    selectedRun?.nodes.find((node) => node.id === approval.nodeId)?.route as { approval_policy?: string; approvals_reviewer?: string } | undefined,
-    Date.now() - seenAt(approval), Boolean(selectedRun?.nodes.some((node) => node.role === "approver")))).map((approval) => {
-    const note = dependencyInstallNote(approval.command, dependencyLinks?.workspaceId === workspaceId ? dependencyLinks.links : null);
-    return note ? { ...approval, dependencyNote: note } : approval;
-  });
   const currentRun = () => mounted.current && selection.current.workspaceId === workspaceId && selection.current.runId === selectedRunId;
   const savedMissionTeam = savedTeams.find(item => item.id === selectedRun?.team?.id) ?? team;
   const missionTeam = missionTeamId ? savedTeams.find(item => item.id === missionTeamId) ?? null : team;
@@ -1696,6 +1698,27 @@ export function AgentOrchestratorSurface({ language, setError }: {
     setChatTaskId(null);
     try { localStorage.setItem("coding-tools:ao:workspace", id); } catch { /* Selection still works for this session. */ }
   };
+  // A chat opened from another project's rows in the list: switch to that project, then open the
+  // chat as soon as its runs have loaded (the switch empties the current project's state first).
+  const pendingSelect = useRef<{ workspaceId: string; taskId: string } | null>(null);
+  const selectChatIn = (id: string, taskId: string) => {
+    if (id === workspaceId) { selectChat(taskId); return; }
+    pendingSelect.current = { workspaceId: id, taskId };
+    chooseWorkspace(id);
+  };
+  useEffect(() => {
+    const pending = pendingSelect.current;
+    if (!pending || pending.workspaceId !== workspaceId) return;
+    if (!chatList(missions, board?.tasks ?? [], taskLifecycle).some((entry) => entry.taskId === pending.taskId)) return;
+    pendingSelect.current = null;
+    selectChat(pending.taskId);
+  }, [missions, board, taskLifecycle, workspaceId]);
+  // Another project's chats for its open row in the list, without switching to it.
+  const loadProjectChats = useCallback(async (id: string) => {
+    const [projectBoard, projectRuns] = await Promise.all([moduleCall("board", { workspaceId: id }), moduleCall("runs", { workspaceId: id })]);
+    return chatList(Array.isArray(projectRuns.runs) ? projectRuns.runs as AoMission[] : [],
+      (projectBoard as unknown as Board).tasks ?? [], (projectRuns.task_lifecycle as TaskLifecycleView[]) || []);
+  }, []);
   // A chat that finishes or needs you while another is open is marked unread, as in Codex.
   const lastChatStatus = useRef<Record<string, string>>({});
   useEffect(() => {
@@ -1871,7 +1894,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
           // Another project's new chat goes through the same seed as "Continue in", with an empty draft.
           newChatIn: (id) => { if (id === workspaceId) startNewChat(); else { setChatSeed({ key: crypto.randomUUID(), workspaceId: id, title: "", text: "" }); chooseWorkspace(id); } },
           editProject: (id) => setProjectEdit({ id, step: "edit" }),
-          removeProject: (id) => setProjectEdit({ id, step: "remove" }) }}
+          removeProject: (id) => setProjectEdit({ id, step: "remove" }),
+          selectIn: selectChatIn }}
+        loadProjectChats={loadProjectChats}
         projectRemote={(folder) => window.codexWebLauncher?.projectRemote?.(folder) ?? Promise.resolve(null)}
         projectGit={readProjectGit} />
       <div className="ao-main">

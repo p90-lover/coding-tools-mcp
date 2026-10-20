@@ -1204,13 +1204,3 @@ test("a single-model chat's card is named by its model, a team's by its role", (
   assert.equal(name("single"), "Model<cpa/cline-pass/deepseek-v4.1-flash>");
   assert.equal(name("team"), "Single assistant");
 });
-
-test("the approvals shown in a chat are worked out after the run they read (a use before it blanked the window)", () => {
-  // Seen live: "ReferenceError: Cannot access 'at' before initialization" inside shownApprovals' filter,
-  // thrown on the first pending approval; with no error boundary the whole window went black.
-  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8");
-  const run = source.indexOf("const selectedRun = ");
-  const shown = source.indexOf("const shownApprovals = ");
-  assert.ok(run > 0 && shown > 0);
-  assert.ok(shown > run, "shownApprovals reads selectedRun, so it is declared after it");
-});
