@@ -336,6 +336,24 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-live-item.kind-steer .cx-user { width: 100%; }
 .cx-bubble { max-width: 82%; padding: 10px 14px; border-radius: 18px; background: var(--cx-bubble); }
 .cx-bubble p { margin: 0; font-size: 14px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* A sent message's attachments above its bubble, as Claude Code shows them: image thumbnails that
+   open full size, and file cards that show the file in its folder. */
+.cx-sent-attachments { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; max-width: 82%; margin-bottom: 4px; }
+.cx-sent-image { display: inline-flex; align-items: center; justify-content: center; width: 120px; height: 120px; padding: 0; overflow: hidden;
+  border: 1px solid var(--ao-line); border-radius: 12px; background: var(--cx-tray); color: var(--ao-muted); font-size: 11px; cursor: zoom-in; }
+.cx-sent-image img { width: 100%; height: 100%; object-fit: cover; }
+.cx-sent-image:disabled { cursor: default; }
+.cx-sent-image span { padding: 6px; overflow: hidden; text-overflow: ellipsis; overflow-wrap: anywhere; }
+.cx-sent-image:hover:not(:disabled) { border-color: color-mix(in srgb, var(--color-text-primary) 25%, transparent); }
+.cx-sent-file { display: inline-flex; align-items: center; gap: 10px; width: 220px; min-height: 52px; padding: 8px 12px; border: 1px solid var(--ao-line);
+  border-radius: 12px; background: var(--cx-tray); color: var(--color-text-primary); font: inherit; text-align: left; cursor: pointer; }
+.cx-sent-file:disabled { cursor: default; }
+.cx-sent-file-icon { flex: none; display: inline-grid; place-items: center; width: 28px; height: 32px; border-radius: 6px; background: var(--cx-active); color: var(--ao-muted); font-size: 9px; font-weight: 600; }
+.cx-sent-file-name { min-width: 0; overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.cx-lightbox { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 32px; background: rgb(0 0 0 / .72); cursor: zoom-out; }
+.cx-lightbox img { max-width: 100%; max-height: 100%; border-radius: 8px; box-shadow: 0 12px 40px rgb(0 0 0 / .4); cursor: default; }
+.cx-lightbox-close { position: absolute; top: 16px; right: 16px; width: 32px; height: 32px; border: 0; border-radius: 50%; background: rgb(255 255 255 / .16);
+  color: #fff; font-size: 20px; line-height: 1; cursor: pointer; }
 .cx-stamp { color: var(--ao-muted); font-size: 11px; }
 .cx-msg-actions { display: flex; gap: 2px; opacity: 0; transition: opacity var(--duration-micro, 140ms); }
 .cx-user:hover .cx-msg-actions, .cx-answer:hover .cx-msg-actions, .cx-msg-actions:focus-within { opacity: 1; }
@@ -871,21 +889,131 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-overview-usage b { overflow: hidden; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .cx-overview-usage small { color: var(--ao-muted); font-size: 11.5px; }
 @media (prefers-reduced-motion: reduce) { .cx-overview-tasks i { animation: none; } }
-/* DeepSeek models show as DeepSeek Harness does (DshStyle): quiet 13px rows "Bash · cmd", a blue
-   "Deep diving for 12s ···" while running, and two stats pills. */
-.cx-turn.is-dsh { --cx-dsh-row: rgb(129 133 140); --cx-dsh-row-hover: rgb(97 102 107); --cx-dsh-blue: rgb(65 118 230); }
-:root[data-theme="dark"] .cx-turn.is-dsh, .ao-workflow[data-theme="dark"] .cx-turn.is-dsh { --cx-dsh-row: rgb(173 178 184); --cx-dsh-row-hover: rgb(207 211 214); }
-.cx-turn.is-dsh .cx-live-item { font-size: 13px; color: var(--cx-dsh-row); }
-.cx-turn.is-dsh .cx-live-item:hover { color: var(--cx-dsh-row-hover); }
-.cx-turn.is-dsh .cx-live-label + .cx-live-text::before { content: "·"; margin: 0 6px 0 2px; opacity: .7; }
-.cx-turn.is-dsh .cx-tool-dot { display: none; }
-.cx-turn.is-dsh .cx-diff-count { font-family: var(--claude-mono, ui-monospace, monospace); font-size: 11px; }
-.cx-turn.is-dsh .cx-diff-count .is-add, .cx-turn.is-dsh .cx-diff-count .is-del { color: inherit; }
-.cx-turn.is-dsh .cx-tool:hover .cx-diff-count .is-add, .cx-turn.is-dsh details[open] .cx-diff-count .is-add { color: var(--ao-green, #2e9d5b); }
-.cx-turn.is-dsh .cx-tool:hover .cx-diff-count .is-del, .cx-turn.is-dsh details[open] .cx-diff-count .is-del { color: var(--ao-red, #c0392b); }
-.cx-turn.is-dsh .cx-dsh-diving { color: var(--cx-dsh-blue); font-size: 12px; }
-.cx-turn.is-dsh .cx-group .cx-live { max-height: min(400px, 50vh); overflow-y: auto;
-  mask-image: linear-gradient(transparent, #000 24px, #000 calc(100% - 24px), transparent); }
+/* A DeepSeek model's turn, as DeepSeek Harness's web client draws one (DshTranscript.tsx; its
+   ui-chat, ui-tool, ui-primitives and ui-theme stylesheets, MIT License, Copyright (c) 2026
+   DeepSeek). The colors are its design-platform tokens, light then dark. */
+.cx-turn.is-dsh {
+  --dsh-primary: rgb(15 17 21); --dsh-secondary: rgb(97 102 107); --dsh-tertiary: rgb(129 133 140); --dsh-caption: rgb(173 178 184);
+  --dsh-shimmer: rgb(0 0 0 / .3); --dsh-border-l1: rgb(0 0 0 / .04); --dsh-border-l2: rgb(0 0 0 / .1);
+  --dsh-code-bg: rgb(249 250 251); --dsh-bubble: rgb(237 243 254); --dsh-bg: var(--color-bg-primary);
+  --dsh-error: rgb(236 19 19); --dsh-success: rgb(34 197 94); --dsh-warn: rgb(221 134 41);
+  --dsh-deep: color-mix(in srgb, rgb(65 118 230) 70%, rgb(23 37 84));
+  --dsh-deep-shimmer: color-mix(in srgb, rgb(65 118 230) 30%, rgb(23 37 84));
+  --dsh-mono: "SF Mono", "JetBrains Mono", "Fira Code", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+  gap: 12px; font-size: 14px;
+}
+:root[data-theme="dark"] .cx-turn.is-dsh, .ao-workflow[data-theme="dark"] .cx-turn.is-dsh {
+  --dsh-primary: rgb(249 250 251); --dsh-secondary: rgb(207 211 214); --dsh-tertiary: rgb(173 178 184); --dsh-caption: rgb(129 133 140);
+  --dsh-shimmer: rgb(255 255 255 / .45); --dsh-border-l1: rgb(255 255 255 / .06); --dsh-border-l2: rgb(255 255 255 / .12);
+  --dsh-code-bg: rgb(27 27 28); --dsh-bubble: rgb(44 44 46); --dsh-error: rgb(242 90 90);
+  --dsh-deep: color-mix(in srgb, rgb(86 134 254) 55%, rgb(173 178 184));
+  --dsh-deep-shimmer: color-mix(in srgb, rgb(147 197 253) 65%, rgb(122 170 255));
+}
+/* User message: a 20px-round bubble, 10/16 padding, 14/22 text. */
+.cx-turn.is-dsh .cx-user { gap: 6px; }
+.cx-turn.is-dsh .cx-bubble { max-width: min(70.2%, 82%); padding: 10px 16px; border-radius: 20px; background: var(--dsh-bubble); color: var(--dsh-primary); }
+.cx-turn.is-dsh .cx-bubble p { font-size: 14px; line-height: 22px; }
+/* The reply: full-width 14/24 narration in the primary label color. */
+.cx-turn.is-dsh .cx-answer, .cx-turn.is-dsh .dsh-reply { color: var(--dsh-primary); font-size: 14px; line-height: 24px; }
+.dsh-turn-work, .dsh-process, .dsh-flow { display: flex; flex-direction: column; min-width: 0; }
+.dsh-flow > * + * { margin-top: 6px; }
+.dsh-process > * + * { margin-top: 6px; }
+/* "Completed in 1m 4s ⌄": 33px, a hairline under it, 16px clear of what follows. */
+.dsh-turn-process { box-sizing: border-box; display: flex; align-items: center; width: 100%; min-width: 0; height: 33px; padding: 0 0 8px; margin-bottom: 16px;
+  border: 0; border-bottom: .5px solid var(--dsh-border-l2); background: none; color: var(--dsh-tertiary); font: inherit; font-size: 14px; text-align: left;
+  cursor: pointer; transition: color 100ms ease; }
+.dsh-turn-process:disabled { cursor: default; }
+.dsh-turn-process:hover:not(:disabled) { color: var(--dsh-secondary); }
+.dsh-turn-process-label { min-width: 0; overflow: hidden; line-height: 24px; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-num { font-family: var(--dsh-mono); font-variant-numeric: tabular-nums; }
+.dsh-turn-process-chevron { display: inline-flex; flex: none; margin-left: 4px; transition: transform 100ms ease; }
+.dsh-turn-process[data-open] .dsh-turn-process-chevron { transform: rotate(180deg); }
+/* DisclosureRow: [16px leading] 6 [title 13/24] 8 [2px dot] 8 [summary]. */
+.dsh-row-root { display: flex; flex-direction: column; width: 100%; min-width: 0; }
+.dsh-row { position: relative; display: flex; align-items: center; height: 24px; min-width: 0; overflow: hidden; color: var(--dsh-tertiary); transition: color 100ms ease; }
+.dsh-row[data-expandable] { cursor: pointer; }
+.dsh-row:hover { color: var(--dsh-secondary); }
+.dsh-row:focus-visible { outline: 1.5px solid var(--dsh-deep); outline-offset: 2px; border-radius: 4px; }
+.dsh-leading { position: relative; display: inline-flex; flex: none; align-items: center; justify-content: center; width: 16px; height: 16px; margin-right: 6px; color: inherit; }
+.dsh-leading svg { width: 14px; height: 14px; }
+.dsh-icon-idle { display: inline-flex; transition: opacity 100ms ease; }
+.dsh-chevron-hover { position: absolute; inset: 0; display: inline-flex; align-items: center; justify-content: center; opacity: 0; transition: opacity 100ms ease; }
+.dsh-row:hover .dsh-icon-idle { opacity: 0; }
+.dsh-row:hover .dsh-chevron-hover { opacity: 1; }
+.dsh-row-text { display: flex; align-items: center; flex: 1 1 auto; min-width: 0; }
+.dsh-title { flex: none; font-size: 13px; font-weight: 400; line-height: 24px; color: inherit; }
+.dsh-sep { flex: none; width: 2px; height: 2px; margin: 0 8px; border-radius: 1px; background: var(--dsh-caption); }
+.dsh-summary { flex: 0 1 auto; min-width: 0; overflow: hidden; font-size: 13px; line-height: 24px; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-summary.is-error { color: var(--dsh-error); }
+.dsh-summary.is-stopped { color: var(--dsh-warn); }
+.dsh-suffix { flex: none; margin-left: 4px; font-size: 13px; line-height: 24px; white-space: nowrap; }
+.dsh-diff-stat { margin-left: 10px; font-family: var(--dsh-mono); font-size: 11px; transform: translateY(.5px); }
+.dsh-row:is(:hover, [aria-expanded="true"]) .dsh-diff-stat .is-add { color: var(--dsh-success); }
+.dsh-row:is(:hover, [aria-expanded="true"]) .dsh-diff-stat .is-del { color: var(--dsh-error); }
+/* A Think row stays one 24px line until opened; its thought indents under the title. */
+.dsh-think-body { min-width: 0; padding: 4px 0 4px 22px; color: var(--dsh-secondary); font-size: 13px; line-height: 20px; }
+.dsh-think-body .cx-md { font-size: 13px; line-height: 20px; }
+.dsh-think[data-open] > .dsh-row { position: sticky; top: 0; z-index: 1; background: var(--dsh-bg); }
+/* Tool bodies: a 4px indent, the code-block surface, a 0.5px l1 hairline, 16px corners. */
+.dsh-body { display: flex; flex-direction: column; }
+.dsh-terminal, .dsh-io, .dsh-diff { margin: 4px 0 4px 4px; border: .5px solid var(--dsh-border-l1); border-radius: 16px; background: var(--dsh-code-bg);
+  font-family: var(--dsh-mono); font-size: 12px; line-height: 18px; overflow: hidden; }
+.dsh-terminal-cmd { padding: 10px 16px; border-bottom: .5px solid var(--dsh-border-l2); color: var(--dsh-secondary); white-space: pre-wrap; overflow-wrap: anywhere; }
+.dsh-terminal-out, .dsh-diff pre { margin: 0; max-height: 224px; overflow: auto; padding: 10px 16px; color: var(--dsh-secondary); white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+.dsh-diff-path { padding: 8px 16px 0; color: var(--dsh-tertiary); }
+.dsh-diff .is-add { color: var(--dsh-success); }
+.dsh-diff .is-del { color: var(--dsh-error); }
+.dsh-io { display: flex; flex-direction: column; }
+.dsh-io-section { display: grid; grid-template-columns: max-content 1fr; column-gap: 14px; align-items: baseline; max-height: 150px; overflow-y: auto; padding: 12px 16px; }
+.dsh-io-label { position: sticky; top: 0; align-self: start; color: var(--dsh-caption); }
+.dsh-io-divider { flex: none; height: .5px; background: var(--dsh-border-l2); }
+.dsh-io-text { min-width: 0; color: var(--dsh-secondary); white-space: pre-wrap; word-break: break-word; }
+.dsh-io-text[data-error] { color: var(--dsh-error); }
+/* A team card's row opens on its own work, indented under its title. */
+.dsh-agent-body { display: flex; flex-direction: column; gap: 6px; padding: 4px 0 4px 22px; min-width: 0; }
+/* A process group: its kind of work's icon turns into a chevron on hover or while open. */
+.dsh-group { min-width: 0; }
+.dsh-group-title { display: flex; align-items: center; gap: 6px; max-width: 100%; padding: 0; border: 0; background: none; color: var(--dsh-tertiary);
+  font: inherit; font-size: 14px; line-height: 24px; text-align: left; cursor: pointer; transition: color 100ms ease; }
+.dsh-group-title:hover { color: var(--dsh-secondary); }
+.dsh-group-title[aria-expanded="true"] { padding-bottom: 8px; }
+.dsh-group-leading { position: relative; display: inline-flex; flex: none; align-items: center; justify-content: center; width: 16px; height: 16px; }
+.dsh-group-leading svg { width: 14px; height: 14px; }
+.dsh-group-icon, .dsh-group-chevron { position: absolute; inset: 0; display: inline-flex; align-items: center; justify-content: center; transition: opacity 100ms ease; }
+.dsh-group-chevron { opacity: 0; }
+.dsh-group-title:is(:hover, :focus-visible, [aria-expanded="true"]) .dsh-group-icon { opacity: 0; }
+.dsh-group-title:is(:hover, :focus-visible, [aria-expanded="true"]) .dsh-group-chevron { opacity: 1; }
+.dsh-group-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-group-body { max-height: min(400px, 50vh); overflow-y: auto; scrollbar-gutter: stable; }
+.dsh-group-body.fade-top { mask-image: linear-gradient(to bottom, transparent 0, #000 24px, #000 100%); }
+.dsh-group-body.fade-bottom { mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 24px), transparent 100%); }
+.dsh-group-body.fade-top.fade-bottom { mask-image: linear-gradient(to bottom, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%); }
+/* Running: a sweep of lighter text across the row (TextShimmer), and the blue "Deep diving" line. */
+.dsh-shimmer { background: linear-gradient(105deg, currentColor 0 40%, var(--dsh-shimmer) 50%, currentColor 60% 100%); background-size: 300% 100%;
+  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; animation: dsh-shimmer 1.5s steps(48, end) .3s infinite; }
+.dsh-shimmer .dsh-sep { background: currentColor; }
+@keyframes dsh-shimmer { 0% { background-position: 100% 0; } 66.6667%, 100% { background-position: 0 0; } }
+.dsh-running { display: flex; flex-direction: column; align-items: flex-start; color: var(--dsh-deep); font-size: 12px; line-height: 22px; }
+.dsh-running .dsh-shimmer { --dsh-shimmer: var(--dsh-deep-shimmer); font-variant-numeric: tabular-nums; }
+.dsh-running-divider { display: block; width: 100%; height: .5px; margin: 8px 0 10px; background: color-mix(in srgb, var(--dsh-border-l1) 75%, var(--dsh-border-l2)); }
+.dsh-running-content { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.dsh-whale { position: relative; display: inline-flex; flex: none; width: 14px; height: 14px; overflow: hidden; contain: strict; }
+.dsh-whale-animated { display: none; position: absolute; inset: 0; }
+@supports (mask-image: url("")) {
+  @media (prefers-reduced-motion: no-preference) and (forced-colors: none) {
+    .dsh-whale-animated { display: block; background: currentColor; mask: url("./dsh-running-whale.png") center / 100% 100% no-repeat; will-change: transform; }
+    .dsh-whale-still { display: none; }
+  }
+}
+.dsh-hint { margin: 0; color: var(--dsh-tertiary); font-size: 13px; line-height: 18px; }
+/* "This turn failed": the error title in red, its message in the secondary color. */
+.dsh-turn-error { display: flex; flex-wrap: wrap; gap: 0 6px; padding: 2px 0; font-size: 13px; line-height: 20px; overflow-wrap: anywhere; }
+.dsh-turn-error-title { color: var(--dsh-error); font-weight: 600; }
+.dsh-turn-error-message { color: var(--dsh-secondary); }
+@media (prefers-reduced-motion: reduce) {
+  .dsh-shimmer { animation: none; background: none; -webkit-text-fill-color: currentColor; }
+  .dsh-row, .dsh-icon-idle, .dsh-chevron-hover, .dsh-group-title, .dsh-group-icon, .dsh-group-chevron, .dsh-turn-process, .dsh-turn-process-chevron { transition: none; }
+}
 .cx-turn-stats.is-dsh { gap: 6px; }
 .cx-turn-stats.is-dsh span { padding: 2px 9px; border: 1px solid var(--ao-line); border-radius: 999px; }
 .cx-turn-stats.is-dsh span::before { content: none; }

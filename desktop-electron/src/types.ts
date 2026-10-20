@@ -797,6 +797,8 @@ export interface LauncherApi {
   saveAttachment?(input: { name: string; type: string; bytes: Uint8Array }): Promise<{ path: string }>;
   /** Selects an existing file in the system file manager. */
   revealFile?(file: string): Promise<boolean>;
+  /** An attached image as a data: URL, for its thumbnail in a sent message. */
+  attachmentPreview?(file: string): Promise<string>;
   /** Opens or refreshes a chat's read-only window; `open: false` once the user has closed it. */
   showChatWindow?(input: { key: string; title: string; page: string; body: string; mode: "open" | "update" }): Promise<{ open: boolean }>;
   /** A project folder's git origin as "owner/repo", or null. */
