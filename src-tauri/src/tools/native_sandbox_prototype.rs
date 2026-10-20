@@ -218,9 +218,11 @@ fn invoke_helper(
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x08000000);
     }
-    let mut child = cmd
-        .spawn()
-        .map_err(|_| err("Verified sandbox helper could not start"))?;
+    let spawned = {
+        let _gate = crate::harness::resource_lease::spawn_gate();
+        cmd.spawn()
+    };
+    let mut child = spawned.map_err(|_| err("Verified sandbox helper could not start"))?;
     let job = match sandbox_process::assign(&child) {
         Ok(job) => job,
         Err(e) => {

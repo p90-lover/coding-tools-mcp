@@ -586,9 +586,11 @@ fn run_git(
         .env("GIT_OPTIONAL_LOCKS", "0");
     // Hooks and config-driven helpers run as git's children: none gets the app's secrets.
     crate::tools::exec::remove_secret_env(&mut cmd);
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| git_error(&format!("git not available: {e}")))?;
+    let spawned = {
+        let _gate = crate::harness::resource_lease::spawn_gate();
+        cmd.spawn()
+    };
+    let mut child = spawned.map_err(|e| git_error(&format!("git not available: {e}")))?;
     let pipe = |reader: Option<Box<dyn std::io::Read + Send>>| {
         std::thread::spawn(move || {
             let mut bytes = Vec::new();
