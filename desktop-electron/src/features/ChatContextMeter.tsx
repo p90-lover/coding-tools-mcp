@@ -39,7 +39,23 @@ export type ChatContextSnapshot = {
   planLabel: string | null; mcpServers: { name: string; status: string }[]; breakdown?: ContextBreakdown | null;
   /** The window the session was launched with, as this app run recorded it (a blank card's full limit included). */
   launchedWindow?: number | null;
+  /** The session the shown usage came from when it is not this one (see previousSessionIds). */
+  carriedFrom?: string;
 };
+
+/**
+ * The reading to show for `sessionId`: its own, or, while it has reported no usage yet, the newest
+ * of the chat's earlier sessions that has. A chat resumed after a restart runs in a new session of
+ * the same conversation, and Claude Code over ACP reports usage only when a model request ends, so
+ * the meter read "Waiting for the agent's first reply" for a whole half-hour first request.
+ */
+export function currentContext(sessions: Record<string, ChatContextSnapshot> | undefined, sessionId: string,
+  previousSessionIds: readonly string[] = []): ChatContextSnapshot | undefined {
+  const own = sessions?.[sessionId];
+  if (!own || own.usage) return own;
+  const earlier = previousSessionIds.map((id) => [id, sessions?.[id]] as const).find(([, snapshot]) => snapshot?.usage);
+  return earlier ? { ...own, usage: earlier[1]!.usage, carriedFrom: earlier[0] } : own;
+}
 
 /** One quota window of a CPA Codex account (cpa-quota.cjs): percent used and when it resets (ms). */
 type QuotaWindow = { usedPercent: number; resetsAt: number | null; windowSeconds: number | null };
@@ -155,8 +171,10 @@ function ContextRows({ segments, scale, used, estimated }: { segments: Segment[]
 }
 
 
-export function ChatContextMeter({ sessionId, agentLabel, model, launchedWindow, nextWindow, canCompact, onCompact, onFraction }: {
+export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, model, launchedWindow, nextWindow, canCompact, onCompact, onFraction }: {
   sessionId?: string;
+  /** The chat's earlier sessions, newest first: their last reading stands in until this one reports. */
+  previousSessionIds?: string[];
   agentLabel?: string;
   /** The session's route model; a "cpa/…" model served by CPA's Codex accounts shows their limits. */
   model?: string;
@@ -179,23 +197,25 @@ export function ChatContextMeter({ sessionId, agentLabel, model, launchedWindow,
   const button = useRef<HTMLButtonElement>(null);
   const panel = useRef<HTMLDivElement>(null);
 
+  const earlierKey = (previousSessionIds ?? []).slice(0, 3).join(",");
   useEffect(() => {
     setSnapshot(null);
     if (!sessionId) return undefined;
     let live = true;
-    const read = () => void getCodingToolsClient().apps.call({ moduleId: "agent-orchestrator", operation: "chat_context", arguments: { sessionIds: [sessionId] } })
+    const earlier = earlierKey ? earlierKey.split(",") : [];
+    const read = () => void getCodingToolsClient().apps.call({ moduleId: "agent-orchestrator", operation: "chat_context", arguments: { sessionIds: [sessionId, ...earlier] } })
       .then((outer) => {
         const sessions = (outer.result as { sessions?: Record<string, ChatContextSnapshot> } | undefined)?.sessions;
         // A reply without this session is a read that failed (AO busy or restarting, a timeout),
         // not a session with no context: the last reading stays instead of the meter emptying.
-        const next = sessions?.[sessionId];
+        const next = currentContext(sessions, sessionId, earlier);
         if (live && next) setSnapshot(next);
       })
       .catch(() => undefined);
     read();
     const timer = window.setInterval(() => { if (document.visibilityState === "visible") read(); }, POLL_MS);
     return () => { live = false; window.clearInterval(timer); };
-  }, [sessionId]);
+  }, [sessionId, earlierKey]);
 
   // CPA's Codex accounts' limits change slowly and CPA Helper caches them: read once a minute while
   // the window is visible, and again when the panel opens. Their token use and cost come along.
@@ -332,7 +352,8 @@ export function ChatContextMeter({ sessionId, agentLabel, model, launchedWindow,
             segments={breakdown ? breakdown.categories.map((category) => ({ id: category.id, label: category.label, tokens: category.tokens }))
               : [{ id: "used", label: "In use", tokens: usage.contextUsed ?? 0 }]} />
             : <div className="cx-ctx-cc-head"><b>{tokensShort(usage.contextUsed)}</b><span>tokens in context</span></div>}
-          {scale && !breakdown ? <p className="cx-ctx-meta">Reading the split from the chat's history…</p> : null}
+          {snapshot?.carriedFrom ? <p className="cx-ctx-meta" title={snapshot.carriedFrom}>Last reading from this chat's previous session; this one reports when its first model request ends</p> : null}
+          {scale && !breakdown && !snapshot?.carriedFrom ? <p className="cx-ctx-meta">Reading the split from the chat's history…</p> : null}
           {pendingWindow ? <p className="cx-ctx-meta"><span className="is-pending">Next run {tokensShort(pendingWindow)}</span></p> : null}
           {/* The conversation's spend as a short list, the cached share beside the input it saved:
               five equal tiles left each number too narrow to read. */}

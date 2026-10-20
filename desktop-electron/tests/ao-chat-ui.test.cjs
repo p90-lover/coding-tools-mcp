@@ -89,6 +89,23 @@ test("every new card starts with instructions and an expected output for its rol
   assert.equal(roles.starterSettings("worker", "Worker").role_name, undefined);
 });
 
+test("a session with no usage yet shows the chat's previous session's last reading, marked as such", () => {
+  // Seen live: a chat resumed after a restart read "Waiting for the agent's first reply" for a
+  // half-hour first request; Claude Code over ACP reports usage only when a model request ends.
+  const usage = { contextUsed: 203_393, contextWindow: 400_000, inputTokens: 0, outputTokens: 0, cachedTokens: 0, totalTokens: 0, cost: 13.3, currency: "USD" };
+  const blank = { controller: "busy", usage: null, rateLimits: null, compactedAt: null, planLabel: null, mcpServers: [] };
+  const sessions = { new: blank, old: { ...blank, controller: "stopped", usage }, other: { ...blank, usage: { ...usage, contextUsed: 5 } } };
+  const carried = meter.currentContext(sessions, "new", ["old", "other"]);
+  assert.equal(carried.controller, "busy", "the current session's own state");
+  assert.equal(carried.usage.contextUsed, 203_393, "the newest earlier session with a reading");
+  assert.equal(carried.carriedFrom, "old");
+  const own = meter.currentContext({ ...sessions, new: { ...blank, usage: { ...usage, contextUsed: 1_000 } } }, "new", ["old"]);
+  assert.equal(own.usage.contextUsed, 1_000, "once it reports, its own reading");
+  assert.equal(own.carriedFrom, undefined);
+  assert.equal(meter.currentContext({ new: blank }, "new", []).usage, null, "nothing to carry: still waiting");
+  assert.equal(meter.currentContext({}, "new", ["old"]), undefined, "a failed read stays a failed read");
+});
+
 test("opening a working role shows live step and output, not a final-result placeholder", () => {
   const team = roles.defaultTeam("workspace", roles.workerRoute(roles.DEFAULT_WORKER_HARNESS, roles.DEFAULT_WORKER_MODEL));
   const node = { ...team.nodes[1], state: "running" };
