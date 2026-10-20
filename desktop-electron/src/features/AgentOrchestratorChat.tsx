@@ -1,4 +1,5 @@
 import { createContext, memo, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { getCodingToolsClient } from "../api/client";
 import { Caret, Icon } from "../icons";
 import { AgentOrchestratorComposerControls, type ComposerControlsProps } from "./AgentOrchestratorComposerControls";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
@@ -28,6 +29,31 @@ const STATUS_LABEL: Record<ChatStatus, string> = {
 };
 /** Text files up to this size are attached inline when their path is unknown. */
 const INLINE_ATTACHMENT_BYTES = 200 * 1024;
+
+/**
+ * "Retry automatically" on the failed-step card (the user: a launch that timed out waited for a
+ * click). The preference lives in the app (chat_auto_retry), so it holds for every chat and after a
+ * restart; turning it on also retries the step that just failed.
+ */
+function AutoRetryToggle({ disabled, onRetryNow }: { disabled: boolean; onRetryNow: () => void }) {
+  const [on, setOn] = useState<boolean | null>(null);
+  const call = (args: { enabled: boolean } | Record<string, never>) => getCodingToolsClient().apps
+    .call({ moduleId: "agent-orchestrator", operation: "chat_auto_retry", arguments: args })
+    .then((outer) => Boolean(((outer as { result?: { autoRetry?: boolean } }).result ?? outer as { autoRetry?: boolean }).autoRetry));
+  useEffect(() => {
+    let live = true;
+    call({}).then((value) => { if (live) setOn(value); }, () => { if (live) setOn(false); });
+    return () => { live = false; };
+  }, []);
+  return <label className="cx-auto-retry" title="A failed step runs again by itself, up to three times with a growing pause; account or sign-in failures still wait for you">
+    <input type="checkbox" checked={on === true} disabled={disabled || on === null} onChange={(event) => {
+      const next = event.target.checked;
+      setOn(next);
+      call({ enabled: next }).then((value) => { setOn(value); if (value) onRetryNow(); }, () => setOn(!next));
+    }} />
+    Retry automatically
+  </label>;
+}
 /** An image attachment's thumbnail URL, where the page can make one. */
 const previewOf = (file: File): string | undefined => (typeof URL !== "undefined" && URL.createObjectURL ? URL.createObjectURL(file) : undefined);
 const freePreview = (url: string | undefined) => { if (url && typeof URL !== "undefined") URL.revokeObjectURL?.(url); };
@@ -1343,7 +1369,8 @@ export function AgentOrchestratorChat({
               <div className="cx-card tone-error">
                 <strong>A step failed</strong>
                 <p>{notice || "The recovery helper retries failed steps up to three times. Retry now, or send a follow-up once you stop this chat."}</p>
-                <div className="cx-card-actions"><button className="button-primary" type="button" disabled={busy} onClick={() => retryStart(latest.id)}>Retry failed step</button></div>
+                <div className="cx-card-actions"><button className="button-primary" type="button" disabled={busy} onClick={() => retryStart(latest.id)}>Retry failed step</button>
+                  <AutoRetryToggle disabled={busy} onRetryNow={() => retryStart(latest.id)} /></div>
               </div>
             ) : null}
           </div>

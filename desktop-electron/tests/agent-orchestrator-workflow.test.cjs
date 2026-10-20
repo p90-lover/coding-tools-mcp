@@ -987,6 +987,31 @@ test("WebGPT is offered only on Native Codex; AO harnesses get every other CPA m
   assert.ok((await workflow.call("models", { harness: "codex-native" })).models.includes("chatgpt-web/high"));
 });
 
+test("\"Retry automatically\" is a saved preference: off by default, on and off by the chat's card", async () => {
+  const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-prefs-"));
+  const file = path.join(dir, "chat-preferences.json");
+  try {
+    const make = () => createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }), chatPreferencesFile: file });
+    const workflow = make();
+    assert.equal((await workflow.call("chat_auto_retry", {})).autoRetry, false);
+    assert.equal((await workflow.call("chat_auto_retry", { enabled: true })).autoRetry, true);
+    assert.equal((await make().call("chat_auto_retry", {})).autoRetry, true, "kept across a restart");
+    await assert.rejects(workflow.call("chat_auto_retry", { enabled: "yes" }), /on or off/);
+    assert.equal((await workflow.call("chat_auto_retry", { enabled: false })).autoRetry, false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("the harness picker names agy by its full name", async () => {
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async () => ({ ok: true }),
+    aoHarness: { catalog: async () => [{ id: "agy", label: "Agy", installed: true, chat: false }, { id: "opencode", label: "opencode", installed: true }] },
+  });
+  const listed = (await workflow.call("harnesses")).harnesses;
+  assert.equal(listed.find(item => item.id === "ao:agy")?.label, "Antigravity");
+  assert.equal(listed.find(item => item.id === "ao:opencode")?.label, "opencode");
+});
+
 test("while AO is still checking agents the harness list says so and the next read asks AO again", async () => {
   let reads = 0;
   const workflow = createAgentOrchestratorWorkflow({
@@ -1016,8 +1041,10 @@ test("CPA models go only to agents that can use them through the gateway", async
   });
   // Aider has no gateway launch support: its own models only.
   assert.deepEqual((await workflow.call("models", { harness: "ao:aider" })).models, ["own-model"]);
-  // agy's gateway mode sends no tools for CPA's model names, so it keeps its own models.
-  assert.deepEqual((await workflow.call("models", { harness: "ao:agy" })).models, ["own-model"]);
+  // agy runs CPA models through its gateway mode too: every harness offers every pool model but
+  // WebGPT (an agy with no Google sign-in listed nothing at all and fell back to WebGPT's tiers).
+  assert.deepEqual((await workflow.call("models", { harness: "ao:agy" })).models,
+    ["own-model", "cpa/gpt-5.5", "cpa/gemini-3.8-flash-high", "cpa/gemini-3.1-pro-low"]);
   // Claude Code and opencode offer only CPA models: their own aliases (fable/haiku/opus/sonnet)
   // are neither CPA nor WebGPT. Codex keeps its ChatGPT-account models next to CPA's.
   for (const harness of ["ao:claude-code", "ao:opencode"]) {
