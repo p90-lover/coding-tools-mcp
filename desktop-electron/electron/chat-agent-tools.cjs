@@ -84,7 +84,7 @@ const AGENT_TOOLS = new Set([
   "git_status", "git_diff", "git_log", "git_show", "git_blame",
   "view_image", "image_info", "compare_images",
   "update_plan", "get_plan", "get_current_time", "tool_search", "server_info",
-  "show_in_chat",
+  "show_in_chat", "schedule_wakeup",
 ]);
 // The app's own agent tool (not headless's): brings a pane of the chat forward for the user. Seen
 // live: an agent asked to "open the browser and keep checking" started it, but nothing showed in
@@ -99,6 +99,23 @@ const SHOW_TOOL_DEFS = Object.freeze([{
     properties: {
       pane: { type: "string", enum: ["terminal", "preview"] },
       command_id: { type: "string", description: "For the terminal: the command to show (from exec_command)" },
+    },
+  },
+}]);
+// The app's own agent tool (chat-wakeups.cjs): the chat is sent a follow-up after the minutes the
+// agent chose, so a turn that waits on a build or CI ends instead of polling and paying for each poll.
+const WAKE_TOOL_DEFS = Object.freeze([{
+  name: "schedule_wakeup", title: "Wake me up later",
+  description: "Be woken in this chat after `minutes` (1-720), with `reason` as your note. Use it whenever you would otherwise wait "
+    + "or poll: a build, a CI run, a deploy, a long job or a server coming up. Call it, tell the user in one line what you are "
+    + "waiting for, then end your turn: do not sleep, loop or poll in the meantime. Pick the delay from how long the thing "
+    + "really takes (a 10-minute build: about 10). The chat is sent your note when the time is up; if the user writes first, "
+    + "the wake-up is dropped. A new call replaces the pending one.",
+  inputSchema: {
+    type: "object", additionalProperties: false, required: ["minutes", "reason"],
+    properties: {
+      minutes: { type: "integer", minimum: 1, maximum: 720, description: "Minutes from now" },
+      reason: { type: "string", maxLength: 500, description: "What to check when you wake, e.g. \"see whether CI run 123 passed\"" },
     },
   },
 }]);
@@ -719,7 +736,7 @@ function paneRulesFor(groups) {
   return rules.length ? "How to work in this chat: " + rules.join(" ") + " " : "";
 }
 
-function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview = false, subagents = "" } = {}) {
+function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview = false, subagents = "", wakeups = false } = {}) {
   return paneRulesFor(groups)
     // Seen live: an agent whose client deferred these tools (names only, loaded through its tool
     // search) said "there is no list_dir tool" and fell back to dir, never loading it.
@@ -767,6 +784,12 @@ function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview
         + "start a subagent with subagent_start and keep working; it runs in this project on its own model and ends with a report "
         + "you read with subagent_result. It cannot see this conversation, so give it the whole task. Several may run in parallel. "
         + (subagents ? `Available: ${String(subagents).slice(0, 1500)}. ` : "subagent_list shows the ones the user set up. ")
+      : "")
+    // Every poll of a slow job is another round of tokens; a turn that ends costs nothing while it waits.
+    + (wakeups
+      ? "Waiting: when you must wait for something slow (a build, CI, a deploy, a long job, a server starting), do not sleep, "
+        + "loop or poll in your turn. Call schedule_wakeup with how many minutes it really takes and a note of what to check, "
+        + "tell the user in one line, and end your turn; the chat wakes you with that note. "
       : "")
     + "Large results are paged; ask for less per call.";
 }
@@ -820,6 +843,8 @@ function createChatAgentTools({
   routineCommand = () => null,
   // Runtime > Subagents (subagents.cjs): the helpers a chat agent may start, when the user set any up.
   subagents = null,
+  // schedule_wakeup's scheduler ({ schedule({ workspaceId, session, minutes, reason }) }); without it the tool is not offered.
+  wakeups = null,
   // Whether the command approver's safety rules block a request's text (never answered for the user).
   blockedCommand = () => false,
   // Runs the terminal's commands in Codex's Windows sandbox (chat-sandbox.cjs) when it is installed.
@@ -1057,9 +1082,10 @@ function createChatAgentTools({
   async function listTools(entry) {
     const catalog = await requestHeadless(`/api/v1/tools/catalog?workspace_id=${encodeURIComponent(entry.workspaceId)}`, null, { method: "GET" });
     // The preview's tools are the app's own, not headless's.
-    const own = [...(allowed(entry, "preview") ? PREVIEW_TOOL_DEFS : []), ...(allowed(entry, "subagents") ? SUBAGENT_TOOL_DEFS : []), ...SHOW_TOOL_DEFS];
+    const own = [...(allowed(entry, "preview") ? PREVIEW_TOOL_DEFS : []), ...(allowed(entry, "subagents") ? SUBAGENT_TOOL_DEFS : []), ...SHOW_TOOL_DEFS,
+      ...(canWake(entry) ? WAKE_TOOL_DEFS : [])];
     return [...(Array.isArray(catalog?.tools) ? catalog.tools : [])
-      .filter((tool) => !PREVIEW_TOOLS.has(tool?.name) && !SUBAGENT_TOOLS.has(tool?.name) && tool?.name !== "show_in_chat"), ...own]
+      .filter((tool) => !PREVIEW_TOOLS.has(tool?.name) && !SUBAGENT_TOOLS.has(tool?.name) && tool?.name !== "show_in_chat" && tool?.name !== "schedule_wakeup"), ...own]
       .filter((tool) => typeof tool?.name === "string" && groupOf(tool.name) && allowed(entry, groupOf(tool.name)))
       // outputSchema is left out: clients would validate structuredContent against it, and the
       // agent gains nothing from it.
@@ -1317,6 +1343,24 @@ function createChatAgentTools({
     return { content: [{ type: "text", text: `Showing ${what} in the chat (it appears within a few seconds).` }] };
   }
 
+  /** Whether a session may schedule wake-ups: a chat's own agent, not a subagent (its report goes to the chat that started it). */
+  const canWake = (entry) => Boolean(wakeups) && !entry.subagent;
+
+  /** schedule_wakeup: the chat is sent the agent's note after `minutes` (agent-orchestrator-workflow.cjs scheduleWakeup). */
+  async function scheduleWakeup(entry, given) {
+    if (!canWake(entry)) return failedCall(`Unknown tool: schedule_wakeup`);
+    if (!entry.aoSession) return failedCall("This chat's session is not ready yet; try again in a moment.");
+    let scheduled;
+    try {
+      scheduled = await wakeups.schedule({ workspaceId: entry.workspaceId, session: entry.aoSession, minutes: given.minutes, reason: given.reason });
+    } catch (error) {
+      return failedCall(`No wake-up was scheduled: ${errorMessage(error)}`);
+    }
+    const at = new Date(scheduled.dueAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    return { content: [{ type: "text", text: `You will be woken in this chat in ${scheduled.minutes} minute${scheduled.minutes === 1 ? "" : "s"} `
+      + `(about ${at}) with your note. End your turn now: do not wait, sleep or poll in the meantime.` }] };
+  }
+
   async function callTool(entry, params) {
     const name = params?.name;
     if (typeof name !== "string" || !name || name.length > 128) return failedCall("A tool name is required");
@@ -1328,6 +1372,7 @@ function createChatAgentTools({
     if (stopped) return stopped;
     const given = params.arguments && typeof params.arguments === "object" && !Array.isArray(params.arguments) ? params.arguments : {};
     if (name === "show_in_chat") return showInChat(entry, given);
+    if (name === "schedule_wakeup") return scheduleWakeup(entry, given);
     // Subagents are the app's own (subagents.cjs): no worktree is needed to start or read one.
     if (group === "subagents") {
       const found = await Promise.resolve().then(() => sessionWorkspace?.(entry.aoSession, entry.workspaceId)).catch(() => null);
@@ -1560,7 +1605,8 @@ function createChatAgentTools({
             capabilities: { tools: { listChanged: false } },
             serverInfo: { name: SERVER_NAME, title: "Coding Tools", version: String(version) },
             instructions: instructionsFor(entry.groups.filter((group) => allowed(entry, group)), { bypass: entry.bypass, sandboxed: sandboxed(), autoReview: reviewedUpstream(entry),
-              subagents: allowed(entry, "subagents") ? (() => { try { return subagents.describe(); } catch { return ""; } })() : "" }),
+              subagents: allowed(entry, "subagents") ? (() => { try { return subagents.describe(); } catch { return ""; } })() : "",
+              wakeups: canWake(entry) }),
           } };
         }
         case "ping": return { jsonrpc: "2.0", id, result: {} };

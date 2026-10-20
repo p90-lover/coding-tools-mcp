@@ -18,7 +18,7 @@ import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, chatAcceptsMessage, chatDuration, chatList, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
-  activitySummary, groupTimeline, mergeTimeline, tidyTimeline,
+  activitySummary, groupTimeline, mergeTimeline, tidyTimeline, wakeupLabel, type ChatWakeup,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -461,6 +461,21 @@ function GoalGlyph({ name }: { name: "target" | "trash" | "play" | "pause" | "ex
       : name === "pause" ? <><circle cx="12" cy="12" r="9" /><path d="M10 9v6M14 9v6" /></>
       : <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />}
   </svg>;
+}
+
+/** The agent asked to be woken later (schedule_wakeup): when, its note, and Cancel. The label ticks alone. */
+function WakeupBar({ wakeup, onCancel }: { wakeup: ChatWakeup; onCancel: () => void }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  return <div className="cx-goal cx-wakeup is-active" role="status">
+    <span className="cx-wakeup-glyph" aria-hidden="true">◷</span>
+    <span className="cx-goal-state" title={`Asked for ${wakeup.minutes} min at ${new Date(wakeup.scheduledAt).toLocaleTimeString()}`}>{wakeupLabel(wakeup, now)}</span>
+    <span className="cx-goal-objective" title={wakeup.reason}>{wakeup.reason}</span>
+    <button type="button" title="Cancel wake-up" aria-label="Cancel wake-up" onClick={onCancel}>Cancel</button>
+  </div>;
 }
 
 export function AgentOrchestratorChat({
@@ -1368,7 +1383,8 @@ export function AgentOrchestratorChat({
             <button type="button" className="cx-primary-button" disabled={!goalEditing.trim() || goalEditing.trim() === commands.goal.objective}
               onClick={() => void commands.goalEdit(goalEditing.trim()).then(() => setGoalEditing(null), (cause) => say("Edit goal", cause instanceof Error ? cause.message : String(cause)))}>Save</button></footer>
         </section> : null}
-        {commands?.goal || commands?.planMode ? <div className="cx-composer-modes">
+        {commands?.goal || commands?.planMode || commands?.wakeup ? <div className="cx-composer-modes">
+          {commands?.wakeup ? <WakeupBar wakeup={commands.wakeup} onCancel={() => void commands.cancelWakeup?.().catch((cause) => say("Cancel wake-up", cause instanceof Error ? cause.message : String(cause)))} /> : null}
           {/* Codex's goal bar: state, objective, how long it has run, then Clear / Resume or Pause / Edit. */}
           {commands?.goal ? <div className={`cx-goal is-${commands.goal.status}`} role="status">
             <GoalGlyph name="target" />

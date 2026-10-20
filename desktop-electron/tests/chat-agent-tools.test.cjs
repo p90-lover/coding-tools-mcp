@@ -34,12 +34,13 @@ function tempTree() {
 }
 
 function fixture({ enabled = () => true, desktop = () => false, terminal = () => false, results = {}, workspaces = null, confirm = async () => true, root = null, worktreesRoot = null,
-  minAnswerMs = 0, answerClock = undefined, sandbox = null, subagents = null, statePath = null, autoAnswerMs = undefined, blockedCommand = undefined, now = undefined } = {}) {
+  minAnswerMs = 0, answerClock = undefined, sandbox = null, subagents = null, statePath = null, autoAnswerMs = undefined, blockedCommand = undefined, now = undefined,
+  wakeups = null } = {}) {
   const calls = [];
   const asked = [];
   const confirmations = [];
   const tools = createChatAgentTools({
-    enabled, desktopEnabled: desktop, terminalEnabled: terminal, worktreesRoot, version: "9.9.9", logger: { info() {}, warn() {} }, sandbox, subagents, statePath,
+    enabled, desktopEnabled: desktop, terminalEnabled: terminal, worktreesRoot, version: "9.9.9", logger: { info() {}, warn() {} }, sandbox, subagents, statePath, wakeups,
     // A fake confirm answers at once; the quick-answer check has its own test.
     minAnswerMs, ...(answerClock ? { answerClock } : {}),
     ...(autoAnswerMs !== undefined ? { autoAnswerMs } : {}), ...(blockedCommand ? { blockedCommand } : {}), ...(now ? { now } : {}),
@@ -760,6 +761,33 @@ test("show_in_chat brings the Terminal forward on a command the agent started, a
     assert.notEqual((await tools.processes(["show-owner"], "ws1"))[0].show.id, show.id, "each request is new, so it shows again");
     tools.forgetSession("show-owner");
   } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("schedule_wakeup hands the chat's own session to the app's scheduler and tells the agent to end its turn", async () => {
+  const asked = [];
+  const wakeups = { schedule: async (request) => {
+    asked.push(request);
+    if (request.minutes > 720) throw new Error("minutes must be a whole number from 1 to 720");
+    return { ok: true, taskId: "task-1", minutes: request.minutes, dueAt: Date.now() + request.minutes * 60_000 };
+  } };
+  const { tools } = fixture({ wakeups });
+  const plain = fixture();
+  try {
+    const client = await session(tools, { id: "wake-owner" });
+    assert.ok((await listed(client.url, client.auth)).includes("schedule_wakeup"), "listed with the agent's own tools");
+    const woken = await callTool(client.url, client.auth, "schedule_wakeup", { minutes: 12, reason: "see whether CI passed" });
+    assert.equal(woken.isError, undefined);
+    assert.match(woken.content[0].text, /woken in this chat in 12 minutes[\s\S]*End your turn now/);
+    assert.deepEqual(asked, [{ workspaceId: "ws1", session: "wake-owner", minutes: 12, reason: "see whether CI passed" }],
+      "the session is the server's own, never one the agent names");
+    const refused = await callTool(client.url, client.auth, "schedule_wakeup", { minutes: 9999, reason: "x" });
+    assert.equal(refused.isError, true);
+    assert.match(refused.content[0].text, /No wake-up was scheduled: minutes must be/);
+    // Without a scheduler (no chat to wake) the tool is not offered at all.
+    const other = await session(plain.tools, { id: "no-wake" });
+    assert.equal((await listed(other.url, other.auth)).includes("schedule_wakeup"), false);
+    assert.equal((await callTool(other.url, other.auth, "schedule_wakeup", { minutes: 1, reason: "x" })).isError, true);
+  } finally { await tools.close(); await plain.tools.close(); }
 });
 
 test("completed pane owners are bounded while live and user terminals stay reachable", async () => {

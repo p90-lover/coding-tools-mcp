@@ -3007,6 +3007,13 @@ async function start() {
         blockedCommand: (text) => missionWorkflowRuntime?.blockedRequest?.(text) ?? true,
         // The subagents a chat agent may start (Runtime > Subagents).
         subagents: subagentsService,
+        // schedule_wakeup: the chat is sent a follow-up after the minutes its agent chose.
+        wakeups: {
+          schedule: (request) => {
+            if (!missionWorkflowRuntime?.scheduleWakeup) throw new Error("Agent Orchestrator is not ready yet");
+            return missionWorkflowRuntime.scheduleWakeup(request);
+          },
+        },
         // Running agents keep their tools across app restarts (credential hashes and the port only).
         statePath: path.join(app.getPath("userData"), "chat-agent-tools.json"),
         previewEnabled: () => stateStore.read().chatAgentPreviewTools !== false,
@@ -3147,6 +3154,8 @@ async function start() {
       subagents: subagentsService,
       // Chat goals (/goal) survive an app restart.
       goalsFile: path.join(app.getPath("userData"), "integrations", "chat-goals.json"),
+      // So do the wake-ups chat agents asked for (schedule_wakeup).
+      wakeupsFile: path.join(app.getPath("userData"), "integrations", "chat-wakeups.json"),
       // So do deleted chat messages (their hidden runs and fresh-session flags).
       chatEditsFile: path.join(app.getPath("userData"), "integrations", "chat-edits.json"),
       knownModelsFile: path.join(app.getPath("userData"), "integrations", "cpa-known-models.json"),

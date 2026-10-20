@@ -1038,6 +1038,15 @@ export type ChatGoal = {
   objective: string; status: "active" | "paused" | "achieved" | "stalled" | "limited";
   round: number; rounds: number; startedAt: number; updatedAt: number; note?: string;
 };
+/** A chat's pending wake-up (its agent's schedule_wakeup), as the bridge keeps it. */
+export type ChatWakeup = { id: string; minutes: number; reason: string; scheduledAt: number; dueAt: number; due?: boolean };
+/** 42_000 -> "Wakes in 42s"; 185_000 -> "Wakes in 3m"; 10_680_000 -> "Wakes in 2h 58m"; a due one waits for its turn to end. */
+export function wakeupLabel(wakeup: Pick<ChatWakeup, "dueAt" | "due">, now = Date.now()): string {
+  const seconds = Math.max(0, Math.ceil((wakeup.dueAt - now) / 1000));
+  if (wakeup.due || !seconds) return "Waking after this turn";
+  return `Wakes in ${seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.ceil(seconds / 60)}m`
+    : `${Math.floor(seconds / 3600)}h ${Math.floor(seconds % 3600 / 60)}m`}`;
+}
 /** Codex's goal summary words for each state. */
 export const GOAL_SUMMARY: Record<ChatGoal["status"], string> = {
   active: "Pursuing goal", paused: "Paused goal", achieved: "Goal achieved", stalled: "Goal stalled", limited: "Goal limited",
@@ -1064,6 +1073,9 @@ export type ChatCommandCard = {
 export type ChatCommands = {
   goal?: ChatGoal | null;
   goalAction: (action: "pause" | "resume" | "clear") => Promise<void>;
+  /** The wake-up the chat's agent asked for (schedule_wakeup), and cancelling it. */
+  wakeup?: ChatWakeup | null;
+  cancelWakeup?: () => Promise<void>;
   /** Edit goal: saves a new objective for the rounds still to come. */
   goalEdit: (objective: string) => Promise<void>;
   /** Compacts the chat's context; says what happened. */
