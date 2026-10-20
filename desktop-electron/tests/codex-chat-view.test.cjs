@@ -522,6 +522,21 @@ test("while a single-model turn runs on one model and the picker shows another, 
     composer: { mode: "single", route, onModeChange() {}, onRouteChange() {} } }).props).render();
   assert.equal(walk(same).some((element) => element.props?.className === "cx-route-note"), false, "nothing to say when they match");
 });
+test("a finished single-model chat says a changed model or effort starts a new agent with only a summary", () => {
+  // Seen live: DeepSeek switched from Max to High between messages; the follow-up started a fresh
+  // agent with a handoff summary, and to the person the chat had forgotten everything.
+  const route = { harness_id: "ao:claude-code", model: "cpa/cline-pass/deepseek-v4.1-flash-1017(max)" };
+  const finished = () => [run("r1", "t", [node("w", "planner", "finished", { route, receipt: { answer: "Done" } })], { execution_mode: "single" })];
+  const changed = mount(base({ selectedTaskId: "t", runs: finished(),
+    composer: { mode: "single", route: { ...route, model: "cpa/cline-pass/deepseek-v4.1-flash-1017(high)" }, onModeChange() {}, onRouteChange() {} } }).props).render();
+  const note = walk(changed).find((element) => element.props?.className === "cx-route-note");
+  assert.ok(note, "the new agent is never a surprise");
+  assert.match(text(note), /starts a new agent that gets only a summary/);
+  assert.match(text(note), /deepseek-v4\.1-flash-1017\(max\)/, "it names what to switch back to");
+  const same = mount(base({ selectedTaskId: "t", runs: finished(),
+    composer: { mode: "single", route: { ...route }, onModeChange() {}, onRouteChange() {} } }).props).render();
+  assert.equal(walk(same).some((element) => element.props?.className === "cx-route-note"), false, "the same route continues the same agent");
+});
 test("a working card's reasoning shows Codex-style: its title as one line, the rest folded", () => {
   const { props } = base({ selectedTaskId: "t", working: true,
     runs: [run("r1", "t", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/gpt-6-luna" } })], { execution_mode: "single" })],

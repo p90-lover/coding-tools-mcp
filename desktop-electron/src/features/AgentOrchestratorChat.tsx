@@ -43,6 +43,9 @@ const CHAT_ATTACHMENTS = new Map<string, ChatAttachment[]>();
 const CARDS_WIDTH_KEY = "coding-tools:ao:cards-panel-width";
 /** Whether the chat's pet is shown ("off" hides it), kept on this computer. */
 const PET_KEY = "coding-tools:ao:pet";
+/** What an AO agent is started with; a follow-up with any of them changed gets a new agent (continuationCard). */
+const SESSION_ROUTE_FIELDS = ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile",
+  "approval_policy", "approvals_reviewer", "effort", "context_window"];
 
 /** Thread actions the chat header, its ⋯ menu and its slash commands share with the thread list. */
 export type ChatThreadActions = {
@@ -483,7 +486,7 @@ export function AgentOrchestratorChat({
   send: (input: { taskId?: string; title?: string; message: string; goal?: string }) => Promise<void>;
   /** Hands a message to the running agent at once (Codex's steer); false when its turn already ended. */
   /** true: steered; "wait": the agent waits on a request, so the message is queued; false: send it normally. */
-  steer?: (input: { taskId: string; message: string }) => Promise<boolean | "wait" | "restart" | "starting">;
+  steer?: (input: { taskId: string; message: string }) => Promise<boolean | "wait" | "restart" | "interrupt" | "starting">;
   openStructure: (runId: string) => void;
   approvals: ChatApproval[];
   approve: (approval: ChatApproval, reply: ApprovalReply) => void;
@@ -779,15 +782,17 @@ export function AgentOrchestratorChat({
     try {
       // A steer the turn outran (it ended first) is sent as an ordinary follow-up instead; a goal is never steered.
       const steered = !goal && steering && steer && selectedTaskId ? await steer({ taskId: selectedTaskId, message }) : false;
-      if ((steered === "wait" || steered === "restart" || steered === "starting") && selectedTaskId) {
+      if ((steered === "wait" || steered === "restart" || steered === "interrupt" || steered === "starting") && selectedTaskId) {
         // The agent was found waiting on its own request just now (the page had not seen it yet):
         // steering would cancel that request, so the message waits for the turn like a queued one.
-        // Or its turn had hung and was stopped: the message goes as the next turn once it settles.
+        // Or its turn had hung, or sat in a long command that would have kept it from reading the
+        // message, and was stopped: the message goes as the same agent's next turn once it settles.
         setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what: "Message", message }));
         if (current()) { setDraft(""); setAttachments([]); setAttachNote(""); }
         if (here()) {
-          say(steered === "restart" ? "Restarting" : "Queued", steered === "restart"
+          say(steered === "restart" ? "Restarting" : steered === "interrupt" ? "Interrupting" : "Queued", steered === "restart"
             ? "The agent had stopped responding, so its turn was stopped; your message is sent as the next turn."
+            : steered === "interrupt" ? "A command was still running, so it was stopped; the same agent gets your message next, with everything it already knows."
             : steered === "starting" ? "The agent is still starting; your message is steered in once it can take it."
             : "The agent is waiting for an answer to its request; your message is steered in once that is answered.", message);
         }
@@ -1372,8 +1377,18 @@ export function AgentOrchestratorChat({
           const lead = latest?.nodes.find((node) => node.role === "planner") ?? latest?.nodes[0];
           const running = lead?.route?.model;
           const picked = composer?.mode === "single" ? composer.route?.model : undefined;
-          return runOpen && latest?.execution_mode === "single" && running && picked && picked !== running
-            ? <p className="cx-route-note" role="status">This turn is running on <b>{running}</b>; your next message uses <b>{picked}</b>.</p> : null;
+          if (runOpen && latest?.execution_mode === "single" && running && picked && picked !== running) {
+            return <p className="cx-route-note" role="status">This turn is running on <b>{running}</b>; your next message uses <b>{picked}</b>.</p>;
+          }
+          // An agent keeps the model, effort, window and permissions it started with, so a follow-up
+          // with any of them changed starts a new agent that gets only a summary of the chat (it
+          // "forgot everything" after an effort switch from Max to High). Say so before it is sent.
+          const route = composer?.mode === "single" ? composer.route : undefined;
+          const changed = !runOpen && latest?.execution_mode === "single" && lead?.route && route
+            && SESSION_ROUTE_FIELDS.some((field) => ((lead.route as Record<string, unknown>)[field] ?? null)
+              !== ((route as unknown as Record<string, unknown>)[field] ?? null));
+          return changed ? <p className="cx-route-note" role="status">Changing the model or its settings starts a new agent that gets only a summary
+            of this chat, not its memory. Switch back to <b>{running}{lead?.route?.effort ? ` · ${lead.route.effort}` : ""}</b> to keep the same agent.</p> : null;
         })()}
         {selectedTaskId ? <ChatBranchBar workspaceId={projectId} sessionId={agentSessions[0]?.id} /> : null}
         {/* A request waiting on the person sits right above the chat box, as wide as it, as DeepSeek
