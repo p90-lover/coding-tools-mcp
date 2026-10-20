@@ -8,30 +8,37 @@ import { createPortal } from "react-dom";
 // sips coffee, reads, looks around, waves. When the pointer comes close it may leap onto it, for a
 // hug with hearts or a ride wherever the pointer goes, then jump back home to the box. It runs to
 // the send button to wave when a request waits for you, dances when a turn finishes and frets when
-// one fails. Left alone while nothing runs, it pulls a bed out of itself and climbs in to nap.
-// Click to pet it, double-click to feed it, drag it anywhere along the box. Pure view: it reads the
-// chat's state and changes nothing.
+// one fails. Left alone while nothing runs, it walks home to its house at the right end of the box
+// and sleeps there. Click to pet it, double-click to feed it, drag it anywhere along the box. Pure
+// view: it reads the chat's state and changes nothing.
+//
+// Clawd itself (Clawd.tsx) is Claude Code's: the CLI's glyphs, poses and animations, frame for frame.
 
 import type { PetMood } from "./ao-chat";
+import { CELL_H, CELL_W, CLICKABLE, COLS, ClawdFrame, ENTRANCES, ROWS, pickOne, useClawdPlayer,
+  type AnimationName, type Arms as ClawdArms, type Eyes, type Feet, type Frame } from "./Clawd";
 
 // Where it was left, as a fraction of the way around the box from the top-left corner.
 const POSITION_KEY = "coding-tools:ao:pet-around";
-// How far out from the box's edge it is held while dragged (px), and the most it can be. Let go, it
-// falls back onto the box: it never stays standing on nothing. LIFT_KEY is where an older build kept
-// that height (it then hovered up to 160 px off the box after every restart); it is only cleared now.
+// LIFT_KEY is where an older build kept how far it was held off the box (it then hovered there after
+// every restart); it is only cleared now. Dragged, it can be held anywhere in the window; let go, it
+// falls back onto the box, faster the shorter the drop.
 const LIFT_KEY = "coding-tools:ao:pet-lift";
-const MAX_LIFT = 160;
-// The drop back onto the box: how long the fall takes, from at most how high above the top edge.
 const FALL_MS = 420;
-const MAX_FALL = 400;
 const NAP_MS = 45_000;
 const CHEER_MS = 6_000;
-// Claude Code draws Clawd with block characters, each quadrant half a terminal cell: pixels about
-// twice as tall as wide. Square pixels made it a squat miniature; these match a 14px terminal.
-const PIXEL_W = 4;
-const PIXEL_H = 8;
-const WIDTH = 18 * PIXEL_W;
-const HEIGHT = 7 * PIXEL_H;
+// Props and the house use the same pixels as Clawd's quadrants: half a terminal cell, twice as tall
+// as wide.
+const PIXEL_W = CELL_W / 2;
+const PIXEL_H = CELL_H / 2;
+const WIDTH = COLS * CELL_W;
+const HEIGHT = ROWS * CELL_H;
+/** Clawd's house, 24×11 pixels, standing on the box's top edge this far in from its right end. */
+const HOUSE_W = 24 * PIXEL_W;
+const HOUSE_H = 11 * PIXEL_H;
+const HOUSE_INSET = 18;
+/** The entrance plays once per window, as the CLI plays one once per version. */
+let entrancePlayed = false;
 /** Claude Code's working spinner, cycled over Clawd's head while the agent works. */
 const SPINNER = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"];
 /** Walking speed in px/s: a stroll while nothing runs, a scurry while the agent works. */
@@ -44,8 +51,6 @@ const NOTICE = 180;
 const REACH = 70;
 /** Between two leaps onto the pointer, so it plays now and then rather than pestering. */
 const PLAY_EVERY = 15_000;
-/** How far beside Clawd its bed lands (px). */
-const BED_GAP = 64;
 
 const LINES: Record<PetMood, string> = {
   idle: "Nothing running. Want to start something?",
@@ -58,62 +63,75 @@ const PETTED = ["Hehe", "More pets, please", "I like you", "*purr*"];
 const MUSINGS = ["Hmm…", "*looks around*", "What are we building?", "♪", "Nice code"];
 const RIDING = ["Wheee!", "Take me somewhere", "Faster!", "Hold on tight"];
 
-// Claude Code's Clawd: its banner glyph " ▐▛███▜▌ / ▝▜█████▛▘ /   ▘▘ ▝▝" read as 2×2 quadrants
-// is an 18×5 sprite. The two quadrants missing from the top row are its eyes.
-const C = { body: "#D97757", eye: "#1F1E1D", tint: "#B85C3F" };
-// Props, in the same pixels.
+// Props and the house, in Clawd's pixels.
 const P = { frame: "#3d3d3a", screen: "#1f2a33", glow: "#7fd1ff", key: "#b4b2a7", mug: "#efede6", rim: "#8c8a82", steam: "#c9c7bd",
   page: "#faf9f5", cover: "#6a9bcc", wood: "#8a5a3c", metal: "#5b5a55", lens: "#bfe3f5", box: "#c8a26b", boxDark: "#9b7a48",
-  sheet: "#f3f1ea", pillow: "#ffffff", quilt: "#6a9bcc", quiltLight: "#8fb6dd" };
+  roof: "#b85c3f", roofEdge: "#8f4430", wall: "#e3cfa6", wallEdge: "#b89b6a", door: "#5a3a26", knob: "#f5c451",
+  glass: "#3d5a73", lit: "#f5c451", frameLight: "#faf9f5" };
 
 /** What Clawd is busy with: a prop beside it (or on its head) and how its arms move. */
 type Job = "none" | "laptop" | "search" | "build" | "carry" | "coffee" | "read";
 type Arms = "down" | "left" | "right" | "both" | "reach";
 type Pose = { look: -1 | 0 | 1; arms: Arms; walking: boolean; sit: boolean };
-/** Bedtime: the bed flying out and growing, Clawd in it, or the bed going back in. */
-type Bed = { phase: "none" | "out" | "in" | "back"; side: 1 | -1 };
 /** On the pointer: leaping on, riding along, or leaping back home to the box (screen px). */
 type Ride = { x: number; y: number; mode: "boarding" | "riding" | "leaving"; look: -1 | 0 | 1 };
 
 const rect = (x: number, y: number, w: number, h: number, color: string, key: string) =>
   <rect key={key} x={x} y={y} width={w} height={h} fill={color} />;
 
-/** Clawd on an 18×7 grid: two rows above its head for raised arms, a "!" or a carried box. */
-function Sprite({ mood, asleep, step, pose, blink, job }: { mood: PetMood; asleep: boolean; step: boolean; pose: Pose; blink: boolean; job: Job }) {
-  const r = rect;
-  // Sitting (or tucked in bed), the body drops a row onto its tucked legs.
-  const top = pose.sit ? 3 : 2;
-  const asking = mood === "ask" && !asleep;
+/**
+ * The frame Clawd rests in between animations, built from the CLI's own parts: eyes turned where it
+ * looks (closed asleep or blinking), feet stepping left and right as it walks (the CLI's waddle),
+ * arms up to ask or carry, one arm working its tool or typing, and a one-row crouch to sit.
+ */
+function restFrame({ mood, asleep, step, pose, blink, job }: { mood: PetMood; asleep: boolean; step: boolean; pose: Pose; blink: boolean; job: Job }): Frame {
   const working = mood === "working" && !asleep;
-  // Working in place with no tool, its arms take turns, typing; carrying, both hold the box.
   const typing = working && !pose.walking && pose.arms === "down" && job === "none";
-  let arms: Arms = asleep ? "down" : asking ? "right" : typing ? (step ? "left" : "right") : pose.arms;
-  if (!asleep && job === "carry") arms = "both";
-  if (!asleep && (job === "laptop" || job === "search" || job === "build" || job === "coffee" || job === "read")) arms = "reach";
-  const leftUp = arms === "both" || arms === "left";
-  const rightUp = arms === "both" || arms === "right";
-  const parts = [r(3, top, 12, 2, C.body, "head"), r(3, top + 2, 12, 2, C.body, "body")];
-  parts.push(leftUp ? r(2, top - 1, 1, 3, C.body, "arm-l") : r(1, top + 2, 2, 1, C.body, "arm-l"));
-  if (arms === "reach") {
-    // Reaching out to its tool: the arm taps (laptop, hammer) or holds steady.
-    const tap = (job === "laptop" || job === "build") && step;
-    parts.push(r(15, top + (tap ? 3 : 2), 3, 1, C.body, "arm-r"));
-  } else parts.push(rightUp ? r(15, top - 1, 1, 3, C.body, "arm-r") : r(15, top + 2, 2, 1, C.body, "arm-r"));
-  // Eyes: holes in the head (drawn dark to read on a light page), turned where it looks; closed
-  // when napping, pleased or blinking; wide and worried after an error.
-  const look = asleep ? 0 : job === "laptop" || job === "read" || job === "coffee" ? 1 : pose.look;
-  if (asleep || mood === "done" || blink) parts.push(r(5, top + 1, 1, 1, C.tint, "eye-l"), r(12, top + 1, 1, 1, C.tint, "eye-r"));
-  else if (mood === "error") parts.push(r(5, top, 1, 2, C.eye, "eye-l"), r(12, top, 1, 2, C.eye, "eye-r"));
-  else parts.push(r(5 + look, top + 1, 1, 1, C.eye, "eye-l"), r(12 + look, top + 1, 1, 1, C.eye, "eye-r"));
-  // Four legs, cycling while it walks; none showing while it sits.
-  if (!pose.sit) {
-    const legs = (pose.walking || (working && job === "none")) && step ? [3, 7, 10, 14] : [4, 6, 11, 13];
-    legs.forEach((x, index) => parts.push(r(x, top + 4, 1, 1, C.body, `leg${index}`)));
+  const eyes: Eyes = asleep || blink ? "closed"
+    : job === "laptop" || job === "read" || job === "coffee" ? "right"
+    : pose.look < 0 ? "left" : pose.look > 0 ? "right" : "open";
+  let arms: ClawdArms = "down";
+  if (!asleep) {
+    if (job === "carry" || (mood === "ask" && !pose.walking) || pose.arms === "both") arms = "up";
+    else if (job !== "none") arms = (job === "laptop" || job === "build") && step ? "down" : "one-up";
+    else if (typing) arms = step ? "one-up" : "down";
+    else if (pose.arms !== "down") arms = "one-up";
   }
-  // A file box carried on its head.
-  if (!asleep && job === "carry") parts.push(r(5, 0, 8, 2, P.box, "box"), r(5, 0, 8, 1, P.boxDark, "box-lid"), r(8, 1, 2, 1, P.boxDark, "box-tape"));
-  if (asking) parts.push(r(16, 0, 1, 2, C.eye, "bang"), r(16, 3, 1, 1, C.eye, "bang-dot"));
-  return <svg viewBox="0 0 18 7" width={WIDTH} height={HEIGHT} preserveAspectRatio="none" aria-hidden="true" shapeRendering="crispEdges">{parts}</svg>;
+  const feet: Feet = pose.walking ? (step ? "left" : "right") : "both";
+  return { pose: { eyes, arms, feet }, offset: pose.sit ? 1 : 0 };
+}
+
+/**
+ * Clawd's house, standing on the box's top edge at its right end: a clay roof, a door on the side
+ * facing the box, and a window, lit while Clawd is home awake. Asleep inside, z's rise from it.
+ */
+function House({ home, asleep, onKnock }: { home: boolean; asleep: boolean; onKnock: () => void }) {
+  const r = rect;
+  const parts: ReactElement[] = [];
+  // The roof, two pixels wider each row down, with an eave line under it.
+  [[10, 4], [8, 8], [6, 12], [4, 16], [2, 20]].forEach(([x, w], row) => parts.push(r(x!, row, w!, 1, P.roof, `roof${row}`)));
+  parts.push(r(2, 4, 20, 1, P.roofEdge, "eave"), r(16, 0, 2, 3, P.roofEdge, "chimney"));
+  // Walls, with darker edges, then the door (its knob) and the window.
+  parts.push(r(3, 5, 18, 6, P.wall, "wall"), r(3, 5, 1, 6, P.wallEdge, "wall-l"), r(20, 5, 1, 6, P.wallEdge, "wall-r"),
+    r(3, 10, 18, 1, P.wallEdge, "sill"));
+  parts.push(r(5, 6, 5, 5, P.door, "door"), r(8, 8, 1, 1, P.knob, "knob"));
+  const lit = home && !asleep;
+  parts.push(r(13, 6, 5, 3, P.frameLight, "window-frame"), r(14, 6, 3, 2, lit ? P.lit : P.glass, "window"));
+  return <button type="button" className={`cx-pet-house${home ? " is-home" : ""}${asleep ? " is-asleep" : ""}`}
+    title={home ? (asleep ? "Clawd is napping. Click to wake it" : "Clawd is home") : "Clawd's house. Click to call Clawd home"}
+    aria-label={home ? (asleep ? "Clawd's house: Clawd is napping inside" : "Clawd's house: Clawd is home") : "Clawd's house"}
+    onClick={onKnock}>
+    <svg viewBox="0 0 24 11" width={HOUSE_W} height={HOUSE_H} preserveAspectRatio="none" aria-hidden="true" shapeRendering="crispEdges">{parts}</svg>
+    {home && asleep ? <span className="cx-pet-house-z" aria-hidden="true"><span>z</span><span>z</span><span>Z</span></span> : null}
+  </button>;
+}
+
+/** A file box carried over its head, held up in both hands. */
+function CarriedBox() {
+  const r = rect;
+  return <svg className="cx-pet-box" viewBox="0 0 8 2" width={8 * PIXEL_W} height={2 * PIXEL_H} preserveAspectRatio="none" aria-hidden="true" shapeRendering="crispEdges">
+    {[r(0, 0, 8, 2, P.box, "box"), r(0, 0, 8, 1, P.boxDark, "box-lid"), r(3, 1, 2, 1, P.boxDark, "box-tape")]}
+  </svg>;
 }
 
 /** The tool beside it, on a 9×7 grid of the same pixels, standing on the same ground line. */
@@ -145,24 +163,7 @@ function Prop({ job, step, tick }: { job: Job; step: boolean; tick: number }) {
     parts.push(r(0, 4, 3, 2, P.page, "page-l"), r(4, 4, 3, 2, P.page, "page-r"), r(3, 4, 1, 3, P.cover, "spine"), r(0, 6, 7, 1, P.cover, "cover"));
     if (tick % 6 === 0) parts.push(r(3, 3, 2, 1, P.page, "turn"));
   }
-  return <svg className="cx-pet-prop" viewBox="0 0 9 7" width={9 * PIXEL_W} height={HEIGHT} preserveAspectRatio="none" aria-hidden="true" shapeRendering="crispEdges">{parts}</svg>;
-}
-
-/** Clawd's bed, 88×24: headboard, mattress and pillow; its quilt is drawn over Clawd separately. */
-function BedFrame({ side }: { side: 1 | -1 }) {
-  const r = rect;
-  // The headboard and pillow sit at the far end from where Clawd jumps in.
-  const head = side > 0 ? 20 : 0, foot = side > 0 ? 0 : 20, pillow = side > 0 ? 15 : 3;
-  return <svg className="cx-pet-bed" viewBox="0 0 22 6" width={88} height={24} preserveAspectRatio="none" aria-hidden="true" shapeRendering="crispEdges">
-    {[r(head, 0, 2, 6, P.wood, "headboard"), r(foot, 2, 2, 4, P.wood, "footboard"), r(1, 4, 20, 1, P.wood, "rail"),
-      r(2, 3, 18, 1, P.sheet, "mattress"), r(pillow, 2, 4, 1, P.pillow, "pillow"), r(1, 5, 1, 1, P.wood, "leg-a"), r(20, 5, 1, 1, P.wood, "leg-b")]}
-  </svg>;
-}
-function Quilt() {
-  const r = rect;
-  return <svg className="cx-pet-quilt" viewBox="0 0 14 3" width={56} height={18} preserveAspectRatio="none" aria-hidden="true" shapeRendering="crispEdges">
-    {[r(0, 0, 14, 3, P.quilt, "quilt"), r(0, 0, 14, 1, P.quiltLight, "fold"), r(3, 1, 1, 2, P.quiltLight, "stripe-a"), r(9, 1, 1, 2, P.quiltLight, "stripe-b")]}
-  </svg>;
+  return <svg className="cx-pet-prop" viewBox="0 0 9 7" width={9 * PIXEL_W} height={7 * PIXEL_H} preserveAspectRatio="none" aria-hidden="true" shapeRendering="crispEdges">{parts}</svg>;
 }
 
 type Floater = { id: number; text: string; offset: number };
@@ -180,6 +181,8 @@ function spotAt(loop: Loop, at: number): { x: number; y: number; side: 0 | 1 | 2
   if (s < 2 * w + h) return { x: w - (s - w - h), y: h, side: 2 };
   return { x: 0, y: h - (s - 2 * w - h), side: 3 };
 }
+/** Where the house stands on the top edge: its left side, in from the box's right end. */
+const houseLeft = (loop: Loop) => Math.max(0, loop.width - HOUSE_W - HOUSE_INSET);
 /** `along` (a distance from the top-left corner, under one lap) on the lap nearest `near`. */
 const nearLap = (loop: Loop, along: number, near: number) => along + Math.round((near - along) / loop.length) * loop.length;
 
@@ -199,13 +202,15 @@ export function ChatPet({ mood, context, onHide }: {
     try { localStorage.removeItem(LIFT_KEY); } catch { /* nothing saved */ }
     return 0;
   });
-  const [falling, setFalling] = useState(false);
+  // The drop back onto the box, as its length in ms (0: not falling).
+  const [falling, setFalling] = useState(0);
   const liftNow = useRef(lift);
   liftNow.current = lift;
   const [loop, setLoop] = useState<Loop | null>(null);
   const [pose, setPose] = useState<Pose>(REST);
   const [job, setJob] = useState<Job>("none");
-  const [bed, setBed] = useState<Bed>({ phase: "none", side: 1 });
+  // Inside its house (out of sight behind the walls), asleep or not.
+  const [home, setHome] = useState(false);
   const [ride, setRide] = useState<Ride | null>(null);
   const [step, setStep] = useState(false);
   const [tick, setTick] = useState(0);
@@ -214,7 +219,6 @@ export function ChatPet({ mood, context, onHide }: {
   const [asleep, setAsleep] = useState(false);
   const [cheering, setCheering] = useState(false);
   const [bubble, setBubble] = useState<string | null>(null);
-  const [motion, setMotion] = useState("");
   const [floaters, setFloaters] = useState<Floater[]>([]);
   const [fed, setFed] = useState(0);
   const drag = useRef<{ moved: boolean; x: number; y: number; lastX: number; lastY: number } | null>(null);
@@ -236,11 +240,12 @@ export function ChatPet({ mood, context, onHide }: {
   moodNow.current = mood;
   const asleepNow = useRef(asleep);
   asleepNow.current = asleep;
-  const bedNow = useRef(bed);
-  bedNow.current = bed;
+  const homeNow = useRef(home);
+  homeNow.current = home;
   const rideNow = useRef(ride);
   rideNow.current = ride;
   const [still] = useState(() => { try { return window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch { return false; } });
+  const clawd = useClawdPlayer(still);
 
   const later = (ms: number, run: () => void) => { plans.current.push(window.setTimeout(run, ms)); };
   const stopWalking = () => { if (walkFrame.current) window.cancelAnimationFrame(walkFrame.current); walkFrame.current = 0; };
@@ -250,13 +255,14 @@ export function ChatPet({ mood, context, onHide }: {
     window.clearTimeout(bubbleTimer.current);
     if (ms) bubbleTimer.current = window.setTimeout(() => setBubble(null), ms);
   };
-  const play = (name: "hop" | "shake" | "spin" | "bounce") => { setMotion(""); window.requestAnimationFrame(() => setMotion(name)); };
+  /** One of Claude Code's own animations. */
+  const play = (name: AnimationName) => clawd.play(name);
   const float = (text: string, left = 10 + Math.round(Math.random() * 24)) => {
     const id = ++seq.current;
     setFloaters((current) => [...current, { id, text, offset: left }]);
     window.setTimeout(() => setFloaters((current) => current.filter((item) => item.id !== id)), 1100);
   };
-  const busyElsewhere = () => asleepNow.current || drag.current !== null || rideNow.current !== null || bedNow.current.phase !== "none";
+  const busyElsewhere = () => asleepNow.current || drag.current !== null || rideNow.current !== null || homeNow.current;
 
   // The box it walks around: measured now and whenever it resizes.
   useEffect(() => {
@@ -277,7 +283,8 @@ export function ChatPet({ mood, context, onHide }: {
     if (!loop || !Number.isNaN(atNow.current)) return;
     let saved = Number.NaN;
     try { saved = Number(localStorage.getItem(POSITION_KEY) ?? Number.NaN); } catch { /* first visit */ }
-    setAt(saved >= 0 && saved < 1 ? saved * loop.length : Math.max(WIDTH / 2, loop.width - WIDTH * 1.5));
+    setAt(saved >= 0 && saved < 1 ? saved * loop.length : Math.max(WIDTH / 2, houseLeft(loop) - WIDTH));
+    if (!entrancePlayed && !still) { entrancePlayed = true; play(pickOne(ENTRANCES)); }
   }, [loop]);
   const remember = () => {
     const current = loopNow.current;
@@ -310,6 +317,19 @@ export function ChatPet({ mood, context, onHide }: {
       : [x - HEIGHT, y - half, x, y + half];
     return rects.some((found) => found.left < frame.left + right && found.right > frame.left + left
       && found.top < frame.top + bottom && found.bottom > frame.top + top);
+  };
+  /** Where Clawd stands to be inside its house: behind the house's middle, on the top edge. */
+  const homeSpot = () => {
+    const current = loopNow.current;
+    return current ? nearLap(current, houseLeft(current) + HOUSE_W / 2, atNow.current) : atNow.current;
+  };
+  /** Whether standing at `spot` would leave it half behind the house: it only stops there to go in. */
+  const inHouse = (spot: number) => {
+    const current = loopNow.current;
+    if (!current) return false;
+    const { x, side } = spotAt(current, spot);
+    const left = houseLeft(current);
+    return side === 0 && x > left - WIDTH / 2 && x < left + HOUSE_W + WIDTH / 2;
   };
   /** The nearest spot to `spot` that covers no button. */
   const freeNear = (spot: number) => {
@@ -355,7 +375,7 @@ export function ChatPet({ mood, context, onHide }: {
       const far = Math.random() < (working ? 0.4 : 0.25);
       const span = far ? current.length * (0.5 + Math.random() * 0.7) : 60 + Math.random() * 200;
       const target = atNow.current + (Math.random() < 0.5 ? -1 : 1) * span;
-      if (!blocked(target, rects)) return target;
+      if (!blocked(target, rects) && !inHouse(target)) return target;
     }
     return atNow.current;
   };
@@ -366,22 +386,13 @@ export function ChatPet({ mood, context, onHide }: {
     if (moodNow.current === "working") {
       // At work: settle at a tool for a while; carrying walks on to drop the box somewhere.
       const next = pick(WORK);
-      if (next === "carry") { setJob("carry"); walkTo(nextSpot(true), SCURRY * 0.8, () => { setJob("none"); play("bounce"); }); return; }
+      if (next === "carry") { setJob("carry"); walkTo(nextSpot(true), SCURRY * 0.8, () => { setJob("none"); play("jump"); }); return; }
       setJob(next);
       later(5000 + Math.random() * 4000, () => setJob("none"));
       return;
     }
-    const choice = pick(["look", "hop", "wave", "stretch", "spin", "sit", "muse", "coffee", "read", "rest"] as const);
-    if (choice === "look") {
-      setPose({ ...REST, look: -1 });
-      later(500, () => setPose({ ...REST, look: 1 }));
-      later(1000, () => setPose({ ...REST, look: 0 }));
-    } else if (choice === "hop") play("hop");
-    else if (choice === "wave") {
-      [0, 260, 520, 780].forEach((when, index) => later(when, () => setPose({ ...REST, arms: index % 2 ? "down" : "right", look: 1 })));
-      later(1040, () => setPose(REST));
-    } else if (choice === "stretch") { setPose({ ...REST, arms: "both" }); later(900, () => setPose(REST)); }
-    else if (choice === "spin") play("spin");
+    const choice = pick(["play", "play", "play", "sit", "muse", "coffee", "read", "rest"] as const);
+    if (choice === "play") play(pickOne(CLICKABLE));
     else if (choice === "sit") { setPose({ ...REST, sit: true }); later(2600, () => setPose(REST)); }
     else if (choice === "coffee" || choice === "read") { setJob(choice); later(3500 + Math.random() * 2500, () => setJob("none")); }
     else if (choice === "muse" && moodNow.current === "idle") say(pick(MUSINGS), 1500);
@@ -399,43 +410,46 @@ export function ChatPet({ mood, context, onHide }: {
     });
   };
 
-  /** Bedtime: it pulls a tiny bed out of its body, the bed grows as it lands beside it, and Clawd
-   *  jumps in, pulls up the quilt and falls asleep. */
-  const goToBed = () => {
+  /** Bedtime: it walks home to its house on the box's top edge, goes in and falls asleep there. A
+   *  visit (`nap` false) stays a moment and comes back out. */
+  const goHome = (nap = true) => {
     cancelPlans();
     setJob("none");
-    const here = atNow.current;
-    const rects = obstacles();
-    const side: 1 | -1 = !blocked(here + BED_GAP, rects) ? 1 : !blocked(here - BED_GAP, rects) ? -1 : 1;
-    setPose({ ...REST, arms: "both", look: side });
-    say("Bedtime…", 1300);
-    if (still) { setBed({ phase: "in", side }); setPose({ ...REST, sit: true }); setAsleep(true); setBubble("Zzz"); return; }
-    later(350, () => setBed({ phase: "out", side }));
-    later(1350, () => { setPose({ ...REST, look: side }); setBed({ phase: "in", side }); });
-    later(2000, () => { setPose({ ...REST, sit: true }); setAsleep(true); setBubble("Zzz"); });
+    if (!loopNow.current) return;
+    say(nap ? "Home time…" : "Coming!", 1300);
+    const settle = () => {
+      homeNow.current = true;
+      setHome(true);
+      setPose(REST);
+      if (nap) later(still ? 0 : 700, () => setAsleep(true));
+      else later(2500, () => leaveHome());
+    };
+    if (still) { atNow.current = homeSpot(); setAt(atNow.current); settle(); return; }
+    walkTo(homeSpot(), nap ? STROLL * 1.3 : SCURRY, settle);
   };
-  /** Out of bed: it hops back and the bed shrinks back into its body. */
-  const unbed = () => {
-    if (bedNow.current.phase === "none" || bedNow.current.phase === "back") return;
-    setBed((current) => ({ ...current, phase: "back" }));
-    window.setTimeout(() => setBed((current) => current.phase === "back" ? { ...current, phase: "none" } : current), still ? 0 : 650);
+  /** Out of the house, through the door on the side facing the box; `walkOut` strolls off too. */
+  const leaveHome = (walkOut = true) => {
+    if (!homeNow.current) return;
+    homeNow.current = false;
+    setHome(false);
+    if (!walkOut || still || !loopNow.current) return;
+    walkTo(freeNear(atNow.current - HOUSE_W / 2 - WIDTH), STROLL, () => { play("jump"); remember(); wander(); });
   };
-  // Nothing running for a while: it goes to bed. Any touch, or the agent starting, wakes it.
+  // Nothing running for a while: it goes home to sleep. Any touch, or the agent starting, wakes it.
   const poke = () => {
     window.clearTimeout(napTimer.current);
     napTimer.current = window.setTimeout(() => {
-      if ((moodNow.current === "idle" || moodNow.current === "done") && !rideNow.current && !drag.current) goToBed();
+      if ((moodNow.current === "idle" || moodNow.current === "done") && !rideNow.current && !drag.current) goHome();
     }, NAP_MS);
   };
   const wake = () => {
-    if (!asleepNow.current && bedNow.current.phase === "none") return false;
+    if (!asleepNow.current && !homeNow.current) return false;
     setAsleep(false);
     setPose(REST);
-    unbed();
     say("Huh? I'm up.", 1500);
     poke();
     cancelPlans();
-    wander();
+    if (homeNow.current) leaveHome(); else wander();
     return true;
   };
 
@@ -461,7 +475,7 @@ export function ChatPet({ mood, context, onHide }: {
       setAt(spot);
       setRide(null);
       setPose(REST);
-      play("hop");
+      play("jump");
       remember();
       poke();
       cancelPlans();
@@ -492,27 +506,26 @@ export function ChatPet({ mood, context, onHide }: {
     cancelPlans();
     if (rideNow.current) leave();
     setAsleep(false);
-    unbed();
+    leaveHome(false);
     setPose(REST);
     setJob("none");
     poke();
     if (mood === "done") {
       setCheering(true);
       float("✓");
-      if (!still) [0, 380, 760].forEach((when, index) => later(when, () => { play("hop"); setPose({ ...REST, look: index % 2 ? -1 : 1, arms: "both" }); }));
-      later(1200, () => setPose(REST));
+      play("celebrate");
       const timer = window.setTimeout(() => setCheering(false), CHEER_MS);
       wander();
       return () => { window.clearTimeout(timer); cancelPlans(); };
     }
     setCheering(false);
     if (mood === "working" && !still) later(400, () => setJob("laptop"));
-    if (mood === "error") { play("shake"); say("Uh oh", 1600); }
+    if (mood === "error") { play("look"); say("Uh oh", 1600); }
     if (mood === "ask") {
       // It runs to the top-right corner, by the send button, and waves for attention.
       say(LINES.ask, 2600);
       const current = loopNow.current;
-      if (!still && current) walkTo(freeNear(nearLap(current, current.width - WIDTH / 2, atNow.current)), SCURRY * 1.4, () => play("hop"));
+      if (!still && current) walkTo(freeNear(nearLap(current, current.width - WIDTH / 2, atNow.current)), SCURRY * 1.4, () => play("jump"));
     }
     wander();
     return cancelPlans;
@@ -524,18 +537,12 @@ export function ChatPet({ mood, context, onHide }: {
   const walking = !asleep && (pose.walking || mood === "working" || job !== "none");
   useEffect(() => {
     if (!walking) { setStep(false); return undefined; }
-    const beat = pose.walking ? 140 : job === "build" ? 260 : job === "coffee" || job === "read" ? 900 : 200;
+    const beat = pose.walking ? 120 : job === "build" ? 260 : job === "coffee" || job === "read" ? 900 : 200;
     const timer = window.setInterval(() => { setStep((current) => !current); setTick((current) => current + 1); }, beat);
     return () => window.clearInterval(timer);
   }, [walking, pose.walking, job]);
   // A spark flies on each hammer blow.
   useEffect(() => { if (job === "build" && step && !still) float("✦", 48); }, [job, step]);
-  // In bed, z's drift up from the pillow.
-  useEffect(() => {
-    if (!asleep || bed.phase !== "in" || still) return undefined;
-    const timer = window.setInterval(() => float("z", WIDTH / 2 + bed.side * (BED_GAP + 12)), 1500);
-    return () => window.clearInterval(timer);
-  }, [asleep, bed.phase, bed.side]);
   // While the agent works, Claude Code's spinner turns over its head.
   const busy = mood === "working" && !asleep && job !== "carry" && !ride;
   useEffect(() => {
@@ -550,7 +557,7 @@ export function ChatPet({ mood, context, onHide }: {
     const next = () => {
       timer = window.setTimeout(() => {
         setBlink(true);
-        timer = window.setTimeout(() => { setBlink(false); next(); }, 130);
+        timer = window.setTimeout(() => { setBlink(false); next(); }, 120);
       }, 2500 + Math.random() * 3500);
     };
     next();
@@ -582,7 +589,7 @@ export function ChatPet({ mood, context, onHide }: {
         const middle = body.left + body.width / 2;
         const distance = Math.hypot(x - middle, y - (body.top + body.height / 2));
         const calm = moodNow.current === "idle" || moodNow.current === "done";
-        if (calm && distance < REACH && bedNow.current.phase === "none" && Date.now() - lastPlay.current > PLAY_EVERY && Math.random() < 0.6) {
+        if (calm && distance < REACH && !homeNow.current && Date.now() - lastPlay.current > PLAY_EVERY && Math.random() < 0.6) {
           lastPlay.current = Date.now();
           board(Math.random() < 0.5 ? 1200 : 4000 + Math.random() * 6000);
           return;
@@ -600,7 +607,7 @@ export function ChatPet({ mood, context, onHide }: {
       const now = Date.now();
       if (now - lastTyped < 1500 || asleepNow.current) return;
       lastTyped = now;
-      play("bounce");
+      play("wink");
       poke();
     };
     window.addEventListener("pointermove", onMove);
@@ -627,7 +634,8 @@ export function ChatPet({ mood, context, onHide }: {
   };
   /**
    * How far out from the box a pointer holds it: the pointer's distance outside the edge the spot is
-   * on, less half its height (it is held by the middle of its body), from 0 on the edge to MAX_LIFT.
+   * on, less half its height (it is held by the middle of its body), from 0 on the edge to as far as
+   * the window goes on that side.
    */
   const liftAt = (clientX: number, clientY: number, spot: number) => {
     const current = loopNow.current;
@@ -636,7 +644,9 @@ export function ChatPet({ mood, context, onHide }: {
     const { side } = spotAt(current, spot);
     const outside = side === 0 ? frame.top - clientY : side === 1 ? clientX - frame.right
       : side === 2 ? clientY - frame.bottom : frame.left - clientX;
-    return Math.max(0, Math.min(MAX_LIFT, Math.round(outside - HEIGHT / 2)));
+    const room = side === 0 ? frame.top : side === 1 ? window.innerWidth - frame.right
+      : side === 2 ? window.innerHeight - frame.bottom : frame.left;
+    return Math.max(0, Math.min(room - HEIGHT, Math.round(outside - HEIGHT / 2)));
   };
 
   const onPointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
@@ -651,9 +661,9 @@ export function ChatPet({ mood, context, onHide }: {
     if (!state) return;
     if (!state.moved && Math.hypot(event.clientX - state.x, event.clientY - state.y) > 4) {
       state.moved = true;
-      // Lifted out of bed: the bed goes back in.
+      // Lifted out of its house.
       setAsleep(false);
-      unbed();
+      leaveHome(false);
       setPose(REST);
     }
     if (!state.moved) return;
@@ -662,7 +672,7 @@ export function ChatPet({ mood, context, onHide }: {
     const spot = nearestSpot(event.clientX, event.clientY);
     atNow.current = spot;
     setAt(spot);
-    // Drawn away from the edge, it comes away with the pointer, as far as MAX_LIFT.
+    // Drawn away from the edge, it comes away with the pointer, anywhere in the window.
     const height = liftAt(event.clientX, event.clientY, spot);
     liftNow.current = height;
     setLift(height);
@@ -676,18 +686,20 @@ export function ChatPet({ mood, context, onHide }: {
     // the height it was let go at, then hops off any button it landed on.
     const current = loopNow.current;
     const frame = composer.current?.getBoundingClientRect();
-    const falls = Boolean(current && frame);
+    let fallMs = 0;
     if (current && frame) {
       const x = Math.max(WIDTH / 2, Math.min(current.width - WIDTH / 2, state.lastX - frame.left));
       const landing = nearLap(current, x, atNow.current);
-      const height = Math.max(0, Math.min(MAX_FALL, Math.round(frame.top - state.lastY - HEIGHT / 2)));
+      const height = Math.max(0, Math.round(frame.top - state.lastY - HEIGHT / 2));
+      // A longer drop takes longer, as a fall does: 420 ms from 400 px.
+      fallMs = Math.round(Math.min(1100, Math.max(260, FALL_MS * Math.sqrt(Math.max(height, 1) / 400))));
       atNow.current = landing;
       setAt(landing);
       liftNow.current = height;
       setLift(height);
       say("Wheee", 900);
       window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
-        setFalling(true);
+        setFalling(fallMs);
         liftNow.current = 0;
         setLift(0);
       }));
@@ -695,9 +707,9 @@ export function ChatPet({ mood, context, onHide }: {
       liftNow.current = 0;
       setLift(0);
     }
-    later(falls ? FALL_MS : 0, () => {
-      setFalling(false);
-      play("hop");
+    later(fallMs, () => {
+      setFalling(0);
+      play("jump");
       poke();
       const free = freeNear(atNow.current);
       if (free !== atNow.current) walkTo(free, SCURRY * DASH, () => { remember(); wander(); });
@@ -718,27 +730,23 @@ export function ChatPet({ mood, context, onHide }: {
       return { left: x - WIDTH / 2, top: y - HEIGHT, transform: `rotate(${side * 90 + Math.floor(at / loop.length) * 360}deg)${lift ? ` translateY(${-lift}px)` : ""}`,
         transformOrigin: `${WIDTH / 2}px ${HEIGHT}px` };
     })() : { visibility: "hidden" };
-  const bedStyle = { "--bed-dx": `${bed.side * BED_GAP}px` } as CSSProperties;
-  const pet = <div ref={box} className={`cx-pet side-${side}${falling ? " is-falling" : ""}${ride ? ` is-riding ride-${ride.mode}` : ""}${bed.phase !== "none" ? ` bed-${bed.phase}` : ""}`}
-    style={{ ...placement, ...bedStyle }}>
-    {bed.phase !== "none" ? <BedFrame side={bed.side} /> : null}
+  const pet = <div ref={box} className={`cx-pet side-${side}${falling ? " is-falling" : ""}${ride ? ` is-riding ride-${ride.mode}` : ""}${home ? " is-home" : ""}`}
+    style={{ ...placement, ...(falling ? { transition: `transform ${falling}ms cubic-bezier(.55, 0, 1, .45)` } : {}) }}>
     {bubble ? <span className="cx-pet-bubble" role="status">{bubble}</span> : null}
     {busy ? <span className="cx-pet-spinner" aria-hidden="true">{SPINNER[spin]}</span> : null}
     {floaters.map((item) => <span key={item.id} className="cx-pet-float" style={{ left: item.offset }} aria-hidden="true">{item.text}</span>)}
-    <button type="button" className={`cx-pet-body is-${shown}${asleep ? " is-asleep" : ""}${pose.walking ? " is-walking" : ""}${job !== "none" ? ` is-${job}` : ""}${motion ? ` is-${motion}` : ""}`}
+    <button type="button" className={`cx-pet-body is-${shown}${asleep ? " is-asleep" : ""}${pose.walking ? " is-walking" : ""}${job !== "none" ? ` is-${job}` : ""}`}
       style={ride && ride.look < 0 ? { transform: "scaleX(-1)" } : undefined}
       aria-label={`Bit the pet: ${asleep ? "napping" : LINES[shown]}${percent !== null ? ` Context ${percent}%.` : ""}`}
       title={asleep ? "Napping. Click to wake" : `${LINES[shown]}${percent !== null ? ` · ${percent}% context` : ""}\nClick to pet · double-click to feed · drag it around the box, or away from it to lift it`}
-      onAnimationEnd={(event) => { if (event.target !== event.currentTarget) setMotion(""); }}
       onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}
       onClick={() => {
         if (drag.current?.moved) return;
         window.clearTimeout(clickTimer.current);
         clickTimer.current = window.setTimeout(() => {
           if (wake()) return;
-          play("hop"); float("♥"); float("♥");
-          setPose({ ...REST, arms: "both" });
-          later(700, () => setPose(REST));
+          // As in Claude Code: a click plays one of Clawd's animations.
+          play(pickOne(CLICKABLE)); float("♥"); float("♥");
           say(pick(PETTED), 1400);
           poke();
         }, 220);
@@ -749,15 +757,18 @@ export function ChatPet({ mood, context, onHide }: {
         setFed((count) => count + 1);
         float("🍪"); window.setTimeout(() => float("nom"), 250);
         say(fed >= 3 ? "So full. Maybe compact me?" : "Nom. Tokens are tasty", 1600);
-        play("bounce");
+        play("boop");
         poke();
       }}
       onContextMenu={(event) => { event.preventDefault(); onHide(); }}>
-      <Sprite mood={shown} asleep={asleep} step={step} pose={pose} blink={blink} job={job} />
+      {!asleep && job === "carry" ? <CarriedBox /> : null}
+      <ClawdFrame frame={clawd.frame ?? restFrame({ mood: shown, asleep, step, pose, blink, job })} />
       <Prop job={asleep || ride ? "none" : job} step={step} tick={tick} />
     </button>
-    {bed.phase === "in" && asleep ? <Quilt /> : null}
   </div>;
+  const house = loop ? <div className="cx-pet-house-spot" style={{ left: houseLeft(loop), top: -HOUSE_H }}>
+    <House home={home} asleep={asleep} onKnock={() => { if (!wake()) goHome(false); }} />
+  </div> : null;
   // Aboard the pointer it lives on the page itself, so no panel's edge clips it.
-  return ride && typeof document !== "undefined" ? createPortal(pet, document.body) : pet;
+  return <>{house}{ride && typeof document !== "undefined" ? createPortal(pet, document.body) : pet}</>;
 }
