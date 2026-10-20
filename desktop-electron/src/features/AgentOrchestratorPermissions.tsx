@@ -9,8 +9,12 @@ export type PermissionCapability = {
   supported: boolean; reason?: string;
   profiles: { id: string; allowed: boolean; description?: string }[];
   approval_policies?: string[]; approvals_reviewers?: string[];
+  /** Whole modes the adapter cannot honour although each part is listed (agy's Ask: its approvals stay in its terminal). */
+  excluded_modes?: { profile: string; policy: string; reviewer: string; reason?: string }[];
   requirements?: Record<string, unknown>;
 };
+const excludedMode = (capability: PermissionCapability, selection: PermissionSelection) => capability.excluded_modes?.find(mode =>
+  mode.profile === selection.profile && mode.policy === selection.policy && mode.reviewer === selection.reviewer);
 export type RuntimePermissionPolicy = { policy_acknowledged: boolean; effective_policy?: { permission_profile?: string; active_permission_profile?: string; approval_policy?: string; approvals_reviewer?: string } | null };
 export type PermissionSelection = { profile?: string; policy?: string; reviewer?: string };
 /** The selected chat owns its role list. Include generated helpers without saving new roles. */
@@ -103,7 +107,10 @@ export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles
   const available = nodes.length > 0 && nodes.every(node => metadata[node.id]?.supported === true);
   const canSelect = (selection: PermissionSelection) => available && capabilities.every(capability =>
     capability.profiles.some(profile => profile.id === selection.profile && profile.allowed) &&
-    capability.approval_policies?.includes(selection.policy!) && capability.approvals_reviewers?.includes(selection.reviewer!));
+    capability.approval_policies?.includes(selection.policy!) && capability.approvals_reviewers?.includes(selection.reviewer!)
+    && !excludedMode(capability, selection));
+  /** Why a mode is unavailable: the adapter's own reason for a mode it excludes, else the general one. */
+  const unavailableReason = (selection: PermissionSelection) => capabilities.map(capability => excludedMode(capability, selection)?.reason).find(Boolean) || reason;
   const active = PERMISSION_MODES.find(mode => nodes.length > 0 && nodes.every(node =>
     nativePermission(node.route) === mode.profile && node.route.approval_policy === mode.policy && node.route.approvals_reviewer === mode.reviewer));
   const effective = mission?.nodes.filter(node => ["running", "reserved"].includes(node.state)).map(node => {
@@ -133,7 +140,7 @@ export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles
     {popup.open ? <section ref={popup.panel} id="ao-permissions-panel" className="ao-composer-popover ao-permissions-panel" aria-label="Access permissions" role="menu">
       <header><h3>How should actions be approved?</h3><button type="button" className="ao-popover-close" aria-label="Close permissions" onClick={popup.close}><Icon name="close" width="14" height="14" /></button></header>
       {PERMISSION_MODES.map(mode => <button key={mode.label} type="button" role="menuitemradio" aria-checked={active?.label === mode.label}
-        className={"ao-permission-option" + (mode.danger ? " is-danger" : "")} disabled={busy || saving || !canSelect(mode)} title={canSelect(mode) ? "Applies to queued / future attempts only; running attempts and shared app grants are unchanged." : reason}
+        className={"ao-permission-option" + (mode.danger ? " is-danger" : "")} disabled={busy || saving || !canSelect(mode)} title={canSelect(mode) ? "Applies to queued / future attempts only; running attempts and shared app grants are unchanged." : unavailableReason(mode)}
         onClick={() => void apply({ profile: mode.profile, policy: mode.policy, reviewer: mode.reviewer })}>
         <span className="ao-permission-symbol"><Icon name={mode.icon} width="17" height="17" /></span>
         <span><strong>{mode.label}</strong><small>{mode.detail}</small></span>

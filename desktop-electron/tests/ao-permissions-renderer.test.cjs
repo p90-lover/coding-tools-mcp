@@ -218,6 +218,19 @@ test("supported external permission presets retain its sentinel and apply the ex
   assert.equal(rows[2].props.disabled, true, "unoffered full-access profile is not an alias fallback");
 });
 
+test("a mode the adapter excludes is disabled with its reason while the others stay selectable", () => {
+  // agy lists each part of Ask (for Approve for me and Full access) but cannot bring its approvals to the chat.
+  const view = renderer("AgentOrchestratorPermissions.tsx");
+  const props = { team: { id: "team", nodes: [node("agy", "ao:agy", ":ao-default")] }, busy: false, loadProfiles: async () => ({}), save: async () => "" };
+  const cap = { agy: { supported: true, profiles: [{ id: ":workspace", allowed: true }, { id: ":danger-full-access", allowed: true }],
+    approval_policies: ["on-request", "never"], approvals_reviewers: ["user", "auto_review"],
+    excluded_modes: [{ profile: ":workspace", policy: "on-request", reviewer: "user", reason: "Antigravity asks for approval in its own terminal" }] } };
+  const tree = view.render("AgentOrchestratorPermissions", props, [true, cap, "", false]);
+  const rows = elements(tree, item => item.type === "button" && item.props.role === "menuitemradio");
+  assert.deepEqual(rows.map(row => row.props.disabled), [true, false, false], "Ask off; Approve for me and Full access on");
+  assert.match(rows[0].props.title, /asks for approval in its own terminal/);
+});
+
 test("permission popup renders exactly three mode rows with no scope or shared grant controls", () => {
   const view = renderer("AgentOrchestratorPermissions.tsx");
   const props = { team: { id: "team", nodes: [node("lead")] }, busy: false, loadProfiles: async () => ({}), save: async () => "", shared: "SHARED MUST NOT RENDER" };

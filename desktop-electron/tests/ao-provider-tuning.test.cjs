@@ -156,6 +156,25 @@ test("Cline DeepSeek V4.1 Flash lists native efforts and forwards them unchanged
   }
 });
 
+test("agy keeps a model's own effort in CPA's suffix form and takes the three permission modes", async () => {
+  // agy read "-high" as its thinking level and asked CPA for "gemini-3.8-flash": 400, unknown provider.
+  const catalog = [{ slug: "gemini-3.8-flash-high", supported_reasoning_levels: [{ effort: "low" }, { effort: "medium" }, { effort: "high" }] },
+    { slug: "gemini-3-flash", supported_reasoning_levels: [{ effort: "low" }, { effort: "medium" }] }];
+  const own = await dispatched("agy", "cpa/gemini-3.8-flash-high", {}, catalog);
+  assert.equal(own.model, "gemini-3.8-flash-high(high)");
+  assert.deepEqual(own.gateway, { provider: "cpa", model: "gemini-3.8-flash-high(high)" });
+  assert.equal((await dispatched("agy", "cpa/gemini-3.8-flash-high", { effort: "low" }, catalog)).model, "gemini-3.8-flash-high(low)", "a picked effort wins");
+  assert.equal((await dispatched("claude-code", "cpa/gemini-3.8-flash-high", {}, catalog)).model, "gemini-3.8-flash-high", "other harnesses send the id as listed");
+  const modes = { approve: ["auto_review", "on-request", ":workspace", "auto"], full: ["user", "never", ":danger-full-access", "bypass-permissions"] };
+  for (const [name, [reviewer, policy, profile, approvalMode]] of Object.entries(modes)) {
+    const input = await dispatched("agy", "cpa/gemini-3-flash", { native_permission_profile: profile, approval_policy: policy, approvals_reviewer: reviewer }, catalog);
+    assert.equal(input.approvalMode, approvalMode, name);
+  }
+  // Ask would leave a shell-command approval in agy's terminal, which nobody sees: refused, not left waiting.
+  await assert.rejects(dispatched("agy", "cpa/gemini-3-flash", { native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" }, catalog),
+    /asks for approval in its own terminal/);
+});
+
 test("a blank CPA card's start effort follows the effort rank, and Auto or a model's own effort is left alone", async () => {
   const levels = (...efforts) => efforts.map(effort => ({ effort }));
   const catalog = [{ slug: "rank-a", supported_reasoning_levels: levels("max", "low") },

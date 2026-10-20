@@ -462,7 +462,8 @@ test("the app's chat tools and subagents read the safety rules of the workflow r
   const once = main.slice(main.indexOf("    if (!subagentsService) {"), main.indexOf("    const createCodingToolsAppsHost"));
   assert.ok(once.includes("createChatAgentTools({") && once.includes("createSubagents({"));
   assert.doesNotMatch(once, /\bagentOrchestratorWorkflow\b/);
-  assert.match(once, /routineCommand: \(command\) => missionWorkflowRuntime\?\.routineCommand\?\.\(command\) \?\? null/);
+  // A command RTK rewrote is judged as the command it wraps (rtk.unwrap), still by the running workflow.
+  assert.match(once, /routineCommand: \(command\) => missionWorkflowRuntime\?\.routineCommand\?\.\(rtk\.unwrap\(command\)\) \?\? null/);
   assert.match(once, /blockedCommand: \(text\) => missionWorkflowRuntime\?\.blockedRequest\?\.\(text\) \?\? true/);
 });
 

@@ -140,6 +140,11 @@ const CPA_MODEL_PREFIX = "cpa/";
 // agy listed none, since its own catalog is empty without a Google sign-in. Its gateway mode sends
 // its tools only for Gemini ids it knows, so another model on agy can chat but not touch files.
 const GATEWAY_AGENTS = new Set(["claude-code", "codex", "opencode", "agy"]);
+// Agents whose AO adapter honours the three permission modes. agy maps them onto its --mode
+// (accept-edits, auto) and --dangerously-skip-permissions; without one it ran in request-review
+// and stopped at approvals in a terminal nobody saw, so its card never finished.
+const PERMISSION_AGENTS = new Set(["claude-code", "codex", "agy"]);
+const AGY_ASK_REASON = "Antigravity asks for approval in its own terminal, which the chat does not show, so it would wait for good. Choose Approve for me or Full access.";
 // Gateway agents whose own model catalogs are not CPA or WebGPT models; they list only CPA models.
 const CPA_ONLY_AGENTS = new Set(["claude-code", "opencode"]);
 const webModel = (model) => WEB_TIERS.includes(model) || LUNA_TIERS.includes(model);
@@ -354,10 +359,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const effort = node.route.effort ?? effortDefault;
     const agent = externalAgent(node);
     const profile = node.route.native_permission_profile ?? node.route.permission_profile;
-    if ((node.route.approval_policy !== undefined || node.route.native_permission_profile !== undefined) && (!["claude-code", "codex"].includes(agent)
+    if ((node.route.approval_policy !== undefined || node.route.native_permission_profile !== undefined) && (!PERMISSION_AGENTS.has(agent)
       || !(profile === ":workspace" && node.route.approval_policy === "on-request" && ["user", "auto_review"].includes(node.route.approvals_reviewer ?? "user")
         || profile === ":danger-full-access" && node.route.approval_policy === "never" && (node.route.approvals_reviewer ?? "user") === "user"))) {
       throw new Error("This adapter cannot honor the saved permission tuple; choose a supported mode explicitly.");
+    }
+    // A saved Ask route (a team template, an older chat) is refused rather than left waiting at an
+    // approval in agy's terminal that nobody sees.
+    if (agent === "agy" && node.route.approval_policy === "on-request" && (node.route.approvals_reviewer ?? "user") === "user") {
+      throw new Error(AGY_ASK_REASON);
     }
     const viaCpa = node.route.model.startsWith(CPA_MODEL_PREFIX) ? node.route.model.slice(CPA_MODEL_PREFIX.length) : null;
     if (viaCpa && !GATEWAY_AGENTS.has(agent)) {
@@ -372,6 +382,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       if (!tuningEfforts.has(effort)) throw new Error("Choose a supported CPA reasoning level");
       // The suffix is session-local; the saved mission model and account remain unchanged.
       wireModel = viaCpa.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "") + "(" + effort + ")";
+    }
+    // agy reads a trailing "-high" in a model id as its own thinking level and drops it, so CPA was
+    // asked for "gemini-3.8-flash" and refused it ("unknown provider for model"). The model's own
+    // effort is pinned in CPA's suffix form, which agy passes through unchanged.
+    if (agent === "agy" && viaCpa && !verbatim && !effort) {
+      const own = /-(minimal|low|medium|high|xhigh|max)$/i.exec(wireModel)?.[1];
+      if (own) wireModel = `${wireModel}(${own.toLowerCase()})`;
     }
     const agentModel = wireModel && agent === "opencode" ? `openai/${wireModel}` : wireModel ?? node.route.model;
     return { workspaceId, agent, model: agentModel, name: node.settings?.name || "AO worker",
@@ -1399,7 +1416,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       }
       if (route.harness_id !== "codex-native") {
         const agent = externalAgent({ route });
-        if (!["claude-code", "codex"].includes(agent)) return unavailable("This adapter does not support the three permission modes.");
+        if (!PERMISSION_AGENTS.has(agent)) return unavailable("This adapter does not support the three permission modes.");
         const catalog = await recentHarnessCatalog();
         const adapter = catalog.find(item => item.id === agent && item.installed);
         if (!adapter) return unavailable("This harness is not installed.");
@@ -1410,6 +1427,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
           profiles: [{ id: ":workspace", allowed: agent !== "codex" || adapter.chat === true }, { id: ":danger-full-access", allowed: true }],
           ...(agent === "codex" && !adapter.chat ? { reason: "Workspace presets require the Codex chat driver; TUI inherits unverified sandbox settings." } : {}),
           approval_policies: ["on-request", "never"], approvals_reviewers: ["user", "auto_review"],
+          // agy in its terminal asks there, which no chat or card shows: Ask (accept-edits still asks
+          // before shell commands) would wait for good. Approve for me and Full access run unattended.
+          ...(agent === "agy" && !adapter.chat ? { excluded_modes: [{ profile: ":workspace", policy: "on-request", reviewer: "user", reason: AGY_ASK_REASON }] } : {}),
         } };
       }
     }

@@ -2499,15 +2499,23 @@ test("permission capabilities use installed AO adapter modes without fabricating
     requestHeadless: async (endpoint) => { reads.push(endpoint); throw new Error("No native connection"); },
     aoHarness: { catalog: async () => [
       { id: "claude-code", installed: true }, { id: "codex", installed: true }, { id: "opencode", installed: true },
+      { id: "agy", installed: true },
     ], spawn: async (...args) => { launches.push(args); } },
   });
-  const capability = (await workflow.call("permission_profiles", { workspaceId: "ws-1", route: { harness_id: "ao:claude-code" } })).capability;
-  assert.equal(capability.supported, true);
-  assert.equal(capability.source, "ao-adapter");
-  assert.equal(capability.requested_only, true, "adapter modes are requests, not effective native readback");
-  assert.deepEqual(capability.profiles.map(profile => profile.id), [":workspace", ":danger-full-access"]);
-  assert.deepEqual(capability.approval_policies, ["on-request", "never"]);
-  assert.deepEqual(capability.approvals_reviewers, ["user", "auto_review"]);
+  // agy takes the three modes too (AO maps them onto its --mode and --dangerously-skip-permissions):
+  // without one it waited at approvals in a terminal nobody saw and its card never finished.
+  for (const harness_id of ["ao:claude-code", "ao:agy"]) {
+    const capability = (await workflow.call("permission_profiles", { workspaceId: "ws-1", route: { harness_id } })).capability;
+    assert.equal(capability.supported, true, harness_id);
+    assert.equal(capability.source, "ao-adapter");
+    assert.equal(capability.requested_only, true, "adapter modes are requests, not effective native readback");
+    assert.deepEqual(capability.profiles.map(profile => profile.id), [":workspace", ":danger-full-access"]);
+    assert.deepEqual(capability.approval_policies, ["on-request", "never"]);
+    assert.deepEqual(capability.approvals_reviewers, ["user", "auto_review"]);
+    // agy in its terminal cannot bring an approval to the chat, so Ask is excluded there.
+    assert.deepEqual((capability.excluded_modes ?? []).map(mode => [mode.profile, mode.policy, mode.reviewer]),
+      harness_id === "ao:agy" ? [[":workspace", "on-request", "user"]] : [], harness_id);
+  }
   for (const harness_id of ["ao:opencode", "codex-native"]) {
     const unsupported = await workflow.call("permission_profiles", { workspaceId: "ws-1", route: { harness_id } });
     assert.equal(unsupported.capability.supported, false);
