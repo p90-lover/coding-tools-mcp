@@ -561,9 +561,10 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (activity.activityKind === "system" && detail.event === "provider.failure" && typeof detail.text === "string" && detail.text.trim()) {
       return { ...base, kind: "system", text: utf8Prefix(`${summary ? `${summary} ` : ""}${detail.text.trim()}`, 400) };
     }
-    // An answered request keeps AO's request id: the workflow knows whether its reviewer (or "Approve
-    // for me") answered it, and the chat shows that on the tool call it let run.
-    const request = activity.activityKind === "approval" && typeof activity.requestId === "string" ? { requestId: activity.requestId.slice(0, 200) } : {};
+    // An answered request or question keeps AO's request id: the workflow knows who answered it (its
+    // reviewer, "Approve for me" or the person, and what they chose), and the chat shows that.
+    const request = (activity.activityKind === "approval" || activity.activityKind === "user_input") && typeof activity.requestId === "string"
+      ? { requestId: activity.requestId.slice(0, 200) } : {};
     return { ...base, kind: activity.activityKind.slice(0, 32), text: utf8Prefix(summary || activity.activityKind, 400), ...request };
   }
   /**

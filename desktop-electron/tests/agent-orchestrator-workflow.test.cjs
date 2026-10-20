@@ -3005,7 +3005,7 @@ test("Approve for me asks a reviewer that failed again before involving the pers
   mission.nodes[0].state = "finished";
 });
 
-test("Approve for me's 20 s answer never allows what the safety rules or the reviewer would not", async () => {
+test("Approve for me answers what the safety rules or its reviewer decide, and leaves a reviewer's ask to the person", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
   const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
@@ -3017,8 +3017,8 @@ test("Approve for me's 20 s answer never allows what the safety rules or the rev
     // An MCP tool's arguments arrive as JSON, where the newline before git push reads "\n".
     { approval_id: "json", source: "ao", kind: "permission", tool: "mcp__coding-tools__exec_command",
       toolInput: JSON.stringify({ cmd: "cd app\ngit push origin main" }), since, decisions },
-    // Nothing blocks it and the reviewer passed it to the person: answered for them.
-    { approval_id: "plain", source: "ao", kind: "permission", tool: "Write", path: "C:/elsewhere/plain", since, decisions },
+    // Nothing blocks it and the reviewer passed it to the person: it waits for them, with no timer.
+    { approval_id: "plain",source: "ao", kind: "permission", tool: "Write", path: "C:/elsewhere/plain", since, decisions },
     // The reviewer is still deciding this one (its budget is longer than the 20 s).
     { approval_id: "slow", source: "ao", kind: "permission", tool: "Write", path: "C:/elsewhere/slow", since, decisions },
   ];
@@ -3039,6 +3039,8 @@ test("Approve for me's 20 s answer never allows what the safety rules or the rev
     },
     requestHeadless: async endpoint => {
       if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+      // No native hub: an AO card's requests are read from its AO session.
+      if (endpoint.endsWith("/harness/status")) return { ok: true, status: { connected: false } };
       return { ok: true, run: mission };
     },
     aoHarness: {
@@ -3051,10 +3053,14 @@ test("Approve for me's 20 s answer never allows what the safety rules or the rev
   const answered = () => Object.fromEntries(resolved);
   try {
     await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
-    for (let tries = 0; tries < 300 && resolved.length < 3; tries++) await new Promise(resolve => setTimeout(resolve, 10));
-    await new Promise(resolve => setTimeout(resolve, 50));
-    assert.deepEqual(answered(), { long: "no", json: "no", plain: "yes" },
-      "a command cut off before the rules saw all of it, and git push in JSON, are denied; the plain request goes ahead");
+    for (let tries = 0; tries < 300 && !answered().json; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    // Several more passes of the run loop, long after the old 20 s answer would have fired.
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    assert.deepEqual(answered(), { json: "no" },
+      "git push in JSON is refused by the safety rules; the cut-off script and the plain request, left at ask, wait for the person");
+    const shown = (await workflow.call("harness_status", { workspaceId: "ws", runId: "run", nodeId: "one" })).status?.pending_approvals ?? [];
+    assert.deepEqual([...shown.filter((request) => !request.awaiting_review).map((request) => request.approval_id)].sort(), ["long", "plain"],
+      "both show to the person as questions");
     releaseSlow("deny");
     for (let tries = 0; tries < 300 && !answered().slow; tries++) await new Promise(resolve => setTimeout(resolve, 10));
     assert.equal(answered().slow, "no", "the reviewer still on a request answers it; nobody allowed it meanwhile");
@@ -3083,7 +3089,8 @@ test("the person's answer to an AO agent's question goes back through AO's input
     requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission] }
       : endpoint.endsWith("/harness/status") ? { ok: true, status: { connected: false } } : { ok: true, run: mission },
     aoHarness: {
-      observe: async () => ({ status: "needs_input", turnId: "t", turnState: "running", needsInput: true, approvals: pending }),
+      observe: async () => ({ status: "needs_input", turnId: "t", turnState: "running", needsInput: true, approvals: pending,
+        timeline: [{ id: "q", kind: "user_input", status: "completed", text: "AskUserQuestion", requestId: "ask" }] }),
       resolveInput: async (...args) => { answered.push(args); pending = []; return { ok: true }; },
       resolveApproval: async () => { throw new Error("a question is not an approval"); },
     },
@@ -3096,6 +3103,14 @@ test("the person's answer to an AO agent's question goes back through AO's input
   assert.deepEqual(JSON.parse(JSON.stringify(answered)), [["session-1", "ask", "accept", { question_0: "Rewrite hosts" }]]);
   assert.equal(dialogs, 0, "answering is the person's own act in the chat");
   await assert.rejects(workflow.call("approve_harness", { ...base, answer: { action: "decline" } }), /no longer waiting/);
+  // The transcript keeps a record of it, as Claude Code shows an answered question.
+  let item;
+  for (let tries = 0; tries < 50 && !item; tries++) {
+    const frame = (await workflow.call("activity", { workspaceId: "ws", runId: "run" })).nodes?.one;
+    item = frame?.timeline?.find((entry) => entry.id === "q");
+    if (!item) await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.deepEqual(JSON.parse(JSON.stringify(item?.answered)), { question: "Lockfile?", answer: "Rewrite hosts" });
 });
 
 test("the pinned executable digest is reused only while the file is unchanged", async () => {

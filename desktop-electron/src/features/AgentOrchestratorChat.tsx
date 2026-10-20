@@ -10,7 +10,7 @@ import { ChatContextMeter } from "./ChatContextMeter";
 import { ChatPet } from "./ChatPet";
 import { ChatTurnStats } from "./ChatTurnStats";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
-import { ApprovedMark, EditDiff, StreamingMarkdown } from "./ChatToolParts";
+import { AnsweredRecord, ApprovedMark, EditDiff, StreamingMarkdown } from "./ChatToolParts";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
@@ -200,12 +200,14 @@ const sameFiles = (a: ChatLiveItem["files"], b: ChatLiveItem["files"]) => a === 
     && file.deletions === b![index].deletions && file.diff === b![index].diff));
 const sameLiveItem = (a: ChatLiveItem, b: ChatLiveItem) => a === b || (a.id === b.id && a.kind === b.kind && a.status === b.status
   && a.text === b.text && a.label === b.label && a.description === b.description && a.approval === b.approval
+  && a.answered?.question === b.answered?.question && a.answered?.answer === b.answered?.answer
   && a.input === b.input && a.output === b.output && sameFiles(a.files, b.files));
 const LiveRow = memo(LiveRowView, (prev, next) => sameLiveItem(prev.item, next.item));
 
 function LiveRowView({ item }: { item: ChatLiveItem }) {
   return <li className={`cx-live-item kind-${item.kind} is-${item.status || "done"}`}>
-    {item.kind === "steer" ? <div className="cx-user cx-steer"><div className="cx-bubble"><p>{item.text}</p></div></div>
+    {item.answered ? <AnsweredRecord question={item.answered.question} answer={item.answered.answer} />
+      : item.kind === "steer" ? <div className="cx-user cx-steer"><div className="cx-bubble"><p>{item.text}</p></div></div>
       : item.kind === "message" ? <StreamingMarkdown text={item.text} live={item.status === "running"} />
       : item.kind === "reasoning" ? <ReasoningItem item={item} />
       : item.kind === "edit" ? <EditItem item={item} />
@@ -1378,7 +1380,12 @@ export function AgentOrchestratorChat({
             Harness shows its approval panel: in the thread it took the thread's own margins and sat
             out of line with the box, scrolled away with the transcript. */}
         {approvals.length ? <div className={`cx-approval-dock${isDeepSeekModel(latest?.nodes.find((node) => node.role === "planner")?.route?.model) ? " is-dsh" : ""}`}>
-          {approvals.map(approval => <AgentOrchestratorApproval key={JSON.stringify([approval.nodeId, approval.approval_id])} approval={approval} busy={busy} approve={approve} />)}
+          {approvals.map(approval => {
+            // Codex names who asks ("Allow ChatGPT to run this command?"): here the card's model.
+            const model = latest?.nodes.find((node) => node.id === approval.nodeId)?.route?.model;
+            const actor = model ? modelName?.(model) || model.slice(model.lastIndexOf("/") + 1) : undefined;
+            return <AgentOrchestratorApproval key={JSON.stringify([approval.nodeId, approval.approval_id])} approval={approval} busy={busy} approve={approve} actor={actor} />;
+          })}
         </div> : null}
         <form className="cx-composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}
           onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}

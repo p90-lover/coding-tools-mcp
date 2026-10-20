@@ -1113,6 +1113,8 @@ test("Approve for me keeps a command's card off the screen while it is answered,
   assert.equal(chat.approvalAnsweredForYou({ kind: "command" }, auto, chat.SELF_ANSWER_GRACE_MS), false, "one still waiting after the grace shows");
   assert.equal(chat.approvalAnsweredForYou({ kind: "command" }, { approval_policy: "on-request" }, 1000), false, "Ask me always shows");
   assert.equal(chat.approvalAnsweredForYou({ kind: "command" }, auto, 1000, true), false, "a team's Command approver decides, so its card shows");
+  assert.equal(chat.approvalAnsweredForYou({ kind: "command", recommendation: { action: "ask" } }, auto, 1000), false,
+    "a request the reviewer left at ask is the person's and shows at once");
 });
 
 test("a refresh that found nothing new keeps the runs and activity objects already held", () => {

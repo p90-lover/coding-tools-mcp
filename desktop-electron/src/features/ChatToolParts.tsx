@@ -36,6 +36,17 @@ export function EditDiff({ diff }: { diff: string }) {
     </tr>)}</tbody></table></div>;
 }
 
+/**
+ * A question the person answered, as Claude Code shows one in its transcript: the question, and
+ * under it the answer they chose in quieter type, in a rounded box.
+ */
+export function AnsweredRecord({ question, answer }: { question: string; answer: string }) {
+  return <div className="cx-answered" role="group" aria-label="Answered question">
+    <p className="cx-answered-question">{question}</p>
+    <p className="cx-answered-answer">{answer}</p>
+  </div>;
+}
+
 // How often a message that is still streaming redraws. A fast model (200+ tokens a second) grew
 // its text on every poll, and each change parsed the whole message as Markdown again.
 const STREAM_REDRAW_MS = 250;
