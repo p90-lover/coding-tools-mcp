@@ -704,6 +704,10 @@ function paneRulesFor(groups) {
 
 function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview = false, subagents = "" } = {}) {
   return paneRulesFor(groups)
+    // Seen live: an agent whose client deferred these tools (names only, loaded through its tool
+    // search) said "there is no list_dir tool" and fell back to dir, never loading it.
+    + "Every Coding Tools tool named here is available: if your client lists one as deferred or you do not see it, "
+    + "load it with your tool search (for example \"list_dir\") before deciding it is missing. "
     + "Coding Tools tools for this chat's own folder (its git worktree, or the project folder it works in): read_file, "
     + "list_dir, search_text and apply_patch for files; git_* for its history. Paths are relative to that folder and paths "
     + "outside it are refused. search_text skips what .gitignore ignores and heavy folders (node_modules, .venv, build "

@@ -364,7 +364,29 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
    * 1 MB and every poll failed on the response limit. A response that is too big is read again
    * with fewer items; the chat shows only the newest 40 anyway.
    */
-  async function conversationTail(id, limits = [100, 40, 10]) {
+  // One read serves every caller for a moment. The chat (every second), the mission controller and
+  // the approval screen each read the same session's tail; with a busy chat that was 2 reads a
+  // second of ~500-700 KB each (58 MB a minute through the main process). Concurrent callers share
+  // the read in flight, and a result serves callers for TAIL_FRESH_MS; `maxAgeMs` lets a caller
+  // that knows the session is idle take an older one.
+  const TAIL_FRESH_MS = 900;
+  const IDLE_TAIL_MS = 30_000;
+  const tailReads = new Map(); // `${id}|${limits}` -> { at, read }
+  function conversationTail(id, limits = [100, 40, 10], { maxAgeMs = TAIL_FRESH_MS } = {}) {
+    const key = `${id}|${limits.join(",")}`;
+    const known = tailReads.get(key);
+    if (known && Date.now() - known.at < maxAgeMs) return known.read;
+    const read = readConversationTail(id, limits);
+    tailReads.set(key, { at: Date.now(), read });
+    read.catch(() => { if (tailReads.get(key)?.read === read) tailReads.delete(key); });
+    if (tailReads.size > 128) tailReads.delete(tailReads.keys().next().value);
+    return read;
+  }
+  /** After the app changes a session (a message, an answer, a stop), its next read is a fresh one. */
+  function forgetTail(id) {
+    for (const key of tailReads.keys()) if (key.startsWith(`${id}|`)) tailReads.delete(key);
+  }
+  async function readConversationTail(id, limits) {
     for (let at = 0; ; at += 1) {
       try {
         // includePending: a request still waiting on an answer is always in the page, however much
@@ -1029,6 +1051,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     },
     /** Sends a follow-up as a new turn of the same session; AO de-duplicates by client message id. */
     async send(id, text, clientMessageId) {
+      forgetTail(id);
       const data = await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/messages`,
         { text: utf8Prefix(String(text), 64 * 1024), ...(clientMessageId ? { clientMessageId: String(clientMessageId).slice(0, 200) } : {}) });
       if (typeof data?.turnId !== "string" || !data.turnId) throw new Error("AO did not start a turn for the follow-up");
@@ -1039,6 +1062,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
      * returns the text instead of starting a detached turn, and this reports `steered: false`.
      */
     async steer(id, text, clientMessageId) {
+      forgetTail(id);
       try {
         const data = await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/steer`,
           { text: utf8Prefix(String(text), 64 * 1024), ...(clientMessageId ? { clientMessageId: String(clientMessageId).slice(0, 200) } : {}) });
@@ -1108,6 +1132,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     async resolveInput(id, requestId, action, content = undefined) {
       if (typeof requestId !== "string" || !requestId) throw new Error("A question to answer is required");
       if (!["accept", "decline", "cancel"].includes(action)) throw new Error("Answer, decline or cancel the question");
+      forgetTail(id);
       const body = action === "accept" && content && typeof content === "object" && !Array.isArray(content) ? { action, content } : { action };
       if (JSON.stringify(body).length > 65536) throw new Error("The answer is too long");
       await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/inputs/${encodeURIComponent(requestId)}/resolve`, body);
@@ -1117,6 +1142,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     async resolveApproval(id, requestId, decisionId) {
       if (typeof requestId !== "string" || !requestId || typeof decisionId !== "string" || !decisionId) throw new Error("Choose an offered decision");
       await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/approvals/${encodeURIComponent(requestId)}/resolve`, { decisionId });
+      forgetTail(id);
       return { ok: true };
     },
     /** A finished turn's reasoning, tool calls and messages (the chat's "Worked" row, opened). */
@@ -1126,6 +1152,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     },
     async interrupt(id) {
       agentTools?.cancelSessionCalls?.(id);
+      forgetTail(id);
       const interrupt = () => internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/interrupt`, {}).catch(error => {
         if (!/CHAT_NO_ACTIVE_TURN/.test(String(error?.message))) throw error;
       });
@@ -1632,7 +1659,14 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       // must not start it) and never fails the app's listing.
       const ids = Array.isArray(args.sessionIds) ? args.sessionIds.filter((id) => typeof id === "string").slice(0, 32) : [];
       const app = agentTools?.processes ? await agentTools.processes(ids, typeof args.workspaceId === "string" ? args.workspaceId : null) : [];
-      const readConversation = state === "ready" ? (id) => conversationTail(id, AGENT_SHELL_CONVERSATION_LIMITS) : null;
+      // A chat lists every session it ever had, and the Terminal polls every 2 s: each finished
+      // session's whole tail was read again each time. One that is not working cannot change, so a
+      // copy up to IDLE_TAIL_MS old serves it; the session record that says so is a 1 KB read.
+      const readConversation = state === "ready" ? async (id) => {
+        const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`).catch(() => null);
+        const working = record?.session?.status === "working";
+        return conversationTail(id, AGENT_SHELL_CONVERSATION_LIMITS, { maxAgeMs: working ? TAIL_FRESH_MS : IDLE_TAIL_MS });
+      } : null;
       return { ok: true, sessions: await withAgentShellCommands(app, ids, readConversation, logger) };
     }
     if (operation.startsWith("chat_process") || operation.startsWith("chat_preview_")
