@@ -614,3 +614,21 @@ test("plain prompts send the person's own words and one turn-token line when Cha
   // Off unless asked, and never for a read-only effort, which has no token.
   expect(compileChatGptWebPrompt(first, capabilities, token).text).toContain("<codex_context_json>");
 });
+
+test("a /goal continuation sends Codex's goal instruction as the prompt and says where update_goal is", () => {
+  const token = "turn_12345678901234567890123456789012";
+  const capabilities = { localToolsEnabled: true, solAvailable: true, proAvailable: true };
+  const goal = "<codex_internal_context source=\"goal\">\nContinue working toward the active thread goal.\n\n<objective>\nship the upgrade cycle\n</objective>\n\nIf the objective is achieved, call update_goal with status \"complete\".\n</codex_internal_context>";
+  const goalTurn: CodexParsedRequest = { ...request("high"), context: { messages: [
+    { role: "developer", content: "<codex_apps_client_time_context></codex_apps_client_time_context>", timestamp: 1 },
+    { role: "user", content: goal, timestamp: 2 },
+  ] } };
+  const plain = compileChatGptWebPrompt(goalTurn, capabilities, token, { plainPrompt: true });
+  expect(plain.text).toBe(`${goal}\n\n(turn_token ${token} — pass it to Codex tools; call update_goal through codex_tool_call)`);
+  // Other Codex blocks in the user role are still left out, and an ordinary prompt's line is unchanged.
+  const page = compileChatGptWebPrompt({ ...goalTurn, context: { messages: [
+    { role: "user", content: "<external_codex_apps_open_page>{\"page_id\":null}</external_codex_apps_open_page>", timestamp: 1 },
+    { role: "user", content: "keep going", timestamp: 2 },
+  ] } }, capabilities, token, { plainPrompt: true });
+  expect(page.text).toBe(`keep going\n\n(turn_token ${token} — pass it to Codex tools)`);
+});

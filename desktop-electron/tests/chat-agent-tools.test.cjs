@@ -306,7 +306,7 @@ test("the MCP endpoint answers initialize, lists the agent tools and calls them 
 
     const reply = await post(url, { jsonrpc: "2.0", id: 2, method: "tools/list" }, auth);
     assert.deepEqual(reply.body.result.tools.map((entry) => entry.name),
-      ["read_file", "apply_patch", "git_status", "view_image", "update_plan"],
+      ["read_file", "apply_patch", "git_status", "view_image", "update_plan", "show_in_chat"],
       "terminal and desktop tools are off by default; request_permissions, the default cwd, task board, native Codex, history, operation store, sandbox and harness tools are never offered");
     assert.equal(Object.hasOwn(reply.body.result.tools[0], "outputSchema"), false);
     assert.deepEqual(reply.body.result.tools[0].annotations, { readOnlyHint: true });
@@ -731,6 +731,35 @@ test("subagent parent validation also accepts synchronous workspace resolvers", 
     assert.equal((await callTool(client.url, client.auth, "subagent_start", { task: "late" })).isError, true);
     assert.equal(called, 1);
   } finally { await tools.close(); }
+});
+
+test("show_in_chat brings the Terminal forward on a command the agent started, and refuses what does not run", async () => {
+  // Seen live: an agent asked to keep a process in view started it, but nothing came up in the chat.
+  const tree = tempTree();
+  const sandbox = fakeSandbox();
+  const { tools } = fixture({ root: tree.root, terminal: () => true, sandbox });
+  try {
+    const client = await session(tools, { id: "show-owner", approvalMode: "bypass-permissions" });
+    assert.ok((await listed(client.url, client.auth)).includes("show_in_chat"), "listed with the agent's own tools");
+    await callTool(client.url, client.auth, "exec_command", { cmd: "python watch.py", yield_time_ms: 0 });
+    const [started] = (await tools.processes(["show-owner"], "ws1"))[0].commands;
+    assert.equal((await callTool(client.url, client.auth, "show_in_chat", { pane: "terminal", command_id: "nope" })).isError, true,
+      "an unknown command is refused");
+    assert.equal((await callTool(client.url, client.auth, "show_in_chat", { pane: "preview" })).isError, true,
+      "the browser shows nothing yet: preview_open first");
+    assert.equal((await callTool(client.url, client.auth, "show_in_chat", { pane: "window" })).isError, true);
+    assert.equal((await tools.processes(["show-owner"], "ws1"))[0].show, undefined, "nothing asked yet");
+    const shown = await callTool(client.url, client.auth, "show_in_chat", { pane: "terminal", command_id: started.id });
+    assert.equal(shown.isError, undefined);
+    assert.match(shown.content[0].text, /Terminal pane on `python watch\.py`/);
+    const show = (await tools.processes(["show-owner"], "ws1"))[0].show;
+    assert.equal(show.pane, "terminal");
+    assert.equal(show.commandId, started.id);
+    const again = await callTool(client.url, client.auth, "show_in_chat", { pane: "terminal", command_id: started.id });
+    assert.equal(again.isError, undefined);
+    assert.notEqual((await tools.processes(["show-owner"], "ws1"))[0].show.id, show.id, "each request is new, so it shows again");
+    tools.forgetSession("show-owner");
+  } finally { await tools.close(); tree.cleanup(); }
 });
 
 test("completed pane owners are bounded while live and user terminals stay reachable", async () => {
@@ -1366,7 +1395,7 @@ test("desktop tools are hidden and refused unless the user opts in, and every sc
     assert.match((await callTool(before.url, before.auth, "capture_screenshot")).content[0].text, /Unknown tool/,
       "a session started without the desktop group does not gain it");
     const opted = await session(tools, { id: "ao-2" });
-    assert.deepEqual((await listed(opted.url, opted.auth)).filter((name) => !["read_file", "apply_patch", "git_status", "view_image", "update_plan"].includes(name)),
+    assert.deepEqual((await listed(opted.url, opted.auth)).filter((name) => !["read_file", "apply_patch", "git_status", "view_image", "update_plan", "show_in_chat"].includes(name)),
       ["capture_screenshot", "list_windows", "computer_snapshot", "computer_action", "vision_status"]);
     const init = await post(opted.url, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, opted.auth);
     assert.match(init.body.result.instructions, /confirms each screen capture/);

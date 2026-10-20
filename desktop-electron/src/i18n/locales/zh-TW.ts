@@ -1,7 +1,7 @@
 export default {
   product: "Coding Tools",
   savedChats: "在 ChatGPT 中儲存聊天",
-  savedChatsBody: "在一般 ChatGPT 聊天中執行 Web GPT 任務。這些聊天會出現在你的 ChatGPT 歷史記錄中，並可能套用 ChatGPT 記憶和自訂指令。關閉後改用臨時聊天，但 ChatGPT 不允許臨時聊天使用本應用程式的工具。預設開啟。",
+  savedChatsBody: "在一般 ChatGPT 聊天中執行 Web GPT 任務。任務不再使用某個聊天後，本應用程式會將其從你的 ChatGPT 歷史記錄中刪除。可能會套用 ChatGPT 記憶和自訂指令。關閉後改用臨時聊天，但 ChatGPT 不允許臨時聊天使用本應用程式的工具。預設開啟。",
   moreTools: "更多",
   integrations: "整合服務",
   providerOAuth: "帳戶",

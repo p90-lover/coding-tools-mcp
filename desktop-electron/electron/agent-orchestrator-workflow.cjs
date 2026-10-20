@@ -1991,7 +1991,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const AUTO_REVIEW_MODEL = "codex-auto-review";
   const APP_TOOLS_ALLOWED = new Set(["read_file", "list_dir", "list_files", "search_text", "grep_text", "get_current_time",
     "get_plan", "update_plan", "tool_search", "server_info", "git_status", "git_diff", "git_log", "git_show", "git_blame",
-    "view_image", "image_info", "compare_images", "check_exec_environment", "read_output", "apply_patch", "patch_check"]);
+    "view_image", "image_info", "compare_images", "check_exec_environment", "read_output", "apply_patch", "patch_check",
+    // Brings a pane of the chat forward; it shows only what already runs.
+    "show_in_chat"]);
   /** Why an app agent-tool call "Approve for me" may answer itself, or null. */
   function routineAppTool(tool) {
     const name = String(tool ?? "");

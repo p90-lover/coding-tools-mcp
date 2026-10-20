@@ -325,6 +325,10 @@ test("an agent's new page brings the Preview pane forward, even over the Termina
   assert.equal(workbench.autoOpenTab(["cmd:c1"], false), "terminal", "a command opens a closed panel on the Terminal");
   assert.equal(workbench.autoOpenTab(["cmd:c1"], true), null, "but never takes the place of what the user looks at");
   assert.equal(workbench.autoOpenTab([], false), null);
+  // The agent asked to show a pane (show_in_chat): that pane, even over what the user looks at.
+  assert.equal(workbench.autoOpenTab(["show:show-1:terminal"], true), "terminal");
+  assert.equal(workbench.autoOpenTab(["page:ao-1:http://localhost:8000", "show:show-2:terminal"], false), "terminal", "an explicit request wins");
+  assert.equal(workbench.autoOpenTab(["show:show-3:preview"], true), "preview");
   // Only a server process opens it: the agent's one-off commands (a status poll, a build, a test)
   // put the Terminal over the chat while it worked.
   const server = (cmd, extra = {}) => workbench.isServerProcess({ cmd, status: "running", ...extra });

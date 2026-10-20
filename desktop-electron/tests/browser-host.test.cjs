@@ -1784,6 +1784,58 @@ test("removing the final turn tab keeps the descriptor-owned idle host attached 
   ]);
 });
 
+test("a released saved chat is deleted from its own page, as a Temporary Chat would vanish", async () => {
+  const { deleteConversationScript, ownedSavedConversationId } = require("../electron/browser-host.cjs");
+  // Only a bridge turn's own saved /c/<uuid> on chatgpt.com is recorded.
+  assert.equal(ownedSavedConversationId(`https://chatgpt.com/c/${SAVED_CONVERSATION_ID}`, true), SAVED_CONVERSATION_ID);
+  assert.equal(ownedSavedConversationId(`https://chatgpt.com/c/${SAVED_CONVERSATION_ID}?temporary-chat=true`, true), null);
+  assert.equal(ownedSavedConversationId(`https://chatgpt.com/c/${SAVED_CONVERSATION_ID}`, false), null, "saved chats off");
+  assert.equal(ownedSavedConversationId(`https://example.com/c/${SAVED_CONVERSATION_ID}`, true), null);
+  assert.equal(ownedSavedConversationId("https://chatgpt.com/", true), null);
+  assert.throws(() => deleteConversationScript("../../backend-api/accounts"), /Not a ChatGPT conversation id/);
+  const script = deleteConversationScript(SAVED_CONVERSATION_ID);
+  assert.match(script, /"PATCH"/);
+  assert.match(script, /is_visible: false/);
+  assert.ok(script.endsWith(`)(${JSON.stringify(SAVED_CONVERSATION_ID)})`));
+
+  const release = async ({ url = `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}`, manual = false, savedChats = true } = {}) => {
+    const calls = [];
+    const logs = [];
+    const tab = {
+      id: "turn-tab", traceId: "trace", status: "ready", ownedConversation: SAVED_CONVERSATION_ID,
+      ...(manual ? { interactionMode: "manual", manualWaiters: new Set(), manualTerminalWaiters: new Set() } : {}),
+      view: { webContents: {
+        isDestroyed: () => calls.includes("close"),
+        getURL: () => url,
+        executeJavaScript: async (code) => { calls.push(["script", code.includes(SAVED_CONVERSATION_ID)]); return { ok: true, status: 200 }; },
+        close: () => calls.push("close"),
+      } },
+    };
+    const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+      turnTabs: new Map([[tab.id, tab]]), closedTurnOwners: new Map(), selectedTabId: "home",
+      window: { contentView: { removeChildView() {} } },
+      getUseSavedChats: () => savedChats,
+      logger: { info: (event) => logs.push(event), warn: (event) => logs.push(event) },
+      syncPowerSaveBlocker() {}, syncViewVisibility() {}, publishState() {}, writeDescriptor() {},
+      snapshot: () => ({ tabs: [] }),
+    });
+    BrowserHost.prototype.removeTurnTab.call(fixture, tab, false);
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    return { calls, logs, gone: !fixture.turnTabs.has(tab.id) };
+  };
+
+  const deleted = await release();
+  assert.equal(deleted.gone, true, "the tab leaves the browser at once");
+  assert.deepEqual(deleted.calls, [["script", true], "close"], "deleted in its page, then closed");
+  assert.ok(deleted.logs.includes("browser.conversation_deleted"));
+  assert.deepEqual((await release({ manual: true })).calls, ["close"], "a Zero Risk tab is the person's own paste");
+  assert.deepEqual((await release({ savedChats: false })).calls, ["close"], "Temporary Chats need no delete");
+  const moved = await release({ url: "https://example.com/" });
+  assert.deepEqual(moved.calls, ["close"], "a tab no longer on chatgpt.com never sends the request");
+  assert.ok(moved.logs.includes("browser.conversation_delete_skipped"));
+});
+
 test("hard refresh accepts Chromium's completed loading cycle even without did-finish-load", async () => {
   const calls = [];
   const contents = new EventEmitter();
@@ -2838,6 +2890,7 @@ test("a retained browser tab expires at thirty minutes", () => {
 
 test("a completed connector turn without binding is released instead of retained", async () => {
   let closed = false;
+  let deletedFirst = false;
   const tab = {
     id: "tab-unbound",
     traceId: "trace_unbound",
@@ -2847,9 +2900,11 @@ test("a completed connector turn without binding is released instead of retained
     status: "running",
     loading: true,
     view: { webContents: {
-      isDestroyed: () => false,
+      isDestroyed: () => closed,
       getURL: () => `https://chatgpt.com/c/${SAVED_CONVERSATION_ID}`,
       setBackgroundThrottling() {},
+      // The released saved chat is deleted in its page before the page closes.
+      executeJavaScript: async (script) => { deletedFirst = !closed && script.includes(SAVED_CONVERSATION_ID); return { ok: true, status: 200 }; },
       close: () => { closed = true; },
     } },
   };
@@ -2879,6 +2934,9 @@ test("a completed connector turn without binding is released instead of retained
   ), { cancelledByUser: false });
 
   assert.equal(fixture.turnTabs.size, 0);
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(deletedFirst, true, "its saved chat was deleted before the page closed");
   assert.equal(closed, true);
 });
 
