@@ -1950,6 +1950,29 @@ test("a finished AO card's work is read back for the chat (turn_timeline), redac
   assert.equal(asked.length, 1);
 });
 
+test("a chat's timeline reads CPA's key once, not once per field, and still redacts it everywhere", async () => {
+  // Seen live: every text field asked for CPA's connection, whose state is read from disk; a long
+  // chat's timeline (400 items) held the main process for 3.8 s when a project was opened.
+  const key = "CPA_PROXY_KEY_1234567890abcdef";
+  let reads = 0;
+  const finished = { id: "p", role: "planner", state: "finished", route: { harness_id: "ao:claude-code", model: "cpa/gpt-6-luna" },
+    receipt: { status: "completed", thread_id: "sess-1", turn_id: "turn-1" } };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [finished] }] };
+      throw new Error(`unexpected ${endpoint}`);
+    },
+    cpaConnection: () => { reads += 1; return { baseUrl: "http://127.0.0.1:8317", proxyApiKey: key }; },
+    aoHarness: { timeline: async () => Array.from({ length: 300 }, (_, index) => ({ id: `c${index}`, kind: "command", status: "completed",
+      text: `curl -H x-key:${key} url`, description: `step ${index}`, input: `{"k":"${key}"}`, output: `echo ${key}` })) },
+    confirm: async () => true,
+  });
+  const { timeline } = await workflow.call("turn_timeline", { workspaceId: "ws-1", runId: "run-1", nodeId: "p" });
+  assert.equal(timeline.length, 300);
+  assert.doesNotMatch(JSON.stringify(timeline), new RegExp(key), "the key is redacted from every field");
+  assert.ok(reads <= 2, `CPA's connection was read ${reads} times for one timeline`);
+});
+
 test("AO chat reads native managed capability for exactly one consented node", async () => {
   const calls = [];
   const capability = { supported: true, profiles: [{ id: ":workspace", allowed: true }],

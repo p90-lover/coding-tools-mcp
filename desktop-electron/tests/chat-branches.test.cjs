@@ -150,3 +150,36 @@ test("chat_branches is read-only and chat_switch_branch writes; the app handler 
   assert.match(handler, /chat_switch_branch: \{ readOnly: false/);
   assert.match(handler, /UPSTREAM_OPERATIONS = new Set\(\[[^\]]*"chat_branches", "chat_switch_branch"/s);
 });
+
+test("a project's branches are read once for callers asking together, kept briefly, and read again after a switch", async () => {
+  // Seen live: opening a project mounted two branch bars at once, each listing the branches with about
+  // a dozen git processes, and starting each held the main process for 100-400 ms.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chat-branches-"));
+  try {
+    const repo = path.join(root, "repo");
+    fs.mkdirSync(repo);
+    git(repo, "init", "-q", "-b", "main");
+    fs.writeFileSync(path.join(repo, "a.txt"), "a");
+    git(repo, "add", "a.txt");
+    git(repo, "commit", "-q", "-m", "first");
+    git(repo, "branch", "feature/one");
+    let lookups = 0;
+    const board = createAoWorkspaceBoard({ listWorkspaces: async () => { lookups += 1; return [{ id: "ws", path: repo }]; },
+      listProjects: async () => [], createProject: async () => ({}), missionCall: async () => ({}) });
+    const [first, second] = await Promise.all([board.branches("ws"), board.branches("ws")]);
+    assert.equal(first, second, "two callers at once share one read");
+    assert.equal(first.current, "main");
+    assert.equal(await board.branches("ws"), first, "a read a moment later is the kept one");
+    git(repo, "branch", "feature/two");
+    assert.ok(!(await board.branches("ws")).branches.some((branch) => branch.name === "feature/two"), "still the kept read");
+    const switched = await board.switchBranch("ws", "feature/one");
+    assert.equal(switched.current, "feature/one");
+    const after = await board.branches("ws");
+    assert.notEqual(after, first, "a switch drops the kept read");
+    assert.equal(after.current, "feature/one");
+    assert.ok(after.branches.some((branch) => branch.name === "feature/two"));
+    assert.ok(lookups >= 4, "the workspace is still looked up on every call");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

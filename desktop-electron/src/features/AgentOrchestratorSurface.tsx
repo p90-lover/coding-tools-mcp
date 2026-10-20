@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent, ReactNode, RefObject } from "react";
 import { getCodingToolsClient } from "../api/client";
 import type { JsonObject, WorkspaceSummary } from "../api/contracts";
@@ -1587,8 +1587,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
     setSheet("");
   });
   // ---- Codex thread actions (thread list, chat header, slash commands) ----
-  const allTasks = board?.tasks ?? [];
-  const togglePin = (taskId: string) => setChatPins((current) => {
+  const allTasks = useMemo(() => board?.tasks ?? [], [board]);
+  const togglePin =(taskId: string) => setChatPins((current) => {
     const next = current.includes(taskId) ? current.filter((id) => id !== taskId) : [taskId, ...current];
     writeList(PINNED_CHATS, next);
     return next;
@@ -1933,10 +1933,49 @@ export function AgentOrchestratorSurface({ language, setError }: {
     await loadArchived();
   })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
 
+  // What the chat list and the open chat are given stays the same object until it changes. Built
+  // inline it was new on every render (each second's activity read, each poll), and the open chat
+  // rebuilds its whole transcript from it, so a project switch rebuilt the conversation many times.
+  const threadChats = useMemo(() => chatList(missions, allTasks, taskLifecycle), [missions, allTasks, taskLifecycle]);
+  const threadArchived = useMemo(() => chatArchived(missions, allTasks, taskLifecycle), [missions, allTasks, taskLifecycle]);
+  const chatRuns = useMemo(() => {
+    const replaced = new Map<string, string>();
+    for (const item of taskLifecycle) {
+      for (const intent of item.reconfigure || []) {
+        const id = intent.replacement_run_id;
+        if (id && !replaced.has(id)) replaced.set(id, intent.previous_run_id);
+      }
+    }
+    return missions.map(mission => ({ ...mission, replaces_run_id: replaced.get(mission.id) }));
+  }, [missions, taskLifecycle]);
+  // The chat's actions call the current handlers through this ref, so the objects it holds keep
+  // their identity across renders (they are only called after a render has committed).
+  const chatHandlers = useRef({ startNewChat, renameChat, missionAction, forkChat, rewindChat, deleteChatMessage, copyChat, togglePin, restartChatRun, stopChatRun });
+  useLayoutEffect(() => {
+    chatHandlers.current = { startNewChat, renameChat, missionAction, forkChat, rewindChat, deleteChatMessage, copyChat, togglePin, restartChatRun, stopChatRun };
+  });
+  const chatPinned = Boolean(chatTaskId && chatPins.includes(chatTaskId));
+  const chatThread = useMemo(() => {
+    if (!chatTaskId) return undefined;
+    return {
+      newChat: () => chatHandlers.current.startNewChat(),
+      rename: (title: string) => chatHandlers.current.renameChat(chatTaskId, title),
+      archive: () => chatHandlers.current.missionAction(chatTaskId, "archive"),
+      fork: (turnIndex?: number | "first") => chatHandlers.current.forkChat(chatTaskId, turnIndex),
+      rewind: (turnIndex: number) => chatHandlers.current.rewindChat(chatTaskId, turnIndex),
+      deleteMessage: (messageIndex: number, runIds: string[]) => chatHandlers.current.deleteChatMessage(chatTaskId, messageIndex, runIds),
+      copyConversation: () => chatHandlers.current.copyChat(chatTaskId, "conversation"),
+      togglePin: () => chatHandlers.current.togglePin(chatTaskId),
+      pinned: chatPinned,
+    };
+  }, [chatTaskId, chatPinned]);
+  const restartChat = useCallback((runId: string) => chatHandlers.current.restartChatRun(runId), []);
+  const stopChat = useCallback((runId: string) => chatHandlers.current.stopChatRun(runId), []);
+
   return (
     <section className="ao-workflow" aria-label={copy.title} lang={language}>
       <ChatThreadList workspaces={workspaces.map((item) => ({ id: item.id, name: item.name, path: item.path }))} workspaceId={workspaceId} onWorkspace={chooseWorkspace}
-        chats={chatList(missions, allTasks, taskLifecycle)} archived={chatArchived(missions, allTasks, taskLifecycle)} selectedTaskId={chatTaskId ?? ""} now={listNow}
+        chats={threadChats} archived={threadArchived} selectedTaskId={chatTaskId ?? ""} now={listNow}
         archivedAll={archivedAll ?? undefined} restoreArchived={restoreArchived} setArchiveDays={setArchiveDays}
         pinned={chatPins} togglePin={togglePin} unread={chatUnread} setUnread={markUnread}
         pinnedProjects={projectPins} toggleProjectPin={toggleProjectPin}
@@ -2097,14 +2136,11 @@ export function AgentOrchestratorSurface({ language, setError }: {
           !workspaceId && workspaceReady
             ? <div className="ao-empty-state"><p>{copy.noWorkspace}</p><button className="button-primary" type="button" onClick={() => setSheet("settings")}>{copy.settings}</button></div>
             : <AgentOrchestratorChat
-                runs={missions.map(mission => ({...mission, replaces_run_id: taskLifecycle.flatMap(item=>item.reconfigure || []).find(intent=>intent.replacement_run_id===mission.id)?.previous_run_id}))}
+                runs={chatRuns}
                 tasks={allTasks} selectedTaskId={chatTaskId ?? ""}
                 projectName={workspaces.find((item) => item.id === workspaceId)?.name} projectBranch={projectBranch}
-                stop={stopChatRun} restart={restartChatRun} loadWork={loadChatWork}
-                thread={chatTaskId ? { newChat: startNewChat, rename: (title) => renameChat(chatTaskId, title), archive: () => missionAction(chatTaskId, "archive"),
-                  fork: (turnIndex) => forkChat(chatTaskId, turnIndex), rewind: (turnIndex) => rewindChat(chatTaskId, turnIndex),
-                  deleteMessage: (messageIndex, runIds) => deleteChatMessage(chatTaskId, messageIndex, runIds),
-                  copyConversation: () => copyChat(chatTaskId, "conversation"), togglePin: () => togglePin(chatTaskId), pinned: chatPins.includes(chatTaskId) } : undefined}
+                stop={stopChat} restart={restartChat} loadWork={loadChatWork}
+                thread={chatThread}
                 onPause={() => controlRun("pause")} onResume={() => controlRun("resume")} onSettings={() => openSheet("settings")}
                 onOpenProject={(() => { const open = workspaces.find((item) => item.id === workspaceId); return open?.path ? () => openFolder(open) : undefined; })()}
                 projects={workspaces.map((item) => ({ id: item.id, name: item.name, path: item.path }))} projectId={workspaceId}

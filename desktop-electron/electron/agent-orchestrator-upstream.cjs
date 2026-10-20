@@ -4,7 +4,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
-const { spawn, spawnSync } = require("node:child_process");
+const { execFile, spawn } = require("node:child_process");
 const { createAgentOrchestratorGateway } = require("./agent-orchestrator-gateway.cjs");
 const { createAoWorkspaceBoard } = require("./agent-orchestrator-workspace.cjs");
 const { readCpaCatalog, collectMissionAccounting } = require("./agent-orchestrator-accounting.cjs");
@@ -1314,8 +1314,10 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     }
     if (operation === "check_repository" || operation === "repository_branch") {
       if (typeof args.directory !== "string" || !path.isAbsolute(args.directory)) throw new Error("An absolute local project directory is required");
-      const result = spawnSync("git", ["-C", args.directory, "rev-parse", operation === "check_repository" ? "--is-inside-work-tree" : "--abbrev-ref", ...(operation === "repository_branch" ? ["HEAD"] : [])], { encoding: "utf8", timeout: 5000, windowsHide: true });
-      return operation === "check_repository" ? result.status === 0 && result.stdout.trim() === "true" : result.status === 0 ? result.stdout.trim() : null;
+      // Asked as a project opens; waiting on git synchronously froze every window for as long as it took.
+      const stdout = await new Promise(resolve => execFile("git", ["-C", args.directory, "rev-parse", operation === "check_repository" ? "--is-inside-work-tree" : "--abbrev-ref", ...(operation === "repository_branch" ? ["HEAD"] : [])],
+        { encoding: "utf8", timeout: 5000, windowsHide: true }, (failure, output) => resolve(failure ? null : String(output))));
+      return operation === "check_repository" ? stdout !== null && stdout.trim() === "true" : stdout === null ? null : stdout.trim();
     }
     if (operation === "open_external") {
       const url = new URL(args.url);
