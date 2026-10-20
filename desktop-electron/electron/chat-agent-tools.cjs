@@ -776,8 +776,11 @@ function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview
         + "page works as intended. Use them for every GUI or frontend check. "
       : "")
     + (groups.includes("desktop")
-      ? "capture_screenshot, list_windows and computer_* see and drive the desktop: the user confirms each screen "
-        + "capture, and computer control works only while the user has enabled it in the app and allowed this chat. "
+      ? (autoReview
+        ? "capture_screenshot, list_windows and computer_* see and drive the desktop: each call is reviewed before it "
+          + "runs, like any other tool request, and computer control works only while the user has enabled it in the app. "
+        : "capture_screenshot, list_windows and computer_* see and drive the desktop: the user confirms each screen "
+          + "capture, and computer control works only while the user has enabled it in the app and allowed this chat. ")
       : "")
     + (groups.includes("subagents")
       ? "Subagents: for a self-contained piece of work (exploring part of the codebase, an independent change, a review) you can "
@@ -1392,14 +1395,18 @@ function createChatAgentTools({
       if (error instanceof ScopeError) return failedCall(error.message);
       throw error;
     }
-    if (CONFIRMED_TOOLS.has(name)) {
+    // Under "Approve for me" on Claude Code every call here already went through the chat's
+    // reviewer (reviewedUpstream), as exec_command does: asking the person again was a second
+    // approval of the same call. Other agents and modes keep the app's own dialogs.
+    const reviewed = reviewedUpstream(entry);
+    if (CONFIRMED_TOOLS.has(name) && !reviewed) {
       // What it observes (which window, which display) is part of what the user allows.
       const details = Object.keys(args).length ? ["\n", ...describeCall(name, args, null)] : [];
       const answer = await ask(`A chat agent wants to ${CONFIRMED_TOOLS.get(name)}`,
         dialogText([...who(entry), `Tool: ${name}\n`, ...details, "\nAllow this once?"]), `The user declined ${name}.`, tooLongToShow(name), { entry, tool: name, signal });
       if (answer !== true) return answer;
     }
-    if (CONTROL_TOOLS.has(name) && !entry.controlAllowed) {
+    if (CONTROL_TOOLS.has(name) && !entry.controlAllowed && !reviewed) {
       // This allows the chat, not one action, so the action's arguments are not what is approved.
       const answer = await ask("A chat agent wants to control your screen",
         dialogText([...who(entry), `Tool: ${name}\n\nWhile you have computer control enabled in Coding Tools, this chat could\n`
