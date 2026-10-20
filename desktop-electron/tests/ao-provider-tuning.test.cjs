@@ -156,23 +156,22 @@ test("Cline DeepSeek V4.1 Flash lists native efforts and forwards them unchanged
   }
 });
 
-test("agy keeps a model's own effort in CPA's suffix form and takes the three permission modes", async () => {
-  // agy read "-high" as its thinking level and asked CPA for "gemini-3.8-flash": 400, unknown provider.
-  const catalog = [{ slug: "gemini-3.8-flash-high", supported_reasoning_levels: [{ effort: "low" }, { effort: "medium" }, { effort: "high" }] },
-    { slug: "gemini-3-flash", supported_reasoning_levels: [{ effort: "low" }, { effort: "medium" }] }];
-  const own = await dispatched("agy", "cpa/gemini-3.8-flash-high", {}, catalog);
-  assert.equal(own.model, "gemini-3.8-flash-high(high)");
-  assert.deepEqual(own.gateway, { provider: "cpa", model: "gemini-3.8-flash-high(high)" });
-  assert.equal((await dispatched("agy", "cpa/gemini-3.8-flash-high", { effort: "low" }, catalog)).model, "gemini-3.8-flash-high(low)", "a picked effort wins");
-  assert.equal((await dispatched("claude-code", "cpa/gemini-3.8-flash-high", {}, catalog)).model, "gemini-3.8-flash-high", "other harnesses send the id as listed");
-  const modes = { approve: ["auto_review", "on-request", ":workspace", "auto"], full: ["user", "never", ":danger-full-access", "bypass-permissions"] };
-  for (const [name, [reviewer, policy, profile, approvalMode]] of Object.entries(modes)) {
-    const input = await dispatched("agy", "cpa/gemini-3-flash", { native_permission_profile: profile, approval_policy: policy, approvals_reviewer: reviewer }, catalog);
-    assert.equal(input.approvalMode, approvalMode, name);
+test("agy gets the bare model name and runs unattended only with Full access", async () => {
+  // agy sends its tools only for a model it recognizes; "gemini-3-flash(medium)" is not one ("not
+  // recognized as a known model"), so the model printed its tool calls as text.
+  const catalog = [{ slug: "gemini-3-flash", supported_reasoning_levels: [{ effort: "low" }, { effort: "medium" }] }];
+  const blank = await dispatched("agy", "cpa/gemini-3-flash", {}, catalog);
+  assert.deepEqual([blank.model, blank.gateway.model], ["gemini-3-flash", "gemini-3-flash"], "no start effort suffix");
+  assert.equal((await dispatched("agy", "cpa/gemini-3-flash(low)", { effort: "low" }, catalog)).model, "gemini-3-flash", "a picked or saved suffix is dropped");
+  assert.equal((await dispatched("claude-code", "cpa/gemini-3-flash", {}, catalog)).model, "gemini-3-flash(medium)", "other harnesses keep the start effort");
+  const full = await dispatched("agy", "cpa/gemini-3-flash", { native_permission_profile: ":danger-full-access", approval_policy: "never", approvals_reviewer: "user" }, catalog);
+  assert.equal(full.approvalMode, "bypass-permissions");
+  // Ask stays at an approval in agy's terminal, which nobody sees, and Approve for me (--mode auto)
+  // is "not available for this account" through the gateway, so it falls back to asking: refused.
+  for (const reviewer of ["user", "auto_review"]) {
+    await assert.rejects(dispatched("agy", "cpa/gemini-3-flash", { native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: reviewer }, catalog),
+      /asks for approval in its own terminal/, reviewer);
   }
-  // Ask would leave a shell-command approval in agy's terminal, which nobody sees: refused, not left waiting.
-  await assert.rejects(dispatched("agy", "cpa/gemini-3-flash", { native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" }, catalog),
-    /asks for approval in its own terminal/);
 });
 
 test("a blank CPA card's start effort follows the effort rank, and Auto or a model's own effort is left alone", async () => {
