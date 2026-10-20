@@ -109,10 +109,6 @@ function runtimeOwnershipPredatesCurrentBoot(state) {
   );
 }
 
-const DAEMON_LOG_ROTATE_BYTES = 8 * 1024 * 1024;
-// A bridge stderr line that reports a problem (and a stack trace's frames), as opposed to progress.
-const DAEMON_PROBLEM = /\b(?:fail(?:ed|ure|s)?|errors?|exception|refused|rejected|denied|invalid|timed out|timeout|cannot|could not|unavailable|aborted|crash(?:ed)?|warn(?:ing)?|blocked|unexpected)\b|^\s+at\s|ENOSPC|EACCES|ECONN/i;
-
 /**
  * Stand-in for a ChildProcess when the launcher adopts a bridge daemon that a
  * previous launcher left running. It reports exit by polling the pid, which is
@@ -140,51 +136,6 @@ class AdoptedProcess extends EventEmitter {
   }
 
   release() {
-    clearInterval(this.timer);
-  }
-}
-
-/** Follows a file-backed child log so a detached daemon's output still reaches the launcher log. */
-class LogTail {
-  constructor(filePath, onLine, { fromEnd = true, offset = null, pollMs = 500 } = {}) {
-    this.filePath = filePath;
-    this.onLine = onLine;
-    this.buffered = "";
-    let size = 0;
-    try { size = fs.statSync(filePath).size; } catch {}
-    this.offset = Number.isInteger(offset) && offset >= 0 ? offset : fromEnd ? size : 0;
-    this.timer = setInterval(() => this.read(), pollMs);
-    this.timer.unref?.();
-  }
-
-  read() {
-    let fd;
-    try {
-      const size = fs.statSync(this.filePath).size;
-      if (size < this.offset) this.offset = 0;
-      if (size === this.offset) return;
-      const length = Math.min(size - this.offset, 256 * 1024);
-      const chunk = Buffer.alloc(length);
-      fd = fs.openSync(this.filePath, "r");
-      fs.readSync(fd, chunk, 0, length, this.offset);
-      this.offset += length;
-      this.buffered += chunk.toString("utf8");
-      for (;;) {
-        const newline = this.buffered.indexOf("\n");
-        if (newline < 0) break;
-        const line = this.buffered.slice(0, newline).replace(/\r$/, "");
-        this.buffered = this.buffered.slice(newline + 1);
-        if (line) this.onLine(line);
-      }
-      if (this.buffered.length > 64 * 1024) this.buffered = this.buffered.slice(-64 * 1024);
-    } catch {
-      // The log may be rotating or not created yet; the next poll retries.
-    } finally {
-      if (fd !== undefined) fs.closeSync(fd);
-    }
-  }
-
-  stop() {
     clearInterval(this.timer);
   }
 }
@@ -496,11 +447,11 @@ class RuntimeSupervisor {
     this.restartableChildren = new WeakSet();
     this.lastChildFailure = { daemon: null, tunnel: null };
     this.lastChildOutput = { daemon: null, tunnel: null };
-    // A persistent bridge daemon runs detached with file-backed output, so it survives a
+    // A persistent bridge daemon runs detached with its output discarded, so it survives a
     // launcher restart, crash or installer update and the next launcher adopts it.
     this.persistentBridge = persistentBridge === true && launcherProfile === "production";
+    // Where an older build kept that output; removed when a persistent daemon starts.
     this.daemonLogPath = path.join(coreHome, "runtime", "daemon.log");
-    this.daemonTail = null;
   }
 
   readConfig() {
@@ -633,27 +584,21 @@ class RuntimeSupervisor {
       )),
     );
     const persistent = name === "daemon" && this.persistentBridge;
-    const logFd = persistent ? this.openDaemonLog() : null;
-    // The daemon log is appended across launches; only this daemon's output is relayed, never the
-    // history before it (which re-logged thousands of old lines on every start).
-    const logStart = logFd !== null ? fs.fstatSync(logFd).size : 0;
-    let child;
-    try {
-      child = spawn(invocation.executable, invocation.args, {
-        cwd: invocation.cwd,
-        detached: persistent ? true : DETACH_OWNED_CHILD,
-        env: {
-          ...process.env,
-          ...runtimeEnvironment,
-          CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR: this.browserDescriptorPath,
-        },
-        stdio: persistent ? ["ignore", logFd, logFd] : ["ignore", "pipe", "pipe"],
-        windowsHide: true,
-      });
-    } finally {
-      if (logFd !== null) fs.closeSync(logFd);
-    }
-    if (persistent) this.followDaemonLog({ offset: logStart });
+    // A persistent daemon outlives this launcher, so it cannot write to a pipe. Its output is
+    // discarded rather than kept in a file: runtime/daemon.log was appended for every line and the
+    // launcher re-copied each one into launcher.jsonl.
+    if (persistent) this.removeOldDaemonLogs();
+    const child = spawn(invocation.executable, invocation.args, {
+      cwd: invocation.cwd,
+      detached: persistent ? true : DETACH_OWNED_CHILD,
+      env: {
+        ...process.env,
+        ...runtimeEnvironment,
+        CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR: this.browserDescriptorPath,
+      },
+      stdio: persistent ? "ignore" : ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
     this[name] = child;
     this.lastChildFailure[name] = null;
     this.lastChildOutput[name] = null;
@@ -703,26 +648,11 @@ class RuntimeSupervisor {
     return child;
   }
 
-  openDaemonLog() {
-    fs.mkdirSync(path.dirname(this.daemonLogPath), { recursive: true });
-    try {
-      if (fs.statSync(this.daemonLogPath).size > DAEMON_LOG_ROTATE_BYTES) {
-        fs.renameSync(this.daemonLogPath, `${this.daemonLogPath}.1`);
-      }
-    } catch {}
-    return fs.openSync(this.daemonLogPath, "a", 0o600);
-  }
-
-  followDaemonLog(position) {
-    this.daemonTail?.stop();
-    this.daemonTail = new LogTail(this.daemonLogPath, (line) => {
-      this.lastChildOutput.daemon = redactText(line).slice(0, 1_000);
-      // The bridge narrates every turn on stderr (broker claims, turn stages, diagnostic checkpoints):
-      // 1,700 of those a day were warnings and buried the real failures on the Activity page. A line
-      // that reads as a failure stays a warning; routine progress is info.
-      if (DAEMON_PROBLEM.test(line)) this.logger.warn("runtime.daemon_stderr", { line });
-      else this.logger.info("runtime.daemon_stderr", { line });
-    }, position);
+  /** Removes the daemon log files an older build wrote. */
+  removeOldDaemonLogs() {
+    for (const file of [this.daemonLogPath, `${this.daemonLogPath}.1`]) {
+      try { fs.rmSync(file, { force: true }); } catch {}
+    }
   }
 
   /**
@@ -769,7 +699,6 @@ class RuntimeSupervisor {
       this.logger[expected ? "info" : "error"]("runtime.daemon_exited", { adopted: true });
       if (!expected && restartable && statePersisted) this.scheduleRecovery("daemon");
     });
-    this.followDaemonLog({ fromEnd: true });
     this.logger.info("runtime.daemon_adopted", { pid: state.daemonPid, previousOwner: state.ownerPid });
     return true;
   }
@@ -790,7 +719,6 @@ class RuntimeSupervisor {
       }
     }
     if (daemon) this.expectedExits.add(daemon);
-    this.daemonTail?.stop();
     daemon?.release?.();
     daemon?.unref?.();
     const state = this.writeState("detached", reason);
@@ -2488,7 +2416,6 @@ module.exports = {
   TUNNEL_MONITOR_FAILURE_THRESHOLD,
   TUNNEL_MONITOR_INTERVAL_MS,
   TUNNEL_START_TIMEOUT_MS,
-  LogTail,
   RuntimeSupervisor,
   managedTunnelConnectArgs,
   validateConfig,

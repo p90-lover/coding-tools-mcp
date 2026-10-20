@@ -11,8 +11,6 @@ const { EventEmitter } = require("node:events");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { processRunning, terminateOwnedProcessTree } = require("./process-tree.cjs");
 
-const PERSISTENT_LOG_ROTATE_BYTES = 8 * 1024 * 1024;
-
 /**
  * Handle for a persistent component process started by an earlier launcher. It reports
  * exit by polling the pid, which is all the start, stop and keep-alive paths need.
@@ -1393,8 +1391,12 @@ function createManagedComponentController({
     return path.join(stateRoot, `${id}.process.json`);
   }
 
-  function persistedLogPath(id) {
-    return path.join(stateRoot, `${id}.process.log`);
+  /** Removes the output log (and its rotation) an older build kept for a persistent component. */
+  function removeOldPersistedLogs(id) {
+    const logPath = path.join(stateRoot, `${id}.process.log`);
+    for (const file of [logPath, `${logPath}.1`]) {
+      try { fs.rmSync(file, { force: true }); } catch {}
+    }
   }
 
   function readPersistedRecord(id) {
@@ -1404,14 +1406,6 @@ function createManagedComponentController({
 
   function clearPersistedRecord(id) {
     try { fs.rmSync(persistedRecordPath(id), { force: true }); } catch {}
-  }
-
-  function openPersistedLog(id) {
-    const logPath = persistedLogPath(id);
-    try {
-      if (fs.statSync(logPath).size > PERSISTENT_LOG_ROTATE_BYTES) fs.renameSync(logPath, `${logPath}.1`);
-    } catch {}
-    return fs.openSync(logPath, "a", 0o600);
   }
 
   async function probeHealth(id) {
@@ -1522,15 +1516,12 @@ function createManagedComponentController({
         const spec = commandSpec(processEntry, context);
         if (disposed) throw new Error("Managed component controller has been disposed");
         const persistent = isPersistentProcess(manifest, processEntry);
-        const logFd = persistent ? openPersistedLog(id) : null;
-        let child;
-        try {
-          child = spawnProcess(spec.executable, spec.args, persistent
-            ? { ...spec.options, detached: true, stdio: ["ignore", logFd, logFd] }
-            : spec.options);
-        } finally {
-          if (logFd !== null) fs.closeSync(logFd);
-        }
+        // A persistent component outlives the app, so it cannot write to a pipe; its output is
+        // discarded rather than appended to a log file for as long as it runs.
+        if (persistent) removeOldPersistedLogs(id);
+        const child = spawnProcess(spec.executable, spec.args, persistent
+          ? { ...spec.options, detached: true, stdio: "ignore" }
+          : spec.options);
         active.set(processEntry.id, child);
         if (persistent && Number.isInteger(child.pid)) {
           writePrivateFileAtomic(persistedRecordPath(id), `${JSON.stringify({
