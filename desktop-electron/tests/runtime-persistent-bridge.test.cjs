@@ -156,6 +156,24 @@ test("an adopted daemon that dies unexpectedly is reported and recovered", async
   assert.ok(events.some(([event, detail]) => event === "runtime.daemon_exited" && detail?.adopted === true));
 });
 
+test("a persistent bridge's output is discarded, never kept in a log file", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "persistent-bridge-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const runtime = path.join(root, "runtime");
+  fs.mkdirSync(runtime, { recursive: true });
+  // An older build's log files go.
+  fs.writeFileSync(path.join(runtime, "daemon.log"), "old line\n");
+  fs.writeFileSync(path.join(runtime, "daemon.log.1"), "older line\n");
+  const { supervisor } = supervisorFor(root);
+  const child = supervisor.spawnChild("daemon", {
+    executable: process.execPath, args: ["-e", "console.log('listening'); console.error('a warning')"], cwd: root,
+  });
+  await new Promise((resolve) => child.once("exit", resolve));
+  assert.equal(child.stdout, null);
+  assert.equal(child.stderr, null);
+  assert.deepEqual(fs.readdirSync(runtime).filter((name) => name.includes("log")), []);
+});
+
 test("a persistent launcher keeps the bridge up when the MCP tunnel is not ready yet", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "persistent-bridge-"));
   const { supervisor, events } = supervisorFor(root);

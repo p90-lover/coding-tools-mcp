@@ -738,10 +738,17 @@ test("a persistent CPA runs detached, survives a keep-running dispose, and is ad
       return child;
     },
   });
+  // The output log an older build kept goes; none is written again.
+  const oldLog = path.join(first.dataRoot, "state", "cpa.process.log");
+  fs.mkdirSync(path.dirname(oldLog), { recursive: true });
+  fs.writeFileSync(oldLog, "old output\n");
+  fs.writeFileSync(`${oldLog}.1`, "older output\n");
   await first.controller.startComponent("cpa");
   assert.equal(spawnOptions.length, 1);
   assert.equal(spawnOptions[0].detached, true);
-  assert.equal(typeof spawnOptions[0].stdio[1], "number", "output goes to a log file, not a pipe");
+  assert.equal(spawnOptions[0].stdio, "ignore", "output is discarded, neither piped nor kept in a file");
+  assert.equal(fs.existsSync(oldLog), false);
+  assert.equal(fs.existsSync(`${oldLog}.1`), false);
   const recordPath = path.join(first.dataRoot, "state", "cpa.process.json");
   assert.equal(JSON.parse(fs.readFileSync(recordPath, "utf8")).pid, survivor.pid);
 
