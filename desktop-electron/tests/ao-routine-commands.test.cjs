@@ -26,6 +26,9 @@ test("Approve for me runs routine project commands without asking: lockfile inst
     // The exact request that held the reviewer: the report plus an exit-status check.
     "ao report --done --note \"Reviewer verdict: APPROVED (verify).\" ; if ($?) { \"exit ok\" } else { \"exit fail\" }",
     "npm test; echo $LASTEXITCODE",
+    // A note's own ";" or "&&" is text, not a chain (review: it sent the report back to the person).
+    "ao report --done --note \"Review complete; focused tests passed\"",
+    "ao report --checkpoint --note 'lint && types pass' && git status",
   ]) assert.ok(routineCommand(command), `routine: ${command}`);
 });
 
@@ -34,6 +37,8 @@ test("only AO's report subcommand is routine, and only as one plain command line
     "ao session claim-pr 12", "ao report --done --note \"x\" ; rm -rf /", "ao report --done --note \"x\" > log.txt",
     "ao report --done --note \"x\" | tee out", "ao report --bogus", "ao report --done --note \"$(whoami)\"",
     "if ($?) { Remove-Item x }", "rm -rf /; if ($?) { \"ok\" }",
+    // An open quote is not one argument; a chain after a closed note still has to be routine.
+    "ao report --done --note \"unfinished", "ao report --done --note \"ok\"; npm publish",
   ]) assert.equal(routineCommand(command), null, `not routine: ${JSON.stringify(command)}`);
 });
 

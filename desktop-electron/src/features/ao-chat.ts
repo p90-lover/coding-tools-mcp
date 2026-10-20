@@ -197,7 +197,6 @@ export function groupTimeline(items: ChatLiveItem[]): ChatLiveSegment[] {
   return segments;
 }
 
-/** "Ran 2 commands, read_output ×7, search_text · 3 thoughts": what a folded group did. */
 /**
  * A tool call's title as one short phrase: a path argument reads by its last part, as Codex shows it
  * ("Read C:/Users/…/skills/using-ao/commands/report.md" → "Read report.md"), and a title still too
@@ -205,7 +204,13 @@ export function groupTimeline(items: ChatLiveItem[]): ChatLiveSegment[] {
  */
 export function shortToolTitle(text: string): string {
   const plain = text.replace(/^mcp__[\w-]+__/, "").replace(/\s+/g, " ").trim();
-  const named = plain.replace(/(?:[A-Za-z]:)?[\\/][^\s"'`]*[\\/]([^\s"'`\\/]+)/g, "$1");
+  // The whole path token, relative ones included ("src/features/ao-chat.ts", "frontend\vite.config.ts"),
+  // becomes its last part; a URL keeps its address.
+  const named = plain.replace(/(^|[\s"'`(])([^\s"'`()]*[\\/][^\s"'`()]*)/g, (match, lead: string, token: string) => {
+    if (token.includes("://")) return match;
+    const last = token.split(/[\\/]+/).filter(Boolean).pop();
+    return last ? lead + last : match;
+  });
   if (named.length <= 40) return named;
   // Cut at the last word that fits, so a word is never left half-shown.
   const head = named.slice(0, 40);
@@ -213,6 +218,7 @@ export function shortToolTitle(text: string): string {
   return `${(space >= 20 ? head.slice(0, space) : head.slice(0, 39)).trimEnd()}…`;
 }
 
+/** "Ran 2 commands, read_output ×7, search_text · 3 thoughts": what a folded group did. */
 export function activitySummary(items: ChatLiveItem[]): string {
   const commands = items.filter((item) => item.kind === "command").length;
   const thoughts = items.filter((item) => item.kind === "reasoning").length;

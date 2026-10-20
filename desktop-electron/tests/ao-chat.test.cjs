@@ -1129,6 +1129,11 @@ test("a tool title with a path reads by its file name in the folded line, never 
   assert.equal(chat.shortToolTitle("Read C:/Users/simon/.ao/coding-tools/skills/using-ao/commands/report.md"), "Read report.md");
   assert.equal(chat.shortToolTitle("Read C:\\Users\\simon\\.ao\\coding-tools\\skills"), "Read skills");
   assert.equal(chat.shortToolTitle("mcp__coding-tools__read_output"), "read_output");
+  // Relative paths read by their file too, never glued to their first folder (review: "Read srcao-chat.ts").
+  assert.equal(chat.shortToolTitle("Read src/features/ao-chat.ts"), "Read ao-chat.ts");
+  assert.equal(chat.shortToolTitle("Read frontend\\vite.config.ts"), "Read vite.config.ts");
+  assert.equal(chat.shortToolTitle("Edit \"desktop-electron/src/App.tsx\""), "Edit \"App.tsx\"");
+  assert.equal(chat.shortToolTitle("Fetch https://example.com/docs"), "Fetch https://example.com/docs", "a URL keeps its address");
   assert.equal(chat.shortToolTitle("Search for every place the context meter reads its session usage"),
     "Search for every place the context meter…");
   const read = (id, path) => ({ id, kind: "tool", status: "completed", text: `Read ${path}` });

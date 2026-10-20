@@ -1983,14 +1983,37 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     /^if\s*\(\s*\$\?\s*\)\s*\{\s*(?:"[\w .-]*"|'[\w .-]*')\s*\}(?:\s*else\s*\{\s*(?:"[\w .-]*"|'[\w .-]*')\s*\})?$/i,
     /^(?:echo\s+|Write-Output\s+)?\$LASTEXITCODE$/i,
   ];
+  /**
+   * A command line split at its "&&" and ";" chains, never inside a quoted argument (an ao report's
+   * note "Review complete; tests passed" is one argument). Null when a quote is left open.
+   */
+  function commandChain(text) {
+    const segments = [];
+    let current = "", quote = null;
+    for (let at = 0; at < text.length; at += 1) {
+      const char = text[at];
+      if (quote) { if (char === quote) quote = null; current += char; continue; }
+      if (char === "\"" || char === "'") { quote = char; current += char; continue; }
+      if (char === ";" || (char === "&" && text[at + 1] === "&")) {
+        segments.push(current.trim());
+        current = "";
+        if (char === "&") at += 1;
+        continue;
+      }
+      current += char;
+    }
+    if (quote) return null;
+    segments.push(current.trim());
+    return segments.filter(Boolean);
+  }
   /** Why `command` is a routine project command "Approve for me" may run, or null. */
   function routineCommand(command) {
     const text = String(command ?? "").trim();
     // One plain command line: no redirects, pipes, subshells, backgrounding or newlines; "&&" and
     // ";" only between commands that are each routine.
     if (!text || text.length > 400 || /[|<>`\n\r]|\$\(|(^|[^&])&([^&]|$)/.test(text)) return null;
-    const segments = text.split(/\s*(?:&&|;)\s*/).filter(Boolean);
-    if (!segments.length) return null;
+    const segments = commandChain(text);
+    if (!segments?.length) return null;
     for (const segment of segments) {
       if (!ROUTINE_SEGMENT.some((pattern) => pattern.test(segment))) return null;
       // Stay inside the project: relative paths only, no parent hops, drives or UNC.
