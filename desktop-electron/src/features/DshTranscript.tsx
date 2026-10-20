@@ -268,14 +268,15 @@ const ENDED = new Map<string, number>();
 /** Turns this chat watched running, so only a turn seen ending gets an end time. */
 const WATCHED = new Set<string>();
 
-export type DshTurnWorkProps = { turn: ChatTurn; live: boolean; expanded: boolean; useWork: UseStepWork };
+/** `errorShownBelow`: the chat's failed-step card shows this turn's error, so the turn leaves it out. */
+export type DshTurnWorkProps = { turn: ChatTurn; live: boolean; expanded: boolean; useWork: UseStepWork; errorShownBelow?: boolean };
 
 /**
  * A DeepSeek turn's work. Running: its rows flat, "Deep diving" under them. Ended: "Completed in
  * 1m 4s" heads it, folded unless the chat shows work details; a failed or stopped turn stays open.
  * The chat memoizes it with its own check of what a turn shows.
  */
-export function DshTurnWork({ turn, live, expanded, useWork }: DshTurnWorkProps) {
+export function DshTurnWork({ turn, live, expanded, useWork, errorShownBelow = false }: DshTurnWorkProps) {
   const steps = [...turn.steps, ...(turn.final ? [turn.final] : [])];
   const failed = steps.some((step) => step.error);
   const stopped = turn.status === "stopped";
@@ -302,7 +303,7 @@ export function DshTurnWork({ turn, live, expanded, useWork }: DshTurnWorkProps)
       {alwaysOpen ? null : <span className="dsh-turn-process-chevron">{ICON.down}</span>}
     </button> : null}
     {open ? <div className="dsh-process">{work}</div> : null}
-    {steps.filter((step) => step.error).map((step) => <div key={`error:${step.key}`} className="dsh-turn-error">
+    {errorShownBelow ? null : steps.filter((step) => step.error).map((step) => <div key={`error:${step.key}`} className="dsh-turn-error">
       <span className="dsh-turn-error-title">This turn failed</span><span className="dsh-turn-error-message">{step.error}</span>
     </div>)}
     {live ? <DshRunning since={turn.startedAtMs} divider heardAt={heardAt} /> : null}
