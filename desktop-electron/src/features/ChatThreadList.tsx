@@ -56,6 +56,8 @@ export type ThreadActions = {
   share: (taskId: string) => void;
   /** A read-only live copy of the chat in its own window. */
   openWindow: (taskId: string) => void;
+  /** Opens a chat of another project the list shows open: switches to that project, then the chat. */
+  selectIn?: (workspaceId: string, taskId: string) => void;
 };
 
 /** A Codex sidebar section: a named group of chats, kept on this computer like pins. */
@@ -95,6 +97,8 @@ export type ThreadListProps = {
   archivedAll?: { days: number; chats: ArchivedChat[] };
   restoreArchived?: (workspaceId: string, taskId: string) => void;
   setArchiveDays?: (days: number) => void;
+  /** Another project's chats, for a project opened in the list without switching to it (Codex). */
+  loadProjectChats?: (workspaceId: string) => Promise<ChatSummary[]>;
 };
 
 /** An archived chat of any project; `archivedAt` (ms) is when its days started counting. */
@@ -130,6 +134,35 @@ export function orderChats<T extends { taskId: string; status: ChatStatus }>(cha
   return [...chats].sort((a, b) =>
     (keepActiveOnTop ? Number(ACTIVE.has(b.status)) - Number(ACTIVE.has(a.status)) : 0) || rank(a) - rank(b));
 }
+
+/**
+ * The Projects list's order, as in Codex: pinned projects first, then the project you used most
+ * recently, then the list's own order for projects not used yet.
+ */
+export function orderProjects<T extends { id: string }>(items: T[], pinned: string[], usedAt: Record<string, number>): T[] {
+  const index = new Map(items.map((item, at) => [item.id, at]));
+  return [...items].sort((a, b) => Number(pinned.includes(b.id)) - Number(pinned.includes(a.id))
+    || (usedAt[b.id] ?? 0) - (usedAt[a.id] ?? 0) || (index.get(a.id) ?? 0) - (index.get(b.id) ?? 0));
+}
+
+/**
+ * Chats that started a new run since the list last saw them (you sent them a message) leave the
+ * order you dragged chats into, so they rise with the newest chats as in Codex instead of staying
+ * where you once placed them. Returns the manual order without them, and whether any moved.
+ */
+export function releaseUsedChats(manual: string[], seenRuns: Record<string, string>, chats: { taskId: string; latestRunId: string }[]): { order: string[]; used: string[] } {
+  const used = chats.filter((chat) => seenRuns[chat.taskId] !== undefined && seenRuns[chat.taskId] !== chat.latestRunId).map((chat) => chat.taskId);
+  return { order: used.length ? manual.filter((id) => !used.includes(id)) : manual, used };
+}
+
+const PROJECT_USED_KEY = "coding-tools:ao:project-used";
+const OPEN_PROJECTS_KEY = "coding-tools:ao:open-projects";
+function readStored<T>(key: string, fallback: T, valid: (value: unknown) => value is T): T {
+  try { const value = JSON.parse(localStorage.getItem(key) || "null"); return valid(value) ? value : fallback; } catch { return fallback; }
+}
+const isTimes = (value: unknown): value is Record<string, number> => Boolean(value) && typeof value === "object" && !Array.isArray(value)
+  && Object.values(value as object).every((entry) => typeof entry === "number");
+const isIds = (value: unknown): value is string[] => Array.isArray(value) && value.every((entry) => typeof entry === "string");
 
 /** Moves `id` to just before `before` (or to the end), in the order the list currently shows. */
 export function moveChat(shown: string[], id: string, before: string | null): string[] {
@@ -247,16 +280,71 @@ export function ChatThreadList(props: ThreadListProps) {
     setCollapsed(next);
     try { localStorage.setItem("coding-tools:ao:collapsed-projects", JSON.stringify([...next])); } catch { /* per-session only */ }
   };
+  // Codex opens a project's chats under its row without leaving the open chat; several projects
+  // can be open at once. The current project keeps its collapse state; others open here.
+  const [openOthers, setOpenOthers] = useState<Set<string>>(() => new Set(readStored(OPEN_PROJECTS_KEY, [], isIds)));
+  const saveOpenOthers = (next: Set<string>) => {
+    setOpenOthers(next);
+    try { localStorage.setItem(OPEN_PROJECTS_KEY, JSON.stringify([...next])); } catch { /* per-session only */ }
+  };
   const clickProject = (id: string) => {
     if (id !== workspaceId) {
-      const next = new Set(collapsed); next.delete(id); saveCollapsed(next);
-      props.onWorkspace(id);
+      const next = new Set(openOthers);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      saveOpenOthers(next);
       return;
     }
     const next = new Set(collapsed);
     if (next.has(id)) next.delete(id); else next.add(id);
     saveCollapsed(next);
   };
+  // After switching projects (a chat opened from another project), the one you left stays open
+  // and the new one shows its chats, as an open Codex project does.
+  const previousWorkspace = useRef(workspaceId);
+  useEffect(() => {
+    const left = previousWorkspace.current;
+    previousWorkspace.current = workspaceId;
+    if (left === workspaceId) return;
+    const others = new Set(openOthers);
+    if (left && !collapsed.has(left)) others.add(left);
+    others.delete(workspaceId);
+    saveOpenOthers(others);
+    if (collapsed.has(workspaceId)) { const next = new Set(collapsed); next.delete(workspaceId); saveCollapsed(next); }
+  }, [workspaceId]);
+  // Other open projects' chats, read when opened and refreshed with the list's clock.
+  const [otherChats, setOtherChats] = useState<Record<string, ChatSummary[]>>({});
+  const { loadProjectChats } = props;
+  const openOtherIds = [...openOthers].filter((id) => id !== workspaceId && workspaces.some((item) => item.id === id)).join("\n");
+  useEffect(() => {
+    if (!loadProjectChats || !openOtherIds) return undefined;
+    let live = true;
+    for (const id of openOtherIds.split("\n")) {
+      void loadProjectChats(id).then((list) => { if (live) setOtherChats((current) => ({ ...current, [id]: list })); }, () => undefined);
+    }
+    return () => { live = false; };
+  }, [loadProjectChats, openOtherIds, now]);
+  // A chat that got a new run was just used: it rises to the top of its project, and its project to
+  // the top of Projects (below pinned ones), as in Codex.
+  const [projectUsedAt, setProjectUsedAt] = useState<Record<string, number>>(() => readStored(PROJECT_USED_KEY, {}, isTimes));
+  const seenRuns = useRef<{ workspaceId: string; runs: Record<string, string> }>({ workspaceId, runs: {} });
+  useEffect(() => {
+    if (seenRuns.current.workspaceId !== workspaceId) seenRuns.current = { workspaceId, runs: {} };
+    // A switch empties the list before the new project's chats arrive; that load is not a use.
+    if (!chats.length) { seenRuns.current.runs = {}; return; }
+    const known = seenRuns.current.runs;
+    const hadChats = Object.keys(known).length > 0;
+    const { order, used } = releaseUsedChats(manualOrder, known, chats);
+    const created = hadChats && chats.some((chat) => known[chat.taskId] === undefined);
+    for (const chat of chats) known[chat.taskId] = chat.latestRunId;
+    if (order !== manualOrder) saveOrder(order);
+    if (used.length || created) {
+      setProjectUsedAt((current) => {
+        const next = { ...current, [workspaceId]: Date.now() };
+        try { localStorage.setItem(PROJECT_USED_KEY, JSON.stringify(next)); } catch { /* per-session only */ }
+        return next;
+      });
+    }
+  }, [chats, workspaceId]);
   const startRename = (chat: ChatSummary) => setRenaming({ taskId: chat.taskId, title: chat.title });
   const commitRename = async () => {
     if (!renaming) return;
@@ -431,12 +519,34 @@ export function ChatThreadList(props: ThreadListProps) {
   // Like Codex, a long project shows its first chats and "Show more"; the open chat always shows.
   const showAll = expanded.has(workspaceId);
   const visibleChats = showAll ? projectChats : projectChats.filter((chat, index) => index < settings.visible || chat.taskId === selectedTaskId);
-  const toggleShowAll = () => setExpanded((current) => { const next = new Set(current); if (next.has(workspaceId)) next.delete(workspaceId); else next.add(workspaceId); return next; });
+  const toggleShowAll = (id = workspaceId) => setExpanded((current) => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+  // Another open project's chats: Codex's rows; opening one switches to its project first.
+  const otherRows = (projectId: string) => {
+    const list = otherChats[projectId];
+    if (!list) return <li className="cx-thread-empty">Loading chats…</li>;
+    if (!list.length) return <li className="cx-thread-empty">No chats yet</li>;
+    const ordered = orderChats(list.filter((chat) => !pinned.includes(chat.taskId)), readOrder(projectId), settings.keepActiveOnTop);
+    const all = expanded.has(projectId);
+    return <>
+      {(all ? ordered : ordered.slice(0, settings.visible)).map((chat) => <li key={chat.taskId}
+        className={`cx-thread-row${unread.includes(chat.taskId) ? " is-unread" : ""}`}>
+        <button type="button" className="cx-thread-select" aria-current={false}
+          onClick={() => (actions.selectIn ? actions.selectIn(projectId, chat.taskId) : props.onWorkspace(projectId))}>
+          <span className="cx-thread-title">{chat.title}</span>
+          {chat.schedule?.state === "scheduled" ? <span className="cx-thread-age" aria-label="Scheduled">◷</span> : null}
+          <span className={`cx-thread-dot status-${chat.status}`} aria-label={STATUS_LABEL[chat.status]} />
+        </button>
+      </li>)}
+      {ordered.length > settings.visible
+        ? <li><button type="button" className="cx-show-more" onClick={() => toggleShowAll(projectId)}>{all ? "Show less" : "Show more"}</button></li>
+        : null}
+    </>;
+  };
   const nameInput = (label: string) => <input className="cx-section-input" autoFocus aria-label={label} placeholder={label} maxLength={80}
     value={naming?.name ?? ""} onChange={(event) => setNaming((current) => current && { ...current, name: event.target.value })}
     onKeyDown={(event) => { if (event.key === "Enter") commitNaming(); if (event.key === "Escape") setNaming(null); }}
     onBlur={commitNaming} />;
-  const projectOrder = [...workspaces].sort((a, b) => Number(props.pinnedProjects.includes(b.id)) - Number(props.pinnedProjects.includes(a.id)));
+  const projectOrder = orderProjects(workspaces, props.pinnedProjects, projectUsedAt);
   return (
     <aside className="cx-threads" aria-label="Projects and chats">
       <button type="button" className="cx-new-chat" aria-pressed={!selectedTaskId} onClick={actions.newChat}>
@@ -473,7 +583,8 @@ export function ChatThreadList(props: ThreadListProps) {
           </div>
           <ul className="cx-projects">
             {projectOrder.map((item) => {
-              const open = item.id === workspaceId && !collapsed.has(item.id);
+              const current = item.id === workspaceId;
+              const open = current ? !collapsed.has(item.id) : openOthers.has(item.id);
               const git = projectGitLabel(item.path ? gits[item.path] : null);
               return <li key={item.id}>
                 <div className="cx-project-row" onMouseEnter={(event) => hoverProject(item, event.currentTarget)} onMouseLeave={leaveProject}>
@@ -494,13 +605,14 @@ export function ChatThreadList(props: ThreadListProps) {
                       <ChatGlyph name="edit" size={14} /></button>
                   </span>
                 </div>
-                {open ? <ul>
+                {open && !current ? <ul>{otherRows(item.id)}</ul> : null}
+                {open && current ? <ul>
                   {props.pendingTitle ? <li className="cx-thread-row is-pending"><span className="cx-thread-select" aria-current="true">
                     <span className="cx-thread-dot status-queued" aria-label="Starting" /><span className="cx-thread-title">{props.pendingTitle}</span>
                   </span></li> : null}
                   {visibleChats.map(row)}
                   {projectChats.length > settings.visible
-                    ? <li><button type="button" className="cx-show-more" onClick={toggleShowAll}>{showAll ? "Show less" : "Show more"}</button></li>
+                    ? <li><button type="button" className="cx-show-more" onClick={() => toggleShowAll()}>{showAll ? "Show less" : "Show more"}</button></li>
                     : null}
                   {!chats.length ? <li className="cx-thread-empty">No chats yet</li> : null}
                 </ul> : null}
