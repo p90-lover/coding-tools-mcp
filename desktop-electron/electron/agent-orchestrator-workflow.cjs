@@ -1391,8 +1391,24 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     if (advice && advice.action !== "ask") {
       return `${advice.action === "allow" ? "Allowed" : "Denied"} by the reviewer${advice.reason ? `: ${advice.reason}` : ""}`;
     }
-    if (autoAnswered.has(requestId)) return denied ? "Denied by Approve for me's safety rules" : "Allowed by Approve for me";
+    // AO records a deny as "completed" like any answer, so the verdict sent is what says it was denied.
+    if (autoAnswered.has(requestId)) return denied || autoAnswered.get(requestId) === "deny" ? "Denied by Approve for me's safety rules" : "Allowed by Approve for me";
     return denied ? "Denied" : "Allowed";
+  }
+
+  /**
+   * A Native Codex thread's recent tool steps (codex_bridge `steps`: Codex item type, status and a
+   * short redacted label) as timeline items the chat already draws for AO cards. Before, a WebGPT
+   * reviewer showed only "running a command" with nothing under it.
+   */
+  function nativeStepTimeline(steps) {
+    const kind = { commandExecution: "command", fileChange: "edit", mcpToolCall: "tool", dynamicToolCall: "tool", webSearch: "tool" };
+    return (Array.isArray(steps) ? steps : []).filter(step => step && kind[step.kind]).map(step => ({
+      id: step.id, kind: kind[step.kind], status: step.status === "running" ? "running" : step.status === "failed" ? "failed" : "completed",
+      text: step.label || "",
+      ...(step.kind === "webSearch" ? { label: "Web search" } : step.kind === "mcpToolCall" || step.kind === "dynamicToolCall"
+        ? { label: String(step.label || "tool").split(": ").pop() } : {}),
+    }));
   }
 
   function publicTimeline(items) {
@@ -1495,6 +1511,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
                 step: publicText(thread?.activity || "working", 120), output: publicText(status.live_output || thread?.answer || thread?.output),
                 error: publicText(status.live_error || thread?.error, 500),
                 activity_at_ms: thread?.activity_at_ms || null, last_event_at_ms: thread?.last_event_at_ms || null,
+                // What a Native Codex card is doing (its commands, edits and tools), as AO cards show it.
+                timeline: publicTimeline(nativeStepTimeline(thread?.steps)),
                 started_at_ms: base.started_at_ms ?? (thread?.started_at_ms || null) };
             }
             const latest = await savedNode(id, run, node.id);
@@ -2252,7 +2270,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const AUTO_ANSWER_MS = 20_000;
   const NO_ANSWER_TEXT = "No answer from the user within 20 seconds; use your best judgment and continue.";
   const pendingSeen = new Map(); // approval_id -> when it was first seen waiting
-  const autoAnswered = new Set();
+  const autoAnswered = new Map(); // approval_id -> the verdict sent ("allow", "deny"; null for a question or plan)
   const answersForPerson = (node) => node?.route?.approvals_reviewer === "auto_review" || node?.route?.approval_policy === "never";
   /** The answer a question gets when nobody answers it: each field's recommended choice. */
   function recommendedAnswer(approval) {
@@ -2318,8 +2336,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (!reviewedHere && at - opened < AUTO_ANSWER_MS) continue;
         const verdict = personal ? null : autoVerdict(mission, node, approval);
         if (verdict === "wait") continue;
-        autoAnswered.add(id);
-        if (autoAnswered.size > 500) autoAnswered.delete(autoAnswered.values().next().value);
+        autoAnswered.set(id, verdict);
+        if (autoAnswered.size > 500) autoAnswered.delete(autoAnswered.keys().next().value);
         try {
           if (approval.source === "ao" && approval.kind === "question") {
             const answer = recommendedAnswer(approval);

@@ -97,21 +97,42 @@ export type ChatLiveItem = {
  */
 export function tidyTimeline(items: ChatLiveItem[]): ChatLiveItem[] {
   const out: ChatLiveItem[] = [];
+  // ACP asks after the call it is about, so an answer belongs to the nearest call before it.
+  const nearestCall = () => {
+    for (let at = out.length - 1; at >= 0; at -= 1) if (["tool", "command", "edit"].includes(out[at].kind)) return at;
+    return -1;
+  };
   for (const item of items) {
     // One the person answered stays as its own row, shown as Claude Code shows an answered question.
     if (item.answered) { out.push(item); continue; }
     const answered = item.kind === "approval" && !item.label && !/reject|denied|declin/i.test(item.status);
-    if (!answered) { out.push(item); continue; }
-    if (!item.approval || /pending/i.test(item.status)) continue;
-    // ACP asks after the call it is about, so the answer belongs to the nearest call still without one.
-    for (let at = out.length - 1; at >= 0; at -= 1) {
-      const call = out[at];
-      if (!["tool", "command", "edit"].includes(call.kind)) continue;
-      if (!call.approval) out[at] = { ...call, approval: item.approval };
-      break;
+    if (!answered) {
+      // A denial that keeps its own row still explains the refusal on the call it refused.
+      if (item.kind === "approval") explainRefusal(out, nearestCall(), item.approval);
+      out.push(item);
+      continue;
     }
+    if (!item.approval || /pending/i.test(item.status)) continue;
+    const at = nearestCall();
+    if (at < 0 || out[at].approval) continue;
+    out[at] = { ...out[at], approval: item.approval };
+    explainRefusal(out, at, item.approval);
   }
   return out;
+}
+
+// claude-agent-acp answers every denied request with this one line, whoever denied it and why.
+const STOCK_REFUSAL = /^(?:Error: )?User refused permission to run tool\.?$/i;
+
+/**
+ * A call the reviewer or "Approve for me" denied shows their verdict ("Denied by the reviewer: …")
+ * where the adapter's stock "User refused permission to run tool" stood: nobody refused it by hand.
+ * The person's own deny is a bare "Denied", and that stock line is true for it, so it stays.
+ */
+function explainRefusal(out: ChatLiveItem[], at: number, approval: string | undefined) {
+  if (at < 0 || !approval || !/^Denied\b./.test(approval)) return;
+  const call = out[at];
+  if (STOCK_REFUSAL.test((call.output ?? "").trim())) out[at] = { ...call, output: approval };
 }
 
 /**
