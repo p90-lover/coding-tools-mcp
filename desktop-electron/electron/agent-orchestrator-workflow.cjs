@@ -2975,37 +2975,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * ended before it arrived, `steered` is false and the caller sends it as a normal follow-up.
    */
   const STEER_STALL_MS = 3 * 60_000;
-  const STEER_STALL_TOOL_MS = 20 * 60_000;
-  // A tool call running this long when a steer arrives is stopped so the agent reads it now.
-  const STEER_TOOL_INTERRUPT_MS = 30_000;
   // "Approve for me" answers a request within 20 s (its reviewer up to 25 s): a steer waits that long.
   const STEER_ANSWER_WAIT_MS = 30_000;
   const STEER_ANSWER_POLL_MS = 750;
-  // How long a declined request may take to clear before the steer is tried anyway.
-  const STEER_DECLINE_WAIT_MS = 5_000;
-  /**
-   * Declines what an AO agent's session is waiting on, as just observed (tool requests, questions);
-   * true when anything was declined.
-   */
-  async function declinePending(session, observed) {
-    let declined = false;
-    for (const pending of observed?.approvals ?? []) {
-      try {
-        if (pending.kind === "question") {
-          await harnessService().resolveInput(session, pending.approval_id, "decline");
-        } else {
-          // A native (Codex) request keeps its own card; only AO's offered "reject" answer is used.
-          const decision = pending.source === "ao" ? aoDecision(pending, false) : null;
-          if (!decision) continue;
-          await harnessService().resolveApproval(session, pending.approval_id, decision);
-        }
-        declined = true;
-      } catch (error) {
-        logger?.warn?.("ao.steer_decline_failed", { message: publicText(error?.message || error, 200) });
-      }
-    }
-    return declined;
-  }
   async function chatSteer({ workspaceId, taskId, message } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
     const text = clean(message, 8192, false);
@@ -3026,15 +2998,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       .catch(() => null);
     let waiting = await observeCard();
     const asking = (state) => Boolean(state?.approvals?.length || state?.needsInput);
-    // Typing while the agent asks is the answer, as in Claude Code: the request is declined (never
-    // allowed) and the message reaches the agent at once. Holding it until the request was answered
-    // looked to the person like a message that could not be sent.
-    if (asking(waiting) && await declinePending(card.receipt.thread_id, waiting)) {
-      for (const deadline = now() + STEER_DECLINE_WAIT_MS; asking(waiting) && now() < deadline;) {
-        await new Promise(resolve => setTimer(resolve, STEER_ANSWER_POLL_MS));
-        waiting = await observeCard();
-      }
-    }
+    // A steer never stops what the agent is doing (the user: "it shouldnt stop the model action,
+    // wait it done to steer"). Declining the waiting request made the agent's tool call fail with
+    // "The user doesn't want to take this action right now. STOP…"; the steer now waits for it.
     for (const deadline = now() + STEER_ANSWER_WAIT_MS; asking(waiting) && now() < deadline;) {
       await new Promise(resolve => setTimer(resolve, STEER_ANSWER_POLL_MS));
       waiting = await observeCard();
@@ -3043,29 +3009,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       return { ok: true, steered: false, waiting: true, reason: "The agent is waiting for an answer to its request; your message is steered in once that is answered" };
     }
     // A turn whose agent hung (a model request that never came back, a retry loop) takes a steer and
-    // never reads it: "keep going" did nothing. Nothing new for STEER_STALL_MS (longer while a tool
-    // call is still running, e.g. a long build) stops that turn; the message is then sent as the
-    // chat's next turn, like a queued one.
+    // never reads it: "keep going" did nothing. Nothing new for STEER_STALL_MS with no tool call
+    // running stops that turn; the message is then sent as the chat's next turn, like a queued one.
+    // A tool call still running (a long build, a GUI it launched) is never stopped by a steer: the
+    // agent reads the steer when that call returns.
     const idle = Number.isFinite(waiting?.lastActivityAt) ? now() - waiting.lastActivityAt : 0;
     // A notice (a provider retry's "Retrying Claude, attempt 7 of 10" stays "running") is no tool.
     const toolRunning = Array.isArray(waiting?.timeline) && waiting.timeline.some(item => item?.status === "running" && !["message", "system"].includes(item.kind));
-    if (idle > (toolRunning ? STEER_STALL_TOOL_MS : STEER_STALL_MS)) {
+    if (!toolRunning && idle > STEER_STALL_MS) {
       await stopExternalTurn(card.receipt.thread_id);
       logger?.info?.("ao.steer_restarted_stalled_turn", { idleSeconds: Math.round(idle / 1000) });
       return { ok: true, steered: false, waiting: true, restarted: true,
         reason: `The agent had shown nothing for ${Math.round(idle / 60_000)} minutes, so its turn was stopped; your message is sent as the next turn` };
-    }
-    // The model reads a steer only when it next calls the model, after the tool call in flight
-    // returns: a steer typed during a long command (a verification run, a build) waited for it, and
-    // the agent went on with what it had just been told to drop. A call running longer than
-    // STEER_TOOL_INTERRUPT_MS is stopped instead, and the message goes as the next turn of the same
-    // session (continuationCard), so the agent keeps everything it read and ran.
-    const toolFor = toolRunning && Number.isFinite(waiting?.toolSince) ? now() - waiting.toolSince : 0;
-    if (toolFor >= STEER_TOOL_INTERRUPT_MS) {
-      await stopExternalTurn(card.receipt.thread_id);
-      logger?.info?.("ao.steer_interrupted_tool", { runningSeconds: Math.round(toolFor / 1000) });
-      return { ok: true, steered: false, waiting: true, restarted: true, interrupted: true,
-        reason: "A command was still running, so it was stopped; your message goes to the same agent as its next turn" };
     }
     // A chat's session is created in the background (spawn's async): its card runs, with the session,
     // while the agent is still starting, and AO has no controller to steer yet. The message waits

@@ -3414,9 +3414,9 @@ test("a turn that has only been retrying its model request for minutes is restar
   assert.equal(steered.length, 0);
 });
 
-test("a steer during a long command stops the command so the same agent reads it next, instead of waiting behind it", async () => {
-  // Seen live on DeepSeek: "verify first", then a steer to change course; the model reads a steer
-  // only when the tool call in flight returns, so the verification ran on as if nothing was said.
+test("a steer during a long command never stops it: the agent reads the steer when the command returns", async () => {
+  // The user: "it shouldnt stop the model action, wait it done to steer". Stopping a command that
+  // had run 30 s turned "launch the gui here" into "Stopped by the user" and a failed turn.
   const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
   const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
   const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
@@ -3432,15 +3432,13 @@ test("a steer during a long command stops the command so the same agent reads it
       interrupt: async id => { interrupted.push(id); },
     } });
   const long = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "skip the verification, just fix it" });
-  assert.equal(long.steered, false);
-  assert.equal(long.interrupted, true, "the chat says a command was stopped");
-  assert.equal(long.restarted, true, "the message is queued as the next turn of the same session");
-  assert.deepEqual(interrupted, ["sess-1"], "the command's turn is stopped");
-  assert.equal(steered.length, 0, "nothing is steered behind a command the agent would finish first");
-  interrupted.length = 0;
-  toolSince = clock - 10_000;
-  const quick = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "and then lint" });
-  assert.equal(quick.steered, true, "a command that only just started is left to finish; the steer is read right after");
+  assert.equal(long.steered, true, "steered into the turn, read when the command returns");
+  assert.equal(long.interrupted, undefined);
+  assert.deepEqual(interrupted, [], "a running command is never stopped by a steer");
+  assert.deepEqual(steered, [["sess-1", "skip the verification, just fix it"]]);
+  toolSince = clock - 25 * 60_000;
+  const hours = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "and then lint" });
+  assert.equal(hours.steered, true, "however long it has run");
   assert.equal(interrupted.length, 0);
 });
 
@@ -4823,13 +4821,14 @@ test("a steer typed while a request waits for its answer reaches the agent once 
   assert.deepEqual(steered, [], "a request still waiting is never cancelled by a steer");
 });
 
-test("typing while the agent asks declines its request and the message reaches the agent at once", async () => {
-  // Seen live: an "Approval needed" card held the typed message, which looked like it could not be sent.
+test("typing while the agent asks never declines its request: the steer waits for the answer", async () => {
+  // Declining it made the agent's call fail with "The user doesn't want to take this action right
+  // now. STOP what you are doing…" (seen live on a Read); the user wants the action to finish first.
   const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
   const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
   const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
     nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
-  let clock = 1_000_000, declined = false;
+  let clock = 1_000_000, looks = 0;
   const steered = [], resolved = [];
   const pending = [{ approval_id: "a1", kind: "tool", source: "ao", tool: "mcp__coding-tools__exec_command",
     decisions: [{ id: "yes", kind: "allow_once" }, { id: "no", kind: "reject_once" }] }];
@@ -4837,17 +4836,17 @@ test("typing while the agent asks declines its request and the message reaches t
     requestHeadless: world.requestHeadless, now: () => clock,
     setTimer: (resolve, ms) => { clock += ms; resolve(); return 0; },
     aoHarness: {
-      observe: async () => ({ turnId: "t1", turnState: "running", status: "working", lastActivityAt: clock, timeline: [], approvals: declined ? [] : pending }),
-      resolveApproval: async (session, approval, decision) => { resolved.push([session, approval, decision]); declined = true; },
+      // The reviewer answers the request on the fifth look.
+      observe: async () => ({ turnId: "t1", turnState: "running", status: "working", lastActivityAt: clock, timeline: [], approvals: ++looks < 5 ? pending : [] }),
+      resolveApproval: async (session, approval, decision) => { resolved.push([session, approval, decision]); },
+      resolveInput: async (session, approval, answer) => { resolved.push([session, approval, answer]); },
       steer: async (session, text) => { steered.push([session, text]); return { steered: true }; },
     },
   });
-  const started = clock;
   const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "use the API instead" });
-  assert.equal(result.steered, true);
-  assert.deepEqual(resolved, [["sess-1", "a1", "no"]], "declined with the agent's reject answer, never allowed");
+  assert.deepEqual(resolved, [], "the steer never answers the agent's request");
+  assert.equal(result.steered, true, "it goes in once the request is answered");
   assert.deepEqual(steered, [["sess-1", "use the API instead"]]);
-  assert.ok(clock - started < 30_000, "the message is not held for the answer wait");
 });
 
 test("a dated DeepSeek V4.1 Flash build from Cline Pass takes the same effort levels as the model itself", async () => {
