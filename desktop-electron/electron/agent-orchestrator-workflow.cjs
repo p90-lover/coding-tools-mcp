@@ -1534,7 +1534,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     return items;
   }
 
-  function publicTimeline(items) {
+  // How much of each tool call's input and output a timeline carries. A working card's live timeline
+  // is sent whole every second, so it keeps them short; a finished turn's work is read once, when
+  // the chat opens it, so it carries what the upstream adapter kept (toolDetails) under fitTimeline's
+  // budget.
+  const LIVE_TOOL_BYTES = { input: 1000, output: 2000 };
+  const READ_TOOL_BYTES = { input: 4 * 1024, output: 16 * 1024 };
+  function publicTimeline(items, toolBytes = LIVE_TOOL_BYTES) {
     // The CPA key, read once for the whole timeline rather than once per field (see publicText).
     const key = cpaKeyToRedact();
     const publicText = (value, limit, keepEnd = false) => publicTextOf(value, limit, keepEnd, key);
@@ -1548,8 +1554,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         : publicText(item.text, item.kind === "message" || item.kind === "reasoning" ? 64 * 1024 : 400),
       ...(item.label ? { label: publicText(item.label, 40) } : {}),
       ...(item.description ? { description: publicText(item.description, 200) } : {}),
-      ...(item.input ? { input: publicText(item.input, 1000) } : {}),
-      ...(item.output ? { output: publicText(item.output, 2000) } : {}),
+      ...(item.input ? { input: publicText(item.input, toolBytes.input) } : {}),
+      ...(item.output ? { output: publicText(item.output, toolBytes.output) } : {}),
+      // Images a tool returned, as the files they were saved to: the chat reads one when it is opened.
+      ...(Array.isArray(item.images) ? { images: item.images.filter(file => typeof file === "string").slice(0, 4).map(file => publicText(file, 1000)) } : {}),
       ...(item.kind === "approval" && typeof item.requestId === "string" ? { approval: publicText(approvalNote(item.requestId, item.status), 240) } : {}),
       // The person's own answer, shown as Claude Code shows an answered question (question, then answer).
       ...((item.kind === "approval" || item.kind === "user_input") && typeof item.requestId === "string" && personAnswers.has(item.requestId)
@@ -1575,6 +1583,14 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       items = items.map(item => item.text.length > limit ? { ...item, text: cut(item.text, limit) } : item);
       if (size() <= TIMELINE_RESPONSE_BYTES) return items;
     }
+    // Tool calls keep a shorter input and output before they lose them: with up to 16 KB of output
+    // each (READ_TOOL_BYTES), a long turn would otherwise drop every call's details at once.
+    for (const limit of [4096, 1024]) {
+      items = items.map(item => ({ ...item,
+        ...(item.input?.length > limit ? { input: cut(item.input, limit) } : {}),
+        ...(item.output?.length > limit ? { output: cut(item.output, limit) } : {}) }));
+      if (size() <= TIMELINE_RESPONSE_BYTES) return items;
+    }
     items = items.map(({ input: _input, output: _output, files, ...item }) =>
       files ? { ...item, files: files.map(({ diff: _diff, ...file }) => file) } : item);
     while (items.length > 1 && size() > TIMELINE_RESPONSE_BYTES) items = items.slice(Math.ceil(items.length / 10));
@@ -1586,7 +1602,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const { node } = await savedNode(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80));
     const session = node?.receipt?.thread_id, turnId = node?.receipt?.turn_id;
     if (!node || !externalAgent(node) || !session || !turnId) return { ok: true, timeline: [] };
-    return { ok: true, timeline: fitTimeline(publicTimeline(await harnessService().timeline(session, turnId))) };
+    return { ok: true, timeline: fitTimeline(publicTimeline(await harnessService().timeline(session, turnId), READ_TOOL_BYTES)) };
   }
 
   const activityFrames = new Map();

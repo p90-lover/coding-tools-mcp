@@ -77,6 +77,8 @@ export type ChatActivity = {
 export type ChatLiveItem = {
   id: string; kind: string; status: string; text: string; label?: string;
   description?: string; input?: string; output?: string;
+  /** Images a tool call returned (a screenshot, a picture it read), as the files Claude Code saved them to. */
+  images?: string[];
   /** For kind "edit": the files it changed (Claude Code's "Edited <file> +12 −3"). */
   files?: ChatEditedFile[];
   /**
@@ -506,6 +508,20 @@ export function chatMessagesFromDescription(description: string | undefined): { 
   return messages;
 }
 
+/** A follow-up sent from this window that the saved chat may not hold yet; `after` is how many
+ *  messages the chat had when it was sent. */
+export type ChatOutgoing = { taskId: string; text: string; stamp: string; after: number };
+
+/**
+ * The chat's description with a just-sent follow-up added as the bridge saves it, until the saved
+ * one holds it: the message shows (as a turn that is starting) the moment it is sent, as in Claude
+ * Code, rather than when the bridge has started its run and the next read brings it.
+ */
+export function chatWithOutgoing(description: string | undefined, outgoing: ChatOutgoing | null | undefined): string | undefined {
+  if (!outgoing || chatMessagesFromDescription(description).length > outgoing.after) return description;
+  return `${description ?? ""}\n\nFollow-up (${outgoing.stamp} UTC):\n${outgoing.text}`.trim();
+}
+
 export function chatRunStatus(run: ChatRun): ChatStatus {
   if (run.cancelled) return "stopped";
   if (run.paused) return "paused";
@@ -528,6 +544,20 @@ export function chatAcceptsMessage(status: ChatStatus | undefined, working = fal
 /** A run that has not settled yet and can still be stopped. */
 export function chatRunOpen(status: ChatStatus | undefined): boolean {
   return status === "queued" || status === "running" || status === "paused" || status === "attention";
+}
+
+/**
+ * A run the person has just stopped, as it shows while the stop goes through (the saved
+ * cancellation, each agent's interrupt, the board reload): stopped at once, the way Claude Code's
+ * Esc ends the spinner the moment it is pressed. Stop used to change nothing for seconds. The next
+ * read of the run replaces this.
+ */
+export function chatRunStopping<T extends ChatRun>(run: T): T {
+  // A card still working or about to start ends its shimmer; a finished, failed or held one keeps
+  // its state, and every card keeps its receipt, so its "Worked" stays openable (hasWork).
+  const stopping = new Set(["running", "reserved", "pending"]);
+  return { ...run, cancelled: true,
+    nodes: run.nodes.map((node) => stopping.has(node.state) ? { ...node, state: "cancelled" } : node) };
 }
 
 /**

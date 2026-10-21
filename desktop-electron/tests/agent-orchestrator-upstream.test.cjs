@@ -232,16 +232,52 @@ test("a pending item too large for any page still lets the chat be read (and sto
   // every read exceeded the handler limit, and Stop failed with "AO response exceeds the handler limit".
   const asked = [];
   const upstream = observeHarness({
-    internalApi: async (_method, endpoint) => {
+    internalApi: async (_method, endpoint, _body, options) => {
       if (!endpoint.includes("/conversation")) return { session: { id: "s", mode: "chat", status: "working" } };
-      asked.push(endpoint.split("?")[1]);
+      asked.push(`${endpoint.split("?")[1]}${options?.trimOver ? " (cut to fit)" : ""}`);
       if (endpoint.includes("includePending=1")) throw new Error("AO response exceeds the handler limit (GET /api/v1/sessions/s/conversation)");
       return { turns: [{ id: "t", state: "running" }], messages: [] };
     },
   });
   const observed = await upstream.observe("s");
   assert.equal(observed.turnState, "running");
-  assert.deepEqual(asked, ["limit=100&includePending=1", "limit=40&includePending=1", "limit=10&includePending=1", "limit=10"]);
+  assert.deepEqual(asked, ["limit=100&includePending=1", "limit=40&includePending=1", "limit=10&includePending=1",
+    "limit=10&includePending=1 (cut to fit)", "limit=10 (cut to fit)"]);
+});
+
+test("a chat whose newest few items are huge opens, read cut to fit, instead of blank", async () => {
+  // Seen live: opening a long chat showed nothing and the toast "AO response exceeds the handler
+  // limit (GET /api/v1/sessions/clash-of-clan-macro-60/conversation)": even 10 items were over 900 KB.
+  const asked = [];
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint, _body, options) => {
+      if (!endpoint.includes("/conversation")) return { session: { id: "s", mode: "chat", status: "working" } };
+      asked.push(endpoint.split("?")[1]);
+      if (!options?.trimOver) throw new Error("AO response exceeds the handler limit (GET /api/v1/sessions/s/conversation)");
+      return { turns: [{ id: "t", state: "running" }], messages: [] };
+    },
+  });
+  const observed = await upstream.observe("s");
+  assert.equal(observed.turnState, "running");
+  // The cut-to-fit read keeps pending requests, so an approval waiting in that chat still shows.
+  assert.equal(asked.at(-1), "limit=10&includePending=1");
+});
+
+test("a response read cut to fit keeps every field, each long string shortened to what the chat shows", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const helpers = source.slice(source.indexOf("  function utf8Prefix"), source.indexOf("  /** The longest suffix of"));
+  const { trimLongStrings } = require("node:vm").runInNewContext(`${timelineBounds(source)}${helpers}({ trimLongStrings })`, { Buffer });
+  const screenshot = "x".repeat(300 * 1024);
+  const page = { activities: [{ id: "a1", detail: { output: screenshot, exitCode: 0 } }], messages: [{ id: "m1", text: "short" }], hasMoreBefore: true };
+  const cut = JSON.parse(JSON.stringify(trimLongStrings(page, 64 * 1024)));
+  assert.equal(cut.messages[0].text, "short");
+  assert.equal(cut.activities[0].detail.exitCode, 0);
+  assert.equal(cut.hasMoreBefore, true);
+  assert.ok(cut.activities[0].detail.output.startsWith("x".repeat(64 * 1024)));
+  assert.match(cut.activities[0].detail.output, /\[236 KB more not shown\]$/);
+  // A character is never split where the cut falls.
+  const chinese = trimLongStrings("中".repeat(30000), 64 * 1024);
+  assert.ok(!chinese.includes("�"));
 });
 
 test("observe shows the reply of a turn that ended while AO still flagged it as streaming", async () => {
@@ -589,6 +625,48 @@ test("a turn that only retries its model request shows no new sign of life, so a
     } : { session: { id: "s", mode: "chat", status: "working" } },
   });
   assert.equal((await upstream.observe("s")).lastActivityAt, Date.parse(at(1.5)), "the last real step, not the retry notices after it");
+});
+
+test("a screenshot tool's row shows its picture and what it said, not the picture's base64", async () => {
+  // Seen live (preview_screenshot, 2026-10-21): AO's `output` for an image result is the provider's
+  // JSON with the PNG as base64; the row showed none of it. Its content carries the image, the file
+  // Claude Code saved it to, and the page's url and title.
+  const base64 = "iVBORw0KGgo".repeat(15000);
+  const screenshot = { id: "a1", turnId: "t", sequence: 2, activityKind: "mcp_tool", status: "completed", summary: "mcp__coding-tools__preview_screenshot",
+    detail: { input: {}, toolKind: "other", providerToolName: "mcp__coding-tools__preview_screenshot",
+      output: JSON.stringify([{ source: { data: base64 } }]),
+      content: [
+        { type: "content", content: { type: "image", mimeType: "image/png", data: base64 } },
+        { type: "content", content: { type: "text", text: "[Image: source: C:\\Users\\me\\.claude\\projects\\p\\tool-results\\shot.png]" } },
+        { type: "content", content: { type: "text", text: "{\"url\":\"http://127.0.0.1:8000/register\",\"title\":\"frontend\"}" } },
+      ] } };
+  // A picture that came back with no saved copy is still said, rather than shown as nothing.
+  const unsaved = { ...screenshot, id: "a2", sequence: 3, detail: { ...screenshot.detail, content: [screenshot.detail.content[0]] } };
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.includes("/conversation")
+      ? { turns: [{ id: "t", state: "running" }], messages: [], activities: [screenshot, unsaved] }
+      : { session: { id: "s", mode: "chat", status: "working" } },
+  });
+  const [shot, bare] = JSON.parse(JSON.stringify((await upstream.observe("s")).timeline));
+  assert.deepEqual(shot.images, ["C:\\Users\\me\\.claude\\projects\\p\\tool-results\\shot.png"]);
+  assert.equal(shot.output, "{\"url\":\"http://127.0.0.1:8000/register\",\"title\":\"frontend\"}");
+  assert.equal(shot.input, undefined, "the tool takes no arguments");
+  assert.equal(bare.images, undefined);
+  assert.match(bare.output, /An image came back/);
+  assert.ok(!bare.output.includes("iVBOR"));
+});
+
+test("a tool's row carries its arguments and output well past a few lines", async () => {
+  const file = Array.from({ length: 300 }, (_, line) => `${line + 1}\tconst value${line} = ${line};`).join("\n");
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.includes("/conversation")
+      ? { turns: [{ id: "t", state: "running" }], messages: [], activities: [{ id: "a1", turnId: "t", sequence: 2, activityKind: "mcp_tool", status: "completed",
+        summary: "Read src/app.ts", detail: { input: { file_path: "src/app.ts", limit: 300 }, toolKind: "read", output: file } }] }
+      : { session: { id: "s", mode: "chat", status: "working" } },
+  });
+  const [read] = (await upstream.observe("s")).timeline;
+  assert.ok(Buffer.byteLength(read.output) > 2000, "more than the old 2 KB cut");
+  assert.ok(read.output.length <= 16 * 1024);
 });
 
 test("observe says when the tool call still running began, so a steer can stop a long one", async () => {

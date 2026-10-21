@@ -12,14 +12,15 @@ import { ChatContextMeter } from "./ChatContextMeter";
 import { ChatPet } from "./ChatPet";
 import { ChatTurnStats } from "./ChatTurnStats";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
-import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, StreamingMarkdown } from "./ChatToolParts";
+import { AnsweredRecord, ApprovedMark, Attachments, EarlierRounds, EditDiff, ImageLightbox, SentImage, StreamingMarkdown, ToolImages } from "./ChatToolParts";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, chatAcceptsMessage, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
-  chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
+  chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
   activitySummary, groupTimeline, mergeTimeline, tidyTimeline, wakeupLabel, type ChatWakeup,
+  chatMessagesFromDescription, chatWithOutgoing, type ChatOutgoing,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -195,14 +196,19 @@ function ToolItem({ item }: { item: ChatLiveItem }) {
   const name = item.kind === "command" ? (tone === "running" ? "Running" : "Ran") : item.label ?? item.kind.replace(/_/g, " ");
   const head = <><span className="cx-tool-dot" aria-hidden="true" /><span className="cx-live-label">{name}</span>
     <span className="cx-live-text">{toolHeadline(item)}</span><ApprovedMark text={item.approval} /></>;
-  const opens = item.kind === "command" || item.input || item.output;
+  const images = item.images ?? [];
+  // A returned image is read from disk only once its row is opened, not for every row in the turn.
+  const [opened, setOpened] = useState(false);
+  const opens = item.kind === "command" || item.input || item.output || images.length;
   return opens
-    ? <details className={`cx-tool tone-${tone}`}><summary>{head}</summary>
+    ? <details className={`cx-tool tone-${tone}`} onToggle={(event) => { if (event.currentTarget.open) setOpened(true); }}>
+      <summary>{head}{images.length ? <span className="cx-tool-image-count">{images.length === 1 ? "image" : `${images.length} images`}</span> : null}</summary>
       <div className="cx-tool-body">
         {item.kind === "command" ? <pre className="cx-tool-io"><code>{item.text}</code></pre> : null}
         {item.input ? <pre className="cx-tool-io"><code>{item.input}</code></pre> : null}
+        {opened && images.length ? <ToolImages paths={images} /> : null}
         {item.output ? <pre className="cx-tool-io is-output"><code>{item.output}</code></pre>
-          : tone === "running" ? null : <p className="cx-tool-empty">No output</p>}
+          : tone === "running" || images.length ? null : <p className="cx-tool-empty">No output</p>}
       </div></details>
     : <div className={`cx-tool tone-${tone}`}><div className="cx-tool-row">{head}</div></div>;
 }
@@ -445,29 +451,6 @@ function WorkGroupView({ turn, idle = false, expanded = false, loadWork }: WorkG
   </div>;
 }
 
-/** Reads an attached image for its thumbnail and shows a file in its folder (the desktop app's). */
-type AttachmentAccess = { preview?: (path: string) => Promise<string>; reveal?: (path: string) => void };
-const Attachments = createContext<AttachmentAccess>({});
-/** Thumbnails already read, by path: a poll re-renders every message, and each image is read once. */
-const PREVIEWS = new Map<string, Promise<string>>();
-
-function SentImage({ item, onOpen }: { item: ChatSentAttachment; onOpen: (url: string) => void }) {
-  const { preview } = useContext(Attachments);
-  const [url, setUrl] = useState<string | null>(null);
-  const [missing, setMissing] = useState(false);
-  useEffect(() => {
-    if (!item.path || !preview) return;
-    let current = true;
-    let read = PREVIEWS.get(item.path);
-    if (!read) { read = preview(item.path); PREVIEWS.set(item.path, read); }
-    read.then((value) => { if (current) setUrl(value); }, () => { PREVIEWS.delete(item.path!); if (current) setMissing(true); });
-    return () => { current = false; };
-  }, [item.path, preview]);
-  return <button type="button" className={`cx-sent-image${missing ? " is-missing" : ""}`} title={item.path} disabled={!url} onClick={() => url && onOpen(url)}>
-    {url ? <img src={url} alt={item.name} /> : <span>{missing ? "Image not found" : item.name}</span>}
-  </button>;
-}
-
 /**
  * A message the person sent, as Claude Code shows one: its attachments above the bubble (images as
  * thumbnails that open full size, other files as cards that show them in their folder), and in
@@ -477,12 +460,6 @@ function SentMessage({ text }: { text: string }) {
   const { reveal } = useContext(Attachments);
   const [open, setOpen] = useState<string | null>(null);
   const parts = chatMessageParts(text);
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: KeyboardEvent) => { if (event.key === "Escape") setOpen(null); };
-    window.addEventListener("keydown", close);
-    return () => window.removeEventListener("keydown", close);
-  }, [open]);
   return <>
     {parts.attachments.length ? <div className="cx-sent-attachments">
       {parts.attachments.map((item, index) => item.image && item.path
@@ -495,10 +472,7 @@ function SentMessage({ text }: { text: string }) {
     </div> : null}
     {parts.annotations?.length ? <SentAnnotations annotations={parts.annotations} /> : null}
     {parts.text ? <div className="cx-bubble"><p>{parts.text}</p></div> : null}
-    {open ? <div className="cx-lightbox" role="dialog" aria-label="Image preview" onClick={() => setOpen(null)}>
-      <img src={open} alt="" onClick={(event) => event.stopPropagation()} />
-      <button type="button" className="cx-lightbox-close" aria-label="Close image preview" onClick={() => setOpen(null)}>×</button>
-    </div> : null}
+    {open ? <ImageLightbox url={open} onClose={() => setOpen(null)} /> : null}
   </>;
 }
 
@@ -723,9 +697,18 @@ export function AgentOrchestratorChat({
     const timer = window.setInterval(() => setNow(Date.now()), 10_000);
     return () => window.clearInterval(timer);
   }, [anyWorking]);
+  // A follow-up just sent from here, shown until the chat's saved messages hold it (chatWithOutgoing).
+  const [outgoing, setOutgoing] = useState<ChatOutgoing | null>(null);
+  const shownOutgoing = outgoing?.taskId === selectedTaskId ? outgoing : null;
+  // Normally the next read replaces it within moments; a send that never reached the chat lets go.
+  useEffect(() => {
+    if (!outgoing) return undefined;
+    const timer = window.setTimeout(() => setOutgoing((current) => current === outgoing ? null : current), 30_000);
+    return () => window.clearTimeout(timer);
+  }, [outgoing]);
   const turns: ChatTurn[] = useMemo(
-    () => chatTurns(chatRuns, descriptions[selectedTaskId] ?? pendingMessage, { describe: describeNode, activity, now, modelName }),
-    [chatRuns, descriptions, selectedTaskId, describeNode, activity, now, pendingMessage, modelName],
+    () => chatTurns(chatRuns, chatWithOutgoing(descriptions[selectedTaskId] ?? pendingMessage, shownOutgoing), { describe: describeNode, activity, now, modelName }),
+    [chatRuns, descriptions, selectedTaskId, describeNode, activity, now, pendingMessage, modelName, shownOutgoing],
   );
   // The stats line counts the latest turn and the unfinished attempts before it (chatStatsSpan).
   const statsSpan = useMemo(() => chatStatsSpan(turns, chatRuns), [turns, chatRuns]);
@@ -884,6 +867,17 @@ export function AgentOrchestratorChat({
     // Only what was sent is cleared: a draft, file or annotation added while it was sending stays.
     const current = () => fromComposer && here() && composing.current.draft === owner.draft && composing.current.attachments === owner.attachments
       && composing.current.annotations === owner.annotations;
+    // As in Claude Code, the box empties and the message shows the moment it is sent; both used to
+    // wait for the bridge to start the turn. A send that fails puts the message back in the box.
+    const sent = current() ? { draft: owner.draft, attachments: owner.attachments, annotations: owner.annotations } : null;
+    if (sent) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
+    // A steer shows under the running turn once the agent has it, not as a turn of its own.
+    const steers = !goal && steering && Boolean(steer && selectedTaskId);
+    const shown = selectedTaskId && !steers ? { taskId: selectedTaskId, text: message,
+      stamp: new Date().toISOString().replace("T", " ").slice(0, 16),
+      after: chatMessagesFromDescription(descriptions[selectedTaskId]).length } : null;
+    if (shown) setOutgoing(shown);
+    if (sent && here()) setAtBottom(true);
     setSending(true);
     try {
       // A steer the turn outran (it ended first) is sent as an ordinary follow-up instead; a goal is never steered.
@@ -910,14 +904,20 @@ export function AgentOrchestratorChat({
         : { title: title.trim() || undefined, message: first, ...(goal ? { goal } : {}) });
       if (fromComposer && CHAT_DRAFTS.get(owner.taskId) === owner.draft) CHAT_DRAFTS.delete(owner.taskId);
       if (fromComposer && CHAT_ATTACHMENTS.get(owner.taskId) === owner.attachments) CHAT_ATTACHMENTS.delete(owner.taskId);
-      if (current()) {
-        setDraft(""); setTitle(""); setAttachments([]); setAnnotations([]); setAttachNote("");
+      if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
+      if (sent || current()) {
+        setTitle("");
         if (!selectedTaskId) setCarried(null);
       }
       if (here()) setAtBottom(true);
       return true;
     } catch {
-      // The surface already shows the error; keep the message so it can be sent again.
+      // The surface already shows the error; the message goes back in the box (unless something new
+      // was typed there meanwhile) so it can be sent again.
+      if (shown) setOutgoing((current) => current === shown ? null : current);
+      if (sent && here() && !composing.current.draft && !composing.current.attachments.length && !composing.current.annotations.length) {
+        setDraft(sent.draft); setAttachments(sent.attachments); setAnnotations(sent.annotations);
+      }
       return false;
     } finally { setSending(false); }
   };

@@ -34,6 +34,14 @@ const EDIT_DIFF_BYTES = 6000;
 const TIMELINE_TEXT_BYTES = 64 * 1024;
 // The most items a turn's timeline carries: a finished turn's read-back pages in up to 6 × 60.
 const TIMELINE_ITEMS = 400;
+// How much of a tool call's arguments and of what came back its row carries (toolDetails). At 1 KB
+// and 2 KB a file's contents or a search's matches stopped a few lines in.
+const TOOL_INPUT_BYTES = 4 * 1024;
+const TOOL_OUTPUT_BYTES = 16 * 1024;
+// An AO response bigger than this fails, so the caller reads again with fewer items (requestApi).
+const RESPONSE_LIMIT = 900000;
+// Even a caller's last, cut-to-fit read (trimOver) refuses a body this big.
+const TRIM_CEILING = 32 * 1024 * 1024;
 // How much of AO's recent meaningful output stays in memory.
 const DAEMON_LINES_CHARS = 64 * 1024;
 
@@ -278,18 +286,27 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       },
     }) : null;
 
-  async function requestApi(method, endpoint, body) {
+  /**
+   * One AO API call. A response over RESPONSE_LIMIT fails, so a caller reads again with fewer items
+   * and polls stay small; `trimOver` (a caller's last try) takes it anyway with every long string
+   * cut to what the chat shows (trimLongStrings), so a conversation whose newest few items are huge
+   * (screenshots, page dumps) still opens instead of showing a blank chat.
+   */
+  async function requestApi(method, endpoint, body, { trimOver = false } = {}) {
     if (state !== "ready") throw new Error("Start the source-integrated AO runtime first");
     if (body?.length > 65536) throw new Error("AO API request exceeds 64 KiB");
     const response = await fetch(`http://127.0.0.1:${daemonPort}${endpoint}`, { method, headers: { "content-type": "application/json" }, body, redirect: "error", signal: AbortSignal.timeout(method === "GET" ? 30000 : 180000) });
     const text = await response.text();
-    if (Buffer.byteLength(text) > 900000) throw new Error(`AO response exceeds the handler limit (${method} ${endpoint.split("?")[0]})`);
+    const size = Buffer.byteLength(text);
+    const oversized = size > RESPONSE_LIMIT;
+    if (oversized && (!trimOver || size > TRIM_CEILING)) throw new Error(`AO response exceeds the handler limit (${method} ${endpoint.split("?")[0]})`);
     // AO answers some failures with an empty or non-JSON body; keep the status instead of
     // failing on JSON.parse and losing it.
     let data = {};
     if (text) {
       try { data = JSON.parse(text); } catch { data = response.ok ? {} : { error: { message: text.slice(0, 300) } }; }
     }
+    if (oversized) data = trimLongStrings(data, TIMELINE_TEXT_BYTES);
     return { ok: response.ok, status: response.status, data };
   }
 
@@ -382,21 +399,28 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     for (const key of tailReads.keys()) if (key.startsWith(`${id}|`)) tailReads.delete(key);
   }
   async function readConversationTail(id, limits) {
-    for (let at = 0; ; at += 1) {
+    const tooLarge = (error) => /exceeds the handler limit/.test(String(error?.message));
+    for (let at = 0; at < limits.length; at += 1) {
       try {
         // includePending: a request still waiting on an answer is always in the page, however much
         // came after it; one that fell out of the newest items never showed and sat until it timed out.
         return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${limits[at]}&includePending=1`);
       } catch (error) {
-        if (!/exceeds the handler limit/.test(String(error?.message))) throw error;
-        if (at === limits.length - 1) {
-          // A pending item is in every page, so one that is itself over the limit (a stuck 1 MB
-          // screenshot call, seen live) failed every read: the chat stopped updating and Stop could
-          // not be confirmed. The newest items alone are read instead.
-          return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${limits[at]}`);
-        }
+        if (!tooLarge(error)) throw error;
       }
     }
+    const last = limits[limits.length - 1];
+    // Even the smallest page was too big (a few screenshots or page dumps among the newest items):
+    // it failed every read and the chat opened blank. It is read cut to fit (requestApi trimOver).
+    try {
+      return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${last}&includePending=1`, undefined, { trimOver: true });
+    } catch (error) {
+      if (!tooLarge(error)) throw error;
+    }
+    // A pending item is in every page, so one that is itself huge (a stuck screenshot call, seen
+    // live) failed every read: the chat stopped updating and Stop could not be confirmed. The
+    // newest items alone are read instead.
+    return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${last}`, undefined, { trimOver: true });
   }
   /**
    * The current turn as a Codex-style transcript: assistant messages, reasoning and tool calls
@@ -432,7 +456,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   async function conversationPageBefore(id, beforeSequence) {
     for (const limit of [60, 20, 5, 1]) {
       try {
-        return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${limit}&beforeSequence=${beforeSequence}`);
+        // The one-item page is read cut to fit (requestApi trimOver): its tool call shows, shortened.
+        return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${limit}&beforeSequence=${beforeSequence}`,
+          undefined, limit === 1 ? { trimOver: true } : undefined);
       } catch (error) {
         if (!/exceeds the handler limit/.test(String(error?.message))) return null;
       }
@@ -479,19 +505,42 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   /**
    * What a tool call did, for the row that opens on it (as Claude Code's do): the agent's own
    * one-line description, its arguments as JSON (without the command and description, which the row
-   * shows already) and what came back. Capped: every working card's timeline is polled.
+   * shows already), what came back, and any images it returned. Capped: every working card's
+   * timeline is polled, so an image goes by the path Claude Code saved it to, and the chat reads it
+   * only when its row is opened.
+   *
+   * An image result (preview_screenshot, Read of a picture) left the row empty: AO's `output` for it
+   * is the provider's JSON with the picture as base64, and that was shown before the readable text
+   * (the page's url and title) that the call's content carries.
    */
   function toolDetails(detail, input) {
     const description = typeof input.description === "string" ? input.description.trim() : "";
     const { command: _command, description: _description, ...rest } = input;
-    const args = Object.keys(rest).length ? utf8Prefix(JSON.stringify(rest, null, 2), 1000) : "";
-    const output = typeof detail.output === "string" && detail.output.trim() ? detail.output
-      : (Array.isArray(detail.content) ? detail.content : [])
-        .map(entry => entry?.content?.text).filter(text => typeof text === "string").join("\n");
+    const args = Object.keys(rest).length ? utf8Prefix(JSON.stringify(rest, null, 2), TOOL_INPUT_BYTES) : "";
+    const texts = [], images = [];
+    let unsaved = 0;
+    for (const entry of Array.isArray(detail.content) ? detail.content : []) {
+      const part = entry?.content && typeof entry.content === "object" ? entry.content : entry;
+      if (part?.type === "image") { unsaved += 1; continue; }
+      if (typeof part?.text !== "string") continue;
+      // Claude Code saves each image a tool returns and says where; that line becomes the picture.
+      const kept = part.text.replace(/^\[Image: source: (.+?)\]\s*$/gm, (_line, file) => {
+        if (images.length < 4 && file.length <= 1000) images.push(file.trim());
+        return "";
+      });
+      if (kept.trim()) texts.push(kept.trim());
+    }
+    unsaved = Math.max(0, unsaved - images.length);
+    const fromContent = texts.join("\n");
+    const output = (unsaved || images.length) ? fromContent
+      : typeof detail.output === "string" && detail.output.trim() ? detail.output.trim() : fromContent;
+    const shown = [output, unsaved ? `[${unsaved === 1 ? "An image" : `${unsaved} images`} came back that the agent's tool did not save]` : ""]
+      .filter(Boolean).join("\n");
     return {
       ...(description ? { description: utf8Prefix(description, 200) } : {}),
       ...(args ? { input: args } : {}),
-      ...(output.trim() ? { output: utf8Prefix(output.trim(), 2000) } : {}),
+      ...(shown ? { output: utf8Prefix(shown, TOOL_OUTPUT_BYTES) } : {}),
+      ...(images.length ? { images } : {}),
     };
   }
   /**
@@ -716,6 +765,20 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     while (cut > 0 && (bytes[cut] & 0xc0) === 0x80) cut -= 1;
     return bytes.toString("utf8", 0, cut);
   }
+  /**
+   * `value` with every string over `maxBytes` of UTF-8 cut to that, saying how much was left out.
+   * The chat never shows more of a field than TIMELINE_TEXT_BYTES, so nothing it shows is lost.
+   */
+  function trimLongStrings(value, maxBytes, depth = 0) {
+    if (typeof value === "string") {
+      const kept = utf8Prefix(value, maxBytes);
+      return kept.length === value.length ? value
+        : `${kept}\n… [${Math.round((Buffer.byteLength(value, "utf8") - Buffer.byteLength(kept, "utf8")) / 1024)} KB more not shown]`;
+    }
+    if (!value || typeof value !== "object" || depth > 32) return value;
+    if (Array.isArray(value)) return value.map((item) => trimLongStrings(item, maxBytes, depth + 1));
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, trimLongStrings(item, maxBytes, depth + 1)]));
+  }
   /** The longest suffix of `text` that is at most `maxBytes` of UTF-8: the newest part of live text. */
   function utf8Suffix(text, maxBytes) {
     const value = String(text);
@@ -730,11 +793,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   }
 
   // Mission-owned AO calls. The run grant already covers them, so no extra dialog.
-  async function internalApi(method, endpoint, body) {
+  async function internalApi(method, endpoint, body, options) {
     // A write may change what a session read in flight is about to return (sharedObserveRead).
     if (method !== "GET") sharedReads.clear();
     await start();
-    const result = await requestApi(method, endpoint, body === undefined ? undefined : JSON.stringify(body));
+    const result = await requestApi(method, endpoint, body === undefined ? undefined : JSON.stringify(body), options);
     if (!result.ok) throw new Error(aoErrorMessage(result));
     return result.data;
   }

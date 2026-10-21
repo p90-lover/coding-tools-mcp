@@ -208,6 +208,18 @@ test("chats group runs by task, newest first, titled 'New task' when the task is
   assert.deepEqual(list[0].runIds, ["r1", "r3"]);
 });
 
+test("a run being stopped reads as stopped at once; its working cards end, its finished ones keep their work", () => {
+  const receipt = { thread_id: "s1", answer: "partial" };
+  const live = run("r", "t", [node("p", "planner", "finished", { receipt }), node("w", "worker", "running", { receipt }),
+    node("v", "reviewer", "pending"), node("h", "worker", "held")]);
+  const stopping = chat.chatRunStopping(live);
+  assert.equal(chat.chatRunStatus(stopping), "stopped");
+  assert.deepEqual(stopping.nodes.map((item) => item.state), ["finished", "cancelled", "cancelled", "held"]);
+  assert.deepEqual(stopping.nodes[1].receipt, receipt, "a stopped card keeps its receipt, so its work can still be opened");
+  assert.equal(live.cancelled, false, "the run it was given is left as it was");
+  assert.equal(live.nodes[1].state, "running");
+});
+
 test("chat status and whether a follow-up can be sent", () => {
   assert.equal(chat.chatRunStatus(run("r", "t", [node("p", "planner", "held")])), "attention");
   assert.equal(chat.chatRunStatus(run("r", "t", [node("p", "planner", "finished")], { paused: true })), "paused");
@@ -330,7 +342,8 @@ test("a new chat's prompt is Codex's \"Do anything\" in either mode; follow-up a
     useState: initial => [typeof initial === "function" ? initial() : initial, () => {}] };
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
     exports: component, require: name => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : name === "./ao-chat" ? chat
-      : name === "./ChatWorkbench" ? { useWorkbenchAutoOpen() {} } : {},
+      : name === "./ChatWorkbench" ? { useWorkbenchAutoOpen() {} }
+        : name === "./ChatToolParts" ? { Attachments: react.createContext({}) } : {},
   });
   const walk = item => !item || typeof item !== "object" ? [] : Array.isArray(item) ? item.flatMap(walk) : [item, ...walk(item.props?.children)];
   const base = { runs: [], tasks: [], selectedTaskId: "", busy: false, loadDescription: async () => "", send: async () => {}, openStructure() {}, approvals: [], approve() {}, describeRoute: () => "", retryStart() {} };
@@ -976,17 +989,41 @@ test("late chat creation never overwrites another project, another chat, or an u
 
 test("send completion preserves the next chat's draft and edits typed during the pending send", async () => {
   for (const taskId of ["task-b", "task-a"]) {
-    const reply = delayedReply(), attachments = [], composing = { current: { taskId: "task-a", draft: "sent text", attachments } };
+    const reply = delayedReply(), attachments = [], annotations = [], composing = { current: { taskId: "task-a", draft: "sent text", attachments, annotations } };
     const state = { draft: "sent text" }, set = key => value => { state[key] = value; };
     const deliver = rendererCallback("AgentOrchestratorChat.tsx", "deliver", {
       selectedTaskId: "task-a", draft: "sent text", attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(),
       setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: () => reply.promise,
-      setDraft: set("draft"), setTitle() {}, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, setCarried() {},
+      setDraft: set("draft"), setTitle() {}, setAttachments() {}, setAnnotations() {}, setAttachNote() {}, setAtBottom() {}, setCarried() {},
+      setOutgoing() {}, descriptions: {}, chatMessagesFromDescription: chat.chatMessagesFromDescription,
     });
     const sending = deliver("sent text");
-    state.draft = "new unsent text"; composing.current = { taskId, draft: state.draft, attachments };
+    // As in Claude Code, the box empties the moment the message is sent.
+    assert.equal(state.draft, "", taskId);
+    state.draft = "new unsent text"; composing.current = { taskId, draft: state.draft, attachments, annotations };
     reply.resolve(); assert.equal(await sending, true);
     assert.equal(state.draft, "new unsent text", taskId);
+  }
+});
+
+test("a send that fails puts the message back in the box, unless something new was typed there", async () => {
+  for (const typedMeanwhile of ["", "new unsent text"]) {
+    const reply = delayedReply(), attachments = [], annotations = [], composing = { current: { taskId: "task-a", draft: "sent text", attachments, annotations } };
+    const state = { draft: "sent text", outgoing: null }, set = key => value => { state[key] = typeof value === "function" ? value(state[key]) : value; };
+    const deliver = rendererCallback("AgentOrchestratorChat.tsx", "deliver", {
+      selectedTaskId: "task-a", draft: "sent text", attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(),
+      setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: () => reply.promise,
+      setDraft: set("draft"), setTitle() {}, setAttachments() {}, setAnnotations() {}, setAttachNote() {}, setAtBottom() {}, setCarried() {},
+      setOutgoing: set("outgoing"), descriptions: { "task-a": "first message" }, chatMessagesFromDescription: chat.chatMessagesFromDescription,
+    });
+    const sending = deliver("sent text");
+    // The follow-up shows in the chat at once, as the chat's second message.
+    assert.equal(state.outgoing.text, "sent text");
+    assert.equal(state.outgoing.after, 1);
+    state.draft = typedMeanwhile; composing.current = { taskId: "task-a", draft: typedMeanwhile, attachments, annotations };
+    reply.reject(new Error("bridge refused")); assert.equal(await sending, false);
+    assert.equal(state.outgoing, null, "the message no longer shows as sent");
+    assert.equal(state.draft, typedMeanwhile || "sent text");
   }
 });
 

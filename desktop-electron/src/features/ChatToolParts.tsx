@@ -1,9 +1,57 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { numberedDiff, type ChatStepRound } from "./ao-chat";
+import { numberedDiff, type ChatSentAttachment, type ChatStepRound } from "./ao-chat";
 
 // Parts of a chat turn both transcripts draw: the Claude Code one (AgentOrchestratorChat) and the
 // DeepSeek Harness one (DshTranscript), so a fix to one is a fix to both.
+
+/** Reads an attached image for its thumbnail and shows a file in its folder (the desktop app's). */
+export type AttachmentAccess = { preview?: (path: string) => Promise<string>; reveal?: (path: string) => void };
+export const Attachments = createContext<AttachmentAccess>({});
+/** Thumbnails already read, by path: a poll re-renders every message, and each image is read once. */
+const PREVIEWS = new Map<string, Promise<string>>();
+
+export function SentImage({ item, onOpen }: { item: ChatSentAttachment; onOpen: (url: string) => void }) {
+  const { preview } = useContext(Attachments);
+  const [url, setUrl] = useState<string | null>(null);
+  const [missing, setMissing] = useState(false);
+  useEffect(() => {
+    if (!item.path || !preview) return;
+    let current = true;
+    let read = PREVIEWS.get(item.path);
+    if (!read) { read = preview(item.path); PREVIEWS.set(item.path, read); }
+    read.then((value) => { if (current) setUrl(value); }, () => { PREVIEWS.delete(item.path!); if (current) setMissing(true); });
+    return () => { current = false; };
+  }, [item.path, preview]);
+  return <button type="button" className={`cx-sent-image${missing ? " is-missing" : ""}`} title={item.path} disabled={!url} onClick={() => url && onOpen(url)}>
+    {url ? <img src={url} alt={item.name} /> : <span>{missing ? "Image not found" : item.name}</span>}
+  </button>;
+}
+
+/** An image shown full size over the chat; a click outside it or Escape closes it. */
+export function ImageLightbox({ url, onClose }: { url: string; onClose: () => void }) {
+  useEffect(() => {
+    const close = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [onClose]);
+  return <div className="cx-lightbox" role="dialog" aria-label="Image preview" onClick={onClose}>
+    <img src={url} alt="" onClick={(event) => event.stopPropagation()} />
+    <button type="button" className="cx-lightbox-close" aria-label="Close image preview" onClick={onClose}>×</button>
+  </div>;
+}
+
+/**
+ * The images a tool call returned (a screenshot, a picture it read), as thumbnails that open full
+ * size. Render it only once the call's row is open: each thumbnail reads its file from disk.
+ */
+export function ToolImages({ paths }: { paths: string[] }) {
+  const [open, setOpen] = useState<string | null>(null);
+  return <div className="cx-sent-attachments cx-tool-images">
+    {paths.map((path, index) => <SentImage key={`${path}:${index}`} item={{ image: true, name: path.split(/[\\/]/).pop() || path, path }} onOpen={setOpen} />)}
+    {open ? <ImageLightbox url={open} onClose={() => setOpen(null)} /> : null}
+  </div>;
+}
 
 /**
  * A card's earlier rounds (a reviewer's past cycles, a retried card's past attempts), oldest first,

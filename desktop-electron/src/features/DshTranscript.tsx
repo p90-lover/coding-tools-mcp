@@ -10,7 +10,7 @@
  */
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, StreamingMarkdown } from "./ChatToolParts";
+import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, StreamingMarkdown, ToolImages } from "./ChatToolParts";
 import {
   dshActivity, dshDuration, dshItemDetail, dshLiveTitle, dshProcessTitle, dshQuietNote, dshSegments, dshThinkSummary, dshToolTitle,
   tidyTimeline, type ChatLiveItem, type ChatStep, type ChatTurn, type DshActivity,
@@ -144,10 +144,13 @@ function DshTool({ item }: { item: ChatLiveItem }) {
     {!settled && files.length ? <span className="dsh-suffix dsh-diff-stat"><span className="is-add">+{added}</span> <span className="is-del">-{removed}</span></span> : null}
     <ApprovedMark text={item.approval} />
   </>;
-  const expandable = item.kind === "command" || activity === "commands" || Boolean(item.input || item.output) || files.some((file) => file.diff);
+  const images = item.images ?? [];
+  const expandable = item.kind === "command" || activity === "commands" || Boolean(item.input || item.output) || files.some((file) => file.diff) || images.length > 0;
   return <DshRow className="dsh-tool" icon={ACTIVITY_ICON[activity]} title={title} summary={summary} suffix={suffix}
     running={tone === "running"} tone={tone} open={open} expandable={expandable} onToggle={() => setOpen(!open)}>
     <div className="dsh-body">
+      {/* A screenshot or a picture the call returned, read from disk only once the row is open. */}
+      {open && images.length ? <ToolImages paths={images} /> : null}
       {item.kind === "command" || activity === "commands"
         ? <div className="dsh-terminal">
           <div className="dsh-terminal-cmd"><span aria-hidden="true">$ </span>{item.kind === "command" ? item.text : dshItemDetail(item)}</div>

@@ -11,7 +11,7 @@ import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "
 import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
-import { GOAL_SUMMARY, approvalAnsweredForYou, chatArchived, chatList, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatWakeup, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
+import { GOAL_SUMMARY, approvalAnsweredForYou, chatArchived, chatList, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatRunStopping, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatWakeup, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
 import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { createLatestConfigQueue } from "./ao-config";
 import {
@@ -496,6 +496,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [workspaceName, setWorkspaceName] = useState("");
   const [board, setBoard] = useState<Board | null>(null);
   const [missions, setMissions] = useState<AoMission[]>([]);
+  // Runs whose Stop is still going through; the chat shows them stopped already (stopChatRun).
+  const [stoppingRuns, setStoppingRuns] = useState<string[]>([]);
   const [selectedRunId, setSelectedRunId] = useState("");
   const [showInactive, setShowInactive] = useState(false);
   // What agent worktrees get of the project's installed dependencies (null: not read yet):
@@ -1506,6 +1508,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
           throw new Error("This chat belongs to another project. Open it from its own project, or start a new chat here.");
         }
         const execution = aoChatExecution(composerMode, singleRoute, savedTeams, composerTeamId);
+        // A new chat shows its message and "Starting" the moment it is sent, as Claude Code does; it
+        // used to wait for the start and two reloads. A follow-up shows its own (AgentOrchestratorChat).
+        if (!input.taskId) setPendingChat({ title: input.title || "New task", message: input.message });
         const result = await moduleCall("chat_send", { workspaceId, message: input.message,
           ...(input.taskId ? { taskId: input.taskId } : input.title ? { title: input.title } : {}),
           ...execution, ...executableArg(), ...(input.goal ? { goal: input.goal } : {}) });
@@ -1513,8 +1518,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
         if (!current()) { resolve(); return; }
         // The route is not kept here: picks are kept as they are made, and a follow-up in an older
         // chat runs on that chat's route, which must not become the next new chat's (or a rewind's).
-        await Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]);
-        if (!current()) { resolve(); return; }
+        // The started run is shown from the reply; the board and runs reload behind it (below).
         const taskId = String(result.taskId);
         if (result.run) {
           const created = result.run as AoMission;
@@ -1733,10 +1737,24 @@ export function AgentOrchestratorSurface({ language, setError }: {
     await loadMissions(workspaceId);
   });
 
-  const stopChatRun = (runId: string) => void run("stop", async () => {
-    await moduleCall("control_run", { workspaceId, runId, action: "stop" });
-    await loadMissions(workspaceId);
-  });
+  // Stop shows at once, as Claude Code's Esc does: the run reads as stopped (chatRunStopping) while
+  // the stop goes through. It is not run(): its one-action lock dropped a Stop clicked while anything
+  // else was in flight, and the stop's agent interrupts and reloads took seconds before anything changed.
+  const stopChatRun = (runId: string) => {
+    if (stoppingRuns.includes(runId)) return;
+    const owner = workspaceId;
+    setStoppingRuns((current) => [...current, runId]);
+    if (selectedRun?.id === runId) setAutoStatus("held");
+    setError(null);
+    void moduleCall("control_run", { workspaceId: owner, runId, action: "stop" })
+      .then(() => loadMissions(owner))
+      // Not stopped after all: the error says why, and a fresh read shows the run as it really is.
+      .catch((cause: unknown) => {
+        setError(cause instanceof Error ? cause.message : String(cause));
+        return loadMissions(owner).catch(() => undefined);
+      })
+      .finally(() => setStoppingRuns((current) => current.filter((id) => id !== runId)));
+  };
 
   const approve = (approval: AoApproval, reply: ApprovalReply) => {
     const owner = approvalScope.current;
@@ -1986,8 +2004,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
   // What the chat list and the open chat are given stays the same object until it changes. Built
   // inline it was new on every render (each second's activity read, each poll), and the open chat
   // rebuilds its whole transcript from it, so a project switch rebuilt the conversation many times.
-  const threadChats = useMemo(() => chatList(missions, allTasks, taskLifecycle), [missions, allTasks, taskLifecycle]);
-  const threadArchived = useMemo(() => chatArchived(missions, allTasks, taskLifecycle), [missions, allTasks, taskLifecycle]);
+  const shownMissions = useMemo(() => stoppingRuns.length
+    ? missions.map((mission) => stoppingRuns.includes(mission.id) ? chatRunStopping(mission) : mission) : missions, [missions, stoppingRuns]);
+  const threadChats = useMemo(() => chatList(shownMissions, allTasks, taskLifecycle), [shownMissions, allTasks, taskLifecycle]);
+  const threadArchived = useMemo(() => chatArchived(shownMissions, allTasks, taskLifecycle), [shownMissions, allTasks, taskLifecycle]);
   const chatRuns = useMemo(() => {
     const replaced = new Map<string, string>();
     for (const item of taskLifecycle) {
@@ -1996,8 +2016,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
         if (id && !replaced.has(id)) replaced.set(id, intent.previous_run_id);
       }
     }
-    return missions.map(mission => ({ ...mission, replaces_run_id: replaced.get(mission.id) }));
-  }, [missions, taskLifecycle]);
+    return shownMissions.map(mission => ({ ...mission, replaces_run_id: replaced.get(mission.id) }));
+  }, [shownMissions, taskLifecycle]);
   // The chat's actions call the current handlers through this ref, so the objects it holds keep
   // their identity across renders (they are only called after a render has committed).
   const chatHandlers = useRef({ startNewChat, renameChat, missionAction, forkChat, rewindChat, deleteChatMessage, copyChat, togglePin, restartChatRun, stopChatRun });

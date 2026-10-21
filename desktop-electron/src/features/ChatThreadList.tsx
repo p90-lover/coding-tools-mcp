@@ -138,13 +138,23 @@ export function orderChats<T extends { taskId: string; status: ChatStatus }>(cha
 }
 
 /**
- * The Projects list's order, as in Codex: pinned projects first, then the project you used most
- * recently, then the list's own order for projects not used yet.
+ * The Projects list's order: pinned projects first, then the order you dragged them into, then the
+ * list's own order for projects not placed yet. A project stays where it is until you move it: it
+ * used to rise whenever it looked used, and opening another project's chat (whose fuller chat list
+ * then arrived) counted as a use, so the list reshuffled on every switch.
  */
-export function orderProjects<T extends { id: string }>(items: T[], pinned: string[], usedAt: Record<string, number>): T[] {
+export function orderProjects<T extends { id: string }>(items: T[], pinned: string[], manual: string[]): T[] {
   const index = new Map(items.map((item, at) => [item.id, at]));
-  return [...items].sort((a, b) => Number(pinned.includes(b.id)) - Number(pinned.includes(a.id))
-    || (usedAt[b.id] ?? 0) - (usedAt[a.id] ?? 0) || (index.get(a.id) ?? 0) - (index.get(b.id) ?? 0));
+  const placed = new Map(manual.map((id, at) => [id, at]));
+  const rank = (item: T) => placed.get(item.id) ?? manual.length + (index.get(item.id) ?? 0);
+  return [...items].sort((a, b) => Number(pinned.includes(b.id)) - Number(pinned.includes(a.id)) || rank(a) - rank(b));
+}
+
+/** The order a project list had when projects still rose with use: kept once as where they stand. */
+export function projectsByLastUse<T extends { id: string }>(items: T[], usedAt: Record<string, number>): string[] {
+  const index = new Map(items.map((item, at) => [item.id, at]));
+  return [...items].sort((a, b) => (usedAt[b.id] ?? 0) - (usedAt[a.id] ?? 0) || (index.get(a.id) ?? 0) - (index.get(b.id) ?? 0))
+    .map((item) => item.id);
 }
 
 /**
@@ -157,7 +167,9 @@ export function releaseUsedChats(manual: string[], seenRuns: Record<string, stri
   return { order: used.length ? manual.filter((id) => !used.includes(id)) : manual, used };
 }
 
+// Where projects stood by last use, from before projects kept their place; read once to keep it.
 const PROJECT_USED_KEY = "coding-tools:ao:project-used";
+const PROJECT_ORDER_KEY = "coding-tools:ao:project-order";
 const OPEN_PROJECTS_KEY = "coding-tools:ao:open-projects";
 function readStored<T>(key: string, fallback: T, valid: (value: unknown) => value is T): T {
   try { const value = JSON.parse(localStorage.getItem(key) || "null"); return valid(value) ? value : fallback; } catch { return fallback; }
@@ -363,27 +375,30 @@ export function ChatThreadList(props: ThreadListProps) {
     }
     return () => { live = false; };
   }, [loadProjectChats, openOtherIds, now]);
-  // A chat that got a new run was just used: it rises to the top of its project, and its project to
-  // the top of Projects (below pinned ones), as in Codex.
-  const [projectUsedAt, setProjectUsedAt] = useState<Record<string, number>>(() => readStored(PROJECT_USED_KEY, {}, isTimes));
+  // The order you dragged projects into. Before there was one, projects rose as they were used; the
+  // first list seen keeps that order, so nothing moves on the update.
+  const [projectOrderSaved, setProjectOrderSaved] = useState<string[] | null>(() => {
+    try { return localStorage.getItem(PROJECT_ORDER_KEY) === null ? null : readStored(PROJECT_ORDER_KEY, [], isIds); } catch { return []; }
+  });
+  const saveProjectOrder = (next: string[]) => {
+    setProjectOrderSaved(next);
+    try { localStorage.setItem(PROJECT_ORDER_KEY, JSON.stringify(next)); localStorage.removeItem(PROJECT_USED_KEY); } catch { /* per-session only */ }
+  };
+  useEffect(() => {
+    if (projectOrderSaved !== null || !workspaces.length) return;
+    saveProjectOrder(projectsByLastUse(workspaces, readStored(PROJECT_USED_KEY, {}, isTimes)));
+  }, [projectOrderSaved, workspaces]);
+  // A chat that got a new run was just used: it rises to the top of its project, as in Codex. Its
+  // project stays where it is.
   const seenRuns = useRef<{ workspaceId: string; runs: Record<string, string> }>({ workspaceId, runs: {} });
   useEffect(() => {
     if (seenRuns.current.workspaceId !== workspaceId) seenRuns.current = { workspaceId, runs: {} };
     // A switch empties the list before the new project's chats arrive; that load is not a use.
     if (!chats.length) { seenRuns.current.runs = {}; return; }
     const known = seenRuns.current.runs;
-    const hadChats = Object.keys(known).length > 0;
-    const { order, used } = releaseUsedChats(manualOrder, known, chats);
-    const created = hadChats && chats.some((chat) => known[chat.taskId] === undefined);
+    const { order } = releaseUsedChats(manualOrder, known, chats);
     for (const chat of chats) known[chat.taskId] = chat.latestRunId;
     if (order !== manualOrder) saveOrder(order);
-    if (used.length || created) {
-      setProjectUsedAt((current) => {
-        const next = { ...current, [workspaceId]: Date.now() };
-        try { localStorage.setItem(PROJECT_USED_KEY, JSON.stringify(next)); } catch { /* per-session only */ }
-        return next;
-      });
-    }
   }, [chats, workspaceId]);
   const startRename = (chat: ChatSummary) => setRenaming({ taskId: chat.taskId, title: chat.title });
   const commitRename = async () => {
@@ -622,7 +637,9 @@ export function ChatThreadList(props: ThreadListProps) {
     value={naming?.name ?? ""} onChange={(event) => setNaming((current) => current && { ...current, name: event.target.value })}
     onKeyDown={(event) => { if (event.key === "Enter") commitNaming(); if (event.key === "Escape") setNaming(null); }}
     onBlur={commitNaming} />;
-  const projectOrder = orderProjects(workspaces, props.pinnedProjects, projectUsedAt);
+  const projectOrder = orderProjects(workspaces, props.pinnedProjects, projectOrderSaved ?? []);
+  // Projects are dragged into your own order like chats; pinned ones stay first regardless.
+  const projectsDrag: DragList = { list: "projects", order: projectOrder.map((item) => item.id), save: saveProjectOrder };
   return (
     <aside className="cx-threads" aria-label="Projects and chats">
       <button type="button" className="cx-new-chat" aria-pressed={!selectedTaskId} onClick={actions.newChat}>
@@ -667,7 +684,8 @@ export function ChatThreadList(props: ThreadListProps) {
               const open = current ? !collapsed.has(item.id) : openOthers.has(item.id);
               const git = projectGitLabel(item.path ? gits[item.path] : null);
               return <li key={item.id}>
-                <div className="cx-project-row" onMouseEnter={(event) => hoverProject(item, event.currentTarget)} onMouseLeave={leaveProject}>
+                <div className={`cx-project-row${isDragged(item.id, projectsDrag) ? " is-dragging" : ""}`} {...dragRow(item.id, projectsDrag)}
+                  onMouseEnter={(event) => hoverProject(item, event.currentTarget)} onMouseLeave={leaveProject}>
                   <button type="button" className="cx-project" aria-expanded={open}
                     onClick={() => clickProject(item.id)} onContextMenu={(event) => openMenu(event, projectMenu(item), item.name)}>
                     <ChatGlyph name="folder" size={15} />

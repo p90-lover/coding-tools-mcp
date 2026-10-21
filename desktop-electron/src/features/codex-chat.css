@@ -88,13 +88,13 @@
 .cx-list-settings { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; border: 0;
   border-radius: 6px; background: transparent; color: var(--ao-muted); cursor: pointer; }
 .cx-list-settings:hover, .cx-list-settings[aria-expanded="true"] { background: var(--cx-hover); color: var(--color-text-primary); }
-.cx-thread-row[draggable="true"] { cursor: grab; }
-.cx-thread-row.is-dragging { opacity: .45; }
-/* Where a dragged chat would land: a line above or below the row under the pointer. */
-.cx-thread-row[data-drop]::before { content: ""; position: absolute; left: 6px; right: 6px; z-index: 1; height: 2px; border-radius: 1px;
+.cx-thread-row[draggable="true"], .cx-project-row[draggable="true"] .cx-project { cursor: grab; }
+.cx-thread-row.is-dragging, .cx-project-row.is-dragging { opacity: .45; }
+/* Where a dragged chat or project would land: a line above or below the row under the pointer. */
+.cx-thread-row[data-drop]::before, .cx-project-row[data-drop]::before { content: ""; position: absolute; left: 6px; right: 6px; z-index: 1; height: 2px; border-radius: 1px;
   background: var(--ao-blue); pointer-events: none; }
-.cx-thread-row[data-drop="before"]::before { top: -1px; }
-.cx-thread-row[data-drop="after"]::before { bottom: -1px; }
+.cx-thread-row[data-drop="before"]::before, .cx-project-row[data-drop="before"]::before { top: -1px; }
+.cx-thread-row[data-drop="after"]::before, .cx-project-row[data-drop="after"]::before { bottom: -1px; }
 .cx-popover { position: fixed; z-index: 70; display: grid; gap: 10px; width: 260px; padding: 12px; border: 1px solid var(--ao-line); border-radius: 10px;
   background: var(--color-bg-primary); box-shadow: 0 12px 36px rgb(0 0 0 / 18%); color: var(--color-text-primary); font-size: 13px; }
 .cx-popover strong { font-size: 13px; }
@@ -521,6 +521,11 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-edit-diff tr.is-hunk td { padding: 1px 10px; color: var(--ao-muted); background: color-mix(in srgb, var(--ao-line) 40%, transparent); text-align: center; }
 .cx-tool.tone-failed .cx-tool-io.is-output { color: var(--ao-red); }
 .cx-tool-empty { margin: 2px 0; color: var(--ao-muted); font-size: 12px; font-style: italic; }
+/* Images a tool returned (a screenshot): left-aligned under the call, larger than a sent thumbnail. */
+.cx-tool-images { justify-content: flex-start; max-width: 100%; margin: 2px 0; }
+.cx-tool-images .cx-sent-image { width: 240px; height: 160px; }
+.cx-tool-image-count { flex: none; margin-left: 6px; padding: 0 5px; border: 1px solid var(--ao-line); border-radius: 4px;
+  color: var(--ao-muted); font-size: 11px; line-height: 16px; }
 @media (prefers-reduced-motion: reduce) { .cx-tool.tone-running .cx-tool-dot { animation: none; } }
 
 .cx-answer { display: grid; gap: 4px; }
