@@ -121,6 +121,37 @@ test("packaged runtime is installed once into a durable versioned directory", ()
   }
 });
 
+test("a launch after the runtime was hashed does not read its files again, and still catches a changed one", () => {
+  // Seen live: hashing 6,002 runtime files (164 MB) twice on every launch kept the window from
+  // opening for over two minutes on a hard disk.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-verified-"));
+  const resourcesPath = runtimeFixture(root);
+  const coreHome = path.join(root, "core-home");
+  const app = { isPackaged: true, getVersion: () => "0.2.0" };
+  const originalRead = fs.readFileSync;
+  const reads = [];
+  fs.readFileSync = function (file, ...rest) { reads.push(String(file)); return originalRead.call(this, file, ...rest); };
+  try {
+    const installed = ensurePackagedRuntime({ app, coreHome, resourcesPath });
+    assert.ok(reads.some(file => file.endsWith("cli.js")), "the first launch hashes the files");
+    reads.length = 0;
+    assert.equal(ensurePackagedRuntime({ app, coreHome, resourcesPath }), installed);
+    assert.deepEqual(reads.filter(file => !file.endsWith("manifest.json") && !file.includes("runtime-verified")), [],
+      "the next launch reads only the manifests and what it remembered");
+
+    // Same size, different content: its changed time moves, so it is hashed again and rejected.
+    fs.writeFileSync(path.join(installed, "app", "cli.js"), "CLI");
+    assert.throws(() => validateRuntimeBundle(installed, { version: "0.2.0", platform: process.platform, arch: process.arch },
+      { stampDir: path.join(coreHome, "runtime-verified") }), /checksum mismatch/);
+    // The launch itself replaces the damaged version directory from the package.
+    const repaired = ensurePackagedRuntime({ app, coreHome, resourcesPath });
+    assert.equal(originalRead(path.join(repaired, "app", "cli.js"), "utf8"), "cli");
+  } finally {
+    fs.readFileSync = originalRead;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("packaged runtime installation rejects a platform or version mismatch", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-mismatch-"));
   const resourcesPath = runtimeFixture(root, "0.1.0");
