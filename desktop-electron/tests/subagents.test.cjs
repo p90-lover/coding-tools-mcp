@@ -617,3 +617,25 @@ test("a settled turn keeps stopping state and capacity until host shutdown is ac
     assert.match(w.service.runs()[0].error, /shutdown is unconfirmed/);
   } finally { acknowledge?.({ ok: false }); w.cleanup(); }
 });
+
+test("a subagent whose model keeps refusing requests stops at the third 429 and tells its chat why", async () => {
+  // Seen live: an explorer on Gemini through Antigravity got "Resource has been exhausted" (429)
+  // for 20 minutes while Claude Code backed off, and the chat that started it waited on its report.
+  const w = world();
+  try {
+    const started = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Map the training data" }));
+    const retrying = (attempt, status = 429) => ({ turnState: "running", status: "working", approvals: [], timeline: [
+      { id: "r", kind: "system", status: "running", text: `Retrying Claude, attempt ${attempt} of 10. API error ${status}. Trying again in 20s.` }] });
+    w.sessions.set(started.subagent_id, retrying(2));
+    let result = parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: started.subagent_id, wait_seconds: 0 }));
+    assert.ok(["starting", "running"].includes(result.state), "two refusals are left to Claude Code's own retries");
+    w.sessions.set(started.subagent_id, retrying(3, 503));
+    result = parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: started.subagent_id, wait_seconds: 0 }));
+    assert.ok(["starting", "running"].includes(result.state), "a failing service (5xx) is not a refusal");
+    w.sessions.set(started.subagent_id, retrying(3));
+    await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: started.subagent_id, wait_seconds: 0 });
+    assert.deepEqual(w.interrupted, [started.subagent_id], "it is stopped");
+    result = parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: started.subagent_id, wait_seconds: 0 }));
+    assert.match(String(result.error ?? ""), /keeps refusing requests \(API error 429, attempt 3 of 10\)/);
+  } finally { w.cleanup(); }
+});

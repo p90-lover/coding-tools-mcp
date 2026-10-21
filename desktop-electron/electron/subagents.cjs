@@ -271,6 +271,20 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
 
   const settled = (observation) => observation?.exited === true || (TERMINAL_TURN.has(observation?.turnState)
     && !["working", "running", "starting"].includes(observation?.status));
+  /**
+   * "API error 429 (attempt 3 of 10)" when the agent is backing off from its model refusing requests
+   * (Claude Code's own retry notice is the newest thing on its timeline, at its third try or later);
+   * otherwise null. A 5xx or a lost connection is left to its own retries.
+   */
+  function refusedModel(observation) {
+    const timeline = Array.isArray(observation?.timeline) ? observation.timeline : [];
+    const last = timeline[timeline.length - 1];
+    if (!last || last.kind !== "system" || last.status !== "running") return null;
+    const text = String(last.text ?? "");
+    const attempt = text.match(/^Retrying\b.*?attempt (\d+) of (\d+)/i);
+    if (!attempt || Number(attempt[1]) < 3 || !/API error 429/i.test(text)) return null;
+    return `API error 429, attempt ${attempt[1]} of ${attempt[2]}`;
+  }
 
   async function check(run) {
     if (!ACTIVE.has(run.state)) return;
@@ -316,6 +330,20 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
       const report = String(observed.answer || "").slice(0, MAX_REPORT);
       if (state === "completed") finish(run, "completed", { report: report || "(The subagent finished without a written report.)" });
       else finish(run, "failed", { error: String(observed.error || `The subagent's turn ended (${state})`).slice(0, 1000), ...(report ? { report } : {}) });
+      return;
+    }
+    // Its model keeps refusing requests: Claude Code backs off from a 429 up to ten times, about 20
+    // minutes, while the chat that started it waits on its report. Seen live: an explorer on Gemini
+    // through Antigravity got "Resource has been exhausted" from every Google account for 20 minutes
+    // and its chat looked stuck. From the third refusal it stops and tells the chat why, so the chat
+    // goes on (on its own, or with another subagent).
+    const refused = refusedModel(observed);
+    if (refused) {
+      run.stopState = "failed";
+      run.error = `Its model keeps refusing requests (${refused}); it was stopped so you can go on. `
+        + "Do the task yourself, or the user can give this subagent another model on the Subagents page.";
+      logger?.info?.("subagents.model_refused", { agent: run.agentId });
+      await stop(run.id).catch(() => undefined);
       return;
     }
     if (Array.isArray(observed?.approvals) && observed.approvals.length) await answer(run, observed.approvals);

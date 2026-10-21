@@ -1284,3 +1284,17 @@ test("a reviewer reset to pending by its own rework still shows its last review"
   const worker = node("w", "worker", "held", { history: [{ answer: "first try" }] });
   assert.equal(chat.chatTurns([run("run2", "t1", [worker])], "x", { now: 0 })[0].steps[0].text, "Earlier attempt:\n\nfirst try");
 });
+test("a turn whose agent is waiting out a model error says so, instead of \"may be stuck\"", () => {
+  // Seen live: a chat rate-limited by its model (Claude Code backing off from 429s for 20 minutes)
+  // said only "nothing new for 10m 38s, may be stuck".
+  const retrying = (text, status = "running") => ({ key: "s", working: { timeline: [
+    { id: "a", kind: "command", status: "completed", text: "ls" },
+    { id: "r", kind: "system", status, text } ] } });
+  assert.equal(chat.dshRetryNote([retrying("Retrying Claude, attempt 8 of 10. API error 429. Trying again in 38.6s.")]),
+    " · the model is rate-limited (429), retrying (8 of 10)");
+  assert.equal(chat.dshRetryNote([retrying("Retrying Claude, attempt 2 of 10. API error 503. Trying again in 2s.")]),
+    " · the model's service is failing (503), retrying (2 of 10)");
+  assert.equal(chat.dshRetryNote([retrying("Retrying Claude, attempt 2 of 10.", "completed")]), "", "a retry that is over says nothing");
+  assert.equal(chat.dshRetryNote([{ key: "s", working: { timeline: [{ id: "a", kind: "command", status: "running", text: "npm test" }] } }]), "",
+    "a card busy with a tool is not retrying");
+});

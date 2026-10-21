@@ -977,6 +977,25 @@ export function dshQuietNote(heardAtMs: number | undefined, now: number): string
   return quiet >= 60_000 ? ` · quiet for ${dshDuration(quiet)}` : "";
 }
 
+/**
+ * Why a running turn is quiet when the agent is waiting out a model error: Claude Code's own notice
+ * ("Retrying Claude, attempt 8 of 10. API error 429. Trying again in 38.6s.") as the newest thing a
+ * working card did. Seen live: a rate-limited chat said only "nothing new for 10m, may be stuck"
+ * while Claude Code was backing off from 429s, so it looked hung. Empty when no card is retrying.
+ */
+export function dshRetryNote(steps: ChatStep[]): string {
+  for (const step of steps) {
+    const items = step.working?.timeline ?? [];
+    const last = items[items.length - 1];
+    if (!last || last.kind !== "system" || last.status !== "running" || !/^Retrying\b/i.test(last.text)) continue;
+    const attempt = last.text.match(/attempt (\d+) of (\d+)/i);
+    const status = last.text.match(/API error (\d{3})/i)?.[1];
+    const why = status === "429" ? "the model is rate-limited (429)" : status ? `the model's service is failing (${status})` : "the model request failed";
+    return ` · ${why}, retrying${attempt ? ` (${attempt[1]} of ${attempt[2]})` : ""}`;
+  }
+  return "";
+}
+
 /** A tool row's title (ui-tool tool-call-model.ts): its variant's word, or the tool's own. */
 export function dshToolTitle(item: ChatLiveItem): string {
   const name = dshToolName(item);
