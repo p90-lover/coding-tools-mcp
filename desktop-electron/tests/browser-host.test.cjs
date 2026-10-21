@@ -1159,7 +1159,7 @@ test("logout clears only the owned ChatGPT session and returns to the sign-in su
   assert.deepEqual(calls[0], ["manualOperation", "ChatGPT logout"]);
   assert.deepEqual(calls[1], ["closeAuthView", authView, true, false]);
   assert.deepEqual(calls[2], ["clearStorageData"]);
-  assert.deepEqual(calls[4], ["loadURL", "https://chatgpt.com/?temporary-chat=true"]);
+  assert.deepEqual(calls[4], ["loadURL", "https://chatgpt.com/"], "a normal new chat (saved chats are on by default)");
   assert.ok(calls.some(([name]) => name === "activateHomeSurface"));
   assert.ok(calls.some(([name]) => name === "show"));
 });
@@ -1183,63 +1183,70 @@ test("launcher shutdown persists ChatGPT DOM storage and cookies before browser 
   assert.deepEqual(calls, ["storage", "cookies"]);
 });
 
-test("OAuth completion is re-proved on the primary Temporary Chat surface before login succeeds", async () => {
-  let primaryReady = false;
-  const completedAuthView = {
-    webContents: {
-      isDestroyed: () => false,
-      executeJavaScript: async () => ({
-        composer: true,
-        temporary: false,
-        sessionAuthenticated: true,
-        readyState: "complete",
-      }),
-    },
-  };
-  const fixture = {
-    activeTraceId: null,
-    manualOperation: "ChatGPT login",
-    authView: completedAuthView,
-    state: { authenticated: false },
-    logger: { info() {} },
-    view: {
+// The browser's own pages (login, logout, refresh, reveal) open the new chat task turns use: a
+// normal chat by default, since ChatGPT refuses connectors in Temporary Chat, and Temporary Chat
+// only when saved chats are turned off.
+const NEW_CHAT_URL = { saved: "https://chatgpt.com/", temporary: "https://chatgpt.com/?temporary-chat=true" };
+
+for (const saved of [true, false]) {
+  const home = saved ? NEW_CHAT_URL.saved : NEW_CHAT_URL.temporary;
+  const mode = saved ? "saved chats" : "Temporary Chat";
+  test(`OAuth completion is re-proved on the primary new chat surface before login succeeds (${mode})`, async () => {
+    let primaryReady = false;
+    const completedAuthView = {
       webContents: {
-        getURL: () => primaryReady
-          ? "https://chatgpt.com/?temporary-chat=true"
-          : "https://chatgpt.com/auth/login",
         isDestroyed: () => false,
         executeJavaScript: async () => ({
-          composer: primaryReady,
-          temporary: primaryReady,
-          sessionAuthenticated: primaryReady,
+          composer: true,
+          temporary: false,
+          sessionAuthenticated: true,
           readyState: "complete",
-          url: primaryReady
-            ? "https://chatgpt.com/?temporary-chat=true"
-            : "https://chatgpt.com/auth/login",
         }),
-        loadURL: async (url) => {
-          assert.equal(url, "https://chatgpt.com/?temporary-chat=true");
-          primaryReady = true;
+      },
+    };
+    const fixture = {
+      activeTraceId: null,
+      manualOperation: "ChatGPT login",
+      authView: completedAuthView,
+      state: { authenticated: false },
+      logger: { info() {} },
+      getUseSavedChats: () => saved,
+      view: {
+        webContents: {
+          getURL: () => primaryReady ? home : "https://chatgpt.com/auth/login",
+          isDestroyed: () => false,
+          executeJavaScript: async () => ({
+            composer: primaryReady,
+            temporary: primaryReady && !saved,
+            savedHome: primaryReady && saved,
+            sessionAuthenticated: primaryReady,
+            readyState: "complete",
+            url: primaryReady ? home : "https://chatgpt.com/auth/login",
+          }),
+          loadURL: async (url) => {
+            assert.equal(url, home);
+            primaryReady = true;
+          },
         },
       },
-    },
-    closeAuthView(view, closeContents, refreshMain) {
-      assert.equal(view, completedAuthView);
-      assert.equal(closeContents, true);
-      assert.equal(refreshMain, false);
-      this.authView = null;
-    },
-    setState(patch) { this.state = { ...this.state, ...patch }; },
-    snapshot() { return this.state; },
-  };
+      closeAuthView(view, closeContents, refreshMain) {
+        assert.equal(view, completedAuthView);
+        assert.equal(closeContents, true);
+        assert.equal(refreshMain, false);
+        this.authView = null;
+      },
+      setState(patch) { this.state = { ...this.state, ...patch }; },
+      snapshot() { return this.state; },
+    };
 
-  const result = await BrowserHost.prototype.probeAuthentication.call(fixture);
-  assert.equal(result.authenticated, true);
-  assert.equal(fixture.authView, null);
-  assert.equal(result.url, "https://chatgpt.com/?temporary-chat=true");
-});
+    const result = await BrowserHost.prototype.probeAuthentication.call(fixture);
+    assert.equal(result.authenticated, true);
+    assert.equal(fixture.authView, null);
+    assert.equal(result.url, home);
+  });
+}
 
-test("a successful primary login redirect is re-proved on Temporary Chat before login completes", async () => {
+test("a successful primary login redirect is re-proved on Temporary Chat when saved chats are off", async () => {
   let currentUrl = "https://chatgpt.com/";
   const loadedUrls = [];
   const fixture = {
@@ -1248,13 +1255,14 @@ test("a successful primary login redirect is re-proved on Temporary Chat before 
     authView: null,
     state: { authenticated: false },
     logger: { info() {} },
+    getUseSavedChats: () => false,
     view: {
       webContents: {
         getURL: () => currentUrl,
         isDestroyed: () => false,
         executeJavaScript: async () => ({
           composer: true,
-          temporary: currentUrl === "https://chatgpt.com/?temporary-chat=true",
+          temporary: currentUrl === NEW_CHAT_URL.temporary,
           sessionAuthenticated: true,
           readyState: "complete",
           url: currentUrl,
@@ -1271,9 +1279,9 @@ test("a successful primary login redirect is re-proved on Temporary Chat before 
 
   const result = await BrowserHost.prototype.probeAuthentication.call(fixture);
 
-  assert.deepEqual(loadedUrls, ["https://chatgpt.com/?temporary-chat=true"]);
+  assert.deepEqual(loadedUrls, [NEW_CHAT_URL.temporary]);
   assert.equal(result.authenticated, true);
-  assert.equal(result.url, "https://chatgpt.com/?temporary-chat=true");
+  assert.equal(result.url, NEW_CHAT_URL.temporary);
 });
 
 test("an authenticated primary surface closes a stale embedded auth popup", async () => {
@@ -2026,7 +2034,7 @@ test("launcher session refresh resolves persisted authentication before setup ac
   assert.deepEqual(calls, [
     ["operation", "session refresh"],
     ["state", { status: "loading", message: "Checking saved ChatGPT session" }],
-    ["load", "https://chatgpt.com/?temporary-chat=true"],
+    ["load", "https://chatgpt.com/"],
     ["probe"],
     ["state", { status: "ready", message: "ChatGPT is ready" }],
   ]);
@@ -2046,7 +2054,8 @@ test("concurrent launcher session refresh requests share one browser operation",
       return await action();
     },
     view: { webContents: {
-      getURL: () => "https://chatgpt.com/?temporary-chat=true",
+      // Already on the new chat, so the refresh probes at once.
+      getURL: () => "https://chatgpt.com/",
       loadURL: async () => {},
     } },
   };
@@ -3605,7 +3614,7 @@ test("Zero Risk reveal navigates without inspecting the ChatGPT DOM", async () =
     snapshot: () => ({ visible: true }),
   });
   assert.deepEqual(await fixture.reveal(false), { visible: true });
-  assert.deepEqual(calls, ["show", ["loadURL", "https://chatgpt.com/?temporary-chat=true"]]);
+  assert.deepEqual(calls, ["show", ["loadURL", "https://chatgpt.com/"]], "the normal new chat, not Temporary Chat");
 });
 
 test("Zero Risk fails closed at every primary-surface inspection boundary", async () => {
