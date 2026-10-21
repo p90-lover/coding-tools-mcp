@@ -4208,6 +4208,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const characters = Array.from(text);
     return characters.length <= 8000 ? text : characters.slice(0, 7970).join("") + "\n[visible work truncated]";
   }
+  const STOP_SETTLE_MS = 15_000;
+  const STOP_SETTLE_POLL_MS = 250;
   /** Interrupt acknowledges a signal; only an exited or settled, non-working turn releases ownership. */
   async function stopExternalTurn(session, ownership = null) {
     for (;;) {
@@ -4230,11 +4232,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (!ownership?.completed && !alreadyExited) {
         await service.interrupt(session);
         let stopped = false;
-        for (let attempt = 0; attempt < 8; attempt++) {
+        // Up to 15 s for the interrupt to settle (it was 2 s). Seen live: a stalled chat's interrupt
+        // landed later than that, so the restart failed ("stop needs attention"), its next steers
+        // and send were refused, and the chat sat for 8 more minutes until another steer found the
+        // turn over.
+        const tries = Math.ceil(STOP_SETTLE_MS / STOP_SETTLE_POLL_MS);
+        for (let attempt = 0; attempt < tries; attempt++) {
           const observation = await service.observe(session);
           if (observation?.exited === true || (["completed", "failed", "interrupted", "cancelled"].includes(observation?.turnState)
             && !["working", "running", "starting"].includes(observation?.status))) { stopped = true; break; }
-          if (attempt < 7) await new Promise(resolve => setTimer(resolve, 250));
+          if (attempt < tries - 1) await new Promise(resolve => setTimer(resolve, STOP_SETTLE_POLL_MS));
         }
         if (!stopped) throw new Error("Owned turn is still working; stop needs attention, no replacement was started");
       }
