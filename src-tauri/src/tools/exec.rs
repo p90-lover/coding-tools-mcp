@@ -1066,7 +1066,9 @@ mod tests {
             let output = call_tool(
                 &ctx,
                 "exec_command",
-                &json!({ "cmd": "python -m workflow_probe", "timeout_ms": 10_000 }),
+                // Wait for the exit, as above: with the default one-second yield a slow start
+                // (the Python install manager's shim, a busy disk) read as still running.
+                &json!({ "cmd": "python -m workflow_probe", "timeout_ms": 10_000, "yield_time_ms": 10_000 }),
             );
             assert_eq!(output["command_ok"], true, "{output}");
             assert!(output["stdout"]
