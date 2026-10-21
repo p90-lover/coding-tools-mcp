@@ -110,8 +110,10 @@ test("Surface caches model capability catalogs for AO harnesses and Native Codex
   vm.runInNewContext(ts.transpileModule(surfaceSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
     exports: surface,
     require: name => name === "react" ? { useState: value => [typeof value === "function" ? value() : value, () => {}],
-      useRef: value => ({ current: value }), useCallback: callback => { callbacks.push(callback); return callback; }, useEffect() {}, useLayoutEffect() {} }
+      useRef: value => ({ current: value }), useCallback: callback => { callbacks.push(callback); return callback; }, useEffect() {}, useLayoutEffect() {},
+      useMemo: build => build() }
       : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
+      : name === "./page-visibility" ? { pageHidden: () => false, useSurfaceHidden: () => () => false, onAoPush: () => () => {} }
       : name === "../api/client" ? { getCodingToolsClient: () => ({ apps: { call: async request => {
         calls.push(request.arguments.harness);
         return { result: { models: ["fixture"], capabilities: { fixture: { efforts: ["high"] } } } };
