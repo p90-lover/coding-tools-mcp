@@ -295,17 +295,27 @@ test("a chat agent's tool list leaves out routing, revision and consent fields a
   };
   const catalog = { ...CATALOG, tools: [
     { name: "read_file", description: "Read a file", inputSchema: { type: "object", properties: { path: { type: "string" }, ...shared }, required: ["path", "project_root"] } },
-    { name: "search_text", description: "Search", inputSchema: { type: "object", properties: { query: { type: "string" }, ...shared } } },
+    { name: "search_text", description: "Search", inputSchema: { type: "object", properties: { query: { type: "string" },
+      max_results: { type: "integer", minimum: 1, default: 1000 }, ...shared } } },
     { name: "grep_text", description: "Grep", inputSchema: { type: "object", properties: { query: { type: "string" } } } },
+    { name: "tool_search", description: "Search tools", inputSchema: { type: "object" } },
   ] };
   const { tools, calls } = fixture({ root: tree.root, catalog });
   try {
     const { url, auth } = await session(tools, { agent: "claude-code" });
     const list = (await post(url, { jsonrpc: "2.0", id: 2, method: "tools/list" }, auth)).body.result.tools;
-    assert.deepEqual(list.map((entry) => entry.name).filter((name) => name !== "show_in_chat"), ["read_file", "search_text"], "grep_text runs search_text, so it is not listed");
+    assert.deepEqual(list.map((entry) => entry.name).filter((name) => name !== "show_in_chat"), ["read_file", "search_text"],
+      "grep_text runs search_text and tool_search names headless's catalog, so neither is listed");
     const read = list.find((entry) => entry.name === "read_file").inputSchema;
     assert.deepEqual(Object.keys(read.properties), ["path"]);
     assert.deepEqual(read.required, ["path"], "a dropped field is not required either");
+    const search = list.find((entry) => entry.name === "search_text").inputSchema;
+    assert.equal(search.properties.max_results.default, 250, "the list says the chat's result size");
+    // A search that names no size gets the chat's; one that does keeps its own.
+    await callTool(url, auth, "search_text", { query: "a" });
+    assert.equal(calls.at(-1).body.arguments.max_results, 250);
+    await callTool(url, auth, "search_text", { query: "a", max_results: 5 });
+    assert.equal(calls.at(-1).body.arguments.max_results, 5);
     // An agent that still names the alias or a routing field is served as before.
     const grep = await callTool(url, auth, "grep_text", { query: "a" });
     assert.equal(grep.isError, false);
@@ -324,12 +334,12 @@ test("project instructions a session already received come back once as text, th
   const withInstructions = (revision, text = "Use pnpm.") => ({ ok: true, content: "x", project_instructions: { revision, instructions: text, files: ["AGENTS.md"] } });
   const first = toolResult("read_file", {}, withInstructions("r1"), seen);
   assert.equal(first.structuredContent.project_instructions.instructions, "Use pnpm.");
-  const again = toolResult("read_file", {}, withInstructions("r1"), seen);
-  assert.equal(again.structuredContent.project_instructions.instructions, "");
-  assert.equal(again.structuredContent.project_instructions.instructions_omitted, true);
-  assert.equal(again.structuredContent.project_instructions.unchanged, true);
-  assert.deepEqual(again.structuredContent.project_instructions.files, ["AGENTS.md"], "the revision and file names stay");
-  assert.doesNotMatch(again.content[0].text, /Use pnpm/, "the agent is not sent the text again");
+  const again = toolResult("read_file", {}, { ...withInstructions("r1"), server_dispatch_ms: 3 }, seen);
+  assert.deepEqual(again.structuredContent.project_instructions, { revision: "r1", unchanged: true, instructions_omitted: true },
+    "only the revision comes back; the text, files and scope came with it the first time");
+  assert.doesNotMatch(again.content[0].text, /Use pnpm|AGENTS\.md/, "the agent is not sent them again");
+  assert.equal(Object.hasOwn(again.structuredContent, "server_dispatch_ms"), false, "headless's timing is not the agent's");
+  assert.equal(again.structuredContent.content, "x", "the result itself is untouched");
   // Edited instructions are a new revision and come in full; another session has its own record.
   assert.equal(toolResult("read_file", {}, withInstructions("r2", "Use bun."), seen).structuredContent.project_instructions.instructions, "Use bun.");
   assert.equal(toolResult("read_file", {}, withInstructions("r1"), new Set()).structuredContent.project_instructions.instructions, "Use pnpm.");
@@ -371,11 +381,11 @@ test("the MCP endpoint answers initialize, lists the agent tools and calls them 
     assert.equal(call.body.workspace_id, "ws1");
     assert.equal(call.body.tool, "read_file");
     assert.equal(call.body.root, path.resolve(tree.root), "headless runs the call rooted at the worktree");
-    assert.deepEqual(call.body.arguments, { path: "src/a.txt" });
+    assert.deepEqual(call.body.arguments, { path: "src/a.txt", max_bytes: 65_536 }, "a chat agent's read gets the chat's size default");
     assert.match(call.body.request_id, /^[0-9a-f-]{36}$/);
     assert.equal(call.options.timeout, 120_000);
     assert.equal(called.isError, false);
-    assert.deepEqual(called.structuredContent, { ok: true, tool: "read_file", echo: { path: "src/a.txt" } });
+    assert.deepEqual(called.structuredContent, { ok: true, tool: "read_file", echo: { path: "src/a.txt", max_bytes: 65_536 } });
     assert.deepEqual(JSON.parse(called.content[0].text), called.structuredContent);
 
     const before = calls.length;

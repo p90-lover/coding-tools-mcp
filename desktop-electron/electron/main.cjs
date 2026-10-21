@@ -2695,6 +2695,10 @@ async function start() {
   }
   app.commandLine.appendSwitch("remote-debugging-address", "127.0.0.1");
   app.commandLine.appendSwitch("remote-debugging-port", String(cdpPort));
+  // Chromium's GPU shader caches (GPUCache, DawnGraphiteCache and DawnWebGPUCache, in the app's
+  // folder and in every session partition) were rewritten every few minutes. Shaders are compiled
+  // again after a restart instead.
+  app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
 
   await app.whenReady();
   // Remove agent executables an update set aside (in-use-files.cjs) once nothing runs them.
