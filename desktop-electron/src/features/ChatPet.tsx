@@ -218,8 +218,14 @@ const WORK: readonly Job[] = ["laptop", "laptop", "search", "build", "carry"];
  * the text box; the user wanted it beside the box).
  */
 type Loop = { width: number; height: number; length: number; beside: boolean };
-/** The gap between the box's right edge and a house standing beside it. */
-const HOUSE_GAP = 10;
+/**
+ * The yard between the box's right edge and a house standing beside it: wider than Clawd is tall, so
+ * walking down the box's right side (sideways, its body out by its height) it passes beside the
+ * house. At 10 px it walked through the house's front, as if no house stood there.
+ */
+const HOUSE_GAP = HEIGHT + 4;
+/** From its doorstep in the yard through the open front to the middle of its room (ms), and back. */
+const DOOR_MS = 900;
 function spotAt(loop: Loop, at: number): { x: number; y: number; side: 0 | 1 | 2 | 3 } {
   const { width: w, height: h, length } = loop;
   const s = ((at % length) + length) % length;
@@ -261,6 +267,11 @@ export function ChatPet({ mood, context, onHide }: {
   const [job, setJob] = useState<Job>("none");
   // Inside its house (out of sight behind the walls), asleep or not.
   const [home, setHome] = useState(false);
+  // Walking in or out through the open front of the house beside the box (DOOR_MS): on the doorstep
+  // in the yard, or on its way between there and the room. Its own timer: a click that clears the
+  // wander plans must not leave it stuck in the doorway.
+  const [door, setDoor] = useState(false);
+  const doorTimer = useRef<number | undefined>(undefined);
   const [ride, setRide] = useState<Ride | null>(null);
   const [step, setStep] = useState(false);
   const [tick, setTick] = useState(0);
@@ -297,6 +308,8 @@ export function ChatPet({ mood, context, onHide }: {
   asleepNow.current = asleep;
   const homeNow = useRef(home);
   homeNow.current = home;
+  const doorNow = useRef(door);
+  doorNow.current = door;
   const rideNow = useRef(ride);
   rideNow.current = ride;
   const [still] = useState(() => { try { return window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch { return false; } });
@@ -317,7 +330,8 @@ export function ChatPet({ mood, context, onHide }: {
     setFloaters((current) => [...current, { id, text, offset: left }]);
     window.setTimeout(() => setFloaters((current) => current.filter((item) => item.id !== id)), 1100);
   };
-  const busyElsewhere = () => asleepNow.current || drag.current !== null || heldNow.current !== null || rideNow.current !== null || homeNow.current;
+  const busyElsewhere = () => asleepNow.current || drag.current !== null || heldNow.current !== null || rideNow.current !== null || homeNow.current
+    || doorNow.current;
 
   // The box it walks around: measured now and whenever it resizes.
   useEffect(() => {
@@ -383,11 +397,12 @@ export function ChatPet({ mood, context, onHide }: {
       && found.top < frame.top + bottom && found.bottom > frame.top + top);
   };
   /** Where Clawd walks to go in: behind the house's middle on the top edge, or, with the house beside
-   *  the box, the top edge's right end, from where it hops in. */
+   *  the box, the foot of the box's right side, from where it steps down into the yard and walks in
+   *  through the open front (it used to vanish into the room from the top edge's right end). */
   const homeSpot = () => {
     const current = loopNow.current;
     if (!current) return atNow.current;
-    return nearLap(current, current.beside ? current.width - WIDTH / 2 : houseLeft(current) + HOUSE_W / 2, atNow.current);
+    return nearLap(current, current.beside ? current.width + current.height - WIDTH / 2 : houseLeft(current) + HOUSE_W / 2, atNow.current);
   };
   /** Whether standing at `spot` would leave it half behind the house: it only stops there to go in.
    *  Beside the box that is the right side next to the house, and the top edge's right end when the
@@ -482,28 +497,54 @@ export function ChatPet({ mood, context, onHide }: {
    *  visit (`nap` false) stays a moment and comes back out. */
   const goHome = (nap = true) => {
     cancelPlans();
+    window.clearTimeout(doorTimer.current);
+    setDoor(false);
     setJob("none");
     if (!loopNow.current) return;
     say(nap ? "Home time…" : "Coming!", 1300);
-    const settle = () => {
+    const inside = () => {
       homeNow.current = true;
+      setDoor(false);
       setHome(true);
       setPose(REST);
       if (nap) later(still ? 0 : 700, () => setAsleep(true));
       else later(2500, () => leaveHome());
+    };
+    // Beside the box it steps down off the box's side onto its doorstep, then walks in through the
+    // open front to the middle of its room, the walls passing in front of it.
+    const settle = () => {
+      if (still || !loopNow.current?.beside) { inside(); return; }
+      setDoor(true);
+      setPose({ ...REST, walking: true, look: 1 });
+      window.clearTimeout(doorTimer.current);
+      doorTimer.current = window.setTimeout(() => {
+        setHome(true);
+        doorTimer.current = window.setTimeout(inside, DOOR_MS);
+      }, 200);
     };
     if (still) { atNow.current = homeSpot(); setAt(atNow.current); settle(); return; }
     walkTo(homeSpot(), nap ? STROLL * 1.3 : SCURRY, settle);
   };
   /** Out of the house, through the door on the side facing the box; `walkOut` strolls off too. */
   const leaveHome = (walkOut = true) => {
-    if (!homeNow.current) return;
-    homeNow.current = false;
+    if (!homeNow.current && !doorNow.current) return;
+    window.clearTimeout(doorTimer.current);
+    const out = () => {
+      homeNow.current = false;
+      setHome(false);
+      setDoor(false);
+      if (!walkOut || still || !loopNow.current) return;
+      // Back the way it came, clear of the house: up the right side and along the top, or back along the top.
+      const { y, side } = spotAt(loopNow.current, atNow.current);
+      walkTo(freeNear(atNow.current - (side === 1 ? y + 1.5 * WIDTH : HOUSE_W / 2 + WIDTH)), STROLL, () => { play("jump"); remember(); wander(); });
+    };
+    // From the room beside the box it walks out through the open front to its doorstep first;
+    // lifted out (a drag), it is just gone from the house.
+    if (!walkOut || still || !homeNow.current || !loopNow.current?.beside) { out(); return; }
+    setDoor(true);
+    setPose({ ...REST, walking: true, look: -1 });
     setHome(false);
-    if (!walkOut || still || !loopNow.current) return;
-    // Back the way it came, clear of the house: up the right side and along the top, or back along the top.
-    const { y, side } = spotAt(loopNow.current, atNow.current);
-    walkTo(freeNear(atNow.current - (side === 1 ? y + 1.5 * WIDTH : HOUSE_W / 2 + WIDTH)), STROLL, () => { play("jump"); remember(); wander(); });
+    doorTimer.current = window.setTimeout(out, DOOR_MS);
   };
   // Nothing running for a while: it goes home to sleep. Any touch, or the agent starting, wakes it.
   const poke = () => {
@@ -711,7 +752,7 @@ export function ChatPet({ mood, context, onHide }: {
 
   useEffect(() => () => {
     window.clearTimeout(rideTimer.current); window.clearTimeout(clickTimer.current); window.clearTimeout(bubbleTimer.current);
-    window.clearTimeout(napTimer.current); window.clearTimeout(fallTimer.current); dragEnd.current?.(); cancelPlans();
+    window.clearTimeout(napTimer.current); window.clearTimeout(fallTimer.current); window.clearTimeout(doorTimer.current); dragEnd.current?.(); cancelPlans();
   }, []);
 
   const shown: PetMood = mood === "done" && !cheering ? "idle" : mood;
@@ -803,11 +844,21 @@ export function ChatPet({ mood, context, onHide }: {
   // Home in the house beside the box: upright in the middle of its room, feet on its floor, as it
   // stands in the house on the top edge (its walk ends sideways at the foot of the box's right side).
   const inRoom = home && !ride && !held && loop?.beside ? housePlace(loop) : null;
-  const side = loop && !Number.isNaN(at) && !ride && !held && !inRoom ? spotAt(loop, at).side : 0;
+  // On its doorstep in the yard: upright on the ground, just out from the box's right side, facing the
+  // open front. Between there and the room it walks at DOOR_MS (the walls are drawn over it).
+  const atDoor = door && !home && !ride && !held && loop?.beside ? { left: loop.width + 2, top: loop.height - HEIGHT } : null;
+  const doorWalk: CSSProperties = door && (inRoom || atDoor) ? { transition: `left ${DOOR_MS}ms linear, top .2s ease-in, transform .18s ease-out` } : {};
+  // Upright on the ground, as many whole turns as the laps it walked: stepping off the box's side is
+  // a quarter turn back, not a spin through every lap.
+  const upright: CSSProperties = { transform: `rotate(${loop && !Number.isNaN(at) ? Math.floor(at / loop.length) * 360 : 0}deg)`,
+    transformOrigin: `${WIDTH / 2}px ${HEIGHT}px` };
+  const side = loop && !Number.isNaN(at) && !ride && !held && !inRoom && !atDoor ? spotAt(loop, at).side : 0;
   // On the box: feet on the outline, body outward, so upright on top, sideways on the sides and
   // upside down under it. On the pointer or held: upright, above everything.
   const placement: CSSProperties = inRoom
-    ? { left: inRoom.left + HOUSE_W / 2 - WIDTH / 2, top: inRoom.top + HOUSE_H - HEIGHT }
+    ? { left: inRoom.left + HOUSE_W / 2 - WIDTH / 2, top: inRoom.top + HOUSE_H - HEIGHT, ...upright, ...doorWalk }
+    : atDoor
+    ? { ...atDoor, ...upright, ...doorWalk }
     : ride
     ? { position: "fixed", left: ride.x - WIDTH / 2, top: ride.y - HEIGHT + 4, zIndex: 60, pointerEvents: "none",
       transition: ride.mode === "riding" ? "none" : "left .42s ease-out, top .42s cubic-bezier(.3,-.7,.6,1)" }
