@@ -882,7 +882,10 @@ export function AgentOrchestratorChat({
   const steering = !accepts && steerOn && steerable && Boolean(steer && selectedTaskId);
   // Otherwise a message typed while the chat runs waits and is sent when the turn finishes, as in Codex.
   const queueing = !accepts && !steering && runOpen && Boolean(selectedTaskId);
-  const canSend = !busy && !sending && Boolean(draft.trim() || attachments.length || annotations.length) && (accepts || steering || queueing);
+  // While a project opens the chat to send into is not chosen yet: sending then started a new chat
+  // although an existing one was about to open. The draft waits until it is.
+  const canSend = !busy && !sending && !(deciding && !selectedTaskId)
+    && Boolean(draft.trim() || attachments.length || annotations.length) && (accepts || steering || queueing);
   const slash = chatSlashMatches(draft, { chat: Boolean(selectedTaskId), run: Boolean(latest), open: runOpen });
 
   // What a command shows above the composer (its result, or why it couldn't run).

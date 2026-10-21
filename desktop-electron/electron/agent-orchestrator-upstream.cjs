@@ -1433,7 +1433,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         for (const key of Object.keys(environment)) if (key.startsWith("AO_")) delete environment[key];
         // Coding Tools-managed CLIs (e.g. agy) are found by AO's harness probes without a global install.
         // Tool-scoped values (e.g. the agy proxy) live only in the daemon's memory.
-        Object.assign(environment, extraEnv());
+        // It may wait briefly (rtk's automatic install), so the start is checked again after it.
+        Object.assign(environment, await extraEnv());
+        checkStartup();
         const toolBin = extraPath();
         if (toolBin) {
           const pathKey = Object.keys(environment).find(key => key.toUpperCase() === "PATH") || "PATH";

@@ -824,17 +824,19 @@ describe("trusted Codex task environment continuity", () => {
   // Seen live: an old Codex task switched to a Web model compacted before its "keep going". The
   // replacement history put this turn's environment, a kept older message and the compaction
   // ahead of Codex Desktop's time/page context and the instruction, so nothing was adjacent.
-  function resolvePreTurnCompaction(environment = environmentXml, compactionTurnId = rolloutTurnId) {
+  function resolvePreTurnCompaction(environment = environmentXml, compactionTurnId: string | null = rolloutTurnId,
+    environmentTurnId = rolloutTurnId) {
     const { codexHome, request } = resumedRootFixture();
     const turn = { internal_chat_message_metadata_passthrough: { turn_id: rolloutTurnId } };
     (request._rawBody as { input: unknown[] }).input = [
-      { type: "message", id: "msg_world", role: "user", ...turn, content: [
+      { type: "message", id: "msg_world", role: "user", internal_chat_message_metadata_passthrough: { turn_id: environmentTurnId }, content: [
         { type: "input_text", text: "# AGENTS.md instructions\n\n<INSTRUCTIONS>Use the repository tools.</INSTRUCTIONS>" },
         { type: "input_text", text: environment },
       ] },
       { type: "message", id: "msg_kept", role: "user", internal_chat_message_metadata_passthrough: { turn_id: "01a13e27-f41e-7db1-8804-670775eca2a0" },
         content: [{ type: "input_text", text: "go fast" }] },
-      { type: "compaction", id: "cmp_current", encrypted_content: "opaque", internal_chat_message_metadata_passthrough: { turn_id: compactionTurnId } },
+      { type: "compaction", id: "cmp_current", encrypted_content: "opaque",
+        ...(compactionTurnId === null ? {} : { internal_chat_message_metadata_passthrough: { turn_id: compactionTurnId } }) },
       { type: "message", id: "msg_time", role: "developer", ...turn, content: [{ type: "input_text", text: "<codex_apps_client_time_context></codex_apps_client_time_context>" }] },
       { type: "message", id: "msg_page", role: "user", ...turn, content: [{ type: "input_text", text: "<external_codex_apps_open_page>{\"page_id\":null}</external_codex_apps_open_page>" }] },
       { type: "message", id: "msg_page_rules", role: "developer", ...turn, content: [{ type: "input_text", text: "<codex_apps_open_page_instructions></codex_apps_open_page_instructions>" }] },
@@ -851,6 +853,17 @@ describe("trusted Codex task environment continuity", () => {
     // Only a compaction stamped with this exact turn counts; another turn's keeps the old refusal.
     expect(() => resolvePreTurnCompaction(environmentXml, "01a13e27-f41e-7db1-8804-670775eca2a0"))
       .toThrow(/missing cwd in trusted Codex environment context/);
+  });
+
+  // Seen live (2026-10-21): Codex Desktop compacted automatically before a goal round and left the
+  // compaction item unstamped. Every round then failed with "missing cwd" and the goal stalled.
+  test("an unstamped compaction counts only after this turn's own environment, and still must match the rollout", () => {
+    expect(resolvePreTurnCompaction(environmentXml, null).cwd).toBe(root);
+    const elsewhere = environmentXml.replaceAll(root, resolve(root, ".."));
+    expect(() => resolvePreTurnCompaction(elsewhere, null)).toThrow(/conflicts with its current Codex rollout/);
+    // An environment another turn left ahead of it is no claim for this one: the turn resolves as any
+    // resumed task does, from its rollout alone, never from that older environment.
+    expect(resolvePreTurnCompaction(elsewhere, null, "01a13e27-f41e-7db1-8804-670775eca2a0").cwd).toBe(root);
   });
 
   test.skipIf(process.platform !== "win32")("resumed Windows tasks accept the same indexed rollout with either path namespace", () => {

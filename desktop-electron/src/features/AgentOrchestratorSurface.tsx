@@ -1770,13 +1770,16 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const visibleNodes = aoVisibleNodes(selectedRun?.nodes ?? [], showInactive);
   const showingHistory = !showInactive && visibleNodes.length > 0 && visibleNodes.every(node => ["cancelled", "archived"].includes(node.state));
   const workers = selectedRun?.nodes.filter(node => node.role === "worker") ?? [];
-  const chooseWorkspace = (id: string) => {
-    // Another project's chat still loading to open gives way to the project chosen now.
-    switchTarget.current = "";
-    if (pendingSelect.current && pendingSelect.current.workspaceId !== id) pendingSelect.current = null;
+  const switchToWorkspace = (id: string) => {
     setWorkspaceId(id);
     setChatTaskId(null);
     try { localStorage.setItem("coding-tools:ao:workspace", id); } catch { /* Selection still works for this session. */ }
+  };
+  const chooseWorkspace = (id: string) => {
+    // A chat clicked in a project still loading gives way to whatever is chosen now: a project, a
+    // new chat in one, a conversation continued there. Only that click's own switch keeps it.
+    switchTarget.current = ""; pendingSelect.current = null;
+    switchToWorkspace(id);
   };
   // A chat opened from another project's rows in the list. As in Codex the open chat stays until the
   // clicked one can show: that project's board and runs are read first, then the switch applies them
@@ -1797,7 +1800,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
       }, () => undefined)
       .then(() => {
         // A failed read switches anyway; the project then loads as any switch does.
-        if (switchTarget.current === id) chooseWorkspace(id);
+        if (switchTarget.current !== id) return;
+        switchTarget.current = "";
+        switchToWorkspace(id);
       });
   };
   useEffect(() => {
@@ -1808,9 +1813,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
       // Gone from the project once it loaded (archived or deleted meanwhile): open what a switch opens.
       if (loadedWorkspace !== workspaceId || boardWorkspace.current !== workspaceId) return;
       pendingSelect.current = null;
+      // Opened as a click opens a chat, so the chat view shows it even from the board or overview.
       const latest = chatList(missions.filter((mission) => mission.workspace_id === workspaceId), board?.tasks ?? [], taskLifecycle)[0];
-      setChatTaskId(latest?.taskId ?? "");
-      if (latest) setSelectedRunId(latest.latestRunId);
+      if (latest) selectChat(latest.taskId);
+      else { setChatTaskId(""); setView("chat"); }
       return;
     }
     pendingSelect.current = null;
