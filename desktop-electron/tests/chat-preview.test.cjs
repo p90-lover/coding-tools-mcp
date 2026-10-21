@@ -694,7 +694,7 @@ test("a running agent keeps its tools across an app restart: same port, its cred
   const statePath = path.join(base, "chat-agent-tools.json");
   t.after(() => fs.rmSync(base, { recursive: true, force: true }));
   const first = leasedServer(statePath, root);
-  const lease = await first.lease({ agent: "claude-code", workspaceId: "ws1" });
+  const lease = await first.lease({ agent: "codex", workspaceId: "ws1" });
   lease.bind("ao-7");
   const [{ url, headers }] = lease.servers;
   await first.close();

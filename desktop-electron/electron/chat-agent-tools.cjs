@@ -192,6 +192,20 @@ const CHAT_HIDDEN_PROPERTIES = Object.freeze(["project_root", "task_id", "known_
 // runs kill_command (headless dispatches each pair to one function). tool_search searches
 // headless's own catalog, so it named tools a chat cannot call and missed the chat's own.
 const UNLISTED_TOOLS = new Set(["grep_text", "kill_session", "tool_search"]);
+// What an agent's own harness already does, left out of its list (a call naming one still works).
+// Every request a chat sends repeats the tool list; a new chat's first request was 53,000-66,000
+// tokens before the user's message, and the model reads all of it before answering (9-36 s on a
+// fresh chat, measured live). Claude Code reads, searches, lists and edits files, runs git through
+// Bash, keeps a todo list and knows the time itself: these were 9,200 characters it never needed.
+// The terminal tools stay: they run in the sandbox and show in the chat's Terminal pane.
+const HARNESS_DUPLICATE_TOOLS = Object.freeze({
+  "claude-code": new Set([
+    "read_file", "list_dir", "list_files", "search_text", "apply_patch", "patch_check",
+    "git_status", "git_diff", "git_log", "git_show", "git_blame",
+    "update_plan", "get_plan", "get_current_time", "server_info",
+  ]),
+});
+const duplicateOfHarness = (entry, name) => HARNESS_DUPLICATE_TOOLS[entry?.agent]?.has(name) === true;
 // How much a chat agent's call returns when it does not say: about what Claude Code returns (30,000
 // characters of command output, 250 search matches). Headless's own defaults are for any client
 // (128 KB of a file, 1,000 matches with previews, 5,000 file names, 64 KB of output), and every
@@ -849,17 +863,24 @@ function paneRulesFor(groups) {
   return rules.length ? "How to work in this chat: " + rules.join(" ") + " " : "";
 }
 
-function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview = false, subagents = "", wakeups = false } = {}) {
+function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview = false, subagents = "", wakeups = false,
+  ownFileTools = false } = {}) {
+  // An agent whose harness has its own file, search, edit and git tools (Claude Code) is not given
+  // ours (HARNESS_DUPLICATE_TOOLS), so it is not told about them either.
+  const scriptTool = ownFileTools ? "your Write tool" : "apply_patch";
   return paneRulesFor(groups)
     // Seen live: an agent whose client deferred these tools (names only, loaded through its tool
     // search) said "there is no list_dir tool" and fell back to dir, never loading it.
     + "Every Coding Tools tool named here is available: if your client lists one as deferred or you do not see it, "
-    + "load it with your tool search (for example \"list_dir\") before deciding it is missing. "
-    + "Coding Tools tools for this chat's own folder (its git worktree, or the project folder it works in): read_file, "
-    + "list_dir, search_text and apply_patch for files; git_* for its history. Paths are relative to that folder and paths "
-    + "outside it are refused. search_text skips what .gitignore ignores and heavy folders (node_modules, .venv, build "
-    + "output) and returns partial results rather than failing when a search runs long: use it when your own search "
-    + "(Grep, ripgrep) times out. "
+    + "load it with your tool search (for example \"" + (ownFileTools ? "exec_command" : "list_dir") + "\") before deciding it is missing. "
+    + (ownFileTools
+      ? "For this chat's own folder (its git worktree, or the project folder it works in) use your own tools: Read, "
+        + "Grep, Glob, Edit, Write, and Bash for git. "
+      : "Coding Tools tools for this chat's own folder (its git worktree, or the project folder it works in): read_file, "
+        + "list_dir, search_text and apply_patch for files; git_* for its history. Paths are relative to that folder and paths "
+        + "outside it are refused. search_text skips what .gitignore ignores and heavy folders (node_modules, .venv, build "
+        + "output) and returns partial results rather than failing when a search runs long: use it when your own search "
+        + "(Grep, ripgrep) times out. ")
     + (groups.includes("terminal")
       ? sandboxed
         ? "exec_command, write_stdin, read_output and kill_command run commands in a sandbox (Codex's Windows sandbox), "
@@ -868,11 +889,11 @@ function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview
           + (bypass ? ""
             : autoReview ? "Each command is reviewed before it runs, like any other tool request; keep each one plain and to the point. "
             : "The user confirms each command and each input sent to one, shown in full: a command with its input must fit "
-              + "about 20 short lines, so write anything longer to a script file with apply_patch and run that. ")
+              + "about 20 short lines, so write anything longer to a script file with " + scriptTool + " and run that. ")
         : "exec_command, write_stdin, read_output and kill_command run commands through the app's terminal. A command "
           + "starts in the worktree but is NOT confined to it: it can read and write anything the user's account can. "
           + (bypass ? "" : "The user confirms each command and each input sent to one, shown in full: a command with its "
-            + "input must fit about 20 short lines, so write anything longer to a script file with apply_patch and run that. ")
+            + "input must fit about 20 short lines, so write anything longer to a script file with " + scriptTool + " and run that. ")
       : "")
     + "When the workspace policy needs approval for an operation, the user is asked in the app; never pass confirm "
     + "or approval_token yourself (they are ignored). "
@@ -1205,7 +1226,8 @@ function createChatAgentTools({
     return [...(Array.isArray(catalog?.tools) ? catalog.tools : [])
       .filter((tool) => !PREVIEW_TOOLS.has(tool?.name) && !SUBAGENT_TOOLS.has(tool?.name) && tool?.name !== "show_in_chat"
         && tool?.name !== "schedule_wakeup" && tool?.name !== "capture_process"), ...own]
-      .filter((tool) => typeof tool?.name === "string" && !UNLISTED_TOOLS.has(tool.name) && groupOf(tool.name) && allowed(entry, groupOf(tool.name)))
+      .filter((tool) => typeof tool?.name === "string" && !UNLISTED_TOOLS.has(tool.name) && !duplicateOfHarness(entry, tool.name)
+        && groupOf(tool.name) && allowed(entry, groupOf(tool.name)))
       // outputSchema is left out: clients would validate structuredContent against it, and the
       // agent gains nothing from it.
       .map(({ name, title, description, inputSchema, annotations }) => ({
@@ -1775,7 +1797,7 @@ function createChatAgentTools({
             serverInfo: { name: SERVER_NAME, title: "Coding Tools", version: String(version) },
             instructions: instructionsFor(entry.groups.filter((group) => allowed(entry, group)), { bypass: entry.bypass, sandboxed: sandboxed(), autoReview: reviewedUpstream(entry),
               subagents: allowed(entry, "subagents") ? (() => { try { return subagents.describe(); } catch { return ""; } })() : "",
-              wakeups: canWake(entry) }),
+              wakeups: canWake(entry), ownFileTools: Boolean(HARNESS_DUPLICATE_TOOLS[entry.agent]) }),
           } };
         }
         case "ping": return { jsonrpc: "2.0", id, result: {} };

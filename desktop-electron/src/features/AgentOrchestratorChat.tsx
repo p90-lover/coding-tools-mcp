@@ -555,7 +555,7 @@ export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
   projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject, projectBranch: branch, steer,
-  pendingMessage, pendingTitle, pendingCreation = false, deciding = false, commands, loadWork,
+  pendingMessage, pendingTitle, pendingCreation = false, deciding = false, onComposing, commands, loadWork,
 }: {
   /** A finished card's thinking and tool calls, read back from its AO session (turn_timeline). */
   loadWork?: LoadWork;
@@ -565,6 +565,8 @@ export function AgentOrchestratorChat({
   pendingMessage?: string; pendingTitle?: string; pendingCreation?: boolean;
   /** Which chat to show is not known yet (a project is opening): show neither a chat nor the new chat page. */
   deciding?: boolean;
+  /** The user started typing a message: the surface gets the agent it needs ready (chat_prewarm). */
+  onComposing?: () => void;
   /** How each card runs (harness · model · effort · context · role), shown on its messages. */
   describeNode?: (node: ChatNode) => string;
   /** What each working card is doing now, by "<run id>:<card id>". */
@@ -873,6 +875,10 @@ export function AgentOrchestratorChat({
 
   const runOpen = Boolean(latest) && chatRunOpen(chat?.status);
   const accepts = chatAcceptsMessage(chat?.status, working);
+  // Starting to type gets the agent the message needs ready (the surface throttles it); a run that
+  // is open already has its agent.
+  const hasDraft = Boolean(draft.trim());
+  useEffect(() => { if (hasDraft && !runOpen) onComposing?.(); }, [hasDraft, runOpen, onComposing]);
   // "Steer while working": a message typed while the agent works goes to it right away.
   const [steerOn, setSteerOn] = useState(() => { try { return localStorage.getItem("coding-tools:ao:steer") !== "off"; } catch { return true; } });
   const toggleSteer = () => setSteerOn((current) => {
