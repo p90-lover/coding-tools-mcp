@@ -2,8 +2,9 @@
 
 // RTK (github.com/rtk-ai/rtk, Apache-2.0 / BUSL-1.1): rewrites the shell commands an agent runs to
 // compact equivalents ("git status" -> "rtk git status"), so the model reads a fraction of their
-// output. Coding Tools uses the person's own installed rtk (winget install rtk-ai.rtk) and never
-// edits their global agent settings: an AO agent's commands reach it two ways, each per session.
+// output. Coding Tools uses the person's rtk, installing it with winget at startup when it is
+// missing (autoInstall), and never edits their global agent settings: an AO agent's commands
+// reach it two ways, each per session.
 // - Every command a chat agent runs through Coding Tools' terminal tool (any harness) is passed
 //   through `rtk rewrite` first (rewrite below).
 // - Claude Code's own Bash tool gets RTK's PreToolUse hook in its session settings: AO reads the
@@ -17,6 +18,7 @@ const { spawnSync, spawn } = require("node:child_process");
 /** `rtk rewrite` landed in 0.23.0. */
 const MIN_VERSION = [0, 23, 0];
 const FIND_TTL_MS = 60_000;
+const AUTO_INSTALL_RETRY_MS = 24 * 60 * 60 * 1000;
 const REWRITE_TIMEOUT_MS = 3_000;
 const MAX_COMMAND = 16_384;
 const VERSION_LINE = /^rtk\s+(\d+)\.(\d+)\.(\d+)/m;
@@ -32,10 +34,30 @@ const atLeast = (version, minimum) => {
 const quoted = (file) => `"${file}"`;
 
 function createRtk({ getEnabled = () => true, logger = null, env = process.env, platform = process.platform,
-  run = spawnSync, now = Date.now, exists = (file) => { try { return fs.statSync(file).isFile(); } catch { return false; } } } = {}) {
+  run = spawnSync, spawnProcess = spawn, now = Date.now, exists = (file) => { try { return fs.statSync(file).isFile(); } catch { return false; } },
+  listDir = (dir) => fs.readdirSync(dir) } = {}) {
   let found = null;
   let checkedAt = -Infinity;
+  /** The winget install in progress (the person's click or the automatic one), shared by both. */
+  let installing = null;
   const exe = platform === "win32" ? "rtk.exe" : "rtk";
+
+  /**
+   * winget's own folders for rtk. Without symlink rights (no Developer Mode) winget makes no Links
+   * shim: it unpacks rtk into Packages\rtk-ai.rtk_<source> and adds that folder to the user's PATH
+   * in the registry, which no process started before the install sees (this app included).
+   */
+  function wingetPackages() {
+    const roots = [env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, "Microsoft", "WinGet", "Packages"),
+      env.ProgramFiles && path.join(env.ProgramFiles, "WinGet", "Packages")].filter(Boolean);
+    const list = [];
+    for (const root of roots) {
+      let names = [];
+      try { names = listDir(root); } catch { continue; }
+      for (const name of names) if (/^rtk-ai\.rtk_/i.test(name)) list.push(path.join(root, name, exe));
+    }
+    return list;
+  }
 
   /** Where rtk may be: an explicit CODING_TOOLS_RTK, PATH, then the usual install folders. */
   function candidates() {
@@ -45,6 +67,7 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
     for (const dir of String(pathValue).split(path.delimiter)) if (dir.trim()) list.push(path.join(dir.trim(), exe));
     const home = env.USERPROFILE || env.HOME;
     if (platform === "win32" && env.LOCALAPPDATA) list.push(path.join(env.LOCALAPPDATA, "Microsoft", "WinGet", "Links", exe));
+    if (platform === "win32") list.push(...wingetPackages());
     if (home) list.push(path.join(home, ".cargo", "bin", exe), path.join(home, ".local", "bin", exe));
     return [...new Set(list)];
   }
@@ -133,29 +156,65 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
 
   function status() {
     const tool = locate(true);
-    return { enabled: enabled(), installed: Boolean(tool), path: tool?.path ?? null, version: tool?.version ?? null,
+    return { enabled: enabled(), installed: Boolean(tool), installing: Boolean(installing), path: tool?.path ?? null, version: tool?.version ?? null,
       minimum: MIN_VERSION.join("."), installCommand: platform === "win32" ? "winget install rtk-ai.rtk" : "brew install rtk" };
   }
 
-  /** Installs rtk with winget (Windows); resolves with its exit code and output tail. */
+  /** Installs rtk with winget (Windows); resolves with its exit code and output tail. One at a time. */
   function install() {
     if (platform !== "win32") return Promise.reject(new Error("Install rtk with your package manager: brew install rtk"));
-    return new Promise((resolve, reject) => {
+    if (installing) return installing;
+    installing = new Promise((resolve, reject) => {
       let output = "";
-      const child = spawn("winget", ["install", "--id", "rtk-ai.rtk", "-e", "--accept-source-agreements", "--accept-package-agreements", "--silent"],
+      const child = spawnProcess("winget", ["install", "--id", "rtk-ai.rtk", "-e", "--accept-source-agreements", "--accept-package-agreements", "--silent"],
         { windowsHide: true, env });
       child.stdout?.on("data", (chunk) => { output = (output + chunk).slice(-4_000); });
       child.stderr?.on("data", (chunk) => { output = (output + chunk).slice(-4_000); });
-      child.on("error", reject);
+      child.on("error", (error) => { installing = null; reject(error); });
       child.on("close", (code) => {
+        installing = null;
         checkedAt = -Infinity;
         logger?.info?.("rtk.install_finished", { code });
         resolve({ code, output: output.trim().slice(-2_000), status: status() });
       });
     });
+    return installing;
   }
 
-  return { locate, active, rewrite, unwrap, claudeHook, binDir, daemonEnvironment, gain, status, install };
+  /**
+   * Installs rtk at startup when it is on and missing, without a click: every agent harness gets
+   * it with nothing for the person to do. An attempt that failed (offline, no winget) is not
+   * repeated for a day; `record` keeps when it ran. Resolves with the install's result, or null.
+   */
+  function autoInstall({ lastAttemptAt = null, record = () => {} } = {}) {
+    if (platform !== "win32" || !enabled()) return Promise.resolve(null);
+    if (installing) return installing.catch(() => null);
+    if (locate(true)) return Promise.resolve(null);
+    // Never tried is null (Number(null) would be 0, "just now" at the epoch); a clock moved back retries.
+    const last = typeof lastAttemptAt === "number" ? lastAttemptAt : NaN;
+    if (Number.isFinite(last) && now() - last >= 0 && now() - last < AUTO_INSTALL_RETRY_MS) return Promise.resolve(null);
+    try { record(now()); } catch { /* tries again next start */ }
+    logger?.info?.("rtk.auto_install");
+    return install().catch((error) => {
+      logger?.warn?.("rtk.auto_install_failed", { message: String(error?.message ?? error) });
+      return null;
+    });
+  }
+
+  /**
+   * Waits for an install in progress, at most `timeoutMs`, so a process started now (AO's daemon,
+   * which hands its PATH and Claude's hook to every agent) is started with rtk.
+   */
+  function ready(timeoutMs) {
+    if (!installing) return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, timeoutMs);
+      timer.unref?.();
+      installing.then(() => {}, () => {}).then(() => { clearTimeout(timer); resolve(); });
+    });
+  }
+
+  return { locate, active, rewrite, unwrap, claudeHook, binDir, daemonEnvironment, gain, status, install, autoInstall, ready };
 }
 
 module.exports = { createRtk };
