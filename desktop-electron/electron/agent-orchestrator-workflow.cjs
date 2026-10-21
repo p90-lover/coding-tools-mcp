@@ -532,6 +532,17 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     warmLog("started", { model: entry.route.model, waiting: warm.size });
     return { ok: true, warmed: true, starting: true };
   }
+  async function continuableSession(session) {
+    for (;;) {
+      while (sessionStops.has(session)) await sessionStops.get(session);
+      const usable = await harnessService().continuable?.(session).catch(error => {
+        if (error?.code === "AO_SESSION_RESTORE_UNCONFIRMED") throw error;
+        return false;
+      });
+      // A Stop may have started during the readiness check and can still exit this host.
+      if (!sessionStops.has(session)) return usable;
+    }
+  }
   /** Hands the ready warm session for this route to a launch, or null. */
   async function takeWarm(workspaceId, route, plain) {
     const key = warmKey(workspaceId, route, plain);
@@ -552,7 +563,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     warm.delete(key);
     clearTimeout(entry.timer);
     const session = await entry.promise.catch(() => null);
-    const usable = Boolean(session) && await harnessService().continuable?.(session).catch(() => false);
+    const usable = Boolean(session) && await continuableSession(session);
     warmLog(usable ? "taken" : "unusable", { model: entry.route.model, ready: Boolean(entry.session), ageMs: now() - entry.started });
     return usable ? session : null;
   }
@@ -604,7 +615,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       // the launch on a busy machine, and the launch timed out while the spare one came up.
       if (previous && !previous.cancelled && !runSettled(previous)) return { ok: true, warmed: false, reason: "The chat's run is starting" };
       const live = freshSessionRequired(id, task) ? null : continuationCard(previous, executionMode, singleRoute);
-      if (live && await harnessService().continuable?.(live.receipt.thread_id).catch(() => false)) {
+      if (live && await continuableSession(live.receipt.thread_id)) {
         return { ok: true, warmed: false, continues: true };
       }
       return chatPrewarmRoute(id, singleRoute, true);
@@ -1123,11 +1134,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         // A single-model follow-up continues the chat's live session as its next turn: no new
         // session, worktree or replayed prompt, and the agent keeps what it already read and ran.
         const continued = continuations.get(runId);
-        continuations.delete(runId);
         // A session that is gone, or refuses the message, falls back to a fresh start.
         let sent = null;
-        if (continued && await harnessService().continuable?.(continued.session).catch(() => false)) {
-          while (sessionStops.has(continued.session)) await sessionStops.get(continued.session);
+        if (continued && await continuableSession(continued.session)) {
           sessionOwners.set(continued.session, runKey(workspaceId, runId));
           if (sessionOwners.size > 500) sessionOwners.delete(sessionOwners.keys().next().value);
           sent = await harnessService().send(continued.session, continued.text, reserved.request_key).catch(() => null);
@@ -1144,10 +1153,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
           ? (await chatHandoff(handoff.workspaceId, handoff.taskId, runId, handoffRoom).catch(() => "")) + reserved.prompt : reserved.prompt;
         // Otherwise a pre-warmed session for exactly this route takes the first prompt as its first
         // turn: it already has its worktree and a running agent, so nothing is launched now.
+        continuations.delete(runId);
         const warmed = sent?.turnId ? null : await takeWarm(workspaceId, node.route, plain);
         let first = null;
         if (warmed) {
-          while (sessionStops.has(warmed)) await sessionStops.get(warmed);
           sessionOwners.set(warmed, runKey(workspaceId, runId));
           if (sessionOwners.size > 500) sessionOwners.delete(sessionOwners.keys().next().value);
           first = await harnessService().send(warmed, prompt, reserved.request_key).catch(() => null);
@@ -1189,7 +1198,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         const mission = latest?.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
         const card = mission?.nodes.find(entry => entry.id === node.id);
         if (!mission?.cancelled && card && card.state === "reserved" && !backgroundRuns.get(runKey(workspaceId, runId))?.stopped) return false;
-        await stopExternalTurn(session);
+        await stopExternalTurn(session, mission?.cancelled || backgroundRuns.get(runKey(workspaceId, runId))?.stopped
+          ? { owner: runKey(workspaceId, runId), releaseAgent: true } : null);
         return true;
       };
       let saved;
@@ -1959,6 +1969,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       stopping.detail = "Stopping owned agents";
       reportRun(id, run, stopping, null);
     }
+    const beforeStop = action === "stop" ? await runs({ workspaceId: id, runId: run }).catch(() => null) : null;
+    const stopTargets = (beforeStop?.runs?.find(entry => entry.id === run && entry.workspace_id === id)?.nodes ?? [])
+      .filter(node => externalAgent(node) && node.receipt?.thread_id)
+      .map(node => ({ nodeId: node.id, sessionId: node.receipt.thread_id,
+        requestKey: node.receipt.request_key ?? node.request_key, turnId: node.receipt.turn_id,
+        completed: node.state === "finished" || node.receipt.status === "completed" }));
     let result;
     try {
       result = await requestHeadless("/api/v1/ao/control", { workspace_id: id, run_id: run, action, ...(nodeId ? { node_id: clean(nodeId, 80) } : {}), confirm: true }, { localConfirmation: true });
@@ -1992,23 +2008,26 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         await cancelSchedule({workspaceId:id,taskId:result.run.project_id,intentId:life.schedule.id})
           .catch(error => logger?.warn?.("ao.stop.schedule_cancel_failed", { run, error: String(error?.message || error).slice(0, 200) }));
       }
-      // The native service has already marked these nodes cancelled; their owned AO sessions
-      // still need the interrupt. An acknowledged native stop does not stop a separate AO agent.
+      // Cancellation preserves receipts; capture their exact attempt before sending any shutdown.
+      if (!beforeStop && (result.run.nodes ?? []).some(node => externalAgent(node) && node.receipt?.thread_id)) {
+        throw new Error("Owned session snapshot is unavailable; shutdown is unconfirmed");
+      }
       const owner = runKey(id, run), sessions = new Map();
       const position = saved?.runs.findIndex(entry => entry.id === run && entry.workspace_id === id) ?? -1;
-      const newer = position >= 0 ? saved.runs.slice(position + 1) : saved?.runs ?? [];
-      for (const node of result.run.nodes ?? []) {
-        const session = node.receipt?.thread_id;
-        if (!externalAgent(node) || node.state === "finished" || node.receipt?.status === "completed" || !session) continue;
-        if (sessionOwners.has(session) && sessionOwners.get(session) !== owner) continue;
-        // read_runs preserves creation order. An old held receipt never regains a continued session.
-        if (newer.some(entry => entry.nodes?.some(card => card.receipt?.thread_id === session))) continue;
-        if (position < 0 && sessionOwners.get(session) !== owner && !node.receipt?.turn_id) {
-          throw new Error("Agent stop ownership could not be confirmed; refresh before retrying");
+      if (stopTargets.length && position < 0) throw new Error("Owned session ownership view is unavailable; shutdown is unconfirmed");
+      const newer = position >= 0 ? saved.runs.slice(position + 1) : [];
+      for (const target of stopTargets) {
+        const node = saved.runs[position].nodes?.find(node => node.id === target.nodeId);
+        if (node?.receipt?.thread_id !== target.sessionId || (node.receipt.request_key ?? node.request_key) !== target.requestKey) {
+          throw new Error("Owned session identity changed while stopping; refresh before retrying");
         }
-        sessions.set(session, node.receipt?.turn_id);
+        if (sessionOwners.has(target.sessionId) && sessionOwners.get(target.sessionId) !== owner) continue;
+        // An old completed or held receipt never regains a continued session.
+        if (newer.some(entry => entry.nodes?.some(card => card.receipt?.thread_id === target.sessionId))) continue;
+        sessions.set(target.sessionId, target);
       }
-      const stopped = await Promise.allSettled([...sessions].map(([session, turnId]) => stopExternalTurn(session, { owner, turnId })));
+      const stopped = await Promise.allSettled([...sessions].map(([session, target]) =>
+        stopExternalTurn(session, { owner, turnId: target.turnId, releaseAgent: true, completed: target.completed })));
       const failure = stopped.find(result => result.status === "rejected");
       if (failure) {
         const message = "Agent stop could not be confirmed: " + publicText(failure.reason?.message || failure.reason, 200);
@@ -3818,24 +3837,46 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
   /** Interrupt acknowledges a signal; only an exited or settled, non-working turn releases ownership. */
   async function stopExternalTurn(session, ownership = null) {
-    if (sessionStops.has(session)) return sessionStops.get(session);
+    for (;;) {
+      const pending = sessionStops.get(session);
+      if (!pending) break;
+      await pending;
+      if (!ownership?.releaseAgent || pending.releasesAgent) return;
+      // Another waiter may have installed the host-release upgrade while this one resumed.
+    }
     const job = Promise.resolve().then(async () => {
       const service = harnessService();
       const owns = () => !ownership || !sessionOwners.has(session) || sessionOwners.get(session) === ownership.owner;
       if (!owns()) return;
-      if (ownership?.turnId) {
+      let alreadyExited = false;
+      if (ownership?.turnId || ownership?.releaseAgent) {
         const current = await service.observe(session);
-        if ((current?.turnId && current.turnId !== ownership.turnId) || !owns()) return;
+        if ((ownership?.turnId && current?.turnId && current.turnId !== ownership.turnId) || !owns()) return;
+        alreadyExited = current?.exited === true;
       }
-      await service.interrupt(session);
-      for (let attempt = 0; attempt < 8; attempt++) {
-        const observation = await service.observe(session);
-        if (observation?.exited === true || (["completed", "failed", "interrupted", "cancelled"].includes(observation?.turnState)
-          && !["working", "running", "starting"].includes(observation?.status))) return;
-        if (attempt < 7) await new Promise(resolve => setTimer(resolve, 250));
+      if (!ownership?.completed && !alreadyExited) {
+        await service.interrupt(session);
+        let stopped = false;
+        for (let attempt = 0; attempt < 8; attempt++) {
+          const observation = await service.observe(session);
+          if (observation?.exited === true || (["completed", "failed", "interrupted", "cancelled"].includes(observation?.turnState)
+            && !["working", "running", "starting"].includes(observation?.status))) { stopped = true; break; }
+          if (attempt < 7) await new Promise(resolve => setTimer(resolve, 250));
+        }
+        if (!stopped) throw new Error("Owned turn is still working; stop needs attention, no replacement was started");
       }
-      throw new Error("Owned turn is still working; stop needs attention, no replacement was started");
+      if (ownership?.releaseAgent && owns()) {
+        const outcomes = await Promise.allSettled([
+          Promise.resolve().then(() => service.exitAgent(session)).then(outcome => {
+            if (outcome?.ok !== true) throw new Error(`Agent ${session} shutdown is unconfirmed`);
+          }),
+          Promise.resolve().then(() => subagents?.stopParent(session)),
+        ]);
+        const failures = outcomes.filter(outcome => outcome.status === "rejected").map(outcome => String(outcome.reason?.message || outcome.reason));
+        if (failures.length) throw new Error(failures.join("; "));
+      }
     });
+    job.releasesAgent = ownership?.releaseAgent === true;
     sessionStops.set(session, job);
     try { return await job; }
     finally { if (sessionStops.get(session) === job) sessionStops.delete(session); }

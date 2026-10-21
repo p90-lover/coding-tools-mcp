@@ -3975,7 +3975,8 @@ test("a card stopped while its agent launched also stops that agent once its ses
     aoHarness: {
       // The user stops the card while AO is still launching its agent.
       spawn: async () => { mission.cancelled = true; mission.nodes[0].state = "cancelled"; return "late-session"; },
-      interrupt: async (id) => { interrupted.push(id); },
+      interrupt: async () => {},
+      exitAgent: async (id) => { interrupted.push(id); return { ok: true }; },
       observe: async () => ({ status: "idle", turnState: "completed" }),
     },
   });
@@ -4695,7 +4696,7 @@ test("a delayed Stop cannot interrupt a newer run that reused the stopped sessio
         if (endpoint.endsWith("/control")) { old.cancelled = true; old.nodes[0].state = "cancelled"; old.nodes[0].receipt.status = "held"; old.updated_at = Date.now(); return { ok: true, run: structuredClone(old) }; }
         throw new Error("unexpected " + endpoint);
       },
-      aoHarness: { interrupt: async () => { interrupted.push(turn); working = false; },
+      aoHarness: { exitAgent: async () => ({ ok: true }), interrupt: async () => { interrupted.push(turn); working = false; },
         observe: async () => ({ turnId: turn, turnState: working ? "running" : "interrupted", status: working ? "working" : "ready" }) },
     };
     try {
@@ -4733,7 +4734,7 @@ test("Stop respects session transfer before the newer dispatch receipt is saved"
       if (endpoint.endsWith("/external/submitted")) { submitted(); await hold; next.nodes[0].state = "running"; next.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run: structuredClone(next) }; }
       throw new Error("unexpected " + endpoint);
     },
-    aoHarness: { spawn: async () => { turn = "turn-b"; working = true; return "shared"; },
+    aoHarness: { exitAgent: async () => ({ ok: true }), spawn: async () => { turn = "turn-b"; working = true; return "shared"; },
       interrupt: async () => { interrupted.push(turn); working = false; },
       observe: async () => ({ turnId: turn, turnState: working ? "running" : "interrupted", status: working ? "working" : "ready" }) },
   });
@@ -4780,7 +4781,7 @@ test("a continued chat waits for an owned Stop's observation and claims its sess
       }
       return world.requestHeadless(endpoint, body, options);
     },
-    aoHarness: { continuable: async () => true,
+    aoHarness: { exitAgent: async () => ({ ok: true }), continuable: async () => true,
       send: async () => { sendCount++; turn = "turn-b"; sendStarted(); await sendGate; return { turnId: "turn-b" }; },
       spawn: async () => { throw new Error("a continuation must reuse its session"); },
       interrupt: async () => { interrupted.push(turn); },
@@ -4861,7 +4862,7 @@ test("team Stop and graph replacement require observed settlement after an inter
     const route = { harness_id: "ao:claude-code", model: "fixture" };
     const mission = { id: "run", workspace_id: "ws", revision: 3, nodes: [{ id: "one", state: "running", role: "planner", parents: [], route,
       receipt: { thread_id: "s1", status: "submitted" } }] };
-    let reads = 0, remainingBusy = Infinity, updates = 0;
+    let reads = 0, remainingBusy = Infinity, updates = 0, signalled = false;
     const interrupted = [];
     const workflow = createAgentOrchestratorWorkflow({
       setTimer: (callback, ms) => ms === 250 ? setImmediate(callback) : setTimeout(callback, ms),
@@ -4871,20 +4872,20 @@ test("team Stop and graph replacement require observed settlement after an inter
         if (endpoint.endsWith("/update")) { updates++; mission.nodes[0].state = "pending"; return { ok: true, run: structuredClone(mission) }; }
         throw new Error("unexpected " + endpoint);
       },
-      aoHarness: { interrupt: async id => { interrupted.push(id); },
-        observe: async () => { reads++; return { turnState: "interrupted", status: remainingBusy-- > 0 ? "working" : "ready" }; } },
+      aoHarness: { exitAgent: async () => ({ ok: true }), interrupt: async id => { interrupted.push(id); signalled = true; },
+        observe: async () => { reads++; return { turnState: "interrupted", status: !signalled || remainingBusy-- > 0 ? "working" : "ready" }; } },
     });
-    const invoke = () => action === "stop"
+    const invoke = () => { signalled = false; return action === "stop"
       ? workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" })
-      : workflow.call("update_run", { workspaceId: "ws", change: { operation: "graph", run_id: "run", expected_revision: 3, change: { operation: "set_parents", node_id: "one", parents: [] } } });
+      : workflow.call("update_run", { workspaceId: "ws", change: { operation: "graph", run_id: "run", expected_revision: 3, change: { operation: "set_parents", node_id: "one", parents: [] } } }); };
     try {
       await assert.rejects(invoke(), /still working|settlement.*unconfirmed/i, "ACK alone is insufficient");
-      assert.equal(reads, 8, "settlement checks are bounded");
+      assert.equal(reads, action === "stop" ? 9 : 8, "one optional exited-host preflight plus bounded settlement checks");
       assert.equal(updates, 0, "a live attempt cannot be replaced");
       assert.deepEqual(interrupted, ["s1"]);
       remainingBusy = 2; reads = 0;
       assert.equal((await invoke()).ok, true);
-      assert.equal(reads, 3, "success waits until the terminal turn's busy status clears");
+      assert.equal(reads, action === "stop" ? 4 : 3, "success waits until the terminal turn's busy status clears");
       assert.equal(updates, action === "rewire" ? 1 : 0);
     } finally { workflow.dispose(); }
   });
@@ -4943,7 +4944,7 @@ test("Stop interrupts external receipts after the engine has marked their nodes 
       }
       throw new Error("unexpected " + endpoint);
     },
-    aoHarness: { interrupt: async id => { interrupted.push(id); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
+    aoHarness: { exitAgent: async () => ({ ok: true }), interrupt: async id => { interrupted.push(id); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
   });
   try {
     assert.equal((await workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" })).ok, true);
@@ -4963,7 +4964,7 @@ test("Stop attempts every owned agent and reports an unconfirmed interrupt", asy
       if (endpoint.endsWith("/read")) return { ok: true, runs: [structuredClone(mission)] };
       throw new Error("unexpected " + endpoint);
     },
-    aoHarness: { interrupt: async id => { interrupted.push(id); if (id === "s1") throw new Error("fixture stop unavailable"); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
+    aoHarness: { exitAgent: async () => ({ ok: true }), interrupt: async id => { interrupted.push(id); if (id === "s1") throw new Error("fixture stop unavailable"); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
   });
   try {
     await assert.rejects(workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" }), /fixture stop unavailable/);
@@ -5018,6 +5019,7 @@ test("a late abandoned launch reports cancellation failure instead of claiming i
     },
     confirm: async () => true,
     aoHarness: { spawn: async () => { mission.cancelled = true; mission.nodes[0].state = "cancelled"; return "late-session"; },
+      observe: async () => ({ exited: false, turnState: "running", status: "working" }),
       interrupt: async () => { throw new Error("fixture stop unavailable"); } },
   });
   try {
@@ -5048,7 +5050,7 @@ test("a local Stop cancels a late submitted session even when native cancellatio
       }
       return { ok: true, run: structuredClone(mission) };
     },
-    aoHarness: { spawn: async () => { spawnStarted(); return session; }, interrupt: async id => { interrupted.push(id); },
+    aoHarness: { exitAgent: async () => ({ ok: true }), spawn: async () => { spawnStarted(); return session; }, interrupt: async id => { interrupted.push(id); },
       observe: async () => ({ status: "idle", turnState: "interrupted" }) },
   });
   try {
@@ -5077,12 +5079,12 @@ test("Stop interrupts the run's working agents even when the service refuses the
       if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], teams: [], worker_capacity: {} };
       return { ok: true };
     },
-    aoHarness: { interrupt: async id => { interrupted.push(id); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
+    aoHarness: { exitAgent: async () => ({ ok: true }), interrupt: async id => { interrupted.push(id); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
     confirm: async () => true,
   });
   const stopped = await workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" });
   assert.equal(stopped.ok, true);
-  assert.deepEqual(interrupted, ["session-1"], "only the working agent is interrupted");
+  assert.deepEqual(interrupted, ["session-1"], "only working turns are interrupted; completed hosts are released separately");
   // Other controls still report the refusal.
   await assert.rejects(workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "pause" }), /revision changed/);
   // A run the service does not know either is not pretended stopped.
@@ -5284,4 +5286,229 @@ test("\"Retry automatically\" also restarts a chat whose run ended on an error, 
   assert.deepEqual(spent.timers, [], "no restart is scheduled past the limit");
   assert.deepEqual(spent.controls, [], "no retry past the limit");
   spent.mission.nodes[0].state = "finished";
+});
+
+test("Stop releases owned completed hosts and descendants without touching a newer owner", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const mission = { id: "old", workspace_id: "ws", nodes: [
+    { id: "one", state: "finished", route, receipt: { thread_id: "idle", request_key: "k1", status: "completed" } },
+    { id: "two", state: "finished", route, receipt: { thread_id: "reused", request_key: "k2", status: "completed" } },
+  ] };
+  const newer = { id: "new", workspace_id: "ws", nodes: [
+    { id: "next", state: "running", route, receipt: { thread_id: "reused", request_key: "k3" } },
+  ] };
+  const exited = [], children = [], interrupted = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async endpoint => ({ ok: true, ...(endpoint.endsWith("/read") ? { runs: [mission, newer] } : { run: mission }) }),
+    aoHarness: { exitAgent: async id => { exited.push(id); return { ok: true }; },
+      interrupt: async id => { interrupted.push(id); }, observe: async () => ({ turnState: "completed", status: "ready" }) },
+    subagents: { stopParent: async id => { children.push(id); } },
+  });
+  try {
+    await workflow.call("control_run", { workspaceId: "ws", runId: "old", action: "stop" });
+    assert.deepEqual(exited, ["idle"]);
+    assert.deepEqual(children, ["idle"]);
+    assert.deepEqual(interrupted, [], "completed turns need no interrupt");
+    assert.equal(newer.nodes[0].state, "running");
+  } finally { workflow.dispose(); }
+});
+
+test("Stop never releases a replacement receipt returned after its captured identity", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const mission = { id: "run", workspace_id: "ws", nodes: [
+    { id: "one", state: "running", route, receipt: { thread_id: "before", request_key: "k1" } },
+  ] };
+  const touched = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async endpoint => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [structuredClone(mission)] };
+      mission.nodes[0].state = "cancelled";
+      mission.nodes[0].receipt = { thread_id: "replacement", request_key: "k2" };
+      return { ok: true, run: structuredClone(mission) };
+    },
+    aoHarness: { exitAgent: async id => { touched.push(id); return { ok: true }; },
+      interrupt: async id => { touched.push(id); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
+    subagents: { stopParent: async id => { touched.push(id); } },
+  });
+  try {
+    await assert.rejects(workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" }), /identity changed/);
+    assert.deepEqual(touched, []);
+  } finally { workflow.dispose(); }
+});
+
+test("Stop attempts every owned host and descendant while reporting shutdown failures", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const mission = { id: "run", workspace_id: "ws", nodes: ["one", "two"].map(id =>
+    ({ id, state: "running", route, receipt: { thread_id: id, request_key: id } })) };
+  const exited = [], children = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async endpoint => ({ ok: true, ...(endpoint.endsWith("/read") ? { runs: [mission] } : { run: mission }) }),
+    aoHarness: { interrupt: async () => {}, observe: async () => ({ turnState: "interrupted", status: "ready" }),
+      exitAgent: async id => { exited.push(id); if (id === "one") throw new Error("host shutdown failed"); return { ok: true }; } },
+    subagents: { stopParent: async id => { children.push(id); if (id === "two") throw new Error("child shutdown failed"); } },
+  });
+  try {
+    await assert.rejects(workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" }), /host shutdown failed|child shutdown failed/);
+    assert.deepEqual(exited.sort(), ["one", "two"]);
+    assert.deepEqual(children.sort(), ["one", "two"]);
+  } finally { workflow.dispose(); }
+});
+
+function workflowInternals(options) {
+  // Test-only access to existing closures; production exposes no additional API.
+  const filename = path.join(__dirname, "../electron/agent-orchestrator-workflow.cjs");
+  const Module = require("node:module");
+  const fixture = new Module(filename, module);
+  fixture.filename = filename;
+  fixture.paths = module.paths;
+  const source = fs.readFileSync(filename, "utf8").replace("return Object.freeze({ call, restoreSchedules,",
+    "return Object.freeze({ takeWarm, chatPrewarm, dispatchExternal, stopExternalTurn, continuations, warm, warmKey, backgroundRuns, runKey, driveRun, call, restoreSchedules,");
+  fixture._compile(source, filename);
+  return fixture.exports.createAgentOrchestratorWorkflow(options);
+}
+
+test("restoration uncertainty reaches all three continuation callers without launching a replacement", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const previous = { id: "old", workspace_id: "ws", project_id: "task", execution_mode: "single",
+    nodes: [{ id: "one", role: "planner", state: "finished", route, receipt: { thread_id: "existing" } }] };
+  for (const caller of ["warm", "prewarm", "dispatch"]) {
+    const uncertainty = Object.assign(new Error("restore pending"), { code: "AO_SESSION_RESTORE_UNCONFIRMED" });
+    let spawned = 0;
+    const workflow = workflowInternals({
+      requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [previous] }
+        : endpoint.endsWith("/reserve") ? { ok: true, request_key: "k", prompt: "follow-up" } : { ok: true, run: previous },
+      aoHarness: { continuable: async () => { throw uncertainty; }, spawn: async () => { spawned++; return "replacement"; } },
+    });
+    try {
+      workflow.warm.set(workflow.warmKey("ws", route, true), { session: "existing", route, promise: Promise.resolve("existing"), started: 0 });
+      workflow.continuations.set("new", { session: "existing", text: "follow-up" });
+      const result = caller === "warm" ? workflow.takeWarm("ws", route, true)
+        : caller === "prewarm" ? workflow.chatPrewarm({ workspaceId: "ws", taskId: "task", executionMode: "single", singleRoute: route })
+        : workflow.dispatchExternal("ws", "new", { id: "next", role: "planner", route }, 1, true, true);
+      await assert.rejects(result, error => error.code === uncertainty.code, caller);
+      assert.equal(spawned, 0, caller + " never starts a replacement under uncertainty");
+      if (caller === "dispatch") assert.equal(workflow.continuations.get("new")?.session, "existing", "retry retains the captured conversation");
+    } finally { workflow.dispose(); }
+  }
+});
+
+test("concurrent host-release upgrades recheck the in-flight stop after its first settlement", async () => {
+  let releaseObservation, observationStarted;
+  const observed = new Promise(resolve => { observationStarted = resolve; });
+  const gate = new Promise(resolve => { releaseObservation = resolve; });
+  let interrupts = 0, exits = 0, children = 0, reads = 0;
+  const workflow = workflowInternals({
+    aoHarness: { interrupt: async () => { interrupts++; }, observe: async () => {
+      if (++reads === 1) { observationStarted(); await gate; }
+      return { turnState: "interrupted", status: "ready" };
+    }, exitAgent: async () => { exits++; return { ok: true }; } },
+    subagents: { stopParent: async () => { children++; } },
+  });
+  try {
+    const initial = workflow.stopExternalTurn("existing");
+    await observed;
+    const one = workflow.stopExternalTurn("existing", { owner: "same", releaseAgent: true });
+    const two = workflow.stopExternalTurn("existing", { owner: "same", releaseAgent: true });
+    releaseObservation();
+    await Promise.all([initial, one, two]);
+    assert.equal(exits, 1, "one verified host exit after the interrupt-only operation");
+    assert.equal(children, 1, "one descendant shutdown");
+    assert.equal(interrupts, 2, "the two release upgrades share their settlement check");
+  } finally { releaseObservation(); workflow.dispose(); }
+});
+
+test("follow-ups and warmed sessions wait for Stop to exit the host before checking its restoration", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  for (const warmed of [false, true]) {
+    let finishExit, exitStarted, alive = true, resumes = 0, spawns = 0;
+    const hostExiting = new Promise(resolve => { exitStarted = resolve; });
+    const exitGate = new Promise(resolve => { finishExit = resolve; });
+    const sent = [], checks = [];
+    const workflow = workflowInternals({
+      requestHeadless: async endpoint => endpoint.endsWith("/reserve") ? { ok: true, request_key: "k", prompt: "follow-up" } : { ok: true, run: {} },
+      aoHarness: {
+        observe: async () => ({ exited: !alive, turnState: "completed", status: alive ? "idle" : "exited" }),
+        exitAgent: async () => { exitStarted(); await exitGate; alive = false; return { ok: true }; },
+        continuable: async () => { checks.push(alive); if (!alive) { resumes++; alive = true; } return true; },
+        send: async id => { if (!alive) throw new Error("CHAT_CONTROLLER_NOT_READY"); sent.push(id); return { turnId: "next-turn" }; },
+        spawn: async () => { spawns++; return "replacement"; },
+      },
+    });
+    try {
+      const stopping = workflow.stopExternalTurn("existing", { owner: "old", releaseAgent: true, completed: true });
+      await hostExiting;
+      if (warmed) workflow.warm.set(workflow.warmKey("ws", route, true), { session: "existing", route, promise: Promise.resolve("existing"), started: 0 });
+      else workflow.continuations.set("new", { session: "existing", text: "follow-up" });
+      const dispatching = workflow.dispatchExternal("ws", "new", { id: "next", role: "planner", route }, 1, true, true);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.deepEqual(checks, [], "readiness must not be sampled while the old Stop will still exit this host");
+      finishExit();
+      await Promise.all([stopping, dispatching]);
+      assert.deepEqual(sent, ["existing"]);
+      assert.equal(resumes, 1, "the exact retained session is resumed after host shutdown");
+      assert.equal(spawns, 0, "no replacement or context loss");
+    } finally { finishExit(); workflow.dispose(); }
+  }
+});
+
+test("Stop retries failed descendant shutdown after the parent's host has already exited", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const mission = { id: "run", workspace_id: "ws", nodes: [
+    { id: "one", state: "cancelled", route, receipt: { thread_id: "parent", request_key: "k", status: "held" } },
+  ] };
+  let exited = false, childAttempts = 0, interrupts = 0;
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async endpoint => ({ ok: true, ...(endpoint.endsWith("/read") ? { runs: [mission] } : { run: mission }) }),
+    aoHarness: {
+      observe: async () => ({ exited, turnState: "interrupted", status: exited ? "exited" : "ready" }),
+      interrupt: async () => { interrupts++; if (exited) throw new Error("CHAT_CONTROLLER_NOT_READY"); },
+      exitAgent: async () => { exited = true; return { ok: true }; },
+    },
+    subagents: { stopParent: async () => { if (++childAttempts === 1) throw new Error("descendant shutdown failed"); } },
+  });
+  const stop = () => workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" });
+  try {
+    await assert.rejects(stop(), /descendant shutdown failed/);
+    assert.equal(exited, true);
+    assert.equal((await stop()).ok, true);
+    assert.equal(childAttempts, 2, "the failed child is retried even though its parent is already gone");
+    assert.equal(interrupts, 1, "an observed exited parent needs no nonexistent-controller interrupt");
+  } finally { workflow.dispose(); }
+});
+
+test("Stop disables the local driver before a queued receipt snapshot can return", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const mission = { id: "run", workspace_id: "ws", revision: 1, execution_mode: "single",
+    nodes: [{ id: "next", role: "planner", state: "pending", parents: [], route }] };
+  let releaseSnapshot, snapshotStarted, reads = 0, dispatched = 0;
+  const snapshot = new Promise(resolve => { releaseSnapshot = resolve; });
+  const started = new Promise(resolve => { snapshotStarted = resolve; });
+  const state = { stopped: false, status: "running" };
+  const workflow = workflowInternals({
+    requestHeadless: async endpoint => {
+      if (endpoint.endsWith("/read")) {
+        if (++reads === 1) { snapshotStarted(); await snapshot; }
+        return { ok: true, runs: [structuredClone(mission)], worker_capacity: { run: 1 } };
+      }
+      if (endpoint.endsWith("/reserve")) return { ok: true, request_key: "k", prompt: "next card" };
+      if (endpoint.endsWith("/submitted")) { mission.nodes[0].state = "finished"; return { ok: true, run: structuredClone(mission) }; }
+      return { ok: true, run: structuredClone(mission) };
+    },
+    aoHarness: { spawn: async () => { dispatched++; return "unwanted"; }, exitAgent: async () => ({ ok: true }),
+      observe: async () => ({ exited: true, turnState: "completed", status: "exited" }) },
+  });
+  workflow.backgroundRuns.set(workflow.runKey("ws", "run"), state);
+  const stopping = workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" });
+  try {
+    await started;
+    await workflow.driveRun("ws", "run", process.execPath, state);
+    assert.equal(dispatched, 0, "the driver must not dispatch another card while Stop's receipt read is queued");
+    assert.equal(state.stopped, true);
+    assert.equal(reads, 1, "the stopped driver must not start another read");
+  } finally {
+    state.stopped = true;
+    releaseSnapshot();
+    await stopping.catch(() => undefined);
+    workflow.dispose();
+  }
 });
