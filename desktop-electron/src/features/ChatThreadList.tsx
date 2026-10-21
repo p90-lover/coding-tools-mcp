@@ -121,20 +121,27 @@ export function archivedGroups(chats: ArchivedChat[], workspaces: ThreadWorkspac
 
 const SHORTCUTS = { rename: "Alt+Ctrl+R", pin: "Alt+Ctrl+P", unread: "Ctrl+Shift+U", archive: "Ctrl+Shift+A" };
 
-/** Chats that are doing something or waiting on you; they stay on top while that setting is on. */
+/** Chats that are doing something or waiting on you (a project card's "N active"). */
 const ACTIVE: ReadonlySet<ChatStatus> = new Set(["running", "queued", "attention"]);
+/** Chats that are working right now; they stay on top while that setting is on. */
+const WORKING: ReadonlySet<ChatStatus> = new Set(["running", "queued"]);
 
 /**
- * The list's order: active chats first (when keepActiveOnTop); then chats you haven't placed yet,
- * newest first, so a new chat appears at the top as in Codex; then the order you dragged chats
- * into. Each group keeps that order, so dragging works among active chats too.
+ * The list's order: working chats first (when keepActiveOnTop), and chats waiting on you until you
+ * place them; then chats you haven't placed yet, newest first, so a new chat appears at the top as
+ * in Codex; then the order you dragged chats into. Each group keeps that order.
+ *
+ * A chat waiting on you was always kept on top, so one could never be dragged anywhere else: it
+ * jumped back at once. Such chats can sit for days, and a list full of them could not be ordered
+ * at all. Placed by hand, one stays where you put it; a new run releases it (releaseUsedChats).
  */
 export function orderChats<T extends { taskId: string; status: ChatStatus }>(chats: T[], manual: string[], keepActiveOnTop: boolean): T[] {
   const position = new Map(manual.map((id, index) => [id, index]));
   const recent = new Map(chats.map((chat, index) => [chat.taskId, index]));
   const rank = (chat: T) => position.get(chat.taskId) ?? (recent.get(chat.taskId) ?? 0) - chats.length;
+  const onTop = (chat: T) => WORKING.has(chat.status) || (chat.status === "attention" && !position.has(chat.taskId));
   return [...chats].sort((a, b) =>
-    (keepActiveOnTop ? Number(ACTIVE.has(b.status)) - Number(ACTIVE.has(a.status)) : 0) || rank(a) - rank(b));
+    (keepActiveOnTop ? Number(onTop(b)) - Number(onTop(a)) : 0) || rank(a) - rank(b));
 }
 
 /**
@@ -241,7 +248,7 @@ export function ChatThreadList(props: ThreadListProps) {
   /** Projects showing all their chats ("Show more"); the rest show the first `visible`. */
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   /** The chat being dragged and the list it is dragged within; where it would land, for the drop line. */
-  const [dragging, setDragging] = useState<{ list: string; id: string } | null>(null);
+  const [dragging, setDragging] = useState<{ list: string; id: string; drag: DragList; listEl: HTMLElement | null } | null>(null);
   const [dropAt, setDropAt] = useState<{ id: string; after: boolean } | null>(null);
   // Another list's order was saved (Pinned, an Archived group, another open project): render again.
   const [, setOrderTick] = useState(0);
@@ -518,34 +525,65 @@ export function ChatThreadList(props: ThreadListProps) {
    * one without a folder, Pinned, a section, Archived), and only within it; moving a chat to another
    * project is "Continue in" on its menu. The upper half of a row drops before it, the lower half after.
    */
+  const endDrag = () => { setDragging(null); setDropAt(null); };
+  /**
+   * A drop anywhere over the list the chat came from (its rows, the gaps between them, below the
+   * last one): the place the drop line last showed. Only a row took the drop before, so letting go
+   * between rows, below the last one or on the dragged row itself was refused (the no-entry cursor)
+   * and nothing moved, which made placing a chat fiddly. Outside that list (another project, Pinned,
+   * Archived, a button) the line goes away and the drop is refused, as before.
+   */
+  const inSourceList = (event: ReactDragEvent<HTMLElement>) => {
+    const list = dragging?.listEl;
+    return !list || Boolean(event.target && list.contains(event.target as Node));
+  };
+  const listDragOver = dragging ? (event: ReactDragEvent<HTMLElement>) => {
+    if (!inSourceList(event)) { if (dropAt) setDropAt(null); return; }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+  } : undefined;
+  const listDrop = (event: ReactDragEvent<HTMLElement>) => {
+    event.preventDefault();
+    if (dragging && dropAt && dropAt.id !== dragging.id && inSourceList(event)) {
+      dragging.drag.save(dropChat(dragging.drag.order, dragging.id, dropAt.id, dropAt.after));
+    }
+    endDrag();
+  };
   const dragRow = (id: string, drag: DragList | undefined) => {
-    const end = () => { setDragging(null); setDropAt(null); };
-    if (!drag) return { onDragEnd: end };
-    const over = dragging?.list === drag.list && dragging.id !== id;
+    if (!drag) return { onDragEnd: endDrag };
+    const sameList = dragging?.list === drag.list;
     const lower = (event: ReactDragEvent<HTMLElement>) => {
       const box = event.currentTarget.getBoundingClientRect();
       return event.clientY > box.top + box.height / 2;
     };
     return {
       draggable: true,
-      "data-drop": over && dropAt?.id === id ? (dropAt.after ? "after" : "before") : undefined,
+      "data-drop": sameList && dragging?.id !== id && dropAt?.id === id ? (dropAt.after ? "after" : "before") : undefined,
       onDragStart: (event: ReactDragEvent<HTMLElement>) => {
-        setDragging({ list: drag.list, id });
+        // The list element the row sits in: drops count only over it (inSourceList).
+        setDragging({ list: drag.list, id, drag, listEl: event.currentTarget.parentElement ?? null });
         event.dataTransfer.effectAllowed = "move";
         event.dataTransfer.setData("text/plain", id);
+        // The browser's own drag image is a see-through copy of the row a few pixels off it, which
+        // read as the chat crossed out and hid the drop line; a small label beside the pointer instead.
+        if (typeof document !== "undefined" && typeof event.dataTransfer.setDragImage === "function") {
+          const ghost = document.createElement("div");
+          ghost.className = "cx-drag-ghost";
+          ghost.textContent = event.currentTarget.querySelector(".cx-thread-title")?.textContent ?? "Chat";
+          document.body.appendChild(ghost);
+          event.dataTransfer.setDragImage(ghost, -14, -6);
+          window.setTimeout(() => ghost.remove(), 0);
+        }
       },
-      onDragOver: over ? (event: ReactDragEvent<HTMLElement>) => {
+      // Over the dragged row itself the line goes away: letting go there leaves the chat in place.
+      onDragOver: sameList ? (event: ReactDragEvent<HTMLElement>) => {
         event.preventDefault();
         event.dataTransfer.dropEffect = "move";
+        if (dragging?.id === id) { if (dropAt) setDropAt(null); return; }
         const after = lower(event);
         if (dropAt?.id !== id || dropAt.after !== after) setDropAt({ id, after });
       } : undefined,
-      onDrop: (event: ReactDragEvent<HTMLElement>) => {
-        event.preventDefault();
-        if (over && dragging) drag.save(dropChat(drag.order, dragging.id, id, lower(event)));
-        end();
-      },
-      onDragEnd: end,
+      onDragEnd: endDrag,
     };
   };
   const isDragged = (id: string, drag: DragList | undefined) => Boolean(drag && dragging?.list === drag.list && dragging.id === id);
@@ -624,7 +662,7 @@ export function ChatThreadList(props: ThreadListProps) {
     onBlur={commitNaming} />;
   const projectOrder = orderProjects(workspaces, props.pinnedProjects, projectUsedAt);
   return (
-    <aside className="cx-threads" aria-label="Projects and chats">
+    <aside className="cx-threads" aria-label="Projects and chats" onDragOver={listDragOver} onDrop={listDrop}>
       <button type="button" className="cx-new-chat" aria-pressed={!selectedTaskId} onClick={actions.newChat}>
         <Icon name="plus" width="15" height="15" />New chat
       </button>
