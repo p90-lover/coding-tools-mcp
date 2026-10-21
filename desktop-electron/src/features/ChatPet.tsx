@@ -209,8 +209,14 @@ const REST: Pose = { look: 0, arms: "down", walking: false, sit: false };
 const pick = <T,>(items: readonly T[]) => items[Math.floor(Math.random() * items.length)]!;
 const WORK: readonly Job[] = ["laptop", "laptop", "search", "build", "carry"];
 
-/** The box's outline as one loop: its size, and the spot and side at a distance around it. */
-type Loop = { width: number; height: number; length: number };
+/**
+ * The box's outline as one loop: its size, and the spot and side at a distance around it. `beside`:
+ * there is room for the house to the box's right (it stood on the box's top edge, over the corner of
+ * the text box; the user wanted it beside the box).
+ */
+type Loop = { width: number; height: number; length: number; beside: boolean };
+/** The gap between the box's right edge and a house standing beside it. */
+const HOUSE_GAP = 10;
 function spotAt(loop: Loop, at: number): { x: number; y: number; side: 0 | 1 | 2 | 3 } {
   const { width: w, height: h, length } = loop;
   const s = ((at % length) + length) % length;
@@ -219,8 +225,13 @@ function spotAt(loop: Loop, at: number): { x: number; y: number; side: 0 | 1 | 2
   if (s < 2 * w + h) return { x: w - (s - w - h), y: h, side: 2 };
   return { x: 0, y: h - (s - 2 * w - h), side: 3 };
 }
-/** Where the house stands on the top edge: its left side, in from the box's right end. */
+/** Where the house stands on the top edge (with no room beside the box): its left side, in from the box's right end. */
 const houseLeft = (loop: Loop) => Math.max(0, loop.width - HOUSE_W - HOUSE_INSET);
+/** The house's top-left corner, from the box's: beside the box on its right, its floor level with
+ *  the box's bottom, or on the top edge when there is no room beside it. */
+const housePlace = (loop: Loop) => loop.beside
+  ? { left: loop.width + HOUSE_GAP, top: loop.height - HOUSE_H }
+  : { left: houseLeft(loop), top: -HOUSE_H };
 /** `along` (a distance from the top-left corner, under one lap) on the lap nearest `near`. */
 const nearLap = (loop: Loop, along: number, near: number) => along + Math.round((near - along) / loop.length) * loop.length;
 
@@ -311,12 +322,19 @@ export function ChatPet({ mood, context, onHide }: {
     composer.current = parent;
     const measure = () => {
       const width = parent.offsetWidth, height = parent.offsetHeight;
-      if (width > 0 && height > 0) setLoop({ width, height, length: 2 * (width + height) });
+      if (!(width > 0 && height > 0)) return;
+      // Room for the house to the right of the box, inside the window.
+      const right = parent.getBoundingClientRect().right;
+      const beside = right + HOUSE_GAP + HOUSE_W + 8 <= document.documentElement.clientWidth;
+      setLoop((current) => current && current.width === width && current.height === height && current.beside === beside
+        ? current : { width, height, length: 2 * (width + height), beside });
     };
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(parent);
-    return () => observer.disconnect();
+    // The window narrowing can take the room beside the box away without resizing the box.
+    window.addEventListener("resize", measure);
+    return () => { observer.disconnect(); window.removeEventListener("resize", measure); };
   }, []);
   // First placement: the saved fraction of the way round, else near the top-right corner.
   useEffect(() => {
@@ -358,15 +376,17 @@ export function ChatPet({ mood, context, onHide }: {
     return rects.some((found) => found.left < frame.left + right && found.right > frame.left + left
       && found.top < frame.top + bottom && found.bottom > frame.top + top);
   };
-  /** Where Clawd stands to be inside its house: behind the house's middle, on the top edge. */
+  /** Where Clawd walks to go in: behind the house's middle on the top edge, or, with the house beside
+   *  the box, the top edge's right end, from where it hops in. */
   const homeSpot = () => {
     const current = loopNow.current;
-    return current ? nearLap(current, houseLeft(current) + HOUSE_W / 2, atNow.current) : atNow.current;
+    if (!current) return atNow.current;
+    return nearLap(current, current.beside ? current.width - WIDTH / 2 : houseLeft(current) + HOUSE_W / 2, atNow.current);
   };
   /** Whether standing at `spot` would leave it half behind the house: it only stops there to go in. */
   const inHouse = (spot: number) => {
     const current = loopNow.current;
-    if (!current) return false;
+    if (!current || current.beside) return false;
     const { x, side } = spotAt(current, spot);
     const left = houseLeft(current);
     return side === 0 && x > left - WIDTH / 2 && x < left + HOUSE_W + WIDTH / 2;
@@ -788,6 +808,11 @@ export function ChatPet({ mood, context, onHide }: {
   const placement: CSSProperties = ride
     ? { position: "fixed", left: ride.x - WIDTH / 2, top: ride.y - HEIGHT + 4, zIndex: 60, pointerEvents: "none",
       transition: ride.mode === "riding" ? "none" : "left .42s ease-out, top .42s cubic-bezier(.3,-.7,.6,1)" }
+    // Home in a house beside the box: upright in the middle of its room, off the box's outline.
+    : loop && home && loop.beside ? (() => {
+      const place = housePlace(loop);
+      return { left: place.left + HOUSE_W / 2 - WIDTH / 2, top: place.top + HOUSE_H - HEIGHT, transform: "none" };
+    })()
     : loop && !Number.isNaN(at) ? (() => {
       const { x, y } = spotAt(loop, at);
       // Turned to its side, "up" is away from the box, so its lift is a move up after the turn.
@@ -832,8 +857,8 @@ export function ChatPet({ mood, context, onHide }: {
   </div>;
   // The room behind Clawd, the roof and walls in front of it: with the front open, it shows inside.
   const house = loop ? <>
-    <div className="cx-pet-house-spot is-inside" style={{ left: houseLeft(loop), top: -HOUSE_H }}><HouseInside home={home} asleep={asleep} /></div>
-    <div className="cx-pet-house-spot" style={{ left: houseLeft(loop), top: -HOUSE_H }}>
+    <div className="cx-pet-house-spot is-inside" style={housePlace(loop)}><HouseInside home={home} asleep={asleep} /></div>
+    <div className="cx-pet-house-spot" style={housePlace(loop)}>
       <House home={home} asleep={asleep} onKnock={() => { if (!wake()) goHome(false); }} />
     </div>
   </> : null;

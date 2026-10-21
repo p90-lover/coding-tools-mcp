@@ -4,7 +4,35 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { createAgentOrchestratorWorkflow } = require("../electron/agent-orchestrator-workflow.cjs");
 
-const { routineCommand } = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }) });
+const { routineCommand, readOnlyInspection } = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }) });
+
+const FOLDER = "F:\\clash of clan macro";
+
+test("read-only inspection inside the workspace folder is allowed: listing, reading, filtering, piped and branched", () => {
+  for (const command of [
+    // The request the reviewer answered "ask" ("may expose credentials") for the project's own config.
+    "Get-ChildItem 'F:\\clash of clan macro' -Filter 'config.json' | Select-Object FullName,Length,LastWriteTime; if (Test-Path 'F:\\clash of clan macro\\config.json') { Get-Content 'F:\\clash of clan macro\\config.json' -Raw | Select-Object -First 1 }",
+    "Get-ChildItem -Recurse -Filter *.py | Where-Object { $_.Length -gt 1000 } | Sort-Object Length | Select-Object -First 10",
+    "Get-Content scripts\\api.js | Select-String 'login'", "if (-not (Test-Path 'models')) { 'missing' } else { Get-ChildItem models }",
+    "dir /b", "type README.md", "cat src/app.ts | head -n 40", "rg -n \"TODO\" src", "findstr /i token src\\config.py",
+  ]) assert.ok(readOnlyInspection(command, FOLDER), `inspection: ${command}`);
+  // A command run in a subfolder of the project stays inside it.
+  assert.ok(readOnlyInspection("Get-ChildItem", FOLDER, "F:\\clash of clan macro\\scripts"));
+});
+
+test("anything that writes, runs code, reads outside the folder or reads the environment still goes to the reviewer", () => {
+  for (const command of [
+    "Get-Content 'C:\\Users\\simon\\.ssh\\id_rsa'", "Get-ChildItem 'F:\\other project'", "type ..\\secrets.txt", "cat ~/notes",
+    "Get-ChildItem -Path:C:\\Windows", "Get-Content $env:USERPROFILE\\x", "Get-Content $path", "echo $env:API_KEY",
+    "Get-Content x > y", "Get-ChildItem | Remove-Item", "Get-ChildItem | ForEach-Object { Remove-Item $_ }",
+    "Set-Content config.json '{}'", "Invoke-Expression 'dir'", "iex 'dir'", "& 'tool.exe'", ". ./script.ps1",
+    "(Get-Item x).Delete()", "Get-Content x; $a = 1", "[IO.File]::ReadAllText('x')", "Get-Content $(whoami)",
+    "Start-Process notepad", "python script.py", "Get-ChildItem `\n Remove-Item x", "ls /etc", "",
+  ]) assert.equal(readOnlyInspection(command, FOLDER), null, `not inspection: ${JSON.stringify(command)}`);
+  // No folder known, or a command run outside the project: the reviewer decides.
+  assert.equal(readOnlyInspection("Get-ChildItem", null), null);
+  assert.equal(readOnlyInspection("Get-ChildItem", FOLDER, "C:\\Windows"), null);
+});
 
 test("Approve for me runs routine project commands without asking: lockfile installs, project scripts, checks", () => {
   for (const command of [
