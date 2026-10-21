@@ -225,8 +225,11 @@ function DshFlow({ items, grouped, hideReply }: { items: ChatLiveItem[]; grouped
 
 function DshStepWork({ step, useWork, answer }: { step: ChatStep; useWork: UseStepWork; answer?: string }) {
   const work = useWork(step, true) ?? [];
-  if (!work.length) return step.hasWork && !step.working ? <p className="dsh-hint">Loading…</p> : null;
-  return <DshFlow items={work} grouped={!step.working} hideReply={answer} />;
+  // A retried single card's earlier attempts come first, folded, as in a team card's row: they were
+  // not shown at all here, and the other view drew them under the new attempt's work.
+  const earlier = <EarlierRounds rounds={step.earlier} />;
+  if (!work.length) return <>{earlier}{step.hasWork && !step.working ? <p className="dsh-hint">Loading…</p> : null}</>;
+  return <>{earlier}<DshFlow items={work} grouped={!step.working} hideReply={answer} /></>;
 }
 
 /** A team card as one row: its name and what it is doing or how it ended, opening on its own work. */

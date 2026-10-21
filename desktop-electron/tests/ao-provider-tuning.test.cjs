@@ -29,7 +29,10 @@ test("AO model catalogs retain native efforts and CPA's advertised levels/contex
   assert.deepEqual(result.capabilities["cpa/gemini-3.8-flash-high"].efforts, ["low", "medium", "high"]);
   assert.equal(result.capabilities["cpa/gemini-3.8-flash-high"].contextLimit, 1048576);
   assert.equal(result.capabilities["cpa/gemini-3.8-flash-high"].contextWindow.max, 1048576);
-  assert.deepEqual(result.capabilities["cpa/claude-sonnet-4-6"].efforts, []);
+  // The one exception to inventing nothing: CPA lists Claude with no levels, but its suffix still
+  // turns thinking on (tried 2026-10-21: "claude-sonnet-4-6(low|medium|high|max)" answered with a
+  // thinking block, the bare name without one).
+  assert.deepEqual(result.capabilities["cpa/claude-sonnet-4-6"].efforts, ["low", "medium", "high", "max"]);
 });
 
 test("classic CPA catalog remains usable but absent capabilities are not invented", async () => {
@@ -193,9 +196,10 @@ test("every provider plugin's model reaches CPA by its bare name, by namespace o
   const levels = [{ effort: "low" }, { effort: "high" }];
   const catalog = [...DISPATCH_CATALOG, { slug: "commandcode-go/deepseek-v4.1-flash", supported_reasoning_levels: levels },
     { slug: "kimi-k3", owned_by: "kimi", supported_reasoning_levels: levels }];
-  for (const model of ["cpa/commandcode-go/deepseek-v4.1-flash", "cpa/commandcode-go/deepseek-v4.1-flash(high)"]) {
+  // Command Code's plugin 1.0.0-codingtools.2 reads the suffix as the request's reasoning level.
+  for (const model of ["cpa/commandcode-go/deepseek-v4.1-flash", "cpa/commandcode-go/deepseek-v4.1-flash(low)"]) {
     const input = await dispatched("claude-code", model, { effort: "high" }, catalog);
-    assert.deepEqual(input.gateway, { provider: "cpa", model: "commandcode-go/deepseek-v4.1-flash" }, "no suffix is added, a saved one is dropped");
+    assert.deepEqual(input.gateway, { provider: "cpa", model: "commandcode-go/deepseek-v4.1-flash(high)" }, "the picked level is its suffix");
   }
   const owned = await dispatched("opencode", "cpa/kimi-k3", { effort: "high" }, catalog);
   assert.equal(owned.model, "openai/kimi-k3", "a plugin model without a namespace is known by its owner");
@@ -208,10 +212,10 @@ test("every provider plugin's model reaches CPA by its bare name, by namespace o
     aoHarness: { models: async () => [] },
   });
   const { capabilities } = await workflow.call("models", { harness: "ao:claude-code", workspaceId: "ws" });
-  for (const id of ["cpa/commandcode-go/deepseek-v4.1-flash", "cpa/kimi-k3"]) {
-    assert.deepEqual(capabilities[id].efforts, [], id);
-    assert.match(capabilities[id].effortReason, /provider plugin/, `${id} says why it takes no level`);
-  }
+  assert.deepEqual(capabilities["cpa/commandcode-go/deepseek-v4.1-flash"].efforts, ["none", "low", "medium", "high", "max"],
+    "Command Code's plugin reads the suffix");
+  assert.deepEqual(capabilities["cpa/kimi-k3"].efforts, [], "cpa/kimi-k3");
+  assert.match(capabilities["cpa/kimi-k3"].effortReason, /provider plugin/, "cpa/kimi-k3 says why it takes no level");
   assert.deepEqual(capabilities["cpa/gpt-5.5"].efforts, ["low", "high"]);
 });
 

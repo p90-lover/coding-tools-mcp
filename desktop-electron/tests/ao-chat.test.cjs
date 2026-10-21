@@ -105,6 +105,11 @@ test("a DeepSeek turn's live heading, Think line and durations read as DeepSeek 
   assert.equal(chat.dshLiveTitle([item("reasoning", { text: "x" }), item("command", { status: "running", text: "npm test" })]).label, "Running commands · npm test");
   assert.equal(chat.dshLiveTitle([item("command"), item("reasoning", { text: "First idea.\n\n**Second** idea" })]).label,
     "Analyzing the request · Second idea", "no call running: the latest thought's last paragraph, ** dropped");
+  // A request nobody answered holds the turn; it said "Running commands" for 85 minutes.
+  const waiting = chat.dshLiveTitle([item("command", { status: "running", text: "Invoke-RestMethod :7411" }), item("approval", { status: "pending", text: "PowerShell" })]);
+  assert.deepEqual(plain(waiting), { activity: "questions", label: "Waiting for approval · Invoke-RestMethod :7411" });
+  assert.equal(chat.dshLiveTitle([item("approval", { status: "resolved" }), item("command", { status: "running", text: "ls" })]).label, "Running commands · ls",
+    "an answered request no longer holds it");
   // ReasoningRow.tsx: settled, the first line; streaming, the newest completed paragraph's first line.
   assert.equal(chat.dshThinkSummary("**Checking health**\nmore", false), "Checking health");
   assert.equal(chat.dshThinkSummary("Let me check health.\nok\n\nNow the configs\nstill typing", true), "Now the configs");
@@ -1455,6 +1460,7 @@ test("the approvals poll skips a card whose attempt changed mid-read instead of 
   const timers = [];
   const effect = rendererCallback("AgentOrchestratorSurface.tsx", "effect:approvalScope.current", {
     Error, STALE_OBSERVE: /AO receipt changed/, activeNodeIds: JSON.stringify(["old", "live"]),
+    // #463: the poll asks only for a run of this project (selectedRunHere).
     workspaceId: "w1", selectedRunId: "run1", selectedRunHere: true, autoStatus: "idle", surfaceHidden: () => false,
     approvalScope: { current: null }, selection: { current: { workspaceId: "w1", runId: "run1" } },
     setPendingApprovals: value => { state.approvals = value; }, setRuntimePolicies: value => { state.policies = value; },
@@ -1508,4 +1514,41 @@ test("the approvals poll asks nothing for a run the open project does not have y
   assert.deepEqual(calls, [], "no observe for a run of another project");
   assert.deepEqual(errors, []);
   cleanup?.();
+});
+test("the approvals poll asks nothing about a run still selected from the previous project", async () => {
+  // Seen in the launcher log: 25 observe and 35 harness_status failures "AO run not found in this workspace".
+  const calls = [];
+  const effect = rendererCallback("AgentOrchestratorSurface.tsx", "effect:approvalScope.current", {
+    Error, STALE_OBSERVE: /AO receipt changed/, activeNodeIds: JSON.stringify(["n1"]),
+    workspaceId: "w2", selectedRunId: "run-from-w1", selectedRunHere: false, autoStatus: "running", surfaceHidden: () => false,
+    approvalScope: { current: null }, selection: { current: { workspaceId: "w2", runId: "run-from-w1" } },
+    setPendingApprovals: () => {}, setRuntimePolicies: () => {}, setMissions: () => {}, setError: () => {},
+    setInterval: () => { calls.push("timer"); return 1; }, clearInterval: () => {},
+    moduleCall: async (op) => { calls.push(op); return {}; },
+  });
+  effect();
+  await new Promise(setImmediate);
+  assert.deepEqual(calls, [], "no poll starts until the run belongs to this project");
+});
+test("the chat list's clock stops while the window is hidden and ticks as soon as it is shown", () => {
+  // Seen in the launcher log: minimized, each minute's tick re-read other open projects' chats and
+  // was refused, "Open the Coding Tools window (not minimized)" (9 board + runs pairs).
+  let hidden = true, interval = null, cleared = false;
+  const listeners = new Map(), ticks = [];
+  const effect = rendererCallback("AgentOrchestratorSurface.tsx", "effect:setListNow(Date.now())", {
+    Date, pageHidden: () => hidden, setListNow: value => ticks.push(value),
+    window: { setInterval: (callback, ms) => { interval = { callback, ms }; return 7; }, clearInterval: id => { cleared = id === 7; } },
+    document: { addEventListener: (type, callback) => listeners.set(type, callback), removeEventListener: (type, callback) => { if (listeners.get(type) === callback) listeners.delete(type); } },
+  });
+  const cleanup = effect();
+  assert.equal(interval.ms, 60_000);
+  interval.callback();
+  assert.equal(ticks.length, 0, "no tick, so no reads, while minimized");
+  hidden = false;
+  listeners.get("visibilitychange")();
+  assert.equal(ticks.length, 1, "shown again, it ticks at once");
+  interval.callback();
+  assert.equal(ticks.length, 2, "and every minute while shown");
+  cleanup();
+  assert.ok(cleared && !listeners.has("visibilitychange"), "unmounting stops both");
 });

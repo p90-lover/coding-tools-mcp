@@ -77,6 +77,15 @@ function ToolButton({ icon, label, onClick, disabled, primary, pressed }: { icon
   return <button type="button" className={`ao-tool${primary ? " is-primary" : ""}`} aria-label={label} title={label} aria-pressed={pressed} disabled={disabled} onClick={onClick}><Glyph name={icon} /></button>;
 }
 
+// How long a request the "Approve for me" reviewer has not answered stays hidden. One review takes
+// at most ~50 s (25 s, then 25 s more to decide); past that, nothing is screening it.
+const REVIEW_GRACE_MS = 120_000;
+/**
+ * A chat message refused only for the moment: the chat started working again under it (its
+ * automatic retry), or the app window was not in front. The chat keeps it at the front of its queue
+ * and sends it as soon as it can, so it is no "Something went wrong".
+ */
+const QUIET_SEND_REFUSAL = /still running|focused app window/i;
 const OVERVIEW_RATIO_KEY = "coding-tools:ao:overview-ratio:v1";
 const OVERVIEW_DIVIDER = 8;
 
@@ -586,7 +595,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
   // reading it while this filter runs during render threw "Cannot access … before initialization"
   // (the window's render error, every time a request was pending).
   const approvalRun = missions.find((mission) => mission.id === selectedRunId);
-  const shownApprovals = pendingApprovalsHere.filter((approval) => !approval.awaiting_review && !approvalAnsweredForYou(approval,
+  // A request still awaiting review after REVIEW_GRACE_MS is shown after all: when nothing was
+  // screening it (the run's loop had stopped, or its reads of the chat failed), it stayed hidden while
+  // the agent waited on it, and a long task sat "may be stuck" for hours.
+  const shownApprovals = pendingApprovalsHere.filter((approval) => !(approval.awaiting_review && Date.now() - seenAt(approval) < REVIEW_GRACE_MS) && !approvalAnsweredForYou(approval,
     approvalRun?.nodes.find((node) => node.id === approval.nodeId)?.route as { approval_policy?: string; approvals_reviewer?: string } | undefined,
     Date.now() - seenAt(approval), Boolean(approvalRun?.nodes.some((node) => node.role === "approver")))).map((approval) => {
     const note = dependencyInstallNote(approval.command, dependencyLinks?.workspaceId === workspaceId ? dependencyLinks.links : null);
@@ -1560,7 +1572,14 @@ export function AgentOrchestratorSurface({ language, setError }: {
         setAutoStatus(startNotice(result) ? "idle" : typeof result.status === "string" ? result.status : "running");
         resolve();
         void Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]).catch(cause => setError(cause instanceof Error ? cause.message : String(cause)));
-      } catch (cause) { if (current() && !input.taskId) setPendingChat(null); reject(cause); throw cause; }
+      } catch (cause) {
+        if (current() && !input.taskId) setPendingChat(null);
+        reject(cause);
+        // Refused only for now (the chat started working again under the message, or the window was
+        // not in front): the chat queues the message and says so; no "Something went wrong" toast.
+        if (input.taskId && QUIET_SEND_REFUSAL.test(cause instanceof Error ? cause.message : String(cause))) return;
+        throw cause;
+      }
     });
   });
   // Steering goes straight to the running agent, outside run()'s one-action-at-a-time lock: it must
@@ -1575,7 +1594,12 @@ export function AgentOrchestratorSurface({ language, setError }: {
       return result.steered === true ? true : result.interrupted === true ? "interrupt" as const : result.restarted === true ? "restart" as const
         : result.starting === true ? "starting" as const
         : result.waiting === true ? "wait" as const : false;
-    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); throw cause; }
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      // The chat waits for focus and steers it in then (see QUIET_SEND_REFUSAL).
+      if (!QUIET_SEND_REFUSAL.test(message)) setError(message);
+      throw cause;
+    }
   };
   // Have the agent the next message needs running before it is sent, so sending does not wait half
   // a minute for a launch: the selected model's (or the team's orchestrator) on a new chat, and on an
@@ -1792,8 +1816,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
             : { response: reply as JsonObject, threadId: approval.thread_id!, turnId: approval.turn_id! }) })
         // Answered already (by the reviewer, or in another window) before this click arrived: the
         // card just goes, as the next poll would take it away; it is not an error to report.
+        // An AO tool request says "AO tool request is no longer pending": seen in the launcher log on a
+        // list_windows card clicked while its reviewer was still answering, it showed as an error.
         .catch((cause: unknown) => {
-          if (/CHAT_REQUEST_NOT_PENDING|no longer waiting/.test(cause instanceof Error ? cause.message : String(cause))) return {} as Record<string, unknown>;
+          if (/CHAT_REQUEST_NOT_PENDING|no longer waiting|no longer pending/.test(cause instanceof Error ? cause.message : String(cause))) return {} as Record<string, unknown>;
           throw cause;
         });
       if (!result.cancelled && mounted.current && selection.current.workspaceId === owner.workspaceId && selection.current.runId === owner.runId) {
@@ -1875,9 +1901,15 @@ export function AgentOrchestratorSurface({ language, setError }: {
       lastChatStatus.current[entry.taskId] = entry.status;
     }
   }, [missions]);
+  // The chat list's clock (its "5m ago" times, and the refresh of other open projects' chats) stops
+  // while the window is hidden and ticks as soon as it is shown again. Minimized, each tick's reads
+  // were refused ("Open the Coding Tools window (not minimized)": 9 board + runs pairs a minute
+  // apart in the launcher log).
   useEffect(() => {
-    const timer = window.setInterval(() => setListNow(Date.now()), 60_000);
-    return () => window.clearInterval(timer);
+    const tick = () => { if (!pageHidden()) setListNow(Date.now()); };
+    const timer = window.setInterval(tick, 60_000);
+    document.addEventListener("visibilitychange", tick);
+    return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", tick); };
   }, []);
   // Every message names how its card runs; working cards also show runtime and current step.
   // A single-model chat's one card is stored as the planner; it is no orchestrator, so no role is shown.

@@ -422,6 +422,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // by their name and ended.
   const WARM_NAME = "Coding Tools · ready";
   const WARM_TTL_MS = 15 * 60_000;
+  // How long a warm start may run before a launch stops waiting for it (takeWarm): one alone on a
+  // busy machine was ready in 20 s.
+  const WARM_START_BUDGET_MS = 45_000;
   // Opening chats warms agents too; keep only the newest few so browsing does not pile them up.
   const WARM_MAX = 2;
   const warm = new Map(); // key -> { promise, session?, timer }
@@ -567,12 +570,24 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       warmLog("miss", { model: route?.model ?? null, waiting: warm.size, differs: near ?? null });
       return null;
     }
-    // Still starting: waiting for it held the launch for up to AO's whole start timeout, and the
-    // launch's own start would queue behind it in AO anyway. The launch starts its own session;
-    // this one stays for the next new chat on the route, ended by WARM_TTL_MS or eviction.
+    // Still starting: the launch waits for it, up to WARM_START_BUDGET_MS from when it began. A
+    // launch that started its own beside it ran two cold starts at once on a busy machine: each
+    // took over a minute (62 s and 68 s, seen live) where one alone took 20 s, so the message
+    // waited a minute for an agent that was 15 s from ready. One older than the budget is stuck:
+    // the launch starts its own as before, and this one stays for the next new chat.
     if (!entry.session) {
-      warmLog("not_ready", { model: entry.route.model, ageMs: now() - entry.started });
-      return null;
+      const left = WARM_START_BUDGET_MS - (now() - entry.started);
+      let timer = null;
+      const ready = left > 0 && await Promise.race([
+        entry.promise.then(() => true, () => false),
+        new Promise(resolve => { timer = setTimer(() => resolve(false), left); }),
+      ]);
+      if (timer) clearTimer(timer);
+      if (!ready || warm.get(key) !== entry) {
+        warmLog("not_ready", { model: entry.route.model, ageMs: now() - entry.started });
+        return null;
+      }
+      warmLog("waited", { model: entry.route.model, ageMs: now() - entry.started });
     }
     warm.delete(key);
     clearTimeout(entry.timer);
@@ -768,8 +783,17 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // took none: GLM 5.3 Flash's effort chip stayed greyed at "Auto" with no level to pick. Not "none"
   // (GLM always reasons: "Reasoning is mandatory") nor "ultra" (no OpenRouter level), though CPA's
   // catalog lists them for some of these models.
+  // Command Code's plugin (1.0.0-codingtools.2) reads the suffix too, as its own advertised levels;
+  // before, it dropped the suffix and a picked level never reached Command Code.
   const CLINE_EFFORT_MODELS = [[/^cline-pass\/deepseek-v4\.1-flash(?:-\d{4,8})?$/, ["none", "low", "high", "max"]],
-    [/^cline-pass\/[^()]+$/, ["minimal", "low", "medium", "high", "xhigh", "max"]]];
+    [/^cline-pass\/[^()]+$/, ["minimal", "low", "medium", "high", "xhigh", "max"]],
+    [/^commandcode-go\/[^()]+$/, ["none", "low", "medium", "high", "max"]]];
+  /**
+   * A Claude model on one of CPA's own providers (Antigravity) that CPA lists with no levels still
+   * takes its suffix: tried 2026-10-21, "claude-sonnet-4-6(low|medium|high|max)" and
+   * "claude-opus-4-6-thinking(low)" answered with a thinking block, and without one they did not.
+   */
+  const CLAUDE_SUFFIX_EFFORTS = ["low", "medium", "high", "max"];
   const CLINE_EFFORTS = { get: id => CLINE_EFFORT_MODELS.find(([pattern]) => pattern.test(String(id)))?.[1], has: id => Boolean(CLINE_EFFORTS.get(id)) };
   // Ids the last catalog read named a plugin as provider of, for launches that have only the id.
   let pluginModels = new Set();
@@ -1026,7 +1050,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       const provider = [entry.provider, entry.owned_by, entry.ownedBy].find(value => typeof value === "string" && value.trim());
       const verbatim = verbatimModel(id, provider) || verbatimModel(id, owners?.get(id));
       if (verbatim) plugins.add(id);
-      const efforts = CLINE_EFFORTS.get(id) ?? (verbatim ? [] : reportedEfforts(entry.supported_reasoning_levels ?? entry.thinking?.levels));
+      const reportedLevels = verbatim ? [] : reportedEfforts(entry.supported_reasoning_levels ?? entry.thinking?.levels);
+      const efforts = CLINE_EFFORTS.get(id) ?? (!verbatim && !reportedLevels.length && /^claude-/i.test(id) ? CLAUDE_SUFFIX_EFFORTS : reportedLevels);
       // context_window is the default the client starts with; max_context_window is how far the
       // model goes (Luna: 272K by default, up to 1M).
       // CPA gives every model of its provider plugins (cline-pass/…, commandcode-go/…) the same stock
@@ -1488,7 +1513,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   /** `key` is the CPA key to redact, when the caller read it once for many texts (publicTimeline). */
   function publicText(value, limit = 4096, keepEnd = false, key = cpaKeyToRedact()) {
     let text = String(value ?? "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
-      .replace(/Bearer\s+\S+|sk-[A-Za-z0-9_-]+/gi, "[redacted]")
+      // A key is a whole token of some length: "sk-" inside a word ("task-runner", "desk-", "risk-")
+      // was redacted, and a command that changed this way went to the person instead of the review.
+      .replace(/Bearer\s+\S+|(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{8,}/gi, "[redacted]")
       .replace(/((?:api[_-]?key|access[_-]?token|authorization)\s*[:=]\s*)[^\s,;]+/gi, "$1[redacted]");
     if (key) text = text.replaceAll(key, "[redacted]");
     return keepEnd ? text.slice(-limit) : text.slice(0, limit);
@@ -1807,13 +1834,34 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
 
   async function observe({ workspaceId, runId, nodeId } = {}) {
     const found = await savedNode(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80));
-    if (externalAgent(found.node)) return observeExternal(workspaceId, runId, found.node, found.mission);
+    if (externalAgent(found.node)) {
+      const result = await observeExternal(workspaceId, runId, found.node, found.mission);
+      screenUndriven(clean(workspaceId, 128), clean(runId, 80), found, result);
+      return result;
+    }
     const response = await requestHeadless("/api/v1/ao/harness/observe", {
       workspace_id: clean(workspaceId, 128), run_id: clean(runId, 80),
       node_id: clean(nodeId, 80),
     });
     if (response?.ok !== true) throw new Error("AO result is unavailable; inspect the run before retrying");
     return response.pending_approvals ? { ...response, pending_approvals: withAdvice(response.pending_approvals, found) } : response;
+  }
+
+  // "Approve for me" reviewed a card's requests only from its run's loop, so a card whose loop had
+  // ended (an app restart past the resume window, a loop that died) kept them waiting for the
+  // person. Seen live: a reviewer's routine `ao report --done` sat "awaiting review" for 33 hours.
+  // Whoever observes such a card (the chat's approvals poll) has its requests reviewed here, one
+  // review per run at a time; a run a loop drives is left to its loop.
+  const undrivenScreens = new Set();
+  function screenUndriven(workspaceId, runId, found, result) {
+    if (!result?.pending_approvals?.length || !found?.mission || !found?.node) return;
+    const key = runKey(workspaceId, runId);
+    const state = backgroundRuns.get(key);
+    if (state?.driving || state?.starting || undrivenScreens.has(key) || !cardApprover(found.mission, found.node)) return;
+    undrivenScreens.add(key);
+    void screenApprovals(workspaceId, runId, found.mission, [found.node], [result])
+      .then((note) => { if (note) logger?.info?.("ao.undriven_screened", { note: publicText(note, 200) }); }, () => undefined)
+      .finally(() => undrivenScreens.delete(key));
   }
 
   // The person's answers to AO requests and questions (request id -> { question, answer }), for the
@@ -2276,31 +2324,33 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const APP_TOOL_PREFIX = "mcp__coding-tools__";
   /** Codex's command-review model, which CPA serves from the ChatGPT account. */
   const AUTO_REVIEW_MODEL = "codex-auto-review";
-  const APP_TOOLS_ALLOWED = new Set(["read_file", "list_dir", "list_files", "search_text", "grep_text", "get_current_time",
-    "get_plan", "update_plan", "tool_search", "server_info", "git_status", "git_diff", "git_log", "git_show", "git_blame",
-    "view_image", "image_info", "compare_images", "check_exec_environment", "read_output", "apply_patch", "patch_check",
-    // Brings a pane of the chat forward; it shows only what already runs.
-    "show_in_chat"]);
+  // The tools a chat agent gets come from their own modules' groups, not a list kept here: a tool
+  // added to a group is covered by Approve for me at once. Before, every new tool (the subagents,
+  // the preview browser) asked the person until someone also added it to a list in this file.
+  //   - AGENT_TOOLS (chat-agent-tools.cjs): confined to the agent's worktree by the endpoint and
+  //     headless (reads, searches, git history, patches, the plan, show_in_chat, schedule_wakeup).
+  //   - PREVIEW_TOOLS: the chat's own browser, loopback pages only, each new address allowed by you.
+  //   - SUBAGENT_TOOLS: the user's own subagents, which run under the same safety rules.
+  // The terminal (TERMINAL_TOOLS) and the screen (DESKTOP_TOOLS) are not routine: their requests go
+  // to the reviewer (and the routine-command rules), apart from the terminal's two reads.
+  const { AGENT_TOOLS } = require("./chat-agent-tools.cjs");
+  const { PREVIEW_TOOLS } = require("./chat-preview.cjs");
+  const { SUBAGENT_TOOLS } = require("./subagents.cjs");
+  const TERMINAL_READS = new Set(["check_exec_environment", "read_output"]);
+  const APP_EDITS = new Set(["apply_patch", "patch_check"]);
   /** Why an app agent-tool call "Approve for me" may answer itself, or null. */
   function routineAppTool(tool) {
     const name = String(tool ?? "");
     if (!name.startsWith(APP_TOOL_PREFIX)) return null;
     const short = name.slice(APP_TOOL_PREFIX.length);
-    // The chat's own preview browser: loopback pages only, each new address allowed by the person.
-    if (/^preview_(?:open|read|screenshot|click|type|press|scroll|navigate|wait|console)$/.test(short)) {
-      return "The chat's own preview browser: pages on this machine only, each new address allowed by you";
-    }
-    // The user's own subagents (Runtime > Subagents): a subagent works in this project under the same
-    // safety rules, its requests answered as "Approve for me" answers them, so starting one does
-    // nothing the agent could not do itself. subagent_start carries the whole brief, longer than a
-    // review reads, so it waited for the person every time.
-    if (/^subagent_(?:list|start|result|status|stop)$/.test(short)) {
-      return "One of your own subagents (Runtime > Subagents), which runs under the same safety rules";
-    }
+    if (PREVIEW_TOOLS.has(short)) return "The chat's own preview browser: pages on this machine only, each new address allowed by you";
+    // subagent_start carries the whole brief, longer than a review reads: it waited for the person.
+    if (SUBAGENT_TOOLS.has(short)) return "One of your own subagents (Runtime > Subagents), which runs under the same safety rules";
     // The chat's own follow-up timer: it sends this chat a note later, and runs nothing.
     if (short === "schedule_wakeup") return "A reminder the chat sends itself later; it runs nothing";
-    if (!APP_TOOLS_ALLOWED.has(short)) return null;
-    return short === "apply_patch" || short === "patch_check"
+    if (short === "show_in_chat") return "Brings a pane of this chat forward; it shows only what already runs";
+    if (!AGENT_TOOLS.has(short) && !TERMINAL_READS.has(short)) return null;
+    return APP_EDITS.has(short)
       ? "An edit through the app's tools, confined to the agent's worktree (like Claude's own edits)"
       : "A read through the app's tools, confined to the agent's worktree";
   }
@@ -2504,7 +2554,26 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // after 20 s or at once, ran or refused commands nobody had judged.
     const advice = approverAdvice.get(approval.approval_id);
     // Not reviewed yet: the reviewer answers it within its budget, or passes it to the person then.
-    return Boolean(advice) && advice.action === "ask";
+    // A review that never came (no run loop to start it, a review pass that hung) hid the request as
+    // "being reviewed" with nothing to answer it: a DeepSeek chat sat 85 minutes on one PowerShell
+    // request. Past REVIEW_DEADLINE_MS it is the person's, still never answered for them.
+    return advice ? advice.action === "ask" : reviewOverdue(approval);
+  }
+  /** Longer than every review try with its retry wait, plus the decide pass: an unreviewed request past it is stuck. */
+  const REVIEW_DEADLINE_MS = REVIEW_TRIES * (REVIEW_BUDGET_MS + REVIEW_RETRY_MS) + REVIEW_BUDGET_MS + 15_000;
+  /** A review pass still running after this has hung; the next one starts beside it. */
+  const SCREEN_PASS_STALE_MS = REVIEW_DEADLINE_MS;
+  const reviewStarted = new Map(); // approval_id -> when its first review try began
+  /**
+   * Counted from the later of the request and its first review try: a review within its whole
+   * budget (every try and retry wait) is not overdue, and one past it stays overdue however often
+   * a hung pass restarts it.
+   */
+  function reviewOverdue(approval) {
+    const since = Date.parse(approval?.since ?? "");
+    const opened = Math.min(Number.isFinite(since) ? since : Infinity, pendingSeen.get(approval?.approval_id) ?? Infinity);
+    const from = Math.max(opened, reviewStarted.get(approval?.approval_id) ?? -Infinity);
+    return Number.isFinite(from) && now() - from > REVIEW_DEADLINE_MS;
   }
   async function screenApprovals(workspaceId, runId, mission, active, observed) {
     let note = null;
@@ -2522,6 +2591,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (!screened || !approval.approval_id || approverAdvice.has(approval.approval_id)) continue;
         const failed = reviewFailures.get(approval.approval_id);
         if (failed && now() - failed.at < REVIEW_RETRY_MS) continue;
+        // Only the first try counts: a review that keeps hanging was restarted every stale pass, and
+        // a deadline measured from the latest try was never reached.
+        if (!reviewStarted.has(approval.approval_id)) reviewStarted.set(approval.approval_id, now());
+        if (reviewStarted.size > 500) reviewStarted.delete(reviewStarted.keys().next().value);
         const request = describeRequest(approval);
         // The command advisor must not decide from a truncated command or permission scope.
         const blocked = hardDenied(request) || hardDenied(approval.command) || hardDenied(approval.toolInput);
@@ -3053,12 +3126,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         else if (waiting.length) state.detail = "The reviewer is checking the agent's request";
         // Reviewing runs beside the loop, one pass at a time: the loop kept reporting and launching
         // while a slow reviewer took up to minutes, and the chat showed nothing meanwhile.
-        if (waiting.length && !state.screening) {
-          state.screening = true;
+        // A pass that hangs (a model list or a send that never returns) no longer blocks every review
+        // after it: past SCREEN_PASS_STALE_MS the next pass starts, and the hung one's end is ignored.
+        if (waiting.length && (!state.screening || now() - state.screening.at > SCREEN_PASS_STALE_MS)) {
+          const pass = { at: now() };
+          state.screening = pass;
           void screenApprovals(workspaceId, runId, mission, waiting.map(mark => mark.node), waiting.map(mark => ({ pending_approvals: mark.pending })))
-            .then(note => { if (note) state.detail = note; },
-              error => { state.detail = "Command approver unavailable: " + publicText(error?.message || error, 200); })
-            .finally(() => { state.screening = false; });
+            .then(note => { if (note && state.screening === pass) state.detail = note; },
+              error => { if (state.screening === pass) state.detail = "Command approver unavailable: " + publicText(error?.message || error, 200); })
+            .finally(() => { if (state.screening === pass) state.screening = null; });
         }
         if (waiting.length && !state.autoAnswering) {
           state.autoAnswering = true;
@@ -3418,13 +3494,33 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // A previous run that is really working must finish or be stopped first. One that is stuck
   // (a failed start left its cards pending, a held card, a pause) is stopped and kept in history,
   // so an old task can always be continued or restarted.
+  // How long a follow-up waits for a run whose cards have all stopped to finish winding down.
+  const RUN_WIND_DOWN_MS = 10_000;
   async function retireOpenRuns(id, task, runsOfWorkspace) {
-    const open = runsOfWorkspace.filter((run) => run.project_id === task && !runSettled(run));
-    for (const run of open) {
+    const openOf = (list) => list.filter((run) => run.project_id === task && !runSettled(run));
+    const carding = (run) => (run.nodes ?? []).some((node) => ["running", "reserved"].includes(node.state));
+    const looping = (run) => {
       const live = backgroundRuns.get(runKey(id, run.id));
-      const working = Boolean(live && (live.starting || live.driving || live.status === "running"))
-        || (run.nodes ?? []).some((node) => ["running", "reserved"].includes(node.state));
-      if (working) throw new Error("This mission is still running; wait for it to finish or stop it first");
+      return Boolean(live && (live.driving || live.status === "running"));
+    };
+    const starting = (run) => Boolean(backgroundRuns.get(runKey(id, run.id))?.starting);
+    const refuse = () => new Error("This mission is still running; wait for it to finish or stop it first");
+    let open = openOf(runsOfWorkspace);
+    // A run whose cards have all stopped can still have its loop winding down for a moment, as after
+    // a steer that stopped a stalled turn: its message, queued for the next turn, was sent as soon as
+    // the chat read free and refused twice within a second ("This chat is still running"). That loop
+    // is waited for, briefly; a card at work, or a run still starting, is refused at once.
+    const deadline = now() + RUN_WIND_DOWN_MS;
+    let waited = false;
+    while (open.some((run) => carding(run) || starting(run) || looping(run))) {
+      if (open.some((run) => carding(run) || starting(run)) || now() >= deadline) throw refuse();
+      waited = true;
+      await new Promise((resolve) => setTimer(resolve, 250));
+    }
+    // The loop may have written the run as it ended: cancel each at its current revision.
+    if (waited) {
+      open = openOf((await runs({ workspaceId: id })).runs);
+      if (open.some((run) => carding(run) || starting(run) || looping(run))) throw refuse();
     }
     for (const run of open) {
       await updateRun({ workspaceId: id, change: { operation: "cancel", run_id: run.id, expected_revision: run.revision } });
@@ -3530,6 +3626,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const observeCard = () => Promise.resolve().then(() => harnessService().observe?.(card.receipt.thread_id, expectedTurns.get(card.receipt.thread_id)))
       .catch(() => null);
     let waiting = await observeCard();
+    // A card that could not be read may be waiting on a request: steering it then wedged AO's chat
+    // (seen 2026-10-21: a steer into a turn waiting on an approval held the session's dispatch lock,
+    // and every later steer, approval answer and stop hung for 180 s). The message waits instead.
+    if (waiting === null) {
+      return { ok: true, steered: false, waiting: true, reason: "The agent's state could not be read; your message is steered in once it can be" };
+    }
     const asking = (state) => Boolean(state?.approvals?.length || state?.needsInput);
     // A steer never stops what the agent is doing (the user: "it shouldnt stop the model action,
     // wait it done to steer"). Declining the waiting request made the agent's tool call fail with
@@ -4106,6 +4208,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const characters = Array.from(text);
     return characters.length <= 8000 ? text : characters.slice(0, 7970).join("") + "\n[visible work truncated]";
   }
+  const STOP_SETTLE_MS = 15_000;
+  const STOP_SETTLE_POLL_MS = 250;
   /** Interrupt acknowledges a signal; only an exited or settled, non-working turn releases ownership. */
   async function stopExternalTurn(session, ownership = null) {
     for (;;) {
@@ -4128,11 +4232,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (!ownership?.completed && !alreadyExited) {
         await service.interrupt(session);
         let stopped = false;
-        for (let attempt = 0; attempt < 8; attempt++) {
+        // Up to 15 s for the interrupt to settle (it was 2 s). Seen live: a stalled chat's interrupt
+        // landed later than that, so the restart failed ("stop needs attention"), its next steers
+        // and send were refused, and the chat sat for 8 more minutes until another steer found the
+        // turn over.
+        const tries = Math.ceil(STOP_SETTLE_MS / STOP_SETTLE_POLL_MS);
+        for (let attempt = 0; attempt < tries; attempt++) {
           const observation = await service.observe(session);
           if (observation?.exited === true || (["completed", "failed", "interrupted", "cancelled"].includes(observation?.turnState)
             && !["working", "running", "starting"].includes(observation?.status))) { stopped = true; break; }
-          if (attempt < 7) await new Promise(resolve => setTimer(resolve, 250));
+          if (attempt < tries - 1) await new Promise(resolve => setTimer(resolve, STOP_SETTLE_POLL_MS));
         }
         if (!stopped) throw new Error("Owned turn is still working; stop needs attention, no replacement was started");
       }

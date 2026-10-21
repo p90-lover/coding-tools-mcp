@@ -132,8 +132,8 @@ function yamlString(value) {
 }
 
 const COMMANDCODE_PLUGINS = [
-  { id: "cline-pass-switcher", file: "cline-pass-switcher-v0.1.0-codingtools.4.dll", sha256: "beaba93be151104aa4137ac28712f7f4f0dc3fa613e21e4784cb6770d0714369" },
-  { id: "commandcode-go", file: "commandcode-go-v1.0.0-codingtools.1.dll", sha256: "ffb690666d979bbeb529ce076291b808aac39b9091ef62f28b5c8e37285cb70c" },
+  { id: "cline-pass-switcher", file: "cline-pass-switcher-v0.1.0-codingtools.5.dll", sha256: "3a635fee93736fba27a1a444915ff08128031c798ffaef0bc582b994c15a5769" },
+  { id: "commandcode-go", file: "commandcode-go-v1.0.0-codingtools.3.dll", sha256: "7b50bd0f2879101c06732e98b6fc1a30ae8afa29a5fd8f6016473f0eb74ff343" },
   { id: "auth-commandcode", file: "auth-commandcode-v0.1.0-codingtools.1.dll", sha256: "b9ab54aa73d1c9fd4e9baaaa4960643aa81f2caecb2f69e5463fc3a62f079afc" },
   // CPA Helper (usage, costs, Codex keeper), rebuilt from walkingddd/CPA-Helper as a native plugin.
   { id: "cpa-helper", file: "cpa-helper-v0.1.0.dll", sha256: "3e1c57168b1bef6f789041026a2437482e540d8be3b7c5e4a2b943011c1eb55c" },
@@ -255,9 +255,13 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     "debug: false",
     "request-log: false",
     // No main.log: it took ~10 MB every two days, half of it warnings nobody reads. CPA then logs
-    // to its output, which the launcher discards for a persistent CPA. Failed requests still leave
-    // their error-*.log (error-logs-max-files).
+    // to its output, which the launcher discards for a persistent CPA.
     "logging-to-file: false",
+    // No request logger at all. Even with request-log off, CPA copied every request body over
+    // 1 MiB (and every chunked one) into logs/request-log-parts-* in case the request failed, then
+    // deleted it: a disk write per agent turn. Commercial mode only drops that logger (and the
+    // error-*.log files it wrote on failures, which nothing here reads).
+    "commercial-mode: true",
     "usage-statistics-enabled: true",
     ...cpaLongRunYamlLines(),
     "",
@@ -265,11 +269,12 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
   if (!savedSource.trim()) return generated;
   const managed = (yaml.parse ?? yaml.load)(generated);
   // User settings survive restarts; listener, credentials, bundled plugin paths and file logging
-  // stay managed (an older build saved logging-to-file: true). So do config v8's grouped forms of
-  // the same security settings: a saved `server` (host 0.0.0.0), `management` or `access` block
-  // would otherwise reopen what the flat keys above keep closed.
+  // stay managed (an older build saved logging-to-file: true; none saved commercial-mode). So do
+  // config v8's grouped forms of the same security settings: a saved `server` (host 0.0.0.0, or
+  // commercial-mode off), `management` or `access` block would otherwise reopen what the flat keys
+  // above keep closed.
   const owned = ["host", "port", "auth-dir", "api-keys", "proxy-url", "remote-management", "plugins", "logging-to-file",
-    "server", "management", "access"];
+    "commercial-mode", "server", "management", "access"];
   const retained = Object.fromEntries(Object.entries(saved).filter(([key]) => !owned.includes(key)));
   const merged = {
     ...managed, ...retained,

@@ -279,3 +279,35 @@ func TestConfigDefaults(t *testing.T) {
 		t.Errorf("upstreamName(kimi) = %q", got)
 	}
 }
+
+// A level picked in Coding Tools arrives only as CPA's suffix on the model name ("glm-5.3-flash(high)"):
+// CPA sets no reasoning_effort for a plugin, and normalizeModel drops the suffix, so it was lost.
+func TestSuffixEffortReachesTheRequest(t *testing.T) {
+	cases := map[string]string{
+		"commandcode-go/glm-5.3-flash(high)": "high", "glm-5.3-flash(Max)": "max", "kimi-k3(none)": "none",
+		"glm-5.3-flash(minimal)": "minimal", "glm-5.3-flash": "", "glm-5.3-flash(auto)": "", "glm-5.3-flash(16000)": "",
+	}
+	for model, want := range cases {
+		if got := suffixEffort(model); got != want {
+			t.Fatalf("%s: got %q want %q", model, got, want)
+		}
+	}
+	payload := []byte(`{"model":"x","reasoning_effort":"low","messages":[{"role":"user","content":"hi"}]}`)
+	var sent map[string]any
+	if err := json.Unmarshal(withSuffixEffort("commandcode-go/glm-5.3-flash(high)", payload), &sent); err != nil {
+		t.Fatal(err)
+	}
+	if sent["reasoning_effort"] != "high" {
+		t.Fatalf("the suffix wins over the body: %v", sent["reasoning_effort"])
+	}
+	if string(withSuffixEffort("glm-5.3-flash", payload)) != string(payload) {
+		t.Fatal("a name without a level leaves the payload as it was")
+	}
+	body, err := buildGenerateBody("z-ai/glm-5.3-flash", withSuffixEffort("glm-5.3-flash(medium)", []byte(`{"messages":[{"role":"user","content":"hi"}]}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `"reasoning_effort":"medium"`) {
+		t.Fatalf("the level reaches Command Code's request: %s", body)
+	}
+}

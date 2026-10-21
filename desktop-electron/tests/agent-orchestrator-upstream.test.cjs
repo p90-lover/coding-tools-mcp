@@ -70,7 +70,7 @@ function observeHarness(context) {
   const shared = helpers.replace(/const TAIL_FRESH_MS = \d+;/, `const TAIL_FRESH_MS = ${Number(context.tailFreshMs ?? 0)};`);
   return vm.runInNewContext(states + timelineBounds(source) + shared + identity + "({" + method + "})", {
     Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"),
-    agentTools: null, setTimeout, observeTui: async () => { throw new Error("not a TUI fixture"); }, ...context,
+    agentTools: null, setTimeout, exitedReleased: new Set(), observeTui: async () => { throw new Error("not a TUI fixture"); }, ...context,
   });
 }
 
@@ -730,6 +730,7 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
   let status = "exited";
   const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
     Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), Date, Math, Number, Promise, agentTools: null,
+    exitedReleased: new Set(),
     internalApi: async (method, endpoint) => {
       calls.push([method, endpoint]);
       if (endpoint === "/api/v1/sessions") return { sessions };
@@ -1426,4 +1427,42 @@ test("resumed chats use live activity rather than PR-derived display status for 
       }
     }
   } finally { await new Promise(resolve => server.close(resolve)); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("an exited chat whose agent may live on is exited again once, so AO stops its leftover host", async () => {
+  // Seen live: five chat hosts (1.4 GB) outlived a daemon restart; AO had marked their sessions
+  // exited, and the idle sweep only looked at idle ones.
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("    async continuable(id)");
+  const end = source.indexOf("    /** Sends a follow-up as a new turn", start);
+  const methods = source.slice(start, end).trim().replace(/,$/, "");
+  const helpers = source.slice(source.indexOf("  async function chatHostGone"), source.indexOf("  // Mission-owned AO calls."));
+  const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
+  const states = source.match(/const TERMINAL_TURN_STATES = .*;/)[0];
+  const now = Date.parse("2026-10-21T18:00:00Z");
+  const ago = minutes => new Date(now - minutes * 60_000).toISOString();
+  const sessions = [
+    { id: "leftover", mode: "chat", status: "exited" },
+    { id: "fresh-exit", mode: "chat", status: "exited" },
+    { id: "gone", mode: "chat", status: "exited", isTerminated: true },
+  ];
+  const turns = { leftover: [{ state: "failed", completedAt: ago(360) }], "fresh-exit": [{ state: "completed", completedAt: ago(5) }], gone: [{ state: "failed", completedAt: ago(360) }] };
+  const exits = [];
+  const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
+    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), Date, Math, Number, Promise, agentTools: null,
+    exitedReleased: new Set(),
+    internalApi: async (method, endpoint) => {
+      if (endpoint === "/api/v1/sessions") return { sessions };
+      const id = endpoint.split("/")[4];
+      if (endpoint.endsWith("/conversation?limit=1")) return { turns: turns[id] ?? [] };
+      if (endpoint.endsWith("/exit-agent")) { exits.push(id); throw new Error("AO: AGENT_EXITED: the agent has already exited"); }
+      return { session: { id, mode: "chat", status: "exited" } };
+    },
+  });
+  assert.deepEqual([...await upstream.idleChatSessions(30 * 60_000, now)], ["leftover"],
+    "an exited chat idle past the limit; a recent one and a terminated one are left alone");
+  assert.equal((await upstream.exitAgent("leftover")).ok, true, "AO's AGENT_EXITED counts as released (it stopped any leftover host)");
+  assert.deepEqual(exits, ["leftover"]);
+  assert.deepEqual([...await upstream.idleChatSessions(30 * 60_000, now)], [], "and it is not asked again this run");
 });

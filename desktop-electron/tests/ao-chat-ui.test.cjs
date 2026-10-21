@@ -73,6 +73,17 @@ test("a DeepSeek turn renders as DeepSeek Harness's: flat rows and Deep diving w
   assert.doesNotMatch(earlier, /dsh-group/, "and stays folded until opened");
 });
 
+test("a retried single DeepSeek card shows its earlier attempt above the attempt now", () => {
+  const timeline = [{ id: "c1", kind: "command", status: "running", text: "npm test", description: "Run the tests" }];
+  const step = { key: "s", nodeId: "n", role: "planner", name: "MiMo V2.6 Pro", detail: "", state: "running", startedAtMs: Date.now() - 5_000,
+    working: { detail: "", stalled: false, timeline }, earlier: [{ label: "Attempt 1", verdict: "failed", text: "The agent's process ended." }] };
+  const turn = { key: "retried", runId: "run", steps: [step], status: "running", solo: false, startedAtMs: Date.now() - 5_000 };
+  const html = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn, live: true, expanded: false, useWork: (item) => item.working?.timeline ?? null }));
+  const attempt = html.indexOf("Attempt 1"), work = html.indexOf("Run the tests");
+  assert.ok(attempt >= 0, "the earlier attempt is shown");
+  assert.ok(work > attempt, "and comes before the new attempt's work");
+});
+
 test("every new card starts with instructions and an expected output for its role", () => {
   const team = roles.defaultTeam("workspace", roles.workerRoute(roles.DEFAULT_WORKER_HARNESS, roles.DEFAULT_WORKER_MODEL));
   for (const node of team.nodes) {
@@ -205,6 +216,21 @@ test("a retried step shows its failed attempt above the attempt now running, not
   const earlier = html.indexOf("Attempt 1"), now = html.indexOf("Opening the preview again.");
   assert.ok(earlier >= 0 && now >= 0, "both show");
   assert.ok(earlier < now, "the failed attempt comes first");
+});
+
+test("an image steered into a running turn shows as the image, not as its path", () => {
+  // Seen live (before #457 reached the app): "Attached image: G:\AppData\Coding Tools\chat-attachments\…png"
+  // printed as text in the steer's bubble inside the turn's work.
+  const steer = "switch number ,if met the number is unable to verify on text\n\nAttached image: G:\\AppData\\Coding Tools\\chat-attachments\\2026-10-21\\image-df19f6fe.png";
+  const props = { runs: [{ id: "run", project_id: "task", cancelled: false, execution_mode: "single", nodes: [{ id: "lead", role: "planner", state: "running",
+    route: { harness_id: "ao:claude-code", model: "m" }, receipt: { thread_id: "sess-3", started_at_ms: Date.now() - 5_000 } }] }],
+    activity: { "run:lead": { activity: "working", timeline: [{ id: "s1", kind: "steer", status: "completed", text: steer }] } },
+    tasks: [{ id: "task", title: "Task" }], selectedTaskId: "task", busy: false, approvals: [],
+    loadDescription: async () => "", send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {} };
+  const html = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, props));
+  assert.match(html, /cx-user cx-steer"><div class="cx-sent-attachments">/, "the steer's image is drawn as an attachment");
+  assert.equal(html.includes("Attached image:"), false, "its path line is not printed");
+  assert.match(html, /<p>switch number ,if met the number is unable to verify on text<\/p>/, "the typed words stay in the bubble");
 });
 
 test("an open chat's composer carries the context meter; a new chat's does not", () => {
