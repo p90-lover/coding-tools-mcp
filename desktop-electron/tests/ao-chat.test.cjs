@@ -1229,6 +1229,21 @@ test("a card's timeline keeps the steps that fell out of the newest poll, and a 
   assert.deepEqual(ids(chat.mergeTimeline(later, [item("9")])), ["9"]);
 });
 
+test("a live turn keeps at most its newest steps, so a long run stays light to redraw", () => {
+  const item = (id) => ({ id: String(id), kind: "tool", status: "completed", text: `call ${id}` });
+  const cap = chat.LIVE_TIMELINE_ITEMS;
+  // Hours of work: every poll's window moved on, and the kept list grew past the cap.
+  let kept = Array.from({ length: cap }, (_, index) => item(index));
+  kept = chat.mergeTimeline(kept, [item(cap - 1), item(cap), item(cap + 1)]);
+  assert.equal(kept.length, cap);
+  assert.equal(kept[0].id, "2", "the oldest steps fall out first");
+  assert.equal(kept.at(-1).id, String(cap + 1));
+  // A finished turn read back whole is not capped: its earliest commands stay readable.
+  const whole = Array.from({ length: cap + 50 }, (_, index) => item(index));
+  assert.equal(chat.mergeTimeline(null, whole, { cap: Infinity }).length, cap + 50);
+  assert.equal(chat.mergeTimeline(kept, whole, { cap: Infinity })[0].id, "0");
+});
+
 test("a single-model chat's card is named by its model, a team's by its role", () => {
   const route = { harness_id: "ao:claude-code", model: "cpa/cline-pass/deepseek-v4.1-flash" };
   const node = { id: "one", role: "planner", state: "running", x: 0, route, settings: { name: "Single assistant" } };
