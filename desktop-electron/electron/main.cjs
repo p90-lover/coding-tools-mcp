@@ -563,7 +563,13 @@ async function autoConnectExistingMcpIfReady({ logger, stateStore, health }) {
 function startCatalogVerificationMonitor({ logger, stateStore }) {
   stopCatalogVerificationMonitor();
   let reportedFailure = null;
+  // Once the catalog is verified, the monitor only waits for an idle, signed-in browser to connect
+  // MCP. That can take as long as the browser is in use, and asking the bridge's health every 2 s
+  // the whole time cost the main process a connection and a config read each time; it asks every
+  // 15 s while waiting.
+  let nextCheckAt = 0;
   const check = async () => {
+    if (Date.now() < nextCheckAt) return;
     const current = stateStore.read();
     if (current.coreSetupComplete !== true || (current.codexCatalogVerified === true && !current.autoConnectExistingMcp)) {
       stopCatalogVerificationMonitor();
@@ -615,7 +621,10 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
         publishOperation({ name: "catalog-verification", status: "completed", message: "Codex model catalog loaded" });
       }
       }
-      if (await autoConnectExistingMcpIfReady({ logger, stateStore, health })) return;
+      if (await autoConnectExistingMcpIfReady({ logger, stateStore, health })) {
+        nextCheckAt = Date.now() + 15_000;
+        return;
+      }
       stopCatalogVerificationMonitor();
     } catch (error) {
       logger.debug("codex.model_catalog_verification_pending", {

@@ -151,7 +151,12 @@ async function planUpdate({ manifest, installRoot, electronVersion, previous = n
       const index = next++;
       const file = candidates[index];
       const target = path.join(installRoot, ...file.path.split("/"));
-      const stat = fs.statSync(target, { throwIfNoEntry: false });
+      // Only a missing file counts as one to replace; an unreadable install still stops the update
+      // here, before anything is downloaded or the app is closed for it.
+      const stat = await fs.promises.stat(target).catch((error) => {
+        if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return undefined;
+        throw error;
+      });
       differs[index] = !(stat?.isFile() && stat.size === file.size && await hash(target) === file.sha256);
       onProgress?.(++checked, candidates.length);
     }
@@ -178,13 +183,17 @@ async function planUpdate({ manifest, installRoot, electronVersion, previous = n
  * file's size and hash. Files the update does not need are read past.
  */
 async function extractPack(packPath, wanted, stageRoot) {
+  // It runs in the launcher's main process while the app is in use: writing and closing each file
+  // synchronously held every window (one close took 2 s on the hard disk, measured live during a
+  // background update), so files are written through promises.
   const written = new Set();
   let buffer = Buffer.alloc(0);
   let current = null;
-  const finish = () => {
-    if (current.fd !== null) {
-      fs.closeSync(current.fd);
-      current.fd = null;
+  const finish = async () => {
+    if (current.file !== null) {
+      const file = current.file;
+      current.file = null;
+      await file.close();
       if (current.hash.digest("hex") !== current.want.sha256) {
         throw new Error(`Update file failed SHA-256 verification: ${current.rel}`);
       }
@@ -200,15 +209,15 @@ async function extractPack(packPath, wanted, stageRoot) {
           const take = Math.min(current.remaining, buffer.length);
           if (take > 0) {
             const part = buffer.subarray(0, take);
-            if (current.fd !== null) {
-              fs.writeSync(current.fd, part);
+            if (current.file !== null) {
+              await current.file.write(part);
               current.hash.update(part);
             }
             current.remaining -= take;
             buffer = buffer.subarray(take);
           }
           if (current.remaining > 0) break;
-          finish();
+          await finish();
           continue;
         }
         if (buffer.length < 4) break;
@@ -221,20 +230,20 @@ async function extractPack(packPath, wanted, stageRoot) {
         if (!rel || !Number.isSafeInteger(header.size) || header.size < 0) throw new Error("Update pack has an unsafe record");
         const want = wanted.get(rel) || null;
         if (want && want.size !== header.size) throw new Error(`Update pack size does not match the manifest: ${rel}`);
-        let fd = null;
+        let file = null;
         if (want) {
           const output = path.join(stageRoot, ...rel.split("/"));
-          fs.mkdirSync(path.dirname(output), { recursive: true });
-          fd = fs.openSync(output, "wx", 0o600);
+          await fs.promises.mkdir(path.dirname(output), { recursive: true });
+          file = await fs.promises.open(output, "wx", 0o600);
         }
-        current = { rel, want, fd, remaining: header.size, hash: want ? crypto.createHash("sha256") : null };
-        if (current.remaining === 0) finish();
+        current = { rel, want, file, remaining: header.size, hash: want ? crypto.createHash("sha256") : null };
+        if (current.remaining === 0) await finish();
       }
     }
     if (current || buffer.length) throw new Error("Update pack ended early");
   } finally {
-    if (current?.fd !== null && current?.fd !== undefined) {
-      try { fs.closeSync(current.fd); } catch {}
+    if (current?.file) {
+      try { await current.file.close(); } catch {}
     }
   }
   for (const rel of wanted.keys()) {
@@ -382,9 +391,10 @@ function createAppUpdateController({
       packs: plan.packs.map((pack) => pack.name), downloadBytes: plan.downloadBytes, withFramework: plan.withFramework,
     });
     fs.mkdirSync(updateRoot, { recursive: true });
+    // An earlier stage holds a whole update's files: removing it synchronously held the windows.
     for (const entry of fs.readdirSync(updateRoot, { withFileTypes: true })) {
       if (entry.isDirectory() && entry.name.startsWith("stage-")) {
-        fs.rmSync(path.join(updateRoot, entry.name), { recursive: true, force: true });
+        await fs.promises.rm(path.join(updateRoot, entry.name), { recursive: true, force: true });
       }
     }
     const stageRoot = fs.mkdtempSync(path.join(updateRoot, "stage-"));
@@ -404,7 +414,7 @@ function createAppUpdateController({
       }
       const wanted = new Map(plan.changed.filter((file) => file.pack === pack.name).map((file) => [file.path, file]));
       await extractPack(packPath, wanted, filesRoot);
-      fs.rmSync(packPath, { force: true });
+      await fs.promises.rm(packPath, { force: true });
       downloaded += pack.size;
       downloadShare(downloaded);
     }
@@ -448,7 +458,7 @@ function createAppUpdateController({
         return true;
       } catch (error) {
         try { child?.kill(); } catch {}
-        if (staged) fs.rmSync(staged.stageRoot, { recursive: true, force: true });
+        if (staged) await fs.promises.rm(staged.stageRoot, { recursive: true, force: true }).catch(() => undefined);
         transition({ status: "available", version: available.version });
         logger?.warn("launcher.app_update_failed", { message: error instanceof Error ? error.message : String(error) });
         throw error;
