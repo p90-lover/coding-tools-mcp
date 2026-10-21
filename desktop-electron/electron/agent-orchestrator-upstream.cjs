@@ -359,21 +359,36 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   // the read in flight, and a result serves callers for TAIL_FRESH_MS; `maxAgeMs` lets a caller
   // that knows the session is idle take an older one.
   const TAIL_FRESH_MS = 900;
+  // A slow read stays fresh three times as long as it took, up to this. Seen live on 0.8.5: one
+  // working session's 507 KB tail took ~620 ms to serve; counted from when the read began, a result
+  // served only ~280 ms after it landed, so that session was read back to back and kept AO at
+  // 30-110% of a core. Light sessions (25 ms) keep their one-second updates.
+  const SLOW_TAIL_FRESH_MAX_MS = 3000;
+  const SLOW_TAIL_MS = 150; // a read slower than this is a slow one
   const IDLE_TAIL_MS = 30_000;
-  const tailReads = new Map(); // `${id}|${limits}` -> { at, read }
+  const tailReads = new Map(); // `${id}|${limits}` -> { read, landedAt (null in flight), fresh }
+  // A read in flight is always shared; a landed one serves for the caller's age or its own `fresh`.
+  const servesFor = (entry, maxAgeMs) => entry.landedAt === null
+    || Date.now() - entry.landedAt < Math.max(maxAgeMs, entry.fresh);
   function conversationTail(id, limits = [100, 40, 10], { maxAgeMs = TAIL_FRESH_MS } = {}) {
     const key = `${id}|${limits.join(",")}`;
     const known = tailReads.get(key);
-    if (known && Date.now() - known.at < maxAgeMs) return known.read;
+    if (known && servesFor(known, maxAgeMs)) return known.read;
     // A fresh read of more items serves a smaller ask too: a working chat's run loop reads 100
     // items each second and its Terminal pane 60 every two, the same session's tail twice over.
     for (const [other, entry] of tailReads) {
       if (other.startsWith(`${id}|`) && Number(other.slice(id.length + 1).split(",")[0]) >= limits[0]
-        && Date.now() - entry.at < maxAgeMs) return entry.read;
+        && servesFor(entry, maxAgeMs)) return entry.read;
     }
+    const startedAt = Date.now();
     const read = readConversationTail(id, limits);
-    tailReads.set(key, { at: Date.now(), read });
-    read.catch(() => { if (tailReads.get(key)?.read === read) tailReads.delete(key); });
+    const entry = { read, landedAt: null, fresh: 0 };
+    tailReads.set(key, entry);
+    read.then(() => {
+      entry.landedAt = Date.now();
+      const took = entry.landedAt - startedAt;
+      entry.fresh = took > SLOW_TAIL_MS ? Math.min(SLOW_TAIL_FRESH_MAX_MS, 3 * took) : 0;
+    }, () => { if (tailReads.get(key)?.read === read) tailReads.delete(key); });
     if (tailReads.size > 128) tailReads.delete(tailReads.keys().next().value);
     return read;
   }

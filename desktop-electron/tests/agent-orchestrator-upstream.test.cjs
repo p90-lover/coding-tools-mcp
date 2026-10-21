@@ -119,6 +119,31 @@ test("a fresh read of a session's newest 100 items serves the Terminal pane's as
   assert.deepEqual(endpoints.map(endpoint => /limit=(\d+)/.exec(endpoint)[1]), ["100", "60", "100"], "a smaller read never serves a larger ask");
 });
 
+test("a slow tail read is shared while in flight and stays fresh three times as long as it took", async () => {
+  // Seen live on 0.8.5: a 507 KB tail took ~620 ms; counted from its start, a result served only
+  // ~280 ms after it landed and the session was read back to back (AO at 30-110% of a core).
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const helpers = source.slice(source.indexOf("  async function chatHostGone"), source.indexOf("  // Mission-owned AO calls."));
+  const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
+  let reads = 0, delay = 400;
+  const { conversationTail } = vm.runInNewContext(`${timelineBounds(source)}${helpers}${identity}({ conversationTail })`, {
+    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), agentTools: null,
+    internalApi: async () => { reads += 1; await new Promise(resolve => setTimeout(resolve, delay)); return { messages: [], activities: [] }; },
+  });
+  const first = conversationTail("slow");
+  await new Promise(resolve => setTimeout(resolve, 300));
+  await Promise.all([first, conversationTail("slow")]);
+  assert.equal(reads, 1, "a read still in flight is shared");
+  await new Promise(resolve => setTimeout(resolve, 1000));
+  await conversationTail("slow");
+  assert.equal(reads, 1, "a 400 ms read still serves a second after it landed (3 x 400 ms)");
+  delay = 5;
+  await new Promise(resolve => setTimeout(resolve, 300));
+  await conversationTail("slow");
+  assert.equal(reads, 2, "then it is read again");
+});
+
 test("chat hosts that outlived the app are counted by whether their loopback address still answers", async () => {
   const vm = require("node:vm");
   const net = require("node:net");
