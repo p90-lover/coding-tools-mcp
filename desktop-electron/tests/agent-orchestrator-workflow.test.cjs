@@ -1893,6 +1893,45 @@ test("runtime recovery activity exposes only bounded sanitized current output", 
   assert.doesNotMatch(JSON.stringify(live), /SECRET_TOKEN|sk-privatekey/);
 });
 
+test("with runReadFreshMs, the activity poll and its per-card checks share one run read, and any other request reads afresh", async () => {
+  const native = { id: "w1", role: "worker", state: "running", route: { harness_id: "codex-native", provider_id: "chatgpt-web", model: "chatgpt-web/high" },
+    receipt: { status: "submitted", thread_id: "thread-1", started_at_ms: 1_000 } };
+  const make = (runReadFreshMs) => {
+    const reads = [];
+    const workflow = createAgentOrchestratorWorkflow({
+      runReadFreshMs,
+      requestHeadless: async (endpoint, body, options) => {
+        if (endpoint === "/api/v1/ao/read") { reads.push(body.run_id); return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [native] }] }; }
+        if (endpoint === "/api/v1/ao/harness/status") return { ok: true, status: { connected: true, threads: [{ id: "thread-1", turn_id: "t", activity: "working" }] } };
+        if (endpoint === "/api/v1/ao/update") { reads.push(`write:${JSON.stringify(options ?? null)}`); return { ok: true, team: { id: "team-1", revision: 2 } }; }
+        throw new Error(`unexpected ${endpoint}`);
+      },
+      confirm: async () => true,
+    });
+    return { workflow, reads };
+  };
+  const poll = async (workflow) => {
+    await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
+    await new Promise(resolve => setImmediate(resolve));
+  };
+  // Without it (the default), the poll reads the run and reads it again for each card it checked.
+  const plain = make(0);
+  await poll(plain.workflow);
+  assert.equal(plain.reads.length, 2);
+  const shared = make(300);
+  await poll(shared.workflow);
+  assert.deepEqual(shared.reads, ["run-1"], "one read serves the poll and the card's check");
+  // A request that may change a run drops what was read, so the next poll reads again.
+  await shared.workflow.call("team_update", { workspaceId: "ws-1", change: { operation: "set_limits" } }).catch(() => null);
+  await poll(shared.workflow);
+  assert.equal(shared.reads.filter(entry => entry === "run-1").length, 2);
+  assert.ok(shared.reads.some(entry => entry.startsWith("write:")), "the write went through");
+  // Once the moment has passed, a read is taken again.
+  await new Promise(resolve => setTimeout(resolve, 320));
+  await poll(shared.workflow);
+  assert.equal(shared.reads.filter(entry => entry === "run-1").length, 3);
+});
+
 test("activity reports each working card's runtime and current step without advancing the run", async () => {
   const calls = [];
   const native = { id: "w1", role: "worker", state: "running", route: { harness_id: "codex-native", provider_id: "chatgpt-web", model: "chatgpt-web/high" },
@@ -2025,6 +2064,28 @@ test("a chat's timeline reads CPA's key once, not once per field, and still reda
   assert.equal(timeline.length, 300);
   assert.doesNotMatch(JSON.stringify(timeline), new RegExp(key), "the key is redacted from every field");
   assert.ok(reads <= 2, `CPA's connection was read ${reads} times for one timeline`);
+});
+
+test("a long turn's work fits the window's 1 MB answer limit and keeps every tool call", async () => {
+  // Seen live: a turn's read-back was 1.5 MB (its thoughts up to 64 KB each), and ipc-schema refused
+  // it, so its folded work never opened.
+  const finished = { id: "p", role: "planner", state: "finished", route: { harness_id: "ao:claude-code", model: "cpa/gpt-6-luna" },
+    receipt: { status: "completed", thread_id: "sess-1", turn_id: "turn-1" } };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [finished] }] };
+      throw new Error(`unexpected ${endpoint}`);
+    },
+    aoHarness: { timeline: async () => Array.from({ length: 60 }, (_, index) => index % 2
+      ? { id: `c${index}`, kind: "command", status: "completed", text: `npm test ${index}`, output: "o".repeat(1500) }
+      : { id: `r${index}`, kind: "reasoning", status: "completed", text: `thinking ${index} ${"x".repeat(60_000)}` }) },
+    confirm: async () => true,
+  });
+  const result = await workflow.call("turn_timeline", { workspaceId: "ws-1", runId: "run-1", nodeId: "p" });
+  assert.ok(Buffer.byteLength(JSON.stringify(result)) < 1024 * 1024, "under the window's limit");
+  assert.equal(result.timeline.filter(item => item.kind === "command").length, 30, "every tool call is kept");
+  assert.equal(result.timeline[1].output, "o".repeat(1500), "tool output is kept when cutting thoughts was enough");
+  assert.match(result.timeline[0].text, /^thinking 0 x+…$/, "a long thought keeps its start");
 });
 
 test("AO chat reads native managed capability for exactly one consented node", async () => {
@@ -2239,6 +2300,50 @@ test("background command approver leaves typed non-command, truncated and unoffe
       if ((await workflow.call("run_status", { workspaceId: "ws", runId: "run" })).status === "finished") break;
       await new Promise(resolve => setTimeout(resolve, 10));
     }
+  }
+});
+
+test("the command approver reviews a repeated request once: the same command asked again uses its verdict", async () => {
+  const route = { harness_id: "codex-native", provider_id: "cliproxyapi-antigravity", model: "test-model", permission_profile: ":workspace" };
+  // Two requests (different ids) for the same command, then one for another command.
+  const pending = [
+    { approval_id: "first", kind: "command", command: "docker compose up -d", cwd: "C:/project" },
+    { approval_id: "again", kind: "command", command: "docker compose up -d", cwd: "C:/project" },
+    { approval_id: "other", kind: "command", command: "docker compose down", cwd: "C:/project" },
+  ];
+  const mission = { id: "run", workspace_id: "ws", revision: 3, grant: { executable_sha256: "a".repeat(64) }, nodes: [
+    { id: "approver", role: "approver", state: "finished", parents: [], route, receipt: { verdict: "APPROVED" }, settings: { auto_decide: true } },
+    { id: "worker", role: "worker", state: "running", parents: ["approver"], route },
+  ] };
+  const reviewed = [], answered = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) };
+      reviewed.push(JSON.parse(init.body).messages[0].content);
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"allow","reason":"Starts the project services"}' } }] }) };
+    },
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+      if (endpoint.endsWith("/observe")) {
+        const left = pending.filter((item) => !answered.includes(item.approval_id));
+        if (!left.length) mission.nodes[1].state = "finished";
+        return { ok: true, pending_approvals: left };
+      }
+      if (endpoint.endsWith("/approval")) { answered.push(body.approval_id); return { ok: true }; }
+      throw new Error("Unexpected endpoint " + endpoint);
+    },
+  });
+  await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  for (let tries = 0; tries < 100 && answered.length < 3; tries++) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(answered.sort(), ["again", "first", "other"], "every request was answered for the person");
+  assert.equal(reviewed.length, 2, "one model call per distinct request, not per request id");
+  assert.ok(reviewed.some((prompt) => prompt.includes("docker compose up -d")) && reviewed.some((prompt) => prompt.includes("docker compose down")));
+  for (let tries = 0; tries < 70; tries++) {
+    if ((await workflow.call("run_status", { workspaceId: "ws", runId: "run" })).status === "finished") break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
 });
 
@@ -3850,6 +3955,64 @@ async function switchedPrompt(earlierAnswer) {
   assert.equal(spawned.length, 1, "another model starts a fresh session");
   return spawned[0].prompt;
 }
+
+test("a second fresh start with no new replies reuses the chat's handoff summary instead of asking a model again", async () => {
+  const first = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/cline-pass/glm-5.3-flash", permission_profile: ":ao-default" };
+  const task = { id: "task-1", title: "Fix auth", description: "find the auth bug", state: "in_progress", clauses: [] };
+  // Too long to hand over whole, so the first fresh start summarizes it.
+  const previous = { id: "r1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "finished", parents: [], route: first, settings: { name: "Single assistant" },
+      receipt: { thread_id: "sess-1", answer: "a long investigation ".repeat(1500) } }] };
+  const world = chatWorld({ tasks: [task], runs: [previous] });
+  const created = new Map();
+  const spawned = [];
+  let summaries = 0;
+  let route = null;
+  const request = async (endpoint, body, options) => {
+    if (endpoint === "/api/v1/ao/read" && body.run_id) {
+      const run = created.get(body.run_id) ?? { id: body.run_id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1,
+        grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+      created.set(body.run_id, run);
+      return { ok: true, runs: [run], worker_capacity: { [body.run_id]: 1 } };
+    }
+    const latest = [...created.values()].at(-1);
+    if (endpoint === "/api/v1/ao/grant") return { ok: true, run: latest, grant: { executable_sha256: "a".repeat(64) } };
+    if (endpoint === "/api/v1/ao/external/reserve") { latest.nodes[0].state = "reserved"; return { ok: true, request_key: `key-${created.size}`, prompt: "full prompt" }; }
+    if (endpoint === "/api/v1/ao/external/submitted") { latest.nodes[0].state = "running"; latest.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run: latest }; }
+    if (endpoint === "/api/v1/ao/external/terminal") { latest.nodes[0].state = "finished"; return { ok: true, run: latest }; }
+    return world.requestHeadless(endpoint, body, options);
+  };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: request, findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async (url) => {
+      // The catalog is read as /v1/models with a query.
+      if (String(url).includes("/v1/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "gemini-3.8-flash-high" },
+        { id: "test-third" }, { id: "cline-pass/glm-5.3-flash" }] }) };
+      summaries += 1;
+      return { ok: true, json: async () => ({ choices: [{ message: { content: "SUMMARY: the token expiry is compared in seconds." } }] }) };
+    },
+    aoHarness: {
+      spawn: async input => { spawned.push(input); return `fresh-${spawned.length}`; },
+      continuable: async () => true,
+      send: async () => { throw new Error("must not continue another model's session"); },
+      observe: async (id, expected) => ({ status: "idle", turnId: expected ?? "t1", turnState: "completed", answer: "" }),
+    },
+  });
+  const switchTo = async (model) => {
+    route = { ...first, model };
+    const before = spawned.length;
+    await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "now fix it", executionMode: "single", singleRoute: route });
+    for (let tries = 0; tries < 200 && spawned.length === before; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(spawned.length, before + 1, `${model} starts a fresh session`);
+    return spawned.at(-1).prompt;
+  };
+  assert.match(await switchTo("cpa/gemini-3.8-flash-high"), /SUMMARY: the token expiry/);
+  assert.equal(summaries, 1);
+  assert.match(await switchTo("cpa/test-third"), /SUMMARY: the token expiry/, "the same summary goes with the next fresh start");
+  assert.equal(summaries, 1, "no model was asked again for replies it already summarized");
+});
 
 test("a chat switched to another model starts it with what the earlier agent replied", async () => {
   // Seen live: switching the chat's model started a fresh agent that knew only the user's messages.

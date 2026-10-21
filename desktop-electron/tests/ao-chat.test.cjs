@@ -426,7 +426,6 @@ function surfaceComposer(seed = {}) {
       return [state[name], value => { state[name] = typeof value === "function" ? value(state[name]) : value; }];
     },
     useRef(initial) { return refs[refCursor++] ??= { current: initial }; },
-    // The surface memoizes its derived lists (#429); a render here computes them each time.
     useCallback: callback => callback, useMemo: calculate => calculate(), useEffect() {}, useLayoutEffect() {},
   };
   const jsx = (type, props) => ({ type, props: props || {} });
@@ -459,6 +458,7 @@ function surfaceComposer(seed = {}) {
     "./AgentOrchestratorCanvas": { AgentOrchestratorCanvas: "Canvas" },
     "./AgentOrchestratorOriginalSurface": { AgentOrchestratorOriginalSurface: "OriginalBoard" },
     "./ao-chat": chat,
+    "./page-visibility": { useSurfaceHidden: () => () => false, pageHidden: () => false, onAoPush: () => () => {} },
   };
   const surface = loadSurface(react, { localStorage: { getItem: () => "w", setItem() {} }, structuredClone }, imports);
   const walk = item => !item || typeof item !== "object" ? [] : Array.isArray(item) ? item.flatMap(walk) : [item, ...walk(item.props?.children)];

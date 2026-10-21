@@ -27,7 +27,11 @@ function gitOutput(folder, args, { run = execFile, timeoutMs = 3000 } = {}) {
   if (typeof folder !== "string" || folder.length > 4096 || !path.isAbsolute(folder)) return Promise.resolve(null);
   if (!fs.statSync(folder, { throwIfNoEntry: false })?.isDirectory()) return Promise.resolve(null);
   return new Promise((resolve) => {
-    run("git", ["-C", folder, ...args], { windowsHide: true, timeout: timeoutMs }, (error, stdout) => resolve(error ? null : String(stdout)));
+    // Windows can refuse the process outright ("spawn UNKNOWN" under memory pressure): execFile
+    // then throws instead of calling back, which failed the whole IPC call.
+    try {
+      run("git", ["-C", folder, ...args], { windowsHide: true, timeout: timeoutMs }, (error, stdout) => resolve(error ? null : String(stdout)));
+    } catch { resolve(null); }
   });
 }
 
@@ -36,8 +40,10 @@ const GIT_INFO_TIMEOUT_MS = 15_000;
 /** A read-only git command's outcome: its output, or whether and why it failed (stderr; a timeout has none). */
 function gitResult(folder, args, { run = execFile, timeoutMs = 3000 } = {}) {
   return new Promise((resolve) => {
-    run("git", ["-C", folder, ...args], { windowsHide: true, timeout: timeoutMs }, (error, stdout, stderr) =>
-      resolve({ ok: !error, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
+    try {
+      run("git", ["-C", folder, ...args], { windowsHide: true, timeout: timeoutMs }, (error, stdout, stderr) =>
+        resolve({ ok: !error, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
+    } catch (error) { resolve({ ok: false, stdout: "", stderr: String(error?.message ?? error) }); }
   });
 }
 

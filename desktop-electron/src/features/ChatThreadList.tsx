@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { MouseEvent as ReactMouseEvent } from "react";
+import type { DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent } from "react";
 import { Icon } from "../icons";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import { chatRelativeTime, scheduledStartLabel, type ChatStatus, type ChatSummary } from "./ao-chat";
@@ -173,6 +173,27 @@ export function moveChat(shown: string[], id: string, before: string | null): st
   return at < 0 ? shown : [...rest.slice(0, at), id, ...rest.slice(at)];
 }
 
+/**
+ * A drop of `dragged` on the row `target`: before it on the row's upper half, after it on the lower
+ * half, so the last place can be reached (a drop only ever went before the row under the pointer).
+ */
+export function dropChat(shown: string[], dragged: string, target: string, after: boolean): string[] {
+  const rest = shown.filter((item) => item !== dragged);
+  const at = rest.indexOf(target);
+  return at < 0 ? shown : moveChat(shown, dragged, after ? rest[at + 1] ?? null : target);
+}
+
+/**
+ * A list in the order you dragged it into, for lists without active chats to keep on top (Pinned,
+ * Archived): items you haven't placed first, in the order given (newest first), then your order.
+ */
+export function inManualOrder<T>(items: T[], manual: string[], id: (item: T) => string): T[] {
+  const position = new Map(manual.map((key, index) => [key, index]));
+  const given = new Map(items.map((item, index) => [id(item), index]));
+  const rank = (item: T) => position.get(id(item)) ?? (given.get(id(item)) ?? 0) - items.length;
+  return [...items].sort((a, b) => rank(a) - rank(b));
+}
+
 type ListSettings = { visible: number; keepActiveOnTop: boolean };
 const SETTINGS_KEY = "coding-tools:ao:chat-list-settings";
 function readListSettings(): ListSettings {
@@ -183,10 +204,16 @@ function readListSettings(): ListSettings {
   } catch { return { visible: 5, keepActiveOnTop: true }; }
 }
 const orderKey = (workspaceId: string) => `coding-tools:ao:chat-order:${workspaceId}`;
-function readOrder(workspaceId: string): string[] {
-  try { const value = JSON.parse(localStorage.getItem(orderKey(workspaceId)) || "[]"); return Array.isArray(value) ? value.filter((id) => typeof id === "string") : []; }
+// Pinned and each Archived group keep their own order (a project's chats use orderKey).
+const listOrderKey = (list: string) => `coding-tools:ao:list-order:${list}`;
+function readIdsAt(key: string): string[] {
+  try { const value = JSON.parse(localStorage.getItem(key) || "[]"); return Array.isArray(value) ? value.filter((id) => typeof id === "string") : []; }
   catch { return []; }
 }
+const readOrder = (workspaceId: string) => readIdsAt(orderKey(workspaceId));
+
+/** A list a row can be dragged within: its key, the ids in the order shown, and how to keep a new order. */
+type DragList = { list: string; order: string[]; save: (next: string[]) => void };
 
 /**
  * Codex's sidebar: New chat, Pinned, then projects that collapse on click, each with its chats.
@@ -213,7 +240,15 @@ export function ChatThreadList(props: ThreadListProps) {
   if (orderFor !== workspaceId) { setOrderFor(workspaceId); setManualOrder(readOrder(workspaceId)); }
   /** Projects showing all their chats ("Show more"); the rest show the first `visible`. */
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [dragging, setDragging] = useState<string | null>(null);
+  /** The chat being dragged and the list it is dragged within; where it would land, for the drop line. */
+  const [dragging, setDragging] = useState<{ list: string; id: string } | null>(null);
+  const [dropAt, setDropAt] = useState<{ id: string; after: boolean } | null>(null);
+  // Another list's order was saved (Pinned, an Archived group, another open project): render again.
+  const [, setOrderTick] = useState(0);
+  const saveListOrder = (key: string, next: string[]) => {
+    try { localStorage.setItem(key, JSON.stringify(next)); } catch { /* per-session only */ }
+    setOrderTick((tick) => tick + 1);
+  };
   // Codex's project card: shown after a short hover beside the row, kept open while the pointer is
   // on the row or the card (it has a pin toggle and Edit project), closed shortly after leaving.
   const [projectCard, setProjectCard] = useState<{ item: ThreadWorkspace; top: number; left: number } | null>(null);
@@ -478,7 +513,44 @@ export function ChatThreadList(props: ThreadListProps) {
     return () => window.removeEventListener("keydown", onKey);
   });
 
-  const row = (chat: ChatSummary) => {
+  /**
+   * A row's drag handlers, as Codex lets you drag chats into your own order: in every list (a project,
+   * one without a folder, Pinned, a section, Archived), and only within it; moving a chat to another
+   * project is "Continue in" on its menu. The upper half of a row drops before it, the lower half after.
+   */
+  const dragRow = (id: string, drag: DragList | undefined) => {
+    const end = () => { setDragging(null); setDropAt(null); };
+    if (!drag) return { onDragEnd: end };
+    const over = dragging?.list === drag.list && dragging.id !== id;
+    const lower = (event: ReactDragEvent<HTMLElement>) => {
+      const box = event.currentTarget.getBoundingClientRect();
+      return event.clientY > box.top + box.height / 2;
+    };
+    return {
+      draggable: true,
+      "data-drop": over && dropAt?.id === id ? (dropAt.after ? "after" : "before") : undefined,
+      onDragStart: (event: ReactDragEvent<HTMLElement>) => {
+        setDragging({ list: drag.list, id });
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", id);
+      },
+      onDragOver: over ? (event: ReactDragEvent<HTMLElement>) => {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        const after = lower(event);
+        if (dropAt?.id !== id || dropAt.after !== after) setDropAt({ id, after });
+      } : undefined,
+      onDrop: (event: ReactDragEvent<HTMLElement>) => {
+        event.preventDefault();
+        if (over && dragging) drag.save(dropChat(drag.order, dragging.id, id, lower(event)));
+        end();
+      },
+      onDragEnd: end,
+    };
+  };
+  const isDragged = (id: string, drag: DragList | undefined) => Boolean(drag && dragging?.list === drag.list && dragging.id === id);
+
+  const row = (chat: ChatSummary, drag?: DragList) => {
     const isPinned = pinned.includes(chat.taskId);
     const isUnread = unread.includes(chat.taskId) && chat.taskId !== selectedTaskId;
     if (renaming?.taskId === chat.taskId) {
@@ -489,14 +561,8 @@ export function ChatThreadList(props: ThreadListProps) {
           onBlur={() => void commitRename()} />
       </li>;
     }
-    // Codex lets you drag chats into your own order; drop before the row under the pointer.
-    const reorder = shownOrder.includes(chat.taskId);
-    return <li key={chat.taskId} className={`cx-thread-row${isUnread ? " is-unread" : ""}${dragging === chat.taskId ? " is-dragging" : ""}`}
-      draggable={reorder}
-      onDragStart={reorder ? (event) => { setDragging(chat.taskId); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", chat.taskId); } : undefined}
-      onDragOver={reorder && dragging && dragging !== chat.taskId ? (event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } : undefined}
-      onDrop={reorder ? (event) => { event.preventDefault(); if (dragging) saveOrder(moveChat(shownOrder, dragging, chat.taskId)); setDragging(null); } : undefined}
-      onDragEnd={() => setDragging(null)}
+    return <li key={chat.taskId} className={`cx-thread-row${isUnread ? " is-unread" : ""}${isDragged(chat.taskId, drag) ? " is-dragging" : ""}`}
+      {...dragRow(chat.taskId, drag)}
       onContextMenu={(event) => openMenu(event, chatMenu(chat), chat.title)}
       onMouseEnter={(event) => {
         const box = event.currentTarget.getBoundingClientRect();
@@ -518,9 +584,12 @@ export function ChatThreadList(props: ThreadListProps) {
     </li>;
   };
 
-  const pinnedChats = chats.filter((chat) => pinned.includes(chat.taskId));
+  const pinnedKey = listOrderKey("pinned");
+  const pinnedChats = inManualOrder(chats.filter((chat) => pinned.includes(chat.taskId)), readIdsAt(pinnedKey), (chat) => chat.taskId);
+  const pinnedDrag: DragList = { list: "pinned", order: pinnedChats.map((chat) => chat.taskId), save: (next) => saveListOrder(pinnedKey, next) };
   const projectChats = orderChats(chats.filter((chat) => !pinned.includes(chat.taskId) && !sectionOf(chat.taskId)), manualOrder, settings.keepActiveOnTop);
   const shownOrder = projectChats.map((chat) => chat.taskId);
+  const projectDrag: DragList = { list: `project:${workspaceId}`, order: shownOrder, save: saveOrder };
   // Like Codex, a long project shows its first chats and "Show more"; the open chat always shows.
   const showAll = expanded.has(workspaceId);
   const visibleChats = showAll ? projectChats : projectChats.filter((chat, index) => index < settings.visible || chat.taskId === selectedTaskId);
@@ -531,10 +600,12 @@ export function ChatThreadList(props: ThreadListProps) {
     if (!list) return <li className="cx-thread-empty">Loading chats…</li>;
     if (!list.length) return <li className="cx-thread-empty">No chats yet</li>;
     const ordered = orderChats(list.filter((chat) => !pinned.includes(chat.taskId)), readOrder(projectId), settings.keepActiveOnTop);
+    // Its order is the one the project keeps when it is the open one.
+    const drag: DragList = { list: `project:${projectId}`, order: ordered.map((chat) => chat.taskId), save: (next) => saveListOrder(orderKey(projectId), next) };
     const all = expanded.has(projectId);
     return <>
-      {(all ? ordered : ordered.slice(0, settings.visible)).map((chat) => <li key={chat.taskId}
-        className={`cx-thread-row${unread.includes(chat.taskId) ? " is-unread" : ""}`}>
+      {(all ? ordered : ordered.slice(0, settings.visible)).map((chat) => <li key={chat.taskId} {...dragRow(chat.taskId, drag)}
+        className={`cx-thread-row${unread.includes(chat.taskId) ? " is-unread" : ""}${isDragged(chat.taskId, drag) ? " is-dragging" : ""}`}>
         <button type="button" className="cx-thread-select" aria-current={false}
           onClick={() => (actions.selectIn ? actions.selectIn(projectId, chat.taskId) : props.onWorkspace(projectId))}>
           <span className="cx-thread-title">{chat.title}</span>
@@ -560,12 +631,16 @@ export function ChatThreadList(props: ThreadListProps) {
       <nav className="cx-thread-scroll">
         {pinnedChats.length ? <section className="cx-thread-group">
           <h3>Pinned</h3>
-          <ul>{pinnedChats.map(row)}</ul>
+          <ul>{pinnedChats.map((chat) => row(chat, pinnedDrag))}</ul>
         </section> : null}
         {sections.map((section) => {
           const key = `section:${section.id}`;
           const open = !collapsed.has(key);
-          const members = chats.filter((chat) => section.taskIds.includes(chat.taskId) && !pinned.includes(chat.taskId));
+          // A section shows its chats in its own order, the one you drag them into.
+          const members = chats.filter((chat) => section.taskIds.includes(chat.taskId) && !pinned.includes(chat.taskId))
+            .sort((a, b) => section.taskIds.indexOf(a.taskId) - section.taskIds.indexOf(b.taskId));
+          const sectionDrag: DragList = { list: key, order: members.map((chat) => chat.taskId), save: (next) => saveSections(sections.map((item) => item.id === section.id
+            ? { ...item, taskIds: [...next, ...item.taskIds.filter((id) => !next.includes(id))] } : item)) };
           return <section key={section.id} className="cx-thread-group">
             {naming?.sectionId === section.id ? nameInput("Section name")
               : <button type="button" className="cx-project cx-section-head" aria-expanded={open}
@@ -574,7 +649,7 @@ export function ChatThreadList(props: ThreadListProps) {
                 <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
                 <span className="cx-thread-title">{section.name}</span>
               </button>}
-            {open ? <ul>{members.map(row)}{!members.length ? <li className="cx-thread-empty">No chats from this project here</li> : null}</ul> : null}
+            {open ? <ul>{members.map((chat) => row(chat, sectionDrag))}{!members.length ? <li className="cx-thread-empty">No chats from this project here</li> : null}</ul> : null}
           </section>;
         })}
         {naming && !naming.sectionId ? <section className="cx-thread-group">{nameInput("New section name")}</section> : null}
@@ -615,7 +690,7 @@ export function ChatThreadList(props: ThreadListProps) {
                   {props.pendingTitle ? <li className="cx-thread-row is-pending"><span className="cx-thread-select" aria-current="true">
                     <span className="cx-thread-dot status-queued" aria-label="Starting" /><span className="cx-thread-title">{props.pendingTitle}</span>
                   </span></li> : null}
-                  {visibleChats.map(row)}
+                  {visibleChats.map((chat) => row(chat, projectDrag))}
                   {projectChats.length > settings.visible
                     ? <li><button type="button" className="cx-show-more" onClick={() => toggleShowAll()}>{showAll ? "Show less" : "Show more"}</button></li>
                     : null}
@@ -642,7 +717,14 @@ export function ChatThreadList(props: ThreadListProps) {
             const text = remaining < DAY_MS ? "<1d" : `${Math.ceil(remaining / DAY_MS)}d`;
             return <span className="cx-thread-badge is-quiet" title={`Moves to Recently deleted on ${new Date(due).toLocaleDateString()}`}>{text}</span>;
           };
-          const archivedRow = (chat: ArchivedChat) => <li key={`${chat.workspaceId}:${chat.taskId}`} className="cx-thread-row is-archived">
+          // Each Archived group (a project, "Chats", Recently deleted) keeps the order you drag it into.
+          const archivedDrag = (group: string, list: ArchivedChat[]) => {
+            const key = listOrderKey(`archived:${group}`);
+            const chats = inManualOrder(list, readIdsAt(key), (chat) => chat.taskId);
+            return { chats, drag: { list: `archived:${group}`, order: chats.map((chat) => chat.taskId), save: (next: string[]) => saveListOrder(key, next) } };
+          };
+          const archivedRow = (chat: ArchivedChat, drag: DragList) => <li key={`${chat.workspaceId}:${chat.taskId}`} {...dragRow(chat.taskId, drag)}
+            className={`cx-thread-row is-archived${isDragged(chat.taskId, drag) ? " is-dragging" : ""}`}>
             <span className="cx-thread-title" title={chat.title}>{chat.title || "Untitled chat"}</span>
             {chat.visibility === "archived" ? left(chat) : null}
             <button type="button" className="cx-restore" disabled={chatBusy(chat.taskId)} onClick={() => restore(chat)}>Restore</button>
@@ -657,13 +739,14 @@ export function ChatThreadList(props: ThreadListProps) {
               {/* A folder per project, as in the Projects list, then "Chats" for chats with no project. */}
               {archivedGroups(kept, workspaces).map((group) => {
                 const key = `archived:${group.key}`, open = !collapsed.has(key);
+                const { chats: shown, drag } = archivedDrag(group.key, group.chats);
                 return <li key={group.key}>
                   <button type="button" className="cx-project" aria-expanded={open} onClick={() => toggle(key)}>
                     {group.project ? <ChatGlyph name="folder" size={15} /> : <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />}
                     <span className="cx-thread-title">{group.name}</span>
                     <span className="cx-archived-count">{group.chats.length}</span>
                   </button>
-                  {open ? <ul>{group.chats.map(archivedRow)}</ul> : null}
+                  {open ? <ul>{shown.map((chat) => archivedRow(chat, drag))}</ul> : null}
                 </li>;
               })}
               {gone.length ? <li>
@@ -672,7 +755,10 @@ export function ChatThreadList(props: ThreadListProps) {
                   <span className="cx-thread-title">Recently deleted</span>
                   <span className="cx-archived-count">{gone.length}</span>
                 </button>
-                {!collapsed.has("archived:deleted") ? <ul>{gone.map(archivedRow)}</ul> : null}
+                {!collapsed.has("archived:deleted") ? (() => {
+                  const { chats: shown, drag } = archivedDrag("deleted", gone);
+                  return <ul>{shown.map((chat) => archivedRow(chat, drag))}</ul>;
+                })() : null}
               </li> : null}
             </ul> : null}
           </section>;
@@ -732,7 +818,7 @@ export function ChatThreadList(props: ThreadListProps) {
           <span>days</span>
         </label> : null}
         {props.setArchiveDays ? <p className="cx-popover-hint">0 keeps them archived. Deleted chats can still be restored.</p> : null}
-        <p className="cx-popover-hint">Drag chats to reorder them, or press Alt+Shift+↑/↓ on the open chat.</p>
+        <p className="cx-popover-hint">Drag chats to reorder them in any list (a project, Pinned, a section, Archived), or press Alt+Shift+↑/↓ on the open chat.</p>
         {manualOrder.length ? <button type="button" className="cx-popover-reset" onClick={() => saveOrder([])}>Reset to newest first</button> : null}
       </FloatingLayer> : null}
       <ChatMenu menu={menu} onClose={() => setMenu(null)} />

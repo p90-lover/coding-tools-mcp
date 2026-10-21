@@ -35,7 +35,7 @@ function tempTree() {
 
 function fixture({ enabled = () => true, desktop = () => false, terminal = () => false, results = {}, workspaces = null, confirm = async () => true, root = null, worktreesRoot = null,
   minAnswerMs = 0, answerClock = undefined, sandbox = null, subagents = null, statePath = null, autoAnswerMs = undefined, blockedCommand = undefined, now = undefined,
-  wakeups = null, rewriteCommand = undefined } = {}) {
+  wakeups = null, rewriteCommand = undefined, catalog = CATALOG } = {}) {
   const calls = [];
   const asked = [];
   const confirmations = [];
@@ -53,7 +53,7 @@ function fixture({ enabled = () => true, desktop = () => false, terminal = () =>
     },
     requestHeadless: async (endpoint, body, options) => {
       calls.push({ endpoint, body, options });
-      if (endpoint.startsWith("/api/v1/tools/catalog?")) return CATALOG;
+      if (endpoint.startsWith("/api/v1/tools/catalog?")) return catalog;
       if (endpoint === "/api/v1/tools/call") {
         const given = results[body.tool];
         const outcome = await (typeof given === "function" ? given(body) : given);
@@ -287,6 +287,66 @@ test("the warm-session identity names the tool groups, never a credential or a s
   } finally { await tools.close(); }
 });
 
+test("a chat agent's tool list leaves out routing, revision and consent fields and the alias tools; calls naming them still work", async () => {
+  const tree = tempTree();
+  const shared = {
+    known_project_instructions_revision: { type: "string" }, project_root: { type: "string" }, task_id: { type: "string" },
+    confirm: { type: "boolean" }, approval_token: { type: "string" },
+  };
+  const catalog = { ...CATALOG, tools: [
+    { name: "read_file", description: "Read a file", inputSchema: { type: "object", properties: { path: { type: "string" }, ...shared }, required: ["path", "project_root"] } },
+    { name: "search_text", description: "Search", inputSchema: { type: "object", properties: { query: { type: "string" },
+      max_results: { type: "integer", minimum: 1, default: 1000 }, ...shared } } },
+    { name: "grep_text", description: "Grep", inputSchema: { type: "object", properties: { query: { type: "string" } } } },
+    { name: "tool_search", description: "Search tools", inputSchema: { type: "object" } },
+  ] };
+  const { tools, calls } = fixture({ root: tree.root, catalog });
+  try {
+    const { url, auth } = await session(tools, { agent: "claude-code" });
+    const list = (await post(url, { jsonrpc: "2.0", id: 2, method: "tools/list" }, auth)).body.result.tools;
+    assert.deepEqual(list.map((entry) => entry.name).filter((name) => name !== "show_in_chat"), ["read_file", "search_text"],
+      "grep_text runs search_text and tool_search names headless's catalog, so neither is listed");
+    const read = list.find((entry) => entry.name === "read_file").inputSchema;
+    assert.deepEqual(Object.keys(read.properties), ["path"]);
+    assert.deepEqual(read.required, ["path"], "a dropped field is not required either");
+    const search = list.find((entry) => entry.name === "search_text").inputSchema;
+    assert.equal(search.properties.max_results.default, 250, "the list says the chat's result size");
+    // A search that names no size gets the chat's; one that does keeps its own.
+    await callTool(url, auth, "search_text", { query: "a" });
+    assert.equal(calls.at(-1).body.arguments.max_results, 250);
+    await callTool(url, auth, "search_text", { query: "a", max_results: 5 });
+    assert.equal(calls.at(-1).body.arguments.max_results, 5);
+    // An agent that still names the alias or a routing field is served as before.
+    const grep = await callTool(url, auth, "grep_text", { query: "a" });
+    assert.equal(grep.isError, false);
+    await callTool(url, auth, "read_file", { path: "src/a.txt", project_root: "." });
+    assert.equal(calls.at(-1).body.tool, "read_file");
+    assert.equal(calls.at(-1).body.arguments.project_root, ".", "still checked against the worktree, and passed on");
+    assert.equal(calls.at(-1).body.root, path.resolve(tree.root));
+  } finally {
+    await tools.close();
+    tree.cleanup();
+  }
+});
+
+test("project instructions a session already received come back once as text, then as unchanged", () => {
+  const seen = new Set();
+  const withInstructions = (revision, text = "Use pnpm.") => ({ ok: true, content: "x", project_instructions: { revision, instructions: text, files: ["AGENTS.md"] } });
+  const first = toolResult("read_file", {}, withInstructions("r1"), seen);
+  assert.equal(first.structuredContent.project_instructions.instructions, "Use pnpm.");
+  const again = toolResult("read_file", {}, { ...withInstructions("r1"), server_dispatch_ms: 3 }, seen);
+  assert.deepEqual(again.structuredContent.project_instructions, { revision: "r1", unchanged: true, instructions_omitted: true },
+    "only the revision comes back; the text, files and scope came with it the first time");
+  assert.doesNotMatch(again.content[0].text, /Use pnpm|AGENTS\.md/, "the agent is not sent them again");
+  assert.equal(Object.hasOwn(again.structuredContent, "server_dispatch_ms"), false, "headless's timing is not the agent's");
+  assert.equal(again.structuredContent.content, "x", "the result itself is untouched");
+  // Edited instructions are a new revision and come in full; another session has its own record.
+  assert.equal(toolResult("read_file", {}, withInstructions("r2", "Use bun."), seen).structuredContent.project_instructions.instructions, "Use bun.");
+  assert.equal(toolResult("read_file", {}, withInstructions("r1"), new Set()).structuredContent.project_instructions.instructions, "Use pnpm.");
+  // Without a session record, results are as headless sent them.
+  assert.equal(toolResult("read_file", {}, withInstructions("r1")).structuredContent.project_instructions.instructions, "Use pnpm.");
+});
+
 test("the MCP endpoint answers initialize, lists the agent tools and calls them in the session's worktree", async () => {
   const tree = tempTree();
   const { tools, calls } = fixture({ root: tree.root });
@@ -321,11 +381,11 @@ test("the MCP endpoint answers initialize, lists the agent tools and calls them 
     assert.equal(call.body.workspace_id, "ws1");
     assert.equal(call.body.tool, "read_file");
     assert.equal(call.body.root, path.resolve(tree.root), "headless runs the call rooted at the worktree");
-    assert.deepEqual(call.body.arguments, { path: "src/a.txt" });
+    assert.deepEqual(call.body.arguments, { path: "src/a.txt", max_bytes: 65_536 }, "a chat agent's read gets the chat's size default");
     assert.match(call.body.request_id, /^[0-9a-f-]{36}$/);
     assert.equal(call.options.timeout, 120_000);
     assert.equal(called.isError, false);
-    assert.deepEqual(called.structuredContent, { ok: true, tool: "read_file", echo: { path: "src/a.txt" } });
+    assert.deepEqual(called.structuredContent, { ok: true, tool: "read_file", echo: { path: "src/a.txt", max_bytes: 65_536 } });
     assert.deepEqual(JSON.parse(called.content[0].text), called.structuredContent);
 
     const before = calls.length;

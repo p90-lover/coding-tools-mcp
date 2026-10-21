@@ -3,7 +3,7 @@ import { getCodingToolsClient } from "../api/client";
 import type { JsonObject } from "../api/contracts";
 import "./original-ui.css";
 import "./agent-orchestrator-original.css";
-import { pageHidden } from "./page-visibility";
+import { useSurfaceHidden } from "./page-visibility";
 
 async function callUpstream(operation: string, args: JsonObject = {}) {
   const response = await getCodingToolsClient().apps.call({ moduleId: "agent-orchestrator", operation, arguments: args });
@@ -25,6 +25,7 @@ export function AgentOrchestratorOriginalSurface({ openMissions, projectBoard = 
   /** Show one AO terminal (e.g. the Antigravity CLI) instead of the AO app. */
   terminal?: AoTerminalView;
 }) {
+  const surfaceHidden = useSurfaceHidden();
   const panel = useRef<HTMLDivElement>(null);
   const [state, setState] = useState("starting");
   const [error, setError] = useState("");
@@ -54,7 +55,7 @@ export function AgentOrchestratorOriginalSurface({ openMissions, projectBoard = 
     observer.observe(panel.current!);
     window.addEventListener("resize", resize);
     const timer = setInterval(() => {
-      if (ready && !pageHidden()) void callUpstream("upstream_status").then((result) => {
+      if (ready && !surfaceHidden()) void callUpstream("upstream_status").then((result) => {
         if (!disposed) setState(String(result.state));
       }).catch((cause) => {
         if (disposed) return;

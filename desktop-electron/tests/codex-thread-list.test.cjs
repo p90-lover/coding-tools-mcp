@@ -256,6 +256,71 @@ test("chat order: active chats stay on top, new chats come next, then the order 
   assert.deepEqual(move(["x", "y", "z"], "x", null), ["y", "z", "x"]);
 });
 
+test("a drop lands before a row's upper half and after its lower half; Pinned and Archived keep a manual order", () => {
+  const list = compile("ChatThreadList.tsx", (name) => name === "./ao-chat" ? chat : name === "react" ? { useState() {}, useRef() {}, useEffect() {} } : name === "react/jsx-runtime" ? { jsx() {}, jsxs() {} } : {});
+  const plain = (value) => JSON.parse(JSON.stringify(value));
+  assert.deepEqual(plain(list.dropChat(["x", "y", "z"], "x", "z", true)), ["y", "z", "x"], "the last place can be reached");
+  assert.deepEqual(plain(list.dropChat(["x", "y", "z"], "z", "y", false)), ["x", "z", "y"]);
+  assert.deepEqual(plain(list.dropChat(["x", "y", "z"], "x", "y", true)), ["y", "x", "z"], "after the next row, not before it");
+  assert.deepEqual(plain(list.dropChat(["x", "y"], "x", "gone", true)), ["x", "y"], "a row no longer shown changes nothing");
+  const ids = (items, manual) => plain(list.inManualOrder(items.map((taskId) => ({ taskId })), manual, (item) => item.taskId).map((item) => item.taskId));
+  assert.deepEqual(ids(["new", "a", "b"], ["b", "a"]), ["new", "b", "a"], "a chat you haven't placed comes first, then your order");
+});
+
+// A drag event on a row 20px tall; the pointer on its upper or lower half.
+const dragEvent = (lower) => ({ preventDefault() {}, clientY: lower ? 15 : 5, dataTransfer: { setData() {} },
+  currentTarget: { getBoundingClientRect: () => ({ top: 0, height: 20 }) } });
+const rowOf = (view, title) => walk(view).find((element) => element.type === "li" && String(element.props.className).startsWith("cx-thread-row") && text(element).includes(title));
+
+test("chats can be dragged into place in every list: Pinned, another open project and Archived, each within itself", async () => {
+  for (const key of Object.keys(stored)) delete stored[key];
+  const { props } = fixture();
+  stored["coding-tools:ao:open-projects"] = JSON.stringify(["b"]);
+  props.pinned = ["t1", "t2"];
+  props.chats = [...props.chats, { taskId: "t5", title: "Third", status: "done", runIds: ["r5"], latestRunId: "r5" }];
+  props.archived = [{ taskId: "t3", title: "Gone", status: "done", runIds: [], latestRunId: "" }, { taskId: "t4", title: "Also gone", status: "done", runIds: [], latestRunId: "" }];
+  const list = mount("ChatThreadList.tsx", { ...props, loadProjectChats: async () => [
+    { taskId: "b1", title: "Beta one", status: "done", runIds: ["rb1"], latestRunId: "rb1" },
+    { taskId: "b2", title: "Beta two", status: "done", runIds: ["rb2"], latestRunId: "rb2" }] }, { effects: true });
+  list.render();
+  await new Promise((resolve) => setImmediate(resolve));
+  const drag = (from, to, lower) => {
+    rowOf(list.render(), from).props.onDragStart(dragEvent(lower));
+    const target = rowOf(list.render(), to);
+    assert.ok(target.props.onDragOver, `${to} takes a drop from ${from}`);
+    target.props.onDragOver(dragEvent(lower));
+    assert.equal(rowOf(list.render(), to).props["data-drop"], lower ? "after" : "before", "a line shows where it lands");
+    rowOf(list.render(), to).props.onDrop(dragEvent(lower));
+  };
+  const pinnedTitles = () => walk(walk(list.render()).find((element) => element.type === "section" && text(element).startsWith("Pinned")))
+    .filter((element) => element.type === "li").map((row) => text(walk(row).find((element) => element.props?.className === "cx-thread-title")));
+
+  // Pinned: Fix app to the end.
+  assert.deepEqual(pinnedTitles(), ["Fix app", "Older"]);
+  drag("Fix app", "Older", true);
+  assert.deepEqual(pinnedTitles(), ["Older", "Fix app"]);
+  assert.deepEqual(JSON.parse(stored["coding-tools:ao:list-order:pinned"]), ["t2", "t1"]);
+
+  // Another open project (a project without a folder): its order is the one it keeps when opened.
+  drag("Beta two", "Beta one", false);
+  assert.deepEqual(JSON.parse(stored["coding-tools:ao:chat-order:b"]), ["b2", "b1"]);
+  const view = list.render();
+  assert.ok(text(view).indexOf("Beta two") < text(view).indexOf("Beta one"));
+
+  // Archived, per group.
+  walk(list.render()).find((element) => element.props?.className === "cx-archived-toggle").props.onClick();
+  drag("Also gone", "Gone", false);
+  assert.deepEqual(JSON.parse(stored["coding-tools:ao:list-order:archived:a"]), ["t4", "t3"]);
+  const archivedView = list.render();
+  assert.ok(text(archivedView).indexOf("Also gone") < text(archivedView).indexOf("Gone"));
+
+  // A chat is dragged within its own list only: a pinned chat cannot be dropped among archived ones.
+  rowOf(list.render(), "Older").props.onDragStart(dragEvent(false));
+  assert.equal(rowOf(list.render(), "Also gone").props.onDragOver, undefined);
+  rowOf(list.render(), "Older").props.onDragEnd();
+  for (const key of Object.keys(stored)) delete stored[key];
+});
+
 test("a long project shows 5 chats and Show more, like Codex; the count is a list setting", () => {
   delete stored["coding-tools:ao:chat-list-settings"];
   delete stored["coding-tools:ao:chat-order:a"];

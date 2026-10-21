@@ -34,10 +34,12 @@ const PIXEL_W = CELL_W / 2;
 const PIXEL_H = CELL_H / 2;
 const WIDTH = COLS * CELL_W;
 const HEIGHT = ROWS * CELL_H;
-/** Clawd's house, 24×11 pixels, standing beside the box's right side (not on top of it, where it
+/** Clawd's house, 34×13 pixels, standing beside the box's right side (not on top of it, where it
  *  covered the box's top edge), its floor level with the box's bottom, this far out from it. */
-const HOUSE_W = 24 * PIXEL_W;
-const HOUSE_H = 11 * PIXEL_H;
+const HOUSE_COLS = 34;
+const HOUSE_ROWS = 13;
+const HOUSE_W = HOUSE_COLS * PIXEL_W;
+const HOUSE_H = HOUSE_ROWS * PIXEL_H;
 const HOUSE_GAP = 6;
 /** On the top edge (no room beside the box), this far in from its right end. */
 const HOUSE_INSET = 18;
@@ -78,7 +80,8 @@ const RIDING = ["Wheee!", "Take me somewhere", "Faster!", "Hold on tight"];
 const P = { frame: "#3d3d3a", screen: "#1f2a33", glow: "#7fd1ff", key: "#b4b2a7", mug: "#efede6", rim: "#8c8a82", steam: "#c9c7bd",
   page: "#faf9f5", cover: "#6a9bcc", wood: "#8a5a3c", metal: "#5b5a55", lens: "#bfe3f5", box: "#c8a26b", boxDark: "#9b7a48",
   roof: "#b85c3f", roofEdge: "#8f4430", wall: "#e3cfa6", wallEdge: "#b89b6a", door: "#5a3a26", knob: "#f5c451",
-  glass: "#3d5a73", lit: "#f5c451", frameLight: "#faf9f5" };
+  glass: "#3d5a73", lit: "#f5c451", frameLight: "#faf9f5",
+  inside: "#d6bf92", insideEdge: "#bfa576", floor: "#9c6b47", rug: "#7f9db8", shade: "#e8dcb8", leaf: "#7fa36b" };
 
 /** What Clawd is busy with: a prop beside it (or on its head) and how its arms move. */
 type Job = "none" | "laptop" | "search" | "build" | "carry" | "coffee" | "read";
@@ -112,27 +115,55 @@ function restFrame({ mood, asleep, step, pose, blink, job }: { mood: PetMood; as
   return { pose: { eyes, arms, feet }, offset: pose.sit ? 1 : 0 };
 }
 
+const houseSvg = (parts: ReactElement[]) =>
+  <svg viewBox={`0 0 ${HOUSE_COLS} ${HOUSE_ROWS}`} width={HOUSE_W} height={HOUSE_H} preserveAspectRatio="none" aria-hidden="true"
+    shapeRendering="crispEdges">{parts}</svg>;
+
 /**
- * Clawd's house, standing beside the box's right side: a clay roof, a door on the side facing the
- * box, and a window, lit while Clawd is home awake. Asleep inside, z's rise from it.
+ * Clawd's house is a doll's house with its front swung open, so you can see in: its rooms are drawn
+ * behind Clawd (HouseInside) and its roof and side walls in front (House). Clawd stands in the
+ * middle of the room, on a rug, with a bookshelf and a picture to its left and a window and a lamp
+ * to its right; it fills the room's middle (18 of its 28 pixels), and its walls (rows 6-12) are a
+ * row taller than Clawd.
+ */
+function HouseInside({ home, asleep }: { home: boolean; asleep: boolean }) {
+  const r = rect;
+  const lit = home && !asleep;
+  return houseSvg([
+    // Back wall with a darker band at its foot, then the floor and the rug Clawd stands on.
+    r(3, 6, 28, 6, P.inside, "back"), r(3, 10, 28, 1, P.insideEdge, "dado"), r(3, 12, 28, 1, P.floor, "floor"), r(9, 12, 16, 1, P.rug, "rug"),
+    // Left: a framed picture over a bookshelf of three books and a plant.
+    r(4, 7, 3, 2, P.wood, "picture"), r(5, 7, 1, 1, P.lens, "picture-sky"), r(5, 8, 1, 1, P.leaf, "picture-hill"),
+    // Left: a framed landscape over a bookshelf of four books.
+    r(3, 9, 4, 3, P.wood, "shelf"), r(3, 10, 1, 1, P.cover, "book-1"), r(4, 10, 1, 1, P.roof, "book-2"), r(5, 10, 1, 1, P.leaf, "book-3"),
+    r(6, 10, 1, 1, P.page, "book-4"),
+    // Right: a window (lit while Clawd is home awake) and a lamp beside it, lit with it.
+    r(26, 7, 4, 3, P.frameLight, "window-frame"), r(27, 7, 2, 2, lit ? P.lit : P.glass, "window"),
+    r(28, 10, 3, 1, lit ? P.lit : P.shade, "lamp-shade"), r(29, 11, 1, 1, P.metal, "lamp-stand"),
+  ]);
+}
+
+/**
+ * The front of Clawd's house, standing beside the box's right side and drawn over Clawd:
+ * a clay roof with its chimney, the side walls, and the front wall swung open on its hinge at the
+ * left. Asleep inside, z's rise from it.
  */
 function House({ home, asleep, onKnock }: { home: boolean; asleep: boolean; onKnock: () => void }) {
   const r = rect;
-  const parts: ReactElement[] = [];
-  // The roof, two pixels wider each row down, with an eave line under it.
-  [[10, 4], [8, 8], [6, 12], [4, 16], [2, 20]].forEach(([x, w], row) => parts.push(r(x!, row, w!, 1, P.roof, `roof${row}`)));
-  parts.push(r(2, 4, 20, 1, P.roofEdge, "eave"), r(16, 0, 2, 3, P.roofEdge, "chimney"));
-  // Walls, with darker edges, then the door (its knob) and the window.
-  parts.push(r(3, 5, 18, 6, P.wall, "wall"), r(3, 5, 1, 6, P.wallEdge, "wall-l"), r(20, 5, 1, 6, P.wallEdge, "wall-r"),
-    r(3, 10, 18, 1, P.wallEdge, "sill"));
-  parts.push(r(5, 6, 5, 5, P.door, "door"), r(8, 8, 1, 1, P.knob, "knob"));
-  const lit = home && !asleep;
-  parts.push(r(13, 6, 5, 3, P.frameLight, "window-frame"), r(14, 6, 3, 2, lit ? P.lit : P.glass, "window"));
+  const parts: ReactElement[] = [r(25, 0, 2, 3, P.roofEdge, "chimney")];
+  // The roof, three pixels wider each side each row down, with an eave line under it.
+  [[14, 6], [11, 12], [8, 18], [5, 24], [2, 30]].forEach(([x, w], row) => parts.push(r(x!, row, w!, 1, P.roof, `roof${row}`)));
+  parts.push(r(1, 5, 32, 1, P.roofEdge, "eave"));
+  // The side walls, edged darker outside; between them the room is open.
+  parts.push(r(2, 6, 1, 7, P.wall, "wall-l"), r(1, 6, 1, 7, P.wallEdge, "wall-l-edge"),
+    r(31, 6, 1, 7, P.wall, "wall-r"), r(32, 6, 1, 7, P.wallEdge, "wall-r-edge"));
+  // The front wall, swung open on its left hinge so its edge shows, with the door's knob on it.
+  parts.push(r(0, 6, 1, 7, P.wall, "front"), r(0, 9, 1, 1, P.knob, "front-knob"));
   return <button type="button" className={`cx-pet-house${home ? " is-home" : ""}${asleep ? " is-asleep" : ""}`}
     title={home ? (asleep ? "Clawd is napping. Click to wake it" : "Clawd is home") : "Clawd's house. Click to call Clawd home"}
     aria-label={home ? (asleep ? "Clawd's house: Clawd is napping inside" : "Clawd's house: Clawd is home") : "Clawd's house"}
     onClick={onKnock}>
-    <svg viewBox="0 0 24 11" width={HOUSE_W} height={HOUSE_H} preserveAspectRatio="none" aria-hidden="true" shapeRendering="crispEdges">{parts}</svg>
+    {houseSvg(parts)}
     {home && asleep ? <span className="cx-pet-house-z" aria-hidden="true"><span>z</span><span>z</span><span>Z</span></span> : null}
   </button>;
 }
@@ -201,8 +232,6 @@ function spotAt(loop: Loop, at: number): { x: number; y: number; side: 0 | 1 | 2
 const housePlace = (loop: Loop) => loop.beside
   ? { left: loop.width + HOUSE_GAP, top: loop.height - HOUSE_H }
   : { left: Math.max(0, loop.width - HOUSE_W - HOUSE_INSET), top: -HOUSE_H };
-/** How far down the house its door's middle is (the door is rows 6 to 10 of its 11). */
-const DOOR_Y = 8.5 * PIXEL_H;
 /** `along` (a distance from the top-left corner, under one lap) on the lap nearest `near`. */
 const nearLap = (loop: Loop, along: number, near: number) => along + Math.round((near - along) / loop.length) * loop.length;
 
@@ -350,16 +379,15 @@ export function ChatPet({ mood, context, onHide }: {
     return rects.some((found) => found.left < frame.left + right && found.right > frame.left + left
       && found.top < frame.top + bottom && found.bottom > frame.top + top);
   };
-  /** Where Clawd stands to go into its house: at its door. Beside the box that is on the right side,
-   *  level with the door (the house stands on the box's bottom, so a tall box puts it low); on the
-   *  top edge, behind the house's middle. */
+  /** Where Clawd walks to go into its house. Beside the box that is the foot of its right side, by the
+   *  house's floor (it then stands upright in the room; see `placement`); on the top edge, the room's
+   *  middle. */
   const homeSpot = () => {
     const current = loopNow.current;
     if (!current) return atNow.current;
-    const place = housePlace(current);
     const along = current.beside
-      ? current.width + Math.max(0, Math.min(current.height, place.top + DOOR_Y))
-      : place.left + HOUSE_W / 2;
+      ? current.width + Math.max(0, current.height - WIDTH / 2)
+      : housePlace(current).left + HOUSE_W / 2;
     return nearLap(current, along, atNow.current);
   };
   /** Whether standing at `spot` would leave it half behind the house: it only stops there to go in.
@@ -774,10 +802,15 @@ export function ChatPet({ mood, context, onHide }: {
   };
 
   const percent = context === null ? null : Math.round(context * 100);
-  const side = loop && !Number.isNaN(at) && !ride && !held ? spotAt(loop, at).side : 0;
+  // Home in the house beside the box: upright in the middle of its room, feet on its floor, as it
+  // stands in the house on the top edge (its walk ends sideways at the foot of the box's right side).
+  const inRoom = home && !ride && !held && loop?.beside ? housePlace(loop) : null;
+  const side = loop && !Number.isNaN(at) && !ride && !held && !inRoom ? spotAt(loop, at).side : 0;
   // On the box: feet on the outline, body outward, so upright on top, sideways on the sides and
   // upside down under it. On the pointer or held: upright, above everything.
-  const placement: CSSProperties = ride
+  const placement: CSSProperties = inRoom
+    ? { left: inRoom.left + HOUSE_W / 2 - WIDTH / 2, top: inRoom.top + HOUSE_H - HEIGHT }
+    : ride
     ? { position: "fixed", left: ride.x - WIDTH / 2, top: ride.y - HEIGHT + 4, zIndex: 60, pointerEvents: "none",
       transition: ride.mode === "riding" ? "none" : "left .42s ease-out, top .42s cubic-bezier(.3,-.7,.6,1)" }
     : held
@@ -824,9 +857,13 @@ export function ChatPet({ mood, context, onHide }: {
       <Prop job={asleep || ride ? "none" : job} step={step} tick={tick} />
     </button>
   </div>;
-  const house = loop ? <div className="cx-pet-house-spot" style={housePlace(loop)}>
-    <House home={home} asleep={asleep} onKnock={() => { if (!wake()) goHome(false); }} />
-  </div> : null;
+  // The room behind Clawd, the roof and walls in front of it: with the front open, it shows inside.
+  const house = loop ? <>
+    <div className="cx-pet-house-spot is-inside" style={housePlace(loop)}><HouseInside home={home} asleep={asleep} /></div>
+    <div className="cx-pet-house-spot" style={housePlace(loop)}>
+      <House home={home} asleep={asleep} onKnock={() => { if (!wake()) goHome(false); }} />
+    </div>
+  </> : null;
   // Aboard the pointer or carried, it lives on the page itself, so no panel's edge clips it.
   return <>{house}{(ride || held) && typeof document !== "undefined" ? createPortal(pet, document.body) : pet}</>;
 }

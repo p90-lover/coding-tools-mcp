@@ -260,7 +260,21 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, logger = null }) {
+  // One run read serves every caller for a moment (as the upstream shares a conversation tail). A
+  // working chat's activity poll, the run loop and their per-node checks each read the same run
+  // within milliseconds: 10-15 /ao/read a second while one mission worked, each one a copy and a
+  // serialization of the run in coding-tools-headless. Any other request may change a run, so it
+  // drops what was read, before it is sent and again once it is answered. The app turns it on
+  // (runReadFreshMs); off by default, so a caller that changes runs some other way reads afresh.
+  const HEADLESS_READS = new Set(["/api/v1/ao/read", "/api/v1/ao/harness/status", "/api/v1/ao/harness/permission-profiles"]);
+  const runReads = new Map(); // JSON [workspace, run] -> { at, read }
+  // Every argument passes through (a confirmed action's third is its localConfirmation).
+  const requestHeadless = (endpoint, ...rest) => {
+    if (HEADLESS_READS.has(endpoint)) return sendHeadless(endpoint, ...rest);
+    runReads.clear();
+    return Promise.resolve(sendHeadless(endpoint, ...rest)).finally(() => runReads.clear());
+  };
   const goals = createGoalStore({ file: goalsFile, now });
   const chatPreferences = createChatPreferences(chatPreferencesFile);
   // Chats whose agent asked to be woken later (schedule_wakeup, chat-wakeups.cjs).
@@ -1264,16 +1278,25 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     return { mission, node: mission?.nodes?.find((entry) => entry.id === nodeId) };
   }
 
-  async function runs({ workspaceId, runId } = {}) {
-    const id = clean(workspaceId, 128);
-    const response = await requestHeadless("/api/v1/ao/read", {
-      workspace_id: id,
-      ...(runId ? { run_id: clean(runId, 80) } : {}),
-    });
-    if (response?.ok !== true || !Array.isArray(response.runs)) {
-      throw new Error("AO run read failed");
+  // Callers only read what comes back (none changes a run in place), so one response is shared.
+  function runs({ workspaceId, runId } = {}) {
+    const id = clean(workspaceId, 128), run = runId ? clean(runId, 80) : "";
+    const key = JSON.stringify([id, run]);
+    const known = runReads.get(key);
+    if (known && Date.now() - known.at < runReadFreshMs) return known.read;
+    const read = (async () => {
+      const response = await requestHeadless("/api/v1/ao/read", { workspace_id: id, ...(run ? { run_id: run } : {}) });
+      if (response?.ok !== true || !Array.isArray(response.runs)) {
+        throw new Error("AO run read failed");
+      }
+      return response;
+    })();
+    if (runReadFreshMs > 0) {
+      runReads.set(key, { at: Date.now(), read });
+      read.catch(() => { if (runReads.get(key)?.read === read) runReads.delete(key); });
+      if (runReads.size > 64) runReads.delete(runReads.keys().next().value);
     }
-    return response;
+    return read;
   }
 
   async function updateRun({ workspaceId, change } = {}) {
@@ -1549,12 +1572,31 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     }));
   }
 
+  // The window refuses an answer over 1 MB (ipc-schema). A long turn's thoughts and messages (up to
+  // 64 KB each) passed that, and its whole work failed to open (1.5 MB, seen live). Over this budget
+  // the longest texts are cut first, then tool arguments, output and diffs, and only then the oldest
+  // items, so the turn still opens with as many of its tool calls as fit.
+  const TIMELINE_RESPONSE_BYTES = 800_000;
+  function fitTimeline(items) {
+    const size = () => Buffer.byteLength(JSON.stringify(items));
+    if (size() <= TIMELINE_RESPONSE_BYTES) return items;
+    const cut = (text, limit) => text.length <= limit ? text : `${text.slice(0, limit).replace(/[\ud800-\udbff]$/, "")}…`;
+    for (const limit of [16 * 1024, 4096, 1024]) {
+      items = items.map(item => item.text.length > limit ? { ...item, text: cut(item.text, limit) } : item);
+      if (size() <= TIMELINE_RESPONSE_BYTES) return items;
+    }
+    items = items.map(({ input: _input, output: _output, files, ...item }) =>
+      files ? { ...item, files: files.map(({ diff: _diff, ...file }) => file) } : item);
+    while (items.length > 1 && size() > TIMELINE_RESPONSE_BYTES) items = items.slice(Math.ceil(items.length / 10));
+    return items;
+  }
+
   /** turn_timeline: a finished card's work, read back from its AO session when the chat opens it. */
   async function turnTimeline({ workspaceId, runId, nodeId } = {}) {
     const { node } = await savedNode(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80));
     const session = node?.receipt?.thread_id, turnId = node?.receipt?.turn_id;
     if (!node || !externalAgent(node) || !session || !turnId) return { ok: true, timeline: [] };
-    return { ok: true, timeline: publicTimeline(await harnessService().timeline(session, turnId)) };
+    return { ok: true, timeline: fitTimeline(publicTimeline(await harnessService().timeline(session, turnId))) };
   }
 
   const activityFrames = new Map();
@@ -2265,6 +2307,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const REVIEW_TRIES = 3;
   const REVIEW_RETRY_MS = 4_000;
   const reviewFailures = new Map(); // approval_id -> { tries, at }
+  // A verdict serves the same request again for a while. Requests were deduped only by their id, so
+  // an agent running the same `cargo test` twenty times had it reviewed twenty times, each a model
+  // call. The key is the whole review prompt: the approver's rules, the folder, the exact request,
+  // its permissions and the contents of any local script it runs, so an edited script, another
+  // folder or new rules are reviewed afresh. Only a model's answer is kept, never a failure.
+  const REVIEW_CACHE_MS = 10 * 60_000;
+  const reviewVerdicts = new Map(); // sha256(prompt) -> { at, action, reason }
   async function askApprover({ approver, mission, approval }) {
     const { baseUrl, key } = connection();
     const catalog = await models();
@@ -2292,6 +2341,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       "allow: clearly safe and needed for the task. deny: destructive, outside the workspace, secret-touching or unrelated. ask: anything unclear.",
       scripts.length ? "Judge a command that runs a local script by the script's contents shown above." : "",
     ].filter(Boolean).join("\n");
+    const verdictKey = createHash("sha256").update(prompt).digest("hex");
+    const known = reviewVerdicts.get(verdictKey);
+    if (known && now() - known.at < REVIEW_CACHE_MS) {
+      logger?.info?.("ao.approval_reviewed", { cached: true, action: known.action, tool: String(approval.tool ?? approval.kind ?? "").slice(0, 80),
+        folder: Boolean(folder), reason: publicText(known.reason, 200) });
+      return { action: known.action, reason: known.reason };
+    }
     let failure = null;
     for (const model of candidates) {
       const left = deadline - now();
@@ -2312,6 +2368,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // The reason otherwise lived only in the run's latest note, so a wrong deny could not be traced.
         logger?.info?.("ao.approval_reviewed", { model, action: decision.action, tool: String(approval.tool ?? approval.kind ?? "").slice(0, 80),
           folder: Boolean(folder), reason: publicText(reason, 200) });
+        reviewVerdicts.set(verdictKey, { at: now(), action: decision.action, reason });
+        if (reviewVerdicts.size > 200) reviewVerdicts.delete(reviewVerdicts.keys().next().value);
         return { action: decision.action, reason };
       } catch (error) {
         failure = error;
@@ -2753,7 +2811,6 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     const detail = "Helper: " + publicText(decision.reason || decision.action, 300);
     state.recoveryDetail = detail;
-    if (decision.action === "wait") state.recoveryWaits.set(workerAttempt, detail);
     if (decision.action === "retry") {
       await controlRun({ workspaceId, runId: mission.id, action: node.role === "worker" ? "retry_auto" : "retry", ...(node.role === "worker" ? { nodeId: node.id } : {}) });
       return { changed: true, retried: true, detail: "Helper retried " + (node.settings?.name || node.role) + ": " + publicText(decision.reason, 300) };
@@ -2762,6 +2819,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       await controlRun({ workspaceId, runId: mission.id, action: "review_failures", nodeId: node.id });
       return { changed: true, detail };
     }
+    // A decision that leaves the run as it is (wait, or stop/give_up on a step that is not a
+    // worker's) stands for this attempt. Only "wait" was kept, so the others asked the recovery
+    // helper's model again on every pass of the run loop.
+    state.recoveryWaits.set(workerAttempt, detail);
     return { detail };
   }
 
@@ -3423,6 +3484,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
 
     let task;
+    // Whether the new chat starts as "New task", the only name nameChat replaces. A name the user
+    // gave, or a single chat's name taken from its message, kept nameChat's model call for nothing.
+    let defaultTitled = false;
     let continuation = null;
     if (taskId) {
       task = clean(taskId, 128);
@@ -3460,8 +3524,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     } else {
       const before = await board({ workspaceId: id });
       const known = new Set(before.tasks.map((entry) => entry.id));
+      const startTitle = clean(title && String(title).trim() ? title : executionMode === "single" ? fallbackChatTitle(naming) : CHAT_TASK_TITLE, 240);
+      defaultTitled = startTitle === CHAT_TASK_TITLE;
       await write(id, { expected_revision: before.revision, change: {
-        operation: "create", title: clean(title && String(title).trim() ? title : executionMode === "single" ? fallbackChatTitle(naming) : CHAT_TASK_TITLE, 240), description: text,
+        operation: "create", title: startTitle, description: text,
       } });
       const added = (await board({ workspaceId: id })).tasks.filter((entry) => !known.has(entry.id));
       if (added.length !== 1) throw new Error("The new chat's task needs review; refresh the board");
@@ -3483,14 +3549,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (deferStart === true) {
       // Keep the normal authorization path: an expired/missing local approval fails visibly.
       void startRun({ workspaceId: id, runId, executable: selectedExecutable }).then(() => {
-        if (!taskId) void nameChat(id, task, naming).catch(() => undefined);
+        if (!taskId && defaultTitled) void nameChat(id, task, naming).catch(() => undefined);
       }).catch(() => undefined);
       return { ok: true, taskId: task, runId, run: createdRun, status: "starting" };
     }
     // The chat exists from here on: report a failed start inside it instead of losing the chat.
     try {
       const started = await startRun({ workspaceId: id, runId, executable: selectedExecutable });
-      if (!taskId && executionMode !== "single") void nameChat(id, task, naming).catch(() => undefined);
+      if (!taskId && defaultTitled) void nameChat(id, task, naming).catch(() => undefined);
       return { ok: true, taskId: task, runId, status: started.status };
     } catch (error) {
       return { ok: true, taskId: task, runId, status: "failed", detail: error instanceof Error ? error.message : String(error) };
@@ -3711,6 +3777,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     while (start > 0 && used + utf8Bytes(chars[start - 1]) <= bytes) used += utf8Bytes(chars[--start]);
     return chars.slice(start).join("");
   };
+  // A chat's last handoff summary: the replies it covered (a hash of exactly those, and how many)
+  // and its text. Each fresh start (a model switch, another agent) summarized the chat's whole,
+  // growing history again; now nothing new reuses the summary, and replies added since are
+  // summarized together with it.
+  const handoffSummaries = new Map(); // JSON [workspace, task] -> { covered, count, summary }
+  const HANDOFF_INPUT_BYTES = 200 * 1024;
+  const repliesHash = (items) => createHash("sha256").update(items.join("\n\n")).digest("hex");
   async function chatHandoff(workspaceId, taskId, runId, maxBytes) {
     const saved = await runs({ workspaceId });
     const earlier = chatEdits.visible(workspaceId, saved.runs.filter(run => run.project_id === taskId && run.id !== runId));
@@ -3729,7 +3802,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const transcript = replies.join("\n\n");
     const whole = `${head}${transcript}${end}`;
     if (utf8Bytes(whole) <= maxBytes) return whole;
-    const summary = await handoffSummary(transcript).catch(() => "");
+    const chatKey = JSON.stringify([workspaceId, taskId]);
+    const known = handoffSummaries.get(chatKey);
+    const builds = known && known.count <= replies.length && repliesHash(replies.slice(0, known.count)) === known.covered;
+    let summary = builds && known.count === replies.length ? known.summary : "";
+    if (!summary) {
+      const input = builds
+        ? `A handoff summary of the earlier replies:\n\n${known.summary}\n\nReplies since then:\n\n${replies.slice(known.count).join("\n\n")}`
+        : transcript;
+      // The newest part, if the history is too long for a model to read at once.
+      summary = await handoffSummary(utf8Bytes(input) <= HANDOFF_INPUT_BYTES ? input : utf8Tail(input, HANDOFF_INPUT_BYTES)).catch(() => "");
+      if (summary) {
+        handoffSummaries.set(chatKey, { covered: repliesHash(replies), count: replies.length, summary });
+        if (handoffSummaries.size > 100) handoffSummaries.delete(handoffSummaries.keys().next().value);
+      }
+    }
     if (summary) {
       const summaryHead = "Earlier in this chat, other agents worked on the messages below. A handoff summary of their replies:\n\n";
       const summaryEnd = "\n\n--- End of summary.\n\n";

@@ -161,6 +161,54 @@ const CHAT_DESCRIPTIONS = Object.freeze({
 });
 // Consent the agent may never give itself: stripped from every call it makes.
 const CONSENT_ARGUMENTS = Object.freeze(["confirm", "confirmed", "approval_token"]);
+// Schema properties a chat agent never needs, left out of its tool list (a call naming one still
+// works): headless's shared routing fields (a chat is rooted in its worktree and never has
+// start_task's tasks), the instructions revision (repeats are left out for it, see
+// omitSeenInstructions) and the consent it may never give. The routing three alone were 600
+// characters on each of 13 tools, a quarter of the list an agent reads with every request.
+const CHAT_HIDDEN_PROPERTIES = Object.freeze(["project_root", "task_id", "known_project_instructions_revision", ...CONSENT_ARGUMENTS]);
+// Tools a chat agent can still call but is not shown. grep_text runs search_text and kill_session
+// runs kill_command (headless dispatches each pair to one function). tool_search searches
+// headless's own catalog, so it named tools a chat cannot call and missed the chat's own.
+const UNLISTED_TOOLS = new Set(["grep_text", "kill_session", "tool_search"]);
+// How much a chat agent's call returns when it does not say: about what Claude Code returns (30,000
+// characters of command output, 250 search matches). Headless's own defaults are for any client
+// (128 KB of a file, 1,000 matches with previews, 5,000 file names, 64 KB of output), and every
+// result lands whole in the agent's context. A call that wants more names its own value, and a
+// result that was cut says so (more can be read with offsets or read_output).
+const CHAT_RESULT_DEFAULTS = Object.freeze({
+  read_file: { max_bytes: 65_536 },
+  list_dir: { max_entries: 500 },
+  list_files: { max_results: 1000 },
+  search_text: { max_results: 250 },
+  grep_text: { max_results: 250 },
+  exec_command: { max_output_bytes: 30_000 },
+  write_stdin: { max_output_bytes: 30_000 },
+  kill_command: { max_output_bytes: 30_000 },
+  kill_session: { max_output_bytes: 30_000 },
+  git_diff: { max_bytes: 65_536 },
+  git_show: { max_bytes: 65_536 },
+});
+/** The call's arguments with CHAT_RESULT_DEFAULTS filled in where it names none. */
+function withChatDefaults(name, args) {
+  const defaults = CHAT_RESULT_DEFAULTS[name];
+  if (!defaults) return args;
+  const filled = { ...args };
+  for (const [key, value] of Object.entries(defaults)) if (filled[key] === undefined || filled[key] === null) filled[key] = value;
+  return filled;
+}
+/** A tool's input schema as a chat agent sees it: without CHAT_HIDDEN_PROPERTIES, with its CHAT_RESULT_DEFAULTS. */
+function chatSchema(name, schema) {
+  if (!schema || typeof schema !== "object" || !schema.properties || typeof schema.properties !== "object") return schema;
+  const properties = { ...schema.properties };
+  let changed = false;
+  for (const key of CHAT_HIDDEN_PROPERTIES) if (Object.hasOwn(properties, key)) { delete properties[key]; changed = true; }
+  for (const [key, value] of Object.entries(CHAT_RESULT_DEFAULTS[name] ?? {})) {
+    if (properties[key] && typeof properties[key] === "object") { properties[key] = { ...properties[key], default: value }; changed = true; }
+  }
+  if (!changed) return schema;
+  return { ...schema, properties, ...(Array.isArray(schema.required) ? { required: schema.required.filter((key) => Object.hasOwn(properties, key)) } : {}) };
+}
 const GROUPS = Object.freeze(["agent", "terminal", "desktop", "preview", "subagents"]);
 const groupOf = (name) => (AGENT_TOOLS.has(name) ? "agent" : TERMINAL_TOOLS.has(name) ? "terminal" : DESKTOP_TOOLS.has(name) ? "desktop"
   : PREVIEW_TOOLS.has(name) ? "preview" : SUBAGENT_TOOLS.has(name) ? "subagents" : null);
@@ -223,10 +271,34 @@ function errorMessage(error) {
   return String(error instanceof Error ? error.message : error).slice(0, 500);
 }
 
-/** The MCP CallToolResult for a workspace tool's structured result, as the workspace listener shapes it. */
-function toolResult(name, args, structured) {
-  const value = structured && typeof structured === "object" && !Array.isArray(structured)
-    ? { ...structured } : { value: structured ?? null };
+/**
+ * A result whose project instructions this session was already given, with their text left out.
+ * Headless attaches the instructions covering a call's path (up to 32 KB of AGENTS.md / CLAUDE.md)
+ * to every result unless the call names the revision it already has, which agents rarely do, and a
+ * chat agent's own harness reads those files too: every file read carried them again. A revision
+ * the session already received comes back marked unchanged, as headless sends it when told.
+ */
+function omitSeenInstructions(value, seen) {
+  const context = value?.project_instructions;
+  if (!seen || !context || typeof context !== "object" || typeof context.revision !== "string") return value;
+  if (!seen.has(context.revision)) {
+    seen.add(context.revision);
+    if (seen.size > 64) seen.delete(seen.values().next().value);
+    return value;
+  }
+  // The revision alone says which instructions apply; their scope, files and warnings came with it.
+  return { ...value, project_instructions: { revision: context.revision, unchanged: true, ...(context.instructions ? { instructions_omitted: true } : {}) } };
+}
+
+/**
+ * The MCP CallToolResult for a workspace tool's structured result, as the workspace listener shapes
+ * it. `seen` is the session's received instruction revisions (see omitSeenInstructions).
+ */
+function toolResult(name, args, structured, seen = null) {
+  const value = omitSeenInstructions(structured && typeof structured === "object" && !Array.isArray(structured)
+    ? { ...structured } : { value: structured ?? null }, seen);
+  // Headless's own timing, of no use to a chat agent (`seen` marks a chat session's result).
+  if (seen) delete value.server_dispatch_ms;
   const isError = value.ok === false;
   const wantsImage = name.startsWith("computer_")
     ? typeof value.base64 === "string"
@@ -1091,13 +1163,13 @@ function createChatAgentTools({
       ...(canWake(entry) ? WAKE_TOOL_DEFS : [])];
     return [...(Array.isArray(catalog?.tools) ? catalog.tools : [])
       .filter((tool) => !PREVIEW_TOOLS.has(tool?.name) && !SUBAGENT_TOOLS.has(tool?.name) && tool?.name !== "show_in_chat" && tool?.name !== "schedule_wakeup"), ...own]
-      .filter((tool) => typeof tool?.name === "string" && groupOf(tool.name) && allowed(entry, groupOf(tool.name)))
+      .filter((tool) => typeof tool?.name === "string" && !UNLISTED_TOOLS.has(tool.name) && groupOf(tool.name) && allowed(entry, groupOf(tool.name)))
       // outputSchema is left out: clients would validate structuredContent against it, and the
       // agent gains nothing from it.
       .map(({ name, title, description, inputSchema, annotations }) => ({
         name, ...(title ? { title } : {}),
         ...(CHAT_DESCRIPTIONS[name] || description ? { description: CHAT_DESCRIPTIONS[name] ?? description } : {}),
-        inputSchema: inputSchema && typeof inputSchema === "object" ? inputSchema : { type: "object" },
+        inputSchema: inputSchema && typeof inputSchema === "object" ? chatSchema(name, inputSchema) : { type: "object" },
         ...(annotations ? { annotations } : {}),
       }));
   }
@@ -1319,7 +1391,7 @@ function createChatAgentTools({
       current = result && typeof result === "object" && result.ok === false ? result.error : null;
       if (!current) break;
     }
-    return toolResult(name, args, result);
+    return toolResult(name, args, result, entry.instructionsSeen ??= new Set());
   }
 
   /**
@@ -1388,7 +1460,7 @@ function createChatAgentTools({
       const stopped = unavailable(entry, name, signal);
       return stopped || subagents.call(entry.aoSession, entry.workspaceId, name, withoutConsent(given));
     }
-    let args = withoutConsent(given);
+    let args = withChatDefaults(name, withoutConsent(given));
     let root;
     try {
       root = await rootOf(entry);
@@ -1462,7 +1534,7 @@ function createChatAgentTools({
       const result = (failure?.code === "APPROVAL_REQUIRED" && typeof failure.details?.request_id === "string")
         || failure?.code === "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION"
         ? await approveAndRetry(entry, name, args, rooted, failure, confirmed, signal)
-        : toolResult(name, args, outcome.result);
+        : toolResult(name, args, outcome.result, entry.instructionsSeen ??= new Set());
       track(entry, name, args, result);
       return result;
     } finally {

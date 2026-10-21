@@ -11,6 +11,7 @@ const { readCpaCatalog, collectMissionAccounting } = require("./agent-orchestrat
 const { createAoSessionEvents } = require("./ao-session-events.cjs");
 const { createAoDependencyLinks } = require("./ao-dependency-links.cjs");
 const { createDaemonLogFilter } = require("./ao-daemon-log.cjs");
+const { compactAoDatabase } = require("./ao-db-maintenance.cjs");
 const { readContextBreakdown } = require("./ao-context-breakdown.cjs");
 const { withAgentShellCommands, CONVERSATION_LIMITS: AGENT_SHELL_CONVERSATION_LIMITS } = require("./chat-agent-shell.cjs");
 const { windowsChildEnvironment, systemEnvironment } = require("./chat-sandbox.cjs");
@@ -157,6 +158,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   let state = "stopped";
   let error = null;
   let logTail = "";
+  let databaseCompacted = false;
   /**
    * AO's recent meaningful output (no debug lines or quick polls, see ao-daemon-log.cjs), in memory
    * only. AO's output never goes to disk: logs/ao-daemon.log took about 65 MB a day, nearly all of
@@ -363,6 +365,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     const key = `${id}|${limits.join(",")}`;
     const known = tailReads.get(key);
     if (known && Date.now() - known.at < maxAgeMs) return known.read;
+    // A fresh read of more items serves a smaller ask too: a working chat's run loop reads 100
+    // items each second and its Terminal pane 60 every two, the same session's tail twice over.
+    for (const [other, entry] of tailReads) {
+      if (other.startsWith(`${id}|`) && Number(other.slice(id.length + 1).split(",")[0]) >= limits[0]
+        && Date.now() - entry.at < maxAgeMs) return entry.read;
+    }
     const read = readConversationTail(id, limits);
     tailReads.set(key, { at: Date.now(), read });
     read.catch(() => { if (tailReads.get(key)?.read === read) tailReads.delete(key); });
@@ -416,24 +424,42 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     return items.sort((a, b) => a.sequence - b.sequence).slice(-TIMELINE_ITEMS);
   }
   /**
-   * A finished turn's transcript, read back from AO for the chat's folded "Worked" row. AO keeps
-   * the whole conversation; an earlier turn is found by paging back (beforeSequence) a few pages,
-   * stopping once a page reaches a turn before it.
+   * The page of a session's conversation before `beforeSequence`. A page over the handler limit
+   * (a command's long output, a screenshot) is read again smaller; one item over it on its own is
+   * stepped past. Those failures used to end the read, and a finished turn lost every tool call
+   * before its last page: its work showed only its final thought.
    */
-  async function pastTurnTimeline(id, turnId, pages = 6) {
+  async function conversationPageBefore(id, beforeSequence) {
+    for (const limit of [60, 20, 5, 1]) {
+      try {
+        return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${limit}&beforeSequence=${beforeSequence}`);
+      } catch (error) {
+        if (!/exceeds the handler limit/.test(String(error?.message))) return null;
+      }
+    }
+    return { messages: [], activities: [], hasMoreBefore: beforeSequence > 1, oldestSequence: beforeSequence - 1 };
+  }
+  /**
+   * A finished turn's transcript, read back from AO for the chat's folded "Worked" row. AO keeps
+   * the whole conversation; an earlier turn is found by paging back (beforeSequence), stopping once
+   * a page reaches a turn before it or enough of this turn is in hand (the chat keeps its newest
+   * TIMELINE_ITEMS). A long turn spans many pages: six were too few for one of twenty minutes.
+   */
+  async function pastTurnTimeline(id, turnId, pages = 80) {
     let conversation = await conversationTail(id, [60, 20]);
     const merged = { messages: [], activities: [] };
+    let mine = 0;
     for (let page = 0; conversation && page < pages; page += 1) {
       const messages = Array.isArray(conversation.messages) ? conversation.messages : [];
       const activities = Array.isArray(conversation.activities) ? conversation.activities : [];
       merged.messages.push(...messages);
       merged.activities.push(...activities);
+      mine += [...messages, ...activities].filter(entry => entry.turnId === turnId).length;
       const oldest = [...messages, ...activities].sort((a, b) => (Number(a.sequence) || 0) - (Number(b.sequence) || 0))[0];
-      const seen = merged.messages.some(entry => entry.turnId === turnId) || merged.activities.some(entry => entry.turnId === turnId);
-      if (seen && oldest && oldest.turnId !== turnId) break;
+      if (mine && oldest && oldest.turnId !== turnId) break;
+      if (mine >= TIMELINE_ITEMS) break;
       if (!conversation.hasMoreBefore || !(Number(conversation.oldestSequence) > 0)) break;
-      conversation = await internalApi("GET",
-        `/api/v1/sessions/${sessionId(id)}/conversation?limit=60&beforeSequence=${Number(conversation.oldestSequence)}`).catch(() => null);
+      conversation = await conversationPageBefore(id, Number(conversation.oldestSequence));
     }
     // An earlier turn has ended; a message AO left flagged as streaming is its final text.
     return turnTimeline(merged, turnId, true);
@@ -1388,6 +1414,14 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         const digest = crypto.createHash("sha256").update(fs.readFileSync(executable)).digest("hex");
         if (digest !== manifest.daemonSha256) throw new Error("AO daemon does not match its build manifest");
         fs.mkdirSync(dataRoot, { recursive: true, mode: 0o700 });
+        // Once per app session, before AO opens it: a database that is mostly empty pages gives the
+        // space back (ao-db-maintenance.cjs). It runs in a worker, and anything it cannot do is skipped.
+        if (!databaseCompacted) {
+          databaseCompacted = true;
+          const compacted = await compactAoDatabase(dataRoot);
+          if (compacted.action !== "none") logger.info?.("ao.database_compacted", compacted);
+          checkStartup();
+        }
         const allocatedPort = await allocatePort();
         checkStartup();
         daemonPort = allocatedPort;

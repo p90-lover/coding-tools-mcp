@@ -1840,8 +1840,13 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("coding-tools:apps:call", (event, input = {}) => {
     if (!appsHost) throw new Error("Apps host is unavailable");
+    // The chat surface's own background calls run on load, on a timer or when a chat opens, often
+    // while focus sits in an embedded view or another app; refused there, they only filled the
+    // Activity log ("Click into the Coding Tools window", 22 a night) and left the archived list,
+    // the agent pre-warm and the Retry automatically switch unset. They still need a visible window.
     const passiveAoLayout = input.moduleId === "agent-orchestrator"
-      && ["upstream_bounds", "upstream_hide", "chat_preview_show", "chat_preview_hide"].includes(input.operation);
+      && (["upstream_bounds", "upstream_hide", "chat_preview_show", "chat_preview_hide", "archived_chats", "chat_prewarm"].includes(input.operation)
+        || (input.operation === "chat_auto_retry" && input.arguments?.enabled === undefined));
     assertFocusedMainWindow(event, !passiveAoLayout && !appsHost.isReadOnly(input.moduleId, input.operation));
     // A chat's preview is drawn at the pane's CSS bounds, scaled by the page's own zoom.
     if (input.moduleId === "agent-orchestrator" && input.operation === "chat_preview_show") {
@@ -2695,6 +2700,10 @@ async function start() {
   }
   app.commandLine.appendSwitch("remote-debugging-address", "127.0.0.1");
   app.commandLine.appendSwitch("remote-debugging-port", String(cdpPort));
+  // Chromium's GPU shader caches (GPUCache, DawnGraphiteCache and DawnWebGPUCache, in the app's
+  // folder and in every session partition) were rewritten every few minutes. Shaders are compiled
+  // again after a restart instead.
+  app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
 
   await app.whenReady();
   // Remove agent executables an update set aside (in-use-files.cjs) once nothing runs them.
@@ -3184,6 +3193,8 @@ async function start() {
     const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
       // Stop agents that sat idle for a while; their chats resume them on the next message.
       releaseIdleAgents: true,
+      // One run read serves the activity poll, the run loop and their checks for 300 ms.
+      runReadFreshMs: 300,
       // Each launch logs where its time went (ao.launch_timing).
       logger,
       // A pre-warmed session is reused only by a launch that attaches the same app tools.

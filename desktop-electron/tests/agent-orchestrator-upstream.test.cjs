@@ -99,6 +99,26 @@ test("callers reading one session's conversation at once share one read, and a r
   assert.equal(reads, 2, "then it is read again");
 });
 
+test("a fresh read of a session's newest 100 items serves the Terminal pane's ask for 60", async () => {
+  // Seen live: a working chat's tail (~350 KB) was read each second by the run loop and every two
+  // seconds by the Terminal pane, under separate keys.
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const helpers = source.slice(source.indexOf("  async function chatHostGone"), source.indexOf("  // Mission-owned AO calls."));
+  const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
+  const endpoints = [];
+  const { conversationTail } = vm.runInNewContext(`${timelineBounds(source)}${helpers}${identity}({ conversationTail })`, {
+    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), agentTools: null,
+    internalApi: async (_method, endpoint) => { endpoints.push(endpoint); return { messages: [], activities: [] }; },
+  });
+  await conversationTail("s");
+  await conversationTail("s", [60, 20]);
+  assert.deepEqual(endpoints.map(endpoint => /limit=(\d+)/.exec(endpoint)[1]), ["100"], "the 100-item read serves the 60-item ask");
+  await conversationTail("other", [60, 20]);
+  await conversationTail("other");
+  assert.deepEqual(endpoints.map(endpoint => /limit=(\d+)/.exec(endpoint)[1]), ["100", "60", "100"], "a smaller read never serves a larger ask");
+});
+
 test("chat hosts that outlived the app are counted by whether their loopback address still answers", async () => {
   const vm = require("node:vm");
   const net = require("node:net");
@@ -1031,6 +1051,37 @@ test("a finished turn's work is read back from AO, paging back until it reaches 
   assert.deepEqual(items.map(item => item.id), ["3", "4", "5"], "only this turn's items, oldest first, across three pages");
   assert.equal(requests.filter(endpoint => endpoint.includes("beforeSequence")).length, 2, "it stops once a page reaches the turn before");
   assert.equal((await upstream.timeline("s", "")).length, 0, "no turn, nothing to read");
+});
+
+test("a long finished turn keeps its tool calls when a page is over AO's handler limit, past six pages", async () => {
+  // Seen live: a 20-minute turn opened on only its last thought. Paging back stopped at the first
+  // page over the 900 KB handler limit (a command's long output), and after six pages in any case.
+  const requests = [];
+  const tool = (sequence) => ({ id: `t${sequence}`, turnId: "mine", sequence, activityKind: "mcp_tool", status: "completed",
+    summary: `Step ${sequence}`, detail: { toolKind: "other", input: { command: `step ${sequence}` } } });
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => {
+      requests.push(endpoint);
+      const before = Number(/beforeSequence=(\d+)/.exec(endpoint)?.[1] ?? 1000);
+      const limit = Number(/limit=(\d+)/.exec(endpoint)[1]);
+      // Sequence 900's output is over the limit on its own; pages near it are over it at 60.
+      if (before > 900 && before - limit <= 900) throw new Error("AO response exceeds the handler limit (GET /conversation)");
+      if (before > 850 && before <= 960 && limit === 60) throw new Error("AO response exceeds the handler limit (GET /conversation)");
+      const sequences = [];
+      for (let sequence = before - 1; sequence >= Math.max(1, before - limit); sequence -= 1) sequences.push(sequence);
+      const activities = sequences.map(sequence => sequence < 100 ? { ...tool(sequence), turnId: "earlier" } : tool(sequence));
+      return { turns: [], messages: [], activities, oldestSequence: Math.min(...sequences), hasMoreBefore: Math.min(...sequences) > 1 };
+    },
+  });
+  const items = await upstream.timeline("s", "mine");
+  const ids = items.map(item => item.id);
+  assert.equal(ids.includes("t901"), true, "the items around the oversized one are still read");
+  assert.equal(ids.includes("t899"), true);
+  assert.equal(ids.includes("t900"), false, "the one item over the limit on its own is stepped past");
+  assert.equal(items.length, 400, "a turn longer than the chat keeps is read back to TIMELINE_ITEMS of its newest items");
+  assert.equal(ids.at(-1), "t999");
+  assert.ok(requests.filter(endpoint => endpoint.includes("beforeSequence")).length > 6, "more than six pages back");
+  assert.ok(requests.some(endpoint => /limit=20&beforeSequence/.test(endpoint)), "an oversized page is read again smaller");
 });
 
 for (const method of ["interrupt", "exitAgent", "kill"]) {

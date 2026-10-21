@@ -14,6 +14,7 @@ import { copyFor, localizeRuntimeMessage, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import { appendLog, logKey, replaceLogs, useLogs } from "./log-store";
 import { ProviderCenterSurface } from "./features/ProviderHubSaasSurface";
+import { SurfaceHiddenContext } from "./features/page-visibility";
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
 import { ProxyGatewaySurface } from "./features/ProxyGatewaySurface";
 import { ExternalServicesSurface } from "./features/ExternalServicesSurface";
@@ -436,7 +437,9 @@ function LauncherShell({
     const group: readonly Surface[] = typeof ids === "string" ? [ids] : ids;
     const current = group.includes(surface);
     return current || group.some((id) => visitedSurfaces.has(id))
-      ? <div className="surface-pane" hidden={!current}>{render()}</div>
+      ? <div className="surface-pane" hidden={!current}>
+        <SurfaceHiddenContext.Provider value={!current}>{render()}</SurfaceHiddenContext.Provider>
+      </div>
       : null;
   };
   const devProfile = snapshot.profile === "development";
