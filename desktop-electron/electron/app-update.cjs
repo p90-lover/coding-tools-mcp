@@ -14,6 +14,20 @@ const path = require("node:path");
 const zlib = require("node:zlib");
 const { spawn } = require("node:child_process");
 
+// The proxy variables as the app started. Global Routing sets them in this process (the built-in
+// gateway's URL carries its local token); the relaunched app must start from the originals, not
+// route through the gateway of the app that just closed.
+const PROXY_VARIABLES = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"];
+const LAUNCH_PROXY_ENV = Object.fromEntries(PROXY_VARIABLES.map((name) => [name, process.env[name]]));
+function launchEnvironment(base = process.env) {
+  const env = { ...base };
+  for (const name of PROXY_VARIABLES) {
+    if (LAUNCH_PROXY_ENV[name] === undefined) delete env[name];
+    else env[name] = LAUNCH_PROXY_ENV[name];
+  }
+  return env;
+}
+
 // Electron's fs treats every *.asar path as a folder; the install's app.asar is a plain file here.
 const fs = (() => { try { return require("original-fs"); } catch { return asarFs; } })();
 const {
@@ -288,8 +302,12 @@ function createAppUpdateController({
     fetchRelease: async () => JSON.parse(await downloadText(RELEASE_API_URL)),
     downloadText, downloadFile, hash: hashFile,
     spawnWorker(runtime, worker, job) {
-      const env = { ...process.env, ELECTRON_RUN_AS_NODE: "1", ELECTRON_NO_ASAR: "1" };
-      return spawn(runtime, [worker, job], { detached: true, stdio: "ignore", windowsHide: true, env });
+      const env = { ...launchEnvironment(), ELECTRON_RUN_AS_NODE: "1", ELECTRON_NO_ASAR: "1" };
+      const child = spawn(runtime, [worker, job], { detached: true, stdio: "ignore", windowsHide: true, env });
+      // A refused start (antivirus, Smart App Control) is reported by the caller from the missing
+      // pid; the 'error' event that follows on the next tick must not be uncaught.
+      child.once("error", () => undefined);
+      return child;
     },
     ...dependencies,
   };

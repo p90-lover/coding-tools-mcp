@@ -85,8 +85,10 @@ async function swapIn(job, stamp) {
   } catch (error) {
     for (const entry of journal.reverse()) {
       try {
-        if (entry.placed) fs.renameSync(entry.destination, entry.staged);
-        if (entry.aside && fs.existsSync(entry.aside)) fs.renameSync(entry.aside, entry.destination);
+        // With the same retries as the swap: a restore refused once (antivirus scanning the file
+        // just renamed) left a new app.asar beside the old runtime, or a file missing.
+        if (entry.placed) await renameWithRetry(entry.destination, entry.staged);
+        if (entry.aside && fs.existsSync(entry.aside)) await renameWithRetry(entry.aside, entry.destination);
       } catch (rollback) {
         appendLog(job, `could not restore ${entry.rel}: ${rollback?.code || rollback}`);
       }
@@ -118,7 +120,8 @@ function sweep(job, journal) {
 function updateUninstallEntry(job) {
   if (process.platform !== "win32") return;
   const base = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
-  const query = spawnSync("reg.exe", ["query", base, "/s", "/v", "InstallLocation"], { encoding: "utf8", windowsHide: true });
+  // Bounded: a hung reg.exe held the update marker and the relaunch never came.
+  const query = spawnSync("reg.exe", ["query", base, "/s", "/v", "InstallLocation"], { encoding: "utf8", windowsHide: true, timeout: 20_000 });
   if (query.status !== 0) return;
   let key = null;
   const wanted = path.win32.normalize(job.installRoot).toLowerCase().replace(/\\+$/, "");
@@ -126,7 +129,7 @@ function updateUninstallEntry(job) {
     if (/^HKEY_/i.test(line)) key = line.trim();
     const match = /^\s+InstallLocation\s+REG_\w+\s+(.+)$/.exec(line);
     if (key && match && path.win32.normalize(match[1].trim()).toLowerCase().replace(/\\+$/, "") === wanted) {
-      spawnSync("reg.exe", ["add", key, "/v", "DisplayVersion", "/t", "REG_SZ", "/d", job.version, "/f"], { windowsHide: true });
+      spawnSync("reg.exe", ["add", key, "/v", "DisplayVersion", "/t", "REG_SZ", "/d", job.version, "/f"], { windowsHide: true, timeout: 20_000 });
       return;
     }
   }

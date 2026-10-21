@@ -234,6 +234,12 @@ impl DataStore {
         self.persistent
     }
 
+    /// Forgets that `data` is a copy of the file, so the next refresh reads it again: for a store
+    /// recovered after a panic, which may have stopped between changing `data` and saving it.
+    pub fn forget_sync(&mut self) {
+        self.synced = None;
+    }
+
     pub fn refresh(&mut self) -> AppResult<()> {
         if !self.persistent {
             self.baseline = serde_json::to_value(&self.data)?;
@@ -508,9 +514,12 @@ fn concurrent_update_error() -> AppError {
 }
 
 fn lock_data_file() -> AppResult<std::sync::MutexGuard<'static, ()>> {
-    DATA_FILE_LOCK
+    // The lock guards no data of its own (every holder reads the file afresh), so a panic while
+    // it was held leaves nothing half done here. Refusing it from then on failed every read and
+    // write of the data file until the service restarted.
+    Ok(DATA_FILE_LOCK
         .lock()
-        .map_err(|_| AppError::Message("data file lock poisoned".into()))
+        .unwrap_or_else(|poisoned| poisoned.into_inner()))
 }
 
 fn random_secret() -> String {

@@ -395,7 +395,8 @@ impl ServiceState {
         let mut contexts = self
             .contexts
             .lock()
-            .map_err(|_| "context cache unavailable")?;
+            // A cache: a panic while it was held must not refuse every later tool call.
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let profile = self
             .core
             .with_data(|store| {
@@ -2687,7 +2688,8 @@ async fn workspace_remove(
         let mut contexts = state
             .contexts
             .lock()
-            .map_err(|_| "context cache unavailable")?;
+            // A cache: a panic while it was held must not refuse every later tool call.
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let prefix = format!("{}\n", body.workspace_id);
         let keys: Vec<_> = contexts
             .keys()
@@ -5805,16 +5807,7 @@ async fn operation_read(
         Ok(lease) => lease,
         Err(response) => return *response,
     };
-    let operations = match state.operations.lock() {
-        Ok(operations) => operations,
-        Err(_) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "OPERATIONS_UNAVAILABLE",
-                "Operation store unavailable",
-            )
-        }
-    };
+    let operations = state.operations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     match operations.records.get(&request_id) {
         Some(receipt) => Json(json!({"ok":true,"operation":receipt})).into_response(),
         None => json_error(
@@ -5965,16 +5958,7 @@ async fn tool_call(
         )
     );
     {
-        let operations = match state.operations.lock() {
-            Ok(operations) => operations,
-            Err(_) => {
-                return json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "OPERATIONS_UNAVAILABLE",
-                    "Operation store unavailable",
-                )
-            }
-        };
+        let operations = state.operations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(existing) = operations.records.get(&body.request_id) {
             if existing.fingerprint != fingerprint {
                 return json_error(
@@ -6014,16 +5998,7 @@ async fn tool_call(
     };
     let admitted_at_ms = now_ms();
     {
-        let mut operations = match state.operations.lock() {
-            Ok(operations) => operations,
-            Err(_) => {
-                return json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "OPERATIONS_UNAVAILABLE",
-                    "Operation store unavailable",
-                )
-            }
-        };
+        let mut operations = state.operations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         operations.insert(OperationReceipt {
             request_id: body.request_id.clone(),
             fingerprint: fingerprint.clone(),
@@ -6076,9 +6051,11 @@ async fn tool_call(
         error,
         automatic_replay: false,
     };
-    if let Ok(mut operations) = state.operations.lock() {
-        operations.insert(receipt.clone());
-    }
+    state
+        .operations
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(receipt.clone());
     Json(json!({"ok":true,"operation":receipt,"replayed":false,"redispatched":false}))
         .into_response()
 }
