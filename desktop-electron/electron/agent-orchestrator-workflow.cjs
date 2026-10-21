@@ -3703,6 +3703,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     while (start > 0 && used + utf8Bytes(chars[start - 1]) <= bytes) used += utf8Bytes(chars[--start]);
     return chars.slice(start).join("");
   };
+  // A chat's last handoff summary: the replies it covered (a hash of exactly those, and how many)
+  // and its text. Each fresh start (a model switch, another agent) summarized the chat's whole,
+  // growing history again; now nothing new reuses the summary, and replies added since are
+  // summarized together with it.
+  const handoffSummaries = new Map(); // JSON [workspace, task] -> { covered, count, summary }
+  const HANDOFF_INPUT_BYTES = 200 * 1024;
+  const repliesHash = (items) => createHash("sha256").update(items.join("\n\n")).digest("hex");
   async function chatHandoff(workspaceId, taskId, runId, maxBytes) {
     const saved = await runs({ workspaceId });
     const earlier = chatEdits.visible(workspaceId, saved.runs.filter(run => run.project_id === taskId && run.id !== runId));
@@ -3721,7 +3728,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const transcript = replies.join("\n\n");
     const whole = `${head}${transcript}${end}`;
     if (utf8Bytes(whole) <= maxBytes) return whole;
-    const summary = await handoffSummary(transcript).catch(() => "");
+    const chatKey = JSON.stringify([workspaceId, taskId]);
+    const known = handoffSummaries.get(chatKey);
+    const builds = known && known.count <= replies.length && repliesHash(replies.slice(0, known.count)) === known.covered;
+    let summary = builds && known.count === replies.length ? known.summary : "";
+    if (!summary) {
+      const input = builds
+        ? `A handoff summary of the earlier replies:\n\n${known.summary}\n\nReplies since then:\n\n${replies.slice(known.count).join("\n\n")}`
+        : transcript;
+      // The newest part, if the history is too long for a model to read at once.
+      summary = await handoffSummary(utf8Bytes(input) <= HANDOFF_INPUT_BYTES ? input : utf8Tail(input, HANDOFF_INPUT_BYTES)).catch(() => "");
+      if (summary) {
+        handoffSummaries.set(chatKey, { covered: repliesHash(replies), count: replies.length, summary });
+        if (handoffSummaries.size > 100) handoffSummaries.delete(handoffSummaries.keys().next().value);
+      }
+    }
     if (summary) {
       const summaryHead = "Earlier in this chat, other agents worked on the messages below. A handoff summary of their replies:\n\n";
       const summaryEnd = "\n\n--- End of summary.\n\n";
