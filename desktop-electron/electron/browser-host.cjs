@@ -3210,9 +3210,11 @@ class BrowserHost {
         result = await probe(this.view.webContents);
       }
     }
+    // A login ends on the new chat the setting chooses: with saved chats on, a Temporary Chat (where
+    // ChatGPT refuses the connector) is left for the saved home, and the saved home is kept as it is.
     if (this.manualOperation === "ChatGPT login"
       && result.sessionAuthenticated
-      && !result.temporary
+      && !isNewChatUrl(result.url ?? url, useSavedChatsFor(this))
       && !this.view.webContents.isDestroyed()) {
       await this.view.webContents.loadURL(newChatUrlFor(this));
       url = this.view.webContents.getURL();

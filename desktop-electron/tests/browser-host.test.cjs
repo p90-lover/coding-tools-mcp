@@ -1246,6 +1246,44 @@ for (const saved of [true, false]) {
   });
 }
 
+// With saved chats on, a login that lands on Temporary Chat (where the connector is refused) moves
+// to the saved home, and one already on the saved home stays there without a reload.
+for (const [start, expectedLoads] of [[NEW_CHAT_URL.temporary, [NEW_CHAT_URL.saved]], [NEW_CHAT_URL.saved, []]]) {
+  test(`a login with saved chats on ends on the saved home (starting on ${start})`, async () => {
+    let currentUrl = start;
+    const loadedUrls = [];
+    const fixture = {
+      activeTraceId: null,
+      manualOperation: "ChatGPT login",
+      authView: null,
+      state: { authenticated: false },
+      logger: { info() {} },
+      getUseSavedChats: () => true,
+      view: {
+        webContents: {
+          getURL: () => currentUrl,
+          isDestroyed: () => false,
+          executeJavaScript: async () => ({
+            composer: true,
+            temporary: currentUrl === NEW_CHAT_URL.temporary,
+            savedHome: currentUrl === NEW_CHAT_URL.saved,
+            sessionAuthenticated: true,
+            readyState: "complete",
+            url: currentUrl,
+          }),
+          loadURL: async (url) => { loadedUrls.push(url); currentUrl = url; },
+        },
+      },
+      setState(patch) { this.state = { ...this.state, ...patch }; },
+      snapshot() { return this.state; },
+    };
+    const result = await BrowserHost.prototype.probeAuthentication.call(fixture);
+    assert.deepEqual(loadedUrls, expectedLoads);
+    assert.equal(result.authenticated, true);
+    assert.equal(result.url, NEW_CHAT_URL.saved);
+  });
+}
+
 test("a successful primary login redirect is re-proved on Temporary Chat when saved chats are off", async () => {
   let currentUrl = "https://chatgpt.com/";
   const loadedUrls = [];
