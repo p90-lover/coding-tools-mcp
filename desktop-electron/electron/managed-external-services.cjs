@@ -353,19 +353,47 @@ function createManagedExternalServicesController({
     return configuration || baseController.upstreamConfiguration(serviceId);
   }
 
+  // project("cpa") reads CPA's install state from disk (bundle markers, release assets) with
+  // synchronous calls. A chat's timeline asked for the connection once per text field it redacts,
+  // about 2,000 times for a long chat, which held the main process for 3.8 s on the hard disk
+  // whenever a project was opened (every IPC, the window's included, waited). The answer changes
+  // only when CPA is installed or repaired or its keys rotate, so it is kept for a moment.
+  const CPA_CONNECTION_TTL_MS = 2_000;
+  let cpaConnectionCache = null;
   function cpaConnection() {
-    const managed = managedController.project("cpa");
-    if (managed.installState !== "installed") return null;
-    const secrets = managedController.runtimeSecrets("cpa");
-    const managementKey = String(secrets.managementKey || "").trim();
-    const proxyApiKey = String(secrets.proxyApiKey || "").trim();
-    if (!managementKey || !proxyApiKey) {
-      throw new Error("Managed CPA credentials are unavailable");
+    const now = Date.now();
+    if (cpaConnectionCache && now - cpaConnectionCache.at < CPA_CONNECTION_TTL_MS) {
+      return cpaConnectionCache.value && { ...cpaConnectionCache.value };
     }
-    return {
-      baseUrl: SERVICE_ENDPOINTS.cpa.endpoint.replace(/\/$/, ""),
-      managementKey,
-      proxyApiKey,
+    const managed = managedController.project("cpa");
+    let value = null;
+    if (managed.installState === "installed") {
+      const secrets = managedController.runtimeSecrets("cpa");
+      const managementKey = String(secrets.managementKey || "").trim();
+      const proxyApiKey = String(secrets.proxyApiKey || "").trim();
+      if (!managementKey || !proxyApiKey) {
+        throw new Error("Managed CPA credentials are unavailable");
+      }
+      value = { baseUrl: SERVICE_ENDPOINTS.cpa.endpoint.replace(/\/$/, ""), managementKey, proxyApiKey };
+    }
+    cpaConnectionCache = { at: now, value };
+    return value && { ...value };
+  }
+  // Whatever can install, repair, start, stop, reconfigure or re-key a component forgets the
+  // remembered connection before it starts and again when it ends (failed or not), so nobody is
+  // handed CPA's old state or old key once it has changed.
+  function forgettingCpaConnection(change) {
+    return (...args) => {
+      cpaConnectionCache = null;
+      let result;
+      try {
+        result = change(...args);
+      } finally {
+        if (!result || typeof result.then !== "function") cpaConnectionCache = null;
+      }
+      return result && typeof result.then === "function"
+        ? result.finally(() => { cpaConnectionCache = null; })
+        : result;
     };
   }
 
@@ -416,11 +444,11 @@ function createManagedExternalServicesController({
 
   return Object.freeze({
     snapshot: combinedSnapshot,
-    configure,
+    configure: forgettingCpaConnection(configure),
     inspect,
-    start,
-    stop,
-    restart,
+    start: forgettingCpaConnection(start),
+    stop: forgettingCpaConnection(stop),
+    restart: forgettingCpaConnection(restart),
     runtimeEnvironment: () => {
       const mesh = buildLoopbackMesh(combinedSnapshot().services);
       persistLoopbackMesh(meshPath, mesh);
@@ -442,9 +470,9 @@ function createManagedExternalServicesController({
     upstreamConfiguration,
     cpaConnection,
     loopbackRequest,
-    installManagedComponent,
-    repairManagedComponent,
-    setManagedComponentCredential,
+    installManagedComponent: forgettingCpaConnection(installManagedComponent),
+    repairManagedComponent: forgettingCpaConnection(repairManagedComponent),
+    setManagedComponentCredential: forgettingCpaConnection(setManagedComponentCredential),
     managedComponentsSnapshot: () => {
       const snapshot = managedController.snapshot();
       return {

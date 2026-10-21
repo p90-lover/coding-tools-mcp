@@ -1440,16 +1440,22 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
 
   // What each working card is doing now, for the chat and the cards: when it started, its
   // current step and when anything was last heard. Read-only; it never advances the run.
-  function publicText(value, limit = 4096, keepEnd = false) {
+  /** CPA's gateway key, to redact from what the chat shows; null without a CPA connection. */
+  function cpaKeyToRedact() {
+    try {
+      const key = cpaConnection?.()?.proxyApiKey;
+      return typeof key === "string" && key.length >= 8 ? key : null;
+    } catch { return null; } // No CPA connection is needed for read-only output.
+  }
+  /** `key` is the CPA key to redact, when the caller read it once for many texts (publicTimeline). */
+  function publicText(value, limit = 4096, keepEnd = false, key = cpaKeyToRedact()) {
     let text = String(value ?? "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
       .replace(/Bearer\s+\S+|sk-[A-Za-z0-9_-]+/gi, "[redacted]")
       .replace(/((?:api[_-]?key|access[_-]?token|authorization)\s*[:=]\s*)[^\s,;]+/gi, "$1[redacted]");
-    try {
-      const key = cpaConnection?.().proxyApiKey;
-      if (typeof key === "string" && key.length >= 8) text = text.replaceAll(key, "[redacted]");
-    } catch { /* No CPA connection is needed for read-only output. */ }
+    if (key) text = text.replaceAll(key, "[redacted]");
     return keepEnd ? text.slice(-limit) : text.slice(0, limit);
   }
+  const publicTextOf = publicText;
 
   /**
    * A role's reasoning, tool calls and messages for the chat, every field through publicText (a
@@ -1506,6 +1512,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   }
 
   function publicTimeline(items) {
+    // The CPA key, read once for the whole timeline rather than once per field (see publicText).
+    const key = cpaKeyToRedact();
+    const publicText = (value, limit, keepEnd = false) => publicTextOf(value, limit, keepEnd, key);
     // The same bounds the upstream adapter's turnTimeline reads with (TIMELINE_ITEMS and
     // TIMELINE_TEXT_BYTES there): every item it built, and a message or thought uncut.
     return (Array.isArray(items) ? items : []).slice(-400).map(item => ({
