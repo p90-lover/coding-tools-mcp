@@ -105,6 +105,11 @@ test("a DeepSeek turn's live heading, Think line and durations read as DeepSeek 
   assert.equal(chat.dshLiveTitle([item("reasoning", { text: "x" }), item("command", { status: "running", text: "npm test" })]).label, "Running commands · npm test");
   assert.equal(chat.dshLiveTitle([item("command"), item("reasoning", { text: "First idea.\n\n**Second** idea" })]).label,
     "Analyzing the request · Second idea", "no call running: the latest thought's last paragraph, ** dropped");
+  // A request nobody answered holds the turn; it said "Running commands" for 85 minutes.
+  const waiting = chat.dshLiveTitle([item("command", { status: "running", text: "Invoke-RestMethod :7411" }), item("approval", { status: "pending", text: "PowerShell" })]);
+  assert.deepEqual(plain(waiting), { activity: "questions", label: "Waiting for approval · Invoke-RestMethod :7411" });
+  assert.equal(chat.dshLiveTitle([item("approval", { status: "resolved" }), item("command", { status: "running", text: "ls" })]).label, "Running commands · ls",
+    "an answered request no longer holds it");
   // ReasoningRow.tsx: settled, the first line; streaming, the newest completed paragraph's first line.
   assert.equal(chat.dshThinkSummary("**Checking health**\nmore", false), "Checking health");
   assert.equal(chat.dshThinkSummary("Let me check health.\nok\n\nNow the configs\nstill typing", true), "Now the configs");
