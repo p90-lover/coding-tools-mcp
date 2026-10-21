@@ -11,6 +11,7 @@ const { readCpaCatalog, collectMissionAccounting } = require("./agent-orchestrat
 const { createAoSessionEvents } = require("./ao-session-events.cjs");
 const { createAoDependencyLinks } = require("./ao-dependency-links.cjs");
 const { createDaemonLogFilter } = require("./ao-daemon-log.cjs");
+const { compactAoDatabase } = require("./ao-db-maintenance.cjs");
 const { readContextBreakdown } = require("./ao-context-breakdown.cjs");
 const { withAgentShellCommands, CONVERSATION_LIMITS: AGENT_SHELL_CONVERSATION_LIMITS } = require("./chat-agent-shell.cjs");
 const { windowsChildEnvironment, systemEnvironment } = require("./chat-sandbox.cjs");
@@ -157,6 +158,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   let state = "stopped";
   let error = null;
   let logTail = "";
+  let databaseCompacted = false;
   /**
    * AO's recent meaningful output (no debug lines or quick polls, see ao-daemon-log.cjs), in memory
    * only. AO's output never goes to disk: logs/ao-daemon.log took about 65 MB a day, nearly all of
@@ -1355,6 +1357,14 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         const digest = crypto.createHash("sha256").update(fs.readFileSync(executable)).digest("hex");
         if (digest !== manifest.daemonSha256) throw new Error("AO daemon does not match its build manifest");
         fs.mkdirSync(dataRoot, { recursive: true, mode: 0o700 });
+        // Once per app session, before AO opens it: a database that is mostly empty pages gives the
+        // space back (ao-db-maintenance.cjs). It runs in a worker, and anything it cannot do is skipped.
+        if (!databaseCompacted) {
+          databaseCompacted = true;
+          const compacted = await compactAoDatabase(dataRoot);
+          if (compacted.action !== "none") logger.info?.("ao.database_compacted", compacted);
+          checkStartup();
+        }
         const allocatedPort = await allocatePort();
         checkStartup();
         daemonPort = allocatedPort;
