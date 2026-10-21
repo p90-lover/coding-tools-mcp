@@ -5937,3 +5937,48 @@ test("Approve for me runs the app's subagent and wake-up tools unasked, and asks
     workflow.dispose();
   }
 });
+// retireOpenRuns, run on its own: a fake loop map, clock and timer, and a board that records cancels.
+function retireHarness({ runs: list, live = {}, endLoopAfter = Infinity, fresh = null }) {
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.resolve(__dirname, "../electron/agent-orchestrator-workflow.cjs"), "utf8");
+  const slice = source.slice(source.indexOf("const RUN_WIND_DOWN_MS"), source.indexOf("async function createTeamRun"));
+  let clock = 0, ticks = 0;
+  const cancels = [];
+  const backgroundRuns = new Map(Object.entries(live));
+  const context = {
+    backgroundRuns, runKey: (id, run) => `${id}:${run}`, runSettled: (run) => run.cancelled === true,
+    now: () => clock,
+    setTimer: (resolve, ms) => { clock += ms; ticks += 1; if (ticks >= endLoopAfter) backgroundRuns.clear(); resolve(); },
+    runs: async () => ({ runs: fresh ?? list }),
+    updateRun: async ({ change }) => { cancels.push(change); },
+  };
+  vm.runInNewContext(`${slice}\nthis.retireOpenRuns = retireOpenRuns;`, context);
+  return { retire: () => context.retireOpenRuns("ws", "task", list), cancels, ticks: () => ticks };
+}
+
+test("a follow-up waits out a run whose cards stopped but whose loop is still winding down, then cancels it", async () => {
+  // Seen in the launcher log: a steer stopped a stalled turn, and its queued message was refused twice
+  // within a second ("This chat is still running") while the run's loop was ending.
+  const run = { id: "r1", project_id: "task", revision: 3, nodes: [{ id: "w", state: "held" }] };
+  const harness = retireHarness({ runs: [run], live: { "ws:r1": { driving: true, status: "held" } }, endLoopAfter: 3,
+    fresh: [{ ...run, revision: 5 }] });
+  await harness.retire();
+  assert.equal(harness.ticks(), 3, "it waited for the loop to end");
+  assert.deepEqual(harness.cancels.map((change) => ({ ...change })), [{ operation: "cancel", run_id: "r1", expected_revision: 5 }],
+    "cancelled at the revision the loop left it at");
+});
+
+test("a follow-up is still refused at once while a card works or the run starts, and after the wind-down limit", async () => {
+  const working = retireHarness({ runs: [{ id: "r1", project_id: "task", revision: 1, nodes: [{ id: "w", state: "running" }] }] });
+  await assert.rejects(working.retire(), /still running/);
+  assert.equal(working.ticks(), 0, "a card at work is not waited for");
+  const starting = retireHarness({ runs: [{ id: "r1", project_id: "task", revision: 1, nodes: [{ id: "w", state: "pending" }] }],
+    live: { "ws:r1": { starting: true } } });
+  await assert.rejects(starting.retire(), /still running/);
+  assert.equal(starting.ticks(), 0, "a run still starting is not waited for");
+  const stuck = retireHarness({ runs: [{ id: "r1", project_id: "task", revision: 1, nodes: [{ id: "w", state: "held" }] }],
+    live: { "ws:r1": { driving: true } } });
+  await assert.rejects(stuck.retire(), /still running/);
+  assert.equal(stuck.ticks(), 40, "a loop that never ends is waited for 10 s at most");
+  assert.deepEqual(stuck.cancels, []);
+});

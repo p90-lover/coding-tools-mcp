@@ -1491,3 +1491,19 @@ test("the approvals poll still reports an observe failure that is not a changed 
   assert.deepEqual(errors, ["AO result is unavailable; inspect the run before retrying"]);
   cleanup();
 });
+
+test("the approvals poll asks nothing about a run still selected from the previous project", async () => {
+  // Seen in the launcher log: 25 observe and 35 harness_status failures "AO run not found in this workspace".
+  const calls = [];
+  const effect = rendererCallback("AgentOrchestratorSurface.tsx", "effect:approvalScope.current", {
+    Error, STALE_OBSERVE: /AO receipt changed/, activeNodeIds: JSON.stringify(["n1"]),
+    workspaceId: "w2", selectedRunId: "run-from-w1", selectedRunHere: false, autoStatus: "running", surfaceHidden: () => false,
+    approvalScope: { current: null }, selection: { current: { workspaceId: "w2", runId: "run-from-w1" } },
+    setPendingApprovals: () => {}, setRuntimePolicies: () => {}, setMissions: () => {}, setError: () => {},
+    setInterval: () => { calls.push("timer"); return 1; }, clearInterval: () => {},
+    moduleCall: async (op) => { calls.push(op); return {}; },
+  });
+  effect();
+  await new Promise(setImmediate);
+  assert.deepEqual(calls, [], "no poll starts until the run belongs to this project");
+});

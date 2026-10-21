@@ -1816,8 +1816,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
             : { response: reply as JsonObject, threadId: approval.thread_id!, turnId: approval.turn_id! }) })
         // Answered already (by the reviewer, or in another window) before this click arrived: the
         // card just goes, as the next poll would take it away; it is not an error to report.
+        // An AO tool request says "AO tool request is no longer pending": seen in the launcher log on a
+        // list_windows card clicked while its reviewer was still answering, it showed as an error.
         .catch((cause: unknown) => {
-          if (/CHAT_REQUEST_NOT_PENDING|no longer waiting/.test(cause instanceof Error ? cause.message : String(cause))) return {} as Record<string, unknown>;
+          if (/CHAT_REQUEST_NOT_PENDING|no longer waiting|no longer pending/.test(cause instanceof Error ? cause.message : String(cause))) return {} as Record<string, unknown>;
           throw cause;
         });
       if (!result.cancelled && mounted.current && selection.current.workspaceId === owner.workspaceId && selection.current.runId === owner.runId) {

@@ -257,7 +257,10 @@
 .ao-workflow .cx-chat .cx-delete-confirm .cx-primary-button { background: var(--ao-red); }
 
 /* ---------- Composer ---------- */
-.ao-workflow .cx-chat .cx-composer, .ao-workflow .cx-chat .cx-context-strip, .ao-workflow .cx-chat .cx-command-card,
+.ao-workflow .cx-chat .cx-queued-message .cx-bubble { max-width: none; }
+.ao-workflow .cx-chat .cx-queued-row[data-state="queued"] .cx-bubble { color: var(--claude-text-2); }
+.ao-workflow .cx-chat .cx-queued-actions button { color: var(--claude-text-2); }
+.ao-workflow .cx-chat .cx-composer, .ao-workflow .cx-chat .cx-context-strip, .ao-workflow .cx-chat .cx-command-card, .ao-workflow .cx-chat .cx-queued,
 .ao-workflow .cx-chat .cx-composer-modes, .ao-workflow .cx-chat .cx-route-note,
 /* The approval card docks above the composer at its exact width, as Codex's does (it was 40px wider). */
 .ao-workflow .cx-chat .cx-approval-dock { max-width: 740px; }
