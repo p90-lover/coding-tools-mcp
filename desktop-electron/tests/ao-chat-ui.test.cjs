@@ -253,7 +253,7 @@ test("an answer's Markdown is parsed once per text, not on every chat re-render"
   assert.equal(parses, 1);
 });
 
-test("an AO agent's question and tool request show as Codex's cards: numbered options to pick, then Submit", () => {
+test("an AO agent's question and tool request show as Codex's cards: numbered options; a tool request's answer is one click", () => {
   const approvalUi = load("AgentOrchestratorApproval.tsx", { "./ChatMarkdown": markdown });
   const question = { nodeId: "one", approval_id: "ask", source: "ao", kind: "question", message: "Please answer the following questions.",
     fields: [
@@ -282,8 +282,9 @@ test("an AO agent's question and tool request show as Codex's cards: numbered op
   assert.match(ask, /<span>Reason<\/span><p>Parse recent refresh and recovery task results/);
   assert.match(ask, /<span>Reviewer<\/span><p>Inspect the complete native command yourself/);
   assert.deepEqual([...ask.matchAll(/class="cdx-option-label">([^<]+)</g)].map((match) => match[1]), ["Allow once", "Allow this conversation", "Deny"], "Codex's words");
-  assert.match(ask, /<button[^>]*disabled=""[^>]*>Submit <kbd class="cdx-kbd">Enter<\/kbd><\/button>/, "nothing picked yet");
-  assert.match(ask, />Deny <kbd class="cdx-kbd">Esc<\/kbd><\/button>/);
+  // Clicking an option answers at once, as Claude Code's prompt does: no Submit or Deny button.
+  assert.doesNotMatch(ask, />Submit </);
+  assert.doesNotMatch(ask, /cdx-foot/);
 });
 
 test("a question the person answered shows as Claude Code shows one: the question, then the answer", () => {
