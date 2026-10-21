@@ -192,14 +192,15 @@ export function mergeActivityFrames(current: Record<string, ChatActivity>, next:
 /**
  * A card's turn as the chat keeps it: a poll carries only the newest items, so the ones seen in
  * earlier polls that have since fallen out of that window stay in front of it, and a long turn
- * keeps every step instead of only its last few. A poll sharing no item with what is kept is a new
- * attempt of the card (a retry keeps its key), which starts over.
+ * keeps every step instead of only its last few. A poll that shares no item with what is kept is
+ * still the same turn: a fast model can write more than a poll's window between two polls. Taking
+ * that for a new attempt dropped the whole turn so far, the user's steer messages in it included
+ * (seen live at 1,300 steps). A retry starts over on its own: the chat keeps work per attempt.
  */
 export function mergeTimeline(known: ChatLiveItem[] | null | undefined, latest: ChatLiveItem[]): ChatLiveItem[] {
   if (!known?.length) return latest;
   const fresh = new Set(latest.map((item) => item.id));
-  const earlier = known.filter((item) => !fresh.has(item.id));
-  return earlier.length === known.length ? latest : [...earlier, ...latest];
+  return [...known.filter((item) => !fresh.has(item.id)), ...latest];
 }
 
 /** A stretch of a turn: a message, steer or edit on its own, or a run of tool calls and thinking. */

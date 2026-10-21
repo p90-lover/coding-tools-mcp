@@ -1225,8 +1225,9 @@ test("a card's timeline keeps the steps that fell out of the newest poll, and a 
   const later = chat.mergeTimeline(seen, [{ ...item("3"), status: "running" }, item("4")]);
   assert.deepEqual(ids(later), ["1", "2", "3", "4"]);
   assert.equal(later[2].status, "running", "an item still in the window takes its latest state");
-  // A retry reuses the card's key; its first poll shares nothing with the old attempt.
-  assert.deepEqual(ids(chat.mergeTimeline(later, [item("9")])), ["9"]);
+  // A poll sharing nothing with what is kept is the same turn moving fast (more items than a poll's
+  // window between two polls): everything already seen stays. A retry is kept apart by its start.
+  assert.deepEqual(ids(chat.mergeTimeline(later, [item("9")])), ["1", "2", "3", "4", "9"]);
 });
 
 test("a single-model chat's card is named by its model, a team's by its role", () => {
