@@ -3104,7 +3104,11 @@ class BrowserHost {
       if (response.status === 401) return { authenticated: false, ready: true };
       if (!response.ok || response.url !== CHATGPT_ORIGIN + "/api/auth/session"
         || !response.headers.get("content-type")?.includes("application/json")) {
-        this.logger?.warn?.("browser.readiness_fetch_unusable", { status: response.status });
+        // Which check failed (seen 9 times in 45 minutes with status 200 and nothing else to go on):
+        // a redirect elsewhere, or a page that is not the session JSON (a challenge page).
+        this.logger?.warn?.("browser.readiness_fetch_unusable", { status: response.status,
+          sameUrl: response.url === CHATGPT_ORIGIN + "/api/auth/session",
+          contentType: String(response.headers.get("content-type") || "").split(";")[0].slice(0, 60) });
         return await this.pageAuthenticationReadiness(contents);
       }
       return { authenticated: authenticatedChatGptSession(await response.json()), ready: true };
