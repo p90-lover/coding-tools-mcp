@@ -3023,23 +3023,37 @@ test("a start blocked on the browser returns its reason instead of a generic tra
 
 // ---- Codex slash commands: /goal, /compact, /diff ----
 
-const { goalVerdict, closingAnswers, createGoalStore, goalPrompt } = require("../electron/chat-goals.cjs");
+const { closingAnswers, createGoalStore, goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck } = require("../electron/chat-goals.cjs");
 
-test("a goal reads the closing cards' verdicts: a team's reviewer, a Single card, or a solo orchestrator", () => {
-  assert.equal(goalVerdict(["Done.\nGOAL: ACHIEVED — all tests pass"]), "achieved");
-  assert.equal(goalVerdict(["**GOAL: CONTINUE** — two tests still fail"]), "continue");
-  assert.equal(goalVerdict(["no verdict at all"]), null);
-  assert.equal(goalVerdict(["GOAL: CONTINUE — x", "GOAL: ACHIEVED"]), "achieved", "any closing card that saw it achieved wins");
+test("a goal round says what Claude Code's /goal says: the condition first, then stop-hook feedback with the evaluator's reason", () => {
+  assert.equal(goalMessage("ship it", 1), "ship it", "the first round is the condition itself");
+  assert.equal(goalMessage("ship it", 2, "Two tests still fail in auth.test.ts."), "Stop hook feedback:\n[ship it]: Two tests still fail in auth.test.ts.");
+  assert.match(goalMessage("ship it", 3, ""), /^Stop hook feedback:\n\[ship it\]: The condition is not met yet/);
+  // The evaluator reads the closing cards: a team's reviewer, a Single card, or a solo orchestrator.
   const team = { nodes: [
     { id: "lead", role: "planner", parents: [], receipt: { answer: "plan" } },
-    { id: "w", role: "worker", parents: ["lead"], receipt: { answer: "GOAL: ACHIEVED (a worker can't close it)" } },
-    { id: "rev", role: "reviewer", parents: ["w"], receipt: { answer: "APPROVED\nGOAL: CONTINUE — docs" } },
-    { id: "retry", role: "retry", parents: ["lead"], receipt: { answer: "GOAL: ACHIEVED" } },
+    { id: "w", role: "worker", parents: ["lead"], receipt: { answer: "all done (a worker can't close it)" } },
+    { id: "rev", role: "reviewer", parents: ["w"], receipt: { answer: "APPROVED, docs missing" } },
+    { id: "retry", role: "retry", parents: ["lead"], receipt: { answer: "done" } },
   ] };
-  assert.deepEqual(closingAnswers(team), ["APPROVED\nGOAL: CONTINUE — docs"], "only the reviewer closes a team; workers and the retry sidecar don't");
-  assert.equal(goalVerdict(closingAnswers({ ...team, solo: true })), "continue");
-  assert.deepEqual(closingAnswers({ nodes: [{ id: "one", role: "planner", parents: [], receipt: { answer: "GOAL: ACHIEVED" } }] }), ["GOAL: ACHIEVED"]);
-  assert.match(goalPrompt("ship it", 2, 6), /^Continue pursuing the goal \(round 2 of 6\)[\s\S]*Goal: ship it[\s\S]*GOAL: ACHIEVED[\s\S]*GOAL: CONTINUE/);
+  assert.deepEqual(closingAnswers(team), ["APPROVED, docs missing"], "only the reviewer closes a team; workers and the retry sidecar don't");
+  assert.deepEqual(closingAnswers({ ...team, solo: true }), ["APPROVED, docs missing", "plan"]);
+  const transcript = roundTranscript("ship it", ["Built and tested; 40/40 pass."]);
+  assert.equal(transcript, "User:\nship it\n\nAssistant:\nBuilt and tested; 40/40 pass.");
+  assert.equal(roundTranscript("x", []), "User:\nx\n\nAssistant:\n(no final answer)");
+  const long = roundTranscript("x", ["a".repeat(30_000) + "THE END"]);
+  assert.ok(long.length <= 24_001 && long.endsWith("THE END"), "a long round keeps its end, where the conclusion is");
+  const prompt = goalCheckPrompt("make every test pass", transcript);
+  assert.match(prompt, /Condition: make every test pass/);
+  assert.match(prompt, /only from the transcript/);
+  assert.match(prompt, /Answer with JSON only: \{"met": true\|false, "reason"/);
+  assert.ok(prompt.endsWith(transcript));
+  // The evaluator's verdict.
+  assert.deepEqual(parseGoalCheck('{"met": true, "reason": "All 40 tests pass, shown in the output."}'), { met: true, reason: "All 40 tests pass, shown in the output." });
+  assert.deepEqual(parseGoalCheck('Sure.\n```json\n{"met": false,\n "reason": "Two tests   fail."}\n```'), { met: false, reason: "Two tests fail." });
+  assert.deepEqual(parseGoalCheck('{"met": false}'), { met: false, reason: "The condition is not met yet." });
+  assert.throws(() => parseGoalCheck("I think it is done."), /no verdict/);
+  assert.throws(() => parseGoalCheck('{"met": "yes"}'), /no verdict/);
 });
 
 test("goals are kept per chat in a file and survive a restart", () => {
@@ -3051,6 +3065,7 @@ test("goals are kept per chat in a file and survive a restart", () => {
     const again = createGoalStore({ file });
     assert.equal(again.get("ws-1", "task-1").objective, "make the build green");
     assert.equal(again.get("ws-1", "task-1").round, 2);
+    assert.equal(again.get("ws-1", "task-1").rounds, 0, "no round limit, as in Claude Code");
     assert.deepEqual(Object.keys(again.forWorkspace("ws-1")), ["task-1"]);
     assert.deepEqual(again.forWorkspace("ws-2"), {});
     assert.throws(() => again.set("ws-1", "task-2", "   "), /Describe your goal/);
@@ -3067,7 +3082,8 @@ test("/goal starts the chat's first round with the goal and keeps it for the cha
   const sent = await workflow.call("chat_send", { workspaceId: "ws-1", message: "make every test pass", goal: "make every test pass", executionMode: "single", singleRoute: route });
   assert.equal(sent.taskId, "task-1");
   assert.equal(world.tasks[0].title, "make every test pass", "the chat is named after the goal, not the round's instructions");
-  assert.match(world.tasks[0].description, /^Goal \(round 1 of 6\):\nGoal: make every test pass[\s\S]*GOAL: ACHIEVED/);
+  assert.match(world.tasks[0].description, /^make every test pass/, "the first round is the condition itself");
+  assert.doesNotMatch(world.tasks[0].description, /GOAL:/, "the agent is not asked to grade itself");
   const { goals } = await workflow.call("runs", { workspaceId: "ws-1" });
   assert.equal(goals["task-1"].objective, "make every test pass");
   assert.equal(goals["task-1"].status, "active");
@@ -3075,82 +3091,117 @@ test("/goal starts the chat's first round with the goal and keeps it for the cha
   await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", message: "x", goal: "   " }), /Describe your goal/);
 });
 
-/** A chat whose goal was set with its first round; tests push settled runs and call goalAfterRun. */
-async function goalChat() {
+/**
+ * A chat whose goal was set with its first round; tests push settled runs and call goalAfterRun.
+ * The goal evaluator (a CPA model) is a stand-in: met when the round's answer says "ALL DONE".
+ */
+async function goalChat({ evaluator = (prompt) => /ALL DONE/.test(prompt)
+  ? { met: true, reason: "The transcript shows every test passing." } : { met: false, reason: "Two tests still fail." } } = {}) {
   const world = chatWorld({ tasks: [{ id: "task-1", title: "Green build", description: "x", state: "in_progress", clauses: [] }], runs: [] });
+  const checks = [];
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/codex.exe",
-    resolveHarness: async () => { throw new Error("stop before the background loop"); } });
+    resolveHarness: async () => { throw new Error("stop before the background loop"); },
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
+    fetchImpl: async (url, init) => {
+      // The pool the chats' own models come from too (the next round checks its model is offered).
+      if (String(url).endsWith("/v1/models")) return { ok: true, json: async () => ({ data: [{ id: "gpt-6-luna" }, { id: "deepseek-v4" }, { id: "gemini-3-flash" }] }) };
+      const body = JSON.parse(init.body);
+      checks.push(body);
+      const verdict = evaluator(body.messages[0].content);
+      if (verdict instanceof Error) return { ok: false, status: 503, json: async () => ({}) };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(verdict) } }] }) };
+    } });
   await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "build green", goal: "build green" });
-  return { world, workflow };
+  return { world, workflow, checks };
 }
 const goalOf = async (workflow) => (await workflow.call("runs", { workspaceId: "ws-1" })).goals["task-1"];
 
 test("after a round without the goal achieved, the chat runs the next round with the same Single model", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default", effort: "max" };
-  const { world, workflow } = await goalChat();
+  const { world, workflow, checks } = await goalChat();
   world.runs.push({ id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
-    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { answer: "Fixed 3 of 5.\nGOAL: CONTINUE — 2 tests fail" } }] });
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { answer: "Fixed 3 of 5; the rest is done too." } }] });
   const updatesBefore = world.updates.length;
   await workflow.goalAfterRun("ws-1", "r1", "finished", null);
+  // A separate evaluator judged the round, not the agent's own word ("the rest is done too").
+  assert.equal(checks.length, 1);
+  assert.equal(checks[0].model, "gemini-3-flash", "a small, fast model, as Claude Code's evaluator");
+  assert.match(checks[0].messages[0].content, /Condition: build green[\s\S]*User:\nbuild green\n\nAssistant:\nFixed 3 of 5; the rest is done too\./);
   const next = world.updates.slice(updatesBefore);
   assert.equal(next.length, 1, "one new round");
   assert.equal(next[0].execution_mode, "single");
   assert.deepEqual(next[0].single_route, route, "the same Single model, effort and permissions");
-  assert.match(world.edits.at(-1).description, /Continue pursuing the goal \(round 2 of 6\)/);
+  assert.match(world.edits.at(-1).description, /Stop hook feedback:\n\[build green\]: Two tests still fail\./, "Claude Code's stop-hook feedback");
   const goal = await goalOf(workflow);
   assert.equal(goal.status, "active");
   assert.equal(goal.round, 2);
+  assert.equal(goal.feedback, "Two tests still fail.");
   // The same settled run is not evaluated twice.
   await workflow.goalAfterRun("ws-1", "r1", "finished", null);
   assert.equal(world.updates.length, updatesBefore + 1);
 });
 
-test("a team's goal round continues on the chat's team; an achieved, failed, stopped or spent goal stops", async () => {
+test("a team's goal round continues on the chat's team; an achieved, failed or stopped goal stops, and there is no round limit", async () => {
   const teamRun = (id, answer) => ({ id, workspace_id: "ws-1", project_id: "task-1", cancelled: false, team: { id: "team-1", revision: 7 }, nodes: [
     { id: "lead", role: "planner", parents: [], state: "finished", receipt: { answer: "plan" } },
     { id: "rev", role: "reviewer", parents: ["lead"], state: "finished", receipt: { answer } }] });
-  let { world, workflow } = await goalChat();
-  world.runs.push(teamRun("t1", "APPROVED\nGOAL: CONTINUE — docs"));
+  let { world, workflow, checks } = await goalChat();
+  world.runs.push(teamRun("t1", "APPROVED, docs missing"));
   const before = world.updates.length;
   await workflow.goalAfterRun("ws-1", "t1", "finished", null);
   assert.equal(world.updates.length, before + 1);
   assert.equal(world.updates.at(-1).operation, "create_from_team");
   assert.equal(world.updates.at(-1).team_id, "team-1", "the next round keeps the chat's team");
+  assert.match(checks[0].messages[0].content, /Assistant:\nAPPROVED, docs missing$/, "the reviewer's answer is what the evaluator reads");
 
   ({ world, workflow } = await goalChat());
-  world.runs.push(teamRun("t2", "APPROVED\nGOAL: ACHIEVED"));
+  world.runs.push(teamRun("t2", "APPROVED. ALL DONE: 40/40 tests pass."));
   await workflow.goalAfterRun("ws-1", "t2", "finished", null);
-  assert.equal((await goalOf(workflow)).status, "achieved");
+  const achieved = await goalOf(workflow);
+  assert.equal(achieved.status, "achieved");
+  assert.equal(achieved.note, "The transcript shows every test passing.", "the evaluator's reason is shown");
 
   for (const [status, attention, expected] of [["failed", "error", "stalled"], ["held", null, "stalled"], ["held", "stopped", "paused"]]) {
-    ({ world, workflow } = await goalChat());
+    ({ world, workflow, checks } = await goalChat());
     world.runs.push(teamRun("t3", "anything"));
     const count = world.updates.length;
     await workflow.goalAfterRun("ws-1", "t3", status, attention);
     assert.equal((await goalOf(workflow)).status, expected, `${status}/${attention}`);
     assert.equal(world.updates.length, count, "no new round");
+    assert.equal(checks.length, 0, "nothing to evaluate");
   }
 
+  // The evaluator cannot be reached: the goal waits instead of going round blind.
+  ({ world, workflow } = await goalChat({ evaluator: () => new Error("down") }));
+  world.runs.push(teamRun("t6", "anything"));
+  const quiet = world.updates.length;
+  await workflow.goalAfterRun("ws-1", "t6", "finished", null);
+  assert.equal((await goalOf(workflow)).status, "stalled");
+  assert.match((await goalOf(workflow)).note, /The goal could not be checked \(the evaluator returned HTTP 503\); \/goal resume tries again/);
+  assert.equal(world.updates.length, quiet);
+
   ({ world, workflow } = await goalChat());
-  // Spend every round: the goal stops as limited, and /goal resume allows more.
-  for (let round = 0; round < 10 && (await goalOf(workflow)).status === "active"; round++) {
-    world.runs.push(teamRun(`t4-${round}`, "GOAL: CONTINUE"));
+  // No round limit, as in Claude Code: it goes on until the condition holds, or the person stops it.
+  for (let round = 0; round < 10; round++) {
+    world.runs.push(teamRun(`t4-${round}`, "more to do"));
     await workflow.goalAfterRun("ws-1", `t4-${round}`, "finished", null);
   }
   let goal = await goalOf(workflow);
-  assert.equal(goal.status, "limited");
-  assert.equal(goal.round, 6);
-  const resumed = await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" });
-  assert.equal(resumed.goal.status, "active");
-  assert.equal(resumed.goal.rounds, 12, "resuming a spent goal allows as many rounds again");
-  assert.equal(resumed.goal.round, 7, "and starts the next round right away");
+  assert.equal(goal.status, "active");
+  assert.equal(goal.round, 11);
+  assert.equal(goal.rounds, 0);
   await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "edit", objective: "build green on CI" });
   assert.equal((await goalOf(workflow)).objective, "build green on CI");
-  assert.equal((await goalOf(workflow)).round, 7, "editing starts no round");
+  assert.equal((await goalOf(workflow)).round, 11, "editing starts no round");
   await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" });
   goal = await goalOf(workflow);
   assert.equal(goal.status, "paused");
-  world.runs.push(teamRun("t5", "GOAL: CONTINUE"));
+  const resumed = await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" });
+  assert.equal(resumed.goal.status, "active");
+  assert.equal(resumed.goal.round, 12, "resume starts the next round right away");
+  assert.match(world.edits.at(-1).description, /Stop hook feedback:\n\[build green on CI\]: Two tests still fail\./, "with the last feedback");
+  await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" });
+  world.runs.push(teamRun("t5", "more"));
   const paused = world.updates.length;
   await workflow.goalAfterRun("ws-1", "t5", "finished", null);
   assert.equal(world.updates.length, paused, "a paused goal starts no round");
@@ -5510,6 +5561,8 @@ test("a dated DeepSeek V4.1 Flash build from Cline Pass takes the same effort le
       // CPA's catalog lists "none" and "ultra" for some; GLM refused the one, OpenRouter the other.
       { id: "cline-pass/glm-5.3-flash", owned_by: "cline", supported_reasoning_levels: [{ effort: "low" }, { effort: "ultra" }] },
       { id: "commandcode-go/glm-5.3-flash", owned_by: "commandcode-go" },
+      // Antigravity's Claude: CPA lists no levels, yet the suffix turns its thinking on.
+      { id: "claude-sonnet-4-6", owned_by: "antigravity" },
     ] }) }),
   });
   const { capabilities } = await workflow.call("models", {});
@@ -5521,10 +5574,12 @@ test("a dated DeepSeek V4.1 Flash build from Cline Pass takes the same effort le
   assert.deepEqual(capabilities["cline-pass/kimi-k3"].efforts, openRouter);
   assert.deepEqual(capabilities["cline-pass/glm-5.3-flash"].efforts, openRouter, "not CPA's none/ultra");
   assert.equal(capabilities["cline-pass/glm-5.3-flash"].effortReason, undefined);
-  assert.deepEqual(capabilities["commandcode-go/glm-5.3-flash"].efforts, [], "Command Code's plugin still passes the name unchanged");
+  assert.deepEqual(capabilities["commandcode-go/glm-5.3-flash"].efforts, ["none", "low", "medium", "high", "max"],
+    "Command Code's plugin 1.0.0-codingtools.2 reads the suffix");
+  assert.deepEqual(capabilities["claude-sonnet-4-6"].efforts, ["low", "medium", "high", "max"]);
 });
 
-test("a Cline Pass model's picked effort reaches CPA as its suffix; Command Code's model still goes bare", async () => {
+test("a Cline Pass or Command Code model's picked effort reaches CPA as its suffix", async () => {
   // Plugin 0.1.0-codingtools.4 turns the suffix into the request's reasoning_effort for every Cline
   // model. Before, only DeepSeek V4.1 Flash took one, and the app sent GLM 5.3 Flash none.
   const spawned = [];
@@ -5539,7 +5594,9 @@ test("a Cline Pass model's picked effort reaches CPA as its suffix; Command Code
   };
   assert.equal(await warm("cpa/cline-pass/glm-5.3-flash", "medium"), "cline-pass/glm-5.3-flash(medium)");
   assert.equal(await warm("cpa/cline-pass/deepseek-v4.1-flash", "max"), "cline-pass/deepseek-v4.1-flash(max)");
-  assert.equal(await warm("cpa/commandcode-go/glm-5.3-flash", "high"), "commandcode-go/glm-5.3-flash");
+  assert.equal(await warm("cpa/commandcode-go/glm-5.3-flash", "high"), "commandcode-go/glm-5.3-flash(high)");
+  // Another plugin's model with no known level still goes by its bare name.
+  assert.equal(await warm("cpa/grok/grok-5", "high"), "grok/grok-5");
   workflow.dispose();
 });
 

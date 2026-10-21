@@ -218,6 +218,21 @@ test("a retried step shows its failed attempt above the attempt now running, not
   assert.ok(earlier < now, "the failed attempt comes first");
 });
 
+test("an image steered into a running turn shows as the image, not as its path", () => {
+  // Seen live (before #457 reached the app): "Attached image: G:\AppData\Coding Tools\chat-attachments\…png"
+  // printed as text in the steer's bubble inside the turn's work.
+  const steer = "switch number ,if met the number is unable to verify on text\n\nAttached image: G:\\AppData\\Coding Tools\\chat-attachments\\2026-10-21\\image-df19f6fe.png";
+  const props = { runs: [{ id: "run", project_id: "task", cancelled: false, execution_mode: "single", nodes: [{ id: "lead", role: "planner", state: "running",
+    route: { harness_id: "ao:claude-code", model: "m" }, receipt: { thread_id: "sess-3", started_at_ms: Date.now() - 5_000 } }] }],
+    activity: { "run:lead": { activity: "working", timeline: [{ id: "s1", kind: "steer", status: "completed", text: steer }] } },
+    tasks: [{ id: "task", title: "Task" }], selectedTaskId: "task", busy: false, approvals: [],
+    loadDescription: async () => "", send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {} };
+  const html = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, props));
+  assert.match(html, /cx-user cx-steer"><div class="cx-sent-attachments">/, "the steer's image is drawn as an attachment");
+  assert.equal(html.includes("Attached image:"), false, "its path line is not printed");
+  assert.match(html, /<p>switch number ,if met the number is unable to verify on text<\/p>/, "the typed words stay in the bubble");
+});
+
 test("an open chat's composer carries the context meter; a new chat's does not", () => {
   const props = { runs: [{ id: "run", project_id: "task", cancelled: false, nodes: [{ id: "lead", role: "planner", state: "finished",
     route: { harness_id: "ao:claude-code", model: "m" }, receipt: { thread_id: "sess-1", answer: "ok" } }] }],

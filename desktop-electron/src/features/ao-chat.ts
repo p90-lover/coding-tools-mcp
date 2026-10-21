@@ -1295,6 +1295,10 @@ export function wakeupLabel(wakeup: Pick<ChatWakeup, "dueAt" | "due">, now = Dat
 export const GOAL_SUMMARY: Record<ChatGoal["status"], string> = {
   active: "Pursuing goal", paused: "Paused goal", achieved: "Goal achieved", stalled: "Goal stalled", limited: "Goal limited",
 };
+/** "3" for a goal with no round limit (Claude Code's), "3 of 6" for one saved with a limit. */
+export function goalRounds(goal: Pick<ChatGoal, "round" | "rounds">): string {
+  return goal.rounds > 0 ? `${goal.round} of ${goal.rounds}` : String(goal.round);
+}
 /** Something typed while a chat's turn runs, sent when the turn finishes: a message, or a command's message. */
 export type QueuedChatMessage = { what: string; message: string; goal?: string };
 /**

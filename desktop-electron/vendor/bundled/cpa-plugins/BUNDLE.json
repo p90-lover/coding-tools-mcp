@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "commandcode-go",
-  "version": "1.0.0-codingtools.2",
+  "version": "1.0.0-codingtools.3",
   "source": {
     "repository": "https://github.com/sperictao/cpa-plugin-commandcode-go",
     "commit": "444ee977daaa96e6fa6ef5155b14cac3a6f9cdc3",
@@ -15,6 +15,7 @@
     "CPA auth-provider browser login and auth-file support",
     "CPA-selected credential per request",
     "native CPA provider routing instead of authless model-router",
+    "a reasoning level in the model's CPA suffix (glm-5.3-flash(high)) becomes the request's reasoning_effort; it was dropped",
     "A tool call a model writes as text (Qwen XML <tool_call><function=…><parameter=…>, or JSON in <tool_call>) to a tool the request offered becomes a real tool_calls entry, streamed or whole (the Cline Pass plugin's texttools.go)"
   ],
   "build": {
@@ -24,9 +25,9 @@
   },
   "platforms": {
     "win32/x64": {
-      "path": "windows/amd64/commandcode-go-v1.0.0-codingtools.2.dll",
-      "sha256": "2ac5bea88dd6c027058e5eb068dd161843edd5e9d440116f7214c514ea468edb",
-      "size": 7690752
+      "path": "windows/amd64/commandcode-go-v1.0.0-codingtools.3.dll",
+      "sha256": "4da895ebf1f43a3abc13559ef6c64d3a3e924f0c694d6d9a2e1dc0e1c3bf8620",
+      "size": 7692288
     }
   },
   "studio": {

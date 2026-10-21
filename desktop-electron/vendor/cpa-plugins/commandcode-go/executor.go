@@ -47,7 +47,39 @@ func (e *Executor) buildBody(model string, payload []byte) ([]byte, error) {
 	if upstream == "" {
 		upstream = model
 	}
-	return buildGenerateBody(upstream, payload)
+	return buildGenerateBody(upstream, withSuffixEffort(model, payload))
+}
+
+// suffixEffort is the reasoning level a model name carries as CPA's suffix ("glm-5.3-flash(high)"),
+// or "". CPA hands a plugin the name unchanged and sets no reasoning_effort for it, and
+// normalizeModel drops the suffix, so a level picked in Coding Tools never reached Command Code.
+func suffixEffort(model string) string {
+	open := strings.LastIndex(model, "(")
+	if open < 0 || !strings.HasSuffix(model, ")") {
+		return ""
+	}
+	switch level := strings.ToLower(strings.TrimSpace(model[open+1 : len(model)-1])); level {
+	case "none", "minimal", "low", "medium", "high", "max":
+		return level
+	}
+	return ""
+}
+
+// withSuffixEffort sets the payload's reasoning_effort from the model's suffix; the suffix wins.
+func withSuffixEffort(model string, payload []byte) []byte {
+	effort := suffixEffort(model)
+	if effort == "" {
+		return payload
+	}
+	var body map[string]any
+	if json.Unmarshal(payload, &body) != nil || body == nil {
+		return payload
+	}
+	body["reasoning_effort"] = effort
+	if b, err := json.Marshal(body); err == nil {
+		return b
+	}
+	return payload
 }
 
 // Execute performs a completion by draining the (always-streaming) generate
