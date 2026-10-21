@@ -2505,7 +2505,7 @@ function registerIpc({ logger, stateStore }) {
   });
   // Runtime > RTK: whether rtk is installed and on, its savings, and installing it (winget).
   handle("rtk:status", async () => rtk.status() ?? { enabled: false, installed: false, path: null, version: null });
-  handle("rtk:gain", async () => rtk.gain() ?? { available: false });
+  handle("rtk:gain", async () => (await rtk.gain()) ?? { available: false });
   handle("rtk:install", async (event) => {
     // Installing software is the person's own click in the visible app.
     assertFocusedMainWindow(event, true);
@@ -3239,6 +3239,8 @@ async function start() {
     const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
       // Stop agents that sat idle for a while; their chats resume them on the next message.
       releaseIdleAgents: true,
+      // Files the person attached (saved by launcher:save-attachment): reading one needs no review.
+      chatAttachmentsDir: path.join(app.getPath("userData"), "chat-attachments"),
       // One run read serves the activity poll, the run loop and their checks for 300 ms.
       runReadFreshMs: 300,
       // Each launch logs where its time went (ao.launch_timing).

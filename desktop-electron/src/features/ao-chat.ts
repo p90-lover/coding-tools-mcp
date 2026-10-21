@@ -716,6 +716,12 @@ type ResumeCandidate = {
  * than this was abandoned, not interrupted.
  */
 export const RESTART_RESUME_WINDOW_MS = 24 * 60 * 60_000;
+// The main process's own bounds (agent-orchestrator-workflow.cjs): a step a restart interrupted runs
+// until it has this many attempts (RESTART_HISTORY_LIMIT), any other failed step until this many
+// (AUTO_RETRY_LIMIT), and a sign-in or account-pool failure is never retried (POOL_EXHAUSTED).
+const RESTART_ATTEMPT_LIMIT = 8;
+const AUTO_RETRY_ATTEMPT_LIMIT = 3;
+const NEEDS_PERSON = /auth_unavailable|invalid[_ -]?auth|account[^\n]*(?:exhaust|unavail)|pool[^\n]*exhaust|sign[- ]?in|reauth|HTTP (?:401|403)/i;
 
 /** The newest time any card of the run started, current receipts and earlier attempts alike (0: none). */
 function newestStart(mission: ResumeCandidate): number {
@@ -737,7 +743,7 @@ function newestStart(mission: ResumeCandidate): number {
  * team's loop recovers its interrupted workers itself. Teams resume too: before, re-entering a
  * project after a restart left a team chat stuck with its next cards never started.
  */
-export function restartResume(mission: ResumeCandidate, now = Date.now()): "retry" | "continue" | null {
+export function restartResume(mission: ResumeCandidate, now = Date.now(), { autoRetry = false }: { autoRetry?: boolean } = {}): "retry" | "continue" | null {
   // A chat stopped or paused on purpose stays that way.
   if (mission.cancelled || mission.paused) return null;
   // Abandoned long ago, not interrupted by this restart. A run whose cards never started has no
@@ -746,11 +752,21 @@ export function restartResume(mission: ResumeCandidate, now = Date.now()): "retr
   if (newest && now - newest > RESTART_RESUME_WINDOW_MS) return null;
   const restarted = mission.nodes.filter(node => ["held", "failed"].includes(node.state)
     && RESTART_INTERRUPTED.test(String(node.receipt?.error || "")));
+  // With "Retry automatically" on, a single chat's failed step is retried whether or not a loop of
+  // this app session saw it fail: its loop had ended (an app restart, or a launch that failed past
+  // it) and the card sat "held" for hours with the switch on. The same budget and exception as the
+  // loop's own retry: three attempts, and a sign-in or account-pool failure waits for the person.
+  const autoRetried = autoRetry && mission.execution_mode === "single" ? mission.nodes.filter(node => node.state === "held"
+    && !restarted.includes(node) && !NEEDS_PERSON.test(String(node.receipt?.error || ""))) : [];
   // Held for any other reason (an approval, a failure to inspect) is the person's call; a reserved
   // card is mid-launch and a start would refuse it.
-  if (mission.nodes.some(node => node.state === "reserved" || (node.state === "held" && !restarted.includes(node)))) return null;
+  if (mission.nodes.some(node => node.state === "reserved"
+    || (node.state === "held" && !restarted.includes(node) && !autoRetried.includes(node)))) return null;
   // Within the attempt budget, so an agent that brings the app down each time is not restarted forever.
-  if (restarted.length) return restarted.every(node => (node.history?.length ?? 0) < 2) ? "retry" : null;
+  if (restarted.length || autoRetried.length) {
+    return restarted.every(node => (node.history?.length ?? 0) < RESTART_ATTEMPT_LIMIT)
+      && autoRetried.every(node => (node.history?.length ?? 0) < AUTO_RETRY_ATTEMPT_LIMIT) ? "retry" : null;
+  }
   return mission.nodes.some(node => ["running", "pending"].includes(node.state)) ? "continue" : null;
 }
 

@@ -12,7 +12,7 @@ import { ChatContextMeter } from "./ChatContextMeter";
 import { ChatPet } from "./ChatPet";
 import { ChatTurnStats } from "./ChatTurnStats";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
-import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, StreamingMarkdown } from "./ChatToolParts";
+import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, StreamingMarkdown } from "./ChatToolParts";
 import { PartErrorBoundary } from "../PartErrorBoundary";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
@@ -271,7 +271,8 @@ const LiveRow = memo(LiveRowView, (prev, next) => sameLiveItem(prev.item, next.i
 function LiveRowView({ item }: { item: ChatLiveItem }) {
   return <li className={`cx-live-item kind-${item.kind} is-${item.status || "done"}`}>
     {item.answered ? <AnsweredRecord question={item.answered.question} answer={item.answered.answer} />
-      : item.kind === "steer" ? <div className="cx-user cx-steer"><div className="cx-bubble"><p>{chatMessageReadable(item.text)}</p></div></div>
+      // As any sent message: an attached image as its thumbnail, not "Attached image: <path>" text.
+      : item.kind === "steer" ? <div className="cx-user cx-steer"><SentMessage text={item.text} /></div>
       : item.kind === "message" ? <StreamingMarkdown text={item.text} live={item.status === "running"} />
       : item.kind === "reasoning" ? <ReasoningItem item={item} />
       : item.kind === "edit" ? <EditItem item={item} />
@@ -482,6 +483,9 @@ function SentImage({ item, onOpen }: { item: ChatSentAttachment; onOpen: (url: s
   </button>;
 }
 
+/** SentMessage for the DeepSeek transcript (SentMessageView), which cannot import this file. */
+const sentMessageView = (text: string) => <SentMessage text={text} />;
+
 /**
  * A message the person sent, as Claude Code shows one: its attachments above the bubble (images as
  * thumbnails that open full size, other files as cards that show them in their folder), and in
@@ -555,7 +559,7 @@ export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
   projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject, projectBranch: branch, steer,
-  pendingMessage, pendingTitle, pendingCreation = false, deciding = false, commands, loadWork,
+  pendingMessage, pendingTitle, pendingCreation = false, deciding = false, onComposing, commands, loadWork,
 }: {
   /** A finished card's thinking and tool calls, read back from its AO session (turn_timeline). */
   loadWork?: LoadWork;
@@ -565,6 +569,8 @@ export function AgentOrchestratorChat({
   pendingMessage?: string; pendingTitle?: string; pendingCreation?: boolean;
   /** Which chat to show is not known yet (a project is opening): show neither a chat nor the new chat page. */
   deciding?: boolean;
+  /** The user started typing a message: the surface gets the agent it needs ready (chat_prewarm). */
+  onComposing?: () => void;
   /** How each card runs (harness · model · effort · context · role), shown on its messages. */
   describeNode?: (node: ChatNode) => string;
   /** What each working card is doing now, by "<run id>:<card id>". */
@@ -873,6 +879,10 @@ export function AgentOrchestratorChat({
 
   const runOpen = Boolean(latest) && chatRunOpen(chat?.status);
   const accepts = chatAcceptsMessage(chat?.status, working);
+  // Starting to type gets the agent the message needs ready (the surface throttles it); a run that
+  // is open already has its agent.
+  const hasDraft = Boolean(draft.trim());
+  useEffect(() => { if (hasDraft && !runOpen) onComposing?.(); }, [hasDraft, runOpen, onComposing]);
   // "Steer while working": a message typed while the agent works goes to it right away.
   const [steerOn, setSteerOn] = useState(() => { try { return localStorage.getItem("coding-tools:ao:steer") !== "off"; } catch { return true; } });
   const toggleSteer = () => setSteerOn((current) => {
@@ -1369,7 +1379,7 @@ export function AgentOrchestratorChat({
             </article></PartErrorBoundary>;
   }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn]);
 
-  return (<Attachments.Provider value={attachmentAccess}><CompactActivity.Provider value={compactActivity}>
+  return (<Attachments.Provider value={attachmentAccess}><SentMessageView.Provider value={sentMessageView}><CompactActivity.Provider value={compactActivity}>
     <div className={`cx-chat${showStructure && structure ? " has-structure" : ""}`}>
       <section className="cx-thread" aria-label={chat?.title || CHAT_DEFAULT_TITLE}>
         <header className="cx-thread-head">
@@ -1697,5 +1707,5 @@ export function AgentOrchestratorChat({
       {workbench && selectedTaskId ? <ChatWorkbench sessions={agentSessions} workspaceId={projectId} tab={workbench} onTab={setWorkbench} onClose={() => setWorkbench(null)} /> : null}
       <ChatMenu menu={menu} onClose={() => setMenu(null)} />
     </div>
-  </CompactActivity.Provider></Attachments.Provider>);
+  </CompactActivity.Provider></SentMessageView.Provider></Attachments.Provider>);
 }
