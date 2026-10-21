@@ -4727,23 +4727,25 @@ test("a model picked mid-chat is what Retry and the next goal round run on, neve
 test("Approve for me: reading a file the person attached needs no review; reading anywhere else outside the project still does", () => {
   // Seen live: an attached screenshot, handed to the agent by its path, was "outside the workspace
   // folder" to the reviewer, which denied the read; the agent never saw the image.
-  const attachments = "G:\\AppData\\Coding Tools\\chat-attachments";
+  // The host's own absolute paths (the CI runs this on Linux and macOS too).
+  const app = path.resolve(path.sep, "ct-app-data");
+  const attachments = path.join(app, "chat-attachments");
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }), findCodexExecutable: () => "C:/codex.exe", chatAttachmentsDir: attachments });
   // A native request as pendingApprovals builds it: the file in `path`, no toolInput.
   const native = (tool, file) => workflow.attachedFileRead({ kind: "permission", tool, path: file });
   const read = (tool, input) => workflow.attachedFileRead({ kind: "permission", tool, toolInput: JSON.stringify(input) });
-  const shot = `${attachments}\\2026-10-21\\image-ab863fa4.png`;
+  const shot = path.join(attachments, "2026-10-21", "image-ab863fa4.png");
   assert.ok(native("Read", shot), "Claude's own Read of an attachment");
   assert.ok(native("read", shot), "named by its ACP kind");
   assert.ok(native(`Read ${shot}`, shot), "named by its summary");
-  assert.ok(read("mcp__coding-tools__view_image", { path: `${attachments}\\2026-10-21\\shot.png` }), "the app's image view");
-  assert.equal(native("Read", "G:\\AppData\\Coding Tools\\settings.json"), null, "not the app's other files");
-  assert.equal(native("Read", `${attachments}\\..\\secrets.json`), null, "no way out of the folder");
-  assert.equal(native("Write", `${attachments}\\x.png`), null, "only reads");
+  assert.ok(read("mcp__coding-tools__view_image", { path: path.join(attachments, "2026-10-21", "shot.png") }), "the app's image view");
+  assert.equal(native("Read", path.join(app, "settings.json")), null, "not the app's other files");
+  assert.equal(native("Read", `${attachments}${path.sep}..${path.sep}secrets.json`), null, "no way out of the folder");
+  assert.equal(native("Write", path.join(attachments, "x.png")), null, "only reads");
   assert.equal(native("Read", "image.png"), null, "an absolute path only");
   assert.equal(workflow.attachedFileRead({ kind: "command", tool: "Read", path: shot }), null, "never a command");
   const without = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }), findCodexExecutable: () => "C:/codex.exe" });
-  assert.equal(without.attachedFileRead({ tool: "Read", toolInput: JSON.stringify({ file_path: `${attachments}\\a.png` }) }), null, "no folder given, no exception");
+  assert.equal(without.attachedFileRead({ tool: "Read", toolInput: JSON.stringify({ file_path: path.join(attachments, "a.png") }) }), null, "no folder given, no exception");
 });
 
 test("Approve for me: the chat's preview tools and routine commands through the app's terminal pass; anything else asks", () => {
