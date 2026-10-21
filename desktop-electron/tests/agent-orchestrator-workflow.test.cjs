@@ -3335,6 +3335,45 @@ test("/compact replaces a long chat's context with Codex's handoff summary; /dif
   assert.deepEqual([...diff.files], ["x"]);
 });
 
+test("Approve for me reviews a card's requests when its chat observes it, even with no run loop driving it", async () => {
+  // Seen live: a reviewer's routine `ao report --done` sat "awaiting review" for 33 hours: its run's
+  // loop had ended, and only a loop reviewed requests.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
+  const requests = [
+    { approval_id: "tests", source: "ao", kind: "command", command: "npm test", tool: "Bash", summary: "Bash", decisions },
+    { approval_id: "push", source: "ao", kind: "command", command: "git push origin main", tool: "Bash", summary: "Bash", decisions },
+  ];
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+    { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const resolved = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"allow","reason":"the project tests"}' } }] }) };
+    },
+    requestHeadless: async (endpoint) => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running",
+        approvals: requests.filter((request) => !resolved.some(([id]) => id === request.approval_id)) }),
+      resolveApproval: async (_session, requestId, decisionId) => { resolved.push([requestId, decisionId]); return { ok: true }; },
+    },
+  });
+  assert.equal((await workflow.call("run_status", { workspaceId: "ws", runId: "run" })).driven, false, "no loop drives it");
+  // The chat's approvals poll observes the card.
+  const seen = await workflow.call("observe", { workspaceId: "ws", runId: "run", nodeId: "one" });
+  assert.equal(seen.pending_approvals.length, 2, "the requests are shown as before");
+  for (let tries = 0; tries < 200 && resolved.length < 2; tries++) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(Object.fromEntries(resolved), { tests: "yes", push: "no" }, "reviewed and answered: allowed by the reviewer, git push refused by the safety rules");
+  // A second observe while nothing is left reviews nothing more.
+  await workflow.call("observe", { workspaceId: "ws", runId: "run", nodeId: "one" });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(resolved.length, 2);
+});
+
 test("a single AO card set to Approve for me has its parked tool requests reviewed and answered through AO", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
