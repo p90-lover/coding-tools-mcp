@@ -1,46 +1,70 @@
 "use strict";
 
-// Chat goals, as Codex's /goal: a chat keeps working toward an objective on its own. Codex keeps a
-// goal on one app-server thread; here a chat is a series of runs (Single model or a whole team, on
-// any harness), so the goal lives with the chat: each round is one run, and when a run settles the
-// chat decides from its final answers whether the goal is achieved, stalled or worth another round.
+// Chat goals, as Claude Code's /goal: a chat keeps working until a condition holds. Claude Code
+// checks the condition each time the agent stops: a separate evaluator model reads the transcript
+// and, when the condition is not met yet, the agent goes on with "Stop hook feedback:" naming the
+// condition and why. Here a chat is a series of runs (Single model or a whole team, on any
+// harness), so the goal lives with the chat: each round is one run, and when a run settles the
+// evaluator judges it from the round's message and the closing cards' answers.
 
 const fs = require("node:fs");
 const path = require("node:path");
 
-/** Rounds a goal may take before it stops as "limited" (Codex stops on a token budget). */
-const DEFAULT_GOAL_ROUNDS = 6;
-const MAX_GOAL_ROUNDS = 20;
 const OBJECTIVE_LIMIT = 2000;
 const STATUSES = new Set(["active", "paused", "achieved", "stalled", "limited"]);
+// How much of a round the evaluator reads, the end kept: an agent's conclusion comes last.
+const TRANSCRIPT_LIMIT = 24_000;
+const REASON_LIMIT = 1_500;
 
-/** What every goal round asks of the agent: work toward the objective and say where it stands. */
-function goalPrompt(objective, round, rounds) {
+/**
+ * The message a goal round sends. The first round sends the condition itself, as the person set
+ * it; every later one is Claude Code's stop-hook feedback: the condition in brackets and the
+ * evaluator's reason it is not met yet.
+ */
+function goalMessage(objective, round, reason = "") {
+  if (round <= 1) return objective;
+  const why = String(reason || "").trim() || "The condition is not met yet; continue from where the last round left off.";
+  return `Stop hook feedback:\n[${objective}]: ${why}`;
+}
+
+/** What a settled round showed: the message it was sent and the closing cards' answers. */
+function roundTranscript(message, answers) {
+  const parts = [`User:\n${String(message || "").trim() || "(no message)"}`];
+  const said = (answers ?? []).filter((answer) => typeof answer === "string" && answer.trim());
+  parts.push(said.length ? said.map((answer) => `Assistant:\n${answer.trim()}`).join("\n\n") : "Assistant:\n(no final answer)");
+  const text = parts.join("\n\n");
+  return text.length > TRANSCRIPT_LIMIT ? `…${text.slice(-TRANSCRIPT_LIMIT)}` : text;
+}
+
+/** The evaluator's instructions: judge the condition from the transcript alone, as JSON. */
+function goalCheckPrompt(objective, transcript) {
   return [
-    round > 1 ? `Continue pursuing the goal (round ${round} of ${rounds}). Pick up from where the last round left off.` : `Goal (round 1 of ${rounds}):`,
-    `Goal: ${objective}`,
+    "You evaluate whether a stop condition set for an AI coding agent is satisfied, judging only from the transcript of its latest turn below.",
     "",
-    "Work toward this goal and verify the result against it. End your final answer with exactly one line:",
-    "GOAL: ACHIEVED — when the goal is fully met and verified",
-    "GOAL: CONTINUE — followed by what still remains",
+    `Condition: ${objective}`,
+    "",
+    "Rules:",
+    "- The condition is satisfied only when the transcript shows evidence that it holds now: the work done, checked, and its result reported.",
+    "- Claims without evidence, plans, partial progress, waiting on someone or something, or work left for later are not satisfied.",
+    "- A condition that describes an ongoing aim rather than an end state is not satisfied by progress alone.",
+    "- If the transcript does not show enough to decide, it is not satisfied.",
+    "",
+    'Answer with JSON only: {"met": true|false, "reason": "<one short paragraph: what the transcript shows, and what is still missing when not met>"}',
+    "",
+    "Transcript:",
+    transcript,
   ].join("\n");
 }
 
-/**
- * Where a run left the goal, from the answers of the cards that close it (a Single model's card, a
- * team's reviewer, or an orchestrator that answered alone): "achieved", "continue", or null when no
- * card said, which counts as another round.
- */
-function goalVerdict(answers) {
-  let verdict = null;
-  for (const answer of answers) {
-    const lines = String(answer || "").split(/\r?\n/).map(line => line.replace(/[*_`]/g, "").trim());
-    const said = lines.reverse().find(line => /^GOAL\s*:\s*(ACHIEVED|CONTINUE)\b/i.test(line));
-    if (!said) continue;
-    if (/ACHIEVED/i.test(said)) return "achieved";
-    verdict = "continue";
-  }
-  return verdict;
+/** The evaluator's answer as { met, reason }; anything unreadable throws. */
+function parseGoalCheck(text) {
+  const raw = String(text ?? "");
+  const start = raw.indexOf("{"), end = raw.lastIndexOf("}");
+  if (start < 0 || end <= start) throw new Error("The goal evaluator gave no verdict");
+  const parsed = JSON.parse(raw.slice(start, end + 1));
+  if (typeof parsed?.met !== "boolean") throw new Error("The goal evaluator gave no verdict");
+  const reason = String(parsed.reason ?? "").replace(/\s+/g, " ").trim().slice(0, REASON_LIMIT);
+  return { met: parsed.met, reason: reason || (parsed.met ? "The condition is met." : "The condition is not met yet.") };
 }
 
 /** The answers of a settled run's closing cards: cards no other card waits on (the retry sidecar aside). */
@@ -63,7 +87,8 @@ function cleanObjective(value) {
 
 /**
  * The saved goals, one per chat ("<workspace>:<task>"), kept in a small JSON file so a goal survives
- * an app restart. Without a file (tests) they live in memory.
+ * an app restart. Without a file (tests) they live in memory. A goal has no round limit, as in
+ * Claude Code (`rounds` 0); one saved by an earlier version keeps its limit.
  */
 function createGoalStore({ file = null, now = Date.now } = {}) {
   let goals = {};
@@ -88,11 +113,10 @@ function createGoalStore({ file = null, now = Date.now } = {}) {
       const prefix = `${workspaceId}:`;
       return Object.fromEntries(Object.entries(goals).filter(([name]) => name.startsWith(prefix)).map(([name, goal]) => [name.slice(prefix.length), goal]));
     },
-    set(workspaceId, taskId, objective, rounds = DEFAULT_GOAL_ROUNDS) {
+    set(workspaceId, taskId, objective) {
       const at = now();
-      const goal = { objective: cleanObjective(objective), status: "active", round: 0,
-        rounds: Math.max(1, Math.min(MAX_GOAL_ROUNDS, Math.round(Number(rounds) || DEFAULT_GOAL_ROUNDS))),
-        startedAt: at, updatedAt: at, lastRunId: "", evaluatedRunId: "", note: "" };
+      const goal = { objective: cleanObjective(objective), status: "active", round: 0, rounds: 0,
+        startedAt: at, updatedAt: at, lastRunId: "", evaluatedRunId: "", note: "", feedback: "" };
       goals[key(workspaceId, taskId)] = goal;
       persist();
       return goal;
@@ -114,4 +138,4 @@ function createGoalStore({ file = null, now = Date.now } = {}) {
   };
 }
 
-module.exports = { DEFAULT_GOAL_ROUNDS, MAX_GOAL_ROUNDS, goalPrompt, goalVerdict, closingAnswers, cleanObjective, createGoalStore };
+module.exports = { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAnswers, cleanObjective, createGoalStore };
