@@ -35,6 +35,9 @@ test("the shell reads agents really send pass without the paid reviewer", () => 
     "Get-Process python -ErrorAction SilentlyContinue | Select-Object Id,StartTime", "netstat -ano | findstr 7373",
     "foreach ($f in \"src/detector.py\",\"server.py\") { Get-Item $f | Select-Object Name,Length }",
     "Set-Location \"F:\\clash of clan macro\"\n# what changed\ngit log --oneline -5",
+    // A local holding a checked literal may be passed on; curl's read-only options are fine.
+    "$p = \"F:\\clash of clan macro\\models\"; Get-ChildItem $p", "curl.exe -s --max-time 5 http://127.0.0.1:7373/api/health",
+    "(Invoke-WebRequest -Uri \"http://127.0.0.1:7413/api/screenshot\" -TimeoutSec 15 -UseBasicParsing).StatusCode",
   ]) assert.ok(readOnlyInspection(command, FOLDER), `inspection: ${command}`);
 });
 
@@ -54,6 +57,16 @@ test("anything that writes, runs code, reads outside the folder or reads the env
     "curl http://127.0.0.1:8000 -o out.html", "curl -d x=1 http://localhost:8000", "iwr \"http://192.168.1.5/\"",
     "Write-Output \"$env:CPA_KEY\"", "\"$home\"", "Get-Content x\n$a = Remove-Item y", "Write-Output @\"\n$(whoami)\n\"@",
     "\"$((Get-Item x).Delete())\"", "$r = $env:API_KEY", "Get-Process | Stop-Process", "Get-CimInstance Win32_Process | Invoke-CimMethod -MethodName Terminate",
+    // Review on #479: curl's long write/upload options, a destination borrowed from another statement or
+    // written without its scheme, a path read from a file, and methods called through ForEach-Object.
+    "curl.exe http://localhost:8000 --output README.md", "curl.exe http://localhost:8000 --data payload", "curl.exe -o x http://localhost:8000",
+    "curl.exe http://localhost:8000 --upload-file x", "Invoke-WebRequest -Uri \"http://127.0.0.1:1/\" -OutFile x",
+    "Invoke-RestMethod -Uri \"http://127.0.0.1:1/\" -Method Post", "Write-Output http://localhost/; curl.exe example.com",
+    "Write-Output \"http://127.0.0.1/\"; Invoke-WebRequest example.com", "curl.exe localhost:8000", "iwr -Uri \"http://evil.example/\"",
+    "$p = Get-Content paths.txt; Get-Content $p", "$p = Get-Content paths.txt; Set-Location $p; Get-Content secrets.txt",
+    "foreach ($f in (Get-Content list.txt)) { Get-Content $f }", "$d = (Get-Item x).FullName; Get-ChildItem -Path $d",
+    "Get-Item README.md | ForEach-Object -MemberName Delete", "Get-Process notepad | ForEach-Object -MemberName Kill",
+    "Get-Item README.md | ForEach-Object Delete", "Get-Process notepad | foreach Kill", "Get-Item x | % Delete",
   ]) assert.equal(readOnlyInspection(command, FOLDER), null, `not inspection: ${JSON.stringify(command)}`);
   // No folder known, or a command run outside the project: the reviewer decides.
   assert.equal(readOnlyInspection("Get-ChildItem", null), null);

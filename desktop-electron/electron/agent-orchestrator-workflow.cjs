@@ -2277,10 +2277,38 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // Web requests a read may make: to a service on this machine only, and sending or writing nothing
   // (seen live: `try { $r = Invoke-WebRequest -Uri "http://127.0.0.1:7373/api/health" …` health checks).
   const WEB_READ_VERBS = new Set(["invoke-webrequest", "iwr", "invoke-restmethod", "irm", "curl", "curl.exe"]);
-  function loopbackRead(text) {
-    const urls = String(text).match(/\b[a-z][\w+.-]*:\/\/[^\s"'`;|)]+/gi) ?? [];
-    if (!urls.length || !urls.every((url) => /^https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d{1,5})?(?:\/|$)/i.test(url))) return false;
-    return !/(?:^|\s)-(?:Body|InFile|OutFile|Form|Method\s+(?!Get\b)\S+|X|d|data(?:-\w+)?|F|form|T|upload-file|o|output|O|remote-name|K|config)\b/i.test(text);
+  // The only options a web read may carry (review: a denylist missed curl's --output and --data).
+  // PowerShell's are matched in any case; curl's exactly, since curl tells -i from -I.
+  const PS_WEB_OPTIONS = new Map([["-uri", "url"], ["-timeoutsec", "value"], ["-usebasicparsing", "flag"], ["-erroraction", "value"],
+    ["-method", "get"]]);
+  const CURL_OPTIONS = new Map([["-s", "flag"], ["-S", "flag"], ["-sS", "flag"], ["-f", "flag"], ["-fsS", "flag"], ["-i", "flag"], ["-I", "flag"],
+    ["--silent", "flag"], ["--show-error", "flag"], ["--fail", "flag"], ["--include", "flag"], ["--head", "flag"],
+    ["-m", "value"], ["--max-time", "value"], ["--connect-timeout", "value"]]);
+  const LOOPBACK_URL = /^https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d{1,5})?(?:[/?#]|$)/i;
+  /**
+   * Whether one web command (its words, quoted values read back through `value`) asks only a service
+   * on this machine and sends and writes nothing. Each destination is the command's own, written with
+   * its scheme (review: a loopback URL printed by another statement passed `curl.exe example.com`).
+   */
+  function loopbackRead(tokens, value) {
+    const curl = /^curl(?:\.exe)?$/i.test(tokens[0]);
+    let destinations = 0;
+    for (let at = 1; at < tokens.length; at += 1) {
+      const token = tokens[at];
+      if (token.startsWith("-")) {
+        const kind = (curl ? CURL_OPTIONS.get(token) : undefined) ?? PS_WEB_OPTIONS.get(token.toLowerCase());
+        if (!kind) return false;
+        if (kind === "flag") continue;
+        const next = tokens[at += 1];
+        if (next === undefined) return false;
+        if (kind === "get" && !/^get$/i.test(value(next))) return false;
+        if (kind === "url") { if (!LOOPBACK_URL.test(value(next))) return false; destinations += 1; }
+        continue;
+      }
+      if (!LOOPBACK_URL.test(value(token))) return false;
+      destinations += 1;
+    }
+    return destinations > 0;
   }
   // git's read-only subcommands; any other (checkout, reset, commit, push, clean…) still goes to review.
   const GIT_READS = new Set(["status", "diff", "log", "show", "rev-parse", "ls-files", "blame", "cat-file", "describe", "shortlog", "grep"]);
@@ -2315,22 +2343,36 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // Quoted arguments are set aside (a path, a filter, a pattern); what is left must be plain words.
     // A double-quoted one expands its variables: only the pipeline's item may appear there too
     // ("$env:CPA_KEY" in quotes passed before and would have printed the key).
+    // Each quoted value becomes ⟦n⟧ (its index), so a web command's quoted URL can be read back.
+    if (text.includes("⟦")) return null;
     const quoted = [];
     let expands = false;
     const bare = text.replace(/"([^"]*)"|'([^']*)'/g, (_, double, single) => {
       if (double !== undefined && /\$(?!_\b|PSItem\b)/i.test(double)) expands = true;
       quoted.push(double ?? single);
-      return " Q ";
+      return ` ⟦${quoted.length - 1}⟧ `;
     });
-    // Variables this command sets itself (`$r = Invoke-WebRequest …`, `foreach ($f in …)`): they hold
-    // only what its own reads produced. Never the environment's or PowerShell's own ($env:, $profile…).
+    const isQuoted = (word) => /^⟦\d+⟧$/.test(word);
+    const valueOf = (word) => isQuoted(word) ? quoted[Number(word.slice(1, -1))] : word;
+    // Variables this command sets itself (`$r = Invoke-WebRequest …`, `foreach ($f in …)`). Never the
+    // environment's or PowerShell's own ($env:, $profile…).
     const locals = new Set([...bare.matchAll(/\$([A-Za-z_]\w*)\s*=(?!=)/g), ...bare.matchAll(/\bforeach\s*\(\s*\$([A-Za-z_]\w*)\s+in\b/gi)]
       .map((match) => match[1].toLowerCase())
       .filter((name) => !/^(?:env|global|script|using|args|input|this|home|profile|pshome|executioncontext|host|psitem|_)$/.test(name)));
-    const localVariable = (word) => {
-      const name = /^\$([A-Za-z_]\w*)(?:\.[A-Za-z_]\w*)*$/.exec(word)?.[1];
-      return Boolean(name && locals.has(name.toLowerCase()));
-    };
+    const localName = (word) => /^\$([A-Za-z_]\w*)(?:\.[A-Za-z_]\w*)*=?$/.exec(word)?.[1]?.toLowerCase();
+    const localVariable = (word) => locals.has(localName(word) ?? "");
+    // A local holding a literal (`$p = "<project>\x"`, `foreach ($f in "a","b")`) is that checked value; one
+    // holding what a command printed may hold any path (review: `$p = Get-Content paths.txt; Get-Content
+    // $p`), so it may be printed or read from, never passed to a command.
+    const statements = bare.split(/[;|{}()]/).map((statement) => statement.trim().split(/\s+/).filter(Boolean));
+    const derived = new Set();
+    const literalOnly = (rest) => rest.length > 0 && rest.join(" ").split(/\s*,\s*/).every((item) => isQuoted(item) || /^[\w.\\/:-]+$/.test(item));
+    for (const tokens of statements) {
+      const name = localName(tokens[0] ?? "");
+      if (name && locals.has(name) && (tokens[0].endsWith("=") || tokens[1] === "=")) {
+        if (!literalOnly(tokens.slice(tokens[0].endsWith("=") ? 1 : 2))) derived.add(name);
+      } else if (name && locals.has(name) && tokens[1]?.toLowerCase() === "in" && !literalOnly(tokens.slice(2))) derived.add(name);
+    }
     // Outside quotes: no assignment (but to a local), type literal or static .NET call
     // ([IO.File]::WriteAllText). A long option's value (--porcelain=v1) is no assignment.
     const unassigned = bare.replace(/\$[A-Za-z_]\w*\s*=(?!=)/g, " ").replace(/(^|\s)--?[\w-]+=/g, "$1");
@@ -2344,17 +2386,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (words.some((word) => /^-[\w-]+:/.test(word))) return null;
     // Each statement starts with a read-only verb, a condition on the pipeline's item, or is a string
     // it prints (`{ 'missing' }`). `$local = <statement>` is judged by its statement.
-    for (const statement of bare.split(/[;|{}()]/)) {
-      let tokens = statement.trim().split(/\s+/).filter(Boolean);
-      if (tokens[0] && localVariable(tokens[0].replace(/=$/, "")) && (tokens[0].endsWith("=") || tokens[1] === "=")) {
+    for (let tokens of statements) {
+      if (tokens[0] && localVariable(tokens[0]) && (tokens[0].endsWith("=") || tokens[1] === "=")) {
         tokens = tokens.slice(tokens[0].endsWith("=") ? 1 : 2);
-      }
+      } else if (tokens[0] && localVariable(tokens[0]) && tokens[1]?.toLowerCase() === "in") continue; // foreach's ($x in …)
+      // A command's output held in a local is never an argument (see `derived`).
+      if (tokens.slice(1).some((token) => derived.has(localName(token) ?? ""))) return null;
       const [first, second] = tokens;
       if (first && WEB_READ_VERBS.has(first.toLowerCase())) {
         // A request to a service on this machine that sends and writes nothing.
-        if (!loopbackRead(text)) return null;
+        if (!loopbackRead(tokens, valueOf)) return null;
         continue;
       }
+      // ForEach-Object runs a script block, checked as statements here; its -MemberName (or a bare
+      // member name: `ForEach-Object Delete`, `foreach Kill`) calls a method unseen (review).
+      if (first && /^(?:foreach-object|foreach|%)$/i.test(first) && tokens.length > 1) return null;
       if (first && first.toLowerCase() === "git") {
         // `git status --porcelain`, `git diff --stat`, `git log -5`: a read-only subcommand only.
         if (!second || !GIT_READS.has(second.toLowerCase())) return null;
@@ -2363,12 +2409,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // A fragment that cannot start a command: a member after a parenthesis ((Get-Date).AddHours), a
       // number or an operator or switch ((-14), -not).
       if (first && /^(?:\.[A-Za-z_]\w*|[-+]?\d+(?:\.\d+)?|-[A-Za-z]\w*)$/.test(first)) continue;
-      if (first && first !== "Q" && !READ_VERBS.has(first.toLowerCase()) && !INSPECTION_VARIABLE.test(first) && !localVariable(first)) return null;
+      if (first && !isQuoted(first) && !READ_VERBS.has(first.toLowerCase()) && !INSPECTION_VARIABLE.test(first) && !localVariable(first)) return null;
     }
     // Paths stay inside the folder, an option's value (--git-dir=…) and a URL's host aside: a URL is
     // judged by loopbackRead.
     // A member name after a parenthesis (.AddHours, .Count) is no path; "..\x" or ".\x" still is.
-    const values = [...quoted, ...words.filter((word) => word !== "Q" && !word.startsWith("$") && !/^\.[A-Za-z_]\w*$/.test(word) && word !== "=")]
+    const values = [...quoted, ...words.filter((word) => !isQuoted(word) && !word.startsWith("$") && !/^\.[A-Za-z_]\w*$/.test(word) && word !== "=")]
       .map((value) => /^--?[\w-]+=/.test(value) ? value.slice(value.indexOf("=") + 1) : value)
       .filter((value) => !/^https?:\/\//i.test(value));
     if (!values.every((value) => insideFolder(value, folder))) return null;
