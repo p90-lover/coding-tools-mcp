@@ -172,6 +172,9 @@ function createAoWorkspaceBoard({ listWorkspaces, listProjects, createProject, m
   syncBudgetMs = SYNC_BUDGET_MS,
 }) {
   const pending = new Map();
+  // branches(): each folder's last list (and the one being read), kept BRANCHES_TTL_MS.
+  const branchReads = new Map();
+  const BRANCHES_TTL_MS = 5_000;
   async function canonical(directory) {
     if (typeof directory !== "string" || !(platform === "win32" ? path.win32 : path).isAbsolute(directory)) throw new Error("Workspace needs an absolute directory");
     const resolved = await realpath(directory);
@@ -235,17 +238,32 @@ function createAoWorkspaceBoard({ listWorkspaces, listProjects, createProject, m
     },
     /** The workspace's AO project ({ workspaceId, projectId|null }) without registering one or syncing it. */
     project: id => binding(id, false),
-    /** The workspace folder's branches, and the one a chat's own folder (`chatRoot`) is on. */
+    /**
+     * The workspace folder's branches, and the one a chat's own folder (`chatRoot`) is on. One list
+     * costs about a dozen git processes, and starting each one holds the main process for 100-400 ms
+     * on a busy machine: opening a project mounted two branch bars at once, each of which re-reads
+     * every 15 s. Callers asking together share one read, and a read is kept for a few seconds.
+     */
     async branches(id, chatRoot = null) {
       const { item } = await workspace(id);
       const folder = platform === "win32" ? item.path.replace(/^\\\\\?\\/, "") : item.path;
-      return listBranches(folder, chatRoot);
+      const key = `${path.resolve(folder)}\u0000${chatRoot ? path.resolve(chatRoot) : ""}`;
+      const cached = branchReads.get(key);
+      if (cached && (cached.pending || Date.now() - cached.at < BRANCHES_TTL_MS)) return cached.read;
+      const entry = { at: Date.now(), pending: true, read: null };
+      entry.read = listBranches(folder, chatRoot).finally(() => { entry.pending = false; entry.at = Date.now(); });
+      entry.read.catch(() => branchReads.delete(key));
+      branchReads.set(key, entry);
+      if (branchReads.size > 64) branchReads.delete(branchReads.keys().next().value);
+      return entry.read;
     },
     /** Checks out `branch` in the workspace folder, then lists the branches again. */
     async switchBranch(id, branch) {
       const { item } = await workspace(id);
       const folder = platform === "win32" ? item.path.replace(/^\\\\\?\\/, "") : item.path;
       const { switched } = await switchFolderBranch(folder, branch);
+      // Every kept read of this folder is out of date now.
+      for (const key of [...branchReads.keys()]) if (key.startsWith(`${path.resolve(folder)}\u0000`)) branchReads.delete(key);
       return { switched, ...await listBranches(folder) };
     },
     readWorkspace,
