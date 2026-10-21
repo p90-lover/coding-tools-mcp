@@ -201,8 +201,10 @@ export function mergeActivityFrames(current: Record<string, ChatActivity>, next:
  * reads its whole timeline back from AO when opened.
  */
 export const LIVE_TIMELINE_ITEMS = 600;
-export function mergeTimeline(known: ChatLiveItem[] | null | undefined, latest: ChatLiveItem[]): ChatLiveItem[] {
-  const capped = (items: ChatLiveItem[]) => (items.length > LIVE_TIMELINE_ITEMS ? items.slice(-LIVE_TIMELINE_ITEMS) : items);
+export function mergeTimeline(known: ChatLiveItem[] | null | undefined, latest: ChatLiveItem[],
+  { cap = LIVE_TIMELINE_ITEMS }: { cap?: number } = {}): ChatLiveItem[] {
+  // `cap` Infinity: a finished turn's timeline read back whole (useStepWork) keeps every entry.
+  const capped = (items: ChatLiveItem[]) => (items.length > cap ? items.slice(-cap) : items);
   if (!known?.length) return capped(latest);
   const fresh = new Set(latest.map((item) => item.id));
   const earlier = known.filter((item) => !fresh.has(item.id));

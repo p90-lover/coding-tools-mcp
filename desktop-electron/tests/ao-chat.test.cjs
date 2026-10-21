@@ -1238,6 +1238,10 @@ test("a live turn keeps at most its newest steps, so a long run stays light to r
   assert.equal(kept.length, cap);
   assert.equal(kept[0].id, "2", "the oldest steps fall out first");
   assert.equal(kept.at(-1).id, String(cap + 1));
+  // A finished turn read back whole is not capped: its earliest commands stay readable.
+  const whole = Array.from({ length: cap + 50 }, (_, index) => item(index));
+  assert.equal(chat.mergeTimeline(null, whole, { cap: Infinity }).length, cap + 50);
+  assert.equal(chat.mergeTimeline(kept, whole, { cap: Infinity })[0].id, "0");
 });
 
 test("a single-model chat's card is named by its model, a team's by its role", () => {

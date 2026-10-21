@@ -335,7 +335,8 @@ function useStepWork(step: ChatStep, runId: string, wanted: boolean, loadWork?: 
     let current = true;
     void loadWork(runId, step.nodeId).then((items) => {
       if (!items.length) return;
-      CHAT_WORK.set(step.key, mergeTimeline(CHAT_WORK.get(step.key), items));
+      // A finished turn read back whole keeps every entry; only live polls are capped.
+      CHAT_WORK.set(step.key, mergeTimeline(CHAT_WORK.get(step.key), items, { cap: Infinity }));
       if (current) setLoaded((count) => count + 1);
     }).catch(() => undefined);
     return () => { current = false; };
