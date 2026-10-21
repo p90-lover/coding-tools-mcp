@@ -1474,7 +1474,7 @@ function createChatAgentTools({
     // person's or the reviewer's) is for the command that actually runs.
     if (name === "exec_command" && typeof args.cmd === "string") {
       let compact = null;
-      try { compact = rewriteCommand(args.cmd); } catch { compact = null; }
+      try { compact = await rewriteCommand(args.cmd); } catch { compact = null; }
       if (typeof compact === "string" && compact && compact !== args.cmd) args = { ...args, cmd: compact };
     }
     // Under "Approve for me" on Claude Code every call here already went through the chat's

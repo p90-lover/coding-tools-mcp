@@ -2505,7 +2505,7 @@ function registerIpc({ logger, stateStore }) {
   });
   // Runtime > RTK: whether rtk is installed and on, its savings, and installing it (winget).
   handle("rtk:status", async () => rtk.status() ?? { enabled: false, installed: false, path: null, version: null });
-  handle("rtk:gain", async () => rtk.gain() ?? { available: false });
+  handle("rtk:gain", async () => (await rtk.gain()) ?? { available: false });
   handle("rtk:install", async (event) => {
     // Installing software is the person's own click in the visible app.
     assertFocusedMainWindow(event, true);

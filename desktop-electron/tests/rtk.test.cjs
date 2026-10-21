@@ -35,7 +35,7 @@ test("rtk is found in WinGet's Links folder, and only a real rtk at least 0.23.0
   assert.equal(world({ files: [] }).rtk.status().installed, false);
 });
 
-test("a command runs as rtk's rewrite on exit 0 or 3, and as written otherwise", () => {
+test("a command runs as rtk's rewrite on exit 0 or 3, and as written otherwise", async () => {
   const { rtk } = world({ rewrites: {
     "git status": [0, "rtk git status\n"],
     "cargo test --all": [3, "rtk cargo test --all"],
@@ -44,19 +44,19 @@ test("a command runs as rtk's rewrite on exit 0 or 3, and as written otherwise",
     "cd app && git log -5": [0, "cd app && rtk git log -5"],
     "two lines": [0, "rtk a\nrtk b"],
   } });
-  assert.equal(rtk.rewrite("git status"), `"${RTK}" git status`, "rtk's full path, quoted, so it runs where its folder is not on PATH");
-  assert.equal(rtk.rewrite("cargo test --all"), `"${RTK}" cargo test --all`, "an ask rule still rewrites; the chat's own approval reviews it");
-  assert.equal(rtk.rewrite("rm -rf build"), null, "a deny rule runs the original");
-  assert.equal(rtk.rewrite("echo hi"), null, "no rtk equivalent runs the original");
-  assert.equal(rtk.rewrite("cd app && git log -5"), `cd app && "${RTK}" git log -5`);
-  assert.equal(rtk.rewrite("two lines"), null, "a multi-line answer is not trusted");
-  assert.equal(rtk.rewrite(""), null);
-  assert.equal(rtk.rewrite("x".repeat(20_000)), null, "an oversized command is left alone");
+  assert.equal(await rtk.rewrite("git status"), `"${RTK}" git status`, "rtk's full path, quoted, so it runs where its folder is not on PATH");
+  assert.equal(await rtk.rewrite("cargo test --all"), `"${RTK}" cargo test --all`, "an ask rule still rewrites; the chat's own approval reviews it");
+  assert.equal(await rtk.rewrite("rm -rf build"), null, "a deny rule runs the original");
+  assert.equal(await rtk.rewrite("echo hi"), null, "no rtk equivalent runs the original");
+  assert.equal(await rtk.rewrite("cd app && git log -5"), `cd app && "${RTK}" git log -5`);
+  assert.equal(await rtk.rewrite("two lines"), null, "a multi-line answer is not trusted");
+  assert.equal(await rtk.rewrite(""), null);
+  assert.equal(await rtk.rewrite("x".repeat(20_000)), null, "an oversized command is left alone");
 });
 
-test("turned off, nothing is rewritten and Claude Code gets no hook", () => {
+test("turned off, nothing is rewritten and Claude Code gets no hook", async () => {
   const { rtk, calls } = world({ enabled: false, rewrites: { "git status": [0, "rtk git status"] } });
-  assert.equal(rtk.rewrite("git status"), null);
+  assert.equal(await rtk.rewrite("git status"), null);
   assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: "" }, "an empty hook turns it off in AO");
   assert.equal(rtk.binDir(), "");
   assert.ok(!calls.some((call) => call[1] === "rewrite"), "rtk is not even asked");
@@ -169,7 +169,7 @@ test("AO's start waits for an install in progress, but not past its bound", asyn
   assert.ok(Date.now() - started < 2_000, "a hung install does not hold AO back");
 });
 
-test("rtk's savings report is read as text and JSON", () => {
-  assert.deepEqual(world().rtk.gain(), { available: true, text: "RTK savings: 1.2K tokens", data: { total_saved: 1234 } });
-  assert.deepEqual(world({ files: [] }).rtk.gain(), { available: false });
+test("rtk's savings report is read as text and JSON", async () => {
+  assert.deepEqual(await world().rtk.gain(), { available: true, text: "RTK savings: 1.2K tokens", data: { total_saved: 1234 } });
+  assert.deepEqual(await world({ files: [] }).rtk.gain(), { available: false });
 });
