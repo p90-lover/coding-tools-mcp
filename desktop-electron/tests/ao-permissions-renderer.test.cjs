@@ -625,3 +625,14 @@ test("the selected run's polls ask only the project the run belongs to", () => {
   assert.match(approvalsPoll, /if \(!workspaceId \|\| !selectedRunId \|\| !selectedRunHere \|\| !ids\.length\) return;/, "so does the approvals poll");
   assert.match(approvalsPoll, /\}, \[workspaceId, selectedRunId, selectedRunHere, activeNodeIds, autoStatus, setError\]\);/, "and starts once it is");
 });
+test("a card clicked after its request was answered or withdrawn just goes, for every way approve_harness says so", () => {
+  // Seen in the launcher log: "AO tool request is no longer pending" showed as an error on a card
+  // clicked while its reviewer was still answering.
+  const surface = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8");
+  const quiet = new RegExp(surface.match(/if \(\/([^/]+)\/\.test\(cause instanceof Error/)[1]);
+  const workflow = fs.readFileSync(path.resolve(__dirname, "../electron/agent-orchestrator-workflow.cjs"), "utf8");
+  const gone = [...workflow.matchAll(/throw new Error\("([^"]*no longer (?:pending|waiting)[^"]*)"\)/g)].map(match => match[1]);
+  assert.ok(gone.includes("AO tool request is no longer pending"), "the AO tool request's own wording is among them");
+  for (const message of gone) assert.match(message, quiet, `"${message}" closes the card quietly`);
+  assert.doesNotMatch("AO result is unavailable; inspect the run before retrying", quiet, "a real failure is still reported");
+});
