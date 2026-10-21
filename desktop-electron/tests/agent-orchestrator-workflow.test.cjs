@@ -5439,6 +5439,20 @@ test("\"Retry automatically\" also restarts a chat whose run ended on an error, 
   assert.deepEqual(second.timers.map(timer => timer.ms), [20_000], "the pause grows with each attempt");
   second.mission.nodes[0].state = "finished";
 
+  // A backend replaced during the pause (dispose) never restarts the run through its old harness.
+  const replaced = setup([]);
+  await replaced.workflow.call("chat_auto_retry", { enabled: true });
+  await replaced.workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  await settle(100);
+  replaced.fail();
+  for (let tries = 0; tries < 200 && !replaced.timers.length; tries++) await settle(10);
+  assert.equal(replaced.timers.length, 1);
+  replaced.workflow.dispose();
+  replaced.timers[0].fn();
+  await settle(200);
+  assert.deepEqual(replaced.controls, [], "a disposed backend starts nothing");
+  replaced.mission.nodes[0].state = "finished";
+
   // Its third retry already used: the limit holds, and the step waits for the person.
   const spent = setup([{}, {}, {}]);
   await spent.workflow.call("chat_auto_retry", { enabled: true });

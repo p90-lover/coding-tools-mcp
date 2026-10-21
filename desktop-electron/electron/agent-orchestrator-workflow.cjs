@@ -3013,10 +3013,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * automatically" on, the run starts again after the pause (startRun retries a held card), within
    * the same attempt limit; a later click, stop or new drive of the run wins over the timer.
    */
+  // The pending restarts, cleared by dispose(): a backend replaced during the pause must not start
+  // the run (and its AO agent) again through its stopped harness.
+  const autoRetryTimers = new Set();
+  let autoRetryDisposed = false;
   function scheduleAutoRetry(workspaceId, runId, executable, state) {
     if (!chatPreferences.get().autoRetry) return;
     const key = runKey(workspaceId, runId);
-    const current = () => !state.stopped && backgroundRuns.get(key) === state;
+    const current = () => !autoRetryDisposed && !state.stopped && backgroundRuns.get(key) === state;
     const mission = async () => (await runs({ workspaceId, runId })).runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
     void (async () => {
       const failed = await mission();
@@ -3025,6 +3029,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const held = failed.nodes.find(node => node.state === "held" && node.role !== "retry") ?? failed.nodes.find(node => node.state === "held");
       const attempt = (held?.history?.length ?? 0) + 1;
       const timer = setTimer(() => {
+        autoRetryTimers.delete(timer);
         void (async () => {
           const latest = await mission();
           if (!current() || !autoRetryAllowed(latest)) return;
@@ -3033,6 +3038,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         })().catch(error => logger?.warn?.("ao.auto_retry_restart_failed", { message: publicText(error?.message || error, 200) }));
       }, AUTO_RETRY_PAUSE_MS * attempt);
       timer?.unref?.();
+      autoRetryTimers.add(timer);
     })().catch(error => logger?.warn?.("ao.auto_retry_restart_failed", { message: publicText(error?.message || error, 200) }));
   }
   /** Whether a run's background grant can start nothing more: every turn started, or its hour over. */
@@ -4271,6 +4277,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     wakeupsDisposed = true;
     for (const timer of wakeTimers.values()) clearTimer(timer);
     wakeTimers.clear();
+    autoRetryDisposed = true;
+    for (const timer of autoRetryTimers) clearTimer(timer);
+    autoRetryTimers.clear();
     // Warm sessions' expiry, re-warms and deferred task edits all reach AO through this backend's
     // harness, which would start a stopped daemon again.
     for (const entry of warm.values()) if (entry.timer) clearTimeout(entry.timer);

@@ -192,17 +192,16 @@ async function waitForPackagedRuntimeSource({
   resourcesPath,
   timeoutMs = DEFAULT_SOURCE_WAIT_TIMEOUT_MS,
   intervalMs = DEFAULT_SOURCE_WAIT_INTERVAL_MS,
+  // The bundle's platform: this machine's, except where a test checks another platform's bundle.
+  platform = process.platform,
+  arch = process.arch,
 }) {
   if (!app.isPackaged) return null;
   if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || !Number.isFinite(intervalMs) || intervalMs <= 0) {
     throw new Error("Packaged runtime source wait requires non-negative timeoutMs and positive intervalMs");
   }
   const source = path.join(resourcesPath, "runtime");
-  const identity = {
-    version: app.getVersion(),
-    platform: process.platform,
-    arch: process.arch,
-  };
+  const identity = { version: app.getVersion(), platform, arch };
   const deadline = Date.now() + timeoutMs;
   let lastError;
   for (;;) {

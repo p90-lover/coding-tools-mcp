@@ -152,9 +152,10 @@ test("a release update installs only the files that changed", async () => {
     assert.equal(fs.existsSync(path.join(installed, "resources", "runtime", "app", "gone.js")), false);
     assert.equal(read(installed, "resources/app.asar.old-123"), "asar v1", "the old file is set aside, not lost");
     assert.equal(journal.filter((entry) => entry.aside).length, 4);
+    // The fixture is a Windows x64 bundle, checked as one on every CI runner (Linux and macOS too).
     assert.equal(await waitForPackagedRuntimeSource({
       app: { isPackaged: true, getVersion: () => "0.8.0" },
-      resourcesPath: path.join(installed, "resources"), timeoutMs: 0,
+      resourcesPath: path.join(installed, "resources"), timeoutMs: 0, platform: "win32", arch: "x64",
     }), path.join(installed, "resources", "runtime"));
 
     const newElectron = await planUpdate({ manifest, installRoot: installed, electronVersion: "40.0.0" });
