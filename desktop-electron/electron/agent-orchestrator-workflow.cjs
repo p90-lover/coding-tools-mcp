@@ -764,7 +764,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   const PLUGIN_NAMESPACES = new Set(["cline-pass", ...PLUGIN_PROVIDERS]);
   // Cline's plugin decodes these suffixes into the provider's request body.
   // DeepSeek V4.1 Flash and its dated builds ("…-flash-1017"), as the plugin's modelEfforts.
-  const CLINE_EFFORT_MODELS = [[/^cline-pass\/deepseek-v4\.1-flash(?:-\d{4,8})?$/, ["none", "low", "high", "max"]]];
+  // Every other Cline Pass model takes OpenRouter's levels (plugin 0.1.0-codingtools.4). Before, they
+  // took none: GLM 5.3 Flash's effort chip stayed greyed at "Auto" with no level to pick. Not "none"
+  // (GLM always reasons: "Reasoning is mandatory") nor "ultra" (no OpenRouter level), though CPA's
+  // catalog lists them for some of these models.
+  const CLINE_EFFORT_MODELS = [[/^cline-pass\/deepseek-v4\.1-flash(?:-\d{4,8})?$/, ["none", "low", "high", "max"]],
+    [/^cline-pass\/[^()]+$/, ["minimal", "low", "medium", "high", "xhigh", "max"]]];
   const CLINE_EFFORTS = { get: id => CLINE_EFFORT_MODELS.find(([pattern]) => pattern.test(String(id)))?.[1], has: id => Boolean(CLINE_EFFORTS.get(id)) };
   // Ids the last catalog read named a plugin as provider of, for launches that have only the id.
   let pluginModels = new Set();

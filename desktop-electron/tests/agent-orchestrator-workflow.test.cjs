@@ -5352,12 +5352,40 @@ test("a dated DeepSeek V4.1 Flash build from Cline Pass takes the same effort le
       { id: "cline-pass/deepseek-v4.1-flash", owned_by: "cline" },
       { id: "cline-pass/deepseek-v4.1-flash-1017", owned_by: "cline" },
       { id: "cline-pass/kimi-k3", owned_by: "cline" },
+      // CPA's catalog lists "none" and "ultra" for some; GLM refused the one, OpenRouter the other.
+      { id: "cline-pass/glm-5.3-flash", owned_by: "cline", supported_reasoning_levels: [{ effort: "low" }, { effort: "ultra" }] },
+      { id: "commandcode-go/glm-5.3-flash", owned_by: "commandcode-go" },
     ] }) }),
   });
   const { capabilities } = await workflow.call("models", {});
   assert.deepEqual(capabilities["cline-pass/deepseek-v4.1-flash-1017"].efforts, ["none", "low", "high", "max"]);
   assert.deepEqual(capabilities["cline-pass/deepseek-v4.1-flash"].efforts, ["none", "low", "high", "max"]);
-  assert.deepEqual(capabilities["cline-pass/kimi-k3"].efforts, [], "another Cline model still passes its name unchanged");
+  // Seen live: GLM 5.3 Flash's effort chip stayed greyed at "Auto". Plugin 0.1.0-codingtools.4 takes
+  // OpenRouter's levels for every other Cline Pass model.
+  const openRouter = ["minimal", "low", "medium", "high", "xhigh", "max"];
+  assert.deepEqual(capabilities["cline-pass/kimi-k3"].efforts, openRouter);
+  assert.deepEqual(capabilities["cline-pass/glm-5.3-flash"].efforts, openRouter, "not CPA's none/ultra");
+  assert.equal(capabilities["cline-pass/glm-5.3-flash"].effortReason, undefined);
+  assert.deepEqual(capabilities["commandcode-go/glm-5.3-flash"].efforts, [], "Command Code's plugin still passes the name unchanged");
+});
+
+test("a Cline Pass model's picked effort reaches CPA as its suffix; Command Code's model still goes bare", async () => {
+  // Plugin 0.1.0-codingtools.4 turns the suffix into the request's reasoning_effort for every Cline
+  // model. Before, only DeepSeek V4.1 Flash took one, and the app sent GLM 5.3 Flash none.
+  const spawned = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: chatWorld({ tasks: [], runs: [] }).requestHeadless,
+    aoHarness: { spawn: async input => { spawned.push(input.model); return `warm-${spawned.length}`; }, warmSessions: async () => [] } });
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local" };
+  const warm = async (model, effort) => {
+    const before = spawned.length;
+    await workflow.call("chat_prewarm", { workspaceId: `ws-${model}`, executionMode: "single", singleRoute: { ...route, model, effort } });
+    for (let tries = 0; tries < 50 && spawned.length === before; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    return spawned.at(-1);
+  };
+  assert.equal(await warm("cpa/cline-pass/glm-5.3-flash", "medium"), "cline-pass/glm-5.3-flash(medium)");
+  assert.equal(await warm("cpa/cline-pass/deepseek-v4.1-flash", "max"), "cline-pass/deepseek-v4.1-flash(max)");
+  assert.equal(await warm("cpa/commandcode-go/glm-5.3-flash", "high"), "commandcode-go/glm-5.3-flash");
+  workflow.dispose();
 });
 
 test("\"Retry automatically\" retries a failed step by itself once its pause is over, with no click", async () => {
