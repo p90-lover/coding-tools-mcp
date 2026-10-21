@@ -815,7 +815,11 @@ export function AgentOrchestratorChat({
     if (!box || !content || typeof ResizeObserver === "undefined") return undefined;
     const observer = new ResizeObserver(() => {
       if (clicked.current) { clicked.current = false; setAtBottom(box.scrollHeight - box.scrollTop - box.clientHeight < 48); return; }
-      if (following.current) box.scrollTop = box.scrollHeight;
+      // Instant, like the follow above: setting scrollTop obeys the theme's smooth scrolling, and the
+      // animation's in-between scroll events read as "left the bottom" and ended following. Seen
+      // live: right after a send (the thread grows a lot at once) the view stopped on an older
+      // message and stayed there.
+      if (following.current) box.scrollTo({ top: box.scrollHeight, behavior: "instant" });
     });
     observer.observe(content);
     return () => observer.disconnect();
