@@ -426,7 +426,8 @@ function surfaceComposer(seed = {}) {
       return [state[name], value => { state[name] = typeof value === "function" ? value(state[name]) : value; }];
     },
     useRef(initial) { return refs[refCursor++] ??= { current: initial }; },
-    useCallback: callback => callback, useEffect() {}, useLayoutEffect() {},
+    // The surface memoizes its derived lists (#429); a render here computes them each time.
+    useCallback: callback => callback, useMemo: calculate => calculate(), useEffect() {}, useLayoutEffect() {},
   };
   const jsx = (type, props) => ({ type, props: props || {} });
   const featureCache = {};
