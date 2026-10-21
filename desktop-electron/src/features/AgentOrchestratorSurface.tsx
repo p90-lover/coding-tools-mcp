@@ -77,6 +77,9 @@ function ToolButton({ icon, label, onClick, disabled, primary, pressed }: { icon
   return <button type="button" className={`ao-tool${primary ? " is-primary" : ""}`} aria-label={label} title={label} aria-pressed={pressed} disabled={disabled} onClick={onClick}><Glyph name={icon} /></button>;
 }
 
+// How long a request the "Approve for me" reviewer has not answered stays hidden. One review takes
+// at most ~50 s (25 s, then 25 s more to decide); past that, nothing is screening it.
+const REVIEW_GRACE_MS = 120_000;
 const OVERVIEW_RATIO_KEY = "coding-tools:ao:overview-ratio:v1";
 const OVERVIEW_DIVIDER = 8;
 
@@ -583,7 +586,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
   // reading it while this filter runs during render threw "Cannot access … before initialization"
   // (the window's render error, every time a request was pending).
   const approvalRun = missions.find((mission) => mission.id === selectedRunId);
-  const shownApprovals = pendingApprovalsHere.filter((approval) => !approval.awaiting_review && !approvalAnsweredForYou(approval,
+  // A request still awaiting review after REVIEW_GRACE_MS is shown after all: when nothing was
+  // screening it (the run's loop had stopped, or its reads of the chat failed), it stayed hidden while
+  // the agent waited on it, and a long task sat "may be stuck" for hours.
+  const shownApprovals = pendingApprovalsHere.filter((approval) => !(approval.awaiting_review && Date.now() - seenAt(approval) < REVIEW_GRACE_MS) && !approvalAnsweredForYou(approval,
     approvalRun?.nodes.find((node) => node.id === approval.nodeId)?.route as { approval_policy?: string; approvals_reviewer?: string } | undefined,
     Date.now() - seenAt(approval), Boolean(approvalRun?.nodes.some((node) => node.role === "approver")))).map((approval) => {
     const note = dependencyInstallNote(approval.command, dependencyLinks?.workspaceId === workspaceId ? dependencyLinks.links : null);
