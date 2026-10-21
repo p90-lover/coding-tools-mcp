@@ -151,7 +151,12 @@ async function planUpdate({ manifest, installRoot, electronVersion, previous = n
       const index = next++;
       const file = candidates[index];
       const target = path.join(installRoot, ...file.path.split("/"));
-      const stat = await fs.promises.stat(target).catch(() => undefined);
+      // Only a missing file counts as one to replace; an unreadable install still stops the update
+      // here, before anything is downloaded or the app is closed for it.
+      const stat = await fs.promises.stat(target).catch((error) => {
+        if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return undefined;
+        throw error;
+      });
       differs[index] = !(stat?.isFile() && stat.size === file.size && await hash(target) === file.sha256);
       onProgress?.(++checked, candidates.length);
     }

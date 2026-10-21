@@ -33,6 +33,8 @@ async function recordLocalDefaultBranch(directory) {
   const branch = await git(directory, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
   if (!branch || !/^[\w./-]{1,200}$/.test(branch)) return;
   await git(directory, ["config", "--local", "ao.defaultBranch", branch]);
+  // The branch list remembers the default it last read (defaultBranchOf); it is this one now.
+  defaultBranches.delete(path.resolve(directory));
 }
 
 const MAX_BRANCHES = 300;
