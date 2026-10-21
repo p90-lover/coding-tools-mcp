@@ -1000,6 +1000,37 @@ test("a finished turn's work is read back from AO, paging back until it reaches 
   assert.equal((await upstream.timeline("s", "")).length, 0, "no turn, nothing to read");
 });
 
+test("a long finished turn keeps its tool calls when a page is over AO's handler limit, past six pages", async () => {
+  // Seen live: a 20-minute turn opened on only its last thought. Paging back stopped at the first
+  // page over the 900 KB handler limit (a command's long output), and after six pages in any case.
+  const requests = [];
+  const tool = (sequence) => ({ id: `t${sequence}`, turnId: "mine", sequence, activityKind: "mcp_tool", status: "completed",
+    summary: `Step ${sequence}`, detail: { toolKind: "other", input: { command: `step ${sequence}` } } });
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => {
+      requests.push(endpoint);
+      const before = Number(/beforeSequence=(\d+)/.exec(endpoint)?.[1] ?? 1000);
+      const limit = Number(/limit=(\d+)/.exec(endpoint)[1]);
+      // Sequence 900's output is over the limit on its own; pages near it are over it at 60.
+      if (before > 900 && before - limit <= 900) throw new Error("AO response exceeds the handler limit (GET /conversation)");
+      if (before > 850 && before <= 960 && limit === 60) throw new Error("AO response exceeds the handler limit (GET /conversation)");
+      const sequences = [];
+      for (let sequence = before - 1; sequence >= Math.max(1, before - limit); sequence -= 1) sequences.push(sequence);
+      const activities = sequences.map(sequence => sequence < 100 ? { ...tool(sequence), turnId: "earlier" } : tool(sequence));
+      return { turns: [], messages: [], activities, oldestSequence: Math.min(...sequences), hasMoreBefore: Math.min(...sequences) > 1 };
+    },
+  });
+  const items = await upstream.timeline("s", "mine");
+  const ids = items.map(item => item.id);
+  assert.equal(ids.includes("t901"), true, "the items around the oversized one are still read");
+  assert.equal(ids.includes("t899"), true);
+  assert.equal(ids.includes("t900"), false, "the one item over the limit on its own is stepped past");
+  assert.equal(items.length, 400, "a turn longer than the chat keeps is read back to TIMELINE_ITEMS of its newest items");
+  assert.equal(ids.at(-1), "t999");
+  assert.ok(requests.filter(endpoint => endpoint.includes("beforeSequence")).length > 6, "more than six pages back");
+  assert.ok(requests.some(endpoint => /limit=20&beforeSequence/.test(endpoint)), "an oversized page is read again smaller");
+});
+
 for (const method of ["interrupt", "exitAgent", "kill"]) {
   test(method + " cancels pending tool calls before contacting AO without revoking the retained lease", async () => {
     const calls = [];
