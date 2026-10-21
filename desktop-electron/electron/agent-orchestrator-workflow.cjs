@@ -2225,7 +2225,29 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     "select-object", "select", "where-object", "where", "sort-object", "sort", "measure-object", "measure", "select-string", "sls",
     "format-table", "ft", "format-list", "fl", "out-string", "convertfrom-json", "convertto-json", "get-location", "pwd", "resolve-path",
     "split-path", "join-path", "get-filehash", "findstr", "head", "tail", "wc", "rg", "grep", "write-output", "echo", "write-host",
-    "if", "else", "elseif", "-not"]);
+    "if", "else", "elseif", "-not",
+    // Seen live (2026-10-21, 824 of 862 shell requests went to the paid model reviewer): agents start
+    // nearly every command by moving into the project (`cd "<project>"; …`, 353 of them) and wrap reads
+    // in try/catch. Moving inside the workspace changes nothing (the path check below keeps it there).
+    "cd", "chdir", "set-location", "sl", "push-location", "pushd", "pop-location", "popd", "try", "catch", "finally",
+    // What runs on this machine and which ports listen: status reads that change nothing.
+    "get-process", "gps", "ps", "get-nettcpconnection", "netstat", "tasklist", "get-ciminstance", "get-service", "get-psdrive",
+    "get-date", "get-command", "start-sleep", "sleep", "foreach-object", "group-object", "select-xml", "foreach"]);
+  // Methods a read may call on what it read: dates, strings, comparisons. Nothing that deletes,
+  // writes, starts or stops.
+  const SAFE_METHODS = new Set(["addhours", "addminutes", "adddays", "addseconds", "addmilliseconds", "tostring", "trim", "trimstart",
+    "trimend", "split", "substring", "contains", "startswith", "endswith", "tolower", "toupper", "replace", "indexof", "lastindexof",
+    "padleft", "padright", "equals", "gettype", "toshortdatestring", "tolongdatestring", "touniversaltime", "tolocaltime"]);
+  // Web requests a read may make: to a service on this machine only, and sending or writing nothing
+  // (seen live: `try { $r = Invoke-WebRequest -Uri "http://127.0.0.1:7373/api/health" …` health checks).
+  const WEB_READ_VERBS = new Set(["invoke-webrequest", "iwr", "invoke-restmethod", "irm", "curl", "curl.exe"]);
+  function loopbackRead(text) {
+    const urls = String(text).match(/\b[a-z][\w+.-]*:\/\/[^\s"'`;|)]+/gi) ?? [];
+    if (!urls.length || !urls.every((url) => /^https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d{1,5})?(?:\/|$)/i.test(url))) return false;
+    return !/(?:^|\s)-(?:Body|InFile|OutFile|Form|Method\s+(?!Get\b)\S+|X|d|data(?:-\w+)?|F|form|T|upload-file|o|output|O|remote-name|K|config)\b/i.test(text);
+  }
+  // git's read-only subcommands; any other (checkout, reset, commit, push, clean…) still goes to review.
+  const GIT_READS = new Set(["status", "diff", "log", "show", "rev-parse", "ls-files", "blame", "cat-file", "describe", "shortlog", "grep"]);
   // The pipeline's own item and fixed values: no other variable (one could hold anything, and $env:
   // holds the app's keys).
   const INSPECTION_VARIABLE = /^\$(?:_|PSItem|\?|true|false|null)(?:\.[A-Za-z_]\w*)*$/i;
@@ -2241,24 +2263,79 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
   /** Why `command` (run in `cwd`) is read-only inspection inside `folder` "Approve for me" may run, or null. */
   function readOnlyInspection(command, folder, cwd = null) {
-    const text = String(command ?? "").trim();
-    if (!text || !folder || text.length > 800 || /[\n\r`<>]|::|\$\(|@[({]|&|\[|=/.test(text)) return null;
+    // Errors shown with the output (2>&1) or dropped (2>$null) write no file; any other redirect still fails.
+    let text = String(command ?? "").replace(/\s+[12]?>&[12](?=\s|;|\||$)|\s+2>\s*\$null\b/gi, "").trim();
+    // A script on several lines: each line is a statement, comment lines are left out. A here-string
+    // (@" … "@) can hold anything, so it still goes to the reviewer.
+    if (/@["']/.test(text)) return null;
+    text = text.split(/\r?\n/).filter((line) => !/^\s*#/.test(line)).join("; ");
+    // "&&" only chains (cd "<project>" && git diff); a lone "&" (call operator, background) still fails.
+    text = text.replace(/\s*&&\s*/g, "; ");
+    // A catch block's "failed: $($_.Exception.Message)" only reads the pipeline item's properties: that
+    // one form of $( ) is read as the property itself; any other still fails below.
+    text = text.replace(/\$\(\s*(\$(?:_|PSItem)(?:\.[A-Za-z_]\w*)*)\s*\)/gi, "$1");
+    if (!text || !folder || text.length > 1500 || /[`<>]|\$\(|@[({]|&/.test(text)) return null;
     if (cwd && !insideFolder(cwd, folder)) return null;
     // Quoted arguments are set aside (a path, a filter, a pattern); what is left must be plain words.
+    // A double-quoted one expands its variables: only the pipeline's item may appear there too
+    // ("$env:CPA_KEY" in quotes passed before and would have printed the key).
     const quoted = [];
-    const bare = text.replace(/"([^"]*)"|'([^']*)'/g, (_, double, single) => { quoted.push(double ?? single); return " Q "; });
-    if (/["']/.test(bare) || /[\w)\]]\s*\.\s*[A-Za-z_]\w*\s*\(/.test(bare)) return null;
+    let expands = false;
+    const bare = text.replace(/"([^"]*)"|'([^']*)'/g, (_, double, single) => {
+      if (double !== undefined && /\$(?!_\b|PSItem\b)/i.test(double)) expands = true;
+      quoted.push(double ?? single);
+      return " Q ";
+    });
+    // Variables this command sets itself (`$r = Invoke-WebRequest …`, `foreach ($f in …)`): they hold
+    // only what its own reads produced. Never the environment's or PowerShell's own ($env:, $profile…).
+    const locals = new Set([...bare.matchAll(/\$([A-Za-z_]\w*)\s*=(?!=)/g), ...bare.matchAll(/\bforeach\s*\(\s*\$([A-Za-z_]\w*)\s+in\b/gi)]
+      .map((match) => match[1].toLowerCase())
+      .filter((name) => !/^(?:env|global|script|using|args|input|this|home|profile|pshome|executioncontext|host|psitem|_)$/.test(name)));
+    const localVariable = (word) => {
+      const name = /^\$([A-Za-z_]\w*)(?:\.[A-Za-z_]\w*)*$/.exec(word)?.[1];
+      return Boolean(name && locals.has(name.toLowerCase()));
+    };
+    // Outside quotes: no assignment (but to a local), type literal or static .NET call
+    // ([IO.File]::WriteAllText). A long option's value (--porcelain=v1) is no assignment.
+    const unassigned = bare.replace(/\$[A-Za-z_]\w*\s*=(?!=)/g, " ").replace(/(^|\s)--?[\w-]+=/g, "$1");
+    if (expands || /["']/.test(bare) || /::|\[|=/.test(unassigned)) return null;
+    // Methods only from the harmless few ((Get-Date).AddHours(-14), $_.Name.Trim()); .Delete(), .Kill()… fail.
+    for (const call of bare.matchAll(/[\w)\]]\s*\.\s*([A-Za-z_]\w*)\s*\(/g)) if (!SAFE_METHODS.has(call[1].toLowerCase())) return null;
     const words = bare.split(/[\s;|{}()]+/).filter(Boolean);
-    if (words.some((word) => word.includes("$") && !INSPECTION_VARIABLE.test(word))) return null;
+    if (words.some((word) => word.includes("$") && !/^\$[A-Za-z_]\w*=?$/.test(word) && !INSPECTION_VARIABLE.test(word) && !localVariable(word))) return null;
+    if (words.some((word) => /^\$[A-Za-z_]\w*=?$/.test(word) && !INSPECTION_VARIABLE.test(word) && !localVariable(word.replace(/=$/, "")))) return null;
     // `-Path:<value>` would carry a path past the check below.
     if (words.some((word) => /^-[\w-]+:/.test(word))) return null;
     // Each statement starts with a read-only verb, a condition on the pipeline's item, or is a string
-    // it prints (`{ 'missing' }`).
+    // it prints (`{ 'missing' }`). `$local = <statement>` is judged by its statement.
     for (const statement of bare.split(/[;|{}()]/)) {
-      const first = statement.trim().split(/\s+/).filter(Boolean)[0];
-      if (first && first !== "Q" && !READ_VERBS.has(first.toLowerCase()) && !INSPECTION_VARIABLE.test(first)) return null;
+      let tokens = statement.trim().split(/\s+/).filter(Boolean);
+      if (tokens[0] && localVariable(tokens[0].replace(/=$/, "")) && (tokens[0].endsWith("=") || tokens[1] === "=")) {
+        tokens = tokens.slice(tokens[0].endsWith("=") ? 1 : 2);
+      }
+      const [first, second] = tokens;
+      if (first && WEB_READ_VERBS.has(first.toLowerCase())) {
+        // A request to a service on this machine that sends and writes nothing.
+        if (!loopbackRead(text)) return null;
+        continue;
+      }
+      if (first && first.toLowerCase() === "git") {
+        // `git status --porcelain`, `git diff --stat`, `git log -5`: a read-only subcommand only.
+        if (!second || !GIT_READS.has(second.toLowerCase())) return null;
+        continue;
+      }
+      // A fragment that cannot start a command: a member after a parenthesis ((Get-Date).AddHours), a
+      // number or an operator or switch ((-14), -not).
+      if (first && /^(?:\.[A-Za-z_]\w*|[-+]?\d+(?:\.\d+)?|-[A-Za-z]\w*)$/.test(first)) continue;
+      if (first && first !== "Q" && !READ_VERBS.has(first.toLowerCase()) && !INSPECTION_VARIABLE.test(first) && !localVariable(first)) return null;
     }
-    if (![...quoted, ...words.filter((word) => word !== "Q" && !word.startsWith("$"))].every((value) => insideFolder(value, folder))) return null;
+    // Paths stay inside the folder, an option's value (--git-dir=…) and a URL's host aside: a URL is
+    // judged by loopbackRead.
+    // A member name after a parenthesis (.AddHours, .Count) is no path; "..\x" or ".\x" still is.
+    const values = [...quoted, ...words.filter((word) => word !== "Q" && !word.startsWith("$") && !/^\.[A-Za-z_]\w*$/.test(word) && word !== "=")]
+      .map((value) => /^--?[\w-]+=/.test(value) ? value.slice(value.indexOf("=") + 1) : value)
+      .filter((value) => !/^https?:\/\//i.test(value));
+    if (!values.every((value) => insideFolder(value, folder))) return null;
     return "Read-only inspection inside the workspace folder";
   }
   /** Why `command` is a routine project command "Approve for me" may run, or null. */
