@@ -1009,8 +1009,8 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
    the sides, upside down underneath. Clawd is Claude Code's (Clawd.tsx): 9×3 terminal cells of
    8×16 px, its moves the CLI's own frames, so nothing here bobs or squashes it. */
 .cx-pet { position: absolute; top: 0; left: 0; z-index: 2; width: 72px; height: 48px; pointer-events: none; transition: transform .18s ease-out; }
-/* Let go above the box, it drops onto the top edge, speeding up as it falls (ChatPet sets how long). */
-.cx-pet.is-falling { transition: transform .42s cubic-bezier(.55, 0, 1, .45); }
+/* Carried anywhere on the screen (ChatPet places it on the page, and times its fall back onto the box). */
+.cx-pet.is-held .cx-pet-body { cursor: grabbing; }
 .cx-pet-body { position: relative; pointer-events: auto; display: block; width: 72px; height: 48px; padding: 0; border: 0; background: transparent; cursor: grab; touch-action: none; }
 /* Claude Code's working spinner, turning over its head while the agent works. */
 .cx-pet-spinner { position: absolute; top: -18px; left: 50%; transform: translateX(-50%); color: #d77757; font-size: 16px; font-weight: 700; line-height: 1; }
@@ -1036,7 +1036,8 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-pet-float { position: absolute; bottom: 40px; font-size: 13px; animation: cx-pet-rise 1.1s ease-out forwards; }
 /* Home: Clawd shows in its open house; a click there knocks on the house, not on Clawd. */
 .cx-pet.is-home .cx-pet-body { pointer-events: none; }
-/* Clawd's house, standing on the box's top edge near its right end: a doll's house with its front
+/* Clawd's house, standing beside the box's right side (on its top edge near the right end when the
+   window leaves no room there): a doll's house with its front
    open. Its room is drawn behind Clawd and its roof and side walls in front, so Clawd shows inside. */
 .cx-pet-house-spot { position: absolute; z-index: 3; width: 136px; height: 104px; pointer-events: none; }
 .cx-pet-house-spot.is-inside { z-index: 1; }

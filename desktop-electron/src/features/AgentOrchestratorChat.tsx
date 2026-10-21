@@ -20,7 +20,7 @@ import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, chatAcceptsMessage, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
-  activitySummary, groupTimeline, mergeTimeline, tidyTimeline, wakeupLabel, type ChatWakeup,
+  activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, type ChatWakeup,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -301,9 +301,10 @@ function ActivityGroup({ items, live }: { items: ChatLiveItem[]; live: boolean }
 }
 
 /** A role's turn, as Codex and Claude Code show it: thinking, tool calls and streamed messages. */
-function LiveTimeline({ items, live = false }: { items: ChatLiveItem[]; live?: boolean }) {
+function LiveTimeline({ items, live = false, reply }: { items: ChatLiveItem[]; live?: boolean; reply?: string }) {
   const compact = useContext(CompactActivity);
-  const tidy = tidyTimeline(items);
+  // A message the reply below already holds is not shown twice (withoutReplied).
+  const tidy = withoutReplied(tidyTimeline(items), reply);
   if (!compact) return <ol className="cx-live">{tidy.map((item) => <LiveRow key={item.id} item={item} />)}</ol>;
   const segments = groupTimeline(tidy);
   return <ol className="cx-live is-compact">
@@ -370,10 +371,11 @@ function StepRow({ step, runId, loadWork }: { step: ChatStep; runId: string; loa
     {open ? <div className="cx-step-body">
       {step.detail ? <p className="cx-step-detail">{step.detail}</p> : null}
       {step.working && !compact ? <p className="cx-step-detail">{step.working.detail}</p> : null}
-      {work?.length ? <LiveTimeline items={work} live={Boolean(step.working)} /> : null}
-      {/* A held or failed card keeps the reply it gave: the error says why, the reply stays readable. */}
-      {/* Its earlier rounds first, folded (oldest first), then where it stands now. */}
+      {/* Its earlier rounds first, folded (oldest first), then the attempt now: a retried card's
+          failed attempt showed under the new attempt's work, as if it came after it. */}
       <EarlierRounds rounds={step.earlier} />
+      {work?.length ? <LiveTimeline items={work} live={Boolean(step.working)} reply={step.text} /> : null}
+      {/* A held or failed card keeps the reply it gave: the error says why, the reply stays readable. */}
       {step.error ? <p className="cx-step-error">{step.error}</p> : null}
       {step.text ? <ChatMarkdown text={step.text} /> : null}
     </div> : null}
@@ -396,7 +398,7 @@ function AnswerWork({ step, runId, expanded, loadWork }: { step: ChatStep; runId
       {summary.additions || summary.deletions ? <DiffCount additions={summary.additions} deletions={summary.deletions} /> : null}
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
     </button>
-    {open ? work?.length ? <LiveTimeline items={work} /> : <p className="cx-tool-empty">Loading…</p> : null}
+    {open ? work?.length ? <LiveTimeline items={work} reply={step.text} /> : <p className="cx-tool-empty">Loading…</p> : null}
   </div>;
 }
 
@@ -745,9 +747,28 @@ export function AgentOrchestratorChat({
     const timer = window.setInterval(() => setNow(Date.now()), 10_000);
     return () => window.clearInterval(timer);
   }, [anyWorking]);
+  // The message being sent, shown at once as Claude Code shows it: the send (saving the chat,
+  // starting its run, reloading the board) took seconds, and the message sat in the composer
+  // meanwhile as if nothing happened. It shows as the chat's next message until the saved chat has it.
+  const [outgoing, setOutgoing] = useState<{ taskId: string; message: string; stamp: string; sent: boolean; at: number } | null>(null);
+  const savedDescription = descriptions[selectedTaskId] ?? pendingMessage;
+  const shownDescription = useMemo(() => {
+    if (!outgoing || outgoing.taskId !== (selectedTaskId ?? "")) return savedDescription;
+    if (!savedDescription) return outgoing.message;
+    if (savedDescription.endsWith(outgoing.message)) return savedDescription;
+    return `${savedDescription}\n\nFollow-up (${outgoing.stamp} UTC):\n${outgoing.message}`;
+  }, [savedDescription, outgoing, selectedTaskId]);
+  // Once sent, it gives way to the saved chat when that has it (or after a while, if it never reads back).
+  useEffect(() => {
+    if (!outgoing?.sent) return undefined;
+    const saved = descriptions[outgoing.taskId];
+    if (!outgoing.taskId || (saved && saved.endsWith(outgoing.message))) { setOutgoing(null); return undefined; }
+    const timer = window.setTimeout(() => setOutgoing((current) => (current === outgoing ? null : current)), Math.max(0, 20_000 - (Date.now() - outgoing.at)));
+    return () => window.clearTimeout(timer);
+  }, [outgoing, descriptions]);
   const turns: ChatTurn[] = useMemo(
-    () => chatTurns(chatRuns, descriptions[selectedTaskId] ?? pendingMessage, { describe: describeNode, activity, now, modelName }),
-    [chatRuns, descriptions, selectedTaskId, describeNode, activity, now, pendingMessage, modelName],
+    () => chatTurns(chatRuns, shownDescription, { describe: describeNode, activity, now, modelName }),
+    [chatRuns, shownDescription, describeNode, activity, now, modelName],
   );
   // A steer shown at once gives way to the turn's own record of it (its live timeline, or the
   // steers under its message once it is done), or after a minute at most.
@@ -964,12 +985,35 @@ export function AgentOrchestratorChat({
       }
       // A rewound chat's first message takes the earlier messages along ahead of it, as context.
       const first = !selectedTaskId && carried?.length ? [...carried, message].join("\n\n").slice(-8192) : message;
-      if (!steered) await send(selectedTaskId ? { taskId: selectedTaskId, message, ...(goal ? { goal } : {}) }
-        : { title: title.trim() || undefined, message: first, ...(goal ? { goal } : {}) });
+      // Shown at once: the message leaves the composer and appears in the chat while it is sent.
+      const shown = !steered && !goal && fromComposer && here();
+      if (shown) {
+        const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
+        setOutgoing({ taskId: selectedTaskId ?? "", message: selectedTaskId ? message : first, stamp, sent: false, at: Date.now() });
+        if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
+        setAtBottom(true);
+      }
+      if (!steered) {
+        try {
+          await send(selectedTaskId ? { taskId: selectedTaskId, message, ...(goal ? { goal } : {}) }
+            : { title: title.trim() || undefined, message: first, ...(goal ? { goal } : {}) });
+        } catch (error) {
+          // Not sent: it goes back where it was typed, unless something new was typed meanwhile.
+          if (shown) {
+            setOutgoing(null);
+            if (here() && !composing.current.draft) {
+              setDraft(owner.draft); setAttachments(owner.attachments); setAnnotations(owner.annotations);
+            }
+          }
+          throw error;
+        }
+        if (shown) setOutgoing((pending) => pending && { ...pending, sent: true });
+      }
       if (fromComposer && CHAT_DRAFTS.get(owner.taskId) === owner.draft) CHAT_DRAFTS.delete(owner.taskId);
       if (fromComposer && CHAT_ATTACHMENTS.get(owner.taskId) === owner.attachments) CHAT_ATTACHMENTS.delete(owner.taskId);
-      if (current()) {
-        setDraft(""); setTitle(""); setAttachments([]); setAnnotations([]); setAttachNote("");
+      if (current() || (shown && here())) {
+        if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
+        setTitle("");
         if (!selectedTaskId) setCarried(null);
       }
       if (here()) setAtBottom(true);

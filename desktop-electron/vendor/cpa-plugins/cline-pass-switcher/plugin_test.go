@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"testing/iotest"
@@ -66,8 +67,8 @@ func TestDeepSeekEffortCatalogAndTransport(t *testing.T) {
 	if len(listed.Models) != 2 || strings.Join(listed.Models[0].Thinking.Levels, ",") != "none,low,high,max" {
 		t.Fatalf("wrong native efforts: %s", catalog)
 	}
-	if len(listed.Models[1].Thinking.Levels) != 0 {
-		t.Fatal("unknown model inherited generic reasoning tiers")
+	if strings.Join(listed.Models[1].Thinking.Levels, ",") != "minimal,low,medium,high,xhigh,max" {
+		t.Fatalf("another Cline model lists OpenRouter's levels: %s", catalog)
 	}
 	for _, effort := range []string{"none", "low", "high", "max"} {
 		req, _ := json.Marshal(map[string]any{
@@ -93,6 +94,26 @@ func TestDeepSeekEffortCatalogAndTransport(t *testing.T) {
 	_ = json.Unmarshal(reply, &rejected)
 	if rejected.OK || rejected.Error == nil || rejected.Error.HTTPStatus != 400 || calls != before {
 		t.Fatal("unsupported effort was sent upstream")
+	}
+	// Any other Cline model: the suffix becomes the body's effort (refused before, so none could be set).
+	req, _ = json.Marshal(map[string]any{"Model": "cline-pass/unknown(medium)", "Payload": []byte(`{"messages":[{"role":"user","content":"OK"}]}`)})
+	if reply, err = execute(req, false); err != nil {
+		t.Fatal(err)
+	}
+	result(t, reply)
+	if sent["model"] != "cline-pass/unknown" || sent["reasoning_effort"] != "medium" {
+		t.Fatalf("medium sent wrong model/effort: %v", sent)
+	}
+	// "none" is DeepSeek V4.1 Flash's alone: GLM refused it upstream ("Reasoning is mandatory").
+	before = calls
+	req, _ = json.Marshal(map[string]any{"Model": "cline-pass/unknown(none)", "Payload": []byte(`{}`)})
+	if reply, err = execute(req, false); err != nil {
+		t.Fatal(err)
+	}
+	rejected = envelope{}
+	_ = json.Unmarshal(reply, &rejected)
+	if rejected.OK || rejected.Error == nil || rejected.Error.HTTPStatus != 400 || calls != before {
+		t.Fatal("none was sent upstream for a model that may not take it")
 	}
 }
 
@@ -336,7 +357,13 @@ func TestDatedDeepSeekBuildsTakeTheSameEfforts(t *testing.T) {
 			t.Fatalf("%s: %v", model, got)
 		}
 	}
-	for _, model := range []string{"cline-pass/deepseek-v4.1-flash-x", "cline-pass/deepseek-v4-flash", "cline-pass/deepseek-v4.1-flash-1017(high)"} {
+	// Other Cline models take OpenRouter's levels: no "none" (DeepSeek V4.1 Flash's own list has it).
+	for _, model := range []string{"cline-pass/deepseek-v4.1-flash-x", "cline-pass/deepseek-v4-flash", "cline-pass/glm-5.3-flash"} {
+		if got := modelEfforts(model); !slices.Equal(got, openRouterEfforts) {
+			t.Fatalf("%s: %v", model, got)
+		}
+	}
+	for _, model := range []string{"cline-pass/deepseek-v4.1-flash-1017(high)", "glm-5.3-flash", "commandcode-go/glm-5.3-flash"} {
 		if got := modelEfforts(model); got != nil {
 			t.Fatalf("%s should take no effort: %v", model, got)
 		}
