@@ -10,9 +10,9 @@ import { ChatMarkdown } from "./ChatMarkdown";
 const Kbd = ({ children }: { children: ReactNode }) => <kbd className="cdx-kbd">{children}</kbd>;
 
 /** Codex's numbered choices: a box with the number (filled when picked), the label, its description. */
-function CdxOptions({ options, picked, multi, onPick, name }: {
+function CdxOptions({ options, picked, multi, onPick, name, disabled }: {
   options: { value: string; label: string; description?: string }[]; picked: string[]; multi?: boolean;
-  onPick: (value: string) => void; name: string;
+  onPick: (value: string) => void; name: string; disabled?: boolean;
 }) {
   return <div className="cdx-options" role={multi ? "group" : "radiogroup"} aria-label={name}>
     {options.map((option, index) => {
@@ -21,7 +21,7 @@ function CdxOptions({ options, picked, multi, onPick, name }: {
       const recommended = /\s*\(recommended\)\s*$/i.test(option.label);
       const label = option.label.replace(/\s*\(recommended\)\s*$/i, "");
       return <button key={option.value} type="button" className={`cdx-option${selected ? " is-selected" : ""}`}
-        role={multi ? "checkbox" : "radio"} aria-checked={selected} onClick={() => onPick(option.value)}>
+        role={multi ? "checkbox" : "radio"} aria-checked={selected} disabled={disabled} onClick={() => onPick(option.value)}>
         {options.length > 1 ? <span className="cdx-option-mark" aria-hidden="true">{index + 1}</span> : null}
         <span className="cdx-option-label">{label}</span>
         {recommended ? <span className="cdx-badge">Recommended</span> : null}
@@ -178,7 +178,8 @@ const prettyInput = (text: string) => { try { return JSON.stringify(JSON.parse(t
  * A tool request from an AO agent as Codex's approval card asks it: "Terminal" / "Edit files" /
  * "Ask permission", "Allow {agent} to run this command?", the command in a box that expands, the
  * reason (and the reviewer's, when it left it to you), then the answers the agent offered as
- * numbered options: pick one, change it, Submit. Deny (Esc) answers at once.
+ * numbered options. As in Claude Code's permission prompt, clicking one (or pressing its number)
+ * answers at once: no Submit or Deny button. Escape answers Deny.
  */
 function AoAsk({ approval, busy, approve, actor }: {
   approval: AoApproval; busy: boolean; approve: (approval: AoApproval, reply: ApprovalReply) => void; actor: string;
@@ -195,17 +196,19 @@ function AoAsk({ approval, busy, approve, actor }: {
   const offered = (approval.decisions ?? []).length ? approval.decisions!
     : [{ id: "allow", kind: "allow_once", label: "Allow once" }, { id: "deny", kind: "reject_once", label: "Deny" }];
   const options = offered.map((decision) => ({ value: decision.id, label: DECISION_WORDS[decision.kind] ?? decision.label }));
-  const [picked, setPicked] = useState<string | null>(null);
+  // The answer sent, shown picked until the card goes; a second click (or key) sends nothing.
+  const [sent, setSent] = useState<string | null>(null);
   const card = useCardFocus();
   const send = (id: string | null) => {
-    if (busy || !id) return;
+    if (busy || sent || !id) return;
+    setSent(id);
     if (!(approval.decisions ?? []).length) { approve(approval, id === "allow"); return; }
     approve(approval, { decisionId: id });
   };
   const denyId = offered.find((decision) => decision.kind === "reject_once")?.id ?? offered.find((decision) => decision.kind.startsWith("reject"))?.id ?? null;
   const reason = approval.reason && approval.reason !== approval.summary ? approval.reason : approval.summary && approval.summary !== tool ? approval.summary : "";
   return <div ref={card} tabIndex={-1} className="cdx-card" role="alert" aria-label={title}
-    onKeyDown={(event) => cardKeys(event, options.length, (index) => setPicked(options[index].value), () => send(picked), () => send(denyId))}>
+    onKeyDown={(event) => cardKeys(event, options.length, (index) => send(options[index].value), () => undefined, () => send(denyId))}>
     <div className="cdx-body">
       <span className="cdx-kind">{kindLine}</span>
       <span className="cdx-title">{title}</span>
@@ -217,11 +220,7 @@ function AoAsk({ approval, busy, approve, actor }: {
       {approval.recommendation?.reason ? <div className="cdx-row"><span>Reviewer</span><p>{approval.recommendation.reason}</p></div> : null}
       {approval.dependencyNote ? <p className={`cdx-reason ao-dependency-note is-${approval.dependencyNote.tone}`}
         role={approval.dependencyNote.tone === "warn" ? "alert" : "note"}>{approval.dependencyNote.text}</p> : null}
-      <CdxOptions name={title} options={options} picked={picked ? [picked] : []} onPick={setPicked} />
-    </div>
-    <div className="cdx-foot">
-      {denyId ? <button type="button" className="cdx-button is-outline" disabled={busy} onClick={() => send(denyId)}>Deny <Kbd>Esc</Kbd></button> : null}
-      <button type="button" className="cdx-button is-primary" disabled={busy || !picked} onClick={() => send(picked)}>Submit <Kbd>Enter</Kbd></button>
+      <CdxOptions name={title} options={options} picked={sent ? [sent] : []} onPick={send} disabled={busy || Boolean(sent)} />
     </div>
   </div>;
 }
