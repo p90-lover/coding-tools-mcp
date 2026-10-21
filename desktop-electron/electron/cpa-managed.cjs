@@ -203,6 +203,30 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
   fs.mkdirSync(pluginDirectory, { recursive: true, mode: 0o700 });
   fs.mkdirSync(authDirectory, { recursive: true, mode: 0o700 });
   fs.mkdirSync(logDirectory, { recursive: true, mode: 0o700 });
+  let savedSource = "";
+  try { savedSource = fs.readFileSync(path.join(state, "config.yaml"), "utf8"); }
+  catch (error) {
+    if (error.code !== "ENOENT") throw new Error("Saved CPA configuration is unavailable; it was not replaced");
+  }
+  let providerConfiguration = "";
+  if (savedSource.trim()) {
+    const yaml = globalThis.Bun?.YAML ?? require("js-yaml");
+    let saved;
+    try {
+      saved = (yaml.parse ?? yaml.load)(savedSource);
+      if (!saved || typeof saved !== "object" || Array.isArray(saved)) throw new Error();
+      if (saved.oauth && (typeof saved.oauth !== "object" || Array.isArray(saved.oauth))) throw new Error();
+    } catch {
+      throw new Error("Saved CPA configuration is invalid; it was not replaced");
+    }
+    // Keep user-owned provider configuration; listener, management, client keys and proxy stay managed.
+    const keys = ["claude-api-key", "gemini-api-key", "codex-api-key", "vertex-api-key",
+      "kimi-api-key", "xai-api-key", "meta-api-key", "openai-compatibility",
+      "oauth-model-alias", "oauth-excluded-models", "upstream", "oauth", "models"];
+    const retained = Object.fromEntries(keys.filter((key) => Object.hasOwn(saved, key)).map((key) => [key, saved[key]]));
+    if (retained.oauth) retained.oauth = { ...retained.oauth, "auth-dir": authDirectory };
+    providerConfiguration = Object.entries(retained).map(([key, value]) => `${key}: ${JSON.stringify(value)}`).join("\n");
+  }
   const clineAuth = path.join(authDirectory, "cline-pass-switcher.json");
   if (!fs.existsSync(clineAuth)) {
     writePrivateFileAtomic(clineAuth, `${JSON.stringify({ type: "cline", switcher: true, label: "Cline Pass" })}\n`);
@@ -260,6 +284,7 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     "logging-to-file: false",
     "usage-statistics-enabled: true",
     ...cpaLongRunYamlLines(),
+    ...(providerConfiguration ? [providerConfiguration] : []),
     "",
   ].join("\n");
   if (!savedSource.trim()) return generated;
