@@ -400,10 +400,19 @@ type WorkGroupProps = { turn: ChatTurn; idle?: boolean; expanded?: boolean; load
 /** A turn still being worked on: its steps change on every update, so it always re-renders. */
 const liveTurn = (turn: ChatTurn) => turn.status === "running" || turn.status === "queued"
   || turn.steps.some((step) => step.working) || Boolean(turn.final?.working);
-const stepShape = (step: ChatStep) => [step.key, step.name, step.detail, step.state, step.verdict ?? "", step.error ?? "", step.text ?? "", step.hasWork ?? false,
-  (step.earlier ?? []).map((round) => `${round.label}:${round.verdict ?? ""}`).join(",")];
-/** What a finished turn's work shows; equal shapes render the same rows. */
-const workShape = (turn: ChatTurn) => JSON.stringify([turn.runId, turn.status, turn.startedAtMs ?? 0, turn.steps.map(stepShape), turn.final ? stepShape(turn.final) : null]);
+const roundsKey = (step: ChatStep) => (step.earlier ?? []).map((round) => `${round.label}:${round.verdict ?? ""}`).join(",");
+/** Whether two steps show the same: compared field by field, stopping at the first difference. */
+const sameStep = (a: ChatStep, b: ChatStep) => a === b || (a.key === b.key && a.name === b.name && a.detail === b.detail
+  && a.state === b.state && (a.verdict ?? "") === (b.verdict ?? "") && (a.error ?? "") === (b.error ?? "")
+  && (a.text ?? "") === (b.text ?? "") && (a.hasWork ?? false) === (b.hasWork ?? false) && roundsKey(a) === roundsKey(b));
+/**
+ * Whether a finished turn's work shows the same. It was a JSON.stringify of every step's whole text
+ * for both turns, twice a turn on every second's update: work that grew with the length of the chat.
+ */
+const sameTurnWork = (a: ChatTurn, b: ChatTurn) => a.runId === b.runId && a.status === b.status
+  && (a.startedAtMs ?? 0) === (b.startedAtMs ?? 0) && a.steps.length === b.steps.length
+  && a.steps.every((step, index) => sameStep(step, b.steps[index]))
+  && (a.final && b.final ? sameStep(a.final, b.final) : !a.final && !b.final);
 
 /**
  * A finished turn's work is skipped on re-render unless it changed. The chat rebuilds every turn
@@ -414,7 +423,7 @@ export function sameWork(prev: WorkGroupProps, next: WorkGroupProps): boolean {
   if (prev.idle !== next.idle || prev.expanded !== next.expanded || prev.loadWork !== next.loadWork) return false;
   if (prev.turn === next.turn) return true;
   if (liveTurn(prev.turn) || liveTurn(next.turn)) return false;
-  return workShape(prev.turn) === workShape(next.turn);
+  return sameTurnWork(prev.turn, next.turn);
 }
 
 const WorkGroup = memo(WorkGroupView, sameWork);
