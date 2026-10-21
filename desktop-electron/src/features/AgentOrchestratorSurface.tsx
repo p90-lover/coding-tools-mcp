@@ -733,14 +733,24 @@ export function AgentOrchestratorSurface({ language, setError }: {
       const running = mission.nodes.filter((node) => node.state === "running");
       const key = `${workspaceId}:${mission.id}`;
       // A run with work left but nothing running (its next cards never started) is just as orphaned.
+      // Whether it could resume at all; "Retry automatically" is read below, once a run qualifies.
       if (mission.workspace_id !== workspaceId || mission.cancelled || settledRuns.current.has(key)
-        || (!running.length && !restartResume(mission))) continue;
+        || (!running.length && !restartResume(mission, Date.now(), { autoRetry: true }))) continue;
       settledRuns.current.add(key);
+      // A failed step a loop is still holding (it waits out its retry pause) is looked at again on a
+      // later update: if that loop ends without retrying, this is what picks the chat up.
+      const held = !running.length && mission.nodes.some((node) => node.state === "held");
       void (async () => {
         const status = await moduleCall("run_status", { workspaceId, runId: mission.id });
         if (!mounted.current || selection.current.workspaceId !== workspaceId) { settledRuns.current.delete(key); return; }
         // A loop in this app session drives it (or is starting it).
-        if (status.driven !== false || ["starting", "running"].includes(String(status.status))) return;
+        if (status.driven !== false || ["starting", "running"].includes(String(status.status))) {
+          if (held) settledRuns.current.delete(key);
+          return;
+        }
+        // Read only where it decides anything: a single chat with a failed step.
+        const autoRetry = held && mission.execution_mode === "single"
+          ? await moduleCall("chat_auto_retry", {}).then((result) => result.autoRetry === true, () => false) : false;
         let nodes = running;
         let still: AoMission | undefined = mission;
         for (;;) {
@@ -749,7 +759,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
           const after = await moduleCall("runs", { workspaceId, runId: mission.id }).catch(() => null);
           still = (after?.runs as AoMission[] | undefined)?.find((run) => run.id === mission.id);
           // Resumable now: its loop takes over the cards still running and starts the next ones.
-          if (still && !resumedRuns.current.has(key) && restartResume(still)) break;
+          if (still && !resumedRuns.current.has(key) && restartResume(still, Date.now(), { autoRetry })) break;
           nodes = still && !still.cancelled ? still.nodes.filter((node) => node.state === "running" && node.route?.harness_id?.startsWith("ao:")) : [];
           // Done once nothing is left running here, another project is open, or a loop took the run over.
           if (!nodes.length || !mounted.current || selection.current.workspaceId !== workspaceId
@@ -759,9 +769,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
         // Left for another project with the card still running: watch it again when it is back.
         if (nodes.length && (!mounted.current || selection.current.workspaceId !== workspaceId)) settledRuns.current.delete(key);
         // A chat the app restart interrupted picks up where it was, the way "Retry failed step"
-        // does, and one with work left continues; teams too. A new background grant still asks in
+        // does, and one with work left continues; teams too. With "Retry automatically" on, so does a
+        // single chat's failed step that nothing retried. A new background grant still asks in
         // this window.
-        const resume = still && !resumedRuns.current.has(key) ? restartResume(still) : null;
+        const resume = still && !resumedRuns.current.has(key) ? restartResume(still, Date.now(), { autoRetry }) : null;
         if (mounted.current && selection.current.workspaceId === workspaceId && resume) {
           resumedRuns.current.add(key);
           if (resume === "retry") await moduleCall("control_run", { workspaceId, runId: mission.id, action: "retry", ...executableArg() });

@@ -1261,7 +1261,7 @@ test("starting a mission whose card is held retries that card first", async () =
   await assert.rejects(workflow.call("control_run", { workspaceId: "ws-1", runId: "r1", action: "rewind" }), /Choose a mission control/);
 });
 
-function heldMissionWorld({ history = [], error = "ChatGPT did not confirm that the prompt was sent", executionMode = undefined } = {}) {
+function heldMissionWorld({ history = [], error = "ChatGPT did not confirm that the prompt was sent", executionMode = undefined, grant = undefined } = {}) {
   const world = { reads: 0, controls: [], controlBodies: [], grants: 0, held: false };
   world.requestHeadless = async (endpoint, body) => {
     if (endpoint === "/api/v1/ao/read") {
@@ -1269,7 +1269,7 @@ function heldMissionWorld({ history = [], error = "ChatGPT did not confirm that 
       // The first start sees a pending card; the loop then finds it held until a retry re-queues it.
       if (world.reads === 2 && !world.controls.length) world.held = true;
       return { ok: true, team: null, worker_capacity: { r1: 1 }, runs: [{ id: "r1", workspace_id: "ws-1", project_id: "task-1", revision: 2, cancelled: false,
-        ...(executionMode ? { execution_mode: executionMode } : {}),
+        ...(executionMode ? { execution_mode: executionMode } : {}), ...(grant ? { grant } : {}),
         nodes: [{ id: "lead", role: "planner", state: world.held ? "held" : "pending", route: { model: "chatgpt-web/high", provider_id: "chatgpt-web" },
           history, receipt: world.held ? { error } : null }] }] };
     }
@@ -1357,6 +1357,30 @@ test("with Retry automatically on, a step that lost the local proxy waits and is
   assert.deepEqual(world.controls, ["retry"]);
   assert.equal(world.controlBodies[0].node_id ?? world.controlBodies[0].nodeId, "lead", "a team retries only the failed card");
   assert.equal(asked, 0);
+});
+
+test("with Retry automatically on, a single chat whose failed launch spent its one turn is retried on a fresh grant", async () => {
+  // Seen live: "Launch failed: The operation was aborted due to timeout" on a single chat held for
+  // hours with the switch on. The launch had used the grant's one turn, and the retry relaunched on
+  // that spent grant, which headless refuses.
+  const spent = { executable_sha256: "a".repeat(64), max_turns: 1, turns_started: 1, granted_at_ms: Date.now(), expires_at_ms: Date.now() + 3_600_000 };
+  const world = heldMissionWorld({ error: "Launch failed: The operation was aborted due to timeout", executionMode: "single", grant: spent });
+  let offset = 0;
+  const states = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/Codex/codex.exe",
+    fetchImpl: async () => { throw new Error("the helper must not be asked"); },
+    webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
+    onRunState: (update) => states.push(String(update?.detail ?? "")),
+    now: () => Date.now() + offset,
+    resolveHarness: async () => ({ expected_sha256: "a".repeat(64), executable: path.resolve("codex.exe") }) });
+  await workflow.call("chat_auto_retry", { enabled: true });
+  await workflow.call("start_run", { workspaceId: "ws-1", runId: "r1" });
+  await until(() => states.some(detail => /Retrying automatically in/.test(detail)));
+  assert.equal(world.grants, 1);
+  offset = 11_000;
+  await until(() => world.grants >= 2);
+  assert.deepEqual(world.controls, ["retry"]);
+  assert.equal(world.grants, 2, "the retry asked for a fresh grant instead of relaunching on the spent one");
 });
 
 test("a lost connection is retried even on a card with many finished rounds, but never a sign-in failure", async () => {
