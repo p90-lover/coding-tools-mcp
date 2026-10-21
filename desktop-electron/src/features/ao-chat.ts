@@ -863,7 +863,10 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
     const live = options.activity?.[key];
     const working = chatWorkingDetail(node, live, now);
     const timeline = liveTimeline(key, live);
-    step.working = { ...working, ...(live?.activity ? { activity: textOf(live.activity) } : {}),
+    // A request nobody has answered yet holds the card: it said "working" or its last tool meanwhile.
+    const newest = timeline.at(-1);
+    const asking = newest?.kind === "approval" && /pending|waiting/i.test(newest.status);
+    step.working = { ...working, ...(asking ? { activity: "waiting for approval" } : live?.activity ? { activity: textOf(live.activity) } : {}),
       ...(timeline.length ? { timeline } : {}) };
     // A retried card's new attempt starts empty; until it writes, its earlier reply stays readable.
     const earlier = copiesEarlier ? latestHistoryAnswer(node) : undefined;
@@ -1016,6 +1019,12 @@ export function dshItemDetail(item: ChatLiveItem): string {
  */
 export function dshLiveTitle(items: ChatLiveItem[]): { activity: DshActivity | "thinking"; label: string } {
   const running = [...items].reverse().find((item) => DSH_WORK.has(item.kind) && !/complet|done|success|fail|error|reject|denied|cancel/i.test(item.status));
+  // A request nobody has answered holds the turn: say so, not "Running" or "Analyzing" (a DeepSeek
+  // chat waited 85 minutes on one while its title said it was still working).
+  if (items.at(-1)?.kind === "approval" && /pending|waiting/i.test(items.at(-1)!.status)) {
+    const detail = running ? dshItemDetail(running) : "";
+    return { activity: "questions", label: detail ? `Waiting for approval · ${detail}` : "Waiting for approval" };
+  }
   if (running) {
     const activity = dshActivity(running);
     const detail = dshItemDetail(running);

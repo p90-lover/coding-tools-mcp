@@ -422,6 +422,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // by their name and ended.
   const WARM_NAME = "Coding Tools · ready";
   const WARM_TTL_MS = 15 * 60_000;
+  // How long a warm start may run before a launch stops waiting for it (takeWarm): one alone on a
+  // busy machine was ready in 20 s.
+  const WARM_START_BUDGET_MS = 45_000;
   // Opening chats warms agents too; keep only the newest few so browsing does not pile them up.
   const WARM_MAX = 2;
   const warm = new Map(); // key -> { promise, session?, timer }
@@ -567,12 +570,24 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       warmLog("miss", { model: route?.model ?? null, waiting: warm.size, differs: near ?? null });
       return null;
     }
-    // Still starting: waiting for it held the launch for up to AO's whole start timeout, and the
-    // launch's own start would queue behind it in AO anyway. The launch starts its own session;
-    // this one stays for the next new chat on the route, ended by WARM_TTL_MS or eviction.
+    // Still starting: the launch waits for it, up to WARM_START_BUDGET_MS from when it began. A
+    // launch that started its own beside it ran two cold starts at once on a busy machine: each
+    // took over a minute (62 s and 68 s, seen live) where one alone took 20 s, so the message
+    // waited a minute for an agent that was 15 s from ready. One older than the budget is stuck:
+    // the launch starts its own as before, and this one stays for the next new chat.
     if (!entry.session) {
-      warmLog("not_ready", { model: entry.route.model, ageMs: now() - entry.started });
-      return null;
+      const left = WARM_START_BUDGET_MS - (now() - entry.started);
+      let timer = null;
+      const ready = left > 0 && await Promise.race([
+        entry.promise.then(() => true, () => false),
+        new Promise(resolve => { timer = setTimer(() => resolve(false), left); }),
+      ]);
+      if (timer) clearTimer(timer);
+      if (!ready || warm.get(key) !== entry) {
+        warmLog("not_ready", { model: entry.route.model, ageMs: now() - entry.started });
+        return null;
+      }
+      warmLog("waited", { model: entry.route.model, ageMs: now() - entry.started });
     }
     warm.delete(key);
     clearTimeout(entry.timer);
@@ -2504,7 +2519,22 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // after 20 s or at once, ran or refused commands nobody had judged.
     const advice = approverAdvice.get(approval.approval_id);
     // Not reviewed yet: the reviewer answers it within its budget, or passes it to the person then.
-    return Boolean(advice) && advice.action === "ask";
+    // A review that never came (no run loop to start it, a review pass that hung) hid the request as
+    // "being reviewed" with nothing to answer it: a DeepSeek chat sat 85 minutes on one PowerShell
+    // request. Past REVIEW_DEADLINE_MS it is the person's, still never answered for them.
+    return advice ? advice.action === "ask" : reviewOverdue(approval);
+  }
+  /** Longer than every review try with its retry wait, plus the decide pass: an unreviewed request past it is stuck. */
+  const REVIEW_DEADLINE_MS = REVIEW_TRIES * (REVIEW_BUDGET_MS + REVIEW_RETRY_MS) + REVIEW_BUDGET_MS + 15_000;
+  /** A review pass still running after this has hung; the next one starts beside it. */
+  const SCREEN_PASS_STALE_MS = REVIEW_DEADLINE_MS;
+  const reviewStarted = new Map(); // approval_id -> when its latest review try began
+  /** Counted from the later of the request and its latest review try, so a review under way is never overdue. */
+  function reviewOverdue(approval) {
+    const since = Date.parse(approval?.since ?? "");
+    const opened = Math.min(Number.isFinite(since) ? since : Infinity, pendingSeen.get(approval?.approval_id) ?? Infinity);
+    const from = Math.max(opened, reviewStarted.get(approval?.approval_id) ?? -Infinity);
+    return Number.isFinite(from) && now() - from > REVIEW_DEADLINE_MS;
   }
   async function screenApprovals(workspaceId, runId, mission, active, observed) {
     let note = null;
@@ -2522,6 +2552,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (!screened || !approval.approval_id || approverAdvice.has(approval.approval_id)) continue;
         const failed = reviewFailures.get(approval.approval_id);
         if (failed && now() - failed.at < REVIEW_RETRY_MS) continue;
+        reviewStarted.set(approval.approval_id, now());
+        if (reviewStarted.size > 500) reviewStarted.delete(reviewStarted.keys().next().value);
         const request = describeRequest(approval);
         // The command advisor must not decide from a truncated command or permission scope.
         const blocked = hardDenied(request) || hardDenied(approval.command) || hardDenied(approval.toolInput);
@@ -3053,12 +3085,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         else if (waiting.length) state.detail = "The reviewer is checking the agent's request";
         // Reviewing runs beside the loop, one pass at a time: the loop kept reporting and launching
         // while a slow reviewer took up to minutes, and the chat showed nothing meanwhile.
-        if (waiting.length && !state.screening) {
-          state.screening = true;
+        // A pass that hangs (a model list or a send that never returns) no longer blocks every review
+        // after it: past SCREEN_PASS_STALE_MS the next pass starts, and the hung one's end is ignored.
+        if (waiting.length && (!state.screening || now() - state.screening.at > SCREEN_PASS_STALE_MS)) {
+          const pass = { at: now() };
+          state.screening = pass;
           void screenApprovals(workspaceId, runId, mission, waiting.map(mark => mark.node), waiting.map(mark => ({ pending_approvals: mark.pending })))
-            .then(note => { if (note) state.detail = note; },
-              error => { state.detail = "Command approver unavailable: " + publicText(error?.message || error, 200); })
-            .finally(() => { state.screening = false; });
+            .then(note => { if (note && state.screening === pass) state.detail = note; },
+              error => { if (state.screening === pass) state.detail = "Command approver unavailable: " + publicText(error?.message || error, 200); })
+            .finally(() => { if (state.screening === pass) state.screening = null; });
         }
         if (waiting.length && !state.autoAnswering) {
           state.autoAnswering = true;

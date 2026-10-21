@@ -2274,6 +2274,31 @@ test("a request the reviewer answers is marked as being reviewed, not shown to t
   assert.equal((await status()).some((item) => item.awaiting_review), false);
 });
 
+test("a request no review ever reached goes to the person after the review deadline", async () => {
+  // Seen live: a DeepSeek chat sat 85 minutes on a PowerShell request marked "being reviewed" while
+  // no review ran; hidden from the person and never answered, the chat looked like it was thinking.
+  let clock = Date.parse("2026-10-21T12:27:56Z");
+  const pending = [{ approval_id: "cmd", kind: "command", command: "Invoke-RestMethod http://127.0.0.1:7411/api/action", since: "2026-10-21T12:27:56Z" }];
+  const saved = { id: "run", workspace_id: "ws", cancelled: false, nodes: [
+    { id: "approver", role: "approver", state: "finished", receipt: { verdict: "APPROVED" }, settings: { auto_decide: true } },
+    { id: "worker", role: "worker", state: "running", route: { harness_id: "codex-native", model: "chatgpt-web/high" } }] };
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    requestHeadless: async (endpoint) => {
+      if (endpoint.endsWith("/harness/status")) return { ok: true, status: { connected: true, pending_approvals: structuredClone(pending) } };
+      if (endpoint.endsWith("/ao/read")) return { ok: true, runs: [structuredClone(saved)] };
+      return { ok: true };
+    },
+  });
+  const shown = async () => (await workflow.call("harness_status", { workspaceId: "ws", runId: "run", nodeId: "worker" })).status.pending_approvals[0];
+  clock += 60_000;
+  assert.equal((await shown()).awaiting_review, true, "a minute in, the reviewer may still answer it");
+  clock += 85 * 60_000;
+  const late = await shown();
+  assert.equal(late.awaiting_review, undefined, "past the deadline the person sees it");
+  assert.equal(late.recommendation, undefined, "and nothing answered it for them");
+});
+
 test("AO typed approval cancelled in the local confirmation never forwards", async () => {
   let sent = 0;
   const workflow = createAgentOrchestratorWorkflow({
@@ -4568,16 +4593,63 @@ test("a project has one warm start in flight at a time; the latest model picked 
   starts[1](); starts[2]();
 });
 
-test("a send does not wait for its model's warm session that is still starting, and no warm start begins beside a launch", async () => {
+test("a send waits for its model's warm session that is still starting instead of starting a second agent beside it", async () => {
+  // Seen live: the warm start was 5 s old when the message was sent; the launch started its own
+  // beside it and both took over a minute on a busy machine, where one alone took 20 s.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  const { request } = launchWorld(route);
+  const spawned = [], sent = [], logs = [];
+  let finishWarm = null;
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: request, findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    logger: { info: (event, fields) => logs.push([event, fields]) },
+    aoHarness: {
+      spawn: input => {
+        spawned.push(input);
+        return input.warm ? new Promise(resolve => { finishWarm = () => resolve("warm-1"); }) : Promise.resolve("fresh-1");
+      },
+      continuable: async () => true,
+      send: async (id, text, key) => { sent.push([id, text, key]); return { turnId: "turn-1", state: "running" }; },
+      observe: async (id, expected) => ({ status: "idle", turnId: expected, turnState: "completed", answer: "fixed" }),
+      warmSessions: async () => [],
+      kill: async () => ({ ok: true }),
+    },
+  });
+  await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route });
+  await until(() => spawned.length === 1);
+  await workflow.call("chat_send", { workspaceId: "ws-1", message: "fix the login", executionMode: "single", singleRoute: route });
+  await tick();
+  assert.equal(spawned.length, 1, "no second agent starts beside the warm one");
+  // While the launch waits, picking another model starts nothing in this project either.
+  assert.equal((await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: { ...route, model: "cpa/other-model" } })).warmed, false);
+  finishWarm();
+  await until(() => sent.length === 1);
+  assert.equal(sent[0][0], "warm-1", "the message is the warm session's first turn");
+  assert.equal(sent[0][1], "fix the login");
+  assert.equal(spawned.length, 1);
+  assert.ok(logs.some(([event, fields]) => event === "ao.warm" && fields.event === "waited"), "the wait is logged");
+  await until(() => logs.some(([event]) => event === "ao.launch_timing"));
+  assert.equal(logs.find(([event]) => event === "ao.launch_timing")[1].via, "warm");
+  workflow.dispose();
+});
+
+test("a send stops waiting for a warm start past its budget and starts its own; no warm start begins beside a launch", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
   const { request } = launchWorld(route);
   const spawned = [], sent = [], logs = [];
   let finishWarm = null, finishLaunch = null;
+  const timers = [];
   const workflow = createAgentOrchestratorWorkflow({
     requestHeadless: request, findCodexExecutable: () => process.execPath,
     resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
     logger: { info: (event, fields) => logs.push([event, fields]) },
+    // Timers run only when the test fires them: the warm start's budget runs out on cue.
+    setTimer: (callback, delay) => { const timer = { callback, delay, cleared: false }; timers.push(timer); return timer; },
+    clearTimer: timer => { if (timer) timer.cleared = true; },
+    releaseIdleAgents: false,
     aoHarness: {
       spawn: input => {
         spawned.push(input);
@@ -4594,10 +4666,14 @@ test("a send does not wait for its model's warm session that is still starting, 
   await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route });
   await until(() => spawned.length === 1);
   assert.equal(spawned[0].warm, true);
-  // The warm session is still starting when the message is sent: the launch starts its own at once.
+  // The warm session is still starting when the message is sent, and stays stuck: once its budget
+  // runs out the launch starts its own.
   await workflow.call("chat_send", { workspaceId: "ws-1", message: "fix the login", executionMode: "single", singleRoute: route });
+  await until(() => timers.some(timer => !timer.cleared && timer.delay > 40_000 && timer.delay <= 45_000));
+  assert.equal(spawned.length, 1, "the launch waits for the warm start first");
+  timers.find(timer => !timer.cleared && timer.delay > 40_000 && timer.delay <= 45_000).callback();
   await until(() => spawned.length === 2);
-  assert.equal(spawned.length, 2, "the launch did not wait for the warm start");
+  assert.equal(spawned.length, 2, "past the budget the launch starts its own");
   assert.equal(spawned[1].warm, undefined);
   assert.equal(spawned[1].prompt, "fix the login");
   assert.deepEqual(sent, [], "the unready warm session never takes the message");

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "commandcode-go",
-  "version": "1.0.0-codingtools.1",
+  "version": "1.0.0-codingtools.2",
   "source": {
     "repository": "https://github.com/sperictao/cpa-plugin-commandcode-go",
     "commit": "444ee977daaa96e6fa6ef5155b14cac3a6f9cdc3",
@@ -14,18 +14,19 @@
   "changes": [
     "CPA auth-provider browser login and auth-file support",
     "CPA-selected credential per request",
-    "native CPA provider routing instead of authless model-router"
+    "native CPA provider routing instead of authless model-router",
+    "A tool call a model writes as text (Qwen XML <tool_call><function=…><parameter=…>, or JSON in <tool_call>) to a tool the request offered becomes a real tool_calls entry, streamed or whole (the Cline Pass plugin's texttools.go)"
   ],
   "build": {
-    "go": "1.26.8",
+    "go": "1.27.1",
     "cCompiler": "Zig 0.16.0",
     "mode": "c-shared"
   },
   "platforms": {
     "win32/x64": {
-      "path": "windows/amd64/commandcode-go-v1.0.0-codingtools.1.dll",
-      "sha256": "ffb690666d979bbeb529ce076291b808aac39b9091ef62f28b5c8e37285cb70c",
-      "size": 12664320
+      "path": "windows/amd64/commandcode-go-v1.0.0-codingtools.2.dll",
+      "sha256": "2ac5bea88dd6c027058e5eb068dd161843edd5e9d440116f7214c514ea468edb",
+      "size": 7690752
     }
   },
   "studio": {
@@ -107,7 +108,7 @@
   "cline": {
     "id": "cline-pass-switcher",
     "provider": "cline",
-    "version": "0.1.0-codingtools.4",
+    "version": "0.1.0-codingtools.5",
     "source": {
       "repository": "https://github.com/munmunjaklin458-afk/cline-pass-switcher",
       "commit": "02538a3137a08948a94f26f17dd4aeff8c029ed1",
@@ -122,7 +123,8 @@
       "Normalize embedded Windows JavaScript line endings before managed runtime patches",
       "DeepSeek V4.1 Flash's dated builds (deepseek-v4.1-flash-1017) take the same none/low/high/max efforts",
       "Streams are SSE-framed for cross-format requests (Claude /v1/messages, Responses) and raw for OpenAI Chat, by CPA's request_path; multiline JSON chunks are compacted (from #352)",
-      "Every other Cline Pass model takes OpenRouter's minimal/low/medium/high/xhigh/max efforts (suffix to body); none and ultra stay refused"
+      "Every other Cline Pass model takes OpenRouter's minimal/low/medium/high/xhigh/max efforts (suffix to body); none and ultra stay refused",
+      "A tool call a model writes as text (Qwen XML <tool_call><function=…><parameter=…>, or JSON in <tool_call>) to a tool the request offered becomes a real tool_calls entry, streamed or whole, so Claude Code runs it"
     ],
     "build": {
       "go": "1.27.1",
@@ -131,9 +133,9 @@
     },
     "platforms": {
       "win32/x64": {
-        "path": "windows/amd64/cline-pass-switcher-v0.1.0-codingtools.4.dll",
-        "sha256": "beaba93be151104aa4137ac28712f7f4f0dc3fa613e21e4784cb6770d0714369",
-        "size": 7817216
+        "path": "windows/amd64/cline-pass-switcher-v0.1.0-codingtools.5.dll",
+        "sha256": "2825b3dd0f6993133578c9d7e468bf0202ed84ca548609350259cb57a49edd06",
+        "size": 7847936
       }
     }
   }

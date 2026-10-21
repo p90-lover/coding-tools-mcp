@@ -73,6 +73,17 @@ test("a DeepSeek turn renders as DeepSeek Harness's: flat rows and Deep diving w
   assert.doesNotMatch(earlier, /dsh-group/, "and stays folded until opened");
 });
 
+test("a retried single DeepSeek card shows its earlier attempt above the attempt now", () => {
+  const timeline = [{ id: "c1", kind: "command", status: "running", text: "npm test", description: "Run the tests" }];
+  const step = { key: "s", nodeId: "n", role: "planner", name: "MiMo V2.6 Pro", detail: "", state: "running", startedAtMs: Date.now() - 5_000,
+    working: { detail: "", stalled: false, timeline }, earlier: [{ label: "Attempt 1", verdict: "failed", text: "The agent's process ended." }] };
+  const turn = { key: "retried", runId: "run", steps: [step], status: "running", solo: false, startedAtMs: Date.now() - 5_000 };
+  const html = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn, live: true, expanded: false, useWork: (item) => item.working?.timeline ?? null }));
+  const attempt = html.indexOf("Attempt 1"), work = html.indexOf("Run the tests");
+  assert.ok(attempt >= 0, "the earlier attempt is shown");
+  assert.ok(work > attempt, "and comes before the new attempt's work");
+});
+
 test("every new card starts with instructions and an expected output for its role", () => {
   const team = roles.defaultTeam("workspace", roles.workerRoute(roles.DEFAULT_WORKER_HARNESS, roles.DEFAULT_WORKER_MODEL));
   for (const node of team.nodes) {
