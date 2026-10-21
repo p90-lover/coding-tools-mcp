@@ -1302,6 +1302,35 @@ test("a held card is handed to the recovery helper, which retries it and restart
   assert.match(asked[0], /did not confirm that the prompt was sent/);
 });
 
+test("a run's loop that loses a local connection picks the run up again instead of leaving it undriven", async () => {
+  // Seen live: another program held every loopback port in TIME_WAIT, a read failed with
+  // "connect EADDRINUSE", the loop ended and the chat said "running" for an hour with nothing watching.
+  const world = heldMissionWorld();
+  let calls = 0;
+  const requestHeadless = async (endpoint, body) => {
+    if (endpoint === "/api/v1/ao/read" && ++calls === 2) throw Object.assign(new Error("connect EADDRINUSE 127.0.0.1:64174"), { code: "EADDRINUSE" });
+    return world.requestHeadless(endpoint, body);
+  };
+  const states = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless, findCodexExecutable: () => "C:/Codex/codex.exe",
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/v1/models")) return { ok: true, json: async () => ({ data: [{ id: "gpt-6-luna" }] }) };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"retry","reason":"The send timed out"}' } }] }) };
+    },
+    webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
+    onRunState: (update) => states.push(String(update?.detail ?? "")),
+    resolveHarness: async () => ({ expected_sha256: "a".repeat(64), executable: path.resolve("codex.exe") }) });
+  const waitFor = async (check, ms) => { for (const end = Date.now() + ms; !check() && Date.now() < end;) await new Promise((resolve) => setTimeout(resolve, 20)); };
+  await workflow.call("start_run", { workspaceId: "ws-1", runId: "r1" });
+  await waitFor(() => states.some((detail) => /Lost a local connection/.test(detail)), 2_000);
+  assert.ok(states.some((detail) => /Lost a local connection \(EADDRINUSE\); checking the run again in 2s/.test(detail)), states.join(" | "));
+  assert.equal((await workflow.call("run_status", { workspaceId: "ws-1", runId: "r1" })).status, "running", "not left for a click meanwhile");
+  await waitFor(() => world.grants >= 2, 8_000);
+  assert.deepEqual(world.controls, ["retry"], "the loop came back and recovered the run as usual");
+  assert.equal(world.grants, 2);
+});
+
 test("a card interrupted by an app restart is retried directly, without asking the helper", async () => {
   const world = heldMissionWorld({ error: "The agent's process ended before it finished (the app restarted); retry this card." });
   let asked = 0;
