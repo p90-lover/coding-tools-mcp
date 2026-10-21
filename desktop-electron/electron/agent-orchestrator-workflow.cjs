@@ -3626,6 +3626,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const observeCard = () => Promise.resolve().then(() => harnessService().observe?.(card.receipt.thread_id, expectedTurns.get(card.receipt.thread_id)))
       .catch(() => null);
     let waiting = await observeCard();
+    // A card that could not be read may be waiting on a request: steering it then wedged AO's chat
+    // (seen 2026-10-21: a steer into a turn waiting on an approval held the session's dispatch lock,
+    // and every later steer, approval answer and stop hung for 180 s). The message waits instead.
+    if (waiting === null) {
+      return { ok: true, steered: false, waiting: true, reason: "The agent's state could not be read; your message is steered in once it can be" };
+    }
     const asking = (state) => Boolean(state?.approvals?.length || state?.needsInput);
     // A steer never stops what the agent is doing (the user: "it shouldnt stop the model action,
     // wait it done to steer"). Declining the waiting request made the agent's tool call fail with
