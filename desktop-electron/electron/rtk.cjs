@@ -109,7 +109,8 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
         resolve(result);
       };
       try {
-        child = spawn(file, args, { windowsHide: true, env: childEnv });
+        // stderr unread would fill its pipe and stall rtk until the timeout killed it.
+        child = spawn(file, args, { windowsHide: true, env: childEnv, stdio: ["ignore", "pipe", "ignore"] });
       } catch (error) {
         finish({ error });
         return;
@@ -161,6 +162,8 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
     // That channel relaxes rtk's approval gate; only a delegate that sets it itself may rely on it.
     delete childEnv.RTK_REWRITE_HOST;
     const out = await runAsync(tool.path, ["rewrite", command], { encoding: "utf8", timeout: REWRITE_TIMEOUT_MS, windowsHide: true, env: childEnv });
+    // RTK turned off while rtk ran: the command runs as written.
+    if (!enabled()) return null;
     if (out?.error || (out?.status !== 0 && out?.status !== 3)) return null;
     const next = String(out.stdout ?? "").trim();
     if (!next || next === command.trim() || next.includes("\n")) return null;

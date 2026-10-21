@@ -62,6 +62,20 @@ test("turned off, nothing is rewritten and Claude Code gets no hook", async () =
   assert.ok(!calls.some((call) => call[1] === "rewrite"), "rtk is not even asked");
 });
 
+test("turned off while rtk is rewriting, the command runs as written", async () => {
+  // Codex review: the app answers other work while rtk runs now, so the switch can change meanwhile.
+  let enabled = true;
+  const RTK_LINK = "C:\\Users\\me\\AppData\\Local\\Microsoft\\WinGet\\Links\\rtk.exe";
+  const rtk = createRtk({ getEnabled: () => enabled, platform: "win32", now: () => 0, exists: (file) => file === RTK_LINK,
+    env: { PATH: "", LOCALAPPDATA: "C:\\Users\\me\\AppData\\Local" },
+    run: (_file, args) => {
+      if (args[0] === "--version") return { status: 0, stdout: "rtk 0.50.0\n" };
+      enabled = false; // the person turns RTK off while this rewrite is running
+      return { status: 0, stdout: "rtk git status" };
+    } });
+  assert.equal(await rtk.rewrite("git status"), null);
+});
+
 test("on, Claude Code's hook and the agents' PATH point at the installed rtk", () => {
   const { rtk } = world();
   assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: `"${RTK}" hook claude` });
