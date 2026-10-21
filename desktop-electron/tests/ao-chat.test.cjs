@@ -1282,7 +1282,71 @@ test("a reviewer reset to pending by its own rework still shows its last review"
   assert.ok(step, "the pending reviewer is not dropped from the turn");
   assert.equal(step.text, `Last review:\n\n${verdict}`, "its newest verdict, labelled as a review");
   const worker = node("w", "worker", "held", { history: [{ answer: "first try" }] });
-  assert.equal(chat.chatTurns([run("run2", "t1", [worker])], "x", { now: 0 })[0].steps[0].text, "Earlier attempt:\n\nfirst try");
+  const held = plain(chat.chatTurns([run("run2", "t1", [worker])], "x", { now: 0 })[0].steps[0]);
+  assert.equal(held.text, undefined, "a team worker's earlier report is not copied up");
+  assert.deepEqual(held.earlier, [{ label: "Attempt 1", text: "first try" }], "it stays folded under its attempt");
+});
+
+test("a failed team worker opens on its error with every attempt folded, not on a whole earlier report", () => {
+  // Seen live (clash of clan macro, 2026-10-21): a worker failed on its seventh try (the proxy
+  // refused), opened by itself, and showed attempt 6's whole report under "Earlier attempt:", left
+  // out of the attempts list, so it read as a message from nowhere.
+  const worker = node("w", "worker", "failed", {
+    receipt: { error: "API Error: 500 proxyconnect tcp: dial tcp 127.0.0.1:17891: connection refused" },
+    history: [{ error: "500" }, { error: "500" }, { error: "500" },
+      { answer: "Report 4", error: "500" }, { answer: "Report 5", error: "500" }, { answer: "Report 6", error: "500" }],
+  });
+  const [turn] = plain(chat.chatTurns([run("r1", "t", [node("p", "planner", "finished", { receipt: { answer: "plan" } }), worker],
+    { execution_mode: "team" })], "go", { now: 0 }));
+  const step = turn.steps.find((item) => item.role === "worker");
+  assert.equal(step.text, undefined);
+  assert.match(step.error, /17891/);
+  assert.deepEqual(step.earlier.map((round) => `${round.label}:${round.verdict}`),
+    ["Attempt 1:failed", "Attempt 2:failed", "Attempt 3:failed", "Attempt 4:failed", "Attempt 5:failed", "Attempt 6:failed"]);
+  assert.equal(step.earlier[5].text, "Report 6", "the newest report is the last attempt, folded");
+  const running = node("w", "worker", "running", { receipt: { started_at_ms: 1 }, history: [{ answer: "Report 1" }] });
+  const live = plain(chat.chatTurns([run("r1", "t", [running], { execution_mode: "team" })], "go", { now: 2 })[0].steps[0]);
+  assert.equal(live.text, undefined, "a retrying worker shows its new attempt, the old report folded");
+  assert.deepEqual(live.earlier, [{ label: "Attempt 1", text: "Report 1" }]);
+});
+
+test("Claude Code's auto-mode billing notice is left out of replies, folded attempts and live messages", () => {
+  const notice = "**Warning:** We're changing auto mode to no longer charge for classifier requests in Claude Code. However, this session isn't eligible because your requests go through 127.0.0.1:8317, which isn't compatible with this update. Nothing breaks: auto mode keeps working, and its classifier requests are billed as before. To fix it and access the new version of auto mode, ask your gateway to implement: https://code.claude.com/docs/en/auto-mode-classifier-billing";
+  assert.equal(chat.withoutHarnessNotices(`${notice}\n\nWorker Report: Part 1`), "Worker Report: Part 1");
+  assert.equal(chat.withoutHarnessNotices(`Plan below.\n\n${notice}\n\nDone.`), "Plan below.\n\nDone.");
+  assert.equal(chat.withoutHarnessNotices(notice.replace(/\*\*/g, "")), "", "the plain form too");
+  const untouched = "Warning: the tests are slow.\n\nDone.";
+  assert.equal(chat.withoutHarnessNotices(untouched), untouched, "the agent's own warnings stay");
+  const planner = node("p", "planner", "finished", { receipt: { answer: `${notice}\n\nThe plan.` } });
+  const worker = node("w", "worker", "failed", { receipt: { error: "500" }, history: [{ answer: `${notice}\n\nReport 1` }] });
+  const [turn] = plain(chat.chatTurns([run("r1", "t", [planner, worker], { execution_mode: "team" })], "go", { now: 0 }));
+  assert.equal(turn.steps[0].text, "The plan.");
+  assert.equal(turn.steps[1].earlier[0].text, "Report 1");
+  const tidy = plain(chat.tidyTimeline([
+    { id: "a", kind: "message", status: "completed", text: notice },
+    { id: "b", kind: "message", status: "completed", text: `${notice}\n\nReading the files.` },
+    { id: "c", kind: "command", status: "completed", text: "ls" },
+  ]));
+  assert.deepEqual(tidy.map((item) => `${item.id}:${item.text}`), ["b:Reading the files.", "c:ls"]);
+});
+
+test("a review's rework block (the card ids the engine reads) is not shown", () => {
+  // Seen live: a review ended with "rework" and `["7394f7d6-3cb1-491d-a715-f1dd90bc79e2"]`.
+  const review = "CHANGES_REQUIRED: Worker 1 must list all 316 entries.";
+  assert.equal(chat.withoutReworkBlock(`${review}\n\nrework\n\`["7394f7d6-3cb1-491d-a715-f1dd90bc79e2"]\``), review);
+  assert.equal(chat.withoutReworkBlock(`${review}\n\`\`\`rework\n["w1"]\n\`\`\``), review);
+  assert.equal(chat.withoutReworkBlock(`${review}\nrework\n["w1", "w2"]`), review);
+  assert.equal(chat.withoutReworkBlock("We should rework the parser.\nDone."), "We should rework the parser.\nDone.", "the word in prose stays");
+  const reviewer = node("r", "reviewer", "finished", { receipt: { answer: `${review}\n\`\`\`rework\n["w1"]\n\`\`\``, verdict: "CHANGES_REQUIRED" },
+    history: [{ answer: `older\nrework\n\`["w1"]\``, verdict: "CHANGES_REQUIRED" }] });
+  const [turn] = plain(chat.chatTurns([run("r1", "t", [node("p", "planner", "finished", { receipt: { answer: "plan" } }), reviewer],
+    { execution_mode: "team" })], "go", { now: 0 }));
+  assert.equal(turn.final.text, review);
+  assert.equal(turn.final.verdict, "CHANGES_REQUIRED", "the verdict still shows");
+  assert.equal(turn.final.earlier[0].text, "older");
+  const worker = node("w", "worker", "finished", { receipt: { answer: "Report\nrework\n[\"x\"]" } });
+  assert.equal(plain(chat.chatTurns([run("r1", "t", [worker], { execution_mode: "team" })], "go", { now: 0 })[0].steps[0].text),
+    "Report\nrework\n[\"x\"]", "only a review's block is the engine's");
 });
 test("a turn whose agent is waiting out a model error says so, instead of \"may be stuck\"", () => {
   // Seen live: a chat rate-limited by its model (Claude Code backing off from 429s for 20 minutes)
