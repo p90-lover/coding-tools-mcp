@@ -1498,7 +1498,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   /** `key` is the CPA key to redact, when the caller read it once for many texts (publicTimeline). */
   function publicText(value, limit = 4096, keepEnd = false, key = cpaKeyToRedact()) {
     let text = String(value ?? "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
-      .replace(/Bearer\s+\S+|sk-[A-Za-z0-9_-]+/gi, "[redacted]")
+      // A key is a whole token of some length: "sk-" inside a word ("task-runner", "desk-", "risk-")
+      // was redacted, and a command that changed this way went to the person instead of the review.
+      .replace(/Bearer\s+\S+|(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{8,}/gi, "[redacted]")
       .replace(/((?:api[_-]?key|access[_-]?token|authorization)\s*[:=]\s*)[^\s,;]+/gi, "$1[redacted]");
     if (key) text = text.replaceAll(key, "[redacted]");
     return keepEnd ? text.slice(-limit) : text.slice(0, limit);

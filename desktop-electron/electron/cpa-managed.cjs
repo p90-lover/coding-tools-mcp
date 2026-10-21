@@ -255,9 +255,13 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     "debug: false",
     "request-log: false",
     // No main.log: it took ~10 MB every two days, half of it warnings nobody reads. CPA then logs
-    // to its output, which the launcher discards for a persistent CPA. Failed requests still leave
-    // their error-*.log (error-logs-max-files).
+    // to its output, which the launcher discards for a persistent CPA.
     "logging-to-file: false",
+    // No request logger at all. Even with request-log off, CPA copied every request body over
+    // 1 MiB (and every chunked one) into logs/request-log-parts-* in case the request failed, then
+    // deleted it: a disk write per agent turn. Commercial mode only drops that logger (and the
+    // error-*.log files it wrote on failures, which nothing here reads).
+    "commercial-mode: true",
     "usage-statistics-enabled: true",
     ...cpaLongRunYamlLines(),
     "",
@@ -265,11 +269,12 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
   if (!savedSource.trim()) return generated;
   const managed = (yaml.parse ?? yaml.load)(generated);
   // User settings survive restarts; listener, credentials, bundled plugin paths and file logging
-  // stay managed (an older build saved logging-to-file: true). So do config v8's grouped forms of
-  // the same security settings: a saved `server` (host 0.0.0.0), `management` or `access` block
-  // would otherwise reopen what the flat keys above keep closed.
+  // stay managed (an older build saved logging-to-file: true; none saved commercial-mode). So do
+  // config v8's grouped forms of the same security settings: a saved `server` (host 0.0.0.0, or
+  // commercial-mode off), `management` or `access` block would otherwise reopen what the flat keys
+  // above keep closed.
   const owned = ["host", "port", "auth-dir", "api-keys", "proxy-url", "remote-management", "plugins", "logging-to-file",
-    "server", "management", "access"];
+    "commercial-mode", "server", "management", "access"];
   const retained = Object.fromEntries(Object.entries(saved).filter(([key]) => !owned.includes(key)));
   const merged = {
     ...managed, ...retained,

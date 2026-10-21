@@ -2031,7 +2031,7 @@ test("activity reports each working card's runtime and current step without adva
       calls.push(endpoint);
       if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [done, native, stuck, agent] }] };
       if (endpoint === "/api/v1/ao/harness/status") {
-        return { ok: true, status: { connected: true, live_output: body.node_id === "w1" ? "native partial Bearer SECRET_TOKEN" : "", threads: body.node_id === "w1"
+        return { ok: true, status: { connected: true, live_output: body.node_id === "w1" ? "native partial Bearer SECRET_TOKEN npm run task-runner sk-abcdefghijklmnopqrst1234" : "", threads: body.node_id === "w1"
           ? [{ id: "thread-1", turn_id: "turn-1", activity: "running a command", activity_at_ms: 5_000, last_event_at_ms: 6_000 }]
           : [{ id: "thread-2", turn_id: null, activity: null, started_at_ms: 2_000 }] } };
       }
@@ -2045,7 +2045,8 @@ test("activity reports each working card's runtime and current step without adva
   const result = await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
   assert.deepEqual(Object.keys(result.nodes).sort(), ["w1", "w2", "w3"], "only working cards");
   assert.equal(result.nodes.w1.activity, "running a command");
-  assert.equal(result.nodes.w1.output, "native partial [redacted]");
+  // "sk-" inside a word (task-runner) is not a key; a whole sk- token is.
+  assert.equal(result.nodes.w1.output, "native partial [redacted] npm run task-runner [redacted]");
   assert.doesNotMatch(JSON.stringify(result), /SECRET_TOKEN/);
   assert.equal(result.nodes.w1.last_event_at_ms, 6_000);
   assert.equal(result.nodes.w1.started_at_ms, 1_000);

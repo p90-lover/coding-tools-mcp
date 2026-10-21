@@ -36,6 +36,47 @@ const TIMELINE_TEXT_BYTES = 64 * 1024;
 const TIMELINE_ITEMS = 400;
 // How much of AO's recent meaningful output stays in memory.
 const DAEMON_LINES_CHARS = 64 * 1024;
+// The largest AO reply the main process reads. At 900 KB two screenshot reads (~1 MB each, the
+// image kept twice as base64) among a chat's newest items failed every conversation read, so a
+// pending approval behind them never showed and a long task sat "may be stuck" for hours. Replies
+// stay in the main process: what reaches the window is the trimmed timeline, under IPC's own cap.
+const AO_RESPONSE_MAX_BYTES = 16 * 1024 * 1024;
+const INLINE_BLOB_MIN = 16 * 1024;
+/**
+ * Replaces inline base64 blobs (a screenshot a tool returned) in a conversation reply with a short
+ * note, including ones inside a JSON-encoded output string. Nothing in the app shows them, and
+ * older AO builds stored them whole; newer ones drop them before storing.
+ */
+function dropInlineBlobs(value) {
+  const blob = text => text.length >= INLINE_BLOB_MIN
+    && /^(data:[\w.+/-]+;base64,)?[A-Za-z0-9+/_=-]+$/.test(text.slice(0, 4096)) && /^[A-Za-z0-9+/_=-]*$/.test(text.slice(-4096));
+  const shrink = text => {
+    if (text.length < INLINE_BLOB_MIN) return text;
+    if (blob(text)) return `[${text.length >> 10} KB of inline binary data not shown]`;
+    const trimmed = text.trimStart();
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        const nested = JSON.parse(text);
+        if (walk(nested)) return JSON.stringify(nested);
+      } catch {}
+    }
+    return text;
+  };
+  const walk = node => {
+    let changed = false;
+    if (!node || typeof node !== "object") return false;
+    for (const key of Object.keys(node)) {
+      const item = node[key];
+      if (typeof item === "string") {
+        const next = shrink(item);
+        if (next !== item) { node[key] = next; changed = true; }
+      } else if (item && typeof item === "object" && walk(item)) changed = true;
+    }
+    return changed;
+  };
+  walk(value);
+  return value;
+}
 
 /**
  * Lines one text change added and removed, as a "+56 −26" count and a short diff: the lines the
@@ -278,18 +319,23 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       },
     }) : null;
 
-  async function requestApi(method, endpoint, body, { maxBytes = 900000 } = {}) {
+  async function requestApi(method, endpoint, body, { maxBytes } = {}) {
     if (state !== "ready") throw new Error("Start the source-integrated AO runtime first");
     if (body?.length > 65536) throw new Error("AO API request exceeds 64 KiB");
     const response = await fetch(`http://127.0.0.1:${daemonPort}${endpoint}`, { method, headers: { "content-type": "application/json" }, body, redirect: "error", signal: AbortSignal.timeout(method === "GET" ? 30000 : 180000) });
     const text = await response.text();
-    if (Buffer.byteLength(text) > maxBytes) throw new Error(`AO response exceeds the handler limit (${method} ${endpoint.split("?")[0]})`);
+    // A conversation read is trimmed below before anything uses it, so it may arrive larger; every
+    // other AO call keeps the 900 KB limit.
+    const conversation = /\/conversation(\?|$)/.test(endpoint);
+    const limit = maxBytes ?? (conversation ? AO_RESPONSE_MAX_BYTES : 900000);
+    if (Buffer.byteLength(text) > limit) throw new Error(`AO response exceeds the handler limit (${method} ${endpoint.split("?")[0]})`);
     // AO answers some failures with an empty or non-JSON body; keep the status instead of
     // failing on JSON.parse and losing it.
     let data = {};
     if (text) {
       try { data = JSON.parse(text); } catch { data = response.ok ? {} : { error: { message: text.slice(0, 300) } }; }
     }
+    if (conversation) dropInlineBlobs(data);
     return { ok: response.ok, status: response.status, data };
   }
 
@@ -1931,4 +1977,4 @@ function steadyContext(readings, id, usage, compactedAt) {
   return steady;
 }
 
-module.exports = { steadyContext, agentCatalog, createAgentOrchestratorUpstream, createAgentInventory, API_OPERATIONS };
+module.exports = { steadyContext, agentCatalog, createAgentOrchestratorUpstream, createAgentInventory, API_OPERATIONS, dropInlineBlobs };
