@@ -2894,6 +2894,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         let mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
         if (!mission) throw new Error("Saved mission is unavailable");
         if (!Number.isInteger(saved.worker_capacity?.[runId])) throw new Error("The installed AO service does not report worker capacity; update the matching runtime");
+        state.socketRestarts = 0;
         // Start every ready Native Codex card's harness together first. Launching a Codex process
         // can take minutes on a slow disk; done one card at a time, a sibling worker waited for
         // it and the workers ran one after another instead of in parallel. The launches below
@@ -3048,10 +3049,31 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         else await pause();
       }
     } catch (error) {
+      // The machine ran short of local sockets or a local service dropped a connection: the run's
+      // cards are fine, only this read or send failed. Seen live: another program opened about 44
+      // loopback connections a second, every port sat in TIME_WAIT, "connect EADDRINUSE" ended this
+      // loop, and the chat stayed "running" for an hour with nothing watching it. The loop starts
+      // again after a pause (2 s, doubling to 60 s) for up to ten failures in a row.
+      const restarts = state.socketRestarts ?? 0;
+      if (!state.stopped && LOCAL_SOCKET_FAILURE.test(`${error?.code ?? ""} ${error?.cause?.code ?? ""} ${error?.message ?? error}`)
+        && restarts < SOCKET_RESTART_LIMIT) {
+        state.socketRestarts = restarts + 1;
+        const delay = Math.min(60_000, 2_000 * 2 ** restarts);
+        state.status = "running";
+        state.detail = `Lost a local connection (${publicText(error?.code || error?.cause?.code || error?.message || error, 80)}); `
+          + `checking the run again in ${Math.round(delay / 1000)}s`;
+        reportRun(workspaceId, runId, state, null);
+        logger?.warn?.("ao.drive_socket_retry", { attempt: state.socketRestarts, code: String(error?.code ?? error?.cause?.code ?? "") });
+        setTimeout(() => { if (!state.stopped) void driveRun(workspaceId, runId, executable, state); }, delay);
+        return;
+      }
       state.status = "held"; state.detail = publicText(error?.message || error, 500);
       reportRun(workspaceId, runId, state, null, state.stopped ? null : "error");
     } finally { state.driving = false; }
   }
+  // A failed local connection, not a failed run (see driveRun).
+  const LOCAL_SOCKET_FAILURE = /EADDRINUSE|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|ENOBUFS|socket hang up|other side closed|fetch failed/i;
+  const SOCKET_RESTART_LIMIT = 10;
   /** Whether a run's background grant can start nothing more: every turn started, or its hour over. */
   function grantSpent(grant) {
     return Boolean(grant) && (grant.turns_started >= grant.max_turns || Date.now() >= grant.expires_at_ms);
