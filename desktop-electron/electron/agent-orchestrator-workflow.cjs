@@ -3,7 +3,7 @@
 const { createHash, randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
-const { DEFAULT_GOAL_ROUNDS, goalPrompt, goalVerdict, closingAnswers, cleanObjective, createGoalStore } = require("./chat-goals.cjs");
+const { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAnswers, cleanObjective, createGoalStore } = require("./chat-goals.cjs");
 const { wakePrompt, wakeupAction, createWakeupStore } = require("./chat-wakeups.cjs");
 const { chatDescriptionWithout, createChatEditStore } = require("./chat-edits.cjs");
 const { createChatArchiveStore } = require("./chat-archive.cjs");
@@ -3598,10 +3598,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
   async function chatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal } = {}) {
     const id = clean(workspaceId, 128);
-    // /goal <objective>: the first round asks for the objective; the chat keeps going from there.
+    // /goal <condition>: the first round sends the condition itself; the chat keeps going from there.
     const objective = goal === undefined ? null : cleanObjective(goal);
     const asked = clean(message, 8192, false);
-    const text = objective ? goalPrompt(objective, 1, DEFAULT_GOAL_ROUNDS) : asked;
+    const text = objective ? goalMessage(objective, 1) : asked;
     const naming = objective ?? asked;
     if (!text.trim()) throw new Error("Type a message to start the chat");
     const selectedExecutable = codexExecutable(executable);
@@ -3747,7 +3747,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     goals.update(id, task, { round, note: "" });
     try {
       // Started in the background: a failed start settles the run, which marks the goal stalled.
-      const result = await chatSend({ workspaceId: id, taskId: task, message: goalPrompt(goal.objective, round, goal.rounds), ...selection, deferStart: true });
+      const result = await chatSend({ workspaceId: id, taskId: task, message: goalMessage(goal.objective, round, goal.feedback), ...selection, deferStart: true });
       if (result?.ok === false) { goals.update(id, task, { status: "stalled", note: String(result.reason || "The next round could not start") }); return; }
       goals.update(id, task, { lastRunId: String(result.runId || ""), note: result.status === "failed" ? String(result.detail || "The next round could not start") : "" });
       if (result.status === "failed") goals.update(id, task, { status: "stalled" });
@@ -3755,6 +3755,30 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const message = String(error?.message || error);
       goals.update(id, task, { status: "stalled", note: /chat is full/.test(message) ? "This chat is full; use /compact, then /goal resume" : message.slice(0, 300) });
     }
+  }
+
+  /**
+   * The goal evaluator: a small CPA model (Claude Code uses a fast one) reads the round that just
+   * settled, the message it was sent and the closing cards' answers, and says whether the condition
+   * holds, with its reason. The reason is what the agent is told next when it does not.
+   */
+  async function checkGoal(goal, mission) {
+    const { baseUrl, key } = connection();
+    const catalog = (await models()).models;
+    const model = catalog.find((id) => /haiku|flash|mini|lite/i.test(id)) ?? catalog[0];
+    if (!model) throw new Error("CPA has no model to check the goal with");
+    const message = goalMessage(goal.objective, goal.round, goal.feedback);
+    const prompt = goalCheckPrompt(goal.objective, roundTranscript(message, closingAnswers(mission)));
+    const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model, temperature: 0, max_tokens: 500, messages: [{ role: "user", content: prompt }] }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!response.ok) throw new Error(`the evaluator returned HTTP ${response.status}`);
+    const check = parseGoalCheck((await response.json())?.choices?.[0]?.message?.content);
+    logger?.info?.("ao.goal_checked", { met: check.met, model, round: goal.round });
+    return check;
   }
 
   const goalChecks = new Set();
@@ -3777,12 +3801,24 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (attention === "stopped") { goals.update(workspaceId, task, { status: "paused", note: "Stopped; /goal resume picks it up again" }); return; }
       if (status === "failed") { goals.update(workspaceId, task, { status: "stalled", note: "The last round failed; retry it, then /goal resume" }); return; }
       if (status === "held") { goals.update(workspaceId, task, { status: "stalled", note: "The last round needs you; answer it, then /goal resume" }); return; }
-      const verdict = goalVerdict(closingAnswers(mission));
-      if (verdict === "achieved") { goals.update(workspaceId, task, { status: "achieved", note: "" }); return; }
-      if (goal.round >= goal.rounds) { goals.update(workspaceId, task, { status: "limited", note: `Stopped after ${goal.rounds} rounds; /goal resume allows more` }); return; }
-      // The agent asked to be woken later (schedule_wakeup): the goal goes on when it wakes, not now.
+      // The agent asked to be woken later (schedule_wakeup): as Claude Code defers its check while
+      // background work runs, the goal is judged when the agent has woken and finished, not now.
       if (wakeups.get(workspaceId, task)?.runId === runId) return;
-      await continueGoal(workspaceId, task, goal, mission);
+      // A separate evaluator model judges the condition, as Claude Code's /goal does when the agent
+      // stops; the agent's own word is not the verdict.
+      let check;
+      try {
+        check = await checkGoal(goal, mission);
+      } catch (error) {
+        goals.update(workspaceId, task, { status: "stalled",
+          note: `The goal could not be checked (${publicText(error?.message || error, 200)}); /goal resume tries again` });
+        return;
+      }
+      if (check.met) { goals.update(workspaceId, task, { status: "achieved", note: check.reason, feedback: "" }); return; }
+      goals.update(workspaceId, task, { feedback: check.reason });
+      // A goal an earlier version saved with a round limit keeps it; a new goal has none.
+      if (goal.rounds > 0 && goal.round >= goal.rounds) { goals.update(workspaceId, task, { status: "limited", note: `Stopped after ${goal.rounds} rounds; /goal resume allows more` }); return; }
+      await continueGoal(workspaceId, task, goals.get(workspaceId, task), mission);
     } finally { goalChecks.delete(guard); }
   }
 
@@ -3798,8 +3834,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // Edit goal: a new objective for the rounds still to come; the running round is left alone.
     if (action === "edit") return { ok: true, goal: goals.update(id, task, { objective: cleanObjective(objective) }) };
     if (action !== "resume") throw new Error("Choose clear, pause, resume, edit or route");
-    // Resuming a goal that ran out of rounds allows it as many more rounds again.
-    const rounds = goal.status === "limited" ? goal.round + goal.rounds : goal.rounds;
+    // Resuming a goal that ran out of rounds (one saved with a limit) allows it as many more again.
+    const rounds = goal.status === "limited" && goal.rounds > 0 ? goal.round + goal.rounds : goal.rounds;
     goals.update(id, task, { status: "active", rounds, note: "" });
     const saved = await runs({ workspaceId: id });
     if (chatWorking(id, task, saved.runs)) return { ok: true, goal: goals.get(id, task) };
