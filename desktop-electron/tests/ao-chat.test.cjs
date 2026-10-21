@@ -330,7 +330,8 @@ test("a new chat's prompt is Codex's \"Do anything\" in either mode; follow-up a
     useState: initial => [typeof initial === "function" ? initial() : initial, () => {}] };
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
     exports: component, require: name => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : name === "./ao-chat" ? chat
-      : name === "./ChatWorkbench" ? { useWorkbenchAutoOpen() {} } : {},
+      : name === "./ChatWorkbench" ? { useWorkbenchAutoOpen() {} }
+      : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null) } : {},
   });
   const walk = item => !item || typeof item !== "object" ? [] : Array.isArray(item) ? item.flatMap(walk) : [item, ...walk(item.props?.children)];
   const base = { runs: [], tasks: [], selectedTaskId: "", busy: false, loadDescription: async () => "", send: async () => {}, openStructure() {}, approvals: [], approve() {}, describeRoute: () => "", retryStart() {} };

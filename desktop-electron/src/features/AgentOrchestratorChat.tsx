@@ -12,7 +12,7 @@ import { ChatContextMeter } from "./ChatContextMeter";
 import { ChatPet } from "./ChatPet";
 import { ChatTurnStats } from "./ChatTurnStats";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
-import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, StreamingMarkdown } from "./ChatToolParts";
+import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, StreamingMarkdown } from "./ChatToolParts";
 import { PartErrorBoundary } from "../PartErrorBoundary";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
@@ -271,7 +271,8 @@ const LiveRow = memo(LiveRowView, (prev, next) => sameLiveItem(prev.item, next.i
 function LiveRowView({ item }: { item: ChatLiveItem }) {
   return <li className={`cx-live-item kind-${item.kind} is-${item.status || "done"}`}>
     {item.answered ? <AnsweredRecord question={item.answered.question} answer={item.answered.answer} />
-      : item.kind === "steer" ? <div className="cx-user cx-steer"><div className="cx-bubble"><p>{chatMessageReadable(item.text)}</p></div></div>
+      // As any sent message: an attached image as its thumbnail, not "Attached image: <path>" text.
+      : item.kind === "steer" ? <div className="cx-user cx-steer"><SentMessage text={item.text} /></div>
       : item.kind === "message" ? <StreamingMarkdown text={item.text} live={item.status === "running"} />
       : item.kind === "reasoning" ? <ReasoningItem item={item} />
       : item.kind === "edit" ? <EditItem item={item} />
@@ -481,6 +482,9 @@ function SentImage({ item, onOpen }: { item: ChatSentAttachment; onOpen: (url: s
     {url ? <img src={url} alt={item.name} /> : <span>{missing ? "Image not found" : item.name}</span>}
   </button>;
 }
+
+/** SentMessage for the DeepSeek transcript (SentMessageView), which cannot import this file. */
+const sentMessageView = (text: string) => <SentMessage text={text} />;
 
 /**
  * A message the person sent, as Claude Code shows one: its attachments above the bubble (images as
@@ -1369,7 +1373,7 @@ export function AgentOrchestratorChat({
             </article></PartErrorBoundary>;
   }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn]);
 
-  return (<Attachments.Provider value={attachmentAccess}><CompactActivity.Provider value={compactActivity}>
+  return (<Attachments.Provider value={attachmentAccess}><SentMessageView.Provider value={sentMessageView}><CompactActivity.Provider value={compactActivity}>
     <div className={`cx-chat${showStructure && structure ? " has-structure" : ""}`}>
       <section className="cx-thread" aria-label={chat?.title || CHAT_DEFAULT_TITLE}>
         <header className="cx-thread-head">
@@ -1697,5 +1701,5 @@ export function AgentOrchestratorChat({
       {workbench && selectedTaskId ? <ChatWorkbench sessions={agentSessions} workspaceId={projectId} tab={workbench} onTab={setWorkbench} onClose={() => setWorkbench(null)} /> : null}
       <ChatMenu menu={menu} onClose={() => setMenu(null)} />
     </div>
-  </CompactActivity.Provider></Attachments.Provider>);
+  </CompactActivity.Provider></SentMessageView.Provider></Attachments.Provider>);
 }
