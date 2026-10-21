@@ -3675,6 +3675,8 @@ test("steering hands the message to the running AO agent and notes it in the cha
   const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "use pnpm, not npm" });
   assert.equal(result.steered, true);
   assert.deepEqual(steered, [["sess-1", "use pnpm, not npm"]]);
+  // The note is written after replying (the reply no longer waits on it).
+  for (let tick = 0; tick < 100 && !world.edits.length; tick += 1) await new Promise((resolve) => setImmediate(resolve));
   assert.match(world.edits[0].description, /^first ask\n\n↳ Steer \([^)]+ UTC\): use pnpm, not npm$/);
   ended = true;
   assert.equal((await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "late" })).steered, false,
