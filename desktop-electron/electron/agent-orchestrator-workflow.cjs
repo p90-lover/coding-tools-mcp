@@ -2974,7 +2974,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           saved = await runs({ workspaceId, runId });
           mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
           if (!mission) throw new Error("Saved mission is unavailable");
-          if (helped?.retried && !mission.grant) {
+          // A retry needs a turn: a grant that is gone, or spent (a single chat's one turn was the
+          // launch that failed), gets a fresh one through startRun. Relaunching on the spent grant
+          // was refused, and the loop ended with the step still "held" and "Retry automatically" on.
+          if (helped?.retried && (!mission.grant || grantSpent(mission.grant))) {
             state.status = "held";
             setTimeout(() => {
               void startRun({ workspaceId, runId, executable }).catch(error => logger?.warn?.("ao.retry_start_failed",

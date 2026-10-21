@@ -143,7 +143,9 @@ test("a chat the app restart left behind resumes when its project opens, single 
   assert.equal(chat.restartResume(single(node("p", "planner", "held", { receipt: { error: "API Error: 503" } }))), null, "a real failure waits");
   assert.equal(chat.restartResume(single(node("p", "planner", "held", { receipt: restarted }), { cancelled: true })), null, "a stopped chat stays stopped");
   assert.equal(chat.restartResume(single(node("p", "planner", "held", { receipt: restarted }), { paused: true })), null);
-  assert.equal(chat.restartResume(single(node("p", "planner", "held", { receipt: restarted, history: [{}, {}] }))), null, "attempts used up");
+  assert.equal(chat.restartResume(single(node("p", "planner", "held", { receipt: restarted, history: [{}, {}, {}] }))), "retry",
+    "restarts are not the step's fault: within the main process's budget of eight attempts");
+  assert.equal(chat.restartResume(single(node("p", "planner", "held", { receipt: restarted, history: Array.from({ length: 8 }, () => ({})) }))), null, "attempts used up");
   assert.equal(chat.restartResume(single(node("p", "planner", "finished"))), null, "a finished chat stays finished");
   assert.equal(chat.restartResume(single(node("p", "planner", "pending"))), "continue", "a chat whose step never started");
   // Seen live: after a restart a team's workers finished on hosts that outlived the app, and its
@@ -155,6 +157,25 @@ test("a chat the app restart left behind resumes when its project opens, single 
   assert.equal(chat.restartResume(team([node("p", "planner", "finished"), node("v", "reviewer", "held", { receipt: { error: "needs you" } }), node("w", "worker", "pending")])), null,
     "a card held for the person keeps the team waiting");
   assert.equal(chat.restartResume(team([node("p", "planner", "reserved"), node("w", "worker", "pending")])), null, "a card mid-launch");
+});
+
+test("with Retry automatically on, a single chat's failed step that nothing retried resumes, within the retry budget", () => {
+  // Seen live: "Launch failed: The operation was aborted due to timeout" held a single chat for hours
+  // with the switch on; its loop had ended and only a restart-interrupted step was ever resumed.
+  const failed = (extra = {}) => node("p", "planner", "held", { receipt: { error: "Launch failed: The operation was aborted due to timeout" }, ...extra });
+  const single = (card) => run("r", "t", [card], { execution_mode: "single" });
+  const on = { autoRetry: true };
+  assert.equal(chat.restartResume(single(failed()), Date.now()), null, "switch off: it waits for the person, as before");
+  assert.equal(chat.restartResume(single(failed()), Date.now(), on), "retry");
+  assert.equal(chat.restartResume(single(failed({ history: [{}, {}] })), Date.now(), on), "retry", "a third attempt");
+  assert.equal(chat.restartResume(single(failed({ history: [{}, {}, {}] })), Date.now(), on), null, "three attempts: the person decides");
+  assert.equal(chat.restartResume(single(node("p", "planner", "held", { receipt: { error: "API error 401: auth_unavailable" } })), Date.now(), on), null,
+    "a sign-in or account-pool failure is never retried by itself");
+  assert.equal(chat.restartResume(run("r", "t", [failed()], { execution_mode: "single", paused: true }), Date.now(), on), null, "a paused chat stays paused");
+  // A team's failed steps are its own loop's (and its helper's) call; a blanket retry would requeue
+  // every card a review set aside.
+  assert.equal(chat.restartResume(run("r", "t", [node("p", "planner", "finished"), node("w", "worker", "held", { receipt: { error: "timeout" } })],
+    { execution_mode: "team" }), Date.now(), on), null);
 });
 
 test("archived and deleted task metadata hides chats without losing explicit history or scheduled status", () => {
@@ -1047,6 +1068,40 @@ test("opening a project resumes a team whose loop died with the app, once per se
   rendererCallback("AgentOrchestratorSurface.tsx", "effect:settledRuns.current.add(key)", fresh)();
   for (let i = 0; i < 5; i += 1) await new Promise(setImmediate);
   assert.deepEqual(calls.filter((call) => call.startsWith("fresh:")), ["fresh:run_status"]);
+});
+
+test("with Retry automatically on, opening a project retries a single chat's failed step that no loop is driving", async () => {
+  // Seen live: "Launch failed: The operation was aborted due to timeout", held for hours, driven: false.
+  const mission = { id: "r", workspace_id: "a", execution_mode: "single", cancelled: false, nodes: [
+    { id: "p", role: "planner", state: "held", history: [], receipt: { error: "Launch failed: The operation was aborted due to timeout", started_at_ms: Date.now() - 3_600_000 } }] };
+  for (const [autoRetry, expected] of [[true, ["run_status", "chat_auto_retry", "runs", "control_run", "start_run"]], [false, ["run_status", "chat_auto_retry", "runs"]]]) {
+    const calls = [];
+    const context = {
+      workspaceId: "a", mounted: { current: true }, missions: [mission], settledRuns: { current: new Set() }, resumedRuns: { current: new Set() },
+      selection: { current: { workspaceId: "a" } }, restartResume: chat.restartResume, executableArg: () => ({}),
+      moduleCall: async (operation, args) => {
+        calls.push(operation);
+        if (operation === "run_status") return { driven: false, status: "held" };
+        if (operation === "chat_auto_retry") return { ok: true, autoRetry };
+        if (operation === "runs") return { runs: [mission] };
+        if (operation === "control_run") assert.equal(args.action, "retry");
+        return { ok: true };
+      },
+      loadMissions: async () => {}, setTimeout,
+    };
+    rendererCallback("AgentOrchestratorSurface.tsx", "effect:settledRuns.current.add(key)", context)();
+    for (let i = 0; i < 6; i += 1) await new Promise(setImmediate);
+    assert.deepEqual(calls, expected, autoRetry ? "retried and started" : "switch off: left for the person");
+  }
+  // While a loop of this session holds it (waiting out its retry pause), it is looked at again later.
+  const settledRuns = { current: new Set() };
+  rendererCallback("AgentOrchestratorSurface.tsx", "effect:settledRuns.current.add(key)", {
+    workspaceId: "a", mounted: { current: true }, missions: [mission], settledRuns, resumedRuns: { current: new Set() },
+    selection: { current: { workspaceId: "a" } }, restartResume: chat.restartResume, executableArg: () => ({}),
+    moduleCall: async () => ({ driven: true, status: "held" }), loadMissions: async () => {}, setTimeout,
+  })();
+  for (let i = 0; i < 3; i += 1) await new Promise(setImmediate);
+  assert.equal(settledRuns.current.size, 0);
 });
 
 test("an old terminal read cannot advance a newly selected command's output cursor", async () => {
