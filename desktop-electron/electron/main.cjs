@@ -314,7 +314,9 @@ function getGptBrowser(logger) {
     }),
     attachView: (view) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.contentView.addChildView(view); },
     detachView: (view) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.contentView.removeChildView(view); },
-    openExternal: (url) => openWebUrl(url),
+    // The pane hands only mailto: links out (to the mail app); openWebUrl refuses them, so every
+    // mailto click failed as an unhandled rejection and the mail app never opened.
+    openExternal: (url) => (/^mailto:/i.test(String(url)) ? shell.openExternal(String(url)) : openWebUrl(url)),
     onChange: (status) => send("launcher:gpt-browser-changed", status),
   });
   return gptBrowser;
@@ -393,8 +395,15 @@ function startBridgeWatchdog(logger, stateStore) {
   if (IS_DEV_PROFILE || bridgeWatchdogTimer) return;
   bridgeWatchdogTimer = setInterval(async () => {
     if (quitting || shutdownInProgress || bridgeWatchdogBusy || !runtimeSupervisor || !runtimeHost) return;
-    if (!runtimeHost.runtimeConfigSnapshot().configured || runtimeHost.currentOperation()) return;
-    const config = runtimeSupervisor.readConfig();
+    // A config file mid-write or unreadable is skipped this minute, not thrown from the timer.
+    let config;
+    try {
+      if (!runtimeHost.runtimeConfigSnapshot().configured || runtimeHost.currentOperation()) return;
+      config = runtimeSupervisor.readConfig();
+    } catch (error) {
+      logger.warn("runtime.watchdog_config_unreadable", { message: error instanceof Error ? error.message : String(error) });
+      return;
+    }
     if (!config) return;
     bridgeWatchdogBusy = true;
     try {
@@ -2676,7 +2685,9 @@ async function start() {
 
   // An update still swapping files in is waited out first (app-update-worker.cjs).
   if (app.isPackaged) await waitForUpdateApply(path.dirname(process.execPath)).catch(() => false);
-  await waitForPackagedRuntimeSource({ app, resourcesPath: process.resourcesPath, coreHome: CORE_HOME });
+  let runtimeSourceFallback = null;
+  await waitForPackagedRuntimeSource({ app, resourcesPath: process.resourcesPath, coreHome: CORE_HOME,
+    onFallback: (error) => { runtimeSourceFallback = error instanceof Error ? error.message : String(error); } });
   let installedRuntimeRoot = null;
   let runtimeRootResolved = false;
   const runtimeRootProvider = () => {
@@ -2758,6 +2769,24 @@ async function start() {
     publish: (record) => send("launcher:log", record),
   });
   quitLogger = logger;
+  // A throw in a timer or an event handler, or a promise nobody awaits, used to reach Electron's
+  // default handler: a modal "A JavaScript error occurred in the main process" box that holds the
+  // whole app until clicked (with the window in the tray it simply looked hung). It is logged
+  // instead, once a minute per message, and the app goes on; start() still owns startup failures.
+  const reportedFaults = new Map(); // message -> when last logged
+  const reportFault = (event, error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    const now = Date.now();
+    if (now - (reportedFaults.get(message) ?? 0) < 60_000) return;
+    reportedFaults.set(message, now);
+    if (reportedFaults.size > 200) reportedFaults.delete(reportedFaults.keys().next().value);
+    try {
+      logger.error(event, { message: message.slice(0, 500), stack: error instanceof Error ? String(error.stack || "").slice(0, 2000) : undefined });
+    } catch { /* a failing log must not become a second fault */ }
+  };
+  process.on("uncaughtException", (error) => reportFault("launcher.uncaught_exception", error));
+  process.on("unhandledRejection", (reason) => reportFault("launcher.unhandled_rejection", reason));
+  if (runtimeSourceFallback) logger.warn("runtime.packaged_source_damaged", { message: runtimeSourceFallback, using: "installed copy" });
   // Runtime > RTK: the person's installed rtk compacts the commands chat agents run (rtk.cjs).
   const rtk = require("./rtk.cjs").createRtk({ getEnabled: () => stateStore.read().rtkEnabled !== false, logger });
   rtkService = rtk;
@@ -3440,10 +3469,16 @@ async function start() {
     codexRouteEnabled: () => stateStore.read().codexRoute !== false,
     refreshBrowserDescriptor: () => browserHost?.writeDescriptor(),
   });
-  const configuredInteractionMode = runtimeHost.runtimeConfigSnapshot().config?.browserInteractionMode;
-  if ((configuredInteractionMode === "automatic" || configuredInteractionMode === "manual")
-    && stateStore.read().browserInteractionMode !== configuredInteractionMode) {
-    stateStore.update({ browserInteractionMode: configuredInteractionMode });
+  // Only a preference sync: an unreadable or invalid setup config (seen: a byte order mark) keeps
+  // the saved mode and the app starts, as the same read a few lines on already does.
+  try {
+    const configuredInteractionMode = runtimeHost.runtimeConfigSnapshot().config?.browserInteractionMode;
+    if ((configuredInteractionMode === "automatic" || configuredInteractionMode === "manual")
+      && stateStore.read().browserInteractionMode !== configuredInteractionMode) {
+      stateStore.update({ browserInteractionMode: configuredInteractionMode });
+    }
+  } catch (error) {
+    logger.warn("runtime.config_unreadable", { message: error instanceof Error ? error.message : String(error) });
   }
   let lastPublishedBrowserAuth = false;
   browserHost = new BrowserHost({

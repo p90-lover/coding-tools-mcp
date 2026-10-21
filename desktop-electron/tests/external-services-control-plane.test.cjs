@@ -397,6 +397,21 @@ test("missing Paseo archive key refuses startup without changing original config
   assert.equal(fs.readFileSync(filePath, "utf8"), original);
 });
 
+test("a disk that refuses the retired-services archive no longer stops the app from starting", () => {
+  // Seen in the fatal log (2026-10-18/19): "ENOSPC ... write" and "ENOENT ... mkdir
+  // ...retired-services\snapshots\<id>" thrown from the archive stopped every launch.
+  const directory = temporaryDirectory();
+  const filePath = path.join(directory, "external-services.json");
+  fs.writeFileSync(filePath, JSON.stringify({ version: 1, services: {} }));
+  // A file where the archive folder goes: its mkdir fails the way a refused folder did.
+  fs.writeFileSync(path.join(directory, "archives"), "not a folder");
+  const warnings = [];
+  const controller = createExternalServicesController({ filePath, keyPath: path.join(directory, "external-services.key"),
+    logger: { warn: (event, detail) => warnings.push({ event, detail }), info() {}, error() {}, debug() {} } });
+  assert.ok(controller.snapshot().services.length >= 1, "the controller started");
+  assert.equal(warnings[0]?.event, "external_services.archive_failed");
+});
+
 test("external service controller owns only CPA and rejects remote endpoints", () => {
   const { controller } = controllerFixture();
   const snapshot = controller.snapshot();

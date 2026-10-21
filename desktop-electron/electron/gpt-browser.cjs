@@ -148,7 +148,11 @@ function createGptBrowserHost({
     // Web pages stay in this account's session, as in an ordinary browser tab; a new-window
     // request loads in place. mailto: goes to the mail app; any other scheme is refused, since
     // a web page must not be able to launch arbitrary protocol handlers on this machine.
-    const handOff = (url) => { if (/^mailto:/i.test(url)) void openExternal(url); };
+    // A refused hand-off (no mail app, a refused scheme) must not become an unhandled rejection.
+    const handOff = (url) => {
+      if (!/^mailto:/i.test(url)) return;
+      try { void Promise.resolve(openExternal(url)).catch(() => undefined); } catch { /* refused */ }
+    };
     contents.setWindowOpenHandler(({ url }) => {
       if (isWebUrl(url)) void contents.loadURL(url).catch(() => {});
       else handOff(url);

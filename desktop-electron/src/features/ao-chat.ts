@@ -756,6 +756,14 @@ export function liveTimeline(key: string, live: ChatActivity | undefined): ChatL
   return [...timeline, { id: `${key}:live`, kind: "message", status: "running", text: output }];
 }
 
+/** Text for a value that should be a string: a message field of an object, or its JSON. */
+function textOf(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "object" && typeof (value as { message?: unknown }).message === "string") return (value as { message: string }).message;
+  try { return typeof value === "object" ? JSON.stringify(value) : String(value); } catch { return String(value); }
+}
+
 function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: number): ChatStep {
   const key = `${run.id}:${node.id}`;
   const step: ChatStep = {
@@ -766,14 +774,17 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
     ...(node.receipt?.thread_id && node.route?.harness_id?.startsWith("ao:") && node.state !== "running" && node.state !== "reserved"
       ? { hasWork: true } : {}),
   };
-  if (node.receipt?.error) step.error = node.receipt.error;
-  if (node.receipt?.answer) step.text = run.solo && node.role === "planner" ? withoutSoloBlock(node.receipt.answer) : node.receipt.answer;
-  if (node.receipt?.verdict) step.verdict = node.receipt.verdict;
+  // The receipt comes from the service as saved; anything but text there (an error object, a
+  // number) is shown as text, since rendering it as is or calling string methods on it threw.
+  const error = textOf(node.receipt?.error), answer = textOf(node.receipt?.answer), verdict = textOf(node.receipt?.verdict);
+  if (error) step.error = error;
+  if (answer) step.text = run.solo && node.role === "planner" ? withoutSoloBlock(answer) : answer;
+  if (verdict) step.verdict = verdict;
   if (node.state === "running" || node.state === "reserved") {
     const live = options.activity?.[key];
     const working = chatWorkingDetail(node, live, now);
     const timeline = liveTimeline(key, live);
-    step.working = { ...working, ...(live?.activity ? { activity: live.activity } : {}),
+    step.working = { ...working, ...(live?.activity ? { activity: textOf(live.activity) } : {}),
       ...(timeline.length ? { timeline } : {}) };
     // A retried card's new attempt starts empty; until it writes, its earlier reply stays readable.
     const earlier = latestHistoryAnswer(node);
@@ -800,23 +811,25 @@ const REVIEW_CARD_ROLES = new Set<ChatNode["role"]>(["reviewer", "approver", "su
  * the newest answered round when the step's own text already shows it.
  */
 export function earlierRounds(node: ChatNode, shownLatest = false): ChatStepRound[] {
-  const history = node.history ?? [];
+  const history = Array.isArray(node.history) ? node.history : [];
   let latestAnswered = -1;
-  for (let index = history.length - 1; index >= 0; index -= 1) if (history[index]?.answer?.trim()) { latestAnswered = index; break; }
+  for (let index = history.length - 1; index >= 0; index -= 1) if (textOf(history[index]?.answer).trim()) { latestAnswered = index; break; }
   const noun = REVIEW_CARD_ROLES.has(node.role) ? "Cycle" : "Attempt";
   return history.flatMap((entry, index) => {
-    const text = entry?.answer?.trim() || entry?.error?.trim();
+    const answer = textOf(entry?.answer).trim(), error = textOf(entry?.error).trim();
+    const text = answer || error;
     if (!text || (shownLatest && index === latestAnswered)) return [];
     // A round that answered and then failed (the answer kept, the error set) still failed.
-    const verdict = entry?.verdict || (entry?.error?.trim() ? "failed" : undefined);
+    const verdict = textOf(entry?.verdict) || (error ? "failed" : undefined);
     return [{ label: `${noun} ${index + 1}`, text, ...(verdict ? { verdict } : {}) }];
   });
 }
 
 /** The newest answer a card gave in an earlier attempt or round (a retry or rework moves it to history). */
 function latestHistoryAnswer(node: ChatNode): string | undefined {
-  for (let index = (node.history?.length ?? 0) - 1; index >= 0; index -= 1) {
-    const answer = node.history?.[index]?.answer?.trim();
+  const history = Array.isArray(node.history) ? node.history : [];
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const answer = textOf(history[index]?.answer).trim();
     if (answer) return answer;
   }
   return undefined;

@@ -13,6 +13,7 @@ import { ChatPet } from "./ChatPet";
 import { ChatTurnStats } from "./ChatTurnStats";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
 import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, StreamingMarkdown } from "./ChatToolParts";
+import { PartErrorBoundary } from "../PartErrorBoundary";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
@@ -1315,7 +1316,9 @@ export function AgentOrchestratorChat({
       dshReaders.set(turn.runId, readWork);
     }
     const idle = notStarted && turn.runId === latest?.id;
-    return <article key={turn.key} className={`cx-turn${dsh ? " is-dsh" : ""}`}>
+    // One message that cannot render (a run's unexpected data) shows a notice in its place; the
+    // chat and the rest of the window stay up.
+    return <PartErrorBoundary key={turn.key} label="This message"><article className={`cx-turn${dsh ? " is-dsh" : ""}`}>
               {turn.user ? <div className="cx-user">
                 <SentMessage text={turn.user.text} />
                 <MessageActions text={chatMessageReadable(turn.user.text)}>
@@ -1356,7 +1359,7 @@ export function AgentOrchestratorChat({
                 ? <p className="cx-note">Finished without an answer.</p> : null}
               {turn.status === "stopped" && !dsh ? <p className="cx-note">Stopped</p> : null}
               {turn.solo ? <p className="cx-note">Answered by the orchestrator alone; no workers ran.</p> : null}
-            </article>;
+            </article></PartErrorBoundary>;
   }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn]);
 
   return (<Attachments.Provider value={attachmentAccess}><CompactActivity.Provider value={compactActivity}>

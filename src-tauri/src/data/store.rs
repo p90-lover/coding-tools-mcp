@@ -234,6 +234,12 @@ impl DataStore {
         self.persistent
     }
 
+    /// Forgets that `data` is a copy of the file, so the next refresh reads it again: for a store
+    /// recovered after a panic, which may have stopped between changing `data` and saving it.
+    pub fn forget_sync(&mut self) {
+        self.synced = None;
+    }
+
     pub fn refresh(&mut self) -> AppResult<()> {
         if !self.persistent {
             self.baseline = serde_json::to_value(&self.data)?;
@@ -513,9 +519,12 @@ struct DataFileLock {
 }
 
 fn lock_data_file() -> AppResult<DataFileLock> {
+    // The lock guards no data of its own (every holder reads the file afresh), so a panic while
+    // it was held leaves nothing half done here. Refusing it from then on failed every read and
+    // write of the data file until the service restarted.
     let process = DATA_FILE_LOCK
         .lock()
-        .map_err(|_| AppError::Message("data file lock poisoned".into()))?;
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let path = data_file_path()?.with_extension("lock");
     std::fs::create_dir_all(path.parent().expect("data file parent"))?;
     // Keep the OS lock on a stable sidecar: saving replaces the JSON file itself.

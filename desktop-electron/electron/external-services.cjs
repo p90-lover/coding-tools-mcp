@@ -313,6 +313,12 @@ function staleWindowMs(id) {
 }
 
 const SNAPSHOT_RELATIVE = /^snapshots\/[a-f0-9-]{36}$/;
+// The archive refusing its sources (a missing key for encrypted secrets, linked or odd files): the
+// one failure that must stop startup, since going on could replace secrets nothing can decrypt.
+const ARCHIVE_REFUSED = "ARCHIVE_REFUSED";
+function archiveRefusal(message) {
+  return Object.assign(new Error(message), { code: ARCHIVE_REFUSED });
+}
 // Retired services never run again: their state under integrations/state/ is frozen.
 const isRetiredState = (relative) => relative.startsWith("integrations/state/");
 
@@ -348,7 +354,7 @@ function archiveRetiredServicesState({ filePath, keyPath, archiveDataRoot = null
   if (archiveDataRoot) {
     const relative = path.relative(privateRoot, archiveDataRoot);
     if (relative.startsWith("..") || path.isAbsolute(relative)) {
-      throw new Error("Paseo archive source must remain inside private userData");
+      throw archiveRefusal("Paseo archive source must remain inside private userData");
     }
   }
   const sources = {};
@@ -360,7 +366,7 @@ function archiveRetiredServicesState({ filePath, keyPath, archiveDataRoot = null
   function include(source, relative) {
     if (!fs.existsSync(source)) return;
     const info = fs.lstatSync(source);
-    if (info.isSymbolicLink()) throw new Error("Paseo archive refuses linked state");
+    if (info.isSymbolicLink()) throw archiveRefusal("Paseo archive refuses linked state");
     if (info.isDirectory()) {
       for (const entry of fs.readdirSync(source)) include(path.join(source, entry), path.join(relative, entry));
     } else if (info.isFile()) {
@@ -368,7 +374,7 @@ function archiveRetiredServicesState({ filePath, keyPath, archiveDataRoot = null
       sources[key] = source;
       stats[key] = statOf(info);
     } else {
-      throw new Error("Paseo archive requires regular files");
+      throw archiveRefusal("Paseo archive requires regular files");
     }
   }
   include(filePath, "external-services.json");
@@ -393,14 +399,14 @@ function archiveRetiredServicesState({ filePath, keyPath, archiveDataRoot = null
   let saved;
   try { saved = JSON.parse(fs.readFileSync(filePath, "utf8")); } catch { saved = null; }
   if (Object.values(saved?.secrets || {}).some(encrypted) && !fs.existsSync(keyPath)) {
-    throw new Error("Paseo archive requires the external service key");
+    throw archiveRefusal("Paseo archive requires the external service key");
   }
   const managedSecrets = archiveDataRoot && path.join(archiveDataRoot, "managed-components.secrets.json");
   if (managedSecrets && fs.existsSync(managedSecrets)) {
     const stored = JSON.parse(fs.readFileSync(managedSecrets, "utf8"));
     if (Object.values(stored?.components || {}).some(encrypted)
         && !fs.existsSync(path.join(archiveDataRoot, "managed-components.key"))) {
-      throw new Error("Paseo archive requires the managed component key");
+      throw archiveRefusal("Paseo archive requires the managed component key");
     }
   }
 
@@ -546,16 +552,19 @@ function createExternalServicesController({
 } = {}) {
   if (!filePath || !keyPath) throw new Error("External service state paths are required");
   const meshFilePath = loopbackMeshPath || path.join(path.dirname(filePath), "loopback-mesh.json");
+  // A backup of frozen state: failing to take it (a full disk, a folder the system would not create,
+  // a file in use, an earlier snapshot's unreadable manifest) is logged and the app starts anyway.
+  // Thrown here, it stopped every launch (seen: "ENOSPC ... write" and "ENOENT ... mkdir
+  // ...retired-services\snapshots\<id>", 2026-10-18/19). Its own refusals (a missing key for
+  // encrypted secrets, linked state) still stop startup.
+  // Deferred, the live file keeps its legacy data until a later launch archives it.
   let archiveDeferred = false;
   try {
     archiveRetiredServicesState({ filePath, keyPath, archiveDataRoot });
   } catch (error) {
-    if (!["ENOENT", "ENOSPC"].includes(error?.code)) throw error;
+    if (error?.code === ARCHIVE_REFUSED) throw error;
     archiveDeferred = true;
-    logger?.warn?.("external-service.archive-deferred", {
-      code: error.code,
-      message: error.message,
-    });
+    logger?.warn?.("external_services.archive_failed", { code: error?.code ?? null, message: error instanceof Error ? error.message : String(error) });
   }
   void removeIncompleteSnapshots(path.join(path.dirname(filePath), "archives", "retired-services"), { logger });
   const codec = createSecretCodec({ safeStorage, keyPath });

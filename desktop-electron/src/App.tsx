@@ -15,6 +15,7 @@ import { Icon, type IconName } from "./icons";
 import { appendLog, logKey, replaceLogs, useLogs } from "./log-store";
 import { ProviderCenterSurface } from "./features/ProviderHubSaasSurface";
 import { SurfaceHiddenContext } from "./features/page-visibility";
+import { PartErrorBoundary } from "./PartErrorBoundary";
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
 import { ProxyGatewaySurface } from "./features/ProxyGatewaySurface";
 import { ExternalServicesSurface } from "./features/ExternalServicesSurface";
@@ -438,7 +439,9 @@ function LauncherShell({
     const current = group.includes(surface);
     return current || group.some((id) => visitedSurfaces.has(id))
       ? <div className="surface-pane" hidden={!current}>
-        <SurfaceHiddenContext.Provider value={!current}>{render()}</SurfaceHiddenContext.Provider>
+        <SurfaceHiddenContext.Provider value={!current}>
+          <PartErrorBoundary label="This page">{render()}</PartErrorBoundary>
+        </SurfaceHiddenContext.Provider>
       </div>
       : null;
   };

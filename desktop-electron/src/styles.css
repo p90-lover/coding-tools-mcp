@@ -2995,3 +2995,20 @@ code {
 .rtk-gain { margin: 0; padding: 14px 16px; overflow: auto; max-height: 420px; border: 1px solid var(--line, rgba(31, 30, 29, .15)); border-radius: 10px;
   background: var(--surface-2, rgba(31, 30, 29, .03)); font: 12px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace; white-space: pre; }
 .surface-empty-note { color: var(--muted, #6b6a66); font-size: 13px; }
+
+/* PartErrorBoundary: one tab or chat message that failed to render, in its own place. */
+.part-error {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--red-400);
+  border-radius: 8px;
+  color: inherit;
+  font-size: 13px;
+}
+.part-error button {
+  margin-left: auto;
+  flex-shrink: 0;
+}

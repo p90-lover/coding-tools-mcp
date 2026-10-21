@@ -106,6 +106,9 @@ function createHarness(hooks = {}) {
     "./agent-orchestrator-workspace.cjs": hooks.workspaceBoard ? { createAoWorkspaceBoard: () => hooks.workspaceBoard } : require("../electron/agent-orchestrator-workspace.cjs"),
     "./agent-orchestrator-accounting.cjs": require("../electron/agent-orchestrator-accounting.cjs"),
     "./ao-context-breakdown.cjs": require("../electron/ao-context-breakdown.cjs"),
+    "./ao-daemon-log.cjs": require("../electron/ao-daemon-log.cjs"),
+    // The launcher's ao.db compaction has its own module; these fixtures have no database.
+    "./ao-db-maintenance.cjs": { compactAoDatabase: async () => ({ action: "none" }) },
     "./chat-agent-shell.cjs": require("../electron/chat-agent-shell.cjs"),
     // The daemon's environment helper (Windows essentials, a bounded PATH); tested in chat-sandbox.test.cjs.
     "./chat-sandbox.cjs": require("../electron/chat-sandbox.cjs"),

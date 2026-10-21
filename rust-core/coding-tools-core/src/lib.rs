@@ -47,10 +47,14 @@ impl CoreState {
     }
 
     pub fn with_data<R>(&self, f: impl FnOnce(&mut DataStore) -> AppResult<R>) -> AppResult<R> {
-        let mut guard = self
-            .data
-            .lock()
-            .map_err(|_| AppError::Message("data store poisoned".into()))?;
+        // A panic while the store was held must not refuse every later request until a restart:
+        // the store is taken back and read from the file again, which is the truth either way.
+        let mut guard = self.data.lock().unwrap_or_else(|poisoned| {
+            self.data.clear_poison();
+            let mut store = poisoned.into_inner();
+            store.forget_sync();
+            store
+        });
         guard.refresh()?;
         f(&mut guard)
     }

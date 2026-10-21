@@ -121,7 +121,10 @@ function createAgentOrchestratorGateway({ rendererRoot, daemonPort, getStatus, d
         "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "cache-control": "no-cache",
         "content-security-policy": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws://127.0.0.1:*; frame-src 'none'; object-src 'none'; base-uri 'self'",
       });
-      if (request.method === "HEAD") response.end(); else fs.createReadStream(realFile).pipe(response);
+      // A file pruned or locked between the stat and the open (a backend swap) ends the response
+      // instead of an uncaught stream 'error'.
+      if (request.method === "HEAD") response.end();
+      else fs.createReadStream(realFile).on("error", () => response.destroy()).pipe(response);
     } catch (error) {
       if (!response.headersSent) json(response, 400, { ok: false, error: error.message }); else response.destroy();
     }
@@ -130,6 +133,9 @@ function createAgentOrchestratorGateway({ rendererRoot, daemonPort, getStatus, d
   server.on("connection", (socket) => { sockets.add(socket); socket.on("close", () => sockets.delete(socket)); });
   server.on("upgrade", (request, client, head) => {
     if (!authorized(request) || !/^\/mux(?:[/?]|$)/.test(request.url)) { client.destroy(); return; }
+    // Node drops the server's socket error handler on upgrade: a reset from the AO window (closed
+    // or reloaded mid-connect) before the upstream answers was an uncaught 'error'.
+    client.on("error", () => client.destroy());
     const upstream = http.request({ hostname: "127.0.0.1", port: daemonPort, path: request.url, headers: { ...request.headers, host: `127.0.0.1:${daemonPort}`, origin, cookie: "" } });
     const headerDeadline = setTimeout(() => upstream.destroy(), 20000);
     pendingRequests.add(upstream);
