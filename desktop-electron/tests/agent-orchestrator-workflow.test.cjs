@@ -1973,6 +1973,28 @@ test("a chat's timeline reads CPA's key once, not once per field, and still reda
   assert.ok(reads <= 2, `CPA's connection was read ${reads} times for one timeline`);
 });
 
+test("a long turn's work fits the window's 1 MB answer limit and keeps every tool call", async () => {
+  // Seen live: a turn's read-back was 1.5 MB (its thoughts up to 64 KB each), and ipc-schema refused
+  // it, so its folded work never opened.
+  const finished = { id: "p", role: "planner", state: "finished", route: { harness_id: "ao:claude-code", model: "cpa/gpt-6-luna" },
+    receipt: { status: "completed", thread_id: "sess-1", turn_id: "turn-1" } };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [finished] }] };
+      throw new Error(`unexpected ${endpoint}`);
+    },
+    aoHarness: { timeline: async () => Array.from({ length: 60 }, (_, index) => index % 2
+      ? { id: `c${index}`, kind: "command", status: "completed", text: `npm test ${index}`, output: "o".repeat(1500) }
+      : { id: `r${index}`, kind: "reasoning", status: "completed", text: `thinking ${index} ${"x".repeat(60_000)}` }) },
+    confirm: async () => true,
+  });
+  const result = await workflow.call("turn_timeline", { workspaceId: "ws-1", runId: "run-1", nodeId: "p" });
+  assert.ok(Buffer.byteLength(JSON.stringify(result)) < 1024 * 1024, "under the window's limit");
+  assert.equal(result.timeline.filter(item => item.kind === "command").length, 30, "every tool call is kept");
+  assert.equal(result.timeline[1].output, "o".repeat(1500), "tool output is kept when cutting thoughts was enough");
+  assert.match(result.timeline[0].text, /^thinking 0 x+…$/, "a long thought keeps its start");
+});
+
 test("AO chat reads native managed capability for exactly one consented node", async () => {
   const calls = [];
   const capability = { supported: true, profiles: [{ id: ":workspace", allowed: true }],

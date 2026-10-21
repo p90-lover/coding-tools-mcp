@@ -1539,12 +1539,31 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     }));
   }
 
+  // The window refuses an answer over 1 MB (ipc-schema). A long turn's thoughts and messages (up to
+  // 64 KB each) passed that, and its whole work failed to open (1.5 MB, seen live). Over this budget
+  // the longest texts are cut first, then tool arguments, output and diffs, and only then the oldest
+  // items, so the turn still opens with as many of its tool calls as fit.
+  const TIMELINE_RESPONSE_BYTES = 800_000;
+  function fitTimeline(items) {
+    const size = () => Buffer.byteLength(JSON.stringify(items));
+    if (size() <= TIMELINE_RESPONSE_BYTES) return items;
+    const cut = (text, limit) => text.length <= limit ? text : `${text.slice(0, limit).replace(/[\ud800-\udbff]$/, "")}…`;
+    for (const limit of [16 * 1024, 4096, 1024]) {
+      items = items.map(item => item.text.length > limit ? { ...item, text: cut(item.text, limit) } : item);
+      if (size() <= TIMELINE_RESPONSE_BYTES) return items;
+    }
+    items = items.map(({ input: _input, output: _output, files, ...item }) =>
+      files ? { ...item, files: files.map(({ diff: _diff, ...file }) => file) } : item);
+    while (items.length > 1 && size() > TIMELINE_RESPONSE_BYTES) items = items.slice(Math.ceil(items.length / 10));
+    return items;
+  }
+
   /** turn_timeline: a finished card's work, read back from its AO session when the chat opens it. */
   async function turnTimeline({ workspaceId, runId, nodeId } = {}) {
     const { node } = await savedNode(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80));
     const session = node?.receipt?.thread_id, turnId = node?.receipt?.turn_id;
     if (!node || !externalAgent(node) || !session || !turnId) return { ok: true, timeline: [] };
-    return { ok: true, timeline: publicTimeline(await harnessService().timeline(session, turnId)) };
+    return { ok: true, timeline: fitTimeline(publicTimeline(await harnessService().timeline(session, turnId))) };
   }
 
   const activityFrames = new Map();
