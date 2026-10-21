@@ -55,7 +55,11 @@ function host(world, dataRoot, extra = {}) {
   });
 }
 
-const tempRoot = () => fs.mkdtempSync(path.join(os.tmpdir(), "gpt-browser-"));
+// Every root is removed when the file's tests end: left behind, each run added folders to the
+// system temp directory (on the SSD), 614 of them by 2026-10-21.
+const tempRoots = [];
+const tempRoot = () => { const root = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-browser-")); tempRoots.push(root); return root; };
+test.after(() => { for (const root of tempRoots) fs.rmSync(root, { recursive: true, force: true }); });
 
 test("the address bar accepts any http(s) site and defaults bare addresses to https", () => {
   assert.equal(browsableUrl("https://chatgpt.com/accept-referral?referral_context=abc"), "https://chatgpt.com/accept-referral?referral_context=abc");
