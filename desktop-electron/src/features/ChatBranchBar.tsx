@@ -2,6 +2,7 @@ import { useEffect, useState, type CSSProperties } from "react";
 import { getCodingToolsClient } from "../api/client";
 import { Caret, Icon } from "../icons";
 import { useComposerPopover } from "./AgentOrchestratorComposerControls";
+import { useSurfaceHidden } from "./page-visibility";
 
 type Branch = {
   name: string; updatedAt: string | null; upstream: string | null; worktree: string | null; current: boolean; chat: boolean; default?: boolean;
@@ -80,6 +81,7 @@ export function ChatBranchBar({ workspaceId, sessionId, inline = false }: { work
   const [failure, setFailure] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
   const popup = useComposerPopover();
+  const surfaceHidden = useSurfaceHidden();
   useEffect(() => {
     if (!workspaceId) { setData(null); return; }
     let live = true;
@@ -90,9 +92,13 @@ export function ChatBranchBar({ workspaceId, sessionId, inline = false }: { work
       if (live) setData(result && Array.isArray(result.branches) ? result as ChatBranches : null);
     }).catch(() => { if (live) setData(null); });
     read();
-    const timer = window.setInterval(read, REFRESH_MS);
+    // Each read runs about a dozen git commands in the main process. A minimized window or a hidden
+    // tab skips its refreshes, and the list is read again when the menu opens (below).
+    const timer = window.setInterval(() => { if (!surfaceHidden()) read(); }, REFRESH_MS);
     return () => { live = false; window.clearInterval(timer); };
-  }, [workspaceId, sessionId, revision]);
+  }, [workspaceId, sessionId, revision, surfaceHidden]);
+  // Opening the menu shows the branches as they are now, not as of the last refresh.
+  useEffect(() => { if (popup.open) setRevision((value) => value + 1); }, [popup.open]);
   useEffect(() => { if (!popup.open) setFailure(null); }, [popup.open]);
   if (!data) return null;
   // Inline, it is one chip in the new-chat strip; otherwise a bar over the composer of a chat.

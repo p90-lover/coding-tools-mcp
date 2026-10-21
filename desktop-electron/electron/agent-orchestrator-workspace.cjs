@@ -37,12 +37,23 @@ async function recordLocalDefaultBranch(directory) {
 
 const MAX_BRANCHES = 300;
 
-/** The repository's default branch: the one recorded for AO, else the remote's HEAD. */
+/**
+ * The repository's default branch: the one recorded for AO, else the remote's HEAD. It hardly ever
+ * changes, but every branch list asked git twice for it (the largest part of the main process's
+ * git time, measured live); it is kept for a minute per folder.
+ */
+const DEFAULT_BRANCH_TTL_MS = 60_000;
+const defaultBranches = new Map();
 async function defaultBranchOf(folder) {
+  const key = path.resolve(folder);
+  const known = defaultBranches.get(key);
+  if (known && Date.now() - known.at < DEFAULT_BRANCH_TTL_MS) return known.value;
   const recorded = await git(folder, ["config", "--local", "--get", "ao.defaultBranch"]);
-  if (recorded) return recorded;
-  const remote = await git(folder, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
-  return remote ? remote.replace(/^origin\//, "") : null;
+  const remote = recorded ? null : await git(folder, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
+  const value = recorded || (remote ? remote.replace(/^origin\//, "") : null);
+  if (defaultBranches.size >= 64) defaultBranches.delete(defaultBranches.keys().next().value);
+  defaultBranches.set(key, { at: Date.now(), value });
+  return value;
 }
 
 /**
