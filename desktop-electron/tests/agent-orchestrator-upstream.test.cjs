@@ -99,6 +99,26 @@ test("callers reading one session's conversation at once share one read, and a r
   assert.equal(reads, 2, "then it is read again");
 });
 
+test("a fresh read of a session's newest 100 items serves the Terminal pane's ask for 60", async () => {
+  // Seen live: a working chat's tail (~350 KB) was read each second by the run loop and every two
+  // seconds by the Terminal pane, under separate keys.
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const helpers = source.slice(source.indexOf("  async function chatHostGone"), source.indexOf("  // Mission-owned AO calls."));
+  const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
+  const endpoints = [];
+  const { conversationTail } = vm.runInNewContext(`${timelineBounds(source)}${helpers}${identity}({ conversationTail })`, {
+    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), agentTools: null,
+    internalApi: async (_method, endpoint) => { endpoints.push(endpoint); return { messages: [], activities: [] }; },
+  });
+  await conversationTail("s");
+  await conversationTail("s", [60, 20]);
+  assert.deepEqual(endpoints.map(endpoint => /limit=(\d+)/.exec(endpoint)[1]), ["100"], "the 100-item read serves the 60-item ask");
+  await conversationTail("other", [60, 20]);
+  await conversationTail("other");
+  assert.deepEqual(endpoints.map(endpoint => /limit=(\d+)/.exec(endpoint)[1]), ["100", "60", "100"], "a smaller read never serves a larger ask");
+});
+
 test("chat hosts that outlived the app are counted by whether their loopback address still answers", async () => {
   const vm = require("node:vm");
   const net = require("node:net");

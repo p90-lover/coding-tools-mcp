@@ -1339,6 +1339,32 @@ test("with Retry automatically on, a step that lost the local proxy waits and is
   assert.equal(asked, 0);
 });
 
+test("the UI's polls share one AO run read for a moment; a write or a decision reads afresh", async () => {
+  // Seen live: the headless service sat at ~45% of a core while a chat ran, the activity, run
+  // status and run list polls each reading the same run, every read copying the whole data file.
+  const reads = [];
+  let clock = 1_000_000;
+  const mission = { id: "r1", workspace_id: "ws-1", nodes: [{ id: "lead", role: "planner", state: "pending" }] };
+  const workflow = createAgentOrchestratorWorkflow({ now: () => clock,
+    requestHeadless: async (endpoint) => {
+      reads.push(endpoint);
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [structuredClone(mission)] };
+      return { ok: true, run: mission };
+    } });
+  const first = await workflow.call("runs", { workspaceId: "ws-1", runId: "r1" });
+  first.runs[0].nodes.length = 0; // a caller's copy is its own
+  await workflow.call("run_status", { workspaceId: "ws-1", runId: "r1" });
+  const again = await workflow.call("runs", { workspaceId: "ws-1", runId: "r1" });
+  assert.equal(again.runs[0].nodes.length, 1);
+  assert.deepEqual(reads, ["/api/v1/ao/read"], "three polls, one read");
+  await workflow.call("control_run", { workspaceId: "ws-1", runId: "r1", action: "pause" }).catch(() => undefined);
+  await workflow.call("runs", { workspaceId: "ws-1", runId: "r1" });
+  assert.equal(reads.filter(endpoint => endpoint === "/api/v1/ao/read").length, 2, "a write in between: read again");
+  clock += 300;
+  await workflow.call("runs", { workspaceId: "ws-1", runId: "r1" });
+  assert.equal(reads.filter(endpoint => endpoint === "/api/v1/ao/read").length, 3, "then the moment passes");
+});
+
 test("a lost connection is retried even on a card with many finished rounds, but never a sign-in failure", async () => {
   const proxy = "proxyconnect tcp: dial tcp 127.0.0.1:17891: connectex: No connection could be made";
   for (const [error, retried] of [[proxy, true], [`API error 503: auth_unavailable ${proxy}`, false]]) {

@@ -3,7 +3,7 @@ import { getCodingToolsClient } from "../api/client";
 import type { JsonObject } from "../api/contracts";
 import type { Copy } from "../i18n";
 import type { Language } from "../types";
-import { pageHidden } from "./page-visibility";
+import { useSurfaceHidden } from "./page-visibility";
 import { Card, Field, Notice, Pill, Segmented, WorkspacePicker, errorText, useWorkspaces } from "./workspace-ui";
 
 interface NativeCodexPanelProps {
@@ -33,6 +33,7 @@ function remember(workspaceId: string, value: Remembered) {
 const wholeNumber = (value: string) => /^(0|[1-9]\d*)$/.test(value);
 
 export function NativeCodexPanel({ copy, language, setError }: NativeCodexPanelProps) {
+  const surfaceHidden = useSurfaceHidden();
   const { workspaces, loaded, loading, refresh } = useWorkspaces(setError);
   const [workspaceId, setWorkspaceId] = useState("");
   const [executable, setExecutable] = useState("");
@@ -84,7 +85,7 @@ export function NativeCodexPanel({ copy, language, setError }: NativeCodexPanelP
       }
     };
     void read();
-    const timer = setInterval(() => { if (!pageHidden()) void read(); }, STATUS_POLL_MS);
+    const timer = setInterval(() => { if (!surfaceHidden()) void read(); }, STATUS_POLL_MS);
     return () => { current = false; clearInterval(timer); };
   }, [workspaceId]);
 

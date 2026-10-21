@@ -21,7 +21,7 @@ import {
 import "./agent-orchestrator.css";
 import "./codex-chat.css";
 import "./claude-theme.css";
-import { onAoPush, pageHidden } from "./page-visibility";
+import { onAoPush, pageHidden, useSurfaceHidden } from "./page-visibility";
 
 type Clause = { id: string; title: string; detail?: string; state: string };
 type PlanTask = {
@@ -466,6 +466,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
   setError: (error: string | null) => void;
 }) {
   const copy = words[language];
+  const surfaceHidden = useSurfaceHidden();
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [workspaceReady, setWorkspaceReady] = useState(false);
   // The project whose board and runs were last read in full: until it is the open one, the chat
@@ -991,7 +992,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     let live = true;
     let reading = false;
     const refresh = () => {
-      if (reading || pageHidden()) return;
+      if (reading || surfaceHidden()) return;
       reading = true;
       void moduleCall("runs", { workspaceId }).then((current) => {
         if (live && Array.isArray(current.runs)) {
@@ -1216,7 +1217,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     let disposed = false;
     let reading = false;
     const pollSelection = async () => {
-      if (reading || pageHidden()) return;
+      if (reading || surfaceHidden()) return;
       reading = true;
       let accepted = false;
       try {
@@ -1263,7 +1264,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     let live = true;
     let reading = false;
     const refresh = async () => {
-      if (reading || pageHidden()) return;
+      if (reading || surfaceHidden()) return;
       reading = true;
       try {
         const status = await moduleCall("run_status", { workspaceId, runId: selectedRunId });
@@ -1295,7 +1296,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     let live = true;
     let reading = false;
     const refresh = async () => {
-      if (reading || pageHidden()) return;
+      if (reading || surfaceHidden()) return;
       reading = true;
       try {
         const results = await Promise.all(ids.map(async nodeId => ({
@@ -1795,13 +1796,16 @@ export function AgentOrchestratorSurface({ language, setError }: {
   // Only runs of the open project: right after a project switch `missions` still holds the previous
   // one's, and asking this workspace for them failed every second ("AO run not found in this workspace").
   const workingRunIds = (view === "overview" && inspectedId && selectedRun ? [selectedRun] : missions.filter(mission => mission.project_id === chatTaskId))
-    .filter(mission => mission.workspace_id === workspaceId && mission.nodes.some(node => ["running", "reserved"].includes(node.state))).map(mission => mission.id).join(",");
+    // A cancelled run works no more, whatever its cards were left saying: three such runs whose
+    // cards stayed "running" kept this one-second poll going for good.
+    .filter(mission => mission.workspace_id === workspaceId && !mission.cancelled
+      && mission.nodes.some(node => ["running", "reserved"].includes(node.state))).map(mission => mission.id).join(",");
   useEffect(() => {
     if (!workspaceId || !workingRunIds) return;
     let live = true;
     let reading = false;
     const poll = async () => {
-      if (reading || pageHidden()) return;
+      if (reading || surfaceHidden()) return;
       reading = true;
       try {
         const frames = await Promise.all(workingRunIds.split(",").map(async runId => {

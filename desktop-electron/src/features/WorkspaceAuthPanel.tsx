@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { getCodingToolsClient } from "../api/client";
 import type { Copy } from "../i18n";
 import type { Language } from "../types";
-import { pageHidden } from "./page-visibility";
+import { useSurfaceHidden } from "./page-visibility";
 import { Card, Field, Notice, Pill, Segmented, WorkspacePicker, errorText, useWorkspaces } from "./workspace-ui";
 import type { Tone } from "./workspace-ui";
 
@@ -26,6 +26,7 @@ function listenerState(value: unknown): string {
 }
 
 export function WorkspaceAuthPanel({ copy, language, setError }: WorkspaceAuthPanelProps) {
+  const surfaceHidden = useSurfaceHidden();
   const { workspaces, loaded, loading, refresh } = useWorkspaces(setError);
   const [workspaceId, setWorkspaceId] = useState("");
   const [service, setService] = useState<Service>("mcp");
@@ -74,7 +75,7 @@ export function WorkspaceAuthPanel({ copy, language, setError }: WorkspaceAuthPa
       }
     };
     void read();
-    const timer = setInterval(() => { if (!pageHidden()) void read(); }, LISTENER_POLL_MS);
+    const timer = setInterval(() => { if (!surfaceHidden()) void read(); }, LISTENER_POLL_MS);
     return () => { current = false; clearInterval(timer); };
   }, [selected?.id, service]);
 

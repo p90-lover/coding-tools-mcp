@@ -261,6 +261,16 @@ function createChatPreferences(file) {
 }
 
 function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, logger = null }) {
+  // AO run reads shared for a moment (see runs()). Every other headless call may change AO's state,
+  // so it counts once as it starts and once as it ends: a read taken across one is never reused.
+  const AO_READ_FRESH_MS = 250;
+  const aoReads = new Map(); // `${workspace}|${run}` -> { at, writes, read }
+  let aoWrites = 0;
+  const sendHeadless = requestHeadless;
+  requestHeadless = async (...args) => {
+    aoWrites += 1;
+    try { return await sendHeadless(...args); } finally { aoWrites += 1; }
+  };
   const goals = createGoalStore({ file: goalsFile, now });
   const chatPreferences = createChatPreferences(chatPreferencesFile);
   // Chats whose agent asked to be woken later (schedule_wakeup, chat-wakeups.cjs).
@@ -1254,16 +1264,36 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     return { mission, node: mission?.nodes?.find((entry) => entry.id === nodeId) };
   }
 
-  async function runs({ workspaceId, runId } = {}) {
+  /**
+   * A workspace's AO runs, or one run. `shared`: the UI's polls (the chat's activity, run status,
+   * the run list) take a read another caller made a moment ago. A working chat's activity poll,
+   * run status poll and the run loop read the same run several times a second, and each read cost
+   * the headless service several copies of the whole data file: it sat at ~45% of a core. Decisions
+   * (the run loop, a claim, a card's re-check) always read afresh, and their reads serve the polls.
+   * A read taken across any other headless call (which may change AO's state) is never reused, and
+   * each caller gets its own copy.
+   */
+  async function runs({ workspaceId, runId, shared: share = false } = {}) {
     const id = clean(workspaceId, 128);
-    const response = await requestHeadless("/api/v1/ao/read", {
-      workspace_id: id,
-      ...(runId ? { run_id: clean(runId, 80) } : {}),
-    });
-    if (response?.ok !== true || !Array.isArray(response.runs)) {
-      throw new Error("AO run read failed");
+    const body = { workspace_id: id, ...(runId ? { run_id: clean(runId, 80) } : {}) };
+    const key = `${body.workspace_id}|${body.run_id ?? ""}`;
+    const known = aoReads.get(key);
+    const shared = share && known && known.writes === aoWrites && now() - known.at < AO_READ_FRESH_MS
+      ? known.read
+      : null;
+    const read = shared ?? (async () => {
+      const response = await sendHeadless("/api/v1/ao/read", body);
+      if (response?.ok !== true || !Array.isArray(response.runs)) {
+        throw new Error("AO run read failed");
+      }
+      return response;
+    })();
+    if (!shared) {
+      aoReads.set(key, { at: now(), writes: aoWrites, read });
+      read.catch(() => { if (aoReads.get(key)?.read === read) aoReads.delete(key); });
+      if (aoReads.size > 64) aoReads.delete(aoReads.keys().next().value);
     }
-    return response;
+    return structuredClone(await read);
   }
 
   async function updateRun({ workspaceId, change } = {}) {
@@ -1547,7 +1577,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
 
   async function activity({ workspaceId, runId } = {}) {
     const id = clean(workspaceId, 128), run = clean(runId, 80);
-    const saved = await runs({ workspaceId: id, runId: run });
+    const saved = await runs({ workspaceId: id, runId: run, shared: true });
     const mission = saved.runs.find(entry => entry.id === run && entry.workspace_id === id);
     if (!mission) throw new Error("AO run not found");
     const working = mission.nodes.filter(node => ["reserved", "running"].includes(node.state));
@@ -1930,7 +1960,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // `driven`: this app session's loop is observing the run right now. A card a previous session
     // left "running" is only ever settled by an observe, so callers need to tell the two apart.
     if (current) return { ok: true, status: current.status, driven: current.driving === true, ...(current.detail ? { detail: current.detail } : {}) };
-    const saved = await runs({ workspaceId: id, runId: run });
+    const saved = await runs({ workspaceId: id, runId: run, shared: true });
     const mission = saved.runs.find((entry) => entry.id === run && entry.workspace_id === id);
     if (!mission) throw new Error("AO run unavailable");
     const status = mission.paused && !mission.cancelled ? "paused" : mission.cancelled || mission.nodes.some((node) => ["held", "cancelled", "archived", "reserved", "running"].includes(node.state))
@@ -4114,7 +4144,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         return { ok: true, run: await subagents.stop(clean(args.subagentId, 128)) };
       }
       case "runs": {
-        const saved = await runs(args);
+        const saved = await runs({ workspaceId: args.workspaceId, runId: args.runId, shared: true });
         // The runs of deleted chat messages stay in AO's history but are not shown in their chat.
         return { ...saved, runs: chatEdits.visible(clean(args.workspaceId, 128), saved.runs), goals: goals.forWorkspace(clean(args.workspaceId, 128)),
           wakeups: wakeups.forWorkspace(clean(args.workspaceId, 128)) };

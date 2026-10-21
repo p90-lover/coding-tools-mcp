@@ -3,7 +3,7 @@ import { getCodingToolsClient } from "../api/client";
 import type { JsonObject, WorkspaceSummary } from "../api/contracts";
 import { AgentOrchestratorOriginalSurface, type AoTerminalView } from "./AgentOrchestratorOriginalSurface";
 import "./antigravity-cli.css";
-import { pageHidden } from "./page-visibility";
+import { useSurfaceHidden } from "./page-visibility";
 
 type Account = { name: string; email: string | null; status: string; disabled: boolean; error: string | null };
 type Sweep = { at: string; refreshed: string[]; signIn: string[]; failed: string[]; error?: string };
@@ -41,6 +41,7 @@ function saveTerminal(value: AoTerminalView | null) {
 const needsAuth = (account: Account) => !account.disabled && (account.status === "expired" || account.status === "error");
 
 export function AntigravityCliSurface({ setError, openNetwork }: { setError: (error: string | null) => void; openNetwork: () => void }) {
+  const surfaceHidden = useSurfaceHidden();
   const [status, setStatus] = useState<Status | null>(null);
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [workspaceId, setWorkspaceId] = useState("");
@@ -60,7 +61,7 @@ export function AntigravityCliSurface({ setError, openNetwork }: { setError: (er
     void getCodingToolsClient().workspaces.list({ cursor: 0, limit: 100 })
       .then(page => { setWorkspaces([...page.items]); setWorkspaceId(page.items[0]?.id ?? ""); })
       .catch(() => undefined);
-    const timer = setInterval(() => { if (!pageHidden()) void refreshStatus(); }, 15_000);
+    const timer = setInterval(() => { if (!surfaceHidden()) void refreshStatus(); }, 15_000);
     return () => clearInterval(timer);
   }, [refreshStatus]);
 

@@ -119,6 +119,11 @@ pub struct DataStore {
     baseline: serde_json::Value,
     persistent: bool,
     parsed: Option<Parsed>,
+    /// The file version `data` and `baseline` are an exact copy of, while they are. Each request
+    /// refreshes the store two to four times, and with the file unchanged every refresh still
+    /// cloned the whole parsed copy (1.4 MB of runs): the headless service sat at ~45% of a core
+    /// with the UI's polls alone. Every change to `data` goes through `save`, which clears it.
+    synced: Option<FileStamp>,
 }
 
 impl DataStore {
@@ -135,6 +140,7 @@ impl DataStore {
             baseline,
             persistent: true,
             parsed: None,
+            synced: None,
         };
         let wrote = !existed_before || imported > 0;
         if wrote {
@@ -145,6 +151,7 @@ impl DataStore {
         }
         // Read: the stamp from before reading (see latest_on_disk). Written: the file just saved.
         store.remember_parsed(if wrote { file_stamp(&path) } else { read_stamp })?;
+        store.synced = store.parsed.as_ref().map(|parsed| parsed.stamp);
         crate::auth::sync_trusted_origins(&store.data);
         Ok(store)
     }
@@ -160,6 +167,7 @@ impl DataStore {
             baseline,
             persistent: false,
             parsed: None,
+            synced: None,
         })
     }
 
@@ -231,9 +239,15 @@ impl DataStore {
             return Ok(());
         }
         let _guard = lock_data_file()?;
+        // Already the version on disk: nothing to copy (or to tell the origin list again).
+        let current = file_stamp(&data_file_path()?);
+        if current.is_some() && current == self.synced {
+            return Ok(());
+        }
         let (data, value) = self.latest_on_disk()?;
         self.baseline = value;
         self.data = data;
+        self.synced = self.parsed.as_ref().map(|parsed| parsed.stamp);
         crate::auth::sync_trusted_origins(&self.data);
         Ok(())
     }
@@ -243,6 +257,8 @@ impl DataStore {
             self.baseline = serde_json::to_value(&self.data)?;
             return Ok(());
         }
+        // `data` holds changes not on disk (or will, if this fails): never a copy of the file.
+        self.synced = None;
         let _guard = lock_data_file()?;
         let (latest, latest_value) = self.latest_on_disk()?;
         let local = serde_json::to_value(&self.data)?;
@@ -265,6 +281,8 @@ impl DataStore {
             // What was just written is the file now; nothing needs to read it back.
             self.remember_parsed(file_stamp(&data_file_path()?))?;
         }
+        // Written, or already equal to the latest version read: the store is that file version.
+        self.synced = self.parsed.as_ref().map(|parsed| parsed.stamp);
         crate::auth::sync_trusted_origins(&self.data);
         Ok(())
     }
@@ -546,9 +564,14 @@ mod tests {
             store.data.last_workspace_id = "unsaved".into();
             store.refresh().expect("refresh after a write");
             assert_eq!(store.data().last_workspace_id, "written-elsewhere");
-            // The file is unchanged now, so this refresh is served from the parsed copy: an
-            // unsaved edit is still dropped, exactly as a full read would.
+            // The file is unchanged and the store is its copy: a refresh copies nothing.
+            assert!(store.synced.is_some());
+            store.refresh().expect("refresh of an unchanged file");
+            assert_eq!(store.data().last_workspace_id, "written-elsewhere");
+            // Data changes only inside save(), which first marks the store unsynced; an edit a
+            // failed save left behind is dropped by the next refresh, from the parsed copy.
             store.data.last_workspace_id = "unsaved-again".into();
+            store.synced = None;
             store.refresh().expect("refresh from the parsed copy");
             assert_eq!(store.data().last_workspace_id, "written-elsewhere");
             store.data.last_workspace_id = "saved-here".into();
