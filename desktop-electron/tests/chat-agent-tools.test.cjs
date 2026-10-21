@@ -302,7 +302,7 @@ test("a chat agent's tool list leaves out routing, revision and consent fields a
   ] };
   const { tools, calls } = fixture({ root: tree.root, catalog });
   try {
-    const { url, auth } = await session(tools, { agent: "claude-code" });
+    const { url, auth } = await session(tools, { agent: "codex" });
     const list = (await post(url, { jsonrpc: "2.0", id: 2, method: "tools/list" }, auth)).body.result.tools;
     assert.deepEqual(list.map((entry) => entry.name).filter((name) => name !== "show_in_chat"), ["read_file", "search_text"],
       "grep_text runs search_text and tool_search names headless's catalog, so neither is listed");
@@ -347,11 +347,34 @@ test("project instructions a session already received come back once as text, th
   assert.equal(toolResult("read_file", {}, withInstructions("r1")).structuredContent.project_instructions.instructions, "Use pnpm.");
 });
 
+test("Claude Code is not offered the file, git and plan tools its own harness has, but can still call them", async () => {
+  // Every request repeats the tool list: a new chat sent 53,000-66,000 tokens before the user's message.
+  const tree = tempTree();
+  const { tools, calls } = fixture({ root: tree.root });
+  try {
+    const claude = await session(tools, { agent: "claude-code" });
+    const listed = (await post(claude.url, { jsonrpc: "2.0", id: 2, method: "tools/list" }, claude.auth)).body.result.tools.map((entry) => entry.name);
+    assert.deepEqual(listed, ["view_image", "show_in_chat"], "read_file, apply_patch, git_status and update_plan are Claude Code's own");
+    const init = await post(claude.url, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "1" } } }, claude.auth);
+    assert.match(init.body.result.instructions, /use your own tools: Read, Grep, Glob, Edit, Write, and Bash for git/);
+    assert.doesNotMatch(init.body.result.instructions, /read_file|search_text|apply_patch/, "it is not told about tools it is not shown");
+    const called = await callTool(claude.url, claude.auth, "read_file", { path: "src/a.txt" });
+    assert.equal(called.isError, false, "a call naming one still works");
+    assert.equal(calls.at(-1).body.tool, "read_file");
+
+    const codex = await session(tools, { agent: "codex" });
+    const codexListed = (await post(codex.url, { jsonrpc: "2.0", id: 2, method: "tools/list" }, codex.auth)).body.result.tools.map((entry) => entry.name);
+    assert.deepEqual(codexListed, ["read_file", "apply_patch", "git_status", "view_image", "update_plan", "show_in_chat"], "other agents keep them");
+  } finally {
+    tree.cleanup?.();
+  }
+});
+
 test("the MCP endpoint answers initialize, lists the agent tools and calls them in the session's worktree", async () => {
   const tree = tempTree();
   const { tools, calls } = fixture({ root: tree.root });
   try {
-    const { url, auth } = await session(tools, { agent: "claude-code" });
+    const { url, auth } = await session(tools, { agent: "codex" });
     const init = await post(url, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "1" } } }, auth);
     assert.equal(init.status, 200);
     assert.equal(init.body.result.protocolVersion, "2025-03-26");

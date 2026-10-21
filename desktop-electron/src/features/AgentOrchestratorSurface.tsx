@@ -1562,10 +1562,22 @@ export function AgentOrchestratorSurface({ language, setError }: {
     try { execution = aoChatExecution(composerMode, singleRoute, savedTeams, composerTeamId); } catch { return; }
     // Wait for the picker to settle so trying models does not start an agent for each.
     const timer = setTimeout(() => {
+      lastPrewarm.current = Date.now();
       void moduleCall("chat_prewarm", { workspaceId, ...execution, ...(chatTaskId ? { taskId: chatTaskId } : {}) }).catch(() => undefined);
     }, 600);
     return () => clearTimeout(timer);
   }, [prewarmKey, savedTeams.length]);
+  // Warmed again when the user starts typing (at most every 30 s): an agent left idle is released,
+  // and the message then waited for a whole launch (4-59 s, measured live) after it was sent. The
+  // backend keeps a warm or running agent as it is, so asking again costs nothing then.
+  const lastPrewarm = useRef(0);
+  const prewarmOnTyping = useCallback(() => {
+    if (!prewarmKey || Date.now() - lastPrewarm.current < 30_000) return;
+    let execution: JsonObject;
+    try { execution = aoChatExecution(composerMode, singleRoute, savedTeams, composerTeamId); } catch { return; }
+    lastPrewarm.current = Date.now();
+    void moduleCall("chat_prewarm", { workspaceId, ...execution, ...(chatTaskId ? { taskId: chatTaskId } : {}) }).catch(() => undefined);
+  }, [prewarmKey, composerMode, singleRoute, savedTeams, composerTeamId, workspaceId, chatTaskId]);
   const retryChatStart = (runId: string) => void run("start-run", async () => {
     const taskId = missions.find((mission) => mission.id === runId)?.project_id ?? "";
     try {
@@ -2193,7 +2205,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
             ? <div className="ao-empty-state"><p>{copy.noWorkspace}</p><button className="button-primary" type="button" onClick={() => setSheet("settings")}>{copy.settings}</button></div>
             : <AgentOrchestratorChat
                 runs={chatRuns}
-                tasks={allTasks} selectedTaskId={chatTaskId ?? ""} deciding={chatTaskId === null}
+                tasks={allTasks} selectedTaskId={chatTaskId ?? ""} deciding={chatTaskId === null} onComposing={prewarmOnTyping}
                 projectName={workspaces.find((item) => item.id === workspaceId)?.name} projectBranch={projectBranch}
                 stop={stopChat} restart={restartChat} loadWork={loadChatWork}
                 thread={chatThread}
