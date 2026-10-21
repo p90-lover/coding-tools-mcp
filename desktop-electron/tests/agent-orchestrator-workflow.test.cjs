@@ -2296,6 +2296,50 @@ test("background command approver leaves typed non-command, truncated and unoffe
   }
 });
 
+test("the command approver reviews a repeated request once: the same command asked again uses its verdict", async () => {
+  const route = { harness_id: "codex-native", provider_id: "cliproxyapi-antigravity", model: "test-model", permission_profile: ":workspace" };
+  // Two requests (different ids) for the same command, then one for another command.
+  const pending = [
+    { approval_id: "first", kind: "command", command: "docker compose up -d", cwd: "C:/project" },
+    { approval_id: "again", kind: "command", command: "docker compose up -d", cwd: "C:/project" },
+    { approval_id: "other", kind: "command", command: "docker compose down", cwd: "C:/project" },
+  ];
+  const mission = { id: "run", workspace_id: "ws", revision: 3, grant: { executable_sha256: "a".repeat(64) }, nodes: [
+    { id: "approver", role: "approver", state: "finished", parents: [], route, receipt: { verdict: "APPROVED" }, settings: { auto_decide: true } },
+    { id: "worker", role: "worker", state: "running", parents: ["approver"], route },
+  ] };
+  const reviewed = [], answered = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) };
+      reviewed.push(JSON.parse(init.body).messages[0].content);
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"allow","reason":"Starts the project services"}' } }] }) };
+    },
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+      if (endpoint.endsWith("/observe")) {
+        const left = pending.filter((item) => !answered.includes(item.approval_id));
+        if (!left.length) mission.nodes[1].state = "finished";
+        return { ok: true, pending_approvals: left };
+      }
+      if (endpoint.endsWith("/approval")) { answered.push(body.approval_id); return { ok: true }; }
+      throw new Error("Unexpected endpoint " + endpoint);
+    },
+  });
+  await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  for (let tries = 0; tries < 100 && answered.length < 3; tries++) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(answered.sort(), ["again", "first", "other"], "every request was answered for the person");
+  assert.equal(reviewed.length, 2, "one model call per distinct request, not per request id");
+  assert.ok(reviewed.some((prompt) => prompt.includes("docker compose up -d")) && reviewed.some((prompt) => prompt.includes("docker compose down")));
+  for (let tries = 0; tries < 70; tries++) {
+    if ((await workflow.call("run_status", { workspaceId: "ws", runId: "run" })).status === "finished") break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+});
+
 test("manual dispatch reconnects a stale idle native policy through exact normal consent", async () => {
   const calls = [], prompts = [];
   const route = { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web",

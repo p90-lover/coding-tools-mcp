@@ -2283,6 +2283,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const REVIEW_TRIES = 3;
   const REVIEW_RETRY_MS = 4_000;
   const reviewFailures = new Map(); // approval_id -> { tries, at }
+  // A verdict serves the same request again for a while. Requests were deduped only by their id, so
+  // an agent running the same `cargo test` twenty times had it reviewed twenty times, each a model
+  // call. The key is the whole review prompt: the approver's rules, the folder, the exact request,
+  // its permissions and the contents of any local script it runs, so an edited script, another
+  // folder or new rules are reviewed afresh. Only a model's answer is kept, never a failure.
+  const REVIEW_CACHE_MS = 10 * 60_000;
+  const reviewVerdicts = new Map(); // sha256(prompt) -> { at, action, reason }
   async function askApprover({ approver, mission, approval }) {
     const { baseUrl, key } = connection();
     const catalog = await models();
@@ -2310,6 +2317,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       "allow: clearly safe and needed for the task. deny: destructive, outside the workspace, secret-touching or unrelated. ask: anything unclear.",
       scripts.length ? "Judge a command that runs a local script by the script's contents shown above." : "",
     ].filter(Boolean).join("\n");
+    const verdictKey = createHash("sha256").update(prompt).digest("hex");
+    const known = reviewVerdicts.get(verdictKey);
+    if (known && now() - known.at < REVIEW_CACHE_MS) {
+      logger?.info?.("ao.approval_reviewed", { cached: true, action: known.action, tool: String(approval.tool ?? approval.kind ?? "").slice(0, 80),
+        folder: Boolean(folder), reason: publicText(known.reason, 200) });
+      return { action: known.action, reason: known.reason };
+    }
     let failure = null;
     for (const model of candidates) {
       const left = deadline - now();
@@ -2330,6 +2344,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // The reason otherwise lived only in the run's latest note, so a wrong deny could not be traced.
         logger?.info?.("ao.approval_reviewed", { model, action: decision.action, tool: String(approval.tool ?? approval.kind ?? "").slice(0, 80),
           folder: Boolean(folder), reason: publicText(reason, 200) });
+        reviewVerdicts.set(verdictKey, { at: now(), action: decision.action, reason });
+        if (reviewVerdicts.size > 200) reviewVerdicts.delete(reviewVerdicts.keys().next().value);
         return { action: decision.action, reason };
       } catch (error) {
         failure = error;
@@ -2749,7 +2765,6 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     const detail = "Helper: " + publicText(decision.reason || decision.action, 300);
     state.recoveryDetail = detail;
-    if (decision.action === "wait") state.recoveryWaits.set(workerAttempt, detail);
     if (decision.action === "retry") {
       await controlRun({ workspaceId, runId: mission.id, action: node.role === "worker" ? "retry_auto" : "retry", ...(node.role === "worker" ? { nodeId: node.id } : {}) });
       return { changed: true, retried: true, detail: "Helper retried " + (node.settings?.name || node.role) + ": " + publicText(decision.reason, 300) };
@@ -2758,6 +2773,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       await controlRun({ workspaceId, runId: mission.id, action: "review_failures", nodeId: node.id });
       return { changed: true, detail };
     }
+    // A decision that leaves the run as it is (wait, or stop/give_up on a step that is not a
+    // worker's) stands for this attempt. Only "wait" was kept, so the others asked the recovery
+    // helper's model again on every pass of the run loop.
+    state.recoveryWaits.set(workerAttempt, detail);
     return { detail };
   }
 
@@ -3391,6 +3410,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
 
     let task;
+    // Whether the new chat starts as "New task", the only name nameChat replaces. A name the user
+    // gave, or a single chat's name taken from its message, kept nameChat's model call for nothing.
+    let defaultTitled = false;
     let continuation = null;
     if (taskId) {
       task = clean(taskId, 128);
@@ -3428,8 +3450,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     } else {
       const before = await board({ workspaceId: id });
       const known = new Set(before.tasks.map((entry) => entry.id));
+      const startTitle = clean(title && String(title).trim() ? title : executionMode === "single" ? fallbackChatTitle(naming) : CHAT_TASK_TITLE, 240);
+      defaultTitled = startTitle === CHAT_TASK_TITLE;
       await write(id, { expected_revision: before.revision, change: {
-        operation: "create", title: clean(title && String(title).trim() ? title : executionMode === "single" ? fallbackChatTitle(naming) : CHAT_TASK_TITLE, 240), description: text,
+        operation: "create", title: startTitle, description: text,
       } });
       const added = (await board({ workspaceId: id })).tasks.filter((entry) => !known.has(entry.id));
       if (added.length !== 1) throw new Error("The new chat's task needs review; refresh the board");
@@ -3451,14 +3475,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (deferStart === true) {
       // Keep the normal authorization path: an expired/missing local approval fails visibly.
       void startRun({ workspaceId: id, runId, executable: selectedExecutable }).then(() => {
-        if (!taskId) void nameChat(id, task, naming).catch(() => undefined);
+        if (!taskId && defaultTitled) void nameChat(id, task, naming).catch(() => undefined);
       }).catch(() => undefined);
       return { ok: true, taskId: task, runId, run: createdRun, status: "starting" };
     }
     // The chat exists from here on: report a failed start inside it instead of losing the chat.
     try {
       const started = await startRun({ workspaceId: id, runId, executable: selectedExecutable });
-      if (!taskId && executionMode !== "single") void nameChat(id, task, naming).catch(() => undefined);
+      if (!taskId && defaultTitled) void nameChat(id, task, naming).catch(() => undefined);
       return { ok: true, taskId: task, runId, status: started.status };
     } catch (error) {
       return { ok: true, taskId: task, runId, status: "failed", detail: error instanceof Error ? error.message : String(error) };
