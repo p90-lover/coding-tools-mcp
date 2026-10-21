@@ -2179,14 +2179,14 @@ test("AO connection forwards saved native policy and rejects a resolver substitu
 });
 
 test("background command approver leaves typed non-command, truncated and unoffered grants for the person", async () => {
-  for (const scenario of ["non-command", "unoffered", "truncated"]) {
+  for (const scenario of ["non-command", "unoffered", "truncated", "failed-answer"]) {
     const route = { harness_id: "codex-native", provider_id: "cliproxyapi-antigravity",
       model: "test-model", permission_profile: ":read-only" };
     const pending = scenario === "non-command"
       ? ["permissions", "questions", "file_change", "mcp_form", "mcp_url", "file_write"].map(kind =>
         ({ approval_id: kind, kind, method: "native/" + kind }))
       : [{ approval_id: scenario, kind: "command", command: "Get-Content test.txt", cwd: "C:/outside",
-        request: { availableDecisions: ["decline"],
+        request: { availableDecisions: scenario === "failed-answer" ? ["accept", "decline"] : ["decline"],
           ...(scenario === "truncated" ? { additionalPermissions: "requested".repeat(150),
             networkApprovalContext: { host: "outside.invalid", protocol: "https" } } : {}) } }];
     const mission = { id: "run", workspace_id: "ws", revision: 3, grant: { executable_sha256: "a".repeat(64) }, nodes: [
@@ -2195,7 +2195,9 @@ test("background command approver leaves typed non-command, truncated and unoffe
       { id: "worker", role: "worker", state: "running", parents: ["approver"], route },
     ] };
     let finished = false, sent = 0, asked = 0;
+    const events = [];
     const workflow = createAgentOrchestratorWorkflow({
+      logger: { info: (event, detail) => events.push([event, detail]) },
       findCodexExecutable: () => process.execPath,
       resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
       cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
@@ -2210,7 +2212,11 @@ test("background command approver leaves typed non-command, truncated and unoffe
           if (finished) mission.nodes[1].state = "finished";
           return { ok: true, pending_approvals: finished ? [] : pending };
         }
-        if (endpoint.endsWith("/approval")) { sent++; throw new Error("A non-command/unoffered grant must not auto-submit"); }
+        if (endpoint.endsWith("/approval")) {
+          sent++;
+          if (scenario === "failed-answer") return { ok: true, result: { ok: false } };
+          throw new Error("A non-command/unoffered grant must not auto-submit");
+        }
         throw new Error("Unexpected endpoint " + endpoint);
       },
     });
@@ -2226,8 +2232,9 @@ test("background command approver leaves typed non-command, truncated and unoffe
     finished = true;
     assert.equal(status.status, "running", scenario + ": " + JSON.stringify(status));
     assert.match(status.detail, /Waiting for your tool approval|checking it yourself/, scenario);
-    assert.equal(sent, 0, scenario);
-    if (scenario !== "unoffered") assert.equal(asked, 0, scenario + " must not send incomplete/native form scope to command advisor");
+    assert.equal(sent, scenario === "failed-answer" ? 1 : 0, scenario);
+    assert.ok(!events.some(([event]) => event === "ao.approval_decided"), "a failed answer is not logged as a decision");
+    if (!["unoffered", "failed-answer"].includes(scenario)) assert.equal(asked, 0, scenario + " must not send incomplete/native form scope to command advisor");
     for (let tries = 0; tries < 70; tries++) {
       if ((await workflow.call("run_status", { workspaceId: "ws", runId: "run" })).status === "finished") break;
       await new Promise(resolve => setTimeout(resolve, 10));
@@ -3324,6 +3331,66 @@ test("Approve for me asks a reviewer that failed again before involving the pers
   mission.nodes[0].state = "finished";
 });
 
+test("Approve for me reviews complete scripts and leaves incomplete or failed reviews pending after 20 seconds", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once" }, { id: "no", kind: "reject_once" }];
+  const command = (`python -c "\n${"print(1)\n".repeat(27)}#`).padEnd(1490, "x") + '"';
+  assert.equal(command.length, 1491);
+  assert.equal(command.split("\n").length, 29);
+  const requests = [
+    { approval_id: "complete", command },
+    { approval_id: "truncated", command: "npm test", reviewTruncated: true },
+    { approval_id: "mcp-cut", kind: "permission", tool: "mcp__coding-tools__exec_command", toolInput: '{"cmd":"npm test"}', reviewTruncated: true },
+    { approval_id: "redacted", command: "python inspect.py fixture-secret" },
+    { approval_id: "oversized", command: "echo " + "x".repeat(25000) },
+    { approval_id: "unavailable", command: "python unavailable.py" },
+    { approval_id: "malformed", command: "python malformed.py" },
+  ].map(request => ({ source: "ao", kind: "command", tool: "PowerShell", since: "2000-01-01T00:00:00Z", decisions, ...request }));
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) },
+    nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "s", request_key: "k" } }] };
+  const resolved = [], prompts = [], events = [];
+  let observed = 0;
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-secret" }),
+    logger: { info: (event, detail) => events.push([event, detail]) },
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) };
+      const prompt = JSON.parse(init.body).messages[0].content;
+      prompts.push(prompt);
+      if (prompt.includes("unavailable.py")) return { ok: false, status: 503 };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: prompt.includes("malformed.py")
+        ? "not a decision" : '{"action":"allow","reason":"fixture-secret should never be logged"}' } }] }) };
+    },
+    requestHeadless: async endpoint => endpoint.endsWith("/read")
+      ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async () => { observed++; return { status: "working", turnId: "t", turnState: "running",
+        approvals: requests.filter(request => !resolved.some(([id]) => id === request.approval_id)) }; },
+      resolveApproval: async (_session, id, decision) => { resolved.push([id, decision]); return { ok: true }; },
+    },
+    confirm: async () => true,
+  });
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 300 && observed < 3; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(observed >= 3, "the stale-answer pass ran repeatedly");
+    assert.deepEqual(resolved, [["complete", "yes"]], "only the complete script received a reviewer decision");
+    assert.ok(prompts.some(prompt => prompt.includes(command)), "the reviewer sees the complete script");
+    assert.equal(prompts.length, 3, "actual truncation is not submitted as a complete review");
+    const decision = events.find(([event, detail]) => event === "ao.approval_decided" && detail.approval_id === "complete");
+    assert.ok(decision, "a successful decision records its actor");
+    assert.equal(decision[1].actor, "reviewer");
+    assert.equal(decision[1].decision, "allow");
+    assert.ok(!JSON.stringify(events).includes("fixture-secret"), "diagnostics omit model reasons and credentials");
+  } finally {
+    mission.nodes[0].state = "finished";
+    workflow.dispose();
+  }
+});
+
 test("Approve for me answers what the safety rules or its reviewer decide, and leaves a reviewer's ask to the person", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
@@ -3331,7 +3398,7 @@ test("Approve for me answers what the safety rules or its reviewer decide, and l
   // Each has waited far longer than the 20 s after which nobody answering lets the agent go on.
   const since = "2000-01-01T00:00:00.000Z";
   const requests = [
-    // Longer than the rules and the reviewer read: git push sits past the cut.
+    // Longer than the reviewer reads, but the safety rules read the whole command: git push past the cut is refused.
     { approval_id: "long", source: "ao", kind: "command", tool: "Bash", command: `echo ${"x".repeat(1600)} && git push origin main`, since, decisions },
     // An MCP tool's arguments arrive as JSON, where the newline before git push reads "\n".
     { approval_id: "json", source: "ao", kind: "permission", tool: "mcp__coding-tools__exec_command",
@@ -3375,11 +3442,11 @@ test("Approve for me answers what the safety rules or its reviewer decide, and l
     for (let tries = 0; tries < 300 && !answered().json; tries++) await new Promise(resolve => setTimeout(resolve, 10));
     // Several more passes of the run loop, long after the old 20 s answer would have fired.
     await new Promise(resolve => setTimeout(resolve, 1500));
-    assert.deepEqual(answered(), { json: "no" },
-      "git push in JSON is refused by the safety rules; the cut-off script and the plain request, left at ask, wait for the person");
+    assert.deepEqual(answered(), { long: "no", json: "no" },
+      "git push is refused by the safety rules, past the review's cut or in JSON; the plain request, left at ask, waits for the person");
     const shown = (await workflow.call("harness_status", { workspaceId: "ws", runId: "run", nodeId: "one" })).status?.pending_approvals ?? [];
-    assert.deepEqual([...shown.filter((request) => !request.awaiting_review).map((request) => request.approval_id)].sort(), ["long", "plain"],
-      "both show to the person as questions");
+    assert.deepEqual([...shown.filter((request) => !request.awaiting_review).map((request) => request.approval_id)].sort(), ["plain"],
+      "the plain request shows to the person as a question");
     releaseSlow("deny");
     for (let tries = 0; tries < 300 && !answered().slow; tries++) await new Promise(resolve => setTimeout(resolve, 10));
     assert.equal(answered().slow, "no", "the reviewer still on a request answers it; nobody allowed it meanwhile");
@@ -4489,13 +4556,14 @@ test("an agent's request answered in the chat is confirmed by the tool-request c
   const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) },
     nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1" } }] };
   const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
-  const resolved = [], general = [], toolRequests = [];
+  const resolved = [], general = [], toolRequests = [], events = [];
   let answer = true;
   const workflow = createAgentOrchestratorWorkflow({
     requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } }
       : endpoint.endsWith("/harness/status") ? { ok: true, status: { connected: false } } : { ok: true, run: mission },
     confirm: async input => { general.push(input.message); return true; },
     confirmToolRequest: async input => { toolRequests.push(input.message); return answer; },
+    logger: { info: (event, detail) => events.push([event, detail]) },
     aoHarness: {
       observe: async () => ({ status: "needs_input", turnState: "running", approvals: [{ approval_id: "req", source: "ao", kind: "command", tool: "PowerShell",
         command: "git status", decisions }] }),
@@ -4510,6 +4578,8 @@ test("an agent's request answered in the chat is confirmed by the tool-request c
   assert.deepEqual(resolved, ["yes", "no"]);
   answer = false;
   assert.equal((await workflow.call("approve_harness", { ...input, allow: true })).cancelled, true, "Cancel in that dialog answers nothing");
+  assert.deepEqual(events, [["ao.approval_decided", { approval_id: "req", actor: "user", decision: "allow" }],
+    ["ao.approval_decided", { approval_id: "req", actor: "user", decision: "deny" }]], "only confirmed successful user decisions are recorded");
   assert.deepEqual(resolved, ["yes", "no"]);
 });
 

@@ -1843,6 +1843,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       })) return { ok: false, cancelled: true };
       await harnessService().resolveApproval(pending.thread_id, approval, decision);
       rememberAnswer(approval, requestText(pending), chosen ? offered.label : approving ? "Allow once" : "Deny");
+      logger?.info?.("ao.approval_decided", { approval_id: approval, actor: "user", decision: approving ? "allow" : "deny" });
       return { ok: true, result: { ok: true } };
     }
     if (typed && (!pending.method || pending.thread_id !== thread || pending.turn_id !== turn)) {
@@ -1868,6 +1869,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (result?.ok !== true || result.result?.ok !== true) {
       throw new Error("AO tool approval outcome is unknown; inspect the card before retrying");
     }
+    logger?.info?.("ao.approval_decided", { approval_id: approval, actor: "user", decision: typed ? "typed_reply" : allow ? "allow" : "deny" });
     return result;
   }
 
@@ -2209,9 +2211,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         ? { ...advised, awaiting_review: true } : advised;
     })
     : approvals;
-  const describeRequest = (approval) => [approval.kind, approval.tool, approval.command, approval.path, approval.toolInput && `input ${approval.toolInput}`,
+  const REVIEW_REQUEST_LIMIT = 1500;
+  // A native shell command already contains its operation; display labels must not consume its review budget.
+  const describeRequest = (approval) => approval.command && !approval.path && !approval.cwd && !approval.toolInput
+    ? String(approval.command).slice(0, REVIEW_REQUEST_LIMIT + 1) : [approval.kind, approval.tool, approval.command, approval.path, approval.toolInput && `input ${approval.toolInput}`,
     approval.cwd && `in ${approval.cwd}`, approval.reason]
-    .filter(Boolean).join(" · ").slice(0, 1500);
+    .filter(Boolean).join(" · ").slice(0, REVIEW_REQUEST_LIMIT + 1);
 
   /**
    * The models a request is reviewed with, first that answers wins. "Approve for me" uses Codex's
@@ -2340,21 +2345,24 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (failed && now() - failed.at < REVIEW_RETRY_MS) continue;
         const request = describeRequest(approval);
         // The command advisor must not decide from a truncated command or permission scope.
-        const incomplete = request.length >= 1500 || JSON.stringify(approval.permissions ?? {}).length > 800;
+        const blocked = hardDenied(request) || hardDenied(approval.command) || hardDenied(approval.toolInput);
+        const incomplete = approval.reviewTruncated === true || request.length > REVIEW_REQUEST_LIMIT
+          || publicText(request, REVIEW_REQUEST_LIMIT + 1) !== request
+          || JSON.stringify(approval.permissions ?? {}).length > 800;
         // An app agent tool's safety comes from its endpoint (worktree confinement, protected paths), not
         // from reading its arguments, so a long patch is no reason to ask.
         let advice = routineAppTool(approval.tool)
-          ? { action: "allow", reason: routineAppTool(approval.tool) }
-          : routineAppCommand(approval)
-          ? { action: "allow", reason: routineAppCommand(approval) }
-          : incomplete
-          ? { action: "ask", reason: "Inspect the complete native command and requested permission scope yourself" }
-          : hardDenied(request)
-            ? { action: "deny", reason: "Blocked by the command approver's safety rules" }
+          ? { action: "allow", actor: "safety_rules", reason_code: "routine_tool", reason: routineAppTool(approval.tool) }
+          : !incomplete && routineAppCommand(approval)
+          ? { action: "allow", actor: "safety_rules", reason_code: "routine_command", reason: routineAppCommand(approval) }
+          : incomplete && !blocked
+          ? { action: "ask", unresolved: true, reason: "The complete request cannot be safely reviewed; inspect the command and permission scope yourself" }
+          : blocked
+            ? { action: "deny", actor: "safety_rules", reason_code: "blocked_command", reason: "Blocked by the command approver's safety rules" }
               // A shell line counts only from the agent's own shell tool; the app's exec_command
               // (an MCP tool with a command) keeps going to the reviewer and the app's confirm.
               : approval.kind === "command" && !/^mcp__/.test(String(approval.tool ?? "")) && routineCommand(approval.command)
-                ? { action: "allow", reason: routineCommand(approval.command) }
+                ? { action: "allow", actor: "safety_rules", reason_code: "routine_command", reason: routineCommand(approval.command) }
                 // A reviewer that cannot answer is asked again (see REVIEW_TRIES); only then does the
                 // request go to the person, and its card says why.
                 : await askApprover({ approver, mission, approval }).catch((error) => ({ action: "failed", error }));
@@ -2368,7 +2376,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             note = `The reviewer could not answer yet (${why}); trying again`;
             continue;
           }
-          advice = { action: "ask", reason: `The command reviewer could not answer after ${tries} tries (${why}); check it yourself` };
+          advice = { action: "ask", unresolved: true, reason: `The command reviewer could not answer after ${tries} tries (${why}); check it yourself` };
         }
         reviewFailures.delete(approval.approval_id);
         const offered = approval.request?.availableDecisions;
@@ -2384,15 +2392,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           const decision = aoDecision(approval, advice.action === "allow");
           if (!decision) note = `Reviewer suggests ${advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
           else if (await harnessService().resolveApproval(approval.thread_id, approval.approval_id, decision).then(() => true, () => false)) {
+            logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action });
             note = `Reviewer ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
-          } else approverAdvice.set(approval.approval_id, { action: "ask", unsent: advice.action, reason: `The reviewer's answer could not be sent (${advice.action}: ${advice.reason}); check it yourself` });
+          } else approverAdvice.set(approval.approval_id, { action: "ask", unresolved: true, unsent: advice.action, reason: `The reviewer's answer could not be sent (${advice.action}: ${advice.reason}); check it yourself` });
         } else if (approver.settings?.auto_decide === true && advice.action !== "ask") {
           const sent = await requestHeadless("/api/v1/ao/harness/approval", {
             workspace_id: workspaceId, run_id: runId, node_id: active[index].id, approval_id: approval.approval_id,
             allow: advice.action === "allow", confirm: false, approver_reason: advice.reason || advice.action, approver_request: request,
-          }).then(() => true, () => false);
+          }).then(result => result?.ok === true && result.result?.ok === true, () => false);
+          if (sent) logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action });
           if (sent) note = `Command approver ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
-          else approverAdvice.set(approval.approval_id, { action: "ask", unsent: advice.action, reason: `The command approver's answer could not be sent (${advice.action}: ${advice.reason}); check it yourself` });
+          else approverAdvice.set(approval.approval_id, { action: "ask", unresolved: true, unsent: advice.action, reason: `The command approver's answer could not be sent (${advice.action}: ${advice.reason}); check it yourself` });
         } else {
           note = `Command approver suggests ${advice.action === "ask" ? "checking it yourself" : advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
         }
@@ -2438,17 +2448,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   /**
    * What a command or tool request nobody answered gets: "wait" while the card's reviewer is still
    * on it or is sending its own answer (its review may take longer than AUTO_ANSWER_MS), "deny"
-   * when the safety rules block it, the reviewer said deny, or it is too long for the rules and the
-   * reviewer to read whole (its blocked part may sit past the cut), otherwise "allow".
+   * when the safety rules block it or the reviewer said deny. Incomplete requests and failed
+   * reviews keep waiting for the person; a valid model "ask" keeps the existing timeout policy.
    */
   function autoVerdict(mission, node, approval) {
     const advice = approverAdvice.get(approval.approval_id);
     const approver = cardApprover(mission, node);
     if (approver && (!advice || (approver.settings?.auto_decide === true && advice.action !== "ask"))) return "wait";
     const request = describeRequest(approval);
-    if (hardDenied(request) || advice?.action === "deny" || advice?.unsent === "deny") return "deny";
+    if (hardDenied(request) || hardDenied(approval.command) || hardDenied(approval.toolInput)
+      || advice?.action === "deny" || advice?.unsent === "deny") return "deny";
     if (advice?.action === "allow") return "allow";
-    return request.length >= 1500 || JSON.stringify(approval.permissions ?? {}).length > 800 ? "deny" : "allow";
+    if (advice?.unresolved || approval.reviewTruncated === true || request.length > REVIEW_REQUEST_LIMIT
+      || publicText(request, REVIEW_REQUEST_LIMIT + 1) !== request
+      || JSON.stringify(approval.permissions ?? {}).length > 800) return "wait";
+    return "allow";
   }
   async function autoAnswerStale(workspaceId, runId, waiting, mission) {
     const at = now();
@@ -2499,7 +2513,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             });
             note = allow ? "Approve for me allowed the command once" : "Denied: blocked by the command approver's safety rules or reviewer";
           }
-          logger?.info?.("ao.auto_answered", { kind: approval.kind, tool: String(approval.tool ?? "").slice(0, 80) });
+          logger?.info?.("ao.auto_answered", { approval_id: id, actor: "timeout_policy", decision: verdict ?? approval.kind,
+            kind: approval.kind, tool: String(approval.tool ?? "").slice(0, 80) });
         } catch (error) {
           logger?.warn?.("ao.auto_answer_failed", { kind: approval.kind, message: publicText(error?.message || error, 200) });
         }
