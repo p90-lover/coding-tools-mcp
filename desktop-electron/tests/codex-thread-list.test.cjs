@@ -252,6 +252,10 @@ test("chat order: active chats stay on top, new chats come next, then the order 
   assert.deepEqual(ids(chats, []), ["b", "new", "a", "c"], "running first, then newest first");
   assert.deepEqual(ids(chats, ["c", "a"]), ["b", "new", "c", "a"], "a chat you haven't placed stays above your order");
   assert.deepEqual(ids(chats, ["c", "a", "new", "b"], false), ["c", "a", "new", "b"], "without the setting, only your order counts");
+  // A chat waiting on you floats until you place it; placed, it stays where you put it.
+  const waiting = [{ taskId: "w", status: "attention" }, { taskId: "a", status: "done" }];
+  assert.deepEqual(ids(waiting, []), ["w", "a"], "an unplaced chat waiting on you is on top");
+  assert.deepEqual(ids(waiting, ["a", "w"]), ["a", "w"], "dragged below another, it stays there");
   assert.deepEqual(move(["x", "y", "z"], "z", "x"), ["z", "x", "y"]);
   assert.deepEqual(move(["x", "y", "z"], "x", null), ["y", "z", "x"]);
 });
@@ -290,7 +294,8 @@ test("chats can be dragged into place in every list: Pinned, another open projec
     assert.ok(target.props.onDragOver, `${to} takes a drop from ${from}`);
     target.props.onDragOver(dragEvent(lower));
     assert.equal(rowOf(list.render(), to).props["data-drop"], lower ? "after" : "before", "a line shows where it lands");
-    rowOf(list.render(), to).props.onDrop(dragEvent(lower));
+    // The whole list takes the drop (between rows or below the last one too) where the line shows.
+    walk(list.render()).find((element) => element.props?.className === "cx-threads").props.onDrop(dragEvent(lower));
   };
   const pinnedTitles = () => walk(walk(list.render()).find((element) => element.type === "section" && text(element).startsWith("Pinned")))
     .filter((element) => element.type === "li").map((row) => text(walk(row).find((element) => element.props?.className === "cx-thread-title")));
@@ -318,6 +323,17 @@ test("chats can be dragged into place in every list: Pinned, another open projec
   rowOf(list.render(), "Older").props.onDragStart(dragEvent(false));
   assert.equal(rowOf(list.render(), "Also gone").props.onDragOver, undefined);
   rowOf(list.render(), "Older").props.onDragEnd();
+
+  // Let go over the dragged row itself: the line goes away and nothing moves.
+  const aside = () => walk(list.render()).find((element) => element.props?.className === "cx-threads");
+  const before = stored["coding-tools:ao:list-order:pinned"];
+  rowOf(list.render(), "Older").props.onDragStart(dragEvent(false));
+  assert.ok(aside().props.onDragOver, "the whole list takes the drag, gaps included");
+  rowOf(list.render(), "Fix app").props.onDragOver(dragEvent(false));
+  rowOf(list.render(), "Older").props.onDragOver(dragEvent(true));
+  assert.equal(rowOf(list.render(), "Fix app").props["data-drop"], undefined, "over itself, no line shows");
+  aside().props.onDrop(dragEvent(true));
+  assert.equal(stored["coding-tools:ao:list-order:pinned"], before, "and the order is unchanged");
   for (const key of Object.keys(stored)) delete stored[key];
 });
 
