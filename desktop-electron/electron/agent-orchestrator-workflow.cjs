@@ -2309,31 +2309,33 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const APP_TOOL_PREFIX = "mcp__coding-tools__";
   /** Codex's command-review model, which CPA serves from the ChatGPT account. */
   const AUTO_REVIEW_MODEL = "codex-auto-review";
-  const APP_TOOLS_ALLOWED = new Set(["read_file", "list_dir", "list_files", "search_text", "grep_text", "get_current_time",
-    "get_plan", "update_plan", "tool_search", "server_info", "git_status", "git_diff", "git_log", "git_show", "git_blame",
-    "view_image", "image_info", "compare_images", "check_exec_environment", "read_output", "apply_patch", "patch_check",
-    // Brings a pane of the chat forward; it shows only what already runs.
-    "show_in_chat"]);
+  // The tools a chat agent gets come from their own modules' groups, not a list kept here: a tool
+  // added to a group is covered by Approve for me at once. Before, every new tool (the subagents,
+  // the preview browser) asked the person until someone also added it to a list in this file.
+  //   - AGENT_TOOLS (chat-agent-tools.cjs): confined to the agent's worktree by the endpoint and
+  //     headless (reads, searches, git history, patches, the plan, show_in_chat, schedule_wakeup).
+  //   - PREVIEW_TOOLS: the chat's own browser, loopback pages only, each new address allowed by you.
+  //   - SUBAGENT_TOOLS: the user's own subagents, which run under the same safety rules.
+  // The terminal (TERMINAL_TOOLS) and the screen (DESKTOP_TOOLS) are not routine: their requests go
+  // to the reviewer (and the routine-command rules), apart from the terminal's two reads.
+  const { AGENT_TOOLS } = require("./chat-agent-tools.cjs");
+  const { PREVIEW_TOOLS } = require("./chat-preview.cjs");
+  const { SUBAGENT_TOOLS } = require("./subagents.cjs");
+  const TERMINAL_READS = new Set(["check_exec_environment", "read_output"]);
+  const APP_EDITS = new Set(["apply_patch", "patch_check"]);
   /** Why an app agent-tool call "Approve for me" may answer itself, or null. */
   function routineAppTool(tool) {
     const name = String(tool ?? "");
     if (!name.startsWith(APP_TOOL_PREFIX)) return null;
     const short = name.slice(APP_TOOL_PREFIX.length);
-    // The chat's own preview browser: loopback pages only, each new address allowed by the person.
-    if (/^preview_(?:open|read|screenshot|click|type|press|scroll|navigate|wait|console)$/.test(short)) {
-      return "The chat's own preview browser: pages on this machine only, each new address allowed by you";
-    }
-    // The user's own subagents (Runtime > Subagents): a subagent works in this project under the same
-    // safety rules, its requests answered as "Approve for me" answers them, so starting one does
-    // nothing the agent could not do itself. subagent_start carries the whole brief, longer than a
-    // review reads, so it waited for the person every time.
-    if (/^subagent_(?:list|start|result|status|stop)$/.test(short)) {
-      return "One of your own subagents (Runtime > Subagents), which runs under the same safety rules";
-    }
+    if (PREVIEW_TOOLS.has(short)) return "The chat's own preview browser: pages on this machine only, each new address allowed by you";
+    // subagent_start carries the whole brief, longer than a review reads: it waited for the person.
+    if (SUBAGENT_TOOLS.has(short)) return "One of your own subagents (Runtime > Subagents), which runs under the same safety rules";
     // The chat's own follow-up timer: it sends this chat a note later, and runs nothing.
     if (short === "schedule_wakeup") return "A reminder the chat sends itself later; it runs nothing";
-    if (!APP_TOOLS_ALLOWED.has(short)) return null;
-    return short === "apply_patch" || short === "patch_check"
+    if (short === "show_in_chat") return "Brings a pane of this chat forward; it shows only what already runs";
+    if (!AGENT_TOOLS.has(short) && !TERMINAL_READS.has(short)) return null;
+    return APP_EDITS.has(short)
       ? "An edit through the app's tools, confined to the agent's worktree (like Claude's own edits)"
       : "A read through the app's tools, confined to the agent's worktree";
   }
