@@ -458,6 +458,9 @@ const NATIVE_ENTRY: AoHarness = { id: NATIVE_HARNESS, label: "Native Codex", run
 /** A project folder's git kind for the chat list's labels; one stable function, so each folder is read once. */
 const readProjectGit = (folder: string) => window.codexWebLauncher?.projectGit?.(folder) ?? Promise.resolve(null);
 
+/** The headless observe answer for a card whose attempt changed between the poll's read and its check. */
+const STALE_OBSERVE = /AO receipt changed/;
+
 /** A chat card's model as the composer's chip names it ("DeepSeek V4.1 Flash", "WebGPT High"). */
 const chatModelName = (model: string) => modelShortLabel(model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, ""), model.startsWith("cpa/")).name;
 
@@ -1335,9 +1338,19 @@ export function AgentOrchestratorSurface({ language, setError }: {
       if (reading || surfaceHidden()) return;
       reading = true;
       try {
-        const results = await Promise.all(ids.map(async nodeId => ({
-          nodeId, result: await moduleCall(["running", "paused"].includes(autoStatus) ? "harness_status" : "observe", { workspaceId, runId: selectedRunId, nodeId }),
-        })));
+        // A card whose attempt moved on while this poll read it (a retry, the app restarting under it)
+        // answers "AO receipt changed; refresh before retrying": the next tick reads the new attempt.
+        // It showed as "Something went wrong" and, rejecting the whole batch, hid the other cards'
+        // requests for that tick.
+        const read = await Promise.all(ids.map(async nodeId => {
+          try {
+            return { nodeId, result: await moduleCall(["running", "paused"].includes(autoStatus) ? "harness_status" : "observe", { workspaceId, runId: selectedRunId, nodeId }) };
+          } catch (cause) {
+            if (STALE_OBSERVE.test(cause instanceof Error ? cause.message : String(cause))) return null;
+            throw cause;
+          }
+        }));
+        const results = read.filter((entry): entry is NonNullable<typeof entry> => entry !== null);
         if (!live || selection.current.workspaceId !== workspaceId || selection.current.runId !== selectedRunId) return;
         const approvals: AoApproval[] = [];
         let newest: AoMission | undefined;
