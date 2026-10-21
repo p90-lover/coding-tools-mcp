@@ -541,7 +541,7 @@ export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
   projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject, projectBranch: branch, steer,
-  pendingMessage, pendingTitle, pendingCreation = false, commands, loadWork,
+  pendingMessage, pendingTitle, pendingCreation = false, deciding = false, commands, loadWork,
 }: {
   /** A finished card's thinking and tool calls, read back from its AO session (turn_timeline). */
   loadWork?: LoadWork;
@@ -549,6 +549,8 @@ export function AgentOrchestratorChat({
   commands?: ChatCommands;
   /** A message being sent into a chat that has no run yet (shown at once, as Codex does). */
   pendingMessage?: string; pendingTitle?: string; pendingCreation?: boolean;
+  /** Which chat to show is not known yet (a project is opening): show neither a chat nor the new chat page. */
+  deciding?: boolean;
   /** How each card runs (harness · model · effort · context · role), shown on its messages. */
   describeNode?: (node: ChatNode) => string;
   /** What each working card is doing now, by "<run id>:<card id>". */
@@ -1359,7 +1361,7 @@ export function AgentOrchestratorChat({
       <section className="cx-thread" aria-label={chat?.title || CHAT_DEFAULT_TITLE}>
         <header className="cx-thread-head">
           <span className="cx-head-folder" title={projectName}><ChatGlyph name="folder" size={15} /></span>
-          {selectedTaskId || pendingCreation
+          {deciding && !selectedTaskId ? <h2 aria-hidden="true" /> : selectedTaskId || pendingCreation
             ? renaming !== null
               ? <input autoFocus className="cx-title-input" aria-label="Chat name" maxLength={240} value={renaming}
                   onChange={(event) => setRenaming(event.target.value)} onBlur={() => void commitRename()}
@@ -1432,7 +1434,7 @@ export function AgentOrchestratorChat({
             requestAnimationFrame(() => requestAnimationFrame(() => { clicked.current = false; }));
           }}>
             {!turns.length ? <div className="cx-empty">
-              {selectedTaskId ? <p>Loading…</p> : <>
+              {deciding && !selectedTaskId ? null : selectedTaskId ? <p>Loading…</p> : <>
                 <span className="cx-empty-glyph" aria-hidden="true"><ChatGlyph name="codex" size={40} /></span>
                 <h1>What should we build{projectName ? <> in {onOpenProject
                   ? <button type="button" className="cx-empty-project" title="Open the project folder" onClick={onOpenProject}>{projectName}</button>
@@ -1453,7 +1455,7 @@ export function AgentOrchestratorChat({
             onClick={() => { setAtBottom(true); scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" }); }}>↓</button> : null}
         </div>
 
-        {!selectedTaskId ? <div className="cx-context-strip" aria-label="Where this chat runs">
+        {!selectedTaskId && !deciding ? <div className="cx-context-strip" aria-label="Where this chat runs">
           {/* Codex's context chips are menus: the project picker, where it runs, and its environment. */}
           <button type="button" className="cx-chip" title={projectName} aria-haspopup="dialog" aria-expanded={Boolean(projectPicker)}
             onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); setProjectPicker(projectPicker ? null : { left: box.left, bottom: window.innerHeight - box.top + 6 }); setPickerQuery(""); }}>

@@ -1273,7 +1273,7 @@ test("starting a mission whose card is held retries that card first", async () =
   await assert.rejects(workflow.call("control_run", { workspaceId: "ws-1", runId: "r1", action: "rewind" }), /Choose a mission control/);
 });
 
-function heldMissionWorld({ history = [], error = "ChatGPT did not confirm that the prompt was sent" } = {}) {
+function heldMissionWorld({ history = [], error = "ChatGPT did not confirm that the prompt was sent", executionMode = undefined } = {}) {
   const world = { reads: 0, controls: [], controlBodies: [], grants: 0, held: false };
   world.requestHeadless = async (endpoint, body) => {
     if (endpoint === "/api/v1/ao/read") {
@@ -1281,6 +1281,7 @@ function heldMissionWorld({ history = [], error = "ChatGPT did not confirm that 
       // The first start sees a pending card; the loop then finds it held until a retry re-queues it.
       if (world.reads === 2 && !world.controls.length) world.held = true;
       return { ok: true, team: null, worker_capacity: { r1: 1 }, runs: [{ id: "r1", workspace_id: "ws-1", project_id: "task-1", revision: 2, cancelled: false,
+        ...(executionMode ? { execution_mode: executionMode } : {}),
         nodes: [{ id: "lead", role: "planner", state: world.held ? "held" : "pending", route: { model: "chatgpt-web/high", provider_id: "chatgpt-web" },
           history, receipt: world.held ? { error } : null }] }] };
     }
@@ -1325,6 +1326,25 @@ test("a card interrupted by an app restart is retried directly, without asking t
   await until(() => world.grants >= 2);
   assert.deepEqual(world.controls, ["retry"]);
   assert.equal(asked, 0);
+});
+
+test("a card an app restart interrupted is retried even after earlier attempts, single or team", async () => {
+  // Seen live: a chat restarted three times in a day showed "Step failed ... the app restarted" and
+  // waited for a click with "Retry automatically" on, its three earlier attempts over the budget.
+  for (const executionMode of ["single", undefined]) {
+    const earlier = [{ status: "failed" }, { status: "failed" }, { status: "failed" }];
+    const world = heldMissionWorld({ error: "The agent's process ended before it finished (the app restarted); retry this card.", history: earlier, executionMode });
+    let asked = 0;
+    const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/Codex/codex.exe",
+      cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
+      fetchImpl: async () => { asked += 1; throw new Error("the helper must not be asked"); },
+      webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
+      resolveHarness: async () => ({ expected_sha256: "a".repeat(64), executable: path.resolve("codex.exe") }) });
+    await workflow.call("start_run", { workspaceId: "ws-1", runId: "r1" });
+    await until(() => world.grants >= 2);
+    assert.deepEqual(world.controls, ["retry"], `${executionMode ?? "team"}: retried, not left for a click`);
+    assert.equal(asked, 0);
+  }
 });
 
 test("with Retry automatically on, a step that lost the local proxy waits and is retried without asking the helper", async () => {

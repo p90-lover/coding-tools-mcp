@@ -2116,6 +2116,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // The upstream observe() error for a turn whose chat host died with an app restart. Nothing
   // about the step itself failed, so it is retried directly instead of asking a helper.
   const RESTART_INTERRUPTED = /process ended before it finished \(the app restarted\)/;
+  // A step an app restart interrupted failed through no fault of its own, so it runs again even after
+  // earlier attempts. It counted against the two-attempt budget: a chat restarted three times in a
+  // day waited for a click with "Retry automatically" on. The bound stops a step that brings the app
+  // down itself from restarting forever.
+  const RESTART_HISTORY_LIMIT = 8;
+  const restartInterrupted = (node) => RESTART_INTERRUPTED.test(String(node?.receipt?.error || ""))
+    && (node.history?.length ?? 0) < RESTART_HISTORY_LIMIT;
 
   // Requests the command approver may never allow, whatever the model says.
   const HARD_DENY = [
@@ -2191,6 +2198,51 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (quote) return null;
     segments.push(current.trim());
     return segments.filter(Boolean);
+  }
+  // Read-only inspection inside the workspace folder: listing, reading, testing and filtering, piped
+  // and branched as PowerShell agents write it. Seen live: `Get-ChildItem '<project>' -Filter
+  // 'config.json' | Select-Object …; if (Test-Path …) { Get-Content … -Raw }` got the model's "ask"
+  // ("may expose credentials") for the project's own config file. Only these verbs; nothing that runs
+  // other code, redirects, assigns, calls methods or names a path outside the folder.
+  const READ_VERBS = new Set(["get-childitem", "gci", "ls", "dir", "get-content", "gc", "cat", "type", "get-item", "gi", "test-path",
+    "select-object", "select", "where-object", "where", "sort-object", "sort", "measure-object", "measure", "select-string", "sls",
+    "format-table", "ft", "format-list", "fl", "out-string", "convertfrom-json", "convertto-json", "get-location", "pwd", "resolve-path",
+    "split-path", "join-path", "get-filehash", "findstr", "head", "tail", "wc", "rg", "grep", "write-output", "echo", "write-host",
+    "if", "else", "elseif", "-not"]);
+  // The pipeline's own item and fixed values: no other variable (one could hold anything, and $env:
+  // holds the app's keys).
+  const INSPECTION_VARIABLE = /^\$(?:_|PSItem|\?|true|false|null)(?:\.[A-Za-z_]\w*)*$/i;
+  /** Whether `value` names a place inside `folder`: under it, or relative with no parent hop. */
+  function insideFolder(value, folder) {
+    const candidate = String(value ?? "").trim();
+    if (!candidate) return true;
+    if (/(?:^|[\\/])\.\.(?:[\\/]|$)/.test(candidate) || /^~(?:[\\/]|$)/.test(candidate)) return false;
+    if (/^\/[a-z?]{1,2}$/i.test(candidate)) return true; // a cmd switch (dir /b, dir /ad, findstr /i)
+    if (!/^(?:[a-z]:|[\\/])/i.test(candidate)) return true;
+    const base = path.resolve(folder).toLowerCase(), target = path.resolve(candidate).toLowerCase();
+    return target === base || target.startsWith(base.endsWith(path.sep) ? base : base + path.sep);
+  }
+  /** Why `command` (run in `cwd`) is read-only inspection inside `folder` "Approve for me" may run, or null. */
+  function readOnlyInspection(command, folder, cwd = null) {
+    const text = String(command ?? "").trim();
+    if (!text || !folder || text.length > 800 || /[\n\r`<>]|::|\$\(|@[({]|&|\[|=/.test(text)) return null;
+    if (cwd && !insideFolder(cwd, folder)) return null;
+    // Quoted arguments are set aside (a path, a filter, a pattern); what is left must be plain words.
+    const quoted = [];
+    const bare = text.replace(/"([^"]*)"|'([^']*)'/g, (_, double, single) => { quoted.push(double ?? single); return " Q "; });
+    if (/["']/.test(bare) || /[\w)\]]\s*\.\s*[A-Za-z_]\w*\s*\(/.test(bare)) return null;
+    const words = bare.split(/[\s;|{}()]+/).filter(Boolean);
+    if (words.some((word) => word.includes("$") && !INSPECTION_VARIABLE.test(word))) return null;
+    // `-Path:<value>` would carry a path past the check below.
+    if (words.some((word) => /^-[\w-]+:/.test(word))) return null;
+    // Each statement starts with a read-only verb, a condition on the pipeline's item, or is a string
+    // it prints (`{ 'missing' }`).
+    for (const statement of bare.split(/[;|{}()]/)) {
+      const first = statement.trim().split(/\s+/).filter(Boolean)[0];
+      if (first && first !== "Q" && !READ_VERBS.has(first.toLowerCase()) && !INSPECTION_VARIABLE.test(first)) return null;
+    }
+    if (![...quoted, ...words.filter((word) => word !== "Q" && !word.startsWith("$"))].every((value) => insideFolder(value, folder))) return null;
+    return "Read-only inspection inside the workspace folder";
   }
   /** Why `command` is a routine project command "Approve for me" may run, or null. */
   function routineCommand(command) {
@@ -2323,6 +2375,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // folder or new rules are reviewed afresh. Only a model's answer is kept, never a failure.
   const REVIEW_CACHE_MS = 10 * 60_000;
   const reviewVerdicts = new Map(); // sha256(prompt) -> { at, action, reason }
+  /**
+   * The folder the agent of a request works in, or null. Without it the reviewer saw only the
+   * workspace's id, so it had to guess whether an absolute path was "outside the workspace": the
+   * same `dir` of a project subfolder was denied, then allowed when retried.
+   */
+  async function requestFolder(approval, mission) {
+    const where = await Promise.resolve().then(() => harnessService().sessionWorkspace?.(approval.thread_id, mission.workspace_id))
+      .catch(() => null);
+    return typeof where?.projectFolder === "string" ? where.projectFolder : typeof where?.root === "string" ? where.root : null;
+  }
   /** `decide`: the reviewer already said "ask"; this time it must choose allow or deny. */
   async function askApprover({ approver, mission, approval, decide = false }) {
     const { baseUrl, key } = connection();
@@ -2333,12 +2395,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const candidates = [...all.filter(model => !(reviewerDown.get(model) > now())), ...all.filter(model => reviewerDown.get(model) > now())];
     if (!candidates.length) throw new Error("CPA has no model for the command approver");
     const deadline = now() + REVIEW_BUDGET_MS;
-    // The folder the agent works in. Without it the reviewer saw only the workspace's id, so it had
-    // to guess whether an absolute path was "outside the workspace": the same `dir` of a project
-    // subfolder was denied, then allowed when retried.
-    const where = await Promise.resolve().then(() => harnessService().sessionWorkspace?.(approval.thread_id, mission.workspace_id))
-      .catch(() => null);
-    const folder = typeof where?.projectFolder === "string" ? where.projectFolder : typeof where?.root === "string" ? where.root : null;
+    const folder = await requestFolder(approval, mission);
     const scripts = reviewScriptExcerpts(approval, folder);
     const prompt = [
       "You are the command approver for an orchestrated coding mission. A worker asks to run a tool request.",
@@ -2355,6 +2412,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         'Answer with JSON only: {"action":"allow"|"deny"|"ask","reason":"<one sentence for the user>"}.',
         "allow: clearly safe and needed for the task. deny: destructive, outside the workspace, secret-touching or unrelated. ask: anything unclear.",
       ]),
+      // Seen live: a project's own config.json read got "ask" ("may expose credentials").
+      "Reading, listing or searching files inside the workspace folder (the project's own config and data files included) is routine: allow it. "
+        + "Secret-touching means credential stores (.env files, private keys, token or password files), not any file that might hold a setting.",
       scripts.length ? "Judge a command that runs a local script by the script's contents shown above." : "",
     ].filter(Boolean).join("\n");
     const verdictKey = createHash("sha256").update(prompt).digest("hex");
@@ -2456,6 +2516,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
               // (an MCP tool with a command) keeps going to the reviewer and the app's confirm.
               : approval.kind === "command" && !/^mcp__/.test(String(approval.tool ?? "")) && routineCommand(approval.command)
                 ? { action: "allow", actor: "safety_rules", reason_code: "routine_command", reason: routineCommand(approval.command) }
+                : approval.kind === "command" && !/^mcp__/.test(String(approval.tool ?? ""))
+                  && readOnlyInspection(approval.command, await requestFolder(approval, mission), approval.cwd)
+                ? { action: "allow", actor: "safety_rules", reason_code: "read_only_inspection", reason: "Read-only inspection inside the workspace folder" }
                 // A reviewer that cannot answer is asked again (see REVIEW_TRIES); only then does the
                 // request go to the person, and its card says why.
                 : await askApprover({ approver, mission, approval }).then(verdict => ({ ...verdict, reviewed: true }),
@@ -2763,8 +2826,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (mission.execution_mode === "single") {
       // The app restarted under the turn: nothing about the step failed, so it runs again (once
       // per attempt budget) instead of waiting for an explicit retry.
-      const interrupted = held.find(node => RESTART_INTERRUPTED.test(String(node.receipt?.error || ""))
-        && (node.history?.length ?? 0) < HELPER_ATTEMPT_LIMIT);
+      const interrupted = held.find(restartInterrupted);
       if (!interrupted) {
         const auto = chatPreferences.get().autoRetry ? autoRetryStep(mission, held) : null;
         if (auto?.retry) {
@@ -2779,8 +2841,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       return { changed: true, retried: true, detail: "The app restarted while this step was running; it continues" };
     }
     const workers = held.filter(node => node.role === "worker");
-    const exhausted = workers.filter(node => (node.history?.length ?? 0) >= HELPER_ATTEMPT_LIMIT ||
-      POOL_EXHAUSTED.test(String(node.receipt?.error || "")));
+    const exhausted = workers.filter(node => !restartInterrupted(node) && ((node.history?.length ?? 0) >= HELPER_ATTEMPT_LIMIT ||
+      POOL_EXHAUSTED.test(String(node.receipt?.error || ""))));
     if (exhausted.length) {
       for (const node of exhausted) await controlRun({ workspaceId, runId: mission.id, action: "review_failures", nodeId: node.id });
       return { changed: true, detail: "Retries or the account pool are exhausted; review will receive partial work and errors" };
@@ -2790,7 +2852,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (REVIEW_ROLES.has(node.role) && (node.receipt?.verdict === "CHANGES_REQUIRED" || mission.nodes.some(entry => entry.role === "worker" && entry.state === "failed"))) {
       return { detail: "Reviewer next step: " + publicText(node.receipt?.answer || node.receipt?.error, 400) };
     }
-    if ((node.history?.length ?? 0) >= HELPER_ATTEMPT_LIMIT) {
+    if ((node.history?.length ?? 0) >= HELPER_ATTEMPT_LIMIT && !restartInterrupted(node)) {
       return { detail: (node.settings?.name || node.role) + " failed 3 times; decide the next step yourself or send a follow-up" };
     }
     state.recoveryWaits ||= new Map();
@@ -2835,7 +2897,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const detail = "Helper: " + publicText(decision.reason || decision.action, 300);
     state.recoveryDetail = detail;
     if (decision.action === "retry") {
-      await controlRun({ workspaceId, runId: mission.id, action: node.role === "worker" ? "retry_auto" : "retry", ...(node.role === "worker" ? { nodeId: node.id } : {}) });
+      // retry_auto refuses a worker with two attempts already; one a restart interrupted is retried
+      // on its own card instead, as a lost connection is.
+      const action = node.role === "worker" && !restartInterrupted(node) ? "retry_auto" : "retry";
+      await controlRun({ workspaceId, runId: mission.id, action, ...(node.role === "worker" ? { nodeId: node.id } : {}) });
       return { changed: true, retried: true, detail: "Helper retried " + (node.settings?.name || node.role) + ": " + publicText(decision.reason, 300) };
     }
     if (workers.length && ["stop", "give_up"].includes(decision.action)) {
@@ -4399,7 +4464,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   /** Whether the command approver's safety rules block this request text whatever anyone answers. */
   const blockedRequest = (text) => hardDenied(text);
   restoreWakeups();
-  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scheduleWakeup, routineCommand, routineAppTool, routineAppCommand, blockedRequest, recommendedAnswer, subagentLaunchArgs });
+  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scheduleWakeup, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, blockedRequest, recommendedAnswer, subagentLaunchArgs });
 }
 
 module.exports = { createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

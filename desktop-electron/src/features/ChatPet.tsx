@@ -40,7 +40,6 @@ const HOUSE_COLS = 34;
 const HOUSE_ROWS = 13;
 const HOUSE_W = HOUSE_COLS * PIXEL_W;
 const HOUSE_H = HOUSE_ROWS * PIXEL_H;
-const HOUSE_GAP = 6;
 /** On the top edge (no room beside the box), this far in from its right end. */
 const HOUSE_INSET = 18;
 /** The entrance plays once per window, as the CLI plays one once per version. */
@@ -213,9 +212,14 @@ const REST: Pose = { look: 0, arms: "down", walking: false, sit: false };
 const pick = <T,>(items: readonly T[]) => items[Math.floor(Math.random() * items.length)]!;
 const WORK: readonly Job[] = ["laptop", "laptop", "search", "build", "carry"];
 
-/** The box's outline as one loop: its size, and the spot and side at a distance around it.
- *  `beside`: there is room for the house beside the box's right side inside the chat surface. */
+/**
+ * The box's outline as one loop: its size, and the spot and side at a distance around it. `beside`:
+ * there is room for the house to the box's right (it stood on the box's top edge, over the corner of
+ * the text box; the user wanted it beside the box).
+ */
 type Loop = { width: number; height: number; length: number; beside: boolean };
+/** The gap between the box's right edge and a house standing beside it. */
+const HOUSE_GAP = 10;
 function spotAt(loop: Loop, at: number): { x: number; y: number; side: 0 | 1 | 2 | 3 } {
   const { width: w, height: h, length } = loop;
   const s = ((at % length) + length) % length;
@@ -224,14 +228,13 @@ function spotAt(loop: Loop, at: number): { x: number; y: number; side: 0 | 1 | 2
   if (s < 2 * w + h) return { x: w - (s - w - h), y: h, side: 2 };
   return { x: 0, y: h - (s - 2 * w - h), side: 3 };
 }
-/**
- * Where the house stands, relative to the box: just outside its right side, floor at its bottom.
- * When the chat surface (which clips) leaves no room there, as in a narrow window, it stands on the
- * box's top edge near the right end instead.
- */
+/** Where the house stands on the top edge (with no room beside the box): its left side, in from the box's right end. */
+const houseLeft = (loop: Loop) => Math.max(0, loop.width - HOUSE_W - HOUSE_INSET);
+/** The house's top-left corner, from the box's: beside the box on its right, its floor level with
+ *  the box's bottom, or on the top edge when there is no room beside it. */
 const housePlace = (loop: Loop) => loop.beside
   ? { left: loop.width + HOUSE_GAP, top: loop.height - HOUSE_H }
-  : { left: Math.max(0, loop.width - HOUSE_W - HOUSE_INSET), top: -HOUSE_H };
+  : { left: houseLeft(loop), top: -HOUSE_H };
 /** `along` (a distance from the top-left corner, under one lap) on the lap nearest `near`. */
 const nearLap = (loop: Loop, along: number, near: number) => along + Math.round((near - along) / loop.length) * loop.length;
 
@@ -379,27 +382,22 @@ export function ChatPet({ mood, context, onHide }: {
     return rects.some((found) => found.left < frame.left + right && found.right > frame.left + left
       && found.top < frame.top + bottom && found.bottom > frame.top + top);
   };
-  /** Where Clawd walks to go into its house. Beside the box that is the foot of its right side, by the
-   *  house's floor (it then stands upright in the room; see `placement`); on the top edge, the room's
-   *  middle. */
+  /** Where Clawd walks to go in: behind the house's middle on the top edge, or, with the house beside
+   *  the box, the top edge's right end, from where it hops in. */
   const homeSpot = () => {
     const current = loopNow.current;
     if (!current) return atNow.current;
-    const along = current.beside
-      ? current.width + Math.max(0, current.height - WIDTH / 2)
-      : housePlace(current).left + HOUSE_W / 2;
-    return nearLap(current, along, atNow.current);
+    return nearLap(current, current.beside ? current.width - WIDTH / 2 : houseLeft(current) + HOUSE_W / 2, atNow.current);
   };
   /** Whether standing at `spot` would leave it half behind the house: it only stops there to go in.
    *  Beside the box that is the right side next to the house, and the top edge's right end when the
    *  house is taller than the box and stands up past its top; on the top edge, the house's span. */
   const inHouse = (spot: number) => {
     const current = loopNow.current;
-    if (!current) return false;
-    const { x, y, side } = spotAt(current, spot);
-    const { left, top } = housePlace(current);
-    if (!current.beside) return side === 0 && x > left - WIDTH / 2 && x < left + HOUSE_W + WIDTH / 2;
-    return (side === 1 && y > top - WIDTH / 2) || (side === 0 && top < 0 && x > current.width - WIDTH / 2 - HOUSE_GAP);
+    if (!current || current.beside) return false;
+    const { x, side } = spotAt(current, spot);
+    const left = houseLeft(current);
+    return side === 0 && x > left - WIDTH / 2 && x < left + HOUSE_W + WIDTH / 2;
   };
   /** The nearest spot to `spot` that covers no button. */
   const freeNear = (spot: number) => {
