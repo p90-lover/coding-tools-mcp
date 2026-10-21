@@ -1819,13 +1819,34 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
 
   async function observe({ workspaceId, runId, nodeId } = {}) {
     const found = await savedNode(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80));
-    if (externalAgent(found.node)) return observeExternal(workspaceId, runId, found.node, found.mission);
+    if (externalAgent(found.node)) {
+      const result = await observeExternal(workspaceId, runId, found.node, found.mission);
+      screenUndriven(clean(workspaceId, 128), clean(runId, 80), found, result);
+      return result;
+    }
     const response = await requestHeadless("/api/v1/ao/harness/observe", {
       workspace_id: clean(workspaceId, 128), run_id: clean(runId, 80),
       node_id: clean(nodeId, 80),
     });
     if (response?.ok !== true) throw new Error("AO result is unavailable; inspect the run before retrying");
     return response.pending_approvals ? { ...response, pending_approvals: withAdvice(response.pending_approvals, found) } : response;
+  }
+
+  // "Approve for me" reviewed a card's requests only from its run's loop, so a card whose loop had
+  // ended (an app restart past the resume window, a loop that died) kept them waiting for the
+  // person. Seen live: a reviewer's routine `ao report --done` sat "awaiting review" for 33 hours.
+  // Whoever observes such a card (the chat's approvals poll) has its requests reviewed here, one
+  // review per run at a time; a run a loop drives is left to its loop.
+  const undrivenScreens = new Set();
+  function screenUndriven(workspaceId, runId, found, result) {
+    if (!result?.pending_approvals?.length || !found?.mission || !found?.node) return;
+    const key = runKey(workspaceId, runId);
+    const state = backgroundRuns.get(key);
+    if (state?.driving || state?.starting || undrivenScreens.has(key) || !cardApprover(found.mission, found.node)) return;
+    undrivenScreens.add(key);
+    void screenApprovals(workspaceId, runId, found.mission, [found.node], [result])
+      .then((note) => { if (note) logger?.info?.("ao.undriven_screened", { note: publicText(note, 200) }); }, () => undefined)
+      .finally(() => undrivenScreens.delete(key));
   }
 
   // The person's answers to AO requests and questions (request id -> { question, answer }), for the
