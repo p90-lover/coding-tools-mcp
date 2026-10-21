@@ -6,4 +6,4 @@ Provider key: `commandcode`. This plugin uses the official CommandCode Provider 
 
 The Windows binary is pinned by `../../bundled/cpa-plugins/BUNDLE.json`. An isolated CPA 7.3.7 run proved registration, OAuth login, auth-file persistence, model discovery, and mocked Chat Completions inference. Real account inference remains a cutover check.
 
-Build with Go 1.26.8, CGO enabled, and Zig 0.16.0 as `CC="zig cc -target x86_64-windows-gnu"`: in `go/`, run `go test ./...` and `go build -buildmode=c-shared -o auth-commandcode-v0.1.0-codingtools.1.dll .`.
+Build with Go 1.26.10 or later (earlier Go trusts distrusted intermediates, CVE-2026-111943), CGO enabled, and Zig 0.16.0 as `CC="zig cc -target x86_64-windows-gnu"`: in `go/`, run `go test ./...` and `go build -buildmode=c-shared -o auth-commandcode-v0.1.0-codingtools.2.dll .`.

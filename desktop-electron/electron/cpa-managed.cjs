@@ -131,14 +131,16 @@ function yamlString(value) {
   return JSON.stringify(String(value));
 }
 
+// The Go plugins are rebuilt with Go 1.26.10: before it, crypto/x509 trusted chains through
+// distrusted intermediates (CVE-2026-111943, the leaked emSign CA keys).
 const COMMANDCODE_PLUGINS = [
-  { id: "cline-pass-switcher", file: "cline-pass-switcher-v0.1.0-codingtools.3.dll", sha256: "36d5224dc699a2263ad0f58f88cac8c3d3c8138fcf5188bda1f2b2e5756c175f" },
-  { id: "commandcode-go", file: "commandcode-go-v1.0.0-codingtools.1.dll", sha256: "ffb690666d979bbeb529ce076291b808aac39b9091ef62f28b5c8e37285cb70c" },
-  { id: "auth-commandcode", file: "auth-commandcode-v0.1.0-codingtools.1.dll", sha256: "b9ab54aa73d1c9fd4e9baaaa4960643aa81f2caecb2f69e5463fc3a62f079afc" },
+  { id: "cline-pass-switcher", file: "cline-pass-switcher-v0.1.0-codingtools.4.dll", sha256: "20d865c73d65dbc1da7748066af7978e51d5c8c8917556135545a89f6dff95bb" },
+  { id: "commandcode-go", file: "commandcode-go-v1.0.0-codingtools.2.dll", sha256: "27075e8b31d23f9b2691f47d1b50ea706f58a4fd9cab1d2900e70488ffe13578" },
+  { id: "auth-commandcode", file: "auth-commandcode-v0.1.0-codingtools.2.dll", sha256: "0d24aa57f4415db4163ece11fa95ab785e7f061bee657894cef1e14b9dc9bf31" },
   // CPA Helper (usage, costs, Codex keeper), rebuilt from walkingddd/CPA-Helper as a native plugin.
   { id: "cpa-helper", file: "cpa-helper-v0.1.0.dll", sha256: "3e1c57168b1bef6f789041026a2437482e540d8be3b7c5e4a2b943011c1eb55c" },
   // Grok Build/Web/Console provider built from chenyme/grok2api (vendor/cpa-plugins/grok-login-provider).
-  { id: "grok-login-provider", file: "grok-login-provider-v0.1.0-codingtools.1.dll", sha256: "57fbdce4ad770499e604a7d3654bc7b700532e0572c0980ff040818a83117cb7" },
+  { id: "grok-login-provider", file: "grok-login-provider-v0.1.0-codingtools.2.dll", sha256: "9894157b26546b325e308b36fcb4fde6795b3ed813bc866e79ab78dfb0a39937" },
 ];
 
 function installBundledCommandCodePlugin(state) {

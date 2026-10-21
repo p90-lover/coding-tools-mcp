@@ -145,6 +145,13 @@ installProcessDiagnosticGuards({
 });
 
 let mainWindow = null;
+// Certificate authorities the app no longer trusts (ca-distrust.cjs: the leaked eMudhra/emSign CA
+// keys). Requiring it takes them out of this process's CA list; the Node runtimes it starts (AO's
+// agents) preload it; every Chromium session refuses a chain through them. Still at startup, before
+// any window, session or connection exists.
+const caDistrust = require("./ca-distrust.cjs");
+process.env.NODE_OPTIONS = caDistrust.childNodeOptions(path.join(launcherUserData, "runtime-preload"), process.env.NODE_OPTIONS);
+app.on("session-created", (created) => created.setCertificateVerifyProc(caDistrust.verifyCertificate));
 let mainWindowReadyToShow = false;
 let mainWindowShowRequested = false;
 let browserHost = null;
@@ -2706,6 +2713,7 @@ async function start() {
   app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
 
   await app.whenReady();
+  session.defaultSession.setCertificateVerifyProc(caDistrust.verifyCertificate);
   // Remove agent executables an update set aside (in-use-files.cjs) once nothing runs them.
   if (process.platform === "win32" && app.isPackaged) {
     setImmediate(() => {

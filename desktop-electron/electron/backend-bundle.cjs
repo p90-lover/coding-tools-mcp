@@ -45,6 +45,9 @@ const BACKEND_MODULES = Object.freeze([
   "antigravity-cli.cjs",
   "antigravity-auth-browser.cjs",
   "ao-session-events.cjs",
+  // Required by agent-orchestrator-upstream.cjs; left out, an installed backend could not load AO.
+  "ao-daemon-log.cjs",
+  "ao-db-maintenance.cjs",
   "ao-dependency-links.cjs",
   "ao-context-breakdown.cjs",
   "cpa-antigravity-reauth.cjs",

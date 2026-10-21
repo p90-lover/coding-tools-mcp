@@ -101,6 +101,8 @@ test("host window installs the private CPA panel session on its webContents", ()
     rendererNavigationAllowed: () => true, openWebUrl: async () => {},
     quitting: false, tray: null, requestQuit() {}, send() {}, trackWindowState() {},
     logger: { warn() {}, info() {} }, cdpPort: 0,
+    // createWindow watches the renderer for blank pages and hangs (renderer-watchdog.cjs).
+    createRendererWatchdog: () => ({ dispose() {} }), recoverRenderer() {},
   };
   const window = vm.runInNewContext(`(${createWindow})`, context)({
     logger: context.logger, stateStore: context.stateStore, windowStatePath: "state", startHidden: true,

@@ -109,10 +109,11 @@ async function main() {
     console.log("[AO build] Renderer verified; daemon and ACP runtime were not rebuilt or replaced.");
     return;
   }
-  // The daemon needs Go 1.27.1; keep the portable toolchain in .tools (aiTemp is cleared as scratch).
+  // The daemon needs Go 1.27; keep the portable toolchain in .tools (aiTemp is cleared as scratch).
+  // At least 1.27.3: before it, crypto/x509 trusted chains through distrusted intermediates
+  // (CVE-2026-111943, the leaked emSign CA keys), so 1.27.1 is no longer picked up by itself.
   const portableGo = [
-    path.join(projectRoot, ".tools", "go1.27.1", "bin", "go.exe"),
-    path.join(projectRoot, "aiTemp", "ao-go-toolchain-1.27.1", "go", "bin", "go.exe"),
+    path.join(projectRoot, ".tools", "go1.27.3", "bin", "go.exe"),
   ].find((candidate) => fs.existsSync(candidate));
   const goExecutable = process.env.CODING_TOOLS_GO || portableGo || "go";
   const daemonPath = path.join(outputRoot, process.platform === "win32" ? "ao-daemon.exe" : "ao-daemon");
