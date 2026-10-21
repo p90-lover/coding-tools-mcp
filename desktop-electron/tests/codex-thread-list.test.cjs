@@ -334,6 +334,21 @@ test("chats can be dragged into place in every list: Pinned, another open projec
   assert.equal(rowOf(list.render(), "Fix app").props["data-drop"], undefined, "over itself, no line shows");
   aside().props.onDrop(dragEvent(true));
   assert.equal(stored["coding-tools:ao:list-order:pinned"], before, "and the order is unchanged");
+
+  // Codex review: a line shown in Pinned, then the pointer let go over another list or a button,
+  // must not save that stale Pinned place. Only the list the chat came from takes the drop.
+  const pinnedList = { contains: (node) => node === "pinned-row" || node === "pinned-gap" };
+  const inside = (lower) => ({ ...dragEvent(lower), target: "pinned-row", currentTarget: { ...dragEvent(lower).currentTarget, parentElement: pinnedList } });
+  const outside = { ...dragEvent(false), target: "archived-row" };
+  rowOf(list.render(), "Older").props.onDragStart(inside(false));
+  rowOf(list.render(), "Fix app").props.onDragOver(inside(false));
+  assert.equal(rowOf(list.render(), "Fix app").props["data-drop"], "before");
+  let refused = true;
+  aside().props.onDragOver({ ...outside, preventDefault() { refused = false; } });
+  assert.ok(refused, "outside its list the drop is refused");
+  assert.equal(rowOf(list.render(), "Fix app").props["data-drop"], undefined, "and the line goes away");
+  aside().props.onDrop(outside);
+  assert.equal(stored["coding-tools:ao:list-order:pinned"], before, "nothing is saved");
   for (const key of Object.keys(stored)) delete stored[key];
 });
 

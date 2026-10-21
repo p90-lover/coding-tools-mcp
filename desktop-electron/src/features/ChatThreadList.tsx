@@ -248,7 +248,7 @@ export function ChatThreadList(props: ThreadListProps) {
   /** Projects showing all their chats ("Show more"); the rest show the first `visible`. */
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   /** The chat being dragged and the list it is dragged within; where it would land, for the drop line. */
-  const [dragging, setDragging] = useState<{ list: string; id: string; drag: DragList } | null>(null);
+  const [dragging, setDragging] = useState<{ list: string; id: string; drag: DragList; listEl: HTMLElement | null } | null>(null);
   const [dropAt, setDropAt] = useState<{ id: string; after: boolean } | null>(null);
   // Another list's order was saved (Pinned, an Archived group, another open project): render again.
   const [, setOrderTick] = useState(0);
@@ -527,17 +527,26 @@ export function ChatThreadList(props: ThreadListProps) {
    */
   const endDrag = () => { setDragging(null); setDropAt(null); };
   /**
-   * A drop anywhere over the chat list: the place the drop line last showed. Only a row took the
-   * drop before, so letting go between rows, below the last one or on the dragged row itself was
-   * refused (the no-entry cursor) and nothing moved, which made placing a chat fiddly.
+   * A drop anywhere over the list the chat came from (its rows, the gaps between them, below the
+   * last one): the place the drop line last showed. Only a row took the drop before, so letting go
+   * between rows, below the last one or on the dragged row itself was refused (the no-entry cursor)
+   * and nothing moved, which made placing a chat fiddly. Outside that list (another project, Pinned,
+   * Archived, a button) the line goes away and the drop is refused, as before.
    */
+  const inSourceList = (event: ReactDragEvent<HTMLElement>) => {
+    const list = dragging?.listEl;
+    return !list || Boolean(event.target && list.contains(event.target as Node));
+  };
   const listDragOver = dragging ? (event: ReactDragEvent<HTMLElement>) => {
+    if (!inSourceList(event)) { if (dropAt) setDropAt(null); return; }
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
   } : undefined;
   const listDrop = (event: ReactDragEvent<HTMLElement>) => {
     event.preventDefault();
-    if (dragging && dropAt && dropAt.id !== dragging.id) dragging.drag.save(dropChat(dragging.drag.order, dragging.id, dropAt.id, dropAt.after));
+    if (dragging && dropAt && dropAt.id !== dragging.id && inSourceList(event)) {
+      dragging.drag.save(dropChat(dragging.drag.order, dragging.id, dropAt.id, dropAt.after));
+    }
     endDrag();
   };
   const dragRow = (id: string, drag: DragList | undefined) => {
@@ -551,7 +560,8 @@ export function ChatThreadList(props: ThreadListProps) {
       draggable: true,
       "data-drop": sameList && dragging?.id !== id && dropAt?.id === id ? (dropAt.after ? "after" : "before") : undefined,
       onDragStart: (event: ReactDragEvent<HTMLElement>) => {
-        setDragging({ list: drag.list, id, drag });
+        // The list element the row sits in: drops count only over it (inSourceList).
+        setDragging({ list: drag.list, id, drag, listEl: event.currentTarget.parentElement ?? null });
         event.dataTransfer.effectAllowed = "move";
         event.dataTransfer.setData("text/plain", id);
         // The browser's own drag image is a see-through copy of the row a few pixels off it, which
