@@ -365,6 +365,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     const key = `${id}|${limits.join(",")}`;
     const known = tailReads.get(key);
     if (known && Date.now() - known.at < maxAgeMs) return known.read;
+    // A fresh read of more items serves a smaller ask too: a working chat's run loop reads 100
+    // items each second and its Terminal pane 60 every two, the same session's tail twice over.
+    for (const [other, entry] of tailReads) {
+      if (other.startsWith(`${id}|`) && Number(other.slice(id.length + 1).split(",")[0]) >= limits[0]
+        && Date.now() - entry.at < maxAgeMs) return entry.read;
+    }
     const read = readConversationTail(id, limits);
     tailReads.set(key, { at: Date.now(), read });
     read.catch(() => { if (tailReads.get(key)?.read === read) tailReads.delete(key); });

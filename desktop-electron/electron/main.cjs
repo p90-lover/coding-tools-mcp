@@ -1840,8 +1840,13 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("coding-tools:apps:call", (event, input = {}) => {
     if (!appsHost) throw new Error("Apps host is unavailable");
+    // The chat surface's own background calls run on load, on a timer or when a chat opens, often
+    // while focus sits in an embedded view or another app; refused there, they only filled the
+    // Activity log ("Click into the Coding Tools window", 22 a night) and left the archived list,
+    // the agent pre-warm and the Retry automatically switch unset. They still need a visible window.
     const passiveAoLayout = input.moduleId === "agent-orchestrator"
-      && ["upstream_bounds", "upstream_hide", "chat_preview_show", "chat_preview_hide"].includes(input.operation);
+      && (["upstream_bounds", "upstream_hide", "chat_preview_show", "chat_preview_hide", "archived_chats", "chat_prewarm"].includes(input.operation)
+        || (input.operation === "chat_auto_retry" && input.arguments?.enabled === undefined));
     assertFocusedMainWindow(event, !passiveAoLayout && !appsHost.isReadOnly(input.moduleId, input.operation));
     // A chat's preview is drawn at the pane's CSS bounds, scaled by the page's own zoom.
     if (input.moduleId === "agent-orchestrator" && input.operation === "chat_preview_show") {
