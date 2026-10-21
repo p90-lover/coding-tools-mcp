@@ -1,3 +1,4 @@
+const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
@@ -34,12 +35,15 @@ function resolveLauncherProfile({
   }
   const development = argv.includes("--dev-profile");
   if (!development) {
+    let userData = configuredPath(env, "CODING_TOOLS_LAUNCHER_DATA_DIR", path.join(appData, "Coding Tools"), homeDir);
+    // Electron and startup services must use the same physical directory through a Windows junction.
+    if (fs.existsSync(userData) && fs.statSync(userData).isDirectory()) userData = fs.realpathSync(userData);
     return {
       kind: PRODUCTION_PROFILE,
       displayName: "Coding Tools",
       coreHome: configuredPath(env, "CODING_TOOLS_HOME", path.join(homeDir, ".coding-tools"), homeDir),
       codexHome: configuredPath(env, "CODEX_HOME", path.join(homeDir, ".codex"), homeDir),
-      userData: configuredPath(env, "CODING_TOOLS_LAUNCHER_DATA_DIR", path.join(appData, "Coding Tools"), homeDir),
+      userData,
       browserPartition: browserPartitionForLauncherProfile(PRODUCTION_PROFILE),
     };
   }
