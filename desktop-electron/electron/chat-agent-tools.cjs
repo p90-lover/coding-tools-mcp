@@ -161,6 +161,24 @@ const CHAT_DESCRIPTIONS = Object.freeze({
 });
 // Consent the agent may never give itself: stripped from every call it makes.
 const CONSENT_ARGUMENTS = Object.freeze(["confirm", "confirmed", "approval_token"]);
+// Schema properties a chat agent never needs, left out of its tool list (a call naming one still
+// works): headless's shared routing fields (a chat is rooted in its worktree and never has
+// start_task's tasks), the instructions revision (repeats are left out for it, see
+// omitSeenInstructions) and the consent it may never give. The routing three alone were 600
+// characters on each of 13 tools, a quarter of the list an agent reads with every request.
+const CHAT_HIDDEN_PROPERTIES = Object.freeze(["project_root", "task_id", "known_project_instructions_revision", ...CONSENT_ARGUMENTS]);
+// Aliases a chat agent can still call but is not shown: grep_text runs search_text, and
+// kill_session runs kill_command (headless dispatches each pair to one function).
+const UNLISTED_ALIASES = new Set(["grep_text", "kill_session"]);
+/** A tool's input schema without CHAT_HIDDEN_PROPERTIES. */
+function chatSchema(schema) {
+  if (!schema || typeof schema !== "object" || !schema.properties || typeof schema.properties !== "object") return schema;
+  const properties = { ...schema.properties };
+  let dropped = false;
+  for (const key of CHAT_HIDDEN_PROPERTIES) if (Object.hasOwn(properties, key)) { delete properties[key]; dropped = true; }
+  if (!dropped) return schema;
+  return { ...schema, properties, ...(Array.isArray(schema.required) ? { required: schema.required.filter((key) => Object.hasOwn(properties, key)) } : {}) };
+}
 const GROUPS = Object.freeze(["agent", "terminal", "desktop", "preview", "subagents"]);
 const groupOf = (name) => (AGENT_TOOLS.has(name) ? "agent" : TERMINAL_TOOLS.has(name) ? "terminal" : DESKTOP_TOOLS.has(name) ? "desktop"
   : PREVIEW_TOOLS.has(name) ? "preview" : SUBAGENT_TOOLS.has(name) ? "subagents" : null);
@@ -223,10 +241,32 @@ function errorMessage(error) {
   return String(error instanceof Error ? error.message : error).slice(0, 500);
 }
 
-/** The MCP CallToolResult for a workspace tool's structured result, as the workspace listener shapes it. */
-function toolResult(name, args, structured) {
-  const value = structured && typeof structured === "object" && !Array.isArray(structured)
-    ? { ...structured } : { value: structured ?? null };
+/**
+ * A result whose project instructions this session was already given, with their text left out.
+ * Headless attaches the instructions covering a call's path (up to 32 KB of AGENTS.md / CLAUDE.md)
+ * to every result unless the call names the revision it already has, which agents rarely do, and a
+ * chat agent's own harness reads those files too: every file read carried them again. A revision
+ * the session already received comes back marked unchanged, as headless sends it when told.
+ */
+function omitSeenInstructions(value, seen) {
+  const context = value?.project_instructions;
+  if (!seen || !context || typeof context !== "object" || typeof context.revision !== "string") return value;
+  if (!seen.has(context.revision)) {
+    seen.add(context.revision);
+    if (seen.size > 64) seen.delete(seen.values().next().value);
+    return value;
+  }
+  if (!context.instructions) return value;
+  return { ...value, project_instructions: { ...context, instructions: "", instructions_omitted: true, unchanged: true } };
+}
+
+/**
+ * The MCP CallToolResult for a workspace tool's structured result, as the workspace listener shapes
+ * it. `seen` is the session's received instruction revisions (see omitSeenInstructions).
+ */
+function toolResult(name, args, structured, seen = null) {
+  const value = omitSeenInstructions(structured && typeof structured === "object" && !Array.isArray(structured)
+    ? { ...structured } : { value: structured ?? null }, seen);
   const isError = value.ok === false;
   const wantsImage = name.startsWith("computer_")
     ? typeof value.base64 === "string"
@@ -1091,13 +1131,13 @@ function createChatAgentTools({
       ...(canWake(entry) ? WAKE_TOOL_DEFS : [])];
     return [...(Array.isArray(catalog?.tools) ? catalog.tools : [])
       .filter((tool) => !PREVIEW_TOOLS.has(tool?.name) && !SUBAGENT_TOOLS.has(tool?.name) && tool?.name !== "show_in_chat" && tool?.name !== "schedule_wakeup"), ...own]
-      .filter((tool) => typeof tool?.name === "string" && groupOf(tool.name) && allowed(entry, groupOf(tool.name)))
+      .filter((tool) => typeof tool?.name === "string" && !UNLISTED_ALIASES.has(tool.name) && groupOf(tool.name) && allowed(entry, groupOf(tool.name)))
       // outputSchema is left out: clients would validate structuredContent against it, and the
       // agent gains nothing from it.
       .map(({ name, title, description, inputSchema, annotations }) => ({
         name, ...(title ? { title } : {}),
         ...(CHAT_DESCRIPTIONS[name] || description ? { description: CHAT_DESCRIPTIONS[name] ?? description } : {}),
-        inputSchema: inputSchema && typeof inputSchema === "object" ? inputSchema : { type: "object" },
+        inputSchema: inputSchema && typeof inputSchema === "object" ? chatSchema(inputSchema) : { type: "object" },
         ...(annotations ? { annotations } : {}),
       }));
   }
@@ -1319,7 +1359,7 @@ function createChatAgentTools({
       current = result && typeof result === "object" && result.ok === false ? result.error : null;
       if (!current) break;
     }
-    return toolResult(name, args, result);
+    return toolResult(name, args, result, entry.instructionsSeen ??= new Set());
   }
 
   /**
@@ -1462,7 +1502,7 @@ function createChatAgentTools({
       const result = (failure?.code === "APPROVAL_REQUIRED" && typeof failure.details?.request_id === "string")
         || failure?.code === "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION"
         ? await approveAndRetry(entry, name, args, rooted, failure, confirmed, signal)
-        : toolResult(name, args, outcome.result);
+        : toolResult(name, args, outcome.result, entry.instructionsSeen ??= new Set());
       track(entry, name, args, result);
       return result;
     } finally {

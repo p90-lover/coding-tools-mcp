@@ -260,7 +260,21 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, logger = null }) {
+  // One run read serves every caller for a moment (as the upstream shares a conversation tail). A
+  // working chat's activity poll, the run loop and their per-node checks each read the same run
+  // within milliseconds: 10-15 /ao/read a second while one mission worked, each one a copy and a
+  // serialization of the run in coding-tools-headless. Any other request may change a run, so it
+  // drops what was read, before it is sent and again once it is answered. The app turns it on
+  // (runReadFreshMs); off by default, so a caller that changes runs some other way reads afresh.
+  const HEADLESS_READS = new Set(["/api/v1/ao/read", "/api/v1/ao/harness/status", "/api/v1/ao/harness/permission-profiles"]);
+  const runReads = new Map(); // JSON [workspace, run] -> { at, read }
+  // Every argument passes through (a confirmed action's third is its localConfirmation).
+  const requestHeadless = (endpoint, ...rest) => {
+    if (HEADLESS_READS.has(endpoint)) return sendHeadless(endpoint, ...rest);
+    runReads.clear();
+    return Promise.resolve(sendHeadless(endpoint, ...rest)).finally(() => runReads.clear());
+  };
   const goals = createGoalStore({ file: goalsFile, now });
   const chatPreferences = createChatPreferences(chatPreferencesFile);
   // Chats whose agent asked to be woken later (schedule_wakeup, chat-wakeups.cjs).
@@ -1254,16 +1268,25 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     return { mission, node: mission?.nodes?.find((entry) => entry.id === nodeId) };
   }
 
-  async function runs({ workspaceId, runId } = {}) {
-    const id = clean(workspaceId, 128);
-    const response = await requestHeadless("/api/v1/ao/read", {
-      workspace_id: id,
-      ...(runId ? { run_id: clean(runId, 80) } : {}),
-    });
-    if (response?.ok !== true || !Array.isArray(response.runs)) {
-      throw new Error("AO run read failed");
+  // Callers only read what comes back (none changes a run in place), so one response is shared.
+  function runs({ workspaceId, runId } = {}) {
+    const id = clean(workspaceId, 128), run = runId ? clean(runId, 80) : "";
+    const key = JSON.stringify([id, run]);
+    const known = runReads.get(key);
+    if (known && Date.now() - known.at < runReadFreshMs) return known.read;
+    const read = (async () => {
+      const response = await requestHeadless("/api/v1/ao/read", { workspace_id: id, ...(run ? { run_id: run } : {}) });
+      if (response?.ok !== true || !Array.isArray(response.runs)) {
+        throw new Error("AO run read failed");
+      }
+      return response;
+    })();
+    if (runReadFreshMs > 0) {
+      runReads.set(key, { at: Date.now(), read });
+      read.catch(() => { if (runReads.get(key)?.read === read) runReads.delete(key); });
+      if (runReads.size > 64) runReads.delete(runReads.keys().next().value);
     }
-    return response;
+    return read;
   }
 
   async function updateRun({ workspaceId, change } = {}) {
