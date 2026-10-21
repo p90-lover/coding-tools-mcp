@@ -194,12 +194,19 @@ export function mergeActivityFrames(current: Record<string, ChatActivity>, next:
  * earlier polls that have since fallen out of that window stay in front of it, and a long turn
  * keeps every step instead of only its last few. A poll sharing no item with what is kept is a new
  * attempt of the card (a retry keeps its key), which starts over.
+ *
+ * At most LIVE_TIMELINE_ITEMS are kept, the newest: an agent running for hours grew the list
+ * without end, and the whole of it was rendered again on every one-second poll (a DeepSeek turn
+ * shows every item flat while it works), so a long turn made the chat sluggish. A finished turn
+ * reads its whole timeline back from AO when opened.
  */
+export const LIVE_TIMELINE_ITEMS = 600;
 export function mergeTimeline(known: ChatLiveItem[] | null | undefined, latest: ChatLiveItem[]): ChatLiveItem[] {
-  if (!known?.length) return latest;
+  const capped = (items: ChatLiveItem[]) => (items.length > LIVE_TIMELINE_ITEMS ? items.slice(-LIVE_TIMELINE_ITEMS) : items);
+  if (!known?.length) return capped(latest);
   const fresh = new Set(latest.map((item) => item.id));
   const earlier = known.filter((item) => !fresh.has(item.id));
-  return earlier.length === known.length ? latest : [...earlier, ...latest];
+  return capped(earlier.length === known.length ? latest : [...earlier, ...latest]);
 }
 
 /** A stretch of a turn: a message, steer or edit on its own, or a run of tool calls and thinking. */
