@@ -371,10 +371,11 @@ function StepRow({ step, runId, loadWork }: { step: ChatStep; runId: string; loa
     {open ? <div className="cx-step-body">
       {step.detail ? <p className="cx-step-detail">{step.detail}</p> : null}
       {step.working && !compact ? <p className="cx-step-detail">{step.working.detail}</p> : null}
+      {/* Its earlier rounds first, folded (oldest first), then the attempt now: a retried card's
+          failed attempt showed under the new attempt's work, as if it came after it. */}
+      <EarlierRounds rounds={step.earlier} />
       {work?.length ? <LiveTimeline items={work} live={Boolean(step.working)} reply={step.text} /> : null}
       {/* A held or failed card keeps the reply it gave: the error says why, the reply stays readable. */}
-      {/* Its earlier rounds first, folded (oldest first), then where it stands now. */}
-      <EarlierRounds rounds={step.earlier} />
       {step.error ? <p className="cx-step-error">{step.error}</p> : null}
       {step.text ? <ChatMarkdown text={step.text} /> : null}
     </div> : null}
