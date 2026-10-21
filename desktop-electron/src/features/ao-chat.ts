@@ -125,6 +125,18 @@ export function tidyTimeline(items: ChatLiveItem[]): ChatLiveItem[] {
   return out;
 }
 
+/**
+ * A turn's work without the messages its reply already shows. Claude Code's reply is the turn's
+ * messages joined, so a single-model chat showed each one twice: between its tool calls, then again
+ * in the answer under the model's name. Only a whole message found in the reply goes.
+ */
+export function withoutReplied(items: ChatLiveItem[], reply?: string): ChatLiveItem[] {
+  const flat = (text: string) => text.replace(/\s+/g, " ").trim();
+  const said = reply ? flat(reply) : "";
+  if (!said) return items;
+  return items.filter((item) => item.kind !== "message" || item.answered || !flat(item.text ?? "") || !said.includes(flat(item.text)));
+}
+
 // claude-agent-acp answers every denied request with this one line, whoever denied it and why.
 const STOCK_REFUSAL = /^(?:Error: )?User refused permission to run tool\.?$/i;
 

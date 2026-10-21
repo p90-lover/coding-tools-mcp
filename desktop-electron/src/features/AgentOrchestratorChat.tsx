@@ -20,7 +20,7 @@ import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, chatAcceptsMessage, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
-  activitySummary, groupTimeline, mergeTimeline, tidyTimeline, wakeupLabel, type ChatWakeup,
+  activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, type ChatWakeup,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -300,9 +300,10 @@ function ActivityGroup({ items, live }: { items: ChatLiveItem[]; live: boolean }
 }
 
 /** A role's turn, as Codex and Claude Code show it: thinking, tool calls and streamed messages. */
-function LiveTimeline({ items, live = false }: { items: ChatLiveItem[]; live?: boolean }) {
+function LiveTimeline({ items, live = false, reply }: { items: ChatLiveItem[]; live?: boolean; reply?: string }) {
   const compact = useContext(CompactActivity);
-  const tidy = tidyTimeline(items);
+  // A message the reply below already holds is not shown twice (withoutReplied).
+  const tidy = withoutReplied(tidyTimeline(items), reply);
   if (!compact) return <ol className="cx-live">{tidy.map((item) => <LiveRow key={item.id} item={item} />)}</ol>;
   const segments = groupTimeline(tidy);
   return <ol className="cx-live is-compact">
@@ -365,7 +366,7 @@ function StepRow({ step, runId, loadWork }: { step: ChatStep; runId: string; loa
     {open ? <div className="cx-step-body">
       {step.detail ? <p className="cx-step-detail">{step.detail}</p> : null}
       {step.working && !compact ? <p className="cx-step-detail">{step.working.detail}</p> : null}
-      {work?.length ? <LiveTimeline items={work} live={Boolean(step.working)} /> : null}
+      {work?.length ? <LiveTimeline items={work} live={Boolean(step.working)} reply={step.text} /> : null}
       {/* A held or failed card keeps the reply it gave: the error says why, the reply stays readable. */}
       {/* Its earlier rounds first, folded (oldest first), then where it stands now. */}
       <EarlierRounds rounds={step.earlier} />
@@ -391,7 +392,7 @@ function AnswerWork({ step, runId, expanded, loadWork }: { step: ChatStep; runId
       {summary.additions || summary.deletions ? <DiffCount additions={summary.additions} deletions={summary.deletions} /> : null}
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
     </button>
-    {open ? work?.length ? <LiveTimeline items={work} /> : <p className="cx-tool-empty">Loading…</p> : null}
+    {open ? work?.length ? <LiveTimeline items={work} reply={step.text} /> : <p className="cx-tool-empty">Loading…</p> : null}
   </div>;
 }
 

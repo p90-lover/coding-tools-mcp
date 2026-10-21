@@ -13,7 +13,7 @@ import { ChatMarkdown } from "./ChatMarkdown";
 import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, StreamingMarkdown } from "./ChatToolParts";
 import {
   dshActivity, dshDuration, dshItemDetail, dshLiveTitle, dshProcessTitle, dshQuietNote, dshRetryNote, dshSegments, dshThinkSummary, dshToolTitle,
-  tidyTimeline, type ChatLiveItem, type ChatStep, type ChatTurn, type DshActivity,
+  tidyTimeline, withoutReplied, type ChatLiveItem, type ChatStep, type ChatTurn, type DshActivity,
 } from "./ao-chat";
 
 // Icons: ui-primitives/src/icons, 1px strokes on a 16 box, drawn 14px inside a 16px leading box.
@@ -209,8 +209,8 @@ function DshGroup({ items, live }: { items: ChatLiveItem[]; live: boolean }) {
 
 /** A card's work: flat while it runs (DeepSeek Harness keeps a running turn flat), grouped once done. */
 function DshFlow({ items, grouped, hideReply }: { items: ChatLiveItem[]; grouped: boolean; hideReply?: string }) {
-  const answer = hideReply?.trim();
-  const tidy = tidyTimeline(items).filter((item) => !(answer && item.kind === "message" && item.text.trim() === answer));
+  // The reply is the turn's messages joined: each one in it shows once, in the reply (withoutReplied).
+  const tidy = withoutReplied(tidyTimeline(items), hideReply);
   if (!grouped) return <div className="dsh-flow">{tidy.map((item) => <DshItem key={item.id} item={item} />)}</div>;
   return <div className="dsh-flow">{dshSegments(tidy).map((segment) => segment.kind === "item"
     ? <DshItem key={segment.item.id} item={segment.item} />

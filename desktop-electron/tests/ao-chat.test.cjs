@@ -1330,6 +1330,21 @@ test("Claude Code's auto-mode billing notice is left out of replies, folded atte
   assert.deepEqual(tidy.map((item) => `${item.id}:${item.text}`), ["b:Reading the files.", "c:ls"]);
 });
 
+test("a single model's messages show once: in its reply, not again in its work above it", () => {
+  // Seen live (MiMo V2.6 Pro, 2026-10-21): Claude Code's reply is the turn's messages joined, and the
+  // chat showed "埠 8000 已有服務在跑…" between the tool calls and again in the answer.
+  const message = (id, text) => ({ id, kind: "message", status: "completed", text });
+  const items = [
+    message("m1", "我先核實現況。"), { id: "c1", kind: "command", status: "completed", text: "netstat -ano" },
+    message("m2", "埠 8000 已有服務在跑,\n直接開預覽。"), { id: "t1", kind: "tool", status: "completed", text: "preview_open" },
+    message("m3", "預覽已開好。"), message("m4", "A note the reply does not repeat."),
+  ];
+  const reply = "我先核實現況。\n\n埠 8000 已有服務在跑, 直接開預覽。\n\n預覽已開好。";
+  assert.deepEqual(chat.withoutReplied(items, reply).map((item) => item.id), ["c1", "t1", "m4"]);
+  assert.deepEqual(chat.withoutReplied(items, undefined).map((item) => item.id), items.map((item) => item.id), "no reply, nothing hidden");
+  assert.deepEqual(chat.withoutReplied(items, "   ").length, items.length);
+});
+
 test("a review's rework block (the card ids the engine reads) is not shown", () => {
   // Seen live: a review ended with "rework" and `["7394f7d6-3cb1-491d-a715-f1dd90bc79e2"]`.
   const review = "CHANGES_REQUIRED: Worker 1 must list all 316 entries.";
