@@ -102,7 +102,11 @@ export function tidyTimeline(items: ChatLiveItem[]): ChatLiveItem[] {
     for (let at = out.length - 1; at >= 0; at -= 1) if (["tool", "command", "edit"].includes(out[at].kind)) return at;
     return -1;
   };
-  for (const item of items) {
+  for (const raw of items) {
+    // The agent's messages without notices the harness wrote into them; one that was only a notice goes.
+    const said = raw.kind === "message" && raw.text ? withoutHarnessNotices(raw.text) : raw.text;
+    if (raw.kind === "message" && raw.text && !said) continue;
+    const item = said === raw.text ? raw : { ...raw, text: said };
     // One the person answered stays as its own row, shown as Claude Code shows an answered question.
     if (item.answered) { out.push(item); continue; }
     const answered = item.kind === "approval" && !item.label && !/reject|denied|declin/i.test(item.status);
@@ -119,6 +123,18 @@ export function tidyTimeline(items: ChatLiveItem[]): ChatLiveItem[] {
     explainRefusal(out, at, item.approval);
   }
   return out;
+}
+
+/**
+ * A turn's work without the messages its reply already shows. Claude Code's reply is the turn's
+ * messages joined, so a single-model chat showed each one twice: between its tool calls, then again
+ * in the answer under the model's name. Only a whole message found in the reply goes.
+ */
+export function withoutReplied(items: ChatLiveItem[], reply?: string): ChatLiveItem[] {
+  const flat = (text: string) => text.replace(/\s+/g, " ").trim();
+  const said = reply ? flat(reply) : "";
+  if (!said) return items;
+  return items.filter((item) => item.kind !== "message" || item.answered || !flat(item.text ?? "") || !said.includes(flat(item.text)));
 }
 
 // claude-agent-acp answers every denied request with this one line, whoever denied it and why.
@@ -612,6 +628,37 @@ export function withoutSoloBlock(answer: string): string {
   return start < 0 ? answer : answer.slice(0, start).trimEnd();
 }
 
+/**
+ * A review without the trailing ```rework block the engine reads (the worker card ids to redo),
+ * fenced or as the web bridge flattens it (a bare "rework" line, then the ids in backticks). Seen
+ * live: the chat ended a review with "rework" and `["7394f7d6-…"]`, card ids nobody can read.
+ */
+export function withoutReworkBlock(answer: string): string {
+  const fenced = answer.lastIndexOf("```rework");
+  const flattened = [...answer.matchAll(/(^|\n)[ \t]*rework[ \t]*\r?\n\s*[`[{]/gi)].pop();
+  const start = Math.max(fenced, flattened?.index !== undefined ? flattened.index + flattened[1].length : -1);
+  return start < 0 ? answer : answer.slice(0, start).trimEnd();
+}
+
+// Claude Code writes this notice into a turn's reply when its requests go through a gateway (CPA):
+// its own auto-mode classifier billing does not apply there. The agent did not write it, and the
+// app reviews requests itself, yet it opened many answers ("**Warning:** We're changing auto mode…").
+const AUTO_MODE_NOTICE = /(^|\n)[ \t]*(?:\*\*)?Warning:(?:\*\*)?[ \t]*We[’']re changing auto mode to no longer charge for classifier requests[\s\S]*?(?=\r?\n[ \t]*\r?\n|$)/g;
+
+/** A reply without notices the harness wrote into it (AUTO_MODE_NOTICE). */
+export function withoutHarnessNotices(text: string): string {
+  const out = text.replace(AUTO_MODE_NOTICE, "$1");
+  return out === text ? text : out.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/** A card's reply as the chat shows it: without harness notices, nor the blocks the engine reads. */
+function shownAnswer(node: ChatNode, value: unknown, run?: ChatRun): string {
+  let text = withoutHarnessNotices(textOf(value));
+  if (run?.solo && node.role === "planner") text = withoutSoloBlock(text);
+  if (REVIEW_CARD_ROLES.has(node.role)) text = withoutReworkBlock(text);
+  return text;
+}
+
 /** The conversation for one chat: each user message followed by that run's replies. */
 export function chatTranscript(runs: ChatRun[], description: string | undefined, options: ChatOptions = {}): ChatMessage[] {
   const said = chatMessagesFromDescription(description);
@@ -629,11 +676,12 @@ export function chatTranscript(runs: ChatRun[], description: string | undefined,
       const described = options.describe?.(node, run);
       const detail = described ? { detail: described } : {};
       if (node.receipt?.error) {
-        messages.push({ kind: "agent", key, role: node.role, name, text: [node.receipt.error, node.receipt.answer ? `Partial work:\n${node.receipt.answer}` : ""].filter(Boolean).join("\n\n"), tone: "error", ...detail });
+        const partial = shownAnswer(node, node.receipt.answer, run);
+        messages.push({ kind: "agent", key, role: node.role, name, text: [node.receipt.error, partial ? `Partial work:\n${partial}` : ""].filter(Boolean).join("\n\n"), tone: "error", ...detail });
       } else if (node.state === "finished" && node.receipt?.answer) {
         messages.push({
           kind: "agent", key, role: node.role, name,
-          text: run.solo && node.role === "planner" ? withoutSoloBlock(node.receipt.answer) : node.receipt.answer,
+          text: shownAnswer(node, node.receipt.answer, run),
           tone: node.role === "reviewer" || node.role === "approver" || node.role === "sub_reviewer" ? "verdict" : "answer",
           ...(node.receipt.verdict ? { verdict: node.receipt.verdict } : {}),
           ...detail,
@@ -802,10 +850,15 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
   };
   // The receipt comes from the service as saved; anything but text there (an error object, a
   // number) is shown as text, since rendering it as is or calling string methods on it threw.
-  const error = textOf(node.receipt?.error), answer = textOf(node.receipt?.answer), verdict = textOf(node.receipt?.verdict);
+  const error = textOf(node.receipt?.error), answer = shownAnswer(node, node.receipt?.answer, run), verdict = textOf(node.receipt?.verdict);
   if (error) step.error = error;
-  if (answer) step.text = run.solo && node.role === "planner" ? withoutSoloBlock(answer) : answer;
+  if (answer) step.text = answer;
   if (verdict) step.verdict = verdict;
+  // Only a card whose reply is the one being acted on copies its earlier reply up: a single chat's
+  // card (it answers the message) and a reviewer (the workers redo what it asked). A team worker's
+  // earlier reports stay folded under their attempts: a failed worker opens on its error, and it
+  // opened on a whole earlier report under "Earlier attempt:" with no attempt it belonged to.
+  const copiesEarlier = REVIEW_CARD_ROLES.has(node.role) || run.execution_mode === "single" || Boolean(run.solo);
   if (node.state === "running" || node.state === "reserved") {
     const live = options.activity?.[key];
     const working = chatWorkingDetail(node, live, now);
@@ -813,11 +866,11 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
     step.working = { ...working, ...(live?.activity ? { activity: textOf(live.activity) } : {}),
       ...(timeline.length ? { timeline } : {}) };
     // A retried card's new attempt starts empty; until it writes, its earlier reply stays readable.
-    const earlier = latestHistoryAnswer(node);
+    const earlier = copiesEarlier ? latestHistoryAnswer(node) : undefined;
     if (!step.text && earlier && !timeline.some((item) => item.kind === "message")) {
       step.text = `${earlierLabel(node)}\n\n${earlier}`;
     }
-  } else if (!step.text && node.state !== "finished") {
+  } else if (!step.text && node.state !== "finished" && copiesEarlier) {
     // A review that sent the work back resets the reviewer to pending for its next round, and its
     // verdict moves to history. The chat showed nothing for it: the latest response, the one the
     // workers are now acting on, vanished until the reviewer answered again.
@@ -839,10 +892,10 @@ const REVIEW_CARD_ROLES = new Set<ChatNode["role"]>(["reviewer", "approver", "su
 export function earlierRounds(node: ChatNode, shownLatest = false): ChatStepRound[] {
   const history = Array.isArray(node.history) ? node.history : [];
   let latestAnswered = -1;
-  for (let index = history.length - 1; index >= 0; index -= 1) if (textOf(history[index]?.answer).trim()) { latestAnswered = index; break; }
+  for (let index = history.length - 1; index >= 0; index -= 1) if (shownAnswer(node, history[index]?.answer).trim()) { latestAnswered = index; break; }
   const noun = REVIEW_CARD_ROLES.has(node.role) ? "Cycle" : "Attempt";
   return history.flatMap((entry, index) => {
-    const answer = textOf(entry?.answer).trim(), error = textOf(entry?.error).trim();
+    const answer = shownAnswer(node, entry?.answer).trim(), error = textOf(entry?.error).trim();
     const text = answer || error;
     if (!text || (shownLatest && index === latestAnswered)) return [];
     // A round that answered and then failed (the answer kept, the error set) still failed.
@@ -855,7 +908,7 @@ export function earlierRounds(node: ChatNode, shownLatest = false): ChatStepRoun
 function latestHistoryAnswer(node: ChatNode): string | undefined {
   const history = Array.isArray(node.history) ? node.history : [];
   for (let index = history.length - 1; index >= 0; index -= 1) {
-    const answer = textOf(history[index]?.answer).trim();
+    const answer = shownAnswer(node, history[index]?.answer).trim();
     if (answer) return answer;
   }
   return undefined;
@@ -1014,6 +1067,25 @@ export function dshQuietNote(heardAtMs: number | undefined, now: number): string
   const quiet = heardAtMs ? now - heardAtMs : 0;
   if (quiet >= STALL_MS) return ` · nothing new for ${dshDuration(quiet)}, may be stuck`;
   return quiet >= 60_000 ? ` · quiet for ${dshDuration(quiet)}` : "";
+}
+
+/**
+ * Why a running turn is quiet when the agent is waiting out a model error: Claude Code's own notice
+ * ("Retrying Claude, attempt 8 of 10. API error 429. Trying again in 38.6s.") as the newest thing a
+ * working card did. Seen live: a rate-limited chat said only "nothing new for 10m, may be stuck"
+ * while Claude Code was backing off from 429s, so it looked hung. Empty when no card is retrying.
+ */
+export function dshRetryNote(steps: ChatStep[]): string {
+  for (const step of steps) {
+    const items = step.working?.timeline ?? [];
+    const last = items[items.length - 1];
+    if (!last || last.kind !== "system" || last.status !== "running" || !/^Retrying\b/i.test(last.text)) continue;
+    const attempt = last.text.match(/attempt (\d+) of (\d+)/i);
+    const status = last.text.match(/API error (\d{3})/i)?.[1];
+    const why = status === "429" ? "the model is rate-limited (429)" : status ? `the model's service is failing (${status})` : "the model request failed";
+    return ` · ${why}, retrying${attempt ? ` (${attempt[1]} of ${attempt[2]})` : ""}`;
+  }
+  return "";
 }
 
 /** A tool row's title (ui-tool tool-call-model.ts): its variant's word, or the tool's own. */

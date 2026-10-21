@@ -100,6 +100,18 @@ test("archive cannot hide a cancelled-but-still-live external turn after an unce
   assert.ok(!world.calls.some(c=>c[1]?.change?.change?.operation==="set_visibility"));
 });
 
+test("a chat whose launch came back without a session can be archived: it owns no agent to stop", async()=>{
+  // Seen live: "Owned session identity is unknown; stop needs attention" kept a "Needs you" chat, whose
+  // card was held after its launch failed, from ever being archived.
+  const world=reconfigureWorld();
+  const lead=world.saved.runs[0].nodes[0];
+  lead.state="held"; lead.receipt={status:"failed",error:"launch timed out",request_key:"request-one"};
+  await world.workflow.call("archive_task",{workspaceId:"ws",taskId:"task"});
+  assert.ok(world.calls.some(c=>c[0]==="/api/v1/ao/control"&&c[1].action==="stop"),"the run is still stopped");
+  assert.ok(!world.calls.some(c=>c[0]==="interrupt"),"no session stop is attempted for a card that has none");
+  assert.ok(world.calls.some(c=>c[1]?.change?.change?.operation==="set_visibility"),"the chat is archived");
+});
+
 test("model edits preserve missed, uncertain and cancelled schedule holds rather than launching",async()=>{
   for(const state of ["missed","needs_attention","cancelled","claimed"]){
     const world=reconfigureWorld();
@@ -2313,14 +2325,14 @@ test("AO connection forwards saved native policy and rejects a resolver substitu
 });
 
 test("background command approver leaves typed non-command, truncated and unoffered grants for the person", async () => {
-  for (const scenario of ["non-command", "unoffered", "truncated"]) {
+  for (const scenario of ["non-command", "unoffered", "truncated", "failed-answer"]) {
     const route = { harness_id: "codex-native", provider_id: "cliproxyapi-antigravity",
       model: "test-model", permission_profile: ":read-only" };
     const pending = scenario === "non-command"
       ? ["permissions", "questions", "file_change", "mcp_form", "mcp_url", "file_write"].map(kind =>
         ({ approval_id: kind, kind, method: "native/" + kind }))
       : [{ approval_id: scenario, kind: "command", command: "Get-Content test.txt", cwd: "C:/outside",
-        request: { availableDecisions: ["decline"],
+        request: { availableDecisions: scenario === "failed-answer" ? ["accept", "decline"] : ["decline"],
           ...(scenario === "truncated" ? { additionalPermissions: "requested".repeat(150),
             networkApprovalContext: { host: "outside.invalid", protocol: "https" } } : {}) } }];
     const mission = { id: "run", workspace_id: "ws", revision: 3, grant: { executable_sha256: "a".repeat(64) }, nodes: [
@@ -2329,7 +2341,9 @@ test("background command approver leaves typed non-command, truncated and unoffe
       { id: "worker", role: "worker", state: "running", parents: ["approver"], route },
     ] };
     let finished = false, sent = 0, asked = 0;
+    const events = [];
     const workflow = createAgentOrchestratorWorkflow({
+      logger: { info: (event, detail) => events.push([event, detail]) },
       findCodexExecutable: () => process.execPath,
       resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
       cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
@@ -2344,7 +2358,11 @@ test("background command approver leaves typed non-command, truncated and unoffe
           if (finished) mission.nodes[1].state = "finished";
           return { ok: true, pending_approvals: finished ? [] : pending };
         }
-        if (endpoint.endsWith("/approval")) { sent++; throw new Error("A non-command/unoffered grant must not auto-submit"); }
+        if (endpoint.endsWith("/approval")) {
+          sent++;
+          if (scenario === "failed-answer") return { ok: true, result: { ok: false } };
+          throw new Error("A non-command/unoffered grant must not auto-submit");
+        }
         throw new Error("Unexpected endpoint " + endpoint);
       },
     });
@@ -2360,8 +2378,9 @@ test("background command approver leaves typed non-command, truncated and unoffe
     finished = true;
     assert.equal(status.status, "running", scenario + ": " + JSON.stringify(status));
     assert.match(status.detail, /Waiting for your tool approval|checking it yourself/, scenario);
-    assert.equal(sent, 0, scenario);
-    if (scenario !== "unoffered") assert.equal(asked, 0, scenario + " must not send incomplete/native form scope to command advisor");
+    assert.equal(sent, scenario === "failed-answer" ? 1 : 0, scenario);
+    assert.ok(!events.some(([event]) => event === "ao.approval_decided"), "a failed answer is not logged as a decision");
+    if (!["unoffered", "failed-answer"].includes(scenario)) assert.equal(asked, 0, scenario + " must not send incomplete/native form scope to command advisor");
     for (let tries = 0; tries < 70; tries++) {
       if ((await workflow.call("run_status", { workspaceId: "ws", runId: "run" })).status === "finished") break;
       await new Promise(resolve => setTimeout(resolve, 10));
@@ -3311,7 +3330,8 @@ test("a single AO card set to Approve for me has its parked tool requests review
   assert.deepEqual(JSON.parse(JSON.stringify(resolved)).sort(), [["session-1", "push", "no"], ["session-1", "safe", "yes"]],
     "allowed once by the reviewer, git push denied by the hard rules, the unclear write left for the person; never an always-grant");
   assert.ok(advised.length >= 1 && advised.every(model => model === "test-model"), "the card's own CPA model reviews");
-  assert.equal(advised.length, 1, "the reviewer is asked only about the unclear write, never about the agent's question");
+  // Its "ask" gets one more review that must choose allow or deny; still undecided, the write waits.
+  assert.equal(advised.length, 2, "the reviewer is asked only about the unclear write (twice), never about the agent's question");
 });
 
 test("Approve for me is reviewed by codex-auto-review first, the card's model when CPA cannot serve it, and the person when neither answers", async () => {
@@ -3502,6 +3522,66 @@ test("Approve for me asks a reviewer that failed again before involving the pers
   mission.nodes[0].state = "finished";
 });
 
+test("Approve for me reviews complete scripts and leaves incomplete or failed reviews pending after 20 seconds", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once" }, { id: "no", kind: "reject_once" }];
+  const command = (`python -c "\n${"print(1)\n".repeat(27)}#`).padEnd(1490, "x") + '"';
+  assert.equal(command.length, 1491);
+  assert.equal(command.split("\n").length, 29);
+  const requests = [
+    { approval_id: "complete", command },
+    { approval_id: "truncated", command: "npm test", reviewTruncated: true },
+    { approval_id: "mcp-cut", kind: "permission", tool: "mcp__coding-tools__exec_command", toolInput: '{"cmd":"npm test"}', reviewTruncated: true },
+    { approval_id: "redacted", command: "python inspect.py fixture-secret" },
+    { approval_id: "oversized", command: "echo " + "x".repeat(25000) },
+    { approval_id: "unavailable", command: "python unavailable.py" },
+    { approval_id: "malformed", command: "python malformed.py" },
+  ].map(request => ({ source: "ao", kind: "command", tool: "PowerShell", since: "2000-01-01T00:00:00Z", decisions, ...request }));
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) },
+    nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "s", request_key: "k" } }] };
+  const resolved = [], prompts = [], events = [];
+  let observed = 0;
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-secret" }),
+    logger: { info: (event, detail) => events.push([event, detail]) },
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) };
+      const prompt = JSON.parse(init.body).messages[0].content;
+      prompts.push(prompt);
+      if (prompt.includes("unavailable.py")) return { ok: false, status: 503 };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: prompt.includes("malformed.py")
+        ? "not a decision" : '{"action":"allow","reason":"fixture-secret should never be logged"}' } }] }) };
+    },
+    requestHeadless: async endpoint => endpoint.endsWith("/read")
+      ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async () => { observed++; return { status: "working", turnId: "t", turnState: "running",
+        approvals: requests.filter(request => !resolved.some(([id]) => id === request.approval_id)) }; },
+      resolveApproval: async (_session, id, decision) => { resolved.push([id, decision]); return { ok: true }; },
+    },
+    confirm: async () => true,
+  });
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 300 && observed < 3; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(observed >= 3, "the stale-answer pass ran repeatedly");
+    assert.deepEqual(resolved, [["complete", "yes"]], "only the complete script received a reviewer decision");
+    assert.ok(prompts.some(prompt => prompt.includes(command)), "the reviewer sees the complete script");
+    assert.equal(prompts.length, 3, "actual truncation is not submitted as a complete review");
+    const decision = events.find(([event, detail]) => event === "ao.approval_decided" && detail.approval_id === "complete");
+    assert.ok(decision, "a successful decision records its actor");
+    assert.equal(decision[1].actor, "reviewer");
+    assert.equal(decision[1].decision, "allow");
+    assert.ok(!JSON.stringify(events).includes("fixture-secret"), "diagnostics omit model reasons and credentials");
+  } finally {
+    mission.nodes[0].state = "finished";
+    workflow.dispose();
+  }
+});
+
 test("Approve for me answers what the safety rules or its reviewer decide, and leaves a reviewer's ask to the person", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
@@ -3509,7 +3589,7 @@ test("Approve for me answers what the safety rules or its reviewer decide, and l
   // Each has waited far longer than the 20 s after which nobody answering lets the agent go on.
   const since = "2000-01-01T00:00:00.000Z";
   const requests = [
-    // Longer than the rules and the reviewer read: git push sits past the cut.
+    // Longer than the reviewer reads, but the safety rules read the whole command: git push past the cut is refused.
     { approval_id: "long", source: "ao", kind: "command", tool: "Bash", command: `echo ${"x".repeat(1600)} && git push origin main`, since, decisions },
     // An MCP tool's arguments arrive as JSON, where the newline before git push reads "\n".
     { approval_id: "json", source: "ao", kind: "permission", tool: "mcp__coding-tools__exec_command",
@@ -3553,11 +3633,11 @@ test("Approve for me answers what the safety rules or its reviewer decide, and l
     for (let tries = 0; tries < 300 && !answered().json; tries++) await new Promise(resolve => setTimeout(resolve, 10));
     // Several more passes of the run loop, long after the old 20 s answer would have fired.
     await new Promise(resolve => setTimeout(resolve, 1500));
-    assert.deepEqual(answered(), { json: "no" },
-      "git push in JSON is refused by the safety rules; the cut-off script and the plain request, left at ask, wait for the person");
+    assert.deepEqual(answered(), { long: "no", json: "no" },
+      "git push is refused by the safety rules, past the review's cut or in JSON; the plain request, left at ask, waits for the person");
     const shown = (await workflow.call("harness_status", { workspaceId: "ws", runId: "run", nodeId: "one" })).status?.pending_approvals ?? [];
-    assert.deepEqual([...shown.filter((request) => !request.awaiting_review).map((request) => request.approval_id)].sort(), ["long", "plain"],
-      "both show to the person as questions");
+    assert.deepEqual([...shown.filter((request) => !request.awaiting_review).map((request) => request.approval_id)].sort(), ["plain"],
+      "the plain request shows to the person as a question");
     releaseSlow("deny");
     for (let tries = 0; tries < 300 && !answered().slow; tries++) await new Promise(resolve => setTimeout(resolve, 10));
     assert.equal(answered().slow, "no", "the reviewer still on a request answers it; nobody allowed it meanwhile");
@@ -4146,7 +4226,8 @@ test("a card stopped while its agent launched also stops that agent once its ses
     aoHarness: {
       // The user stops the card while AO is still launching its agent.
       spawn: async () => { mission.cancelled = true; mission.nodes[0].state = "cancelled"; return "late-session"; },
-      interrupt: async (id) => { interrupted.push(id); },
+      interrupt: async () => {},
+      exitAgent: async (id) => { interrupted.push(id); return { ok: true }; },
       observe: async () => ({ status: "idle", turnState: "completed" }),
     },
   });
@@ -4727,13 +4808,14 @@ test("an agent's request answered in the chat is confirmed by the tool-request c
   const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) },
     nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1" } }] };
   const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
-  const resolved = [], general = [], toolRequests = [];
+  const resolved = [], general = [], toolRequests = [], events = [];
   let answer = true;
   const workflow = createAgentOrchestratorWorkflow({
     requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } }
       : endpoint.endsWith("/harness/status") ? { ok: true, status: { connected: false } } : { ok: true, run: mission },
     confirm: async input => { general.push(input.message); return true; },
     confirmToolRequest: async input => { toolRequests.push(input.message); return answer; },
+    logger: { info: (event, detail) => events.push([event, detail]) },
     aoHarness: {
       observe: async () => ({ status: "needs_input", turnState: "running", approvals: [{ approval_id: "req", source: "ao", kind: "command", tool: "PowerShell",
         command: "git status", decisions }] }),
@@ -4748,6 +4830,8 @@ test("an agent's request answered in the chat is confirmed by the tool-request c
   assert.deepEqual(resolved, ["yes", "no"]);
   answer = false;
   assert.equal((await workflow.call("approve_harness", { ...input, allow: true })).cancelled, true, "Cancel in that dialog answers nothing");
+  assert.deepEqual(events, [["ao.approval_decided", { approval_id: "req", actor: "user", decision: "allow" }],
+    ["ao.approval_decided", { approval_id: "req", actor: "user", decision: "deny" }]], "only confirmed successful user decisions are recorded");
   assert.deepEqual(resolved, ["yes", "no"]);
 });
 
@@ -4887,7 +4971,7 @@ test("a delayed Stop cannot interrupt a newer run that reused the stopped sessio
         if (endpoint.endsWith("/control")) { old.cancelled = true; old.nodes[0].state = "cancelled"; old.nodes[0].receipt.status = "held"; old.updated_at = Date.now(); return { ok: true, run: structuredClone(old) }; }
         throw new Error("unexpected " + endpoint);
       },
-      aoHarness: { interrupt: async () => { interrupted.push(turn); working = false; },
+      aoHarness: { exitAgent: async () => ({ ok: true }), interrupt: async () => { interrupted.push(turn); working = false; },
         observe: async () => ({ turnId: turn, turnState: working ? "running" : "interrupted", status: working ? "working" : "ready" }) },
     };
     try {
@@ -4925,7 +5009,7 @@ test("Stop respects session transfer before the newer dispatch receipt is saved"
       if (endpoint.endsWith("/external/submitted")) { submitted(); await hold; next.nodes[0].state = "running"; next.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run: structuredClone(next) }; }
       throw new Error("unexpected " + endpoint);
     },
-    aoHarness: { spawn: async () => { turn = "turn-b"; working = true; return "shared"; },
+    aoHarness: { exitAgent: async () => ({ ok: true }), spawn: async () => { turn = "turn-b"; working = true; return "shared"; },
       interrupt: async () => { interrupted.push(turn); working = false; },
       observe: async () => ({ turnId: turn, turnState: working ? "running" : "interrupted", status: working ? "working" : "ready" }) },
   });
@@ -4972,7 +5056,7 @@ test("a continued chat waits for an owned Stop's observation and claims its sess
       }
       return world.requestHeadless(endpoint, body, options);
     },
-    aoHarness: { continuable: async () => true,
+    aoHarness: { exitAgent: async () => ({ ok: true }), continuable: async () => true,
       send: async () => { sendCount++; turn = "turn-b"; sendStarted(); await sendGate; return { turnId: "turn-b" }; },
       spawn: async () => { throw new Error("a continuation must reuse its session"); },
       interrupt: async () => { interrupted.push(turn); },
@@ -5053,7 +5137,7 @@ test("team Stop and graph replacement require observed settlement after an inter
     const route = { harness_id: "ao:claude-code", model: "fixture" };
     const mission = { id: "run", workspace_id: "ws", revision: 3, nodes: [{ id: "one", state: "running", role: "planner", parents: [], route,
       receipt: { thread_id: "s1", status: "submitted" } }] };
-    let reads = 0, remainingBusy = Infinity, updates = 0;
+    let reads = 0, remainingBusy = Infinity, updates = 0, signalled = false;
     const interrupted = [];
     const workflow = createAgentOrchestratorWorkflow({
       setTimer: (callback, ms) => ms === 250 ? setImmediate(callback) : setTimeout(callback, ms),
@@ -5063,20 +5147,20 @@ test("team Stop and graph replacement require observed settlement after an inter
         if (endpoint.endsWith("/update")) { updates++; mission.nodes[0].state = "pending"; return { ok: true, run: structuredClone(mission) }; }
         throw new Error("unexpected " + endpoint);
       },
-      aoHarness: { interrupt: async id => { interrupted.push(id); },
-        observe: async () => { reads++; return { turnState: "interrupted", status: remainingBusy-- > 0 ? "working" : "ready" }; } },
+      aoHarness: { exitAgent: async () => ({ ok: true }), interrupt: async id => { interrupted.push(id); signalled = true; },
+        observe: async () => { reads++; return { turnState: "interrupted", status: !signalled || remainingBusy-- > 0 ? "working" : "ready" }; } },
     });
-    const invoke = () => action === "stop"
+    const invoke = () => { signalled = false; return action === "stop"
       ? workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" })
-      : workflow.call("update_run", { workspaceId: "ws", change: { operation: "graph", run_id: "run", expected_revision: 3, change: { operation: "set_parents", node_id: "one", parents: [] } } });
+      : workflow.call("update_run", { workspaceId: "ws", change: { operation: "graph", run_id: "run", expected_revision: 3, change: { operation: "set_parents", node_id: "one", parents: [] } } }); };
     try {
       await assert.rejects(invoke(), /still working|settlement.*unconfirmed/i, "ACK alone is insufficient");
-      assert.equal(reads, 8, "settlement checks are bounded");
+      assert.equal(reads, action === "stop" ? 9 : 8, "one optional exited-host preflight plus bounded settlement checks");
       assert.equal(updates, 0, "a live attempt cannot be replaced");
       assert.deepEqual(interrupted, ["s1"]);
       remainingBusy = 2; reads = 0;
       assert.equal((await invoke()).ok, true);
-      assert.equal(reads, 3, "success waits until the terminal turn's busy status clears");
+      assert.equal(reads, action === "stop" ? 4 : 3, "success waits until the terminal turn's busy status clears");
       assert.equal(updates, action === "rewire" ? 1 : 0);
     } finally { workflow.dispose(); }
   });
@@ -5135,7 +5219,7 @@ test("Stop interrupts external receipts after the engine has marked their nodes 
       }
       throw new Error("unexpected " + endpoint);
     },
-    aoHarness: { interrupt: async id => { interrupted.push(id); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
+    aoHarness: { exitAgent: async () => ({ ok: true }), interrupt: async id => { interrupted.push(id); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
   });
   try {
     assert.equal((await workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" })).ok, true);
@@ -5155,7 +5239,7 @@ test("Stop attempts every owned agent and reports an unconfirmed interrupt", asy
       if (endpoint.endsWith("/read")) return { ok: true, runs: [structuredClone(mission)] };
       throw new Error("unexpected " + endpoint);
     },
-    aoHarness: { interrupt: async id => { interrupted.push(id); if (id === "s1") throw new Error("fixture stop unavailable"); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
+    aoHarness: { exitAgent: async () => ({ ok: true }), interrupt: async id => { interrupted.push(id); if (id === "s1") throw new Error("fixture stop unavailable"); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
   });
   try {
     await assert.rejects(workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" }), /fixture stop unavailable/);
@@ -5210,6 +5294,7 @@ test("a late abandoned launch reports cancellation failure instead of claiming i
     },
     confirm: async () => true,
     aoHarness: { spawn: async () => { mission.cancelled = true; mission.nodes[0].state = "cancelled"; return "late-session"; },
+      observe: async () => ({ exited: false, turnState: "running", status: "working" }),
       interrupt: async () => { throw new Error("fixture stop unavailable"); } },
   });
   try {
@@ -5240,7 +5325,7 @@ test("a local Stop cancels a late submitted session even when native cancellatio
       }
       return { ok: true, run: structuredClone(mission) };
     },
-    aoHarness: { spawn: async () => { spawnStarted(); return session; }, interrupt: async id => { interrupted.push(id); },
+    aoHarness: { exitAgent: async () => ({ ok: true }), spawn: async () => { spawnStarted(); return session; }, interrupt: async id => { interrupted.push(id); },
       observe: async () => ({ status: "idle", turnState: "interrupted" }) },
   });
   try {
@@ -5269,12 +5354,12 @@ test("Stop interrupts the run's working agents even when the service refuses the
       if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], teams: [], worker_capacity: {} };
       return { ok: true };
     },
-    aoHarness: { interrupt: async id => { interrupted.push(id); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
+    aoHarness: { exitAgent: async () => ({ ok: true }), interrupt: async id => { interrupted.push(id); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
     confirm: async () => true,
   });
   const stopped = await workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" });
   assert.equal(stopped.ok, true);
-  assert.deepEqual(interrupted, ["session-1"], "only the working agent is interrupted");
+  assert.deepEqual(interrupted, ["session-1"], "only working turns are interrupted; completed hosts are released separately");
   // Other controls still report the refusal.
   await assert.rejects(workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "pause" }), /revision changed/);
   // A run the service does not know either is not pretended stopped.
@@ -5346,10 +5431,451 @@ test("a dated DeepSeek V4.1 Flash build from Cline Pass takes the same effort le
       { id: "cline-pass/deepseek-v4.1-flash", owned_by: "cline" },
       { id: "cline-pass/deepseek-v4.1-flash-1017", owned_by: "cline" },
       { id: "cline-pass/kimi-k3", owned_by: "cline" },
+      // CPA's catalog lists "none" and "ultra" for some; GLM refused the one, OpenRouter the other.
+      { id: "cline-pass/glm-5.3-flash", owned_by: "cline", supported_reasoning_levels: [{ effort: "low" }, { effort: "ultra" }] },
+      { id: "commandcode-go/glm-5.3-flash", owned_by: "commandcode-go" },
     ] }) }),
   });
   const { capabilities } = await workflow.call("models", {});
   assert.deepEqual(capabilities["cline-pass/deepseek-v4.1-flash-1017"].efforts, ["none", "low", "high", "max"]);
   assert.deepEqual(capabilities["cline-pass/deepseek-v4.1-flash"].efforts, ["none", "low", "high", "max"]);
-  assert.deepEqual(capabilities["cline-pass/kimi-k3"].efforts, [], "another Cline model still passes its name unchanged");
+  // Seen live: GLM 5.3 Flash's effort chip stayed greyed at "Auto". Plugin 0.1.0-codingtools.4 takes
+  // OpenRouter's levels for every other Cline Pass model.
+  const openRouter = ["minimal", "low", "medium", "high", "xhigh", "max"];
+  assert.deepEqual(capabilities["cline-pass/kimi-k3"].efforts, openRouter);
+  assert.deepEqual(capabilities["cline-pass/glm-5.3-flash"].efforts, openRouter, "not CPA's none/ultra");
+  assert.equal(capabilities["cline-pass/glm-5.3-flash"].effortReason, undefined);
+  assert.deepEqual(capabilities["commandcode-go/glm-5.3-flash"].efforts, [], "Command Code's plugin still passes the name unchanged");
+});
+
+test("a Cline Pass model's picked effort reaches CPA as its suffix; Command Code's model still goes bare", async () => {
+  // Plugin 0.1.0-codingtools.4 turns the suffix into the request's reasoning_effort for every Cline
+  // model. Before, only DeepSeek V4.1 Flash took one, and the app sent GLM 5.3 Flash none.
+  const spawned = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: chatWorld({ tasks: [], runs: [] }).requestHeadless,
+    aoHarness: { spawn: async input => { spawned.push(input.model); return `warm-${spawned.length}`; }, warmSessions: async () => [] } });
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local" };
+  const warm = async (model, effort) => {
+    const before = spawned.length;
+    await workflow.call("chat_prewarm", { workspaceId: `ws-${model}`, executionMode: "single", singleRoute: { ...route, model, effort } });
+    for (let tries = 0; tries < 50 && spawned.length === before; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    return spawned.at(-1);
+  };
+  assert.equal(await warm("cpa/cline-pass/glm-5.3-flash", "medium"), "cline-pass/glm-5.3-flash(medium)");
+  assert.equal(await warm("cpa/cline-pass/deepseek-v4.1-flash", "max"), "cline-pass/deepseek-v4.1-flash(max)");
+  assert.equal(await warm("cpa/commandcode-go/glm-5.3-flash", "high"), "commandcode-go/glm-5.3-flash");
+  workflow.dispose();
+});
+
+test("\"Retry automatically\" retries a failed step by itself once its pause is over, with no click", async () => {
+  // The run stopped on the first pass after the failure ("No card is ready"), so the countdown it
+  // showed never ended and the failed step waited for a click after all.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", cancelled: false,
+    grant: { executable_sha256: "a".repeat(64), expires_at_ms: Date.now() + 3_600_000 },
+    nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, history: [], receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const controls = [];
+  let clock = 1_000_000;
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "test-model" }] }) }),
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+      if (endpoint === "/api/v1/ao/control") {
+        controls.push(body.action);
+        // AO retries the step; here it finishes at once, which settles the run.
+        mission.nodes[0] = { ...mission.nodes[0], state: "finished", history: [{ error: "launch timed out" }] };
+        mission.revision++;
+      }
+      return { ok: true, run: mission };
+    },
+    aoHarness: { observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: [] }) },
+    confirm: async () => true,
+  });
+  await workflow.call("chat_auto_retry", { enabled: true });
+  await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  const status = () => workflow.call("run_status", { workspaceId: "ws", runId: "run" });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    // The launch fails: AO holds the step.
+    mission.nodes[0] = { ...mission.nodes[0], state: "held", receipt: { ...mission.nodes[0].receipt, error: "launch timed out" } };
+    let detail = "";
+    for (let tries = 0; tries < 100 && !/Retrying automatically in/.test(detail); tries++) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+      detail = String((await status()).detail ?? "");
+    }
+    assert.match(detail, /Retrying automatically in \d+s \(attempt 1 of 3\)/);
+    await new Promise(resolve => setTimeout(resolve, 600));
+    assert.deepEqual(controls, [], "nothing is retried before the pause is over");
+    clock += 11_000;
+    for (let tries = 0; tries < 200 && !controls.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(controls, ["retry"], "the failed step was retried by itself");
+  } finally {
+    mission.nodes[0].state = "finished";
+    for (let tries = 0; tries < 100 && (await status()).status === "running"; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  }
+});
+test("\"Retry automatically\" also restarts a chat whose run ended on an error, within the attempt limit", async () => {
+  // A launch that timed out threw out of the run before the failed step was looked at, so nothing
+  // was left to retry it.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
+  function setup(history) {
+    const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", cancelled: false,
+      grant: { executable_sha256: "a".repeat(64), expires_at_ms: Date.now() + 3_600_000 },
+      nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, history, receipt: { thread_id: "session-1", request_key: "k" } }] };
+    const controls = [], timers = [];
+    let lost = false;
+    const workflow = createAgentOrchestratorWorkflow({
+      // Only the auto-retry pauses (10 s per attempt); other timers are not this test's.
+      setTimer: (fn, ms) => { if ([10_000, 20_000, 30_000].includes(ms)) timers.push({ fn, ms }); return { unref() {} }; },
+      findCodexExecutable: () => process.execPath,
+      resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+      cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+      fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "test-model" }] }) }),
+      requestHeadless: async (endpoint, body) => {
+        if (endpoint.endsWith("/read")) {
+          if (lost) { lost = false; return { ok: true, runs: [], worker_capacity: { run: 1 } }; }
+          return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+        }
+        if (endpoint === "/api/v1/ao/control") {
+          controls.push(body.action);
+          mission.nodes[0] = { ...mission.nodes[0], state: "finished" };
+          mission.revision++;
+        }
+        return { ok: true, run: mission };
+      },
+      aoHarness: { observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: [] }) },
+      confirm: async () => true,
+    });
+    const fail = () => {
+      mission.nodes[0] = { ...mission.nodes[0], state: "held", receipt: { ...mission.nodes[0].receipt, error: "launch timed out" } };
+      lost = true; // the next read fails, ending the run on an error
+    };
+    return { workflow, mission, controls, timers, fail };
+  }
+  const settle = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+  const first = setup([]);
+  await first.workflow.call("chat_auto_retry", { enabled: true });
+  await first.workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  await settle(100);
+  first.fail();
+  for (let tries = 0; tries < 200 && !first.timers.length; tries++) await settle(10);
+  assert.deepEqual(first.timers.map(timer => timer.ms), [10_000], "a restart is scheduled after the first pause");
+  first.timers[0].fn();
+  for (let tries = 0; tries < 200 && !first.controls.length; tries++) await settle(10);
+  assert.deepEqual(first.controls, ["retry"]);
+
+  // A second failure waits longer, as autoRetryStep's countdown does.
+  const second = setup([{}]);
+  await second.workflow.call("chat_auto_retry", { enabled: true });
+  await second.workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  await settle(100);
+  second.fail();
+  for (let tries = 0; tries < 200 && !second.timers.length; tries++) await settle(10);
+  assert.deepEqual(second.timers.map(timer => timer.ms), [20_000], "the pause grows with each attempt");
+  second.mission.nodes[0].state = "finished";
+
+  // A backend replaced during the pause (dispose) never restarts the run through its old harness.
+  const replaced = setup([]);
+  await replaced.workflow.call("chat_auto_retry", { enabled: true });
+  await replaced.workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  await settle(100);
+  replaced.fail();
+  for (let tries = 0; tries < 200 && !replaced.timers.length; tries++) await settle(10);
+  assert.equal(replaced.timers.length, 1);
+  replaced.workflow.dispose();
+  replaced.timers[0].fn();
+  await settle(200);
+  assert.deepEqual(replaced.controls, [], "a disposed backend starts nothing");
+  replaced.mission.nodes[0].state = "finished";
+
+  // Its third retry already used: the limit holds, and the step waits for the person.
+  const spent = setup([{}, {}, {}]);
+  await spent.workflow.call("chat_auto_retry", { enabled: true });
+  await spent.workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  await settle(100);
+  spent.fail();
+  await settle(300);
+  assert.deepEqual(spent.timers, [], "no restart is scheduled past the limit");
+  assert.deepEqual(spent.controls, [], "no retry past the limit");
+  spent.mission.nodes[0].state = "finished";
+});
+
+test("Stop releases owned completed hosts and descendants without touching a newer owner", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const mission = { id: "old", workspace_id: "ws", nodes: [
+    { id: "one", state: "finished", route, receipt: { thread_id: "idle", request_key: "k1", status: "completed" } },
+    { id: "two", state: "finished", route, receipt: { thread_id: "reused", request_key: "k2", status: "completed" } },
+  ] };
+  const newer = { id: "new", workspace_id: "ws", nodes: [
+    { id: "next", state: "running", route, receipt: { thread_id: "reused", request_key: "k3" } },
+  ] };
+  const exited = [], children = [], interrupted = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async endpoint => ({ ok: true, ...(endpoint.endsWith("/read") ? { runs: [mission, newer] } : { run: mission }) }),
+    aoHarness: { exitAgent: async id => { exited.push(id); return { ok: true }; },
+      interrupt: async id => { interrupted.push(id); }, observe: async () => ({ turnState: "completed", status: "ready" }) },
+    subagents: { stopParent: async id => { children.push(id); } },
+  });
+  try {
+    await workflow.call("control_run", { workspaceId: "ws", runId: "old", action: "stop" });
+    assert.deepEqual(exited, ["idle"]);
+    assert.deepEqual(children, ["idle"]);
+    assert.deepEqual(interrupted, [], "completed turns need no interrupt");
+    assert.equal(newer.nodes[0].state, "running");
+  } finally { workflow.dispose(); }
+});
+
+test("Stop never releases a replacement receipt returned after its captured identity", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const mission = { id: "run", workspace_id: "ws", nodes: [
+    { id: "one", state: "running", route, receipt: { thread_id: "before", request_key: "k1" } },
+  ] };
+  const touched = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async endpoint => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [structuredClone(mission)] };
+      mission.nodes[0].state = "cancelled";
+      mission.nodes[0].receipt = { thread_id: "replacement", request_key: "k2" };
+      return { ok: true, run: structuredClone(mission) };
+    },
+    aoHarness: { exitAgent: async id => { touched.push(id); return { ok: true }; },
+      interrupt: async id => { touched.push(id); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
+    subagents: { stopParent: async id => { touched.push(id); } },
+  });
+  try {
+    await assert.rejects(workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" }), /identity changed/);
+    assert.deepEqual(touched, []);
+  } finally { workflow.dispose(); }
+});
+
+test("Stop attempts every owned host and descendant while reporting shutdown failures", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const mission = { id: "run", workspace_id: "ws", nodes: ["one", "two"].map(id =>
+    ({ id, state: "running", route, receipt: { thread_id: id, request_key: id } })) };
+  const exited = [], children = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async endpoint => ({ ok: true, ...(endpoint.endsWith("/read") ? { runs: [mission] } : { run: mission }) }),
+    aoHarness: { interrupt: async () => {}, observe: async () => ({ turnState: "interrupted", status: "ready" }),
+      exitAgent: async id => { exited.push(id); if (id === "one") throw new Error("host shutdown failed"); return { ok: true }; } },
+    subagents: { stopParent: async id => { children.push(id); if (id === "two") throw new Error("child shutdown failed"); } },
+  });
+  try {
+    await assert.rejects(workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" }), /host shutdown failed|child shutdown failed/);
+    assert.deepEqual(exited.sort(), ["one", "two"]);
+    assert.deepEqual(children.sort(), ["one", "two"]);
+  } finally { workflow.dispose(); }
+});
+
+function workflowInternals(options) {
+  // Test-only access to existing closures; production exposes no additional API.
+  const filename = path.join(__dirname, "../electron/agent-orchestrator-workflow.cjs");
+  const Module = require("node:module");
+  const fixture = new Module(filename, module);
+  fixture.filename = filename;
+  fixture.paths = module.paths;
+  const source = fs.readFileSync(filename, "utf8").replace("return Object.freeze({ call, restoreSchedules,",
+    "return Object.freeze({ takeWarm, chatPrewarm, dispatchExternal, stopExternalTurn, continuations, warm, warmKey, backgroundRuns, runKey, driveRun, call, restoreSchedules,");
+  fixture._compile(source, filename);
+  return fixture.exports.createAgentOrchestratorWorkflow(options);
+}
+
+test("restoration uncertainty reaches all three continuation callers without launching a replacement", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const previous = { id: "old", workspace_id: "ws", project_id: "task", execution_mode: "single",
+    nodes: [{ id: "one", role: "planner", state: "finished", route, receipt: { thread_id: "existing" } }] };
+  for (const caller of ["warm", "prewarm", "dispatch"]) {
+    const uncertainty = Object.assign(new Error("restore pending"), { code: "AO_SESSION_RESTORE_UNCONFIRMED" });
+    let spawned = 0;
+    const workflow = workflowInternals({
+      requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [previous] }
+        : endpoint.endsWith("/reserve") ? { ok: true, request_key: "k", prompt: "follow-up" } : { ok: true, run: previous },
+      aoHarness: { continuable: async () => { throw uncertainty; }, spawn: async () => { spawned++; return "replacement"; } },
+    });
+    try {
+      workflow.warm.set(workflow.warmKey("ws", route, true), { session: "existing", route, promise: Promise.resolve("existing"), started: 0 });
+      workflow.continuations.set("new", { session: "existing", text: "follow-up" });
+      const result = caller === "warm" ? workflow.takeWarm("ws", route, true)
+        : caller === "prewarm" ? workflow.chatPrewarm({ workspaceId: "ws", taskId: "task", executionMode: "single", singleRoute: route })
+        : workflow.dispatchExternal("ws", "new", { id: "next", role: "planner", route }, 1, true, true);
+      await assert.rejects(result, error => error.code === uncertainty.code, caller);
+      assert.equal(spawned, 0, caller + " never starts a replacement under uncertainty");
+      if (caller === "dispatch") assert.equal(workflow.continuations.get("new")?.session, "existing", "retry retains the captured conversation");
+    } finally { workflow.dispose(); }
+  }
+});
+
+test("concurrent host-release upgrades recheck the in-flight stop after its first settlement", async () => {
+  let releaseObservation, observationStarted;
+  const observed = new Promise(resolve => { observationStarted = resolve; });
+  const gate = new Promise(resolve => { releaseObservation = resolve; });
+  let interrupts = 0, exits = 0, children = 0, reads = 0;
+  const workflow = workflowInternals({
+    aoHarness: { interrupt: async () => { interrupts++; }, observe: async () => {
+      if (++reads === 1) { observationStarted(); await gate; }
+      return { turnState: "interrupted", status: "ready" };
+    }, exitAgent: async () => { exits++; return { ok: true }; } },
+    subagents: { stopParent: async () => { children++; } },
+  });
+  try {
+    const initial = workflow.stopExternalTurn("existing");
+    await observed;
+    const one = workflow.stopExternalTurn("existing", { owner: "same", releaseAgent: true });
+    const two = workflow.stopExternalTurn("existing", { owner: "same", releaseAgent: true });
+    releaseObservation();
+    await Promise.all([initial, one, two]);
+    assert.equal(exits, 1, "one verified host exit after the interrupt-only operation");
+    assert.equal(children, 1, "one descendant shutdown");
+    assert.equal(interrupts, 2, "the two release upgrades share their settlement check");
+  } finally { releaseObservation(); workflow.dispose(); }
+});
+
+test("follow-ups and warmed sessions wait for Stop to exit the host before checking its restoration", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  for (const warmed of [false, true]) {
+    let finishExit, exitStarted, alive = true, resumes = 0, spawns = 0;
+    const hostExiting = new Promise(resolve => { exitStarted = resolve; });
+    const exitGate = new Promise(resolve => { finishExit = resolve; });
+    const sent = [], checks = [];
+    const workflow = workflowInternals({
+      requestHeadless: async endpoint => endpoint.endsWith("/reserve") ? { ok: true, request_key: "k", prompt: "follow-up" } : { ok: true, run: {} },
+      aoHarness: {
+        observe: async () => ({ exited: !alive, turnState: "completed", status: alive ? "idle" : "exited" }),
+        exitAgent: async () => { exitStarted(); await exitGate; alive = false; return { ok: true }; },
+        continuable: async () => { checks.push(alive); if (!alive) { resumes++; alive = true; } return true; },
+        send: async id => { if (!alive) throw new Error("CHAT_CONTROLLER_NOT_READY"); sent.push(id); return { turnId: "next-turn" }; },
+        spawn: async () => { spawns++; return "replacement"; },
+      },
+    });
+    try {
+      const stopping = workflow.stopExternalTurn("existing", { owner: "old", releaseAgent: true, completed: true });
+      await hostExiting;
+      if (warmed) workflow.warm.set(workflow.warmKey("ws", route, true), { session: "existing", route, promise: Promise.resolve("existing"), started: 0 });
+      else workflow.continuations.set("new", { session: "existing", text: "follow-up" });
+      const dispatching = workflow.dispatchExternal("ws", "new", { id: "next", role: "planner", route }, 1, true, true);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.deepEqual(checks, [], "readiness must not be sampled while the old Stop will still exit this host");
+      finishExit();
+      await Promise.all([stopping, dispatching]);
+      assert.deepEqual(sent, ["existing"]);
+      assert.equal(resumes, 1, "the exact retained session is resumed after host shutdown");
+      assert.equal(spawns, 0, "no replacement or context loss");
+    } finally { finishExit(); workflow.dispose(); }
+  }
+});
+
+test("Stop retries failed descendant shutdown after the parent's host has already exited", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const mission = { id: "run", workspace_id: "ws", nodes: [
+    { id: "one", state: "cancelled", route, receipt: { thread_id: "parent", request_key: "k", status: "held" } },
+  ] };
+  let exited = false, childAttempts = 0, interrupts = 0;
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async endpoint => ({ ok: true, ...(endpoint.endsWith("/read") ? { runs: [mission] } : { run: mission }) }),
+    aoHarness: {
+      observe: async () => ({ exited, turnState: "interrupted", status: exited ? "exited" : "ready" }),
+      interrupt: async () => { interrupts++; if (exited) throw new Error("CHAT_CONTROLLER_NOT_READY"); },
+      exitAgent: async () => { exited = true; return { ok: true }; },
+    },
+    subagents: { stopParent: async () => { if (++childAttempts === 1) throw new Error("descendant shutdown failed"); } },
+  });
+  const stop = () => workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" });
+  try {
+    await assert.rejects(stop(), /descendant shutdown failed/);
+    assert.equal(exited, true);
+    assert.equal((await stop()).ok, true);
+    assert.equal(childAttempts, 2, "the failed child is retried even though its parent is already gone");
+    assert.equal(interrupts, 1, "an observed exited parent needs no nonexistent-controller interrupt");
+  } finally { workflow.dispose(); }
+});
+
+test("Stop disables the local driver before a queued receipt snapshot can return", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const mission = { id: "run", workspace_id: "ws", revision: 1, execution_mode: "single",
+    nodes: [{ id: "next", role: "planner", state: "pending", parents: [], route }] };
+  let releaseSnapshot, snapshotStarted, reads = 0, dispatched = 0;
+  const snapshot = new Promise(resolve => { releaseSnapshot = resolve; });
+  const started = new Promise(resolve => { snapshotStarted = resolve; });
+  const state = { stopped: false, status: "running" };
+  const workflow = workflowInternals({
+    requestHeadless: async endpoint => {
+      if (endpoint.endsWith("/read")) {
+        if (++reads === 1) { snapshotStarted(); await snapshot; }
+        return { ok: true, runs: [structuredClone(mission)], worker_capacity: { run: 1 } };
+      }
+      if (endpoint.endsWith("/reserve")) return { ok: true, request_key: "k", prompt: "next card" };
+      if (endpoint.endsWith("/submitted")) { mission.nodes[0].state = "finished"; return { ok: true, run: structuredClone(mission) }; }
+      return { ok: true, run: structuredClone(mission) };
+    },
+    aoHarness: { spawn: async () => { dispatched++; return "unwanted"; }, exitAgent: async () => ({ ok: true }),
+      observe: async () => ({ exited: true, turnState: "completed", status: "exited" }) },
+  });
+  workflow.backgroundRuns.set(workflow.runKey("ws", "run"), state);
+  const stopping = workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" });
+  try {
+    await started;
+    await workflow.driveRun("ws", "run", process.execPath, state);
+    assert.equal(dispatched, 0, "the driver must not dispatch another card while Stop's receipt read is queued");
+    assert.equal(state.stopped, true);
+    assert.equal(reads, 1, "the stopped driver must not start another read");
+  } finally {
+    state.stopped = true;
+    releaseSnapshot();
+    await stopping.catch(() => undefined);
+    workflow.dispose();
+  }
+});
+
+test("Approve for me runs the app's subagent and wake-up tools unasked, and asks its reviewer once more for allow or deny", async () => {
+  // Seen live: subagent_start (its brief longer than the review reads) waited for the person, and a
+  // reviewer's "ask" put plain commands in front of them.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "allow", kind: "allow_once", label: "Allow Once" }, { id: "reject", kind: "reject_once", label: "Deny" }];
+  const requests = [
+    { approval_id: "start", kind: "permission", tool: "mcp__coding-tools__subagent_start", reviewTruncated: true,
+      toolInput: JSON.stringify({ agent: "explorer", task: "Map the YOLO training state. ".repeat(80) }) },
+    { approval_id: "wake", kind: "permission", tool: "mcp__coding-tools__schedule_wakeup", toolInput: JSON.stringify({ minutes: 10, reason: "CI" }) },
+    { approval_id: "settles-allow", kind: "command", tool: "Bash", command: "python tools/calibrate.py" },
+    { approval_id: "settles-deny", kind: "command", tool: "Bash", command: "python tools/upload.py" },
+  ].map(request => ({ source: "ao", decisions, ...request }));
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+    { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const resolved = [], prompts = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
+      if (!String(url).endsWith("/chat/completions")) return { ok: false, status: 404, json: async () => ({}) };
+      const prompt = JSON.parse(init.body).messages[0].content;
+      prompts.push(prompt);
+      const decide = /allow or deny/i.test(prompt) && !/"ask"/.test(prompt);
+      const verdict = !decide ? { action: "ask", reason: "not sure" }
+        : prompt.includes("calibrate.py") ? { action: "allow", reason: "a project script" } : { action: "deny", reason: "uploads data" };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(verdict) } }] }) };
+    },
+    requestHeadless: async (endpoint) => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running",
+        approvals: requests.filter(request => !resolved.some(([id]) => id === request.approval_id)) }),
+      resolveApproval: async (_session, requestId, decisionId) => { resolved.push([requestId, decisionId]); return { ok: true }; },
+    },
+    confirm: async () => true,
+  });
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 400 && resolved.length < 4; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(Object.fromEntries(resolved), { start: "allow", wake: "allow", "settles-allow": "allow", "settles-deny": "reject" });
+    assert.ok(!prompts.some(prompt => prompt.includes("subagent_start") || prompt.includes("schedule_wakeup")), "the app's own tools need no review");
+    assert.equal(prompts.filter(prompt => prompt.includes("calibrate.py")).length, 2, "an ask is followed by one allow-or-deny review");
+  } finally {
+    mission.nodes[0].state = "finished";
+    workflow.dispose();
+  }
 });

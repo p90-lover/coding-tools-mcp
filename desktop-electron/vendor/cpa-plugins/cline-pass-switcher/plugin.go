@@ -34,7 +34,7 @@ const pluginID = "cline-pass-switcher"
 const apiPrefix = "/v0/management/" + pluginID
 const resourcePrefix = "/v0/resource/plugins/" + pluginID
 
-var pluginVersion = "0.1.0-codingtools.3"
+var pluginVersion = "0.1.0-codingtools.4"
 var hostAvailable atomic.Bool
 
 type envelope struct {
@@ -371,9 +371,19 @@ func management(raw []byte) ([]byte, error) {
 // 19 Oct) take the same reasoning levels.
 var deepseekV41Flash = regexp.MustCompile(`^cline-pass/deepseek-v4\.1-flash(-\d{4,8})?$`)
 
+// Every other Cline Pass model reaches OpenRouter, which takes these and maps them onto the model's
+// own reasoning (tried 2026-10-21 on GLM 5.3 Flash, MiniMax M3, Qwen 3.7 Plus, MiMo v2.6 Flash and
+// DeepSeek V4 Pro). Not "none": GLM always reasons and refused it ("Reasoning is mandatory"). Not
+// "ultra": OpenRouter has no such level. Without these the plugin refused any effort suffix, so no
+// level could be picked for those models at all.
+var openRouterEfforts = []string{"minimal", "low", "medium", "high", "xhigh", "max"}
+
 func modelEfforts(model string) []string {
 	if deepseekV41Flash.MatchString(model) {
 		return []string{"none", "low", "high", "max"}
+	}
+	if strings.HasPrefix(model, "cline-pass/") && !strings.Contains(model, "(") {
+		return openRouterEfforts
 	}
 	return nil
 }
@@ -449,7 +459,7 @@ func execute(raw []byte, stream bool) ([]byte, error) {
 	}
 	if levels := modelEfforts(model); len(levels) > 0 && effort != "" {
 		if !slices.Contains(levels, effort) {
-			return upstreamErrorEnvelope("unsupported_effort", "Supported reasoning levels are none, low, high, max", 400, false), nil
+			return upstreamErrorEnvelope("unsupported_effort", "Supported reasoning levels are "+strings.Join(levels, ", "), 400, false), nil
 		}
 		// The explicit suffix wins over CPA's generic conversion (max used to become xhigh).
 		body["reasoning_effort"] = effort

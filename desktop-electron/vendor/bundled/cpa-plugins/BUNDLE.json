@@ -107,7 +107,7 @@
   "cline": {
     "id": "cline-pass-switcher",
     "provider": "cline",
-    "version": "0.1.0-codingtools.3",
+    "version": "0.1.0-codingtools.4",
     "source": {
       "repository": "https://github.com/munmunjaklin458-afk/cline-pass-switcher",
       "commit": "02538a3137a08948a94f26f17dd4aeff8c029ed1",
@@ -121,18 +121,19 @@
       "DeepSeek V4.1 Flash native none/low/high/max efforts with suffix-to-body translation",
       "Normalize embedded Windows JavaScript line endings before managed runtime patches",
       "DeepSeek V4.1 Flash's dated builds (deepseek-v4.1-flash-1017) take the same none/low/high/max efforts",
-      "Streams are SSE-framed for cross-format requests (Claude /v1/messages, Responses) and raw for OpenAI Chat, by CPA's request_path; multiline JSON chunks are compacted (from #352)"
+      "Streams are SSE-framed for cross-format requests (Claude /v1/messages, Responses) and raw for OpenAI Chat, by CPA's request_path; multiline JSON chunks are compacted (from #352)",
+      "Every other Cline Pass model takes OpenRouter's minimal/low/medium/high/xhigh/max efforts (suffix to body); none and ultra stay refused"
     ],
     "build": {
-      "go": "1.26.0",
-      "cCompiler": "Zig 0.17.0 (ziglang)",
+      "go": "1.27.1",
+      "cCompiler": "Zig 0.16.0",
       "mode": "c-shared"
     },
     "platforms": {
       "win32/x64": {
-        "path": "windows/amd64/cline-pass-switcher-v0.1.0-codingtools.3.dll",
-        "sha256": "36d5224dc699a2263ad0f58f88cac8c3d3c8138fcf5188bda1f2b2e5756c175f",
-        "size": 7306752
+        "path": "windows/amd64/cline-pass-switcher-v0.1.0-codingtools.4.dll",
+        "sha256": "beaba93be151104aa4137ac28712f7f4f0dc3fa613e21e4784cb6770d0714369",
+        "size": 7817216
       }
     }
   }

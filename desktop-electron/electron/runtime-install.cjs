@@ -259,6 +259,9 @@ async function waitForPackagedRuntimeSource({
   onFallback = null,
   timeoutMs = DEFAULT_SOURCE_WAIT_TIMEOUT_MS,
   intervalMs = DEFAULT_SOURCE_WAIT_INTERVAL_MS,
+  // The bundle's platform: this machine's, except where a test checks another platform's bundle.
+  platform = process.platform,
+  arch = process.arch,
   // The same remembered verification ensurePackagedRuntime uses: without it this wait hashed every
   // runtime file again on each launch, before the window could open.
   coreHome = null,
@@ -268,11 +271,7 @@ async function waitForPackagedRuntimeSource({
     throw new Error("Packaged runtime source wait requires non-negative timeoutMs and positive intervalMs");
   }
   const source = path.join(resourcesPath, "runtime");
-  const identity = {
-    version: app.getVersion(),
-    platform: process.platform,
-    arch: process.arch,
-  };
+  const identity = { version: app.getVersion(), platform, arch };
   const verify = coreHome ? { stampDir: runtimeVerifiedDir(coreHome) } : {};
   const deadline = Date.now() + timeoutMs;
   let lastError;

@@ -1004,8 +1004,11 @@ test("send completion preserves the next chat's draft and edits typed during the
       selectedTaskId: "task-a", draft: "sent text", attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(),
       setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: () => reply.promise,
       setDraft: set("draft"), setTitle() {}, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, setCarried() {},
+      // The message shows in the chat at once (setOutgoing) and leaves the composer before it is sent.
+      setOutgoing() {}, setAnnotations() {},
     });
     const sending = deliver("sent text");
+    assert.equal(state.draft, "", "the sent text leaves the composer at once, not when the send returns");
     state.draft = "new unsent text"; composing.current = { taskId, draft: state.draft, attachments };
     reply.resolve(); assert.equal(await sending, true);
     assert.equal(state.draft, "new unsent text", taskId);
@@ -1351,7 +1354,100 @@ test("a reviewer reset to pending by its own rework still shows its last review"
   assert.ok(step, "the pending reviewer is not dropped from the turn");
   assert.equal(step.text, `Last review:\n\n${verdict}`, "its newest verdict, labelled as a review");
   const worker = node("w", "worker", "held", { history: [{ answer: "first try" }] });
-  assert.equal(chat.chatTurns([run("run2", "t1", [worker])], "x", { now: 0 })[0].steps[0].text, "Earlier attempt:\n\nfirst try");
+  const held = plain(chat.chatTurns([run("run2", "t1", [worker])], "x", { now: 0 })[0].steps[0]);
+  assert.equal(held.text, undefined, "a team worker's earlier report is not copied up");
+  assert.deepEqual(held.earlier, [{ label: "Attempt 1", text: "first try" }], "it stays folded under its attempt");
+});
+
+test("a failed team worker opens on its error with every attempt folded, not on a whole earlier report", () => {
+  // Seen live (clash of clan macro, 2026-10-21): a worker failed on its seventh try (the proxy
+  // refused), opened by itself, and showed attempt 6's whole report under "Earlier attempt:", left
+  // out of the attempts list, so it read as a message from nowhere.
+  const worker = node("w", "worker", "failed", {
+    receipt: { error: "API Error: 500 proxyconnect tcp: dial tcp 127.0.0.1:17891: connection refused" },
+    history: [{ error: "500" }, { error: "500" }, { error: "500" },
+      { answer: "Report 4", error: "500" }, { answer: "Report 5", error: "500" }, { answer: "Report 6", error: "500" }],
+  });
+  const [turn] = plain(chat.chatTurns([run("r1", "t", [node("p", "planner", "finished", { receipt: { answer: "plan" } }), worker],
+    { execution_mode: "team" })], "go", { now: 0 }));
+  const step = turn.steps.find((item) => item.role === "worker");
+  assert.equal(step.text, undefined);
+  assert.match(step.error, /17891/);
+  assert.deepEqual(step.earlier.map((round) => `${round.label}:${round.verdict}`),
+    ["Attempt 1:failed", "Attempt 2:failed", "Attempt 3:failed", "Attempt 4:failed", "Attempt 5:failed", "Attempt 6:failed"]);
+  assert.equal(step.earlier[5].text, "Report 6", "the newest report is the last attempt, folded");
+  const running = node("w", "worker", "running", { receipt: { started_at_ms: 1 }, history: [{ answer: "Report 1" }] });
+  const live = plain(chat.chatTurns([run("r1", "t", [running], { execution_mode: "team" })], "go", { now: 2 })[0].steps[0]);
+  assert.equal(live.text, undefined, "a retrying worker shows its new attempt, the old report folded");
+  assert.deepEqual(live.earlier, [{ label: "Attempt 1", text: "Report 1" }]);
+});
+
+test("Claude Code's auto-mode billing notice is left out of replies, folded attempts and live messages", () => {
+  const notice = "**Warning:** We're changing auto mode to no longer charge for classifier requests in Claude Code. However, this session isn't eligible because your requests go through 127.0.0.1:8317, which isn't compatible with this update. Nothing breaks: auto mode keeps working, and its classifier requests are billed as before. To fix it and access the new version of auto mode, ask your gateway to implement: https://code.claude.com/docs/en/auto-mode-classifier-billing";
+  assert.equal(chat.withoutHarnessNotices(`${notice}\n\nWorker Report: Part 1`), "Worker Report: Part 1");
+  assert.equal(chat.withoutHarnessNotices(`Plan below.\n\n${notice}\n\nDone.`), "Plan below.\n\nDone.");
+  assert.equal(chat.withoutHarnessNotices(notice.replace(/\*\*/g, "")), "", "the plain form too");
+  const untouched = "Warning: the tests are slow.\n\nDone.";
+  assert.equal(chat.withoutHarnessNotices(untouched), untouched, "the agent's own warnings stay");
+  const planner = node("p", "planner", "finished", { receipt: { answer: `${notice}\n\nThe plan.` } });
+  const worker = node("w", "worker", "failed", { receipt: { error: "500" }, history: [{ answer: `${notice}\n\nReport 1` }] });
+  const [turn] = plain(chat.chatTurns([run("r1", "t", [planner, worker], { execution_mode: "team" })], "go", { now: 0 }));
+  assert.equal(turn.steps[0].text, "The plan.");
+  assert.equal(turn.steps[1].earlier[0].text, "Report 1");
+  const tidy = plain(chat.tidyTimeline([
+    { id: "a", kind: "message", status: "completed", text: notice },
+    { id: "b", kind: "message", status: "completed", text: `${notice}\n\nReading the files.` },
+    { id: "c", kind: "command", status: "completed", text: "ls" },
+  ]));
+  assert.deepEqual(tidy.map((item) => `${item.id}:${item.text}`), ["b:Reading the files.", "c:ls"]);
+});
+
+test("a single model's messages show once: in its reply, not again in its work above it", () => {
+  // Seen live (MiMo V2.6 Pro, 2026-10-21): Claude Code's reply is the turn's messages joined, and the
+  // chat showed "埠 8000 已有服務在跑…" between the tool calls and again in the answer.
+  const message = (id, text) => ({ id, kind: "message", status: "completed", text });
+  const items = [
+    message("m1", "我先核實現況。"), { id: "c1", kind: "command", status: "completed", text: "netstat -ano" },
+    message("m2", "埠 8000 已有服務在跑,\n直接開預覽。"), { id: "t1", kind: "tool", status: "completed", text: "preview_open" },
+    message("m3", "預覽已開好。"), message("m4", "A note the reply does not repeat."),
+  ];
+  const reply = "我先核實現況。\n\n埠 8000 已有服務在跑, 直接開預覽。\n\n預覽已開好。";
+  assert.deepEqual(chat.withoutReplied(items, reply).map((item) => item.id), ["c1", "t1", "m4"]);
+  assert.deepEqual(chat.withoutReplied(items, undefined).map((item) => item.id), items.map((item) => item.id), "no reply, nothing hidden");
+  assert.deepEqual(chat.withoutReplied(items, "   ").length, items.length);
+});
+
+test("a review's rework block (the card ids the engine reads) is not shown", () => {
+  // Seen live: a review ended with "rework" and `["7394f7d6-3cb1-491d-a715-f1dd90bc79e2"]`.
+  const review = "CHANGES_REQUIRED: Worker 1 must list all 316 entries.";
+  assert.equal(chat.withoutReworkBlock(`${review}\n\nrework\n\`["7394f7d6-3cb1-491d-a715-f1dd90bc79e2"]\``), review);
+  assert.equal(chat.withoutReworkBlock(`${review}\n\`\`\`rework\n["w1"]\n\`\`\``), review);
+  assert.equal(chat.withoutReworkBlock(`${review}\nrework\n["w1", "w2"]`), review);
+  assert.equal(chat.withoutReworkBlock("We should rework the parser.\nDone."), "We should rework the parser.\nDone.", "the word in prose stays");
+  const reviewer = node("r", "reviewer", "finished", { receipt: { answer: `${review}\n\`\`\`rework\n["w1"]\n\`\`\``, verdict: "CHANGES_REQUIRED" },
+    history: [{ answer: `older\nrework\n\`["w1"]\``, verdict: "CHANGES_REQUIRED" }] });
+  const [turn] = plain(chat.chatTurns([run("r1", "t", [node("p", "planner", "finished", { receipt: { answer: "plan" } }), reviewer],
+    { execution_mode: "team" })], "go", { now: 0 }));
+  assert.equal(turn.final.text, review);
+  assert.equal(turn.final.verdict, "CHANGES_REQUIRED", "the verdict still shows");
+  assert.equal(turn.final.earlier[0].text, "older");
+  const worker = node("w", "worker", "finished", { receipt: { answer: "Report\nrework\n[\"x\"]" } });
+  assert.equal(plain(chat.chatTurns([run("r1", "t", [worker], { execution_mode: "team" })], "go", { now: 0 })[0].steps[0].text),
+    "Report\nrework\n[\"x\"]", "only a review's block is the engine's");
+});
+test("a turn whose agent is waiting out a model error says so, instead of \"may be stuck\"", () => {
+  // Seen live: a chat rate-limited by its model (Claude Code backing off from 429s for 20 minutes)
+  // said only "nothing new for 10m 38s, may be stuck".
+  const retrying = (text, status = "running") => ({ key: "s", working: { timeline: [
+    { id: "a", kind: "command", status: "completed", text: "ls" },
+    { id: "r", kind: "system", status, text } ] } });
+  assert.equal(chat.dshRetryNote([retrying("Retrying Claude, attempt 8 of 10. API error 429. Trying again in 38.6s.")]),
+    " · the model is rate-limited (429), retrying (8 of 10)");
+  assert.equal(chat.dshRetryNote([retrying("Retrying Claude, attempt 2 of 10. API error 503. Trying again in 2s.")]),
+    " · the model's service is failing (503), retrying (2 of 10)");
+  assert.equal(chat.dshRetryNote([retrying("Retrying Claude, attempt 2 of 10.", "completed")]), "", "a retry that is over says nothing");
+  assert.equal(chat.dshRetryNote([{ key: "s", working: { timeline: [{ id: "a", kind: "command", status: "running", text: "npm test" }] } }]), "",
+    "a card busy with a tool is not retrying");
 });
 test("the approvals poll skips a card whose attempt changed mid-read instead of raising an error", async () => {
   const state = { approvals: null, policies: null, errors: [] };
