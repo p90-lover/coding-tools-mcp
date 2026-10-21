@@ -1326,7 +1326,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
     const ids = JSON.parse(activeNodeIds) as string[];
     setPendingApprovals([]);
     approvalScope.current = { workspaceId, runId: selectedRunId };
-    if (!workspaceId || !selectedRunId || !ids.length) return;
+    // As the status poll above: a run still selected from the previous project was asked about in
+    // this one every 3 s ("AO run not found in this workspace", 25 times in the launcher log).
+    if (!workspaceId || !selectedRunId || !selectedRunHere || !ids.length) return;
     let live = true;
     let reading = false;
     const refresh = async () => {
@@ -1360,9 +1362,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
     const timer = setInterval(() => void refresh(), 3000);
     void refresh();
     return () => { live = false; clearInterval(timer); };
-  }, [workspaceId, selectedRunId, activeNodeIds, autoStatus, setError]);
+  }, [workspaceId, selectedRunId, selectedRunHere, activeNodeIds, autoStatus, setError]);
 
-  const taskName = (id: string) => board?.tasks.find((task) => task.id === id)?.title ?? id;
+  const taskName =(id: string) => board?.tasks.find((task) => task.id === id)?.title ?? id;
   const describeNode = (node: CanvasNode) => node.route.model.startsWith("chatgpt-web/") ? modelLabel(node.route.model)
     : `${harnessLabel(node.route.harness_id || NATIVE_HARNESS, harnesses)} · ${node.route.model}`;
   const moveCard = async (positions: { id: string; x: number; y: number }[], parentId?: string) => {
