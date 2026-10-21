@@ -122,31 +122,71 @@ function runtimeFilePaths(runtimeRoot) {
   return paths.sort(comparePaths);
 }
 
-function validateRuntimeFile(runtimeRoot, canonicalRoot, file) {
+/** A runtime file's stat, checked for presence, kind, symlink escape and size. */
+function statRuntimeFile(runtimeRoot, canonicalRoot, file) {
   const absolutePath = path.join(runtimeRoot, ...file.path.split("/"));
+  // One call per file: a plain file's lstat is its stat; only a symlink is followed.
   let metadata;
   try {
-    metadata = fs.statSync(absolutePath);
-  } catch {
+    metadata = fs.lstatSync(absolutePath);
+    if (metadata.isSymbolicLink()) {
+      const target = fs.realpathSync(absolutePath);
+      if (target !== canonicalRoot && !target.startsWith(`${canonicalRoot}${path.sep}`)) {
+        throw new Error(`Runtime bundle symlink escapes the bundle: ${absolutePath}`);
+      }
+      metadata = fs.statSync(absolutePath);
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Runtime bundle")) throw error;
     throw new Error(`Runtime bundle file is missing: ${absolutePath}`);
   }
   if (!metadata.isFile()) throw new Error(`Runtime bundle entry is not a file: ${absolutePath}`);
-  if (fs.lstatSync(absolutePath).isSymbolicLink()) {
-    const target = fs.realpathSync(absolutePath);
-    if (target !== canonicalRoot && !target.startsWith(`${canonicalRoot}${path.sep}`)) {
-      throw new Error(`Runtime bundle symlink escapes the bundle: ${absolutePath}`);
-    }
-  }
   if (metadata.size !== file.size) {
     throw new Error(`Runtime bundle file size mismatch: ${absolutePath}`);
   }
+  return metadata;
+}
+
+function hashRuntimeFile(runtimeRoot, file) {
+  const absolutePath = path.join(runtimeRoot, ...file.path.split("/"));
   const sha256 = createHash("sha256").update(fs.readFileSync(absolutePath)).digest("hex");
   if (sha256 !== file.sha256) {
     throw new Error(`Runtime bundle file checksum mismatch: ${absolutePath}`);
   }
 }
 
-function inspectRuntimeBundle(runtimeRoot, identity) {
+// Every launch checked the runtime by reading and hashing all of its files (6,002 files, 164 MB in
+// 0.8.3), twice: the packaged copy and the version directory. On the hard disk holding the app that
+// kept the window from opening for over two minutes after a restart, which looked like a crash.
+// A bundle whose files were all hashed is remembered by the stat of every file (size, modified and
+// changed times); while those stay the same, the files are checked but not read again. Changing a
+// file's content changes its changed time (ctime), which even setting its modified time back does.
+const MAX_VERIFIED_SIGNATURES = 4;
+function verifiedSignatures(stampDir, bundleId) {
+  if (!stampDir) return [];
+  try {
+    const saved = JSON.parse(fs.readFileSync(path.join(stampDir, `${bundleId}.json`), "utf8"));
+    return Array.isArray(saved?.signatures) ? saved.signatures.filter(value => SHA256_PATTERN.test(value)) : [];
+  } catch {
+    return [];
+  }
+}
+function rememberVerified(stampDir, bundleId, signature) {
+  if (!stampDir) return;
+  try {
+    const signatures = [signature, ...verifiedSignatures(stampDir, bundleId).filter(value => value !== signature)]
+      .slice(0, MAX_VERIFIED_SIGNATURES);
+    fs.mkdirSync(stampDir, { recursive: true, mode: 0o700 });
+    const target = path.join(stampDir, `${bundleId}.json`);
+    const temporary = `${target}.tmp-${process.pid}`;
+    fs.writeFileSync(temporary, JSON.stringify({ signatures }), { mode: 0o600 });
+    fs.renameSync(temporary, target);
+  } catch {
+    // Not remembering only means the next launch hashes the files again.
+  }
+}
+
+function inspectRuntimeBundle(runtimeRoot, identity, { stampDir = null } = {}) {
   const manifest = readRuntimeManifest(runtimeRoot, identity);
   const expectedPaths = manifest.files.map(file => file.path);
   const expectedSet = new Set(expectedPaths);
@@ -176,15 +216,29 @@ function inspectRuntimeBundle(runtimeRoot, identity) {
   }
 
   const canonicalRoot = fs.realpathSync(runtimeRoot);
-  for (const file of manifest.files) validateRuntimeFile(runtimeRoot, canonicalRoot, file);
+  const stats = createHash("sha256");
+  for (const file of manifest.files) {
+    const metadata = statRuntimeFile(runtimeRoot, canonicalRoot, file);
+    stats.update(`${file.path}\0${metadata.size}\0${metadata.mtimeMs}\0${metadata.ctimeMs}\0`);
+  }
+  const signature = stats.digest("hex");
+  if (!verifiedSignatures(stampDir, manifest.bundleId).includes(signature)) {
+    for (const file of manifest.files) hashRuntimeFile(runtimeRoot, file);
+    rememberVerified(stampDir, manifest.bundleId, signature);
+  }
   if (identity.platform !== "win32" && (fs.statSync(paths.executable).mode & 0o111) === 0) {
     throw new Error(`Bundled Bun runtime is not executable: ${paths.executable}`);
   }
   return { manifest, runtimeRoot: paths.runtimeRoot };
 }
 
-function validateRuntimeBundle(runtimeRoot, identity) {
-  return inspectRuntimeBundle(runtimeRoot, identity).runtimeRoot;
+function validateRuntimeBundle(runtimeRoot, identity, options = {}) {
+  return inspectRuntimeBundle(runtimeRoot, identity, options).runtimeRoot;
+}
+
+/** Where verified bundles are remembered (see verifiedSignatures), outside every bundle. */
+function runtimeVerifiedDir(coreHome) {
+  return path.join(coreHome, "runtime-verified");
 }
 
 /**
@@ -196,16 +250,18 @@ function installedPackagedRuntime({ app, coreHome }) {
   if (!app.isPackaged || !coreHome) return null;
   const identity = { version: app.getVersion(), platform: process.platform, arch: process.arch };
   const destination = path.join(coreHome, "versions", `${identity.version}-${identity.platform}-${identity.arch}`);
-  try { return validateRuntimeBundle(destination, identity); } catch { return null; }
+  try { return validateRuntimeBundle(destination, identity, { stampDir: runtimeVerifiedDir(coreHome) }); } catch { return null; }
 }
 
 async function waitForPackagedRuntimeSource({
   app,
   resourcesPath,
-  coreHome = null,
   onFallback = null,
   timeoutMs = DEFAULT_SOURCE_WAIT_TIMEOUT_MS,
   intervalMs = DEFAULT_SOURCE_WAIT_INTERVAL_MS,
+  // The same remembered verification ensurePackagedRuntime uses: without it this wait hashed every
+  // runtime file again on each launch, before the window could open.
+  coreHome = null,
 }) {
   if (!app.isPackaged) return null;
   if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || !Number.isFinite(intervalMs) || intervalMs <= 0) {
@@ -217,11 +273,12 @@ async function waitForPackagedRuntimeSource({
     platform: process.platform,
     arch: process.arch,
   };
+  const verify = coreHome ? { stampDir: runtimeVerifiedDir(coreHome) } : {};
   const deadline = Date.now() + timeoutMs;
   let lastError;
   for (;;) {
     try {
-      return validateRuntimeBundle(source, identity);
+      return validateRuntimeBundle(source, identity, verify);
     } catch (error) {
       lastError = error;
       // A whole installed copy of this version runs the app; a damaged source is reported, not fatal.
@@ -264,7 +321,7 @@ function retireSideBundles(versionsRoot, baseName) {
 
 // Moves a validated side bundle into the version directory. Returns null (keep using the side
 // bundle) when either directory is still in use; the previous release is restored in that case.
-function promoteSideBundle(side, destination, expectedIdentity) {
+function promoteSideBundle(side, destination, expectedIdentity, verify) {
   const previous = `${destination}.previous-${process.pid}-${Date.now()}`;
   const hadDestination = fs.existsSync(destination);
   if (hadDestination) {
@@ -281,7 +338,7 @@ function promoteSideBundle(side, destination, expectedIdentity) {
     throw error;
   }
   if (hadDestination) retireDirectory(previous);
-  return validateRuntimeBundle(destination, expectedIdentity);
+  return validateRuntimeBundle(destination, expectedIdentity, verify);
 }
 
 function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
@@ -292,9 +349,11 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
     arch: process.arch,
   };
   const source = path.join(resourcesPath, "runtime");
+  // Bundles already hashed are remembered here (see verifiedSignatures), outside every bundle.
+  const verify = { stampDir: runtimeVerifiedDir(coreHome) };
   let sourceBundle;
   try {
-    sourceBundle = inspectRuntimeBundle(source, identity);
+    sourceBundle = inspectRuntimeBundle(source, identity, verify);
   } catch (error) {
     // The installed copy of this version, when whole, runs the app (installedPackagedRuntime).
     const installed = installedPackagedRuntime({ app, coreHome });
@@ -314,7 +373,7 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
   const side = `${destination}-${String(sourceBundle.manifest.bundleId).slice(0, 12)}`;
   if (fs.existsSync(destination)) {
     try {
-      const root = validateRuntimeBundle(destination, expectedIdentity);
+      const root = validateRuntimeBundle(destination, expectedIdentity, verify);
       retireSideBundles(versionsRoot, path.basename(destination));
       return root;
     } catch {
@@ -324,8 +383,8 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
   }
   if (fs.existsSync(side)) {
     let sideRoot = null;
-    try { sideRoot = validateRuntimeBundle(side, expectedIdentity); } catch {}
-    if (sideRoot) return promoteSideBundle(side, destination, expectedIdentity) ?? sideRoot;
+    try { sideRoot = validateRuntimeBundle(side, expectedIdentity, verify); } catch {}
+    if (sideRoot) return promoteSideBundle(side, destination, expectedIdentity, verify) ?? sideRoot;
     retireDirectory(side);
   }
 
@@ -342,20 +401,20 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
       // Not a file an update set aside because something still ran it.
       filter: (from) => !SET_ASIDE_FILE.test(path.basename(from)),
     });
-    validateRuntimeBundle(temporary, expectedIdentity);
+    validateRuntimeBundle(temporary, expectedIdentity, verify);
     if (fs.existsSync(destination)) {
       try {
         renameAtomicFile(destination, previous);
       } catch (error) {
         if (!directoryInUse(error)) throw error;
         renameAtomicFile(temporary, side);
-        return validateRuntimeBundle(side, expectedIdentity);
+        return validateRuntimeBundle(side, expectedIdentity, verify);
       }
       previousMoved = true;
     }
     try {
       renameAtomicFile(temporary, destination);
-      validateRuntimeBundle(destination, expectedIdentity);
+      validateRuntimeBundle(destination, expectedIdentity, verify);
     } catch (error) {
       try { fs.rmSync(destination, { recursive: true, force: true }); } catch { /* restored over below */ }
       if (previousMoved) {
@@ -385,7 +444,7 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
     }
   }
   try { fs.chmodSync(destination, 0o700); } catch {}
-  return validateRuntimeBundle(destination, expectedIdentity);
+  return validateRuntimeBundle(destination, expectedIdentity, verify);
 }
 
 module.exports = {

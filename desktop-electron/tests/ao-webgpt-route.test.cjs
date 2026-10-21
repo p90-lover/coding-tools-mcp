@@ -85,12 +85,12 @@ test("a WebGPT model always gets the Native Codex route", () => {
 // WebGPT model can be picked anywhere and the card then moves to Native Codex.
 test("every harness lists the WebGPT models and marks that they switch to Native Codex", () => {
   assert.match(source, /loadModels\(NATIVE_HARNESS\)\.then\(items => \(Array\.isArray\(items\) \? items : items\.models\)\.filter\(isWebModel\)/);
-  assert.match(source, /setModels\(\[\.\.\.new Set\(\[\.\.\.catalog\.models, \.\.\.webItems\]\)\]\)/, "no duplicate WebGPT rows");
+  assert.match(source, /models: \[\.\.\.new Set\(\[\.\.\.catalog\.models, \.\.\.webItems\]\)\]/, "no duplicate WebGPT rows");
   assert.match(source, /isWebModel\(model\) \? " · switches to Native Codex"/);
   assert.match(source, /WebGPT runs only on Native Codex: choosing a WebGPT model switches to it/);
   // The model select routes the pick through workerRoute (which forces Native Codex for WebGPT),
   // keeping the card's effort and context where they apply.
-  assert.match(source, /onChange=\{event => onChange\(withTuning\(workerRoute\(route\.harness_id, event\.target\.value, nativePermission\(route\)\), route\)\)\}/);
+  assert.match(source, /onChange=\{event => onChange\(withTuning\(workerRoute\(route\.harness_id, event\.target\.value, nativePermission\(route\)\), route(?:, listed)?\)\)\}/);
 });
 
 test("effort and context window carry over only where the new route applies them", () => {

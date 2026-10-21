@@ -180,7 +180,9 @@ function createHarness(hooks = {}) {
       set: value => value, inEffect: async () => ({ shared: [], farmed: [] }), exclusive: (_projectId, work) => work() }) },
     // The context panel's history reader has its own tests (ao-context-breakdown.test.cjs).
     "./ao-context-breakdown.cjs": { readContextBreakdown: async () => null },
+    // Which daemon output lines are kept in memory: a pure filter, used as it is.
     "./ao-daemon-log.cjs": require("../electron/ao-daemon-log.cjs"),
+    // Compacting AO's database has its own worker; a fixture's database never needs it.
     "./ao-db-maintenance.cjs": { compactAoDatabase: async () => ({ action: "none" }) },
   };
   const loadedModule = { exports: {} };

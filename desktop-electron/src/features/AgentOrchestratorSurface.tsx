@@ -842,9 +842,14 @@ export function AgentOrchestratorSurface({ language, setError }: {
     };
   }, [setError]);
 
+  // A chat clicked in another project: that project's board and runs, read before switching to it
+  // (selectChatIn), so the switch shows them at once instead of an empty project first.
+  const preloaded = useRef<{ workspaceId: string; board: Board; runs: Record<string, unknown> } | null>(null);
   useEffect(() => {
     if (!workspaceReady || !workspaceId) { setBoard(null); setMissions([]); return; }
     let live = true;
+    const ready = preloaded.current?.workspaceId === workspaceId ? preloaded.current : null;
+    preloaded.current = null;
     boardWorkspace.current = "";
     setBoard(null);
     setMissions([]);
@@ -852,13 +857,33 @@ export function AgentOrchestratorSurface({ language, setError }: {
     setTeam(null); setSavedTeams([]); setComposerTeamId(""); setMissionTeamId(""); setDraftTeam(null); setInspectedId(""); setTaskLifecycle([]); setConfigStatus("");
     // This project is loading again (it may have been loaded before: A, then B, then A).
     setLoadedWorkspace("");
+    const applyBoard = (current: Board) => { boardWorkspace.current = workspaceId; setBoard(current); };
+    const applyRuns = (current: Record<string, unknown>) => {
+      const runs = Array.isArray(current.runs) ? current.runs as AoMission[] : [];
+      setTaskLifecycle((current.task_lifecycle as TaskLifecycleView[]) || []);
+      setMissions(runs);
+      setGoals(chatGoals(current));
+      setWakeups(chatWakeups(current));
+      const setups = aoSavedTeams(current);
+      setSavedTeams(setups); setComposerTeamId(selected => aoComposerTeam(selected, setups, current.team as AoTeam | null));
+      setTeam(current.team as AoTeam | null ?? setups[0] ?? null);
+      if (current.limits) { setLimits(current.limits as typeof limits); setGlobalLimit((current.limits as typeof limits).max_workers); }
+      setSelectedRunId(runs[0]?.id ?? "");
+    };
+    if (ready) {
+      // Applied with the resets above, in one render: the runs poll keeps them current from here.
+      applyBoard(ready.board);
+      applyRuns(ready.runs);
+      setLoadedWorkspace(workspaceId);
+      return () => { live = false; };
+    }
     // Both reads start at once (one after the other, behind every poll a switch sets off, they left
     // the new project's list empty for 2-6 s), and each is applied as soon as it lands: the board
     // never waits on the runs. The chat list counts as loaded only once both have landed.
     const boardRead = (async () => {
       try {
         const current = await moduleCall("board", { workspaceId }) as unknown as Board;
-        if (live) { boardWorkspace.current = workspaceId; setBoard(current); }
+        if (live) applyBoard(current);
         return true;
       } catch (cause) {
         if (live) setError(cause instanceof Error ? cause.message : String(cause));
@@ -870,16 +895,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
       try {
         const current = await moduleCall("runs", { workspaceId });
         if (live) {
-          const runs = Array.isArray(current.runs) ? current.runs as AoMission[] : [];
-          setTaskLifecycle((current.task_lifecycle as TaskLifecycleView[]) || []);
-          setMissions(runs);
-          setGoals(chatGoals(current));
-          setWakeups(chatWakeups(current));
-          const setups = aoSavedTeams(current);
-          setSavedTeams(setups); setComposerTeamId(selected => aoComposerTeam(selected, setups, current.team as AoTeam | null));
-          setTeam(current.team as AoTeam | null ?? setups[0] ?? null);
-          if (current.limits) { setLimits(current.limits as typeof limits); setGlobalLimit((current.limits as typeof limits).max_workers); }
-          setSelectedRunId(runs[0]?.id ?? "");
+          applyRuns(current);
           runsLoaded = true;
         }
       } catch (cause) {
@@ -982,10 +998,15 @@ export function AgentOrchestratorSurface({ language, setError }: {
     if (chatTaskId !== null || !board || boardWorkspace.current !== workspaceId) return;
     // "Continue in project" switched here to open a new, pre-filled chat, not the latest one.
     if (chatSeed?.workspaceId === workspaceId) { setChatTaskId(""); setView("chat"); return; }
+    // A chat clicked in this project's rows opens itself (pendingSelect), not the latest one.
+    if (pendingSelect.current?.workspaceId === workspaceId) return;
+    // The board and the runs are read at once and the board usually lands first: deciding then found
+    // no chats, opened the new chat page, and stayed there although the project had chats.
+    if (loadedWorkspace !== workspaceId) return;
     const latest = chatList(missions.filter((mission) => mission.workspace_id === workspaceId), board.tasks, taskLifecycle)[0];
     setChatTaskId(latest?.taskId ?? "");
     if (latest) setSelectedRunId(latest.latestRunId);
-  }, [chatTaskId, missions, board]);
+  }, [chatTaskId, missions, board, loadedWorkspace]);
   // Keep the shared project tree and newly created runs current in either view.
   useEffect(() => {
     if (!workspaceId) return;
@@ -1026,6 +1047,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
     return () => window.removeEventListener("coding-tools:ao:teams-changed", changed);
   }, [workspaceId, setError]);
   const selectChat = (taskId: string, next: "chat" | "overview" = "chat") => {
+    // A chat chosen here wins over another project's chat still loading to open (selectChatIn).
+    switchTarget.current = ""; pendingSelect.current = null;
     if (pendingChat?.taskId !== taskId) setPendingChat(null);
     setSheet(""); setInspectedId(""); setDraftTeam(null); setConfigStatus(""); setView(next);
     setChatTaskId(taskId);
@@ -1746,29 +1769,58 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const visibleNodes = aoVisibleNodes(selectedRun?.nodes ?? [], showInactive);
   const showingHistory = !showInactive && visibleNodes.length > 0 && visibleNodes.every(node => ["cancelled", "archived"].includes(node.state));
   const workers = selectedRun?.nodes.filter(node => node.role === "worker") ?? [];
-  const chooseWorkspace = (id: string) => {
+  const switchToWorkspace = (id: string) => {
     setWorkspaceId(id);
     setChatTaskId(null);
     try { localStorage.setItem("coding-tools:ao:workspace", id); } catch { /* Selection still works for this session. */ }
   };
-  // A chat opened from another project's rows in the list: switch to that project, then open the
-  // chat as soon as its runs have loaded (the switch empties the current project's state first).
+  const chooseWorkspace = (id: string) => {
+    // A chat clicked in a project still loading gives way to whatever is chosen now: a project, a
+    // new chat in one, a conversation continued there. Only that click's own switch keeps it.
+    switchTarget.current = ""; pendingSelect.current = null;
+    switchToWorkspace(id);
+  };
+  // A chat opened from another project's rows in the list. As in Codex the open chat stays until the
+  // clicked one can show: that project's board and runs are read first, then the switch applies them
+  // at once and opens the chat (switching first showed the empty project, its new chat page, and
+  // only then the chat). `switchTarget` is the project being read, so a later click wins.
   const pendingSelect = useRef<{ workspaceId: string; taskId: string } | null>(null);
+  const switchTarget = useRef("");
   const selectChatIn = (id: string, taskId: string) => {
     // A cached row of the project just switched to (its runs not read yet) waits like another
     // project's: selecting it now set a chat with no run, and the load then picked another chat's run.
     if (id === workspaceId && loadedWorkspace === workspaceId) { selectChat(taskId); return; }
     if (id === workspaceId) { pendingSelect.current = { workspaceId: id, taskId }; return; }
     pendingSelect.current = { workspaceId: id, taskId };
-    chooseWorkspace(id);
+    switchTarget.current = id;
+    void Promise.all([moduleCall("board", { workspaceId: id }), moduleCall("runs", { workspaceId: id })])
+      .then(([projectBoard, projectRuns]) => {
+        if (switchTarget.current === id) preloaded.current = { workspaceId: id, board: projectBoard as unknown as Board, runs: projectRuns };
+      }, () => undefined)
+      .then(() => {
+        // A failed read switches anyway; the project then loads as any switch does.
+        if (switchTarget.current !== id) return;
+        switchTarget.current = "";
+        switchToWorkspace(id);
+      });
   };
   useEffect(() => {
     const pending = pendingSelect.current;
     if (!pending || pending.workspaceId !== workspaceId) return;
-    if (!chatList(missions, board?.tasks ?? [], taskLifecycle).some((entry) => entry.taskId === pending.taskId)) return;
+    const chats = chatList(missions, board?.tasks ?? [], taskLifecycle);
+    if (!chats.some((entry) => entry.taskId === pending.taskId)) {
+      // Gone from the project once it loaded (archived or deleted meanwhile): open what a switch opens.
+      if (loadedWorkspace !== workspaceId || boardWorkspace.current !== workspaceId) return;
+      pendingSelect.current = null;
+      // Opened as a click opens a chat, so the chat view shows it even from the board or overview.
+      const latest = chatList(missions.filter((mission) => mission.workspace_id === workspaceId), board?.tasks ?? [], taskLifecycle)[0];
+      if (latest) selectChat(latest.taskId);
+      else { setChatTaskId(""); setView("chat"); }
+      return;
+    }
     pendingSelect.current = null;
     selectChat(pending.taskId);
-  }, [missions, board, taskLifecycle, workspaceId]);
+  }, [missions, board, taskLifecycle, workspaceId, loadedWorkspace]);
   // Another project's chats for its open row in the list, without switching to it.
   const loadProjectChats = useCallback(async (id: string) => {
     const [projectBoard, projectRuns] = await Promise.all([moduleCall("board", { workspaceId: id }), moduleCall("runs", { workspaceId: id })]);
@@ -2141,7 +2193,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
             ? <div className="ao-empty-state"><p>{copy.noWorkspace}</p><button className="button-primary" type="button" onClick={() => setSheet("settings")}>{copy.settings}</button></div>
             : <AgentOrchestratorChat
                 runs={chatRuns}
-                tasks={allTasks} selectedTaskId={chatTaskId ?? ""}
+                tasks={allTasks} selectedTaskId={chatTaskId ?? ""} deciding={chatTaskId === null}
                 projectName={workspaces.find((item) => item.id === workspaceId)?.name} projectBranch={projectBranch}
                 stop={stopChat} restart={restartChat} loadWork={loadChatWork}
                 thread={chatThread}
