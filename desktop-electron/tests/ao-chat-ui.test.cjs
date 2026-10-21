@@ -192,6 +192,21 @@ test("mission inspectors keep Retry structural changes in saved team templates",
 });
 
 
+test("a retried step shows its failed attempt above the attempt now running, not under it", () => {
+  // Seen live: "Attempt 1 failed · The agent's process ended before it finished" sat under the new
+  // attempt's thinking, as if it had come after it.
+  const props = { runs: [{ id: "run", project_id: "task", cancelled: false, execution_mode: "single", nodes: [{ id: "lead", role: "planner", state: "running",
+    route: { harness_id: "ao:claude-code", model: "m" }, receipt: { thread_id: "sess-2", started_at_ms: Date.now() - 57_000 },
+    history: [{ error: "The agent's process ended before it finished (the app restarted); retry this card." }] }] }],
+    activity: { "run:lead": { activity: "working", timeline: [{ id: "m1", kind: "message", status: "running", text: "Opening the preview again." }] } },
+    tasks: [{ id: "task", title: "Task" }], selectedTaskId: "task", busy: false, approvals: [],
+    loadDescription: async () => "", send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {} };
+  const html = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, props));
+  const earlier = html.indexOf("Attempt 1"), now = html.indexOf("Opening the preview again.");
+  assert.ok(earlier >= 0 && now >= 0, "both show");
+  assert.ok(earlier < now, "the failed attempt comes first");
+});
+
 test("an open chat's composer carries the context meter; a new chat's does not", () => {
   const props = { runs: [{ id: "run", project_id: "task", cancelled: false, nodes: [{ id: "lead", role: "planner", state: "finished",
     route: { harness_id: "ao:claude-code", model: "m" }, receipt: { thread_id: "sess-1", answer: "ok" } }] }],

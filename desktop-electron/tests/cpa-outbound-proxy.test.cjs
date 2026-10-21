@@ -8,6 +8,42 @@ const { createManagedExternalServicesController, resolveCpaProxyRoute, resolveMa
 const { runtimeConfiguration, installBundledCommandCodePlugin } = require("../electron/cpa-managed.cjs");
 const { redactText } = require("../electron/logging.cjs");
 
+test("CPA can use the built-in gateway without changing other components", (t) => {
+  const root = fs.mkdtempSync(path.join(__dirname, "../../aiTemp/cpa-scoped-proxy-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const safeStorage = { isEncryptionAvailable: () => false };
+  const store = createProviderNetworkStore({
+    filePath: path.join(root, "providers", "provider-network.json"),
+    keyPath: path.join(root, "providers", "provider-network.key"), safeStorage,
+  });
+  store.saveProxyProfile({ id: "legacy", name: "Global route", enabled: true,
+    endpoint: { protocol: "http", host: "127.0.0.1", port: 17891 }, scopes: ["all"] });
+  store.saveProxyProfile({ id: "builtin-gateway", name: "Built-in proxy gateway", enabled: true,
+    endpoint: { protocol: "http", host: "127.0.0.1", port: 17894 },
+    username: "ct", password: "gateway-test-key", scopes: ["all"] });
+  store.setGlobalRouting({ enabled: true, profileId: "legacy" });
+  const dataRoot = path.join(root, "integrations");
+  assert.equal(resolveCpaProxyRoute(dataRoot, safeStorage).profileId, "legacy");
+  store.setProviderPolicy({ providerId: "cpa", mode: "profile", profileId: "builtin-gateway" });
+  const environment = resolveManagedProxyEnvironment("cpa", dataRoot, safeStorage);
+  const route = new URL(environment.CODING_TOOLS_CPA_OUTBOUND_PROXY_URL);
+  assert.equal(route.port, "17894");
+  assert.equal(route.username, "ct");
+  assert.equal(route.password, "gateway-test-key");
+  assert.equal(resolveCpaProxyRoute(dataRoot, safeStorage).profileId, "builtin-gateway");
+  assert.equal(new URL(resolveManagedProxyEnvironment("antigravity-cli", dataRoot, safeStorage).HTTPS_PROXY).port, "17891");
+  assert.equal(store.snapshot().routing.globalProfileId, "legacy");
+  store.setGlobalRouting({ enabled: false, profileId: null });
+  assert.equal(resolveCpaProxyRoute(dataRoot, safeStorage).profileId, "builtin-gateway");
+  store.setProviderPolicy({ providerId: "cpa", mode: "inherit" });
+  assert.equal(resolveCpaProxyRoute(dataRoot, safeStorage).url, "");
+  store.setGlobalRouting({ enabled: true, profileId: "legacy" });
+  assert.equal(resolveCpaProxyRoute(dataRoot, safeStorage).profileId, "legacy");
+  store.setProviderPolicy({ providerId: "cpa", mode: "direct" });
+  assert.equal(resolveCpaProxyRoute(dataRoot, safeStorage).url, "");
+  assert.throws(() => resolveManagedProxyEnvironment("cpa", dataRoot, safeStorage), /Select a .*network proxy/);
+});
+
 test("CPA config follows the selected authenticated global profile", () => {
   const root = fs.mkdtempSync(path.join(__dirname, "../../aiTemp/cpa-outbound-proxy-"));
   const providers = path.join(root, "providers");
@@ -82,7 +118,7 @@ test("CPA config follows the selected authenticated global profile", () => {
   store.setGlobalRouting({ enabled: false, profileId: null });
   const direct = resolveCpaProxyRoute(path.join(root, "integrations"), safeStorage);
   assert.equal(direct.url, "");
-  assert.throws(() => resolveManagedProxyEnvironment("cpa", path.join(root, "integrations"), safeStorage), /Select a global network proxy/);
+  assert.throws(() => resolveManagedProxyEnvironment("cpa", path.join(root, "integrations"), safeStorage), /Select a network proxy/);
   for (const componentId of ["paseo", "codex-router", "commandcode-proxy", "anneal"]) {
     assert.deepEqual(resolveManagedProxyEnvironment(componentId, path.join(root, "integrations"), safeStorage), {});
   }

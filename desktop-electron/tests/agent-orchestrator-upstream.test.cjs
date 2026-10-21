@@ -70,7 +70,7 @@ function observeHarness(context) {
   const shared = helpers.replace(/const TAIL_FRESH_MS = \d+;/, `const TAIL_FRESH_MS = ${Number(context.tailFreshMs ?? 0)};`);
   return vm.runInNewContext(states + timelineBounds(source) + shared + identity + "({" + method + "})", {
     Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"),
-    agentTools: null, observeTui: async () => { throw new Error("not a TUI fixture"); }, ...context,
+    agentTools: null, setTimeout, observeTui: async () => { throw new Error("not a TUI fixture"); }, ...context,
   });
 }
 
@@ -266,7 +266,40 @@ test("a pending item too large for any page still lets the chat be read (and sto
   });
   const observed = await upstream.observe("s");
   assert.equal(observed.turnState, "running");
-  assert.deepEqual(asked, ["limit=100&includePending=1", "limit=40&includePending=1", "limit=10&includePending=1", "limit=10"]);
+  assert.deepEqual(asked, ["limit=100&includePending=1", "limit=40&includePending=1", "limit=10&includePending=1",
+    "limit=3&includePending=1", "limit=1&includePending=1", "limit=10"]);
+});
+
+test("one item over the limit among the newest ten no longer hides what came after it", async () => {
+  // Seen live (clash-of-clan-macro-60): a 1.3 MB MCP page dump was among the newest 10 items, so the
+  // reads of 100, 40 and 10 all failed, the chat showed "AO response exceeds the handler limit", and
+  // the pending approval behind it was never seen or answered: "may be stuck" for 3 hours.
+  const asked = [];
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => {
+      if (!endpoint.includes("/conversation")) return { session: { id: "s", mode: "chat", status: "working" } };
+      asked.push(endpoint.split("?")[1]);
+      if (Number(/limit=(\d+)/.exec(endpoint)[1]) >= 10) throw new Error("AO response exceeds the handler limit (GET /api/v1/sessions/s/conversation)");
+      return { turns: [{ id: "t", state: "running" }], messages: [] };
+    },
+  });
+  const observed = await upstream.observe("s");
+  assert.equal(observed.turnState, "running");
+  assert.deepEqual(asked, ["limit=100&includePending=1", "limit=40&includePending=1", "limit=10&includePending=1", "limit=3&includePending=1"],
+    "three items, pending ones included, get past it");
+});
+
+test("a newest item over the limit on its own still fails the read, after every smaller page", async () => {
+  const asked = [];
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => {
+      if (!endpoint.includes("/conversation")) return { session: { id: "s", mode: "chat", status: "working" } };
+      asked.push(endpoint.split("?")[1]);
+      throw new Error("AO response exceeds the handler limit (GET /api/v1/sessions/s/conversation)");
+    },
+  });
+  await assert.rejects(upstream.observe("s"), /exceeds the handler limit/);
+  assert.deepEqual(asked.slice(-3), ["limit=10", "limit=3", "limit=1"]);
 });
 
 test("observe shows the reply of a turn that ended while AO still flagged it as streaming", async () => {
@@ -526,6 +559,30 @@ test("a request AO holds outside a turn has no turn_id key, so the status read p
 // Seen live: AO's ACP approval for the app's exec_command had no toolName (subjectKind "mcp_tool",
 // toolKind "other"); the name was only the summary. The input was dropped, so "Approve for me"'s
 // reviewer saw no command, answered "ask", and the chat waited on the person for a bare `cd`.
+test("approval input bounds explicitly identify truncation without expanding reviewer payloads", async () => {
+  const inputs = [
+    { command: "python -c \"" + "x".repeat(1491) + "\"" },
+    { command: "x".repeat(4001) },
+    { cmd: "x".repeat(2000) },
+    { path: "x".repeat(1001) },
+  ];
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {
+      turns: [{ id: "t", state: "running" }], messages: [],
+      activities: inputs.map((input, index) => ({ activityKind: "approval", status: "pending", requestId: "req-" + index,
+        summary: index === 2 ? "mcp__coding-tools__exec_command" : "PowerShell",
+        detail: { input, decisions: [{ id: "allow", kind: "allow_once" }] } })),
+    } : { session: { id: "s", mode: "chat", status: "working" } },
+  });
+  const approvals = (await upstream.observe("s")).approvals;
+  assert.equal(approvals[0].command, inputs[0].command, "a complete native script keeps every character");
+  assert.equal(approvals[0].reviewTruncated, undefined);
+  assert.equal(approvals[1].command.length, 4000);
+  assert.equal(approvals[2].toolInput.length, 1500);
+  assert.equal(approvals[3].path.length, 1000);
+  assert.ok(approvals.slice(1).every(approval => approval.reviewTruncated === true));
+});
+
 test("an MCP tool approval named only by its summary keeps its input for the reviewer", async () => {
   const upstream = observeHarness({
     internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {
@@ -636,6 +693,15 @@ test("observe says when the tool call still running began, so a steer can stop a
   assert.equal(idle.toolSince, undefined, "no tool call in flight");
 });
 
+test("exitAgent requires the selected agent's acknowledged exited state", async () => {
+  for (const outcome of [{ ok: false }, { ok: true }, { ok: true, session: { id: "s", status: "working" } }, { ok: true, session: { id: "other", status: "exited" } }]) {
+    const upstream = observeHarness({ internalApi: async () => outcome });
+    await assert.rejects(upstream.exitAgent("s"), /shutdown is unconfirmed/);
+  }
+  const upstream = observeHarness({ internalApi: async () => ({ ok: true, session: { id: "s", status: "exited" } }) });
+  assert.equal((await upstream.exitAgent("s")).ok, true);
+});
+
 test("an idle agent is found by its last turn, released with exit-agent, and resumed when its chat continues", async () => {
   const vm = require("node:vm");
   const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
@@ -668,7 +734,7 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
       if (endpoint === "/api/v1/sessions") return { sessions };
       const id = endpoint.split("/")[4];
       if (endpoint.endsWith("/conversation?limit=1")) return { turns: turns[id] ?? [] };
-      if (endpoint.endsWith("/exit-agent")) return { ok: true };
+      if (endpoint.endsWith("/exit-agent")) return { ok: true, session: { id, status: "exited" } };
       if (endpoint.endsWith("/resume-agent")) { if (!resumeOk) throw new Error("resume failed"); status = "idle"; return { ok: true }; }
       return { session: { id, mode: "chat", status } };
     },
@@ -680,7 +746,7 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
   assert.equal(await upstream.continuable("old"), true, "a released agent is resumed for the next message");
   assert.ok(calls.some(([method, endpoint]) => method === "POST" && endpoint === "/api/v1/sessions/old/resume-agent"));
   status = "exited"; resumeOk = false;
-  assert.equal(await upstream.continuable("old"), false, "a failed resume falls back to a fresh session");
+  await assert.rejects(upstream.continuable("old"), error => error.code === "AO_SESSION_RESTORE_UNCONFIRMED", "an uncertain resume cannot replace the retained conversation");
 });
 
 test("a resumed chat gets the app's tools again, and an AO that refuses them still resumes it", async () => {
@@ -1198,4 +1264,113 @@ test("the context meter keeps its reading through a steer's zero snapshot, and d
   steadyContext(readings, "s6", { contextUsed: 400_000, contextWindow: 400000 }, null);
   assert.equal(steadyContext(readings, "s6", { contextUsed: 40_000, contextWindow: 400000 }, null).contextUsed, 40_000,
     "a large real drop below a quarter, but not near nothing, comes through");
+});
+
+test("a daemon-owned resume conflict waits for readiness and concurrent callers never send early", async () => {
+  let status = "exited", resumes = 0, sends = 0, ticks = [];
+  const upstream = observeHarness({
+    setTimeout: callback => { ticks.push(callback); },
+    internalApi: async (method, endpoint) => {
+      if (method === "POST") {
+        resumes++;
+        throw Object.assign(new Error("The agent is already being resumed"), { status: 409, code: "AGENT_RESUME_IN_PROGRESS" });
+      }
+      return { session: { id: "owned", mode: "chat", status, provisionState: "ready" } };
+    },
+  });
+  let settled = false;
+  const prewarm = upstream.continuable("owned");
+  const send = upstream.continuable("owned").then(ready => { if (ready) sends++; return ready; });
+  const both = Promise.all([prewarm, send]).finally(() => { settled = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(resumes, 1, "the daemon already owns restoration; do not submit another resume");
+  assert.equal(settled, false, "a conflict alone cannot authorize sending");
+  assert.equal(sends, 0);
+  status = "idle";
+  for (const tick of ticks.splice(0)) tick();
+  assert.deepEqual(await both, [true, true]);
+  assert.equal(sends, 1);
+});
+
+test("resume waits distinguish terminal failure from timeout and transport uncertainty", async () => {
+  for (const scenario of ["terminal", "timeout", "transport"]) {
+    let reads = 0, resumes = 0, clock = 0;
+    const upstream = observeHarness({
+      Date: { now: () => clock },
+      setTimeout: callback => { clock += 1000; setImmediate(callback); },
+      internalApi: async method => {
+        if (method === "POST") {
+          resumes++;
+          throw Object.assign(new Error("restoring"), { status: 409, code: "AGENT_RESUME_IN_PROGRESS" });
+        }
+        reads++;
+        if (reads > 1 && scenario === "transport") throw new Error("read unavailable");
+        return { session: { id: "owned", mode: "chat", status: reads > 1 && scenario === "terminal" ? "terminated" : "exited", provisionState: "ready" } };
+      },
+    });
+    if (scenario === "terminal") assert.equal(await upstream.continuable("owned"), false);
+    else await assert.rejects(upstream.continuable("owned"), error => error.code === "AO_SESSION_RESTORE_UNCONFIRMED");
+    assert.equal(resumes, 1);
+    assert.ok(reads <= 152, "readiness polling is bounded");
+  }
+});
+
+test("only the structured resume-in-progress conflict enters the readiness wait", async () => {
+  for (const error of [
+    Object.assign(new Error("The agent is already being resumed"), { status: 403, code: "AGENT_RESUME_IN_PROGRESS" }),
+    Object.assign(new Error("The agent is already being resumed"), { status: 409, code: "OTHER_CONFLICT" }),
+  ]) {
+    let reads = 0;
+    const upstream = observeHarness({ internalApi: async method => {
+      if (method === "POST") throw error;
+      reads++; return { session: { id: "owned", mode: "chat", status: "exited" } };
+    } });
+    await assert.rejects(upstream.continuable("owned"), cause => cause.code === "AO_SESSION_RESTORE_UNCONFIRMED");
+    assert.equal(reads, 1, "message text never impersonates the structured conflict");
+  }
+});
+
+test("internal AO errors retain bounded structured status and code without changing their message", async () => {
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("  async function internalApi(");
+  const end = source.indexOf("  const agentId =", start);
+  for (const data of [
+    { code: "AGENT_RESUME_IN_PROGRESS", message: "restoring" },
+    { error: { code: "AGENT_RESUME_IN_PROGRESS", message: "restoring" } },
+  ]) {
+    const api = require("node:vm").runInNewContext(source.slice(start, end) + "; internalApi", {
+      // A write clears the shared session reads first (sharedObserveRead).
+      sharedReads: new Map(),
+      start: async () => {}, requestApi: async () => ({ ok: false, status: 409, data }),
+      aoErrorMessage: () => "original unchanged message",
+    });
+    await assert.rejects(api("POST", "/api/v1/sessions/owned/resume-agent", {}), error =>
+      error.status === 409 && error.code === "AGENT_RESUME_IN_PROGRESS" && error.message === "original unchanged message");
+  }
+});
+
+test("resumed chats use live activity rather than PR-derived display status for readiness", async () => {
+  const net = require("node:net");
+  const root = fs.mkdtempSync(path.join(__dirname, "../../aiTemp/resume-host-"));
+  const server = net.createServer(socket => socket.end());
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  fs.mkdirSync(path.join(root, "chat-hosts", "owned"), { recursive: true });
+  fs.writeFileSync(path.join(root, "chat-hosts", "owned", "host.json"), JSON.stringify({ address: "127.0.0.1:" + server.address().port }));
+  try {
+    for (const display of ["pr_open", "draft", "ci_failed", "review_pending", "changes_requested", "approved", "mergeable", "merged"]) {
+      for (const hasActivity of [true, false]) {
+        let restored = false, clock = 0;
+        const upstream = observeHarness({
+          dataRoot: root, Date: { now: () => clock },
+          setTimeout: callback => { clock += 1000; setImmediate(callback); },
+          internalApi: async method => {
+            if (method === "POST") { restored = true; return { ok: true }; }
+            return { session: { id: "owned", mode: "chat", status: restored ? display : "exited", provisionState: "ready",
+              ...(hasActivity ? { activity: { state: restored ? "idle" : "exited" } } : {}) } };
+          },
+        });
+        assert.equal(await upstream.continuable("owned"), true, display + " with a live host preserves the chat");
+      }
+    }
+  } finally { await new Promise(resolve => server.close(resolve)); fs.rmSync(root, { recursive: true, force: true }); }
 });

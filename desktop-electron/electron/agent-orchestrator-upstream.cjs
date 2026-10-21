@@ -397,21 +397,30 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     for (const key of tailReads.keys()) if (key.startsWith(`${id}|`)) tailReads.delete(key);
   }
   async function readConversationTail(id, limits) {
-    for (let at = 0; ; at += 1) {
+    const tooLarge = error => /exceeds the handler limit/.test(String(error?.message));
+    // Down to 3 items and then 1 past the caller's own sizes: one item can be over the limit by
+    // itself. Seen live: a 1.3 MB MCP page dump among the newest 10 failed every read, so a pending
+    // approval behind it never showed, nobody answered it, and the chat sat "may be stuck" for 3 hours.
+    const smallest = limits[limits.length - 1];
+    const sizes = [...limits, ...[3, 1].filter(size => size < smallest)];
+    for (const size of sizes) {
       try {
         // includePending: a request still waiting on an answer is always in the page, however much
         // came after it; one that fell out of the newest items never showed and sat until it timed out.
-        return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${limits[at]}&includePending=1`);
+        return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${size}&includePending=1`);
       } catch (error) {
-        if (!/exceeds the handler limit/.test(String(error?.message))) throw error;
-        if (at === limits.length - 1) {
-          // A pending item is in every page, so one that is itself over the limit (a stuck 1 MB
-          // screenshot call, seen live) failed every read: the chat stopped updating and Stop could
-          // not be confirmed. The newest items alone are read instead.
-          return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${limits[at]}`);
-        }
+        if (!tooLarge(error)) throw error;
       }
     }
+    // A pending item is in every page, so one that is itself over the limit (a stuck 1 MB screenshot
+    // call, seen live) failed every read: the chat stopped updating and Stop could not be confirmed.
+    // The newest items alone are read instead.
+    let failure;
+    for (const size of [smallest, ...[3, 1].filter(size => size < smallest)]) {
+      try { return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${size}`); }
+      catch (error) { if (!tooLarge(error)) throw error; failure = error; }
+    }
+    throw failure;
   }
   /**
    * The current turn as a Codex-style transcript: assistant messages, reasoning and tool calls
@@ -626,11 +635,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // summary (seen live: subjectKind "mcp_tool", toolKind "other"). Without it the input was
         // dropped, so the reviewer saw an exec_command with no command and answered "ask".
         const toolName = String(detail.toolName || activity.summary || "");
-        const toolInput = /^mcp__/.test(toolName) && Object.keys(input).length ? utf8Prefix(JSON.stringify(input), 1500) : "";
+        const rawToolInput = /^mcp__/.test(toolName) && Object.keys(input).length ? JSON.stringify(input) : "";
+        const toolInput = utf8Prefix(rawToolInput, 1500);
+        const reviewTruncated = Buffer.byteLength(command, "utf8") > 4000 || Buffer.byteLength(rawToolInput, "utf8") > 1500
+          || Buffer.byteLength(path, "utf8") > 1000 || Buffer.byteLength(String(input.description ?? ""), "utf8") > 500;
         return {
           approval_id: activity.requestId.slice(0, 200), source: "ao", kind: plan ? "plan" : command ? "command" : "permission",
           ...(plan ? { plan } : {}),
           ...(toolInput ? { toolInput } : {}),
+          ...(reviewTruncated ? { reviewTruncated: true } : {}),
           ...(typeof activity.createdAt === "string" ? { since: activity.createdAt } : {}),
           ...(command ? { command: utf8Prefix(command, 4000) } : {}), ...(path ? { path: utf8Prefix(path, 1000) } : {}),
           ...(typeof input.description === "string" ? { reason: utf8Prefix(input.description, 500) } : {}),
@@ -750,7 +763,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (method !== "GET") sharedReads.clear();
     await start();
     const result = await requestApi(method, endpoint, body === undefined ? undefined : JSON.stringify(body));
-    if (!result.ok) throw new Error(aoErrorMessage(result));
+    if (!result.ok) {
+      const error = new Error(aoErrorMessage(result));
+      error.status = result.status;
+      const code = result.data?.code ?? result.data?.error?.code;
+      if (typeof code === "string" && /^[A-Z0-9_]{1,80}$/.test(code)) error.code = code;
+      throw error;
+    }
     return result.data;
   }
   const agentId = (value) => {
@@ -1045,20 +1064,53 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       // started a fresh session beside the agent coming back. Callers share the first check.
       const key = sessionId(id);
       if (!continuing.has(key)) continuing.set(key, (async () => {
-        const record = await internalApi("GET", `/api/v1/sessions/${key}`).catch(() => null);
-        const status = record?.session?.status;
-        if (!record?.session || record.session.mode === "tui" || record.session.isTerminated || ["terminated", "killed", "errored"].includes(status)) return false;
-        if (status === "exited") {
-          // An agent released while idle (exitAgent) keeps its session, worktree and conversation:
-          // bring it back (a few seconds) rather than start over and replay the whole chat.
-          // AO holds a chat's tool servers only while its daemon runs: one resumed after a restart
-          // came back without the app's tools. Fresh ones for the session go with the resume.
+        const uncertain = cause => Object.assign(new Error("The existing agent's restoration could not be confirmed; retry this chat without starting a replacement"),
+          { code: "AO_SESSION_RESTORE_UNCONFIRMED", cause });
+        const read = async () => {
+          try {
+            const record = await internalApi("GET", `/api/v1/sessions/${key}`);
+            if (!record?.session) throw uncertain();
+            return record.session;
+          } catch (error) { if (error.status === 404 && error.code === "SESSION_NOT_FOUND") return null; throw uncertain(error); }
+        };
+        const invalid = session => !session || session.mode === "tui" || session.isTerminated
+          || ["terminated", "killed", "errored"].includes(session.status) || session.provisionState === "failed";
+        let session = await read();
+        if (invalid(session)) return false;
+        if (session.id !== key) throw uncertain();
+        if (session.status === "exited") {
+          // Startup may already own restoration. A conflict is not readiness: wait for this
+          // exact session's observable live state, without issuing a second resume or new launch.
           const renewed = await Promise.resolve().then(() => agentTools?.renew?.(key)).catch(() => null);
-          const resume = body => internalApi("POST", `/api/v1/sessions/${key}/resume-agent`, body).catch(() => null);
-          let resumed = await resume(renewed?.servers?.length ? { mcpServers: renewed.servers } : {});
-          // An AO from before resume took servers refuses the field; resume as before then.
-          if (resumed?.ok !== true && renewed?.servers?.length) resumed = await resume({});
-          if (resumed?.ok !== true) return false;
+          let body = renewed?.servers?.length ? { mcpServers: renewed.servers } : {};
+          try {
+            let resumed;
+            try { resumed = await internalApi("POST", `/api/v1/sessions/${key}/resume-agent`, body); }
+            catch (error) {
+              // Only the known old-schema rejection may retry without the optional servers.
+              if (!body.mcpServers || !/unknown field [\\"']?mcpServers/.test(String(error?.message))) throw error;
+              resumed = await internalApi("POST", `/api/v1/sessions/${key}/resume-agent`, {});
+            }
+            if (resumed?.ok !== true) throw uncertain();
+          } catch (error) {
+            if (["SESSION_NOT_RESTORABLE", "SESSION_TERMINATED", "SESSION_NOT_FOUND"].includes(error.code)) return false;
+            if (error.status !== 409 || error.code !== "AGENT_RESUME_IN_PROGRESS") throw uncertain(error);
+          }
+          const deadline = Date.now() + 30000;
+          for (let attempt = 0; attempt < 150 && Date.now() < deadline; attempt++) {
+            session = await read();
+            if (invalid(session)) return false;
+            if (session.id !== key) throw uncertain();
+            // Status is a display value: an idle live agent may show its pull request state.
+            const activity = session.activity?.state;
+            const live = activity == null
+              ? ["idle", "working", "needs_input", "pr_open", "draft", "ci_failed", "review_pending", "changes_requested", "approved", "mergeable", "merged"].includes(session.status)
+              : ["idle", "active", "waiting_input", "blocked"].includes(activity);
+            if (live && (!session.statusReadiness || session.statusReadiness === "ready") && session.provisionState !== "provisioning"
+              && !(await chatHostGone(key))) return true;
+            await new Promise(resolve => setTimeout(resolve, 200));
+          }
+          throw uncertain();
         }
         return !(await chatHostGone(key));
       })().finally(() => continuing.delete(key)));
@@ -1070,7 +1122,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
      */
     async exitAgent(id) {
       agentTools?.cancelSessionCalls?.(id);
-      await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/exit-agent`, {});
+      let outcome;
+      try { outcome = await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/exit-agent`, {}); }
+      catch (error) {
+        if (!/\bAGENT_EXITED\b/.test(String(error?.message))) throw error;
+        outcome = { ok: true, ...await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`) };
+      }
+      if (outcome?.ok !== true || outcome.session?.id !== id || outcome.session?.status !== "exited") {
+        throw new Error(`Agent ${id} shutdown is unconfirmed`);
+      }
       return { ok: true };
     },
     /**

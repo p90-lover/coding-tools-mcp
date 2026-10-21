@@ -546,6 +546,17 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     warmLog("started", { model: entry.route.model, waiting: warm.size });
     return { ok: true, warmed: true, starting: true };
   }
+  async function continuableSession(session) {
+    for (;;) {
+      while (sessionStops.has(session)) await sessionStops.get(session);
+      const usable = await harnessService().continuable?.(session).catch(error => {
+        if (error?.code === "AO_SESSION_RESTORE_UNCONFIRMED") throw error;
+        return false;
+      });
+      // A Stop may have started during the readiness check and can still exit this host.
+      if (!sessionStops.has(session)) return usable;
+    }
+  }
   /** Hands the ready warm session for this route to a launch, or null. */
   async function takeWarm(workspaceId, route, plain) {
     const key = warmKey(workspaceId, route, plain);
@@ -566,7 +577,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     warm.delete(key);
     clearTimeout(entry.timer);
     const session = await entry.promise.catch(() => null);
-    const usable = Boolean(session) && await harnessService().continuable?.(session).catch(() => false);
+    const usable = Boolean(session) && await continuableSession(session);
     warmLog(usable ? "taken" : "unusable", { model: entry.route.model, ready: Boolean(entry.session), ageMs: now() - entry.started });
     return usable ? session : null;
   }
@@ -618,7 +629,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // the launch on a busy machine, and the launch timed out while the spare one came up.
       if (previous && !previous.cancelled && !runSettled(previous)) return { ok: true, warmed: false, reason: "The chat's run is starting" };
       const live = freshSessionRequired(id, task) ? null : continuationCard(previous, executionMode, singleRoute);
-      if (live && await harnessService().continuable?.(live.receipt.thread_id).catch(() => false)) {
+      if (live && await continuableSession(live.receipt.thread_id)) {
         return { ok: true, warmed: false, continues: true };
       }
       return chatPrewarmRoute(id, singleRoute, true);
@@ -753,7 +764,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   const PLUGIN_NAMESPACES = new Set(["cline-pass", ...PLUGIN_PROVIDERS]);
   // Cline's plugin decodes these suffixes into the provider's request body.
   // DeepSeek V4.1 Flash and its dated builds ("…-flash-1017"), as the plugin's modelEfforts.
-  const CLINE_EFFORT_MODELS = [[/^cline-pass\/deepseek-v4\.1-flash(?:-\d{4,8})?$/, ["none", "low", "high", "max"]]];
+  // Every other Cline Pass model takes OpenRouter's levels (plugin 0.1.0-codingtools.4). Before, they
+  // took none: GLM 5.3 Flash's effort chip stayed greyed at "Auto" with no level to pick. Not "none"
+  // (GLM always reasons: "Reasoning is mandatory") nor "ultra" (no OpenRouter level), though CPA's
+  // catalog lists them for some of these models.
+  const CLINE_EFFORT_MODELS = [[/^cline-pass\/deepseek-v4\.1-flash(?:-\d{4,8})?$/, ["none", "low", "high", "max"]],
+    [/^cline-pass\/[^()]+$/, ["minimal", "low", "medium", "high", "xhigh", "max"]]];
   const CLINE_EFFORTS = { get: id => CLINE_EFFORT_MODELS.find(([pattern]) => pattern.test(String(id)))?.[1], has: id => Boolean(CLINE_EFFORTS.get(id)) };
   // Ids the last catalog read named a plugin as provider of, for launches that have only the id.
   let pluginModels = new Set();
@@ -1137,11 +1153,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         // A single-model follow-up continues the chat's live session as its next turn: no new
         // session, worktree or replayed prompt, and the agent keeps what it already read and ran.
         const continued = continuations.get(runId);
-        continuations.delete(runId);
         // A session that is gone, or refuses the message, falls back to a fresh start.
         let sent = null;
-        if (continued && await harnessService().continuable?.(continued.session).catch(() => false)) {
-          while (sessionStops.has(continued.session)) await sessionStops.get(continued.session);
+        if (continued && await continuableSession(continued.session)) {
           sessionOwners.set(continued.session, runKey(workspaceId, runId));
           if (sessionOwners.size > 500) sessionOwners.delete(sessionOwners.keys().next().value);
           sent = await harnessService().send(continued.session, continued.text, reserved.request_key).catch(() => null);
@@ -1158,10 +1172,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           ? (await chatHandoff(handoff.workspaceId, handoff.taskId, runId, handoffRoom).catch(() => "")) + reserved.prompt : reserved.prompt;
         // Otherwise a pre-warmed session for exactly this route takes the first prompt as its first
         // turn: it already has its worktree and a running agent, so nothing is launched now.
+        continuations.delete(runId);
         const warmed = sent?.turnId ? null : await takeWarm(workspaceId, node.route, plain);
         let first = null;
         if (warmed) {
-          while (sessionStops.has(warmed)) await sessionStops.get(warmed);
           sessionOwners.set(warmed, runKey(workspaceId, runId));
           if (sessionOwners.size > 500) sessionOwners.delete(sessionOwners.keys().next().value);
           first = await harnessService().send(warmed, prompt, reserved.request_key).catch(() => null);
@@ -1203,7 +1217,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         const mission = latest?.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
         const card = mission?.nodes.find(entry => entry.id === node.id);
         if (!mission?.cancelled && card && card.state === "reserved" && !backgroundRuns.get(runKey(workspaceId, runId))?.stopped) return false;
-        await stopExternalTurn(session);
+        await stopExternalTurn(session, mission?.cancelled || backgroundRuns.get(runKey(workspaceId, runId))?.stopped
+          ? { owner: runKey(workspaceId, runId), releaseAgent: true } : null);
         return true;
       };
       let saved;
@@ -1885,6 +1900,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       })) return { ok: false, cancelled: true };
       await harnessService().resolveApproval(pending.thread_id, approval, decision);
       rememberAnswer(approval, requestText(pending), chosen ? offered.label : approving ? "Allow once" : "Deny");
+      logger?.info?.("ao.approval_decided", { approval_id: approval, actor: "user", decision: approving ? "allow" : "deny" });
       return { ok: true, result: { ok: true } };
     }
     if (typed && (!pending.method || pending.thread_id !== thread || pending.turn_id !== turn)) {
@@ -1910,6 +1926,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (result?.ok !== true || result.result?.ok !== true) {
       throw new Error("AO tool approval outcome is unknown; inspect the card before retrying");
     }
+    logger?.info?.("ao.approval_decided", { approval_id: approval, actor: "user", decision: typed ? "typed_reply" : allow ? "allow" : "deny" });
     return result;
   }
 
@@ -1999,6 +2016,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       stopping.detail = "Stopping owned agents";
       reportRun(id, run, stopping, null);
     }
+    const beforeStop = action === "stop" ? await runs({ workspaceId: id, runId: run }).catch(() => null) : null;
+    const stopTargets = (beforeStop?.runs?.find(entry => entry.id === run && entry.workspace_id === id)?.nodes ?? [])
+      .filter(node => externalAgent(node) && node.receipt?.thread_id)
+      .map(node => ({ nodeId: node.id, sessionId: node.receipt.thread_id,
+        requestKey: node.receipt.request_key ?? node.request_key, turnId: node.receipt.turn_id,
+        completed: node.state === "finished" || node.receipt.status === "completed" }));
     let result;
     try {
       result = await requestHeadless("/api/v1/ao/control", { workspace_id: id, run_id: run, action, ...(nodeId ? { node_id: clean(nodeId, 80) } : {}), confirm: true }, { localConfirmation: true });
@@ -2032,23 +2055,26 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         await cancelSchedule({workspaceId:id,taskId:result.run.project_id,intentId:life.schedule.id})
           .catch(error => logger?.warn?.("ao.stop.schedule_cancel_failed", { run, error: String(error?.message || error).slice(0, 200) }));
       }
-      // The native service has already marked these nodes cancelled; their owned AO sessions
-      // still need the interrupt. An acknowledged native stop does not stop a separate AO agent.
+      // Cancellation preserves receipts; capture their exact attempt before sending any shutdown.
+      if (!beforeStop && (result.run.nodes ?? []).some(node => externalAgent(node) && node.receipt?.thread_id)) {
+        throw new Error("Owned session snapshot is unavailable; shutdown is unconfirmed");
+      }
       const owner = runKey(id, run), sessions = new Map();
       const position = saved?.runs.findIndex(entry => entry.id === run && entry.workspace_id === id) ?? -1;
-      const newer = position >= 0 ? saved.runs.slice(position + 1) : saved?.runs ?? [];
-      for (const node of result.run.nodes ?? []) {
-        const session = node.receipt?.thread_id;
-        if (!externalAgent(node) || node.state === "finished" || node.receipt?.status === "completed" || !session) continue;
-        if (sessionOwners.has(session) && sessionOwners.get(session) !== owner) continue;
-        // read_runs preserves creation order. An old held receipt never regains a continued session.
-        if (newer.some(entry => entry.nodes?.some(card => card.receipt?.thread_id === session))) continue;
-        if (position < 0 && sessionOwners.get(session) !== owner && !node.receipt?.turn_id) {
-          throw new Error("Agent stop ownership could not be confirmed; refresh before retrying");
+      if (stopTargets.length && position < 0) throw new Error("Owned session ownership view is unavailable; shutdown is unconfirmed");
+      const newer = position >= 0 ? saved.runs.slice(position + 1) : [];
+      for (const target of stopTargets) {
+        const node = saved.runs[position].nodes?.find(node => node.id === target.nodeId);
+        if (node?.receipt?.thread_id !== target.sessionId || (node.receipt.request_key ?? node.request_key) !== target.requestKey) {
+          throw new Error("Owned session identity changed while stopping; refresh before retrying");
         }
-        sessions.set(session, node.receipt?.turn_id);
+        if (sessionOwners.has(target.sessionId) && sessionOwners.get(target.sessionId) !== owner) continue;
+        // An old completed or held receipt never regains a continued session.
+        if (newer.some(entry => entry.nodes?.some(card => card.receipt?.thread_id === target.sessionId))) continue;
+        sessions.set(target.sessionId, target);
       }
-      const stopped = await Promise.allSettled([...sessions].map(([session, turnId]) => stopExternalTurn(session, { owner, turnId })));
+      const stopped = await Promise.allSettled([...sessions].map(([session, target]) =>
+        stopExternalTurn(session, { owner, turnId: target.turnId, releaseAgent: true, completed: target.completed })));
       const failure = stopped.find(result => result.status === "rejected");
       if (failure) {
         const message = "Agent stop could not be confirmed: " + publicText(failure.reason?.message || failure.reason, 200);
@@ -2264,6 +2290,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (/^preview_(?:open|read|screenshot|click|type|press|scroll|navigate|wait|console)$/.test(short)) {
       return "The chat's own preview browser: pages on this machine only, each new address allowed by you";
     }
+    // The user's own subagents (Runtime > Subagents): a subagent works in this project under the same
+    // safety rules, its requests answered as "Approve for me" answers them, so starting one does
+    // nothing the agent could not do itself. subagent_start carries the whole brief, longer than a
+    // review reads, so it waited for the person every time.
+    if (/^subagent_(?:list|start|result|status|stop)$/.test(short)) {
+      return "One of your own subagents (Runtime > Subagents), which runs under the same safety rules";
+    }
+    // The chat's own follow-up timer: it sends this chat a note later, and runs nothing.
+    if (short === "schedule_wakeup") return "A reminder the chat sends itself later; it runs nothing";
     if (!APP_TOOLS_ALLOWED.has(short)) return null;
     return short === "apply_patch" || short === "patch_check"
       ? "An edit through the app's tools, confined to the agent's worktree (like Claude's own edits)"
@@ -2324,9 +2359,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         ? { ...advised, awaiting_review: true } : advised;
     })
     : approvals;
-  const describeRequest = (approval) => [approval.kind, approval.tool, approval.command, approval.path, approval.toolInput && `input ${approval.toolInput}`,
+  const REVIEW_REQUEST_LIMIT = 1500;
+  // A native shell command already contains its operation; display labels must not consume its review budget.
+  const describeRequest = (approval) => approval.command && !approval.path && !approval.cwd && !approval.toolInput
+    ? String(approval.command).slice(0, REVIEW_REQUEST_LIMIT + 1) : [approval.kind, approval.tool, approval.command, approval.path, approval.toolInput && `input ${approval.toolInput}`,
     approval.cwd && `in ${approval.cwd}`, approval.reason]
-    .filter(Boolean).join(" · ").slice(0, 1500);
+    .filter(Boolean).join(" · ").slice(0, REVIEW_REQUEST_LIMIT + 1);
 
   /**
    * The models a request is reviewed with, first that answers wins. "Approve for me" uses Codex's
@@ -2373,7 +2411,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       .catch(() => null);
     return typeof where?.projectFolder === "string" ? where.projectFolder : typeof where?.root === "string" ? where.root : null;
   }
-  async function askApprover({ approver, mission, approval }) {
+  /** `decide`: the reviewer already said "ask"; this time it must choose allow or deny. */
+  async function askApprover({ approver, mission, approval, decide = false }) {
     const { baseUrl, key } = connection();
     const catalog = await models();
     const all = reviewerModels(approver, catalog.models, catalog.hidden ?? []);
@@ -2391,8 +2430,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       `Request: ${describeRequest(approval)}`,
       approval.permissions ? `Permissions: ${JSON.stringify(approval.permissions).slice(0, 800)}` : "",
       ...scripts.map((script) => `Local script ${script.file} (from the request's working folder${script.truncated ? ", first 4 KB" : ""}):\n${script.text}`),
-      'Answer with JSON only: {"action":"allow"|"deny"|"ask","reason":"<one sentence for the user>"}.',
-      "allow: clearly safe and needed for the task. deny: destructive, outside the workspace, secret-touching or unrelated. ask: anything unclear.",
+      ...(decide ? [
+        'Answer with JSON only: {"action":"allow"|"deny","reason":"<one sentence for the user>"}.',
+        "Nobody else will look at this request: choose allow or deny. allow: safe and needed for the task. "
+          + "deny: destructive, outside the workspace, secret-touching, unrelated, or anything you are not sure is safe.",
+      ] : [
+        'Answer with JSON only: {"action":"allow"|"deny"|"ask","reason":"<one sentence for the user>"}.',
+        "allow: clearly safe and needed for the task. deny: destructive, outside the workspace, secret-touching or unrelated. ask: anything unclear.",
+      ]),
       // Seen live: a project's own config.json read got "ask" ("may expose credentials").
       "Reading, listing or searching files inside the workspace folder (the project's own config and data files included) is routine: allow it. "
         + "Secret-touching means credential stores (.env files, private keys, token or password files), not any file that might hold a setting.",
@@ -2479,29 +2524,39 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (failed && now() - failed.at < REVIEW_RETRY_MS) continue;
         const request = describeRequest(approval);
         // The command advisor must not decide from a truncated command or permission scope.
-        const incomplete = request.length >= 1500 || JSON.stringify(approval.permissions ?? {}).length > 800;
+        const blocked = hardDenied(request) || hardDenied(approval.command) || hardDenied(approval.toolInput);
+        const incomplete = approval.reviewTruncated === true || request.length > REVIEW_REQUEST_LIMIT
+          || publicText(request, REVIEW_REQUEST_LIMIT + 1) !== request
+          || JSON.stringify(approval.permissions ?? {}).length > 800;
         // An app agent tool's safety comes from its endpoint (worktree confinement, protected paths), not
         // from reading its arguments, so a long patch is no reason to ask.
         let advice = routineAppTool(approval.tool)
-          ? { action: "allow", reason: routineAppTool(approval.tool) }
+          ? { action: "allow", actor: "safety_rules", reason_code: "routine_tool", reason: routineAppTool(approval.tool) }
           : attachedFileRead(approval)
-          ? { action: "allow", reason: attachedFileRead(approval) }
-          : routineAppCommand(approval)
-          ? { action: "allow", reason: routineAppCommand(approval) }
-          : incomplete
-          ? { action: "ask", reason: "Inspect the complete native command and requested permission scope yourself" }
-          : hardDenied(request)
-            ? { action: "deny", reason: "Blocked by the command approver's safety rules" }
+          ? { action: "allow", actor: "safety_rules", reason_code: "attached_file_read", reason: attachedFileRead(approval) }
+          : !incomplete && routineAppCommand(approval)
+          ? { action: "allow", actor: "safety_rules", reason_code: "routine_command", reason: routineAppCommand(approval) }
+          : incomplete && !blocked
+          ? { action: "ask", unresolved: true, reason: "The complete request cannot be safely reviewed; inspect the command and permission scope yourself" }
+          : blocked
+            ? { action: "deny", actor: "safety_rules", reason_code: "blocked_command", reason: "Blocked by the command approver's safety rules" }
               // A shell line counts only from the agent's own shell tool; the app's exec_command
               // (an MCP tool with a command) keeps going to the reviewer and the app's confirm.
               : approval.kind === "command" && !/^mcp__/.test(String(approval.tool ?? "")) && routineCommand(approval.command)
-                ? { action: "allow", reason: routineCommand(approval.command) }
+                ? { action: "allow", actor: "safety_rules", reason_code: "routine_command", reason: routineCommand(approval.command) }
                 : approval.kind === "command" && !/^mcp__/.test(String(approval.tool ?? ""))
                   && readOnlyInspection(approval.command, await requestFolder(approval, mission), approval.cwd)
-                ? { action: "allow", reason: "Read-only inspection inside the workspace folder" }
+                ? { action: "allow", actor: "safety_rules", reason_code: "read_only_inspection", reason: "Read-only inspection inside the workspace folder" }
                 // A reviewer that cannot answer is asked again (see REVIEW_TRIES); only then does the
                 // request go to the person, and its card says why.
-                : await askApprover({ approver, mission, approval }).catch((error) => ({ action: "failed", error }));
+                : await askApprover({ approver, mission, approval }).then(verdict => ({ ...verdict, reviewed: true }),
+                  (error) => ({ action: "failed", error }));
+        // The reviewer was unsure ("ask"): asked once more, it must choose allow or deny (deny when in
+        // doubt), so a request it could read whole no longer waits for the person for want of a decision.
+        if (advice.action === "ask" && advice.reviewed) {
+          const decided = await askApprover({ approver, mission, approval, decide: true }).catch(() => null);
+          if (decided && decided.action !== "ask") advice = { action: decided.action, reason: decided.reason };
+        }
         if (advice.action === "failed") {
           const tries = (reviewFailures.get(approval.approval_id)?.tries ?? 0) + 1;
           const why = publicText(advice.error?.message || advice.error, 160);
@@ -2512,7 +2567,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             note = `The reviewer could not answer yet (${why}); trying again`;
             continue;
           }
-          advice = { action: "ask", reason: `The command reviewer could not answer after ${tries} tries (${why}); check it yourself` };
+          advice = { action: "ask", unresolved: true, reason: `The command reviewer could not answer after ${tries} tries (${why}); check it yourself` };
         }
         reviewFailures.delete(approval.approval_id);
         const offered = approval.request?.availableDecisions;
@@ -2528,15 +2583,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           const decision = aoDecision(approval, advice.action === "allow");
           if (!decision) note = `Reviewer suggests ${advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
           else if (await harnessService().resolveApproval(approval.thread_id, approval.approval_id, decision).then(() => true, () => false)) {
+            logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action });
             note = `Reviewer ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
-          } else approverAdvice.set(approval.approval_id, { action: "ask", unsent: advice.action, reason: `The reviewer's answer could not be sent (${advice.action}: ${advice.reason}); check it yourself` });
+          } else approverAdvice.set(approval.approval_id, { action: "ask", unresolved: true, unsent: advice.action, reason: `The reviewer's answer could not be sent (${advice.action}: ${advice.reason}); check it yourself` });
         } else if (approver.settings?.auto_decide === true && advice.action !== "ask") {
           const sent = await requestHeadless("/api/v1/ao/harness/approval", {
             workspace_id: workspaceId, run_id: runId, node_id: active[index].id, approval_id: approval.approval_id,
             allow: advice.action === "allow", confirm: false, approver_reason: advice.reason || advice.action, approver_request: request,
-          }).then(() => true, () => false);
+          }).then(result => result?.ok === true && result.result?.ok === true, () => false);
+          if (sent) logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action });
           if (sent) note = `Command approver ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
-          else approverAdvice.set(approval.approval_id, { action: "ask", unsent: advice.action, reason: `The command approver's answer could not be sent (${advice.action}: ${advice.reason}); check it yourself` });
+          else approverAdvice.set(approval.approval_id, { action: "ask", unresolved: true, unsent: advice.action, reason: `The command approver's answer could not be sent (${advice.action}: ${advice.reason}); check it yourself` });
         } else {
           note = `Command approver suggests ${advice.action === "ask" ? "checking it yourself" : advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
         }
@@ -2582,17 +2639,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   /**
    * What a command or tool request nobody answered gets: "wait" while the card's reviewer is still
    * on it or is sending its own answer (its review may take longer than AUTO_ANSWER_MS), "deny"
-   * when the safety rules block it, the reviewer said deny, or it is too long for the rules and the
-   * reviewer to read whole (its blocked part may sit past the cut), otherwise "allow".
+   * when the safety rules block it or the reviewer said deny. Incomplete requests and failed
+   * reviews keep waiting for the person; a valid model "ask" keeps the existing timeout policy.
    */
   function autoVerdict(mission, node, approval) {
     const advice = approverAdvice.get(approval.approval_id);
     const approver = cardApprover(mission, node);
     if (approver && (!advice || (approver.settings?.auto_decide === true && advice.action !== "ask"))) return "wait";
     const request = describeRequest(approval);
-    if (hardDenied(request) || advice?.action === "deny" || advice?.unsent === "deny") return "deny";
+    if (hardDenied(request) || hardDenied(approval.command) || hardDenied(approval.toolInput)
+      || advice?.action === "deny" || advice?.unsent === "deny") return "deny";
     if (advice?.action === "allow") return "allow";
-    return request.length >= 1500 || JSON.stringify(approval.permissions ?? {}).length > 800 ? "deny" : "allow";
+    if (advice?.unresolved || approval.reviewTruncated === true || request.length > REVIEW_REQUEST_LIMIT
+      || publicText(request, REVIEW_REQUEST_LIMIT + 1) !== request
+      || JSON.stringify(approval.permissions ?? {}).length > 800) return "wait";
+    return "allow";
   }
   async function autoAnswerStale(workspaceId, runId, waiting, mission) {
     const at = now();
@@ -2643,7 +2704,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             });
             note = allow ? "Approve for me allowed the command once" : "Denied: blocked by the command approver's safety rules or reviewer";
           }
-          logger?.info?.("ao.auto_answered", { kind: approval.kind, tool: String(approval.tool ?? "").slice(0, 80) });
+          logger?.info?.("ao.auto_answered", { approval_id: id, actor: "timeout_policy", decision: verdict ?? approval.kind,
+            kind: approval.kind, tool: String(approval.tool ?? "").slice(0, 80) });
         } catch (error) {
           logger?.warn?.("ao.auto_answer_failed", { kind: approval.kind, message: publicText(error?.message || error, 200) });
         }
@@ -2718,9 +2780,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (autoRetrySeen.size > 500) autoRetrySeen.delete(autoRetrySeen.keys().next().value);
     }
     const wait = AUTO_RETRY_PAUSE_MS * attempt - (now() - autoRetrySeen.get(key));
+    // `waiting`: the run must keep going until the pause is over (driveRun), or nothing retries it.
     if (wait > 0) return { waiting: true, detail: `Retrying automatically in ${Math.ceil(wait / 1000)}s (attempt ${attempt} of ${AUTO_RETRY_LIMIT})` };
     autoRetrySeen.delete(key);
     return { retry: true, attempt };
+  }
+  /**
+   * Whether "Retry automatically" may restart a single chat whose drive ended on an error (a launch
+   * that timed out throws out of driveRun before recoverHeld sees the held card): on, a held step,
+   * within the attempt limit, and not a failure only the person can fix.
+   */
+  function autoRetryAllowed(mission) {
+    if (!chatPreferences.get().autoRetry || !mission || mission.cancelled || mission.paused || mission.execution_mode !== "single") return false;
+    if (mission.nodes.some(node => ["running", "reserved"].includes(node.state))) return false;
+    const node = mission.nodes.find(entry => entry.state === "held" && entry.role !== "retry") ?? mission.nodes.find(entry => entry.state === "held");
+    return Boolean(node) && !POOL_EXHAUSTED.test(String(node.receipt?.error || "")) && (node.history?.length ?? 0) + 1 <= AUTO_RETRY_LIMIT;
   }
   // A step that failed because the way out was down for a moment: the local proxy every CPA model
   // and the ChatGPT browser go through (seen live: ProxyBridge restarted, and for three minutes CPA
@@ -2894,6 +2968,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         let mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
         if (!mission) throw new Error("Saved mission is unavailable");
         if (!Number.isInteger(saved.worker_capacity?.[runId])) throw new Error("The installed AO service does not report worker capacity; update the matching runtime");
+        state.socketRestarts = 0;
         // Start every ready Native Codex card's harness together first. Launching a Codex process
         // can take minutes on a slow disk; done one card at a time, a sibling worker waited for
         // it and the workers ran one after another instead of in parallel. The launches below
@@ -3048,10 +3123,65 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         else await pause();
       }
     } catch (error) {
+      // The machine ran short of local sockets or a local service dropped a connection: the run's
+      // cards are fine, only this read or send failed. Seen live: another program opened about 44
+      // loopback connections a second, every port sat in TIME_WAIT, "connect EADDRINUSE" ended this
+      // loop, and the chat stayed "running" for an hour with nothing watching it. The loop starts
+      // again after a pause (2 s, doubling to 60 s) for up to ten failures in a row.
+      const restarts = state.socketRestarts ?? 0;
+      if (!state.stopped && LOCAL_SOCKET_FAILURE.test(`${error?.code ?? ""} ${error?.cause?.code ?? ""} ${error?.message ?? error}`)
+        && restarts < SOCKET_RESTART_LIMIT) {
+        state.socketRestarts = restarts + 1;
+        const delay = Math.min(60_000, 2_000 * 2 ** restarts);
+        state.status = "running";
+        state.detail = `Lost a local connection (${publicText(error?.code || error?.cause?.code || error?.message || error, 80)}); `
+          + `checking the run again in ${Math.round(delay / 1000)}s`;
+        reportRun(workspaceId, runId, state, null);
+        logger?.warn?.("ao.drive_socket_retry", { attempt: state.socketRestarts, code: String(error?.code ?? error?.cause?.code ?? "") });
+        setTimeout(() => { if (!state.stopped) void driveRun(workspaceId, runId, executable, state); }, delay);
+        return;
+      }
       state.status = "held"; state.detail = publicText(error?.message || error, 500);
       reportRun(workspaceId, runId, state, null, state.stopped ? null : "error");
+      if (!state.stopped) scheduleAutoRetry(workspaceId, runId, executable, state);
     } finally { state.driving = false; }
   }
+  /**
+   * A drive that ended on an error left its failed step held with nothing to retry it. With "Retry
+   * automatically" on, the run starts again after the pause (startRun retries a held card), within
+   * the same attempt limit; a later click, stop or new drive of the run wins over the timer.
+   */
+  // The pending restarts, cleared by dispose(): a backend replaced during the pause must not start
+  // the run (and its AO agent) again through its stopped harness.
+  const autoRetryTimers = new Set();
+  let autoRetryDisposed = false;
+  function scheduleAutoRetry(workspaceId, runId, executable, state) {
+    if (!chatPreferences.get().autoRetry) return;
+    const key = runKey(workspaceId, runId);
+    const current = () => !autoRetryDisposed && !state.stopped && backgroundRuns.get(key) === state;
+    const mission = async () => (await runs({ workspaceId, runId })).runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
+    void (async () => {
+      const failed = await mission();
+      if (!current() || !autoRetryAllowed(failed)) return;
+      // The same growing pause as autoRetryStep: 10 s before the second try, 20 s before the third.
+      const held = failed.nodes.find(node => node.state === "held" && node.role !== "retry") ?? failed.nodes.find(node => node.state === "held");
+      const attempt = (held?.history?.length ?? 0) + 1;
+      const timer = setTimer(() => {
+        autoRetryTimers.delete(timer);
+        void (async () => {
+          const latest = await mission();
+          if (!current() || !autoRetryAllowed(latest)) return;
+          logger?.info?.("ao.auto_retry_restart", { attempt });
+          await startRun({ workspaceId, runId, executable });
+        })().catch(error => logger?.warn?.("ao.auto_retry_restart_failed", { message: publicText(error?.message || error, 200) }));
+      }, AUTO_RETRY_PAUSE_MS * attempt);
+      timer?.unref?.();
+      autoRetryTimers.add(timer);
+    })().catch(error => logger?.warn?.("ao.auto_retry_restart_failed", { message: publicText(error?.message || error, 200) }));
+  }
+  // A failed local connection, not a failed run (see driveRun).
+  const LOCAL_SOCKET_FAILURE = /EADDRINUSE|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|ENOBUFS|socket hang up|other side closed|fetch failed/i;
+  const SOCKET_RESTART_LIMIT = 10;
   /** Whether a run's background grant can start nothing more: every turn started, or its hour over. */
   function grantSpent(grant) {
     return Boolean(grant) && (grant.turns_started >= grant.max_turns || Date.now() >= grant.expires_at_ms);
@@ -3942,24 +4072,46 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
   /** Interrupt acknowledges a signal; only an exited or settled, non-working turn releases ownership. */
   async function stopExternalTurn(session, ownership = null) {
-    if (sessionStops.has(session)) return sessionStops.get(session);
+    for (;;) {
+      const pending = sessionStops.get(session);
+      if (!pending) break;
+      await pending;
+      if (!ownership?.releaseAgent || pending.releasesAgent) return;
+      // Another waiter may have installed the host-release upgrade while this one resumed.
+    }
     const job = Promise.resolve().then(async () => {
       const service = harnessService();
       const owns = () => !ownership || !sessionOwners.has(session) || sessionOwners.get(session) === ownership.owner;
       if (!owns()) return;
-      if (ownership?.turnId) {
+      let alreadyExited = false;
+      if (ownership?.turnId || ownership?.releaseAgent) {
         const current = await service.observe(session);
-        if ((current?.turnId && current.turnId !== ownership.turnId) || !owns()) return;
+        if ((ownership?.turnId && current?.turnId && current.turnId !== ownership.turnId) || !owns()) return;
+        alreadyExited = current?.exited === true;
       }
-      await service.interrupt(session);
-      for (let attempt = 0; attempt < 8; attempt++) {
-        const observation = await service.observe(session);
-        if (observation?.exited === true || (["completed", "failed", "interrupted", "cancelled"].includes(observation?.turnState)
-          && !["working", "running", "starting"].includes(observation?.status))) return;
-        if (attempt < 7) await new Promise(resolve => setTimer(resolve, 250));
+      if (!ownership?.completed && !alreadyExited) {
+        await service.interrupt(session);
+        let stopped = false;
+        for (let attempt = 0; attempt < 8; attempt++) {
+          const observation = await service.observe(session);
+          if (observation?.exited === true || (["completed", "failed", "interrupted", "cancelled"].includes(observation?.turnState)
+            && !["working", "running", "starting"].includes(observation?.status))) { stopped = true; break; }
+          if (attempt < 7) await new Promise(resolve => setTimer(resolve, 250));
+        }
+        if (!stopped) throw new Error("Owned turn is still working; stop needs attention, no replacement was started");
       }
-      throw new Error("Owned turn is still working; stop needs attention, no replacement was started");
+      if (ownership?.releaseAgent && owns()) {
+        const outcomes = await Promise.allSettled([
+          Promise.resolve().then(() => service.exitAgent(session)).then(outcome => {
+            if (outcome?.ok !== true) throw new Error(`Agent ${session} shutdown is unconfirmed`);
+          }),
+          Promise.resolve().then(() => subagents?.stopParent(session)),
+        ]);
+        const failures = outcomes.filter(outcome => outcome.status === "rejected").map(outcome => String(outcome.reason?.message || outcome.reason));
+        if (failures.length) throw new Error(failures.join("; "));
+      }
     });
+    job.releasesAgent = ownership?.releaseAgent === true;
     sessionStops.set(session, job);
     try { return await job; }
     finally { if (sessionStops.get(session) === job) sessionStops.delete(session); }
@@ -3979,7 +4131,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!latest) throw new Error("Owned mission disappeared while stopping");
     const external = latest.nodes.filter(node => externalAgent(node)
       && (["running","reserved"].includes(node.state) || node.request_key && node.state !== "finished" && node.receipt?.status !== "completed"));
-    if (external.some(node => !node.receipt?.thread_id)) throw new Error("Owned session identity is unknown; stop needs attention");
+    // Only a card still running or reserved without a session could have an agent nobody can name.
+    // One whose launch came back without a session (held with the failure, "Needs you") owns none:
+    // there is nothing to stop, and refusing here kept such a chat from ever being archived.
+    if (external.some(node => !node.receipt?.thread_id && ["running", "reserved"].includes(node.state))) {
+      throw new Error("Owned session identity is unknown; stop needs attention");
+    }
     const result = await requestHeadless("/api/v1/ao/control", {
       workspace_id: workspaceId, run_id: mission.id, action: "stop", confirm: true,
     }, { localConfirmation: true });
@@ -3987,7 +4144,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         || result.run.nodes.some(node => ["running", "reserved"].includes(node.state))) {
       throw new Error("Owned native stop was not acknowledged; no replacement was started");
     }
-    for (const node of external) await stopExternalTurn(node.receipt.thread_id);
+    for (const node of external) if (node.receipt?.thread_id) await stopExternalTurn(node.receipt.thread_id);
     return result.run;
   }
   async function resolveStoppedIntents(workspaceId,taskId,saved) {
@@ -4267,6 +4424,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     wakeupsDisposed = true;
     for (const timer of wakeTimers.values()) clearTimer(timer);
     wakeTimers.clear();
+    autoRetryDisposed = true;
+    for (const timer of autoRetryTimers) clearTimer(timer);
+    autoRetryTimers.clear();
     // Warm sessions' expiry, re-warms and deferred task edits all reach AO through this backend's
     // harness, which would start a stopped daemon again.
     for (const entry of warm.values()) if (entry.timer) clearTimeout(entry.timer);
