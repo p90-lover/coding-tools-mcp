@@ -1455,7 +1455,7 @@ test("the approvals poll skips a card whose attempt changed mid-read instead of 
   const timers = [];
   const effect = rendererCallback("AgentOrchestratorSurface.tsx", "effect:approvalScope.current", {
     Error, STALE_OBSERVE: /AO receipt changed/, activeNodeIds: JSON.stringify(["old", "live"]),
-    workspaceId: "w1", selectedRunId: "run1", autoStatus: "idle", surfaceHidden: () => false,
+    workspaceId: "w1", selectedRunId: "run1", selectedRunHere: true, autoStatus: "idle", surfaceHidden: () => false,
     approvalScope: { current: null }, selection: { current: { workspaceId: "w1", runId: "run1" } },
     setPendingApprovals: value => { state.approvals = value; }, setRuntimePolicies: value => { state.policies = value; },
     setMissions: () => {}, setError: error => state.errors.push(error),
@@ -1479,7 +1479,7 @@ test("the approvals poll still reports an observe failure that is not a changed 
   const errors = [];
   const effect = rendererCallback("AgentOrchestratorSurface.tsx", "effect:approvalScope.current", {
     Error, STALE_OBSERVE: /AO receipt changed/, activeNodeIds: JSON.stringify(["n1"]),
-    workspaceId: "w1", selectedRunId: "run1", autoStatus: "idle", surfaceHidden: () => false,
+    workspaceId: "w1", selectedRunId: "run1", selectedRunHere: true, autoStatus: "idle", surfaceHidden: () => false,
     approvalScope: { current: null }, selection: { current: { workspaceId: "w1", runId: "run1" } },
     setPendingApprovals: () => {}, setRuntimePolicies: () => {}, setMissions: () => {}, setError: error => errors.push(error),
     setInterval: () => 1, clearInterval: () => {},
@@ -1489,4 +1489,23 @@ test("the approvals poll still reports an observe failure that is not a changed 
   await new Promise(setImmediate);
   assert.deepEqual(errors, ["AO result is unavailable; inspect the run before retrying"]);
   cleanup();
+});
+
+test("the approvals poll asks nothing for a run the open project does not have yet (#463)", async () => {
+  // Right after a project switch the selected run still belongs to the previous project: asking the
+  // new one for it failed ("AO run not found in this workspace") and showed an error toast.
+  const calls = [], errors = [];
+  const effect = rendererCallback("AgentOrchestratorSurface.tsx", "effect:approvalScope.current", {
+    Error, STALE_OBSERVE: /AO receipt changed/, activeNodeIds: JSON.stringify(["n1"]),
+    workspaceId: "w2", selectedRunId: "run-from-w1", selectedRunHere: false, autoStatus: "idle", surfaceHidden: () => false,
+    approvalScope: { current: null }, selection: { current: { workspaceId: "w2", runId: "run-from-w1" } },
+    setPendingApprovals: () => {}, setRuntimePolicies: () => {}, setMissions: () => {}, setError: error => errors.push(error),
+    setInterval: () => 1, clearInterval: () => {},
+    moduleCall: async (op) => { calls.push(op); throw new Error("AO run not found in this workspace"); },
+  });
+  const cleanup = effect();
+  await new Promise(setImmediate);
+  assert.deepEqual(calls, [], "no observe for a run of another project");
+  assert.deepEqual(errors, []);
+  cleanup?.();
 });
