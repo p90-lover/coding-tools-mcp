@@ -62,7 +62,16 @@ function loadJson(file, fallback) {
 const config = { ...DEFAULT_CONFIG, ...loadJson(CONFIG_PATH, {}) };
 const META = loadJson(META_PATH, { models: {}, history: [], catalog: null, orModelsFetchedAt: 0, orModelList: null });
 const saveConfig = () => fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
-const saveMeta = () => fs.writeFileSync(META_PATH, JSON.stringify(META, null, 2));
+let metaTimer = null;
+const saveMeta = () => {
+  clearTimeout(metaTimer);
+  metaTimer = null;
+  fs.writeFileSync(META_PATH, JSON.stringify(META, null, 2));
+};
+// Coding Tools: record() runs on every proxied request, and rewriting the whole ~80 KB file each
+// time was a disk write per chat turn. Its history and counters are written at most once a minute
+// (a stop can lose that minute of them); every other saveMeta() still writes at once.
+const saveMetaSoon = () => { metaTimer ??= setTimeout(saveMeta, 60_000); };
 // 旧版单 apiKey 迁移为账号池
 if ((!Array.isArray(config.accounts) || config.accounts.length === 0) && config.apiKey) {
   config.accounts = [{ name: '默认账号', key: config.apiKey, enabled: true }];
@@ -423,7 +432,7 @@ function record(modelId, info) {
     st.lastUsed = Date.now();
     st.lastError = info.error || null;
   }
-  saveMeta();
+  saveMetaSoon();
 }
 
 // ---------- 聊天代理 ----------
