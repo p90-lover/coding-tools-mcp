@@ -8,6 +8,8 @@ export type Surface = "browser" | "gpt-browser" | "chatgpt-desktop" | "email" | 
 export interface RtkStatus {
   enabled: boolean;
   installed: boolean;
+  /** A winget install is running (the app's automatic one at startup, or the button's). */
+  installing?: boolean;
   path: string | null;
   version: string | null;
   minimum?: string;

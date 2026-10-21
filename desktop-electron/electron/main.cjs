@@ -2761,6 +2761,11 @@ async function start() {
   // Runtime > RTK: the person's installed rtk compacts the commands chat agents run (rtk.cjs).
   const rtk = require("./rtk.cjs").createRtk({ getEnabled: () => stateStore.read().rtkEnabled !== false, logger });
   rtkService = rtk;
+  // Missing rtk is installed now, without a click (a failed try waits a day); AO's start waits for it.
+  try {
+    void rtk.autoInstall({ lastAttemptAt: stateStore.read().rtkAutoInstallAt,
+      record: (at) => { stateStore.update({ rtkAutoInstallAt: at }); } });
+  } catch (error) { logger.warn("rtk.auto_install_failed", { message: String(error?.message ?? error) }); }
   // The GPU process (or a utility process) dying is logged with its reason; Chromium restarts it.
   app.on("child-process-gone", (_event, details) => {
     logger.warn("launcher.child_process_gone", { type: details?.type, reason: details?.reason, exitCode: details?.exitCode, name: details?.name });
@@ -3152,7 +3157,10 @@ async function start() {
 
       // rtk's folder too: a command RTK rewrote in an agent's own shell calls `rtk`.
       extraPath: () => [antigravityCli.binDir(), rtk.binDir()].filter(Boolean).join(path.delimiter),
-      extraEnv: () => {
+      extraEnv: async () => {
+        // An rtk install still running (the automatic one at startup) finishes first, up to 15 s:
+        // the daemon's PATH and Claude's hook are fixed for its whole run.
+        try { await rtk.ready(15_000); } catch { /* starts without waiting */ }
         let env = {};
         try { env = shimProxyEnvironment(antigravityProxyEnvironment()); } catch { /* no proxy for agy */ }
         // RTK's Claude Code hook, which AO puts in each Claude session's own settings (empty: off).
