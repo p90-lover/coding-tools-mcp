@@ -397,6 +397,31 @@ test("questions and MCP form or URL replies use method-specific response shapes"
   assert.deepEqual(replies.pop(), { action: "cancel" });
 });
 
+test("an AO agent's tool request is answered by clicking an option: no Submit or Deny button, and only once", () => {
+  const view = renderer("AgentOrchestratorApproval.tsx");
+  const replies = [];
+  const approval = { nodeId: "lead", approval_id: "ask", source: "ao", kind: "command", tool: "PowerShell", command: "Get-ChildItem",
+    decisions: [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "always", kind: "allow_always", label: "Always allow" }, { id: "no", kind: "reject_once", label: "Reject" }] };
+  // The approval renders Codex's card (AoAsk), whose options are a CdxOptions element.
+  const card = () => {
+    const outer = view.render("AgentOrchestratorApproval", { approval, busy: false, approve: (_, reply) => replies.push(plain(reply)), actor: "DeepSeek" });
+    return outer.type(outer.props);
+  };
+  let tree = card();
+  assert.deepEqual(elements(tree, item => item.type === "button").map(text), [], "the card itself has no Submit or Deny button");
+  const options = () => elements(tree, item => typeof item.type === "function" && item.type.name === "CdxOptions")[0];
+  let buttons = elements(options().type(options().props), item => item.type === "button");
+  assert.deepEqual(buttons.map(button => text(button.props.children[1])), ["Allow once", "Allow this conversation", "Deny"]);
+  buttons[1].props.onClick();
+  assert.deepEqual(replies, [{ decisionId: "always" }], "one click answers");
+  tree = card();
+  buttons = elements(options().type(options().props), item => item.type === "button");
+  assert.ok(buttons.every(button => button.props.disabled), "the answered card takes no second answer");
+  assert.equal(options().props.picked[0], "always", "and shows the answer picked");
+  buttons[2].props.onClick();
+  assert.equal(replies.length, 1);
+});
+
 test("native decision objects are forwarded unchanged and unscoped requests are disabled", () => {
   const view = renderer("AgentOrchestratorApproval.tsx");
   const decision = { acceptWithExecpolicyAmendment: { execpolicy_amendment: ["git", "status"] } };

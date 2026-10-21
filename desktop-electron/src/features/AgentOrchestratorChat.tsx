@@ -12,7 +12,7 @@ import { ChatContextMeter } from "./ChatContextMeter";
 import { ChatPet } from "./ChatPet";
 import { ChatTurnStats } from "./ChatTurnStats";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
-import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, StreamingMarkdown } from "./ChatToolParts";
+import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, StreamingMarkdown } from "./ChatToolParts";
 import { PartErrorBoundary } from "../PartErrorBoundary";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
@@ -271,7 +271,8 @@ const LiveRow = memo(LiveRowView, (prev, next) => sameLiveItem(prev.item, next.i
 function LiveRowView({ item }: { item: ChatLiveItem }) {
   return <li className={`cx-live-item kind-${item.kind} is-${item.status || "done"}`}>
     {item.answered ? <AnsweredRecord question={item.answered.question} answer={item.answered.answer} />
-      : item.kind === "steer" ? <div className="cx-user cx-steer"><div className="cx-bubble"><p>{chatMessageReadable(item.text)}</p></div></div>
+      // As any sent message: an attached image as its thumbnail, not "Attached image: <path>" text.
+      : item.kind === "steer" ? <div className="cx-user cx-steer"><SentMessage text={item.text} /></div>
       : item.kind === "message" ? <StreamingMarkdown text={item.text} live={item.status === "running"} />
       : item.kind === "reasoning" ? <ReasoningItem item={item} />
       : item.kind === "edit" ? <EditItem item={item} />
@@ -324,23 +325,27 @@ const CHAT_WORK_LIVE = new Set<string>();
 type LoadWork = (runId: string, nodeId: string) => Promise<ChatLiveItem[]>;
 
 function useStepWork(step: ChatStep, runId: string, wanted: boolean, loadWork?: LoadWork): ChatLiveItem[] | null {
+  // Kept per attempt: a retried card starts again (a new start time) with nothing of the last one.
+  // Within an attempt nothing seen is ever dropped (mergeTimeline).
+  const workKey = `${step.key}@${step.startedAtMs ?? ""}`;
   const live = step.working?.timeline;
   const [, setLoaded] = useState(0);
   // A poll carries only the turn's newest items; the ones before them stay (mergeTimeline).
-  if (live?.length) { CHAT_WORK.set(step.key, mergeTimeline(CHAT_WORK.get(step.key), live)); CHAT_WORK_LIVE.add(step.key); }
-  const known = CHAT_WORK.get(step.key) ?? null;
+  if (live?.length) { CHAT_WORK.set(workKey, mergeTimeline(CHAT_WORK.get(workKey), live)); CHAT_WORK_LIVE.add(workKey); }
+  const known = CHAT_WORK.get(workKey) ?? null;
   const settled = !step.working;
   useEffect(() => {
-    if (!wanted || !step.hasWork || !loadWork || (known && !(settled && CHAT_WORK_LIVE.has(step.key)))) return;
-    CHAT_WORK_LIVE.delete(step.key);
+    if (!wanted || !step.hasWork || !loadWork || (known && !(settled && CHAT_WORK_LIVE.has(workKey)))) return;
+    CHAT_WORK_LIVE.delete(workKey);
     let current = true;
     void loadWork(runId, step.nodeId).then((items) => {
       if (!items.length) return;
-      CHAT_WORK.set(step.key, mergeTimeline(CHAT_WORK.get(step.key), items));
+      // A finished turn read back whole keeps every entry; only live polls are capped.
+      CHAT_WORK.set(workKey, mergeTimeline(CHAT_WORK.get(workKey), items, { cap: Infinity }));
       if (current) setLoaded((count) => count + 1);
     }).catch(() => undefined);
     return () => { current = false; };
-  }, [wanted, known, settled, step.hasWork, step.key, step.nodeId, runId, loadWork]);
+  }, [wanted, known, settled, step.hasWork, workKey, step.nodeId, runId, loadWork]);
   return known;
 }
 
@@ -401,10 +406,19 @@ type WorkGroupProps = { turn: ChatTurn; idle?: boolean; expanded?: boolean; load
 /** A turn still being worked on: its steps change on every update, so it always re-renders. */
 const liveTurn = (turn: ChatTurn) => turn.status === "running" || turn.status === "queued"
   || turn.steps.some((step) => step.working) || Boolean(turn.final?.working);
-const stepShape = (step: ChatStep) => [step.key, step.name, step.detail, step.state, step.verdict ?? "", step.error ?? "", step.text ?? "", step.hasWork ?? false,
-  (step.earlier ?? []).map((round) => `${round.label}:${round.verdict ?? ""}`).join(",")];
-/** What a finished turn's work shows; equal shapes render the same rows. */
-const workShape = (turn: ChatTurn) => JSON.stringify([turn.runId, turn.status, turn.startedAtMs ?? 0, turn.steps.map(stepShape), turn.final ? stepShape(turn.final) : null]);
+const roundsKey = (step: ChatStep) => (step.earlier ?? []).map((round) => `${round.label}:${round.verdict ?? ""}`).join(",");
+/** Whether two steps show the same: compared field by field, stopping at the first difference. */
+const sameStep = (a: ChatStep, b: ChatStep) => a === b || (a.key === b.key && a.name === b.name && a.detail === b.detail
+  && a.state === b.state && (a.verdict ?? "") === (b.verdict ?? "") && (a.error ?? "") === (b.error ?? "")
+  && (a.text ?? "") === (b.text ?? "") && (a.hasWork ?? false) === (b.hasWork ?? false) && roundsKey(a) === roundsKey(b));
+/**
+ * Whether a finished turn's work shows the same. It was a JSON.stringify of every step's whole text
+ * for both turns, twice a turn on every second's update: work that grew with the length of the chat.
+ */
+const sameTurnWork = (a: ChatTurn, b: ChatTurn) => a.runId === b.runId && a.status === b.status
+  && (a.startedAtMs ?? 0) === (b.startedAtMs ?? 0) && a.steps.length === b.steps.length
+  && a.steps.every((step, index) => sameStep(step, b.steps[index]))
+  && (a.final && b.final ? sameStep(a.final, b.final) : !a.final && !b.final);
 
 /**
  * A finished turn's work is skipped on re-render unless it changed. The chat rebuilds every turn
@@ -415,7 +429,7 @@ export function sameWork(prev: WorkGroupProps, next: WorkGroupProps): boolean {
   if (prev.idle !== next.idle || prev.expanded !== next.expanded || prev.loadWork !== next.loadWork) return false;
   if (prev.turn === next.turn) return true;
   if (liveTurn(prev.turn) || liveTurn(next.turn)) return false;
-  return workShape(prev.turn) === workShape(next.turn);
+  return sameTurnWork(prev.turn, next.turn);
 }
 
 const WorkGroup = memo(WorkGroupView, sameWork);
@@ -469,6 +483,9 @@ function SentImage({ item, onOpen }: { item: ChatSentAttachment; onOpen: (url: s
     {url ? <img src={url} alt={item.name} /> : <span>{missing ? "Image not found" : item.name}</span>}
   </button>;
 }
+
+/** SentMessage for the DeepSeek transcript (SentMessageView), which cannot import this file. */
+const sentMessageView = (text: string) => <SentMessage text={text} />;
 
 /**
  * A message the person sent, as Claude Code shows one: its attachments above the bubble (images as
@@ -543,7 +560,7 @@ export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
   projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject, projectBranch: branch, steer,
-  pendingMessage, pendingTitle, pendingCreation = false, deciding = false, commands, loadWork,
+  pendingMessage, pendingTitle, pendingCreation = false, deciding = false, onComposing, commands, loadWork,
 }: {
   /** A finished card's thinking and tool calls, read back from its AO session (turn_timeline). */
   loadWork?: LoadWork;
@@ -553,6 +570,8 @@ export function AgentOrchestratorChat({
   pendingMessage?: string; pendingTitle?: string; pendingCreation?: boolean;
   /** Which chat to show is not known yet (a project is opening): show neither a chat nor the new chat page. */
   deciding?: boolean;
+  /** The user started typing a message: the surface gets the agent it needs ready (chat_prewarm). */
+  onComposing?: () => void;
   /** How each card runs (harness · model · effort · context · role), shown on its messages. */
   describeNode?: (node: ChatNode) => string;
   /** What each working card is doing now, by "<run id>:<card id>". */
@@ -636,6 +655,8 @@ export function AgentOrchestratorChat({
   const [draft, setDraft] = useState("");
   const [title, setTitle] = useState("");
   const [sending, setSending] = useState(false);
+  // Steers shown at once while they reach the agent (deliver), until the turn shows them itself.
+  const [pendingSteers, setPendingSteers] = useState<{ id: string; taskId: string | undefined; text: string; at: number }[]>([]);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [attachNote, setAttachNote] = useState("");
   // Words selected in this chat's answers and added to the next message (ChatAnnotations).
@@ -748,6 +769,20 @@ export function AgentOrchestratorChat({
     () => chatTurns(chatRuns, shownDescription, { describe: describeNode, activity, now, modelName }),
     [chatRuns, shownDescription, describeNode, activity, now, modelName],
   );
+  // A steer shown at once gives way to the turn's own record of it (its live timeline, or the
+  // steers under its message once it is done), or after a minute at most.
+  useEffect(() => {
+    if (!pendingSteers.length) return;
+    const seen = new Set<string>();
+    for (const turn of turns) {
+      for (const steer of turn.user?.steers ?? []) seen.add(steer.text.trim());
+      for (const step of turn.steps) for (const item of step.working?.timeline ?? []) if (item.kind === "steer") seen.add(item.text.trim());
+    }
+    const keep = pendingSteers.filter((entry) => !seen.has(entry.text.trim()) && Date.now() - entry.at < 60_000);
+    if (keep.length !== pendingSteers.length) setPendingSteers(keep);
+    const timer = window.setTimeout(() => setPendingSteers((list) => list.filter((entry) => Date.now() - entry.at < 60_000)), 60_000);
+    return () => window.clearTimeout(timer);
+  }, [turns, pendingSteers]);
   // The stats line counts the latest turn and the unfinished attempts before it (chatStatsSpan).
   const statsSpan = useMemo(() => chatStatsSpan(turns, chatRuns), [turns, chatRuns]);
   const stepCount = turns.reduce((total, turn) => total + turn.steps.length + (turn.final ? 1 : 0), 0);
@@ -864,6 +899,10 @@ export function AgentOrchestratorChat({
 
   const runOpen = Boolean(latest) && chatRunOpen(chat?.status);
   const accepts = chatAcceptsMessage(chat?.status, working);
+  // Starting to type gets the agent the message needs ready (the surface throttles it); a run that
+  // is open already has its agent.
+  const hasDraft = Boolean(draft.trim());
+  useEffect(() => { if (hasDraft && !runOpen) onComposing?.(); }, [hasDraft, runOpen, onComposing]);
   // "Steer while working": a message typed while the agent works goes to it right away.
   const [steerOn, setSteerOn] = useState(() => { try { return localStorage.getItem("coding-tools:ao:steer") !== "off"; } catch { return true; } });
   const toggleSteer = () => setSteerOn((current) => {
@@ -886,7 +925,10 @@ export function AgentOrchestratorChat({
   const queueing = !accepts && !steering && runOpen && Boolean(selectedTaskId);
   // While a project opens the chat to send into is not chosen yet: sending then started a new chat
   // although an existing one was about to open. The draft waits until it is.
-  const canSend = !busy && !sending && !(deciding && !selectedTaskId)
+  // A steer goes straight to the agent and a queued message waits here: neither takes the surface's
+  // one-action lock (busy), which an approval or a refresh holds often while a chat runs. Waiting on
+  // it kept the Stop button in place of Steer while the user typed.
+  const canSend = (!busy || steering || queueing) && !sending && !(deciding && !selectedTaskId)
     && Boolean(draft.trim() || attachments.length || annotations.length) && (accepts || steering || queueing);
   const slash = chatSlashMatches(draft, { chat: Boolean(selectedTaskId), run: Boolean(latest), open: runOpen });
 
@@ -908,10 +950,22 @@ export function AgentOrchestratorChat({
     // Only what was sent is cleared: a draft, file or annotation added while it was sending stays.
     const current = () => fromComposer && here() && composing.current.draft === owner.draft && composing.current.attachments === owner.attachments
       && composing.current.annotations === owner.annotations;
-    setSending(true);
+    // A steer shows at once, as in Codex: the composer clears and the message waits under the turn
+    // ("Steering…") while it reaches the agent, which can take seconds (it waits out an approval
+    // being answered). Until then the box held the text and the Stop button stayed.
+    const steerNow = !goal && steering && Boolean(steer && selectedTaskId);
+    const pendingId = steerNow ? `steer-${Date.now()}-${Math.random().toString(36).slice(2)}` : "";
+    if (steerNow) {
+      setPendingSteers((list) => [...list, { id: pendingId, taskId: selectedTaskId, text: message, at: Date.now() }]);
+      if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
+    } else setSending(true);
+    const dropPending = () => { if (pendingId) setPendingSteers((list) => list.filter((entry) => entry.id !== pendingId)); };
     try {
       // A steer the turn outran (it ended first) is sent as an ordinary follow-up instead; a goal is never steered.
-      const steered = !goal && steering && steer && selectedTaskId ? await steer({ taskId: selectedTaskId, message }) : false;
+      const steered = steerNow ? await steer!({ taskId: selectedTaskId, message }) : false;
+      // Delivered: it stays shown until the turn shows it (see pendingSteers); anything else drops it.
+      if (steered !== true) dropPending();
+      if (steerNow && steered === false) setSending(true);
       if ((steered === "wait" || steered === "restart" || steered === "interrupt" || steered === "starting") && selectedTaskId) {
         // The agent was found waiting on its own request just now (the page had not seen it yet):
         // steering would cancel that request, so the message waits for the turn like a queued one.
@@ -964,7 +1018,12 @@ export function AgentOrchestratorChat({
       if (here()) setAtBottom(true);
       return true;
     } catch {
-      // The surface already shows the error; keep the message so it can be sent again.
+      // The surface already shows the error; keep the message so it can be sent again. A steer had
+      // cleared the composer at once: what was typed comes back, unless something new was typed since.
+      dropPending();
+      if (steerNow && here() && !composing.current.draft.trim() && !composing.current.attachments.length) {
+        setDraft(owner.draft); setAttachments(owner.attachments); setAnnotations(owner.annotations);
+      }
       return false;
     } finally { setSending(false); }
   };
@@ -1363,7 +1422,7 @@ export function AgentOrchestratorChat({
             </article></PartErrorBoundary>;
   }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn]);
 
-  return (<Attachments.Provider value={attachmentAccess}><CompactActivity.Provider value={compactActivity}>
+  return (<Attachments.Provider value={attachmentAccess}><SentMessageView.Provider value={sentMessageView}><CompactActivity.Provider value={compactActivity}>
     <div className={`cx-chat${showStructure && structure ? " has-structure" : ""}`}>
       <section className="cx-thread" aria-label={chat?.title || CHAT_DEFAULT_TITLE}>
         <header className="cx-thread-head">
@@ -1449,6 +1508,10 @@ export function AgentOrchestratorChat({
               </>}
             </div> : null}
             {threadTurns}
+            {pendingSteers.filter((entry) => entry.taskId === selectedTaskId).map((entry) => <div key={entry.id} className="cx-user cx-steer is-pending">
+              <SentMessage text={entry.text} />
+              <span className="cx-stamp">Steering…</span>
+            </div>)}
             {(notice || notStarted) && latest && chat?.status === "queued" && !working ? (
               <div className="cx-card tone-error">
                 <strong>{notice ? "The run could not start" : "This run hasn't started"}</strong>
@@ -1687,5 +1750,5 @@ export function AgentOrchestratorChat({
       {workbench && selectedTaskId ? <ChatWorkbench sessions={agentSessions} workspaceId={projectId} tab={workbench} onTab={setWorkbench} onClose={() => setWorkbench(null)} /> : null}
       <ChatMenu menu={menu} onClose={() => setMenu(null)} />
     </div>
-  </CompactActivity.Provider></Attachments.Provider>);
+  </CompactActivity.Provider></SentMessageView.Provider></Attachments.Provider>);
 }

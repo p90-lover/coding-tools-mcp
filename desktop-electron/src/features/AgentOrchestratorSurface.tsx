@@ -733,14 +733,24 @@ export function AgentOrchestratorSurface({ language, setError }: {
       const running = mission.nodes.filter((node) => node.state === "running");
       const key = `${workspaceId}:${mission.id}`;
       // A run with work left but nothing running (its next cards never started) is just as orphaned.
+      // Whether it could resume at all; "Retry automatically" is read below, once a run qualifies.
       if (mission.workspace_id !== workspaceId || mission.cancelled || settledRuns.current.has(key)
-        || (!running.length && !restartResume(mission))) continue;
+        || (!running.length && !restartResume(mission, Date.now(), { autoRetry: true }))) continue;
       settledRuns.current.add(key);
+      // A failed step a loop is still holding (it waits out its retry pause) is looked at again on a
+      // later update: if that loop ends without retrying, this is what picks the chat up.
+      const held = !running.length && mission.nodes.some((node) => node.state === "held");
       void (async () => {
         const status = await moduleCall("run_status", { workspaceId, runId: mission.id });
         if (!mounted.current || selection.current.workspaceId !== workspaceId) { settledRuns.current.delete(key); return; }
         // A loop in this app session drives it (or is starting it).
-        if (status.driven !== false || ["starting", "running"].includes(String(status.status))) return;
+        if (status.driven !== false || ["starting", "running"].includes(String(status.status))) {
+          if (held) settledRuns.current.delete(key);
+          return;
+        }
+        // Read only where it decides anything: a single chat with a failed step.
+        const autoRetry = held && mission.execution_mode === "single"
+          ? await moduleCall("chat_auto_retry", {}).then((result) => result.autoRetry === true, () => false) : false;
         let nodes = running;
         let still: AoMission | undefined = mission;
         for (;;) {
@@ -749,7 +759,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
           const after = await moduleCall("runs", { workspaceId, runId: mission.id }).catch(() => null);
           still = (after?.runs as AoMission[] | undefined)?.find((run) => run.id === mission.id);
           // Resumable now: its loop takes over the cards still running and starts the next ones.
-          if (still && !resumedRuns.current.has(key) && restartResume(still)) break;
+          if (still && !resumedRuns.current.has(key) && restartResume(still, Date.now(), { autoRetry })) break;
           nodes = still && !still.cancelled ? still.nodes.filter((node) => node.state === "running" && node.route?.harness_id?.startsWith("ao:")) : [];
           // Done once nothing is left running here, another project is open, or a loop took the run over.
           if (!nodes.length || !mounted.current || selection.current.workspaceId !== workspaceId
@@ -759,9 +769,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
         // Left for another project with the card still running: watch it again when it is back.
         if (nodes.length && (!mounted.current || selection.current.workspaceId !== workspaceId)) settledRuns.current.delete(key);
         // A chat the app restart interrupted picks up where it was, the way "Retry failed step"
-        // does, and one with work left continues; teams too. A new background grant still asks in
+        // does, and one with work left continues; teams too. With "Retry automatically" on, so does a
+        // single chat's failed step that nothing retried. A new background grant still asks in
         // this window.
-        const resume = still && !resumedRuns.current.has(key) ? restartResume(still) : null;
+        const resume = still && !resumedRuns.current.has(key) ? restartResume(still, Date.now(), { autoRetry }) : null;
         if (mounted.current && selection.current.workspaceId === workspaceId && resume) {
           resumedRuns.current.add(key);
           if (resume === "retry") await moduleCall("control_run", { workspaceId, runId: mission.id, action: "retry", ...executableArg() });
@@ -1563,10 +1574,22 @@ export function AgentOrchestratorSurface({ language, setError }: {
     try { execution = aoChatExecution(composerMode, singleRoute, savedTeams, composerTeamId); } catch { return; }
     // Wait for the picker to settle so trying models does not start an agent for each.
     const timer = setTimeout(() => {
+      lastPrewarm.current = Date.now();
       void moduleCall("chat_prewarm", { workspaceId, ...execution, ...(chatTaskId ? { taskId: chatTaskId } : {}) }).catch(() => undefined);
     }, 600);
     return () => clearTimeout(timer);
   }, [prewarmKey, savedTeams.length]);
+  // Warmed again when the user starts typing (at most every 30 s): an agent left idle is released,
+  // and the message then waited for a whole launch (4-59 s, measured live) after it was sent. The
+  // backend keeps a warm or running agent as it is, so asking again costs nothing then.
+  const lastPrewarm = useRef(0);
+  const prewarmOnTyping = useCallback(() => {
+    if (!prewarmKey || Date.now() - lastPrewarm.current < 30_000) return;
+    let execution: JsonObject;
+    try { execution = aoChatExecution(composerMode, singleRoute, savedTeams, composerTeamId); } catch { return; }
+    lastPrewarm.current = Date.now();
+    void moduleCall("chat_prewarm", { workspaceId, ...execution, ...(chatTaskId ? { taskId: chatTaskId } : {}) }).catch(() => undefined);
+  }, [prewarmKey, composerMode, singleRoute, savedTeams, composerTeamId, workspaceId, chatTaskId]);
   const retryChatStart = (runId: string) => void run("start-run", async () => {
     const taskId = missions.find((mission) => mission.id === runId)?.project_id ?? "";
     try {
@@ -2194,7 +2217,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
             ? <div className="ao-empty-state"><p>{copy.noWorkspace}</p><button className="button-primary" type="button" onClick={() => setSheet("settings")}>{copy.settings}</button></div>
             : <AgentOrchestratorChat
                 runs={chatRuns}
-                tasks={allTasks} selectedTaskId={chatTaskId ?? ""} deciding={chatTaskId === null}
+                tasks={allTasks} selectedTaskId={chatTaskId ?? ""} deciding={chatTaskId === null} onComposing={prewarmOnTyping}
                 projectName={workspaces.find((item) => item.id === workspaceId)?.name} projectBranch={projectBranch}
                 stop={stopChat} restart={restartChat} loadWork={loadChatWork}
                 thread={chatThread}

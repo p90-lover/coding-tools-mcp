@@ -563,7 +563,13 @@ async function autoConnectExistingMcpIfReady({ logger, stateStore, health }) {
 function startCatalogVerificationMonitor({ logger, stateStore }) {
   stopCatalogVerificationMonitor();
   let reportedFailure = null;
+  // Once the catalog is verified, the monitor only waits for an idle, signed-in browser to connect
+  // MCP. That can take as long as the browser is in use, and asking the bridge's health every 2 s
+  // the whole time cost the main process a connection and a config read each time; it asks every
+  // 15 s while waiting.
+  let nextCheckAt = 0;
   const check = async () => {
+    if (Date.now() < nextCheckAt) return;
     const current = stateStore.read();
     if (current.coreSetupComplete !== true || (current.codexCatalogVerified === true && !current.autoConnectExistingMcp)) {
       stopCatalogVerificationMonitor();
@@ -615,7 +621,10 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
         publishOperation({ name: "catalog-verification", status: "completed", message: "Codex model catalog loaded" });
       }
       }
-      if (await autoConnectExistingMcpIfReady({ logger, stateStore, health })) return;
+      if (await autoConnectExistingMcpIfReady({ logger, stateStore, health })) {
+        nextCheckAt = Date.now() + 15_000;
+        return;
+      }
       stopCatalogVerificationMonitor();
     } catch (error) {
       logger.debug("codex.model_catalog_verification_pending", {
@@ -2496,7 +2505,7 @@ function registerIpc({ logger, stateStore }) {
   });
   // Runtime > RTK: whether rtk is installed and on, its savings, and installing it (winget).
   handle("rtk:status", async () => rtk.status() ?? { enabled: false, installed: false, path: null, version: null });
-  handle("rtk:gain", async () => rtk.gain() ?? { available: false });
+  handle("rtk:gain", async () => (await rtk.gain()) ?? { available: false });
   handle("rtk:install", async (event) => {
     // Installing software is the person's own click in the visible app.
     assertFocusedMainWindow(event, true);
@@ -3230,6 +3239,8 @@ async function start() {
     const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
       // Stop agents that sat idle for a while; their chats resume them on the next message.
       releaseIdleAgents: true,
+      // Files the person attached (saved by launcher:save-attachment): reading one needs no review.
+      chatAttachmentsDir: path.join(app.getPath("userData"), "chat-attachments"),
       // One run read serves the activity poll, the run loop and their checks for 300 ms.
       runReadFreshMs: 300,
       // Each launch logs where its time went (ao.launch_timing).

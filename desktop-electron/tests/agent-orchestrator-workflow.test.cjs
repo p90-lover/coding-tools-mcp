@@ -1273,7 +1273,7 @@ test("starting a mission whose card is held retries that card first", async () =
   await assert.rejects(workflow.call("control_run", { workspaceId: "ws-1", runId: "r1", action: "rewind" }), /Choose a mission control/);
 });
 
-function heldMissionWorld({ history = [], error = "ChatGPT did not confirm that the prompt was sent", executionMode = undefined } = {}) {
+function heldMissionWorld({ history = [], error = "ChatGPT did not confirm that the prompt was sent", executionMode = undefined, grant = undefined } = {}) {
   const world = { reads: 0, controls: [], controlBodies: [], grants: 0, held: false };
   world.requestHeadless = async (endpoint, body) => {
     if (endpoint === "/api/v1/ao/read") {
@@ -1281,7 +1281,7 @@ function heldMissionWorld({ history = [], error = "ChatGPT did not confirm that 
       // The first start sees a pending card; the loop then finds it held until a retry re-queues it.
       if (world.reads === 2 && !world.controls.length) world.held = true;
       return { ok: true, team: null, worker_capacity: { r1: 1 }, runs: [{ id: "r1", workspace_id: "ws-1", project_id: "task-1", revision: 2, cancelled: false,
-        ...(executionMode ? { execution_mode: executionMode } : {}),
+        ...(executionMode ? { execution_mode: executionMode } : {}), ...(grant ? { grant } : {}),
         nodes: [{ id: "lead", role: "planner", state: world.held ? "held" : "pending", route: { model: "chatgpt-web/high", provider_id: "chatgpt-web" },
           history, receipt: world.held ? { error } : null }] }] };
     }
@@ -1369,6 +1369,30 @@ test("with Retry automatically on, a step that lost the local proxy waits and is
   assert.deepEqual(world.controls, ["retry"]);
   assert.equal(world.controlBodies[0].node_id ?? world.controlBodies[0].nodeId, "lead", "a team retries only the failed card");
   assert.equal(asked, 0);
+});
+
+test("with Retry automatically on, a single chat whose failed launch spent its one turn is retried on a fresh grant", async () => {
+  // Seen live: "Launch failed: The operation was aborted due to timeout" on a single chat held for
+  // hours with the switch on. The launch had used the grant's one turn, and the retry relaunched on
+  // that spent grant, which headless refuses.
+  const spent = { executable_sha256: "a".repeat(64), max_turns: 1, turns_started: 1, granted_at_ms: Date.now(), expires_at_ms: Date.now() + 3_600_000 };
+  const world = heldMissionWorld({ error: "Launch failed: The operation was aborted due to timeout", executionMode: "single", grant: spent });
+  let offset = 0;
+  const states = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/Codex/codex.exe",
+    fetchImpl: async () => { throw new Error("the helper must not be asked"); },
+    webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
+    onRunState: (update) => states.push(String(update?.detail ?? "")),
+    now: () => Date.now() + offset,
+    resolveHarness: async () => ({ expected_sha256: "a".repeat(64), executable: path.resolve("codex.exe") }) });
+  await workflow.call("chat_auto_retry", { enabled: true });
+  await workflow.call("start_run", { workspaceId: "ws-1", runId: "r1" });
+  await until(() => states.some(detail => /Retrying automatically in/.test(detail)));
+  assert.equal(world.grants, 1);
+  offset = 11_000;
+  await until(() => world.grants >= 2);
+  assert.deepEqual(world.controls, ["retry"]);
+  assert.equal(world.grants, 2, "the retry asked for a fresh grant instead of relaunching on the spent one");
 });
 
 test("a lost connection is retried even on a card with many finished rounds, but never a sign-in failure", async () => {
@@ -3755,6 +3779,8 @@ test("steering hands the message to the running AO agent and notes it in the cha
   const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "use pnpm, not npm" });
   assert.equal(result.steered, true);
   assert.deepEqual(steered, [["sess-1", "use pnpm, not npm"]]);
+  // The note is written after replying (the reply no longer waits on it).
+  for (let tick = 0; tick < 100 && !world.edits.length; tick += 1) await new Promise((resolve) => setImmediate(resolve));
   assert.match(world.edits[0].description, /^first ask\n\n↳ Steer \([^)]+ UTC\): use pnpm, not npm$/);
   ended = true;
   assert.equal((await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "late" })).steered, false,
@@ -4804,6 +4830,30 @@ test("a model picked mid-chat is what Retry and the next goal round run on, neve
   assert.equal(next.length, 1);
   assert.equal(next[0].execution_mode, "single");
   assert.deepEqual(next[0].single_route, picked, "the next round uses the newly picked model");
+});
+
+test("Approve for me: reading a file the person attached needs no review; reading anywhere else outside the project still does", () => {
+  // Seen live: an attached screenshot, handed to the agent by its path, was "outside the workspace
+  // folder" to the reviewer, which denied the read; the agent never saw the image.
+  // The host's own absolute paths (the CI runs this on Linux and macOS too).
+  const app = path.resolve(path.sep, "ct-app-data");
+  const attachments = path.join(app, "chat-attachments");
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }), findCodexExecutable: () => "C:/codex.exe", chatAttachmentsDir: attachments });
+  // A native request as pendingApprovals builds it: the file in `path`, no toolInput.
+  const native = (tool, file) => workflow.attachedFileRead({ kind: "permission", tool, path: file });
+  const read = (tool, input) => workflow.attachedFileRead({ kind: "permission", tool, toolInput: JSON.stringify(input) });
+  const shot = path.join(attachments, "2026-10-21", "image-ab863fa4.png");
+  assert.ok(native("Read", shot), "Claude's own Read of an attachment");
+  assert.ok(native("read", shot), "named by its ACP kind");
+  assert.ok(native(`Read ${shot}`, shot), "named by its summary");
+  assert.ok(read("mcp__coding-tools__view_image", { path: path.join(attachments, "2026-10-21", "shot.png") }), "the app's image view");
+  assert.equal(native("Read", path.join(app, "settings.json")), null, "not the app's other files");
+  assert.equal(native("Read", `${attachments}${path.sep}..${path.sep}secrets.json`), null, "no way out of the folder");
+  assert.equal(native("Write", path.join(attachments, "x.png")), null, "only reads");
+  assert.equal(native("Read", "image.png"), null, "an absolute path only");
+  assert.equal(workflow.attachedFileRead({ kind: "command", tool: "Read", path: shot }), null, "never a command");
+  const without = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }), findCodexExecutable: () => "C:/codex.exe" });
+  assert.equal(without.attachedFileRead({ tool: "Read", toolInput: JSON.stringify({ file_path: path.join(attachments, "a.png") }) }), null, "no folder given, no exception");
 });
 
 test("Approve for me: the chat's preview tools and routine commands through the app's terminal pass; anything else asks", () => {

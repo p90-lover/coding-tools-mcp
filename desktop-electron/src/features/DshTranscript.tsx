@@ -8,9 +8,9 @@
  * - once it ends, "Completed in 1m 4s" heads it and folds its work, grouped as "Ran commands,
  *   read files" runs between the replies.
  */
-import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useContext, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, StreamingMarkdown } from "./ChatToolParts";
+import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, StreamingMarkdown } from "./ChatToolParts";
 import {
   dshActivity, dshDuration, dshItemDetail, dshLiveTitle, dshProcessTitle, dshQuietNote, dshRetryNote, dshSegments, dshThinkSummary, dshToolTitle,
   tidyTimeline, withoutReplied, type ChatLiveItem, type ChatStep, type ChatTurn, type DshActivity,
@@ -173,8 +173,14 @@ function DshItem({ item }: { item: ChatLiveItem }) {
   if (item.answered) return <AnsweredRecord question={item.answered.question} answer={item.answered.answer} />;
   if (item.kind === "reasoning") return <DshThink item={item} />;
   if (item.kind === "message") return <div className="dsh-reply"><StreamingMarkdown text={item.text} live={item.status === "running"} /></div>;
-  if (item.kind === "steer") return <div className="cx-user cx-steer"><div className="cx-bubble"><p>{item.text}</p></div></div>;
+  if (item.kind === "steer") return <DshSteer text={item.text} />;
   return <DshTool item={item} />;
+}
+
+/** A message steered into the turn, drawn as the chat draws any message the person sent. */
+function DshSteer({ text }: { text: string }) {
+  const sent = useContext(SentMessageView);
+  return <div className="cx-user cx-steer">{sent(text)}</div>;
 }
 
 /**

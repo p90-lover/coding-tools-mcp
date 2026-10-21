@@ -90,6 +90,10 @@
 .cx-list-settings:hover, .cx-list-settings[aria-expanded="true"] { background: var(--cx-hover); color: var(--color-text-primary); }
 .cx-thread-row[draggable="true"] { cursor: grab; }
 .cx-thread-row.is-dragging { opacity: .45; }
+/* The label that follows the pointer while a chat is dragged (ChatThreadList); drawn off screen. */
+.cx-drag-ghost { position: fixed; top: -1000px; left: -1000px; max-width: 240px; padding: 4px 10px; overflow: hidden;
+  border: 1px solid var(--ao-blue); border-radius: 6px; background: var(--color-bg-primary); color: var(--color-text-primary);
+  font-size: 12px; white-space: nowrap; text-overflow: ellipsis; box-shadow: 0 4px 12px rgb(0 0 0 / 18%); }
 /* Where a dragged chat would land: a line above or below the row under the pointer. */
 .cx-thread-row[data-drop]::before { content: ""; position: absolute; left: 6px; right: 6px; z-index: 1; height: 2px; border-radius: 1px;
   background: var(--ao-blue); pointer-events: none; }
@@ -359,6 +363,8 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-empty p { margin: 0; color: var(--ao-muted); font-size: 13px; }
 .cx-turn { display: flex; flex-direction: column; gap: 10px; }
 .cx-user { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+/* A steer shown at once while it reaches the agent, until the turn shows it as sent. */
+.cx-user.is-pending { opacity: .65; }
 /* A message steered into a working turn: the user's own bubble, in the live timeline where it was sent. */
 .cx-live-item.kind-steer { display: block; margin: 6px 0; }
 .cx-live-item.kind-steer .cx-user { width: 100%; }

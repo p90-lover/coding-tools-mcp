@@ -260,7 +260,7 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, chatAttachmentsDir = null, logger = null }) {
   // One run read serves every caller for a moment (as the upstream shares a conversation tail). A
   // working chat's activity poll, the run loop and their per-node checks each read the same run
   // within milliseconds: 10-15 /ao/read a second while one mission worked, each one a copy and a
@@ -2316,6 +2316,27 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!input || typeof input.cmd !== "string" || (typeof input.stdin === "string" && input.stdin)) return null;
     return routineCommand(input.cmd);
   }
+  /**
+   * Why a request to read a file the person attached to the chat may run without asking, or null.
+   * An attachment is saved in the app's chat-attachments folder and handed to the agent by its path;
+   * it lies outside the project, so the reviewer judged reading it "outside the workspace folder"
+   * and denied it (seen live: an attached screenshot the agent was never allowed to see).
+   */
+  const ATTACHMENT_APP_TOOLS = new Set([`${APP_TOOL_PREFIX}read_file`, `${APP_TOOL_PREFIX}view_image`, `${APP_TOOL_PREFIX}image_info`]);
+  function attachedFileRead(approval) {
+    if (!chatAttachmentsDir || approval?.kind === "command") return null;
+    const tool = String(approval?.tool ?? "");
+    // Claude's own Read arrives as its name ("Read"), its ACP kind ("read") or its summary ("Read <path>").
+    const nativeRead = /^read$/i.test(tool) || /^Read\s/.test(tool);
+    if (!nativeRead && !ATTACHMENT_APP_TOOLS.has(tool)) return null;
+    // A native request carries its file as `path`; an app tool's is in its JSON input.
+    let file = nativeRead && typeof approval.path === "string" ? approval.path : null;
+    if (!file && typeof approval.toolInput === "string") {
+      try { const input = JSON.parse(approval.toolInput); file = input?.file_path ?? input?.path; } catch { return null; }
+    }
+    if (typeof file !== "string" || !path.isAbsolute(file)) return null;
+    return insideFolder(file, chatAttachmentsDir) ? "A file you attached to this chat (the app's chat attachments folder)" : null;
+  }
   const approverAdvice = new Map(); // approval_id -> { action, reason }
   /** AO's offered decision id for allow-once / deny-once; an "always" choice is never made for the user. */
   const aoDecision = (approval, allow) => (approval.decisions || [])
@@ -2511,6 +2532,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // from reading its arguments, so a long patch is no reason to ask.
         let advice = routineAppTool(approval.tool)
           ? { action: "allow", actor: "safety_rules", reason_code: "routine_tool", reason: routineAppTool(approval.tool) }
+          : attachedFileRead(approval)
+          ? { action: "allow", actor: "safety_rules", reason_code: "attached_file_read", reason: attachedFileRead(approval) }
           : !incomplete && routineAppCommand(approval)
           ? { action: "allow", actor: "safety_rules", reason_code: "routine_command", reason: routineAppCommand(approval) }
           : incomplete && !blocked
@@ -3048,7 +3071,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           saved = await runs({ workspaceId, runId });
           mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
           if (!mission) throw new Error("Saved mission is unavailable");
-          if (helped?.retried && !mission.grant) {
+          // A retry needs a turn: a grant that is gone, or spent (a single chat's one turn was the
+          // launch that failed), gets a fresh one through startRun. Relaunching on the spent grant
+          // was refused, and the loop ended with the step still "held" and "Retry automatically" on.
+          if (helped?.retried && (!mission.grant || grantSpent(mission.grant))) {
             state.status = "held";
             setTimeout(() => {
               void startRun({ workspaceId, runId, executable }).catch(error => logger?.warn?.("ao.retry_start_failed",
@@ -3531,8 +3557,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
     };
     // The steer itself was delivered; the transcript note is best-effort, and a team's waits for
-    // its run to settle (see whenTaskIdle).
-    if (!grantAtRisk(run)) await note().catch(() => undefined);
+    // its run to settle (see whenTaskIdle). It is written after replying: waiting for its board
+    // read and write held the chat's composer for seconds after the agent already had the message.
+    if (!grantAtRisk(run)) void note().catch(() => undefined);
     else whenTaskIdle(id, task, note);
     return { ok: true, steered: true, runId: run.id, nodeId: card.id };
   }
@@ -4469,7 +4496,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   /** Whether the command approver's safety rules block this request text whatever anyone answers. */
   const blockedRequest = (text) => hardDenied(text);
   restoreWakeups();
-  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scheduleWakeup, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, blockedRequest, recommendedAnswer, subagentLaunchArgs });
+  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scheduleWakeup, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs });
 }
 
 module.exports = { createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
