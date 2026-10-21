@@ -363,8 +363,26 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-empty p { margin: 0; color: var(--ao-muted); font-size: 13px; }
 .cx-turn { display: flex; flex-direction: column; gap: 10px; }
 .cx-user { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
-/* A steer shown at once while it reaches the agent, until the turn shows it as sent. */
-.cx-user.is-pending { opacity: .65; }
+/* Claude Code's queued-message bar, right above the composer at its width: messages waiting for the
+   agent, right-aligned and newest last, as the person's own bubbles with the text greyed (claude.ai's
+   UserMessage state "queued"), their actions beside them; one on its way pulses (state "pending").
+   Its list is Claude's: gap xs, at most min(40vh, 22rem) tall, then it scrolls. */
+.cx-queued { flex: 0 0 auto; width: calc(100% - 48px); max-width: 780px; margin: 0 auto 8px; }
+.cx-queued-list { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; max-height: min(40vh, 22rem); margin: -4px 0; padding: 4px 0;
+  overflow-y: auto; list-style: none; }
+.cx-queued-row { display: flex; align-items: center; justify-content: flex-end; gap: 4px; width: 100%; min-width: 0; }
+.cx-queued-message { flex: 0 1 auto; min-width: 0; max-width: min(85%, calc(100% - 92px)); }
+.cx-queued-message .cx-bubble { max-width: none; }
+.cx-queued-row[data-state="queued"] .cx-bubble { color: var(--ao-muted); }
+.cx-queued-row[data-state="pending"] .cx-bubble { animation: cx-queued-pulse 2s cubic-bezier(.4, 0, .6, 1) infinite; }
+@keyframes cx-queued-pulse { 50% { opacity: .5; } }
+@media (prefers-reduced-motion: reduce) { .cx-queued-row[data-state="pending"] .cx-bubble { animation: none; color: var(--ao-muted); } }
+.cx-queued-actions { display: flex; flex: none; gap: 2px; }
+.cx-queued-actions button { display: inline-grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 6px;
+  background: transparent; color: var(--ao-muted); cursor: pointer; }
+.cx-queued-actions button:hover:not(:disabled) { background: var(--cx-hover); color: var(--color-text-primary); }
+.cx-queued-actions button:disabled { opacity: .4; cursor: default; }
+.cx-sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 /* A message steered into a working turn: the user's own bubble, in the live timeline where it was sent. */
 .cx-live-item.kind-steer { display: block; margin: 6px 0; }
 .cx-live-item.kind-steer .cx-user { width: 100%; }

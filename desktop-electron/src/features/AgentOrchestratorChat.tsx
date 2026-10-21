@@ -272,7 +272,8 @@ function LiveRowView({ item }: { item: ChatLiveItem }) {
   return <li className={`cx-live-item kind-${item.kind} is-${item.status || "done"}`}>
     {item.answered ? <AnsweredRecord question={item.answered.question} answer={item.answered.answer} />
       // As any sent message: an attached image as its thumbnail, not "Attached image: <path>" text.
-      : item.kind === "steer" ? <div className="cx-user cx-steer"><SentMessage text={item.text} /></div>
+      // Claude Code shows a message the agent took mid-turn as an ordinary sent message, Copy and all.
+      : item.kind === "steer" ? <div className="cx-user cx-steer"><SentMessage text={item.text} /><MessageActions text={chatMessageReadable(item.text)} /></div>
       : item.kind === "message" ? <StreamingMarkdown text={item.text} live={item.status === "running"} />
       : item.kind === "reasoning" ? <ReasoningItem item={item} />
       : item.kind === "edit" ? <EditItem item={item} />
@@ -528,6 +529,49 @@ function MessageActions({ text, children }: { text: string; children?: ReactNode
     <button type="button" title="Copy" aria-label="Copy message" onClick={() => void navigator.clipboard.writeText(text).then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 1500); })}>
       {copied ? <Icon name="check" width="14" height="14" /> : "⧉"}</button>
     {children}
+  </div>;
+}
+
+/** A message in the queued-message bar: waiting to be sent ("queued"), or on its way to the agent ("pending"). */
+type QueuedBarItem = {
+  key: string; text: string; state: "queued" | "pending";
+  onRemove?: () => void; onEdit?: () => void; onSendNow?: () => void; sendNowBlocked?: string;
+};
+
+/** The queued-message actions' glyphs: Remove from queue (X), Edit in composer (pencil), Send now (arrow up). */
+function QueuedGlyph({ name }: { name: "remove" | "edit" | "send" }) {
+  return <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    {name === "remove" ? <path d="M18 6 6 18M6 6l12 12" />
+      : name === "edit" ? <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+      : <path d="M12 19V5M5 12l7-7 7 7" />}
+  </svg>;
+}
+
+/**
+ * Claude Code's queued-message bar (claude.ai's QueuedMessageBar): a message sent while the agent
+ * works waits right above the composer, newest last, as the person's own bubble with its text
+ * greyed, until the agent takes it; from then on the chat shows it as any sent message. A waiting
+ * one has Remove from queue, Edit in composer and Send now beside it; one on its way pulses.
+ * Screen readers hear Claude Code's own status line. It replaced the "Queued" notice cards and the
+ * "Steering…" bubble at the end of the chat.
+ */
+function QueuedMessageBar({ items }: { items: QueuedBarItem[] }) {
+  if (!items.length) return null;
+  const waiting = items.filter((item) => item.state === "queued").length;
+  return <div className="cx-queued">
+    <ol className="cx-queued-list" aria-label="Queued messages">
+      {items.map((item) => <li key={item.key} className="cx-queued-row" data-state={item.state}>
+        {item.state === "queued" ? <div className="cx-queued-actions" role="toolbar" aria-label="Queued message actions">
+          <button type="button" aria-label="Remove from queue" data-tip="Remove from queue" onClick={item.onRemove}><QueuedGlyph name="remove" /></button>
+          <button type="button" aria-label="Edit in composer" data-tip="Edit in composer" onClick={item.onEdit}><QueuedGlyph name="edit" /></button>
+          <button type="button" aria-label="Send now" data-tip={item.sendNowBlocked ?? "Send now"} disabled={Boolean(item.sendNowBlocked)}
+            onClick={item.onSendNow}><QueuedGlyph name="send" /></button>
+        </div> : null}
+        <div className="cx-user cx-queued-message"><SentMessage text={item.text} /></div>
+      </li>)}
+    </ol>
+    <span className="cx-sr-only" role="status">{waiting === 0 ? "" : waiting === 1 ? "1 message queued. Will send after the current response."
+      : `${waiting} messages queued. Will send after the current response.`}</span>
   </div>;
 }
 
@@ -951,9 +995,9 @@ export function AgentOrchestratorChat({
     // Only what was sent is cleared: a draft, file or annotation added while it was sending stays.
     const current = () => fromComposer && here() && composing.current.draft === owner.draft && composing.current.attachments === owner.attachments
       && composing.current.annotations === owner.annotations;
-    // A steer shows at once, as in Codex: the composer clears and the message waits under the turn
-    // ("Steering…") while it reaches the agent, which can take seconds (it waits out an approval
-    // being answered). Until then the box held the text and the Stop button stayed.
+    // A steer shows at once, as in Claude Code: the composer clears and the message waits in the
+    // queued-message bar, pulsing, while it reaches the agent, which can take seconds (it waits out
+    // an approval being answered). Until then the box held the text and the Stop button stayed.
     const steerNow = !goal && steering && Boolean(steer && selectedTaskId);
     const pendingId = steerNow ? `steer-${Date.now()}-${Math.random().toString(36).slice(2)}` : "";
     if (steerNow) {
@@ -974,12 +1018,11 @@ export function AgentOrchestratorChat({
         // message, and was stopped: the message goes as the same agent's next turn once it settles.
         setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what: "Message", message }));
         if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
-        if (here()) {
-          say(steered === "restart" ? "Restarting" : steered === "interrupt" ? "Interrupting" : "Queued", steered === "restart"
+        // The queued-message bar shows it waiting, as Claude Code does; only a stopped turn is told.
+        if (here() && (steered === "restart" || steered === "interrupt")) {
+          say(steered === "restart" ? "Restarting" : "Interrupting", steered === "restart"
             ? "The agent had stopped responding, so its turn was stopped; your message is sent as the next turn."
-            : steered === "interrupt" ? "A command was still running, so it was stopped; the same agent gets your message next, with everything it already knows."
-            : steered === "starting" ? "The agent is still starting; your message is steered in once it can take it."
-            : "The agent is waiting for an answer to its request; your message is steered in once that is answered.", chatMessageReadable(message));
+            : "A command was still running, so it was stopped; the same agent gets your message next, with everything it already knows.", chatMessageReadable(message));
         }
         return true;
       }
@@ -1048,7 +1091,6 @@ export function AgentOrchestratorChat({
       // Several messages typed during one turn go together, in order.
       setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what: "Message", message: text }));
       setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote("");
-      say("Queued", `It's sent when the current turn finishes.${latest && runOpen && stop ? " Send /stop to end the turn now." : ""}`, chatMessageReadable(text));
       return;
     }
     await deliver(text);
@@ -1064,9 +1106,6 @@ export function AgentOrchestratorChat({
     setQueueVersion((value) => value + 1);
   };
   const queued = queueOf(selectedTaskId);
-  useEffect(() => {
-    if (queued.length) say("Queued", `${queued.length === 1 ? "A message is" : `${queued.length} messages are`} waiting for this chat's turn to finish; sent then.`);
-  }, [selectedTaskId]);
   // One queued item per free spell: right after a send the chat may still read as free for a moment,
   // and the next item must wait for the turn that send started.
   const sentWhileFree = useRef(false);
@@ -1131,8 +1170,8 @@ export function AgentOrchestratorChat({
       steerRetry.current = { attempts, until: Date.now() + wait };
       window.clearTimeout(steerRetryTimer.current);
       steerRetryTimer.current = window.setTimeout(() => setSteerRetryTick((value) => value + 1), wait);
+      // Back at the head of the queued-message bar, where it stays until the agent can take it.
       setQueue(task, [next, ...queueOf(task)]);
-      if (here) say("Queued", `The message couldn't be steered in yet; trying again in ${wait / 1000} s (or it's sent when the turn finishes).`, next.message);
     }).finally(() => { steeringQueue.current = false; });
   }, [queueVersion, selectedTaskId, accepts, steering, awaitingAnswer, busy, sending, windowFocused, steerRetryTick]);
   /**
@@ -1146,6 +1185,37 @@ export function AgentOrchestratorChat({
     say(what, `Queued: it's sent when the current turn finishes.${latest && runOpen && stop ? " Send /stop to end the turn now." : ""}`);
     return "queued";
   };
+  // The queued-message bar: this chat's queued messages (a command or a goal waits out of sight, as
+  // before), then the steers still on their way to the agent. Send now steers a message in at once,
+  // or sends it when the chat is free; while the agent waits on its own request steering would
+  // cancel that request, so it waits too.
+  const sendNowBlocked = busy || sending ? "Another message is being sent"
+    : accepts || (steering && !awaitingAnswer) ? undefined
+    : awaitingAnswer ? "Answer the agent's request first" : "Sent when the current turn finishes";
+  const takeQueued = (index: number) => {
+    const queue = queueOf(selectedTaskId), item = queue[index];
+    if (item) setQueue(selectedTaskId, queue.filter((_, at) => at !== index));
+    return item;
+  };
+  const queuedBar: QueuedBarItem[] = [
+    ...queued.flatMap((item, index): QueuedBarItem[] => item.what !== "Message" || item.goal ? [] : [{
+      key: `queued:${index}:${item.message.length}`, text: item.message, state: "queued", sendNowBlocked,
+      onRemove: () => { takeQueued(index); },
+      onEdit: () => {
+        const taken = takeQueued(index);
+        if (!taken) return;
+        setDraft((typed) => (typed.trim() ? `${taken.message}\n\n${typed}` : taken.message));
+        input.current?.focus();
+      },
+      onSendNow: () => {
+        const task = selectedTaskId, taken = takeQueued(index);
+        if (!taken) return;
+        void deliver(taken.message, undefined, false).then((sent) => { if (!sent) setQueue(task, [taken, ...queueOf(task)]); });
+      },
+    }]),
+    ...pendingSteers.filter((entry) => entry.taskId === selectedTaskId)
+      .map((entry): QueuedBarItem => ({ key: entry.id, text: entry.text, state: "pending" })),
+  ];
   // The messages /rewind can go back to, oldest first, with the turn each one opened.
   const rewindPoints = turns.flatMap((turn, turnIndex) => turn.user ? [{ turnIndex, messageIndex: turn.messageIndex ?? turnIndex, text: chatMessageReadable(turn.user.text) }] : []);
   // Delete message: the turn whose message waits for the in-chat confirmation, or null. A message
@@ -1395,7 +1465,8 @@ export function AgentOrchestratorChat({
               {turn.user?.steers?.length && !turn.steps.some((step) => step.working?.timeline?.some((item) => item.kind === "steer"))
                 ? turn.user.steers.map((steer, index) => <div key={`steer:${index}`} className="cx-user cx-steer">
                   <SentMessage text={steer.text} />
-                  <span className="cx-stamp">Steered · {steer.stamp} UTC</span>
+                  <MessageActions text={chatMessageReadable(steer.text)} />
+                  <span className="cx-stamp">{steer.stamp} UTC</span>
                 </div>) : null}
               {dsh && readWork
                 ? <DshWork key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} live={!idle && liveTurn(turn)} expanded={showWork} useWork={readWork}
@@ -1509,10 +1580,6 @@ export function AgentOrchestratorChat({
               </>}
             </div> : null}
             {threadTurns}
-            {pendingSteers.filter((entry) => entry.taskId === selectedTaskId).map((entry) => <div key={entry.id} className="cx-user cx-steer is-pending">
-              <SentMessage text={entry.text} />
-              <span className="cx-stamp">Steering…</span>
-            </div>)}
             {(notice || notStarted) && latest && chat?.status === "queued" && !working ? (
               <div className="cx-card tone-error">
                 <strong>{notice ? "The run could not start" : "This run hasn't started"}</strong>
@@ -1649,6 +1716,7 @@ export function AgentOrchestratorChat({
         </div> : null}
         {/* Outside the chat box's form: its comment box submits on Enter, and that must not send the message. */}
         {selectedTaskId ? <SelectionAnnotator root={scroller} annotations={annotations} onAdd={addAnnotation} onComment={commentAnnotation} /> : null}
+        <QueuedMessageBar items={queuedBar} />
         <form className="cx-composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}
           onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
           onDrop={(event) => { if (event.dataTransfer.files.length) { event.preventDefault(); void addFiles(event.dataTransfer.files); } }}>
