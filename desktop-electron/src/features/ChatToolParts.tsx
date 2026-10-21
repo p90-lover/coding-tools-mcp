@@ -1,9 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { numberedDiff, type ChatStepRound } from "./ao-chat";
+import { chatMessageReadable, numberedDiff, type ChatStepRound } from "./ao-chat";
 
 // Parts of a chat turn both transcripts draw: the Claude Code one (AgentOrchestratorChat) and the
 // DeepSeek Harness one (DshTranscript), so a fix to one is a fix to both.
+
+/**
+ * How a message the person sent is drawn (AgentOrchestratorChat provides its SentMessage: attached
+ * images as thumbnails). A steer in the DeepSeek transcript showed "Attached image: <path>" as text.
+ */
+export const SentMessageView = createContext<(text: string) => ReactNode>(
+  (text) => <div className="cx-bubble"><p>{chatMessageReadable(text)}</p></div>);
 
 /**
  * A card's earlier rounds (a reviewer's past cycles, a retried card's past attempts), oldest first,
