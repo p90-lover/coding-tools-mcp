@@ -6,4 +6,4 @@ Coding Tools adds CPA browser login, per-account auth files, and credential sele
 
 The upstream Go-plan plugin does not process image input. Keep the old proxy available until a vision replacement or an explicit acceptance of that gap. A real CommandCode account and running installed app are needed for live inference proof.
 
-To rebuild on Windows, use Go 1.26.8 with CGO enabled and Zig 0.16.0 as `CC="zig cc -target x86_64-windows-gnu"`, then run `go test ./...` and `go build -buildmode=c-shared -o commandcode-go-v1.0.0-codingtools.1.dll ./cmd/commandcodego`.
+To rebuild on Windows, use Go 1.27.1 with CGO enabled and Zig 0.16.0 as `CC="zig cc -target x86_64-windows-gnu"`, then run `go test ./...` and `go build -buildmode=c-shared -trimpath -ldflags "-s -w" -o commandcode-go-v1.0.0-codingtools.3.dll ./cmd/commandcodego`.

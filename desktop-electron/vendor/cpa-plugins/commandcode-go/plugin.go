@@ -42,7 +42,7 @@ const (
 	upstreamBaseURL = "https://api.commandcode.ai"
 )
 
-const pluginVersion = "1.0.0-codingtools.2"
+const pluginVersion = "1.0.0-codingtools.3"
 
 // CommandCodeGoPlugin wires auth, model metadata and execution.
 type CommandCodeGoPlugin struct {

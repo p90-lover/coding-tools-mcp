@@ -393,6 +393,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   }
   // continuable() checks in flight, by session (see there).
   const continuing = new Map();
+  // "exited" chat sessions already exited again this run to stop a leftover host (idleChatSessions).
+  const exitedReleased = new Set();
   /**
    * The newest items of a session's conversation. AO counts messages and tool activities alike,
    * and a tool's output can be tens of KB (an MCP browser tool's page dumps), so 100 items reached
@@ -1207,6 +1209,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       try { outcome = await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/exit-agent`, {}); }
       catch (error) {
         if (!/\bAGENT_EXITED\b/.test(String(error?.message))) throw error;
+        // AO stopped any host the exited session still had; the idle sweep need not ask again.
+        exitedReleased.add(String(id));
+        if (exitedReleased.size > 2000) exitedReleased.delete(exitedReleased.values().next().value);
         outcome = { ok: true, ...await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`) };
       }
       if (outcome?.ok !== true || outcome.session?.id !== id || outcome.session?.status !== "exited") {
@@ -1221,7 +1226,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     async idleChatSessions(idleMs, now = Date.now()) {
       const list = await internalApi("GET", "/api/v1/sessions");
       const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
-      const candidates = sessions.filter(session => session?.mode === "chat" && session.status === "idle" && !session.isTerminated);
+      // An "exited" chat can still have its agent running: AO marks it exited when the daemon
+      // restarts, but its chat host lives on for a reattach that never comes (five such agents held
+      // 1.4 GB on 2026-10-21). Exiting it again stops that host (AO's ExitAgent), once per app run.
+      const candidates = sessions.filter(session => session?.mode === "chat" && !session.isTerminated
+        && (session.status === "idle" || (session.status === "exited" && !exitedReleased.has(String(session.id)))));
       const idle = await Promise.all(candidates.map(async session => {
         const conversation = await internalApi("GET", `/api/v1/sessions/${sessionId(session.id)}/conversation?limit=1`).catch(() => null);
         const turns = Array.isArray(conversation?.turns) ? conversation.turns : [];

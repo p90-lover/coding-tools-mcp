@@ -136,7 +136,20 @@ func (e *Executor) Execute(ctx context.Context, req pluginapi.ExecutorRequest) (
 	if err != nil {
 		return pluginapi.ExecutorResponse{}, err
 	}
+	if sieve := sieveFor(req.Payload); sieve != nil {
+		raw = sieve.sieveMessage(raw)
+	}
 	return pluginapi.ExecutorResponse{Payload: raw}, nil
+}
+
+// sieveFor turns tool calls a model wrote as text into real ones (texttools.go), for a request
+// that offered tools; nil otherwise.
+func sieveFor(payload []byte) *toolSieve {
+	var body map[string]any
+	if json.Unmarshal(payload, &body) != nil {
+		return nil
+	}
+	return newToolSieve(body)
 }
 
 // ExecuteStream streams the generate wire, converting each JSONL event into
@@ -190,8 +203,27 @@ func (e *Executor) ExecuteStream(ctx context.Context, req pluginapi.ExecutorRequ
 				return true
 			}
 		}
+		sieve := sieveFor(req.Payload)
+		send := func(frame []byte) bool {
+			if sieve == nil || len(frame) == 0 {
+				return len(frame) == 0 || emit(frame)
+			}
+			for _, chunk := range sieve.sieveChunk(frame) {
+				if !emit(chunk) {
+					return false
+				}
+			}
+			return true
+		}
+		defer func() {
+			if sieve != nil {
+				if rest := sieve.drain(); rest != nil {
+					emit(rest)
+				}
+			}
+		}()
 		if frame, err := builder.roleChunk(); err == nil {
-			if !emit(frame) {
+			if !send(frame) {
 				return
 			}
 		}
@@ -209,7 +241,7 @@ func (e *Executor) ExecuteStream(ctx context.Context, req pluginapi.ExecutorRequ
 				out <- pluginapi.ExecutorStreamChunk{Err: err}
 				return
 			}
-			if len(frame) > 0 && !emit(frame) {
+			if len(frame) > 0 && !send(frame) {
 				return
 			}
 			if ev.Type == "finish" {

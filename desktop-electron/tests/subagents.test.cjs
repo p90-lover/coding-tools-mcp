@@ -149,8 +149,10 @@ test("the saved settings and subagents are validated and kept", () => {
     assert.deepEqual(saved.agents.map((agent) => agent.id), ["explorer", "implementer", "reviewer"], "the starters until the user changes them");
     assert.equal(saved.settings.maxConcurrent, 3);
     assert.deepEqual(saved.settings.defaultRoute, ROUTE);
-    const clamped = cleanConfig({ settings: { maxConcurrent: 99, timeoutMinutes: 0, permission: "nonsense" }, agents: [] }).settings;
-    assert.equal(clamped.maxConcurrent, 10);
+    // As many as the person wants, up to 100, globally and per chat (the cap was 10).
+    const clamped = cleanConfig({ settings: { maxConcurrent: 500, maxPerChat: 40, timeoutMinutes: 0, permission: "nonsense" }, agents: [] }).settings;
+    assert.equal(clamped.maxConcurrent, 100);
+    assert.equal(clamped.maxPerChat, 40);
     assert.equal(clamped.timeoutMinutes, 1);
     assert.equal(clamped.permission, "auto");
     assert.throws(() => cleanConfig({ agents: [{ name: "a" }, { name: "A" }] }), /share the id/);
