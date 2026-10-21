@@ -3626,6 +3626,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const observeCard = () => Promise.resolve().then(() => harnessService().observe?.(card.receipt.thread_id, expectedTurns.get(card.receipt.thread_id)))
       .catch(() => null);
     let waiting = await observeCard();
+    // A card that could not be read may be waiting on a request: steering it then wedged AO's chat
+    // (seen 2026-10-21: a steer into a turn waiting on an approval held the session's dispatch lock,
+    // and every later steer, approval answer and stop hung for 180 s). The message waits instead.
+    if (waiting === null) {
+      return { ok: true, steered: false, waiting: true, reason: "The agent's state could not be read; your message is steered in once it can be" };
+    }
     const asking = (state) => Boolean(state?.approvals?.length || state?.needsInput);
     // A steer never stops what the agent is doing (the user: "it shouldnt stop the model action,
     // wait it done to steer"). Declining the waiting request made the agent's tool call fail with
@@ -4202,6 +4208,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const characters = Array.from(text);
     return characters.length <= 8000 ? text : characters.slice(0, 7970).join("") + "\n[visible work truncated]";
   }
+  const STOP_SETTLE_MS = 15_000;
+  const STOP_SETTLE_POLL_MS = 250;
   /** Interrupt acknowledges a signal; only an exited or settled, non-working turn releases ownership. */
   async function stopExternalTurn(session, ownership = null) {
     for (;;) {
@@ -4224,11 +4232,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (!ownership?.completed && !alreadyExited) {
         await service.interrupt(session);
         let stopped = false;
-        for (let attempt = 0; attempt < 8; attempt++) {
+        // Up to 15 s for the interrupt to settle (it was 2 s). Seen live: a stalled chat's interrupt
+        // landed later than that, so the restart failed ("stop needs attention"), its next steers
+        // and send were refused, and the chat sat for 8 more minutes until another steer found the
+        // turn over.
+        const tries = Math.ceil(STOP_SETTLE_MS / STOP_SETTLE_POLL_MS);
+        for (let attempt = 0; attempt < tries; attempt++) {
           const observation = await service.observe(session);
           if (observation?.exited === true || (["completed", "failed", "interrupted", "cancelled"].includes(observation?.turnState)
             && !["working", "running", "starting"].includes(observation?.status))) { stopped = true; break; }
-          if (attempt < 7) await new Promise(resolve => setTimer(resolve, 250));
+          if (attempt < tries - 1) await new Promise(resolve => setTimer(resolve, STOP_SETTLE_POLL_MS));
         }
         if (!stopped) throw new Error("Owned turn is still working; stop needs attention, no replacement was started");
       }

@@ -5378,7 +5378,8 @@ test("team Stop and graph replacement require observed settlement after an inter
       : workflow.call("update_run", { workspaceId: "ws", change: { operation: "graph", run_id: "run", expected_revision: 3, change: { operation: "set_parents", node_id: "one", parents: [] } } }); };
     try {
       await assert.rejects(invoke(), /still working|settlement.*unconfirmed/i, "ACK alone is insufficient");
-      assert.equal(reads, action === "stop" ? 9 : 8, "one optional exited-host preflight plus bounded settlement checks");
+      // 60 settlement checks: 15 s at 250 ms (it was 8, 2 s, which gave up on interrupts that land later).
+      assert.equal(reads, action === "stop" ? 61 : 60, "one optional exited-host preflight plus bounded settlement checks");
       assert.equal(updates, 0, "a live attempt cannot be replaced");
       assert.deepEqual(interrupted, ["s1"]);
       remainingBusy = 2; reads = 0;
@@ -6152,4 +6153,50 @@ test("a follow-up is still refused at once while a card works or the run starts,
   await assert.rejects(stuck.retire(), /still running/);
   assert.equal(stuck.ticks(), 40, "a loop that never ends is waited for 10 s at most");
   assert.deepEqual(stuck.cancels, []);
+});
+
+test("a hung turn whose interrupt lands after a few seconds is still restarted, not left as 'stop needs attention'", async () => {
+  // Seen live: the stall restart gave up after 2 s ("Owned turn is still working; stop needs
+  // attention"), though AO had the turn ended a little later; the chat sat for 8 more minutes.
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  const interrupted = [];
+  let readsAfterInterrupt = 0;
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 4 * 60_000,
+    setTimer: (callback) => { callback(); return 0; },
+    aoHarness: {
+      // The interrupt takes 20 more reads (5 s at 250 ms) to settle.
+      observe: async () => {
+        const ended = interrupted.length && ++readsAfterInterrupt > 20;
+        return { turnId: "t1", turnState: ended ? "interrupted" : "running", status: ended ? "ready" : "working", lastActivityAt: 1_000_000, timeline: [], approvals: [] };
+      },
+      steer: async () => ({ steered: true }),
+      interrupt: async id => { interrupted.push(id); },
+    } });
+  const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
+  assert.equal(result.restarted, true, "the hung turn is stopped and the message goes as the next turn");
+  assert.deepEqual(interrupted, ["sess-1"]);
+});
+
+test("a steer is never sent to an agent whose state could not be read", async () => {
+  // Seen live: a turn waiting on an approval could not be read (its conversation was too large for
+  // the old client), was taken for "not asking", and the steer wedged the chat in AO.
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  const steered = [], interrupted = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless,
+    aoHarness: {
+      observe: async () => { throw new Error("AO response exceeds the handler limit"); },
+      steer: async (id, text) => { steered.push([id, text]); return { steered: true }; },
+      interrupt: async id => { interrupted.push(id); },
+    } });
+  const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
+  assert.equal(result.steered, false);
+  assert.equal(result.waiting, true, "it waits in the chat's queue and is steered in once the agent can be read");
+  assert.deepEqual(steered, [], "nothing is steered blind");
+  assert.deepEqual(interrupted, [], "nor is the turn stopped");
 });
