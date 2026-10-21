@@ -1893,6 +1893,45 @@ test("runtime recovery activity exposes only bounded sanitized current output", 
   assert.doesNotMatch(JSON.stringify(live), /SECRET_TOKEN|sk-privatekey/);
 });
 
+test("with runReadFreshMs, the activity poll and its per-card checks share one run read, and any other request reads afresh", async () => {
+  const native = { id: "w1", role: "worker", state: "running", route: { harness_id: "codex-native", provider_id: "chatgpt-web", model: "chatgpt-web/high" },
+    receipt: { status: "submitted", thread_id: "thread-1", started_at_ms: 1_000 } };
+  const make = (runReadFreshMs) => {
+    const reads = [];
+    const workflow = createAgentOrchestratorWorkflow({
+      runReadFreshMs,
+      requestHeadless: async (endpoint, body, options) => {
+        if (endpoint === "/api/v1/ao/read") { reads.push(body.run_id); return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [native] }] }; }
+        if (endpoint === "/api/v1/ao/harness/status") return { ok: true, status: { connected: true, threads: [{ id: "thread-1", turn_id: "t", activity: "working" }] } };
+        if (endpoint === "/api/v1/ao/update") { reads.push(`write:${JSON.stringify(options ?? null)}`); return { ok: true, team: { id: "team-1", revision: 2 } }; }
+        throw new Error(`unexpected ${endpoint}`);
+      },
+      confirm: async () => true,
+    });
+    return { workflow, reads };
+  };
+  const poll = async (workflow) => {
+    await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
+    await new Promise(resolve => setImmediate(resolve));
+  };
+  // Without it (the default), the poll reads the run and reads it again for each card it checked.
+  const plain = make(0);
+  await poll(plain.workflow);
+  assert.equal(plain.reads.length, 2);
+  const shared = make(300);
+  await poll(shared.workflow);
+  assert.deepEqual(shared.reads, ["run-1"], "one read serves the poll and the card's check");
+  // A request that may change a run drops what was read, so the next poll reads again.
+  await shared.workflow.call("team_update", { workspaceId: "ws-1", change: { operation: "set_limits" } }).catch(() => null);
+  await poll(shared.workflow);
+  assert.equal(shared.reads.filter(entry => entry === "run-1").length, 2);
+  assert.ok(shared.reads.some(entry => entry.startsWith("write:")), "the write went through");
+  // Once the moment has passed, a read is taken again.
+  await new Promise(resolve => setTimeout(resolve, 320));
+  await poll(shared.workflow);
+  assert.equal(shared.reads.filter(entry => entry === "run-1").length, 3);
+});
+
 test("activity reports each working card's runtime and current step without advancing the run", async () => {
   const calls = [];
   const native = { id: "w1", role: "worker", state: "running", route: { harness_id: "codex-native", provider_id: "chatgpt-web", model: "chatgpt-web/high" },
