@@ -119,10 +119,10 @@ pub struct DataStore {
     baseline: serde_json::Value,
     persistent: bool,
     parsed: Option<Parsed>,
-    /// The file version `data` and `baseline` are an exact copy of, while they are. Each request
-    /// refreshes the store two to four times, and with the file unchanged every refresh still
-    /// cloned the whole parsed copy (1.4 MB of runs): the headless service sat at ~45% of a core
-    /// with the UI's polls alone. Every change to `data` goes through `save`, which clears it.
+    /// The file version `data` and `baseline` were last set from (a load, a refresh, a save).
+    /// While the file still has it, a refresh has nothing to do. Every change to `data` goes
+    /// through save(), which clears it first, so a save that fails leaves the next refresh to
+    /// read the file again.
     synced: Option<FileStamp>,
 }
 
@@ -151,7 +151,6 @@ impl DataStore {
         }
         // Read: the stamp from before reading (see latest_on_disk). Written: the file just saved.
         store.remember_parsed(if wrote { file_stamp(&path) } else { read_stamp })?;
-        store.synced = store.parsed.as_ref().map(|parsed| parsed.stamp);
         crate::auth::sync_trusted_origins(&store.data);
         Ok(store)
     }
@@ -174,6 +173,7 @@ impl DataStore {
     /// Keeps the store's current data, just loaded or written, as the parsed copy of the file
     /// version `stamp` names. Its JSON form is built from the data, as reading the file would.
     fn remember_parsed(&mut self, stamp: Option<FileStamp>) -> AppResult<()> {
+        self.synced = stamp;
         self.parsed = match stamp {
             Some(stamp) => Some(Parsed {
                 stamp,
@@ -185,15 +185,16 @@ impl DataStore {
         Ok(())
     }
 
-    /// The data file's current contents and their JSON form: the parsed copy while the file is
-    /// the version it was parsed from, otherwise read again. Callers hold the data file lock.
-    fn latest_on_disk(&mut self) -> AppResult<(AppData, serde_json::Value)> {
+    /// The data file's current contents, their JSON form and the stamp they belong to: the parsed
+    /// copy while the file is the version it was parsed from, otherwise read again. Callers hold
+    /// the data file lock.
+    fn latest_on_disk(&mut self) -> AppResult<(AppData, serde_json::Value, Option<FileStamp>)> {
         // Stamped before reading: a write landing in between leaves an older stamp on the newer
         // data, so the next call reads again, never the other way round.
         let stamp = file_stamp(&data_file_path()?);
         if let (Some(stamp), Some(parsed)) = (stamp, self.parsed.as_ref()) {
             if parsed.stamp == stamp {
-                return Ok((parsed.data.clone(), parsed.value.clone()));
+                return Ok((parsed.data.clone(), parsed.value.clone(), Some(stamp)));
             }
         }
         let data = load_or_migrate()?;
@@ -203,7 +204,7 @@ impl DataStore {
             data: data.clone(),
             value: value.clone(),
         });
-        Ok((data, value))
+        Ok((data, value, stamp))
     }
 
     pub fn read_file<R>(f: impl FnOnce(&AppData) -> AppResult<R>) -> AppResult<R> {
@@ -239,15 +240,18 @@ impl DataStore {
             return Ok(());
         }
         let _guard = lock_data_file()?;
-        // Already the version on disk: nothing to copy (or to tell the origin list again).
+        // The file is the version this store already holds: nothing to copy. Each request
+        // refreshed several times, and each refresh deep-copied the whole data and its JSON form
+        // (every run, node and answer, often MBs) while a chat's polls asked several times a
+        // second; coding-tools-headless sat at a third of a core.
         let current = file_stamp(&data_file_path()?);
         if current.is_some() && current == self.synced {
             return Ok(());
         }
-        let (data, value) = self.latest_on_disk()?;
+        let (data, value, stamp) = self.latest_on_disk()?;
         self.baseline = value;
         self.data = data;
-        self.synced = self.parsed.as_ref().map(|parsed| parsed.stamp);
+        self.synced = stamp;
         crate::auth::sync_trusted_origins(&self.data);
         Ok(())
     }
@@ -257,16 +261,17 @@ impl DataStore {
             self.baseline = serde_json::to_value(&self.data)?;
             return Ok(());
         }
-        // `data` holds changes not on disk (or will, if this fails): never a copy of the file.
-        self.synced = None;
         let _guard = lock_data_file()?;
-        let (latest, latest_value) = self.latest_on_disk()?;
+        // `data` holds an edit not on disk yet: until this save lands, a refresh reads the file.
+        self.synced = None;
+        let (latest, latest_value, stamp) = self.latest_on_disk()?;
         let local = serde_json::to_value(&self.data)?;
         let merged = match merge_local_changes(&self.baseline, &local, &latest_value) {
             Ok(value) => value,
             Err(error) => {
                 self.baseline = latest_value;
                 self.data = latest;
+                self.synced = stamp;
                 return Err(error);
             }
         };
@@ -277,12 +282,13 @@ impl DataStore {
         }
         self.data = data;
         self.baseline = merged;
-        if wrote {
+        if !wrote {
+            // Nothing to write: the store now holds the file's version as it is.
+            self.synced = stamp;
+        } else {
             // What was just written is the file now; nothing needs to read it back.
             self.remember_parsed(file_stamp(&data_file_path()?))?;
         }
-        // Written, or already equal to the latest version read: the store is that file version.
-        self.synced = self.parsed.as_ref().map(|parsed| parsed.stamp);
         crate::auth::sync_trusted_origins(&self.data);
         Ok(())
     }
@@ -564,12 +570,8 @@ mod tests {
             store.data.last_workspace_id = "unsaved".into();
             store.refresh().expect("refresh after a write");
             assert_eq!(store.data().last_workspace_id, "written-elsewhere");
-            // The file is unchanged and the store is its copy: a refresh copies nothing.
-            assert!(store.synced.is_some());
-            store.refresh().expect("refresh of an unchanged file");
-            assert_eq!(store.data().last_workspace_id, "written-elsewhere");
-            // Data changes only inside save(), which first marks the store unsynced; an edit a
-            // failed save left behind is dropped by the next refresh, from the parsed copy.
+            // An edit whose save failed (here: one that never reached save) is dropped too: the
+            // store is no longer known to hold the file's version, so the refresh reads it.
             store.data.last_workspace_id = "unsaved-again".into();
             store.synced = None;
             store.refresh().expect("refresh from the parsed copy");
@@ -580,6 +582,35 @@ mod tests {
             assert_eq!(store.data().last_workspace_id, "saved-here");
             let on_disk = DataStore::read_file(|data| Ok(data.last_workspace_id.clone())).unwrap();
             assert_eq!(on_disk, "saved-here");
+        });
+    }
+
+    #[test]
+    fn refresh_of_an_unchanged_file_copies_nothing() {
+        crate::data::with_test_file(isolated_fixture(), || {
+            let mut store = DataStore::load().expect("load");
+            store.data.last_workspace_id = "kept".into();
+            store.save().expect("save");
+            // The same allocation after refreshing: the data was not replaced by a copy.
+            let held = store.data().last_workspace_id.as_ptr();
+            for _ in 0..3 {
+                store.refresh().expect("refresh");
+            }
+            assert_eq!(store.data().last_workspace_id.as_ptr(), held);
+            assert_eq!(store.data().last_workspace_id, "kept");
+            // A save with nothing new to write keeps the store in step as well.
+            store.save().expect("save without changes");
+            let held = store.data().last_workspace_id.as_ptr();
+            store.refresh().expect("refresh");
+            assert_eq!(store.data().last_workspace_id.as_ptr(), held);
+            // Another writer: the next refresh reads its version.
+            DataStore::update_file(|data| {
+                data.last_workspace_id = "theirs".into();
+                Ok(())
+            })
+            .expect("another writer");
+            store.refresh().expect("refresh after a write");
+            assert_eq!(store.data().last_workspace_id, "theirs");
         });
     }
 

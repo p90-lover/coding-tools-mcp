@@ -3189,6 +3189,8 @@ async function start() {
     const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
       // Stop agents that sat idle for a while; their chats resume them on the next message.
       releaseIdleAgents: true,
+      // One run read serves the activity poll, the run loop and their checks for 300 ms.
+      runReadFreshMs: 300,
       // Each launch logs where its time went (ao.launch_timing).
       logger,
       // A pre-warmed session is reused only by a launch that attaches the same app tools.

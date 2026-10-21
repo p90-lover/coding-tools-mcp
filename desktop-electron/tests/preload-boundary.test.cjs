@@ -248,6 +248,37 @@ test("schema-invalid and oversized requests fail before Electron IPC", async () 
   assert.equal(invocations.length, 0);
 });
 
+test("request size is counted in UTF-8 bytes, not characters", async () => {
+  const { api, invocations } = loadPreload(() => ({ items: [], nextCursor: null }));
+  // 30,000 characters are under the 64 KiB limit, but 90,000 bytes are not.
+  await assert.rejects(
+    api.history.search({ workspaceRoot: "C:\\fixture", query: "\u4e2d".repeat(30_000) }),
+    /IPC_REQUEST_TOO_LARGE: 90\d{3} bytes/,
+  );
+  // A surrogate pair is 4 bytes: 16,000 emoji (32,000 units) are 64,000 bytes and fit.
+  await api.history.search({ workspaceRoot: "C:\\fixture", query: "\u{1f600}".repeat(16_000) });
+  await assert.rejects(
+    api.history.search({ workspaceRoot: "C:\\fixture", query: "\u{1f600}".repeat(16_400) }),
+    /IPC_REQUEST_TOO_LARGE/,
+  );
+  assert.equal(invocations.length, 1);
+});
+
+test("responses arrive as frozen snapshots and holes in arrays are refused", async () => {
+  const items = [{ id: "a", nested: { tags: ["x"] } }];
+  const { api } = loadPreload(() => ({ items, nextCursor: null }));
+  const result = await api.history.search({ workspaceRoot: "C:\\fixture", query: "a" });
+  assert.notEqual(result.items, items);
+  assert.equal(Object.isFrozen(result.items[0].nested.tags), true);
+  assert.throws(() => { "use strict"; result.items[0].id = "b"; }, TypeError);
+
+  const sparse = loadPreload(() => ({ items: [{ id: "a" }, , { id: "c" }], nextCursor: null }));
+  await assert.rejects(
+    sparse.api.history.search({ workspaceRoot: "C:\\fixture", query: "a" }),
+    /IPC_RESPONSE_SCHEMA_INVALID: \$\.items must be a dense JSON array/,
+  );
+});
+
 test("forged validation codes thrown by accessors are normalized", async () => {
   const input = {};
   Object.defineProperty(input, "workspaceId", {

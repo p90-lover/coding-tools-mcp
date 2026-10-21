@@ -260,16 +260,20 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, logger = null }) {
-  // AO run reads shared for a moment (see runs()). Every other headless call may change AO's state,
-  // so it counts once as it starts and once as it ends: a read taken across one is never reused.
-  const AO_READ_FRESH_MS = 250;
-  const aoReads = new Map(); // `${workspace}|${run}` -> { at, writes, read }
-  let aoWrites = 0;
-  const sendHeadless = requestHeadless;
-  requestHeadless = async (...args) => {
-    aoWrites += 1;
-    try { return await sendHeadless(...args); } finally { aoWrites += 1; }
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, logger = null }) {
+  // One run read serves every caller for a moment (as the upstream shares a conversation tail). A
+  // working chat's activity poll, the run loop and their per-node checks each read the same run
+  // within milliseconds: 10-15 /ao/read a second while one mission worked, each one a copy and a
+  // serialization of the run in coding-tools-headless. Any other request may change a run, so it
+  // drops what was read, before it is sent and again once it is answered. The app turns it on
+  // (runReadFreshMs); off by default, so a caller that changes runs some other way reads afresh.
+  const HEADLESS_READS = new Set(["/api/v1/ao/read", "/api/v1/ao/harness/status", "/api/v1/ao/harness/permission-profiles"]);
+  const runReads = new Map(); // JSON [workspace, run] -> { at, read }
+  // Every argument passes through (a confirmed action's third is its localConfirmation).
+  const requestHeadless = (endpoint, ...rest) => {
+    if (HEADLESS_READS.has(endpoint)) return sendHeadless(endpoint, ...rest);
+    runReads.clear();
+    return Promise.resolve(sendHeadless(endpoint, ...rest)).finally(() => runReads.clear());
   };
   const goals = createGoalStore({ file: goalsFile, now });
   const chatPreferences = createChatPreferences(chatPreferencesFile);
@@ -1264,36 +1268,25 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     return { mission, node: mission?.nodes?.find((entry) => entry.id === nodeId) };
   }
 
-  /**
-   * A workspace's AO runs, or one run. `shared`: the UI's polls (the chat's activity, run status,
-   * the run list) take a read another caller made a moment ago. A working chat's activity poll,
-   * run status poll and the run loop read the same run several times a second, and each read cost
-   * the headless service several copies of the whole data file: it sat at ~45% of a core. Decisions
-   * (the run loop, a claim, a card's re-check) always read afresh, and their reads serve the polls.
-   * A read taken across any other headless call (which may change AO's state) is never reused, and
-   * each caller gets its own copy.
-   */
-  async function runs({ workspaceId, runId, shared: share = false } = {}) {
-    const id = clean(workspaceId, 128);
-    const body = { workspace_id: id, ...(runId ? { run_id: clean(runId, 80) } : {}) };
-    const key = `${body.workspace_id}|${body.run_id ?? ""}`;
-    const known = aoReads.get(key);
-    const shared = share && known && known.writes === aoWrites && now() - known.at < AO_READ_FRESH_MS
-      ? known.read
-      : null;
-    const read = shared ?? (async () => {
-      const response = await sendHeadless("/api/v1/ao/read", body);
+  // Callers only read what comes back (none changes a run in place), so one response is shared.
+  function runs({ workspaceId, runId } = {}) {
+    const id = clean(workspaceId, 128), run = runId ? clean(runId, 80) : "";
+    const key = JSON.stringify([id, run]);
+    const known = runReads.get(key);
+    if (known && Date.now() - known.at < runReadFreshMs) return known.read;
+    const read = (async () => {
+      const response = await requestHeadless("/api/v1/ao/read", { workspace_id: id, ...(run ? { run_id: run } : {}) });
       if (response?.ok !== true || !Array.isArray(response.runs)) {
         throw new Error("AO run read failed");
       }
       return response;
     })();
-    if (!shared) {
-      aoReads.set(key, { at: now(), writes: aoWrites, read });
-      read.catch(() => { if (aoReads.get(key)?.read === read) aoReads.delete(key); });
-      if (aoReads.size > 64) aoReads.delete(aoReads.keys().next().value);
+    if (runReadFreshMs > 0) {
+      runReads.set(key, { at: Date.now(), read });
+      read.catch(() => { if (runReads.get(key)?.read === read) runReads.delete(key); });
+      if (runReads.size > 64) runReads.delete(runReads.keys().next().value);
     }
-    return structuredClone(await read);
+    return read;
   }
 
   async function updateRun({ workspaceId, change } = {}) {
@@ -1470,16 +1463,22 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
 
   // What each working card is doing now, for the chat and the cards: when it started, its
   // current step and when anything was last heard. Read-only; it never advances the run.
-  function publicText(value, limit = 4096, keepEnd = false) {
+  /** CPA's gateway key, to redact from what the chat shows; null without a CPA connection. */
+  function cpaKeyToRedact() {
+    try {
+      const key = cpaConnection?.()?.proxyApiKey;
+      return typeof key === "string" && key.length >= 8 ? key : null;
+    } catch { return null; } // No CPA connection is needed for read-only output.
+  }
+  /** `key` is the CPA key to redact, when the caller read it once for many texts (publicTimeline). */
+  function publicText(value, limit = 4096, keepEnd = false, key = cpaKeyToRedact()) {
     let text = String(value ?? "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
       .replace(/Bearer\s+\S+|sk-[A-Za-z0-9_-]+/gi, "[redacted]")
       .replace(/((?:api[_-]?key|access[_-]?token|authorization)\s*[:=]\s*)[^\s,;]+/gi, "$1[redacted]");
-    try {
-      const key = cpaConnection?.().proxyApiKey;
-      if (typeof key === "string" && key.length >= 8) text = text.replaceAll(key, "[redacted]");
-    } catch { /* No CPA connection is needed for read-only output. */ }
+    if (key) text = text.replaceAll(key, "[redacted]");
     return keepEnd ? text.slice(-limit) : text.slice(0, limit);
   }
+  const publicTextOf = publicText;
 
   /**
    * A role's reasoning, tool calls and messages for the chat, every field through publicText (a
@@ -1536,6 +1535,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   }
 
   function publicTimeline(items) {
+    // The CPA key, read once for the whole timeline rather than once per field (see publicText).
+    const key = cpaKeyToRedact();
+    const publicText = (value, limit, keepEnd = false) => publicTextOf(value, limit, keepEnd, key);
     // The same bounds the upstream adapter's turnTimeline reads with (TIMELINE_ITEMS and
     // TIMELINE_TEXT_BYTES there): every item it built, and a message or thought uncut.
     return (Array.isArray(items) ? items : []).slice(-400).map(item => ({
@@ -1560,12 +1562,31 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     }));
   }
 
+  // The window refuses an answer over 1 MB (ipc-schema). A long turn's thoughts and messages (up to
+  // 64 KB each) passed that, and its whole work failed to open (1.5 MB, seen live). Over this budget
+  // the longest texts are cut first, then tool arguments, output and diffs, and only then the oldest
+  // items, so the turn still opens with as many of its tool calls as fit.
+  const TIMELINE_RESPONSE_BYTES = 800_000;
+  function fitTimeline(items) {
+    const size = () => Buffer.byteLength(JSON.stringify(items));
+    if (size() <= TIMELINE_RESPONSE_BYTES) return items;
+    const cut = (text, limit) => text.length <= limit ? text : `${text.slice(0, limit).replace(/[\ud800-\udbff]$/, "")}…`;
+    for (const limit of [16 * 1024, 4096, 1024]) {
+      items = items.map(item => item.text.length > limit ? { ...item, text: cut(item.text, limit) } : item);
+      if (size() <= TIMELINE_RESPONSE_BYTES) return items;
+    }
+    items = items.map(({ input: _input, output: _output, files, ...item }) =>
+      files ? { ...item, files: files.map(({ diff: _diff, ...file }) => file) } : item);
+    while (items.length > 1 && size() > TIMELINE_RESPONSE_BYTES) items = items.slice(Math.ceil(items.length / 10));
+    return items;
+  }
+
   /** turn_timeline: a finished card's work, read back from its AO session when the chat opens it. */
   async function turnTimeline({ workspaceId, runId, nodeId } = {}) {
     const { node } = await savedNode(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80));
     const session = node?.receipt?.thread_id, turnId = node?.receipt?.turn_id;
     if (!node || !externalAgent(node) || !session || !turnId) return { ok: true, timeline: [] };
-    return { ok: true, timeline: publicTimeline(await harnessService().timeline(session, turnId)) };
+    return { ok: true, timeline: fitTimeline(publicTimeline(await harnessService().timeline(session, turnId))) };
   }
 
   const activityFrames = new Map();
@@ -1577,7 +1598,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
 
   async function activity({ workspaceId, runId } = {}) {
     const id = clean(workspaceId, 128), run = clean(runId, 80);
-    const saved = await runs({ workspaceId: id, runId: run, shared: true });
+    const saved = await runs({ workspaceId: id, runId: run });
     const mission = saved.runs.find(entry => entry.id === run && entry.workspace_id === id);
     if (!mission) throw new Error("AO run not found");
     const working = mission.nodes.filter(node => ["reserved", "running"].includes(node.state));
@@ -1960,7 +1981,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // `driven`: this app session's loop is observing the run right now. A card a previous session
     // left "running" is only ever settled by an observe, so callers need to tell the two apart.
     if (current) return { ok: true, status: current.status, driven: current.driving === true, ...(current.detail ? { detail: current.detail } : {}) };
-    const saved = await runs({ workspaceId: id, runId: run, shared: true });
+    const saved = await runs({ workspaceId: id, runId: run });
     const mission = saved.runs.find((entry) => entry.id === run && entry.workspace_id === id);
     if (!mission) throw new Error("AO run unavailable");
     const status = mission.paused && !mission.cancelled ? "paused" : mission.cancelled || mission.nodes.some((node) => ["held", "cancelled", "archived", "reserved", "running"].includes(node.state))
@@ -4144,7 +4165,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         return { ok: true, run: await subagents.stop(clean(args.subagentId, 128)) };
       }
       case "runs": {
-        const saved = await runs({ workspaceId: args.workspaceId, runId: args.runId, shared: true });
+        const saved = await runs(args);
         // The runs of deleted chat messages stay in AO's history but are not shown in their chat.
         return { ...saved, runs: chatEdits.visible(clean(args.workspaceId, 128), saved.runs), goals: goals.forWorkspace(clean(args.workspaceId, 128)),
           wakeups: wakeups.forWorkspace(clean(args.workspaceId, 128)) };

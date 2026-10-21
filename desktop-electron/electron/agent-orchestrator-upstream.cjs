@@ -4,7 +4,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
-const { spawn, spawnSync } = require("node:child_process");
+const { execFile, spawn } = require("node:child_process");
 const { createAgentOrchestratorGateway } = require("./agent-orchestrator-gateway.cjs");
 const { createAoWorkspaceBoard } = require("./agent-orchestrator-workspace.cjs");
 const { readCpaCatalog, collectMissionAccounting } = require("./agent-orchestrator-accounting.cjs");
@@ -422,24 +422,42 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     return items.sort((a, b) => a.sequence - b.sequence).slice(-TIMELINE_ITEMS);
   }
   /**
-   * A finished turn's transcript, read back from AO for the chat's folded "Worked" row. AO keeps
-   * the whole conversation; an earlier turn is found by paging back (beforeSequence) a few pages,
-   * stopping once a page reaches a turn before it.
+   * The page of a session's conversation before `beforeSequence`. A page over the handler limit
+   * (a command's long output, a screenshot) is read again smaller; one item over it on its own is
+   * stepped past. Those failures used to end the read, and a finished turn lost every tool call
+   * before its last page: its work showed only its final thought.
    */
-  async function pastTurnTimeline(id, turnId, pages = 6) {
+  async function conversationPageBefore(id, beforeSequence) {
+    for (const limit of [60, 20, 5, 1]) {
+      try {
+        return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${limit}&beforeSequence=${beforeSequence}`);
+      } catch (error) {
+        if (!/exceeds the handler limit/.test(String(error?.message))) return null;
+      }
+    }
+    return { messages: [], activities: [], hasMoreBefore: beforeSequence > 1, oldestSequence: beforeSequence - 1 };
+  }
+  /**
+   * A finished turn's transcript, read back from AO for the chat's folded "Worked" row. AO keeps
+   * the whole conversation; an earlier turn is found by paging back (beforeSequence), stopping once
+   * a page reaches a turn before it or enough of this turn is in hand (the chat keeps its newest
+   * TIMELINE_ITEMS). A long turn spans many pages: six were too few for one of twenty minutes.
+   */
+  async function pastTurnTimeline(id, turnId, pages = 80) {
     let conversation = await conversationTail(id, [60, 20]);
     const merged = { messages: [], activities: [] };
+    let mine = 0;
     for (let page = 0; conversation && page < pages; page += 1) {
       const messages = Array.isArray(conversation.messages) ? conversation.messages : [];
       const activities = Array.isArray(conversation.activities) ? conversation.activities : [];
       merged.messages.push(...messages);
       merged.activities.push(...activities);
+      mine += [...messages, ...activities].filter(entry => entry.turnId === turnId).length;
       const oldest = [...messages, ...activities].sort((a, b) => (Number(a.sequence) || 0) - (Number(b.sequence) || 0))[0];
-      const seen = merged.messages.some(entry => entry.turnId === turnId) || merged.activities.some(entry => entry.turnId === turnId);
-      if (seen && oldest && oldest.turnId !== turnId) break;
+      if (mine && oldest && oldest.turnId !== turnId) break;
+      if (mine >= TIMELINE_ITEMS) break;
       if (!conversation.hasMoreBefore || !(Number(conversation.oldestSequence) > 0)) break;
-      conversation = await internalApi("GET",
-        `/api/v1/sessions/${sessionId(id)}/conversation?limit=60&beforeSequence=${Number(conversation.oldestSequence)}`).catch(() => null);
+      conversation = await conversationPageBefore(id, Number(conversation.oldestSequence));
     }
     // An earlier turn has ended; a message AO left flagged as streaming is its final text.
     return turnTimeline(merged, turnId, true);
@@ -1307,8 +1325,10 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     }
     if (operation === "check_repository" || operation === "repository_branch") {
       if (typeof args.directory !== "string" || !path.isAbsolute(args.directory)) throw new Error("An absolute local project directory is required");
-      const result = spawnSync("git", ["-C", args.directory, "rev-parse", operation === "check_repository" ? "--is-inside-work-tree" : "--abbrev-ref", ...(operation === "repository_branch" ? ["HEAD"] : [])], { encoding: "utf8", timeout: 5000, windowsHide: true });
-      return operation === "check_repository" ? result.status === 0 && result.stdout.trim() === "true" : result.status === 0 ? result.stdout.trim() : null;
+      // Asked as a project opens; waiting on git synchronously froze every window for as long as it took.
+      const stdout = await new Promise(resolve => execFile("git", ["-C", args.directory, "rev-parse", operation === "check_repository" ? "--is-inside-work-tree" : "--abbrev-ref", ...(operation === "repository_branch" ? ["HEAD"] : [])],
+        { encoding: "utf8", timeout: 5000, windowsHide: true }, (failure, output) => resolve(failure ? null : String(output))));
+      return operation === "check_repository" ? stdout !== null && stdout.trim() === "true" : stdout === null ? null : stdout.trim();
     }
     if (operation === "open_external") {
       const url = new URL(args.url);

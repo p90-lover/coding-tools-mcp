@@ -50,17 +50,32 @@ function isPlainObject(value) {
   return prototype === Object.prototype || prototype === null;
 }
 
+// Every key of every response is normalized (three regular expressions) to look for credentials,
+// and the same few dozen names ("id", "kind", "status"…) repeat throughout. A project's runs and
+// chat timelines held the window for 0.8 s in this checking alone, so a key's form is remembered.
+const NORMALIZED_KEYS = new Map();
+const NORMALIZED_KEYS_MAX = 4096;
 function normalizedJsonKey(key) {
-  return key
+  let normalized = NORMALIZED_KEYS.get(key);
+  if (normalized !== undefined) return normalized;
+  normalized = key
     .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
     .toLowerCase()
     .replace(/[-.\s]+/g, "_");
+  if (NORMALIZED_KEYS.size >= NORMALIZED_KEYS_MAX) NORMALIZED_KEYS.clear();
+  NORMALIZED_KEYS.set(key, normalized);
+  return normalized;
 }
 
 function jsonKeyIsDisallowed(key, rejectSensitiveKeys) {
   return DISALLOWED_JSON_KEYS.has(key)
     || (rejectSensitiveKeys && SENSITIVE_RESPONSE_KEYS.has(normalizedJsonKey(key)));
 }
+
+// `path` names where a value sits, for an error message. It may be a function that builds it:
+// building a path string for every value of a large response cost more than checking the value,
+// so a path is only spelled out when something fails.
+const pathText = (path) => (typeof path === "function" ? path() : path);
 
 function snapshotJsonValue(
   value,
@@ -70,32 +85,35 @@ function snapshotJsonValue(
   depth = 0,
   rejectSensitiveKeys = false,
 ) {
-  if (depth > MAX_JSON_DEPTH) throw codedError(code, `${path} exceeds the maximum JSON depth`);
+  if (depth > MAX_JSON_DEPTH) throw codedError(code, `${pathText(path)} exceeds the maximum JSON depth`);
   if (value === null || typeof value === "string" || typeof value === "boolean") return value;
   if (typeof value === "number" && Number.isFinite(value)) return value;
 
   if (!Array.isArray(value) && !isPlainObject(value)) {
-    throw codedError(code, `${path} must be a JSON value`);
+    throw codedError(code, `${pathText(path)} must be a JSON value`);
   }
-  if (ancestors.has(value)) throw codedError(code, `${path} contains a cyclic reference`);
+  if (ancestors.has(value)) throw codedError(code, `${pathText(path)} contains a cyclic reference`);
 
   ancestors.add(value);
   try {
     if (Array.isArray(value)) {
       const length = value.length;
       if (!Number.isSafeInteger(length) || length < 0 || length > MAX_JSON_ARRAY_ITEMS) {
-        throw codedError(code, `${path} has an invalid or excessive array length`);
+        throw codedError(code, `${pathText(path)} has an invalid or excessive array length`);
       }
-      const keys = Object.keys(value);
-      if (keys.length !== length || keys.some((key, index) => key !== String(index))) {
-        throw codedError(code, `${path} must be a dense JSON array without extra properties`);
+      // Dense, with nothing but its indexes: as many own keys as items, and every index present.
+      if (Object.keys(value).length !== length) {
+        throw codedError(code, `${pathText(path)} must be a dense JSON array without extra properties`);
       }
       const snapshot = new Array(length);
       for (let index = 0; index < length; index += 1) {
+        if (!Object.prototype.hasOwnProperty.call(value, index)) {
+          throw codedError(code, `${pathText(path)} must be a dense JSON array without extra properties`);
+        }
         snapshot[index] = snapshotJsonValue(
           value[index],
           code,
-          `${path}[${index}]`,
+          () => `${pathText(path)}[${index}]`,
           ancestors,
           depth + 1,
           rejectSensitiveKeys,
@@ -106,26 +124,23 @@ function snapshotJsonValue(
 
     const keys = Object.keys(value);
     if (keys.length > MAX_JSON_OBJECT_ENTRIES) {
-      throw codedError(code, `${path} has too many object entries`);
+      throw codedError(code, `${pathText(path)} has too many object entries`);
     }
     const snapshot = {};
     for (const key of keys) {
+      // __proto__, prototype and constructor are refused here, so assigning below always makes an
+      // own property; freezing the object then makes each one read-only, as defining them did.
       if (jsonKeyIsDisallowed(key, rejectSensitiveKeys)) {
-        throw codedError(code, `${path}.${key} is not allowed`);
+        throw codedError(code, `${pathText(path)}.${key} is not allowed`);
       }
-      Object.defineProperty(snapshot, key, {
-        value: snapshotJsonValue(
-          value[key],
-          code,
-          `${path}.${key}`,
-          ancestors,
-          depth + 1,
-          rejectSensitiveKeys,
-        ),
-        enumerable: true,
-        configurable: false,
-        writable: false,
-      });
+      snapshot[key] = snapshotJsonValue(
+        value[key],
+        code,
+        () => `${pathText(path)}.${key}`,
+        ancestors,
+        depth + 1,
+        rejectSensitiveKeys,
+      );
     }
     return Object.freeze(snapshot);
   } finally {
@@ -170,15 +185,45 @@ function assertJsonValue(value, code, path = "$", ancestors = new Set(), depth =
   }
 }
 
-function assertSerializedSize(value, limit, sizeCode, valueCode) {
-  assertJsonValue(value, valueCode);
+/**
+ * The UTF-8 length of `text`, as Buffer.byteLength counts it (a lone surrogate is 3 bytes). In the
+ * sandboxed preload Buffer is a JavaScript polyfill that first builds an array of every byte, which
+ * cost hundreds of milliseconds per large response; this only counts.
+ */
+function utf8Length(text) {
+  let bytes = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const unit = text.charCodeAt(index);
+    if (unit < 0x80) bytes += 1;
+    else if (unit < 0x800) bytes += 2;
+    else if (unit >= 0xd800 && unit <= 0xdbff && index + 1 < text.length
+      && (text.charCodeAt(index + 1) & 0xfc00) === 0xdc00) {
+      bytes += 4;
+      index += 1;
+    } else bytes += 3;
+  }
+  return bytes;
+}
+
+/**
+ * Throws when `value` serializes to more than `limit` bytes. `validated` says it is a snapshot
+ * snapshotJsonValue already checked (plain JSON, acyclic, within depth), which need not be walked again.
+ */
+function assertSerializedSize(value, limit, sizeCode, valueCode, { validated = false } = {}) {
+  if (!validated) assertJsonValue(value, valueCode);
   let serialized;
   try {
     serialized = JSON.stringify(value);
   } catch (error) {
     throw codedError(valueCode, error instanceof Error ? error.message : String(error));
   }
-  const bytes = Buffer.byteLength(serialized, "utf8");
+  // At most 3 bytes per UTF-16 unit (4 per surrogate pair), and at least 1: only a text between
+  // limit/3 and limit units long needs counting.
+  if (serialized.length * 3 <= limit) return;
+  if (serialized.length > limit) {
+    throw codedError(sizeCode, `at least ${serialized.length} bytes exceeds ${limit}`);
+  }
+  const bytes = utf8Length(serialized);
   if (bytes > limit) throw codedError(sizeCode, `${bytes} bytes exceeds ${limit}`);
 }
 
@@ -782,6 +827,7 @@ async function invokeContract(ipcRenderer, name, payload = {}) {
     MAX_REQUEST_BYTES,
     "IPC_REQUEST_TOO_LARGE",
     "IPC_REQUEST_SCHEMA_INVALID",
+    { validated: true },
   );
   assertSchema(requestSnapshot, contract.request, "IPC_REQUEST_SCHEMA_INVALID");
   if (name === "apps.call" && RETIRED_APP_MODULE_IDS.includes(requestSnapshot.moduleId)) {
@@ -805,6 +851,7 @@ async function invokeContract(ipcRenderer, name, payload = {}) {
     MAX_RESPONSE_BYTES,
     "IPC_RESPONSE_TOO_LARGE",
     "IPC_RESPONSE_SCHEMA_INVALID",
+    { validated: true },
   );
   assertSchema(responseSnapshot, contract.response, "IPC_RESPONSE_SCHEMA_INVALID");
   return responseSnapshot;

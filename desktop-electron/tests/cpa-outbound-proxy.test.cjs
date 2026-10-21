@@ -59,7 +59,7 @@ test("CPA config follows the selected authenticated global profile", () => {
     fs.writeFileSync(path.join(platformDir, "commandcode-go-v0.9.0.dll"), "old plugin");
     fs.writeFileSync(path.join(platformDir, "auth-commandcode-v0.0.1.dll"), "old plugin");
     const installed = installBundledCommandCodePlugin(path.join(root, "cpa"));
-    assert.deepEqual(installed.map((file) => fs.statSync(file).size), [7_277_568, 12_664_320, 14_896_640, 810_496, 24_915_456]);
+    assert.deepEqual(installed.map((file) => fs.statSync(file).size), [7_306_752, 12_664_320, 14_896_640, 810_496, 24_915_456]);
     assert.equal(fs.existsSync(path.join(platformDir, "commandcode-go-v0.9.0.dll")), false);
     assert.equal(fs.existsSync(path.join(platformDir, "auth-commandcode-v0.0.1.dll")), false);
     assert.equal(fs.readdirSync(path.join(root, "cpa", "Trash", "plugins")).length, 2);

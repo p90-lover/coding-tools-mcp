@@ -90,6 +90,11 @@
 .cx-list-settings:hover, .cx-list-settings[aria-expanded="true"] { background: var(--cx-hover); color: var(--color-text-primary); }
 .cx-thread-row[draggable="true"] { cursor: grab; }
 .cx-thread-row.is-dragging { opacity: .45; }
+/* Where a dragged chat would land: a line above or below the row under the pointer. */
+.cx-thread-row[data-drop]::before { content: ""; position: absolute; left: 6px; right: 6px; z-index: 1; height: 2px; border-radius: 1px;
+  background: var(--ao-blue); pointer-events: none; }
+.cx-thread-row[data-drop="before"]::before { top: -1px; }
+.cx-thread-row[data-drop="after"]::before { bottom: -1px; }
 .cx-popover { position: fixed; z-index: 70; display: grid; gap: 10px; width: 260px; padding: 12px; border: 1px solid var(--ao-line); border-radius: 10px;
   background: var(--color-bg-primary); box-shadow: 0 12px 36px rgb(0 0 0 / 18%); color: var(--color-text-primary); font-size: 13px; }
 .cx-popover strong { font-size: 13px; }
@@ -1023,11 +1028,14 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-pet.side-2 .cx-pet-bubble { transform: rotate(180deg); }
 .cx-pet.side-3 .cx-pet-bubble { transform: rotate(90deg); }
 .cx-pet-float { position: absolute; bottom: 40px; font-size: 13px; animation: cx-pet-rise 1.1s ease-out forwards; }
-/* Home: inside its house Clawd is behind the walls, so only the house shows; its bubble still does. */
+/* Home: Clawd shows in its open house; a click there knocks on the house, not on Clawd. */
 .cx-pet.is-home .cx-pet-body { pointer-events: none; }
-/* Clawd's house, standing on the box's top edge near its right end, drawn over Clawd so it can go in. */
-.cx-pet-house-spot { position: absolute; z-index: 3; width: 96px; height: 88px; pointer-events: none; }
-.cx-pet-house { position: relative; display: block; width: 96px; height: 88px; padding: 0; border: 0; background: transparent;
+/* Clawd's house, standing on the box's top edge near its right end: a doll's house with its front
+   open. Its room is drawn behind Clawd and its roof and side walls in front, so Clawd shows inside. */
+.cx-pet-house-spot { position: absolute; z-index: 3; width: 136px; height: 104px; pointer-events: none; }
+.cx-pet-house-spot.is-inside { z-index: 1; }
+.cx-pet-house-spot.is-inside svg { display: block; }
+.cx-pet-house { position: relative; display: block; width: 136px; height: 104px; padding: 0; border: 0; background: transparent;
   cursor: pointer; pointer-events: auto; }
 .cx-pet-house svg { display: block; }
 .cx-pet-house:focus-visible { outline: 2px solid var(--ao-blue); outline-offset: 2px; border-radius: 6px; }

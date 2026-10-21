@@ -1339,32 +1339,6 @@ test("with Retry automatically on, a step that lost the local proxy waits and is
   assert.equal(asked, 0);
 });
 
-test("the UI's polls share one AO run read for a moment; a write or a decision reads afresh", async () => {
-  // Seen live: the headless service sat at ~45% of a core while a chat ran, the activity, run
-  // status and run list polls each reading the same run, every read copying the whole data file.
-  const reads = [];
-  let clock = 1_000_000;
-  const mission = { id: "r1", workspace_id: "ws-1", nodes: [{ id: "lead", role: "planner", state: "pending" }] };
-  const workflow = createAgentOrchestratorWorkflow({ now: () => clock,
-    requestHeadless: async (endpoint) => {
-      reads.push(endpoint);
-      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [structuredClone(mission)] };
-      return { ok: true, run: mission };
-    } });
-  const first = await workflow.call("runs", { workspaceId: "ws-1", runId: "r1" });
-  first.runs[0].nodes.length = 0; // a caller's copy is its own
-  await workflow.call("run_status", { workspaceId: "ws-1", runId: "r1" });
-  const again = await workflow.call("runs", { workspaceId: "ws-1", runId: "r1" });
-  assert.equal(again.runs[0].nodes.length, 1);
-  assert.deepEqual(reads, ["/api/v1/ao/read"], "three polls, one read");
-  await workflow.call("control_run", { workspaceId: "ws-1", runId: "r1", action: "pause" }).catch(() => undefined);
-  await workflow.call("runs", { workspaceId: "ws-1", runId: "r1" });
-  assert.equal(reads.filter(endpoint => endpoint === "/api/v1/ao/read").length, 2, "a write in between: read again");
-  clock += 300;
-  await workflow.call("runs", { workspaceId: "ws-1", runId: "r1" });
-  assert.equal(reads.filter(endpoint => endpoint === "/api/v1/ao/read").length, 3, "then the moment passes");
-});
-
 test("a lost connection is retried even on a card with many finished rounds, but never a sign-in failure", async () => {
   const proxy = "proxyconnect tcp: dial tcp 127.0.0.1:17891: connectex: No connection could be made";
   for (const [error, retried] of [[proxy, true], [`API error 503: auth_unavailable ${proxy}`, false]]) {
@@ -1919,6 +1893,45 @@ test("runtime recovery activity exposes only bounded sanitized current output", 
   assert.doesNotMatch(JSON.stringify(live), /SECRET_TOKEN|sk-privatekey/);
 });
 
+test("with runReadFreshMs, the activity poll and its per-card checks share one run read, and any other request reads afresh", async () => {
+  const native = { id: "w1", role: "worker", state: "running", route: { harness_id: "codex-native", provider_id: "chatgpt-web", model: "chatgpt-web/high" },
+    receipt: { status: "submitted", thread_id: "thread-1", started_at_ms: 1_000 } };
+  const make = (runReadFreshMs) => {
+    const reads = [];
+    const workflow = createAgentOrchestratorWorkflow({
+      runReadFreshMs,
+      requestHeadless: async (endpoint, body, options) => {
+        if (endpoint === "/api/v1/ao/read") { reads.push(body.run_id); return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [native] }] }; }
+        if (endpoint === "/api/v1/ao/harness/status") return { ok: true, status: { connected: true, threads: [{ id: "thread-1", turn_id: "t", activity: "working" }] } };
+        if (endpoint === "/api/v1/ao/update") { reads.push(`write:${JSON.stringify(options ?? null)}`); return { ok: true, team: { id: "team-1", revision: 2 } }; }
+        throw new Error(`unexpected ${endpoint}`);
+      },
+      confirm: async () => true,
+    });
+    return { workflow, reads };
+  };
+  const poll = async (workflow) => {
+    await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
+    await new Promise(resolve => setImmediate(resolve));
+  };
+  // Without it (the default), the poll reads the run and reads it again for each card it checked.
+  const plain = make(0);
+  await poll(plain.workflow);
+  assert.equal(plain.reads.length, 2);
+  const shared = make(300);
+  await poll(shared.workflow);
+  assert.deepEqual(shared.reads, ["run-1"], "one read serves the poll and the card's check");
+  // A request that may change a run drops what was read, so the next poll reads again.
+  await shared.workflow.call("team_update", { workspaceId: "ws-1", change: { operation: "set_limits" } }).catch(() => null);
+  await poll(shared.workflow);
+  assert.equal(shared.reads.filter(entry => entry === "run-1").length, 2);
+  assert.ok(shared.reads.some(entry => entry.startsWith("write:")), "the write went through");
+  // Once the moment has passed, a read is taken again.
+  await new Promise(resolve => setTimeout(resolve, 320));
+  await poll(shared.workflow);
+  assert.equal(shared.reads.filter(entry => entry === "run-1").length, 3);
+});
+
 test("activity reports each working card's runtime and current step without advancing the run", async () => {
   const calls = [];
   const native = { id: "w1", role: "worker", state: "running", route: { harness_id: "codex-native", provider_id: "chatgpt-web", model: "chatgpt-web/high" },
@@ -2028,6 +2041,51 @@ test("a finished AO card's work is read back for the chat (turn_timeline), redac
   assert.deepEqual((await workflow.call("turn_timeline", { workspaceId: "ws-1", runId: "run-1", nodeId: "n" })).timeline, [],
     "a native Codex card has no AO session to read");
   assert.equal(asked.length, 1);
+});
+
+test("a chat's timeline reads CPA's key once, not once per field, and still redacts it everywhere", async () => {
+  // Seen live: every text field asked for CPA's connection, whose state is read from disk; a long
+  // chat's timeline (400 items) held the main process for 3.8 s when a project was opened.
+  const key = "CPA_PROXY_KEY_1234567890abcdef";
+  let reads = 0;
+  const finished = { id: "p", role: "planner", state: "finished", route: { harness_id: "ao:claude-code", model: "cpa/gpt-6-luna" },
+    receipt: { status: "completed", thread_id: "sess-1", turn_id: "turn-1" } };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [finished] }] };
+      throw new Error(`unexpected ${endpoint}`);
+    },
+    cpaConnection: () => { reads += 1; return { baseUrl: "http://127.0.0.1:8317", proxyApiKey: key }; },
+    aoHarness: { timeline: async () => Array.from({ length: 300 }, (_, index) => ({ id: `c${index}`, kind: "command", status: "completed",
+      text: `curl -H x-key:${key} url`, description: `step ${index}`, input: `{"k":"${key}"}`, output: `echo ${key}` })) },
+    confirm: async () => true,
+  });
+  const { timeline } = await workflow.call("turn_timeline", { workspaceId: "ws-1", runId: "run-1", nodeId: "p" });
+  assert.equal(timeline.length, 300);
+  assert.doesNotMatch(JSON.stringify(timeline), new RegExp(key), "the key is redacted from every field");
+  assert.ok(reads <= 2, `CPA's connection was read ${reads} times for one timeline`);
+});
+
+test("a long turn's work fits the window's 1 MB answer limit and keeps every tool call", async () => {
+  // Seen live: a turn's read-back was 1.5 MB (its thoughts up to 64 KB each), and ipc-schema refused
+  // it, so its folded work never opened.
+  const finished = { id: "p", role: "planner", state: "finished", route: { harness_id: "ao:claude-code", model: "cpa/gpt-6-luna" },
+    receipt: { status: "completed", thread_id: "sess-1", turn_id: "turn-1" } };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [finished] }] };
+      throw new Error(`unexpected ${endpoint}`);
+    },
+    aoHarness: { timeline: async () => Array.from({ length: 60 }, (_, index) => index % 2
+      ? { id: `c${index}`, kind: "command", status: "completed", text: `npm test ${index}`, output: "o".repeat(1500) }
+      : { id: `r${index}`, kind: "reasoning", status: "completed", text: `thinking ${index} ${"x".repeat(60_000)}` }) },
+    confirm: async () => true,
+  });
+  const result = await workflow.call("turn_timeline", { workspaceId: "ws-1", runId: "run-1", nodeId: "p" });
+  assert.ok(Buffer.byteLength(JSON.stringify(result)) < 1024 * 1024, "under the window's limit");
+  assert.equal(result.timeline.filter(item => item.kind === "command").length, 30, "every tool call is kept");
+  assert.equal(result.timeline[1].output, "o".repeat(1500), "tool output is kept when cutting thoughts was enough");
+  assert.match(result.timeline[0].text, /^thinking 0 x+…$/, "a long thought keeps its start");
 });
 
 test("AO chat reads native managed capability for exactly one consented node", async () => {
