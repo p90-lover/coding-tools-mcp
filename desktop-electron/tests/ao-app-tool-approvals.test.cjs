@@ -16,7 +16,8 @@ test("the terminal, the screen, unknown tools and look-alike servers still go to
   for (const name of [
     "mcp__coding-tools__exec_command", "mcp__coding-tools__write_stdin", "mcp__coding-tools__kill_command",
     "mcp__coding-tools__computer_click", "mcp__coding-tools__capture_screenshot", "mcp__coding-tools__list_windows",
-    "mcp__coding-tools__vision_status", "mcp__coding-tools__delete_everything",
+    "mcp__coding-tools__vision_status", "mcp__coding-tools__capture_process", "mcp__coding-tools__capture_window",
+    "mcp__coding-tools__delete_everything",
     "mcp__coding-tools-evil__read_file", "mcp__coding_tools__read_file", "mcp__other__read_file", "read_file",
     "mcp__coding-tools__read_file_extra", "", undefined,
   ]) assert.equal(routineAppTool(name), null, String(name));
