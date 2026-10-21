@@ -30,7 +30,7 @@ test("managed CPA keeps saved user settings and extra plugin registrations while
     fs.writeFileSync(path.join(state, "config.yaml"), JSON.stringify({
       host: "0.0.0.0", port: 9999, "auth-dir": "/old/auth", "api-keys": ["old-key"],
       "proxy-url": "http://old.invalid", "remote-management": { "allow-remote": true, "secret-key": "old-secret" },
-      "disable-cooling": true, "request-retry": 8, debug: true, "logging-to-file": true,
+      "disable-cooling": true, "request-retry": 8, debug: true, "logging-to-file": true, "commercial-mode": false,
       "claude-api-key": [{ "api-key": "provider-fixture", "base-url": "https://provider.example" }],
       oauth: { "auth-dir": "/old/oauth", providers: { custom: { enabled: true } } },
       plugins: { enabled: false, dir: "/old/plugins", configs: {
@@ -56,6 +56,7 @@ test("managed CPA keeps saved user settings and extra plugin registrations while
     assert.equal(config["request-retry"], 8);
     assert.equal(config.debug, true);
     assert.equal(config["logging-to-file"], false, "an older build's saved file logging is turned off");
+    assert.equal(config["commercial-mode"], true, "a saved request logger cannot come back");
     assert.equal(config["claude-api-key"][0]["api-key"], "provider-fixture");
     assert.equal(config.oauth["auth-dir"], path.join(state, "auth"));
     assert.equal(config.oauth.providers.custom.enabled, true);
@@ -70,6 +71,8 @@ test("managed CPA writes no main.log and removes the ones an older build left", 
     const config = (yaml.parse ?? yaml.load)(runtimeConfiguration(state, "m".repeat(36), "p".repeat(36)));
     assert.equal(config["logging-to-file"], false);
     assert.equal(config["request-log"], false);
+    // No request logger: it spooled large request bodies to logs/request-log-parts-* temp files.
+    assert.equal(config["commercial-mode"], true);
     const logs = path.join(state, "logs");
     for (const name of ["main.log", "main-2026-10-18T02-24-10.083.log", "error-v1-chat-completions-2026-10-20T23-06-07.log"]) {
       fs.writeFileSync(path.join(logs, name), "x\n");
