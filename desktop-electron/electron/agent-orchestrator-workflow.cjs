@@ -3418,13 +3418,33 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // A previous run that is really working must finish or be stopped first. One that is stuck
   // (a failed start left its cards pending, a held card, a pause) is stopped and kept in history,
   // so an old task can always be continued or restarted.
+  // How long a follow-up waits for a run whose cards have all stopped to finish winding down.
+  const RUN_WIND_DOWN_MS = 10_000;
   async function retireOpenRuns(id, task, runsOfWorkspace) {
-    const open = runsOfWorkspace.filter((run) => run.project_id === task && !runSettled(run));
-    for (const run of open) {
+    const openOf = (list) => list.filter((run) => run.project_id === task && !runSettled(run));
+    const carding = (run) => (run.nodes ?? []).some((node) => ["running", "reserved"].includes(node.state));
+    const looping = (run) => {
       const live = backgroundRuns.get(runKey(id, run.id));
-      const working = Boolean(live && (live.starting || live.driving || live.status === "running"))
-        || (run.nodes ?? []).some((node) => ["running", "reserved"].includes(node.state));
-      if (working) throw new Error("This mission is still running; wait for it to finish or stop it first");
+      return Boolean(live && (live.driving || live.status === "running"));
+    };
+    const starting = (run) => Boolean(backgroundRuns.get(runKey(id, run.id))?.starting);
+    const refuse = () => new Error("This mission is still running; wait for it to finish or stop it first");
+    let open = openOf(runsOfWorkspace);
+    // A run whose cards have all stopped can still have its loop winding down for a moment, as after
+    // a steer that stopped a stalled turn: its message, queued for the next turn, was sent as soon as
+    // the chat read free and refused twice within a second ("This chat is still running"). That loop
+    // is waited for, briefly; a card at work, or a run still starting, is refused at once.
+    const deadline = now() + RUN_WIND_DOWN_MS;
+    let waited = false;
+    while (open.some((run) => carding(run) || starting(run) || looping(run))) {
+      if (open.some((run) => carding(run) || starting(run)) || now() >= deadline) throw refuse();
+      waited = true;
+      await new Promise((resolve) => setTimer(resolve, 250));
+    }
+    // The loop may have written the run as it ended: cancel each at its current revision.
+    if (waited) {
+      open = openOf((await runs({ workspaceId: id })).runs);
+      if (open.some((run) => carding(run) || starting(run) || looping(run))) throw refuse();
     }
     for (const run of open) {
       await updateRun({ workspaceId: id, change: { operation: "cancel", run_id: run.id, expected_revision: run.revision } });
