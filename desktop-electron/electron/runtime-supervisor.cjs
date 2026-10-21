@@ -67,7 +67,9 @@ function loopbackHealthBaseURL(value) {
 }
 
 function readJson(pathname) {
-  return JSON.parse(fs.readFileSync(pathname, "utf8"));
+  // A file saved by Windows PowerShell (Set-Content -Encoding utf8) starts with a byte order mark,
+  // which JSON.parse refuses: the setup config read that way stopped the app at startup.
+  return JSON.parse(fs.readFileSync(pathname, "utf8").replace(/^﻿/, ""));
 }
 
 function errorMessage(error) {

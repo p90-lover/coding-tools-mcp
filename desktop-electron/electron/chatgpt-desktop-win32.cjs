@@ -516,6 +516,13 @@ function createWin32Helper({ logger, spawnProcess = spawn } = {}) {
       if (child === exited) child = null;
       failAll(new Error(`ChatGPT desktop helper exited (${code})`));
     });
+    // PowerShell refused (policy, antivirus) or the helper gone before a write (EPIPE): without these
+    // listeners either one was an uncaught 'error' event in the main process.
+    child.on("error", (error) => {
+      if (child === exited) child = null;
+      failAll(error instanceof Error ? error : new Error(String(error)));
+    });
+    child.stdin?.on?.("error", (error) => failAll(error instanceof Error ? error : new Error(String(error))));
     return child;
   }
 

@@ -1017,7 +1017,7 @@ class BrowserHost {
       }
       let parsed;
       try { parsed = new URL(url); } catch { return { action: "deny" }; }
-      if (parsed.protocol === "https:" || parsed.protocol === "http:") void shell.openExternal(parsed.toString());
+      if (parsed.protocol === "https:" || parsed.protocol === "http:") void shell.openExternal(parsed.toString()).catch(() => undefined);
       return { action: "deny" };
     });
     const blockAuthenticationNavigation = (event, url) => {
@@ -1953,7 +1953,13 @@ class BrowserHost {
     }
     this.syncViewVisibility();
     this.publishState?.(this.snapshot());
-    this.writeDescriptor();
+    // Reached from a page's load-failure and crash events and from the turn-tab sweep timer, where a
+    // throw (a full disk, the file held open) was uncaught. The next change writes it again.
+    try {
+      this.writeDescriptor();
+    } catch (error) {
+      this.logger?.warn?.("browser.descriptor_write_failed", { message: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   removeUserTab(tab) {
@@ -2079,7 +2085,12 @@ class BrowserHost {
         origin: navigationOriginForLog(contents.getURL()),
       });
       this.setState({ url: contents.getURL(), loading: false });
-      if (browserInteractionModeFor(this) === "automatic") void this.probeAuthentication();
+      // Its page load rejects on an aborted navigation, a proxy failure or no network.
+      if (browserInteractionModeFor(this) === "automatic") {
+        void this.probeAuthentication().catch((error) => this.logger?.warn?.("browser.auth_probe_failed", {
+          message: error instanceof Error ? error.message : String(error),
+        }));
+      }
     });
     contents.on("page-title-updated", (_event, title) => {
       if (browserInteractionModeFor(this) === "manual") return;

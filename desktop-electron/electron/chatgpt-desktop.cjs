@@ -206,6 +206,8 @@ function createChatGptDesktopHost({
         current.watcher = fs.watch(current.directory, (_event, name) => {
           if (!name || /\.json$/i.test(String(name))) check();
         });
+        // The folder removed or renamed (a CPA repair) emits 'error'; the slow re-check covers it.
+        current.watcher.on("error", () => current.watcher?.close());
       } catch (error) {
         // Missing folder (no CPA account yet) or a watch failure: the slow re-check still covers it.
         if (error?.code !== "ENOENT") logger?.warn?.("chatgpt_desktop.account_watch_failed", { message: error.message });
@@ -366,10 +368,13 @@ function createChatGptDesktopHost({
     };
     for (const [directory, fileName] of [[paths.codexHome, "auth.json"], [path.dirname(account.file), null]]) {
       try {
-        current.watchers.push(fs.watch(directory, (_event, changed) => {
+        const watcher = fs.watch(directory, (_event, changed) => {
           const name = changed ? String(changed) : "";
           if (fileName ? name === fileName : /\.json$/i.test(name)) schedule();
-        }));
+        });
+        // A watched folder removed (a slot's Codex home, a moved CPA auth folder) emits 'error'.
+        watcher.on("error", () => watcher.close());
+        current.watchers.push(watcher);
       } catch (error) {
         logger?.warn?.("chatgpt_desktop.watch_failed", { message: error.message });
       }
