@@ -952,6 +952,33 @@ test("observes of one session that overlap share one conversation read; later on
   assert.equal(reads, 2, "a landed read is never reused: the next observe reads afresh");
 });
 
+test("a chat whose newest items are each over the handler limit still shows its work, with their big fields cut", async () => {
+  // Seen live: two screenshot tool calls of 1.3 MB each among a chat's newest 20 items made every
+  // conversation read 2.7 MB; all sizes failed, and the chat showed nothing for 5 hours.
+  const screenshot = "data:image/png;base64," + "A".repeat(1_300_000);
+  const asked = [];
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint, _body, options) => {
+      if (!endpoint.includes("/conversation")) return { session: { id: "s", mode: "chat", status: "working" } };
+      asked.push(options?.maxBytes ?? null);
+      if (!options?.maxBytes) throw new Error("AO response exceeds the handler limit (GET /api/v1/sessions/s/conversation)");
+      return {
+        turns: [{ id: "t", state: "running" }],
+        messages: [{ id: "m", turnId: "t", sequence: 2, role: "assistant", text: "Took a screenshot of the game." }],
+        activities: [{ id: "shot", turnId: "t", sequence: 1, activityKind: "mcp_tool", status: "completed", summary: "capture_screenshot",
+          detail: { toolName: "mcp__coding-tools__capture_screenshot", output: "Captured 1920x1080.", content: [{ type: "image", data: screenshot }] } }],
+      };
+    },
+  });
+  const observed = await upstream.observe("s");
+  assert.ok(asked.slice(0, -1).every((value) => value === null), "the usual sizes are tried first");
+  assert.ok(asked.at(-1) > 2_000_000, "then one read with room for the big items");
+  const timeline = JSON.parse(JSON.stringify(observed.timeline));
+  assert.deepEqual(timeline.map((item) => item.id), ["shot", "m"], "the turn's work shows again");
+  assert.equal(timeline[0].output, "Captured 1920x1080.", "the tool's text output is kept");
+  assert.ok(JSON.stringify(observed).length < 100_000, "the image bytes are not carried along");
+});
+
 test("an ACP edit opens on its changed lines, not the whole file, and a long message is not cut at 4 KB", async () => {
   // As AO stored it live: the whole file before and after, and a patch marking every line changed.
   const lines = Array.from({ length: 200 }, (_, at) => `line ${at}`);

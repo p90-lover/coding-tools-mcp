@@ -278,12 +278,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       },
     }) : null;
 
-  async function requestApi(method, endpoint, body) {
+  async function requestApi(method, endpoint, body, { maxBytes = 900000 } = {}) {
     if (state !== "ready") throw new Error("Start the source-integrated AO runtime first");
     if (body?.length > 65536) throw new Error("AO API request exceeds 64 KiB");
     const response = await fetch(`http://127.0.0.1:${daemonPort}${endpoint}`, { method, headers: { "content-type": "application/json" }, body, redirect: "error", signal: AbortSignal.timeout(method === "GET" ? 30000 : 180000) });
     const text = await response.text();
-    if (Buffer.byteLength(text) > 900000) throw new Error(`AO response exceeds the handler limit (${method} ${endpoint.split("?")[0]})`);
+    if (Buffer.byteLength(text) > maxBytes) throw new Error(`AO response exceeds the handler limit (${method} ${endpoint.split("?")[0]})`);
     // AO answers some failures with an empty or non-JSON body; keep the status instead of
     // failing on JSON.parse and losing it.
     let data = {};
@@ -408,10 +408,43 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           // A pending item is in every page, so one that is itself over the limit (a stuck 1 MB
           // screenshot call, seen live) failed every read: the chat stopped updating and Stop could
           // not be confirmed. The newest items alone are read instead.
-          return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${limits[at]}`);
+          const page = `/api/v1/sessions/${sessionId(id)}/conversation?limit=${limits[at]}`;
+          try {
+            return await internalApi("GET", page);
+          } catch (fallback) {
+            if (!/exceeds the handler limit/.test(String(fallback?.message))) throw fallback;
+          }
+          // Still over: a finished tool call's stored result can be megabytes on its own too
+          // (screenshot data: two 1.3 MB calls among a chat's newest 20 items, seen live), and the
+          // chat showed none of its work for hours. The page is read once with room for them and
+          // their big fields are cut (compactConversation); the chat never shows those bytes.
+          return compactConversation(await internalApi("GET", `${page}&includePending=1`, undefined, { maxBytes: CONVERSATION_COMPACT_READ_BYTES }));
         }
       }
     }
+  }
+  /**
+   * A conversation page with every string over COMPACT_FIELD_CHARS inside an activity's detail
+   * replaced by a short note of its size. The chat reads an activity's text output (toolDetails
+   * keeps 2,000 characters of it) and never its image data.
+   */
+  const CONVERSATION_COMPACT_READ_BYTES = 32 * 1024 * 1024;
+  const COMPACT_FIELD_CHARS = 64 * 1024;
+  function compactConversation(conversation) {
+    const cut = (value, depth = 0) => {
+      if (typeof value === "string") {
+        return value.length > COMPACT_FIELD_CHARS ? `${value.slice(0, 2000)}… [${value.length - 2000} characters omitted]` : value;
+      }
+      if (!value || typeof value !== "object" || depth > 12) return value;
+      if (Array.isArray(value)) return value.map((item) => cut(item, depth + 1));
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, cut(item, depth + 1)]));
+    };
+    if (!conversation || !Array.isArray(conversation.activities)) return conversation;
+    return { ...conversation, activities: conversation.activities.map((activity) => (activity && typeof activity === "object"
+      ? { ...activity, ...(activity.detail !== undefined ? { detail: cut(activity.detail) } : {}),
+        ...(typeof activity.commandOutput === "string" ? { commandOutput: cut(activity.commandOutput) } : {}),
+        ...(typeof activity.streamedText === "string" ? { streamedText: cut(activity.streamedText) } : {}) }
+      : activity)) };
   }
   /**
    * The current turn as a Codex-style transcript: assistant messages, reasoning and tool calls
@@ -745,11 +778,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   }
 
   // Mission-owned AO calls. The run grant already covers them, so no extra dialog.
-  async function internalApi(method, endpoint, body) {
+  async function internalApi(method, endpoint, body, options) {
     // A write may change what a session read in flight is about to return (sharedObserveRead).
     if (method !== "GET") sharedReads.clear();
     await start();
-    const result = await requestApi(method, endpoint, body === undefined ? undefined : JSON.stringify(body));
+    const result = await requestApi(method, endpoint, body === undefined ? undefined : JSON.stringify(body), options);
     if (!result.ok) throw new Error(aoErrorMessage(result));
     return result.data;
   }
