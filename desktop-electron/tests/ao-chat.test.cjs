@@ -1455,7 +1455,8 @@ test("the approvals poll skips a card whose attempt changed mid-read instead of 
   const timers = [];
   const effect = rendererCallback("AgentOrchestratorSurface.tsx", "effect:approvalScope.current", {
     Error, STALE_OBSERVE: /AO receipt changed/, activeNodeIds: JSON.stringify(["old", "live"]),
-    workspaceId: "w1", selectedRunId: "run1", autoStatus: "idle", surfaceHidden: () => false,
+    // #463: the poll asks only for a run of this project (selectedRunHere).
+    workspaceId: "w1", selectedRunId: "run1", selectedRunHere: true, autoStatus: "idle", surfaceHidden: () => false,
     approvalScope: { current: null }, selection: { current: { workspaceId: "w1", runId: "run1" } },
     setPendingApprovals: value => { state.approvals = value; }, setRuntimePolicies: value => { state.policies = value; },
     setMissions: () => {}, setError: error => state.errors.push(error),
@@ -1479,7 +1480,7 @@ test("the approvals poll still reports an observe failure that is not a changed 
   const errors = [];
   const effect = rendererCallback("AgentOrchestratorSurface.tsx", "effect:approvalScope.current", {
     Error, STALE_OBSERVE: /AO receipt changed/, activeNodeIds: JSON.stringify(["n1"]),
-    workspaceId: "w1", selectedRunId: "run1", autoStatus: "idle", surfaceHidden: () => false,
+    workspaceId: "w1", selectedRunId: "run1", selectedRunHere: true, autoStatus: "idle", surfaceHidden: () => false,
     approvalScope: { current: null }, selection: { current: { workspaceId: "w1", runId: "run1" } },
     setPendingApprovals: () => {}, setRuntimePolicies: () => {}, setMissions: () => {}, setError: error => errors.push(error),
     setInterval: () => 1, clearInterval: () => {},

@@ -11,7 +11,7 @@ import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "
 import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
-import { GOAL_SUMMARY, approvalAnsweredForYou, chatArchived, chatList, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatWakeup, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
+import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatWakeup, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
 import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { createLatestConfigQueue } from "./ao-config";
 import {
@@ -80,6 +80,12 @@ function ToolButton({ icon, label, onClick, disabled, primary, pressed }: { icon
 // How long a request the "Approve for me" reviewer has not answered stays hidden. One review takes
 // at most ~50 s (25 s, then 25 s more to decide); past that, nothing is screening it.
 const REVIEW_GRACE_MS = 120_000;
+/**
+ * A chat message refused only for the moment: the chat started working again under it (its
+ * automatic retry), or the app window was not in front. The chat keeps it at the front of its queue
+ * and sends it as soon as it can, so it is no "Something went wrong".
+ */
+const QUIET_SEND_REFUSAL = /still running|focused app window/i;
 const OVERVIEW_RATIO_KEY = "coding-tools:ao:overview-ratio:v1";
 const OVERVIEW_DIVIDER = 8;
 
@@ -1566,7 +1572,14 @@ export function AgentOrchestratorSurface({ language, setError }: {
         setAutoStatus(startNotice(result) ? "idle" : typeof result.status === "string" ? result.status : "running");
         resolve();
         void Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]).catch(cause => setError(cause instanceof Error ? cause.message : String(cause)));
-      } catch (cause) { if (current() && !input.taskId) setPendingChat(null); reject(cause); throw cause; }
+      } catch (cause) {
+        if (current() && !input.taskId) setPendingChat(null);
+        reject(cause);
+        // Refused only for now (the chat started working again under the message, or the window was
+        // not in front): the chat queues the message and says so; no "Something went wrong" toast.
+        if (input.taskId && QUIET_SEND_REFUSAL.test(cause instanceof Error ? cause.message : String(cause))) return;
+        throw cause;
+      }
     });
   });
   // Steering goes straight to the running agent, outside run()'s one-action-at-a-time lock: it must
@@ -1581,7 +1594,12 @@ export function AgentOrchestratorSurface({ language, setError }: {
       return result.steered === true ? true : result.interrupted === true ? "interrupt" as const : result.restarted === true ? "restart" as const
         : result.starting === true ? "starting" as const
         : result.waiting === true ? "wait" as const : false;
-    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); throw cause; }
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      // The chat waits for focus and steers it in then (see QUIET_SEND_REFUSAL).
+      if (!QUIET_SEND_REFUSAL.test(message)) setError(message);
+      throw cause;
+    }
   };
   // Have the agent the next message needs running before it is sent, so sending does not wait half
   // a minute for a launch: the selected model's (or the team's orchestrator) on a new chat, and on an
@@ -1995,7 +2013,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
         for (const node of latestRun.nodes) rows.push([node.settings?.name || node.role, `${describeChatNode(node as unknown as ChatNode, latestRun as unknown as ChatRun)} · ${node.state}`]);
       } else rows.push(["Mode", composerMode === "single" ? `Single model · ${singleRoute.model}` : "Team"]);
       if (chatTaskId) rows.push(["Context", `${description.length.toLocaleString("en-US")} of ${CHAT_CONTEXT_LIMIT.toLocaleString("en-US")} characters (${Math.round(description.length / CHAT_CONTEXT_LIMIT * 100)}% full)`]);
-      rows.push(["Goal", goal ? `${GOAL_SUMMARY[goal.status]} · round ${goal.round} of ${goal.rounds} · ${goalElapsed(goal.startedAt)} · ${goal.objective}` : "None"]);
+      rows.push(["Goal", goal ? `${GOAL_SUMMARY[goal.status]} · round ${goalRounds(goal)} · ${goalElapsed(goal.startedAt)} · ${goal.objective}` : "None"]);
       rows.push(["Plan mode", planMode ? "On" : "Off"]);
       return { title: "Status", rows };
     },
