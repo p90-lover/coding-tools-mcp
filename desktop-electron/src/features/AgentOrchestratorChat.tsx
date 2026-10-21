@@ -1096,10 +1096,8 @@ export function AgentOrchestratorChat({
         if (busyNow) sentWhileFree.current = true;
         setQueue(selectedTaskId, [{ what: "Message", message, ...(goal ? { goal } : {}) }, ...queueOf(selectedTaskId)]);
         if (unfocused) setWindowFocused(false);
+        // It shows in the queued-message bar above the composer (#466), which has no notice cards.
         if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
-        if (here()) say("Queued", busyNow
-          ? "The chat started working again (its automatic retry), so your message waits: it's steered in or sent as soon as it can be."
-          : "It's sent when this window is in front again.", chatMessageReadable(message));
         return true;
       }
       // The surface already shows the error; keep the message so it can be sent again. A steer had
