@@ -12,8 +12,8 @@ import { useContext, useEffect, useRef, useState, type KeyboardEvent, type React
 import { ChatMarkdown } from "./ChatMarkdown";
 import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, StreamingMarkdown } from "./ChatToolParts";
 import {
-  dshActivity, dshDuration, dshItemDetail, dshLiveTitle, dshProcessTitle, dshQuietNote, dshSegments, dshThinkSummary, dshToolTitle,
-  tidyTimeline, type ChatLiveItem, type ChatStep, type ChatTurn, type DshActivity,
+  dshActivity, dshDuration, dshItemDetail, dshLiveTitle, dshProcessTitle, dshQuietNote, dshRetryNote, dshSegments, dshThinkSummary, dshToolTitle,
+  tidyTimeline, withoutReplied, type ChatLiveItem, type ChatStep, type ChatTurn, type DshActivity,
 } from "./ao-chat";
 
 // Icons: ui-primitives/src/icons, 1px strokes on a 16 box, drawn 14px inside a 16px leading box.
@@ -215,8 +215,8 @@ function DshGroup({ items, live }: { items: ChatLiveItem[]; live: boolean }) {
 
 /** A card's work: flat while it runs (DeepSeek Harness keeps a running turn flat), grouped once done. */
 function DshFlow({ items, grouped, hideReply }: { items: ChatLiveItem[]; grouped: boolean; hideReply?: string }) {
-  const answer = hideReply?.trim();
-  const tidy = tidyTimeline(items).filter((item) => !(answer && item.kind === "message" && item.text.trim() === answer));
+  // The reply is the turn's messages joined: each one in it shows once, in the reply (withoutReplied).
+  const tidy = withoutReplied(tidyTimeline(items), hideReply);
   if (!grouped) return <div className="dsh-flow">{tidy.map((item) => <DshItem key={item.id} item={item} />)}</div>;
   return <div className="dsh-flow">{dshSegments(tidy).map((segment) => segment.kind === "item"
     ? <DshItem key={segment.item.id} item={segment.item} />
@@ -249,11 +249,12 @@ function DshAgent({ step, useWork, answer }: { step: ChatStep; useWork: UseStepW
 }
 
 /** RunningStatus: a hairline over the whale's tail and "Deep diving for 1m 4s ···", in DeepSeek blue. */
-function DshRunning({ since, divider, heardAt }: { since?: number; divider: boolean; heardAt?: number }) {
+function DshRunning({ since, divider, heardAt, retry = "" }: { since?: number; divider: boolean; heardAt?: number; retry?: string }) {
   const now = useNow(true);
   // A long turn can go quiet for many minutes (a slow model request): say how long, so a quiet turn
-  // does not look frozen, and say plainly when it has been quiet as long as a stuck one.
-  const quietNote = dshQuietNote(heardAt, now);
+  // does not look frozen, and say plainly when it has been quiet as long as a stuck one. A turn whose
+  // agent is waiting out a model error says that instead (dshRetryNote).
+  const quietNote = retry || dshQuietNote(heardAt, now);
   return <div className="dsh-running" role="status" aria-live="polite">
     {divider ? <span className="dsh-running-divider" aria-hidden="true" /> : null}
     <span className="dsh-running-content">
@@ -313,6 +314,6 @@ export function DshTurnWork({ turn, live, expanded, useWork, errorShownBelow = f
     {errorShownBelow ? null : steps.filter((step) => step.error).map((step) => <div key={`error:${step.key}`} className="dsh-turn-error">
       <span className="dsh-turn-error-title">This turn failed</span><span className="dsh-turn-error-message">{step.error}</span>
     </div>)}
-    {live ? <DshRunning since={turn.startedAtMs} divider heardAt={heardAt} /> : null}
+    {live ? <DshRunning since={turn.startedAtMs} divider heardAt={heardAt} retry={dshRetryNote(steps)} /> : null}
   </div>;
 }

@@ -132,7 +132,7 @@ function yamlString(value) {
 }
 
 const COMMANDCODE_PLUGINS = [
-  { id: "cline-pass-switcher", file: "cline-pass-switcher-v0.1.0-codingtools.3.dll", sha256: "36d5224dc699a2263ad0f58f88cac8c3d3c8138fcf5188bda1f2b2e5756c175f" },
+  { id: "cline-pass-switcher", file: "cline-pass-switcher-v0.1.0-codingtools.4.dll", sha256: "beaba93be151104aa4137ac28712f7f4f0dc3fa613e21e4784cb6770d0714369" },
   { id: "commandcode-go", file: "commandcode-go-v1.0.0-codingtools.1.dll", sha256: "ffb690666d979bbeb529ce076291b808aac39b9091ef62f28b5c8e37285cb70c" },
   { id: "auth-commandcode", file: "auth-commandcode-v0.1.0-codingtools.1.dll", sha256: "b9ab54aa73d1c9fd4e9baaaa4960643aa81f2caecb2f69e5463fc3a62f079afc" },
   // CPA Helper (usage, costs, Codex keeper), rebuilt from walkingddd/CPA-Helper as a native plugin.
@@ -265,8 +265,11 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
   if (!savedSource.trim()) return generated;
   const managed = (yaml.parse ?? yaml.load)(generated);
   // User settings survive restarts; listener, credentials, bundled plugin paths and file logging
-  // stay managed (an older build saved logging-to-file: true).
-  const owned = ["host", "port", "auth-dir", "api-keys", "proxy-url", "remote-management", "plugins", "logging-to-file"];
+  // stay managed (an older build saved logging-to-file: true). So do config v8's grouped forms of
+  // the same security settings: a saved `server` (host 0.0.0.0), `management` or `access` block
+  // would otherwise reopen what the flat keys above keep closed.
+  const owned = ["host", "port", "auth-dir", "api-keys", "proxy-url", "remote-management", "plugins", "logging-to-file",
+    "server", "management", "access"];
   const retained = Object.fromEntries(Object.entries(saved).filter(([key]) => !owned.includes(key)));
   const merged = {
     ...managed, ...retained,

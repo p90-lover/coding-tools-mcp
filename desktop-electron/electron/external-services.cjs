@@ -557,18 +557,25 @@ function createExternalServicesController({
   // Thrown here, it stopped every launch (seen: "ENOSPC ... write" and "ENOENT ... mkdir
   // ...retired-services\snapshots\<id>", 2026-10-18/19). Its own refusals (a missing key for
   // encrypted secrets, linked state) still stop startup.
+  // Deferred, the live file keeps its legacy data until a later launch archives it.
+  let archiveDeferred = false;
   try {
     archiveRetiredServicesState({ filePath, keyPath, archiveDataRoot });
   } catch (error) {
     if (error?.code === ARCHIVE_REFUSED) throw error;
+    archiveDeferred = true;
     logger?.warn?.("external_services.archive_failed", { code: error?.code ?? null, message: error instanceof Error ? error.message : String(error) });
   }
   void removeIncompleteSnapshots(path.join(path.dirname(filePath), "archives", "retired-services"), { logger });
   const codec = createSecretCodec({ safeStorage, keyPath });
   let state;
+  let unarchivedState = null;
   try {
-    state = normalizeState(JSON.parse(fs.readFileSync(filePath, "utf8")), env);
-  } catch {
+    const saved = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    state = normalizeState(saved, env);
+    if (archiveDeferred) unarchivedState = saved;
+  } catch (error) {
+    if (archiveDeferred && error?.code !== "ENOENT") throw error;
     state = initialState(env);
   }
   const processes = new Map();
@@ -593,7 +600,14 @@ function createExternalServicesController({
   }]));
 
   function write() {
-    writePrivateFileAtomic(filePath, `${JSON.stringify(state, null, 2)}\n`);
+    // Keep legacy recovery data in the live file until a later launch can archive it.
+    const saved = unarchivedState ? {
+      ...unarchivedState,
+      ...state,
+      services: { ...unarchivedState.services, ...state.services },
+      secrets: { ...unarchivedState.secrets, ...state.secrets },
+    } : state;
+    writePrivateFileAtomic(filePath, `${JSON.stringify(saved, null, 2)}\n`);
   }
 
   function secretFor(id) {
@@ -964,7 +978,15 @@ function createExternalServicesController({
     const lastWrite = activity.lastLeaseWriteAt || 0;
     if (Date.now() - lastWrite < KEEP_ALIVE_LEASE_WRITE_MS) return;
     runtime.set(id, { ...activity, lastLeaseWriteAt: Date.now() });
-    write();
+    try {
+      write();
+    } catch (error) {
+      logger?.warn?.("external-service.keep-alive-lease-persist-failed", {
+        serviceId: id,
+        code: error?.code,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   const keepAliveTimers = new Map();
