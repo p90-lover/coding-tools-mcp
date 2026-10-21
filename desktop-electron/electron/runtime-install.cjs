@@ -236,11 +236,19 @@ function validateRuntimeBundle(runtimeRoot, identity, options = {}) {
   return inspectRuntimeBundle(runtimeRoot, identity, options).runtimeRoot;
 }
 
+/** Where verified bundles are remembered (see verifiedSignatures), outside every bundle. */
+function runtimeVerifiedDir(coreHome) {
+  return path.join(coreHome, "runtime-verified");
+}
+
 async function waitForPackagedRuntimeSource({
   app,
   resourcesPath,
   timeoutMs = DEFAULT_SOURCE_WAIT_TIMEOUT_MS,
   intervalMs = DEFAULT_SOURCE_WAIT_INTERVAL_MS,
+  // The same remembered verification ensurePackagedRuntime uses: without it this wait hashed every
+  // runtime file again on each launch, before the window could open.
+  coreHome = null,
 }) {
   if (!app.isPackaged) return null;
   if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || !Number.isFinite(intervalMs) || intervalMs <= 0) {
@@ -252,11 +260,12 @@ async function waitForPackagedRuntimeSource({
     platform: process.platform,
     arch: process.arch,
   };
+  const verify = coreHome ? { stampDir: runtimeVerifiedDir(coreHome) } : {};
   const deadline = Date.now() + timeoutMs;
   let lastError;
   for (;;) {
     try {
-      return validateRuntimeBundle(source, identity);
+      return validateRuntimeBundle(source, identity, verify);
     } catch (error) {
       lastError = error;
     }
@@ -322,7 +331,7 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
   };
   const source = path.join(resourcesPath, "runtime");
   // Bundles already hashed are remembered here (see verifiedSignatures), outside every bundle.
-  const verify = { stampDir: path.join(coreHome, "runtime-verified") };
+  const verify = { stampDir: runtimeVerifiedDir(coreHome) };
   const sourceBundle = inspectRuntimeBundle(source, identity, verify);
   const expectedIdentity = { ...identity, bundleId: sourceBundle.manifest.bundleId };
   const versionsRoot = path.join(coreHome, "versions");

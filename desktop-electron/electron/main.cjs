@@ -2676,7 +2676,7 @@ async function start() {
 
   // An update still swapping files in is waited out first (app-update-worker.cjs).
   if (app.isPackaged) await waitForUpdateApply(path.dirname(process.execPath)).catch(() => false);
-  await waitForPackagedRuntimeSource({ app, resourcesPath: process.resourcesPath });
+  await waitForPackagedRuntimeSource({ app, resourcesPath: process.resourcesPath, coreHome: CORE_HOME });
   let installedRuntimeRoot = null;
   let runtimeRootResolved = false;
   const runtimeRootProvider = () => {
