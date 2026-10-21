@@ -17,7 +17,7 @@ import { PartErrorBoundary } from "../PartErrorBoundary";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
-  CHAT_DEFAULT_TITLE, GOAL_SUMMARY, chatAcceptsMessage, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen,
+  CHAT_DEFAULT_TITLE, GOAL_SUMMARY, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
   activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, type ChatWakeup,
@@ -1204,7 +1204,12 @@ export function AgentOrchestratorChat({
       onEdit: () => {
         const taken = takeQueued(index);
         if (!taken) return;
-        setDraft((typed) => (typed.trim() ? `${taken.message}\n\n${typed}` : taken.message));
+        // Its annotations come back as the composer's own, ahead of any already there, and only its
+        // text goes in the box: the block the agent reads, put in the box, went out behind a new
+        // selection's block, numbered from 1 again, and showed raw in the chat.
+        const { annotations: kept, rest } = chatAnnotationsSplit(taken.message);
+        setDraft((typed) => (typed.trim() ? `${rest}\n\n${typed}` : rest));
+        if (kept.length) setAnnotations((current) => [...kept.map((item) => ({ ...item, id: ++annotationIds })), ...current]);
         input.current?.focus();
       },
       onSendNow: () => {

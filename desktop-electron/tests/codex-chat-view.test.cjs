@@ -378,6 +378,28 @@ test("a queued message waits in Claude Code's queued-message bar: greyed, with R
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0);
 });
 
+test("Edit in composer gives a queued message's annotations back as the composer's own, not as the block the agent reads", async () => {
+  const { props } = base({ selectedTaskId: "t-notes", working: true,
+    runs: [run("r1", "t-notes", [node("w", "planner", "running", { route: { harness_id: "codex-native", model: "chatgpt-web/high" } })], { execution_mode: "single" })],
+    steer: async () => { throw new Error("not steerable"); } });
+  const view = mount(props);
+  const all = () => walk(view.render());
+  const annotator = () => all().find((element) => typeof element.props?.onAdd === "function");
+  const tray = () => all().find((element) => Array.isArray(element.props?.annotations) && typeof element.props?.onRemove === "function");
+  const id = annotator().props.onAdd("the parser drops tabs");
+  annotator().props.onComment(id, "fix this too");
+  all().find((element) => element.type === "textarea").props.onChange({ target: { value: "first note" } });
+  await all().find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+  assert.equal(tray().props.annotations.length, 0, "the annotation went with the queued message");
+  // A new selection made meanwhile stays, after the queued message's own.
+  annotator().props.onAdd("another line");
+  const row = all().find((element) => element.type === "li" && element.props.className === "cx-queued-row");
+  walk(row).find((element) => element.props?.["aria-label"] === "Edit in composer").props.onClick();
+  assert.equal(all().find((element) => element.type === "textarea").props.value, "first note", "only the text goes in the box");
+  assert.deepEqual(JSON.parse(JSON.stringify(tray().props.annotations.map((item) => [item.text, item.comment]))),
+    [["the parser drops tabs", "fix this too"], ["another line", ""]], "its annotations come back as chips, ahead of the new one");
+});
+
 test("a steer on its way pulses in the queued-message bar; once taken it is an ordinary sent message", async () => {
   let release;
   const { props } = base({ selectedTaskId: "t-steer", working: false,
