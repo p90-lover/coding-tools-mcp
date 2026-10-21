@@ -5068,3 +5068,127 @@ test("a dated DeepSeek V4.1 Flash build from Cline Pass takes the same effort le
   assert.deepEqual(capabilities["cline-pass/deepseek-v4.1-flash"].efforts, ["none", "low", "high", "max"]);
   assert.deepEqual(capabilities["cline-pass/kimi-k3"].efforts, [], "another Cline model still passes its name unchanged");
 });
+
+test("\"Retry automatically\" retries a failed step by itself once its pause is over, with no click", async () => {
+  // The run stopped on the first pass after the failure ("No card is ready"), so the countdown it
+  // showed never ended and the failed step waited for a click after all.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", cancelled: false,
+    grant: { executable_sha256: "a".repeat(64), expires_at_ms: Date.now() + 3_600_000 },
+    nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, history: [], receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const controls = [];
+  let clock = 1_000_000;
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "test-model" }] }) }),
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+      if (endpoint === "/api/v1/ao/control") {
+        controls.push(body.action);
+        // AO retries the step; here it finishes at once, which settles the run.
+        mission.nodes[0] = { ...mission.nodes[0], state: "finished", history: [{ error: "launch timed out" }] };
+        mission.revision++;
+      }
+      return { ok: true, run: mission };
+    },
+    aoHarness: { observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: [] }) },
+    confirm: async () => true,
+  });
+  await workflow.call("chat_auto_retry", { enabled: true });
+  await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  const status = () => workflow.call("run_status", { workspaceId: "ws", runId: "run" });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    // The launch fails: AO holds the step.
+    mission.nodes[0] = { ...mission.nodes[0], state: "held", receipt: { ...mission.nodes[0].receipt, error: "launch timed out" } };
+    let detail = "";
+    for (let tries = 0; tries < 100 && !/Retrying automatically in/.test(detail); tries++) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+      detail = String((await status()).detail ?? "");
+    }
+    assert.match(detail, /Retrying automatically in \d+s \(attempt 1 of 3\)/);
+    await new Promise(resolve => setTimeout(resolve, 600));
+    assert.deepEqual(controls, [], "nothing is retried before the pause is over");
+    clock += 11_000;
+    for (let tries = 0; tries < 200 && !controls.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(controls, ["retry"], "the failed step was retried by itself");
+  } finally {
+    mission.nodes[0].state = "finished";
+    for (let tries = 0; tries < 100 && (await status()).status === "running"; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  }
+});
+test("\"Retry automatically\" also restarts a chat whose run ended on an error, within the attempt limit", async () => {
+  // A launch that timed out threw out of the run before the failed step was looked at, so nothing
+  // was left to retry it.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
+  function setup(history) {
+    const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", cancelled: false,
+      grant: { executable_sha256: "a".repeat(64), expires_at_ms: Date.now() + 3_600_000 },
+      nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, history, receipt: { thread_id: "session-1", request_key: "k" } }] };
+    const controls = [], timers = [];
+    let lost = false;
+    const workflow = createAgentOrchestratorWorkflow({
+      // Only the auto-retry pauses (10 s per attempt); other timers are not this test's.
+      setTimer: (fn, ms) => { if ([10_000, 20_000, 30_000].includes(ms)) timers.push({ fn, ms }); return { unref() {} }; },
+      findCodexExecutable: () => process.execPath,
+      resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+      cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+      fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "test-model" }] }) }),
+      requestHeadless: async (endpoint, body) => {
+        if (endpoint.endsWith("/read")) {
+          if (lost) { lost = false; return { ok: true, runs: [], worker_capacity: { run: 1 } }; }
+          return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+        }
+        if (endpoint === "/api/v1/ao/control") {
+          controls.push(body.action);
+          mission.nodes[0] = { ...mission.nodes[0], state: "finished" };
+          mission.revision++;
+        }
+        return { ok: true, run: mission };
+      },
+      aoHarness: { observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: [] }) },
+      confirm: async () => true,
+    });
+    const fail = () => {
+      mission.nodes[0] = { ...mission.nodes[0], state: "held", receipt: { ...mission.nodes[0].receipt, error: "launch timed out" } };
+      lost = true; // the next read fails, ending the run on an error
+    };
+    return { workflow, mission, controls, timers, fail };
+  }
+  const settle = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+  const first = setup([]);
+  await first.workflow.call("chat_auto_retry", { enabled: true });
+  await first.workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  await settle(100);
+  first.fail();
+  for (let tries = 0; tries < 200 && !first.timers.length; tries++) await settle(10);
+  assert.deepEqual(first.timers.map(timer => timer.ms), [10_000], "a restart is scheduled after the first pause");
+  first.timers[0].fn();
+  for (let tries = 0; tries < 200 && !first.controls.length; tries++) await settle(10);
+  assert.deepEqual(first.controls, ["retry"]);
+
+  // A second failure waits longer, as autoRetryStep's countdown does.
+  const second = setup([{}]);
+  await second.workflow.call("chat_auto_retry", { enabled: true });
+  await second.workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  await settle(100);
+  second.fail();
+  for (let tries = 0; tries < 200 && !second.timers.length; tries++) await settle(10);
+  assert.deepEqual(second.timers.map(timer => timer.ms), [20_000], "the pause grows with each attempt");
+  second.mission.nodes[0].state = "finished";
+
+  // Its third retry already used: the limit holds, and the step waits for the person.
+  const spent = setup([{}, {}, {}]);
+  await spent.workflow.call("chat_auto_retry", { enabled: true });
+  await spent.workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  await settle(100);
+  spent.fail();
+  await settle(300);
+  assert.deepEqual(spent.timers, [], "no restart is scheduled past the limit");
+  assert.deepEqual(spent.controls, [], "no retry past the limit");
+  spent.mission.nodes[0].state = "finished";
+});
