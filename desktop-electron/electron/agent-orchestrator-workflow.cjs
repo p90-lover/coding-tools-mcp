@@ -3423,8 +3423,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
     };
     // The steer itself was delivered; the transcript note is best-effort, and a team's waits for
-    // its run to settle (see whenTaskIdle).
-    if (!grantAtRisk(run)) await note().catch(() => undefined);
+    // its run to settle (see whenTaskIdle). It is written after replying: waiting for its board
+    // read and write held the chat's composer for seconds after the agent already had the message.
+    if (!grantAtRisk(run)) void note().catch(() => undefined);
     else whenTaskIdle(id, task, note);
     return { ok: true, steered: true, runId: run.id, nodeId: card.id };
   }
