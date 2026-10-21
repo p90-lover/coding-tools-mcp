@@ -38,8 +38,14 @@ type toolSieve struct {
 	held      strings.Builder // text not yet released: a possible opener, or a call being captured
 	capturing string          // the closing tag awaited, "" when not inside a call
 	found     int             // calls converted so far
-	nextIndex int             // the tool_calls index the next converted call takes
+	nextIndex int             // the tool_calls index the next call (converted or native) takes
+	native    map[int]int     // a native tool call's index upstream -> its index in our output
 	template  map[string]any  // the latest chunk's id, object, created, model and choice index
+	// Quoting in the text released so far: a call shown inside a Markdown code block or inline code
+	// is an example (an explanation, a quoted earlier call), never one to run.
+	fenceOpen  bool // inside a ``` block
+	inlineOpen bool // inside `inline code` (closed by its backticks or the end of the line)
+	ticks      int  // backticks the released text currently ends with
 }
 
 // newToolSieve returns a sieve for a chat-completions request body, or nil when the request offers
@@ -83,11 +89,17 @@ func (s *toolSieve) feed(text string) (string, []textToolCall) {
 			if at < 0 {
 				// Keep back only a tail that could still grow into an opener.
 				keep := partialOpenerTail(buf)
-				out.WriteString(buf[:len(buf)-keep])
+				s.release(&out, buf[:len(buf)-keep])
 				s.reset(buf[len(buf)-keep:])
 				return out.String(), calls
 			}
-			out.WriteString(buf[:at])
+			s.release(&out, buf[:at])
+			if s.quoted() {
+				// An example in a code block or inline code: its tag is text like the rest.
+				s.release(&out, buf[at:at+len(opener)])
+				s.reset(buf[at+len(opener):])
+				continue
+			}
 			s.reset(buf[at:])
 			if opener == toolCallOpen {
 				s.capturing = toolCallClose
@@ -99,7 +111,7 @@ func (s *toolSieve) feed(text string) (string, []textToolCall) {
 		end := strings.Index(buf, s.capturing)
 		if end < 0 {
 			if len(buf) > maxCapturedCall {
-				out.WriteString(buf)
+				s.release(&out, buf)
 				s.reset("")
 				s.capturing = ""
 			}
@@ -111,9 +123,50 @@ func (s *toolSieve) feed(text string) (string, []textToolCall) {
 		if call, ok := s.parse(block); ok {
 			calls = append(calls, call)
 		} else {
-			out.WriteString(block)
+			s.release(&out, block)
 		}
 	}
+}
+
+// release lets text through, keeping track of the Markdown quoting it opens or closes.
+func (s *toolSieve) release(out *strings.Builder, text string) {
+	out.WriteString(text)
+	for i := 0; i < len(text); i++ {
+		if text[i] == '`' {
+			s.ticks++
+			continue
+		}
+		s.endTicks()
+		if text[i] == '\n' {
+			s.inlineOpen = false
+		}
+	}
+}
+
+// endTicks closes a run of backticks: three or more open or close a code block, fewer open or
+// close inline code outside one.
+func (s *toolSieve) endTicks() {
+	switch {
+	case s.ticks >= 3:
+		s.fenceOpen = !s.fenceOpen
+		s.inlineOpen = false
+	case s.ticks > 0 && !s.fenceOpen:
+		s.inlineOpen = !s.inlineOpen
+	}
+	s.ticks = 0
+}
+
+// quoted reports whether text released now continues a code block or inline code.
+func (s *toolSieve) quoted() bool {
+	fence, inline := s.fenceOpen, s.inlineOpen
+	switch {
+	case s.ticks >= 3: // a fence the text just opened or closed
+		fence = !fence
+		inline = false
+	case s.ticks > 0 && !fence:
+		inline = !inline
+	}
+	return fence || inline
 }
 
 // flush releases whatever is still held (a partial opener or an unclosed call) as text.
@@ -285,11 +338,24 @@ func (s *toolSieve) sieveChunk(payload []byte) [][]byte {
 	if delta == nil {
 		return [][]byte{payload}
 	}
+	// Native calls and converted ones share one index space: a native call keeps the index it was
+	// first given here for all its argument deltas, and never takes one a converted call used.
 	for _, raw := range asSlice(delta["tool_calls"]) {
 		call, _ := raw.(map[string]any)
-		if index, ok := call["index"].(float64); ok && int(index) >= s.nextIndex {
-			s.nextIndex = int(index) + 1
+		index, ok := call["index"].(float64)
+		if !ok {
+			continue
 		}
+		mapped, seen := s.native[int(index)]
+		if !seen {
+			if s.native == nil {
+				s.native = map[int]int{}
+			}
+			mapped = s.nextIndex
+			s.native[int(index)] = mapped
+			s.nextIndex++
+		}
+		call["index"] = mapped
 	}
 	text, hasText := delta["content"].(string)
 	var calls []textToolCall

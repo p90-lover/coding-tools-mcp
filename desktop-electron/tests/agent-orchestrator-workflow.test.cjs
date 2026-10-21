@@ -3658,6 +3658,62 @@ test("Approve for me reviews complete scripts and leaves incomplete or failed re
   }
 });
 
+test("a review that keeps hanging still hands its request to the person at the deadline from its first try", async () => {
+  let clock = Date.parse("2026-10-21T12:00:00Z");
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
+  const request = { approval_id: "hung", source: "ao", kind: "permission", tool: "Write", path: "C:/elsewhere/hung",
+    since: new Date(clock).toISOString(), decisions };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+    { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+  let reviews = 0;
+  const hung = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) };
+      reviews++;
+      // The reviewer does not answer until the test ends.
+      return new Promise(resolve => hung.push(() => resolve({ ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"deny","reason":"fixture"}' } }] }) })));
+    },
+    requestHeadless: async endpoint => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+      if (endpoint.endsWith("/harness/status")) return { ok: true, status: { connected: false } };
+      return { ok: true, run: mission };
+    },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: [request] }),
+      resolveApproval: async () => ({ ok: true }),
+    },
+    confirm: async () => true,
+  });
+  const shown = async () => (await workflow.call("harness_status", { workspaceId: "ws", runId: "run", nodeId: "one" })).status?.pending_approvals?.[0];
+  const waitFor = async (check) => { for (let tries = 0; tries < 500 && !check(); tries++) await new Promise(resolve => setTimeout(resolve, 10)); };
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    await waitFor(() => reviews >= 1);
+    assert.equal(reviews, 1, "the review began");
+    // The pass hangs; once it is stale a later pass starts the review again.
+    clock += 128_000;
+    await waitFor(() => reviews >= 2);
+    assert.equal(reviews, 2, "a later pass tried again");
+    assert.equal((await shown()).awaiting_review, undefined,
+      "past the deadline from the first try the person sees it, though a new try just began");
+  } finally {
+    for (const release of hung) release();
+    mission.nodes[0].state = "finished";
+    for (let tries = 0; tries < 100; tries++) {
+      if ((await workflow.call("run_status", { workspaceId: "ws", runId: "run" })).status !== "running") break;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    workflow.dispose();
+  }
+});
+
 test("Approve for me answers what the safety rules or its reviewer decide, and leaves a reviewer's ask to the person", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };

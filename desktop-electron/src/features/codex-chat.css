@@ -472,7 +472,9 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-tool .cx-live-label { color: var(--color-text-primary); text-transform: none; }
 .cx-tool .cx-live-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; }
 .cx-tool[open] .cx-live-text { white-space: normal; }
-.cx-tool-dot { flex: 0 0 auto; align-self: center; width: 7px; height: 7px; border-radius: 50%; background: var(--ao-muted); }
+/* Centred on the first line, not the row: an opened call's text wraps, and a centred dot sat halfway
+   down its command instead of beside its name. */
+.cx-tool-dot { flex: 0 0 auto; align-self: flex-start; width: 7px; height: 7px; margin-top: calc(0.5lh - 3.5px); border-radius: 50%; background: var(--ao-muted); }
 .cx-tool.tone-ok .cx-tool-dot { background: var(--ao-green); }
 .cx-tool.tone-failed .cx-tool-dot { background: var(--ao-red); }
 .cx-tool.tone-failed .cx-live-label { color: var(--ao-red); }

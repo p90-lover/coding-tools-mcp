@@ -161,6 +161,65 @@ func TestWholeResponseTextCallBecomesARealCall(t *testing.T) {
 	}
 }
 
+func TestQuotedTextCallsStayExamples(t *testing.T) {
+	for _, text := range []string{
+		"Do not run this example:\n```xml\n" + liveTextCall + "\n```\nDone.",
+		"Inline: `" + liveTextCall + "` is the syntax.",
+		"See `run " + liveTextCall + "` above.",
+	} {
+		for _, n := range []int{1, 2, 5, len(text)} {
+			got := relay(t, streamOf(text, n), newToolSieve(execTools()))
+			if got.text != text || len(got.calls) != 0 || got.finish[len(got.finish)-1] != "stop" {
+				t.Fatalf("pieces of %d: a quoted call stays text: %+v", n, got)
+			}
+		}
+	}
+	// After a closed code block a real call converts again.
+	text := "```\nexample\n```\n" + liveTextCall
+	got := relay(t, streamOf(text, 3), newToolSieve(execTools()))
+	if len(got.calls) != 1 || got.text != "```\nexample\n```\n" {
+		t.Fatalf("a call after a closed block converts: %+v", got)
+	}
+}
+
+func TestNativeCallAfterConvertedCallTakesItsOwnIndex(t *testing.T) {
+	sieve := newToolSieve(execTools())
+	var indexes []float64
+	var ids []string
+	collect := func(chunks [][]byte) {
+		for _, b := range chunks {
+			var chunk struct {
+				Choices []struct {
+					Delta struct {
+						ToolCalls []struct {
+							Index float64 `json:"index"`
+							ID    string  `json:"id"`
+						} `json:"tool_calls"`
+					} `json:"delta"`
+				} `json:"choices"`
+			}
+			if err := json.Unmarshal(b, &chunk); err != nil {
+				t.Fatal(err)
+			}
+			for _, call := range chunk.Choices[0].Delta.ToolCalls {
+				indexes = append(indexes, call.Index)
+				ids = append(ids, call.ID)
+			}
+		}
+	}
+	collect(sieve.sieveChunk([]byte(`{"id":"c","choices":[{"index":0,"delta":{"content":` + strconvQuote(liveTextCall) + `}}]}`)))
+	collect(sieve.sieveChunk([]byte(`{"id":"c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"native-1","type":"function","function":{"name":"mcp__coding-tools__exec_command","arguments":""}}]}}]}`)))
+	collect(sieve.sieveChunk([]byte(`{"id":"c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"cmd\":\"ls\"}"}}]}}]}`)))
+	if len(indexes) != 3 || indexes[0] != 0 || indexes[1] != 1 || indexes[2] != 1 {
+		t.Fatalf("converted call at 0, the native call and its later delta at 1: %v (ids %v)", indexes, ids)
+	}
+}
+
+func strconvQuote(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
 func TestHermesJSONTextCall(t *testing.T) {
 	got := relay(t, streamOf(`<tool_call>{"name":"mcp__coding-tools__exec_command","arguments":{"cmd":"ls"}}</tool_call>`, 6), newToolSieve(execTools()))
 	if len(got.calls) != 1 || got.calls[0]["function"].(map[string]any)["arguments"] != `{"cmd":"ls"}` {

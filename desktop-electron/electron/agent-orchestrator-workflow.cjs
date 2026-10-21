@@ -2538,8 +2538,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const REVIEW_DEADLINE_MS = REVIEW_TRIES * (REVIEW_BUDGET_MS + REVIEW_RETRY_MS) + REVIEW_BUDGET_MS + 15_000;
   /** A review pass still running after this has hung; the next one starts beside it. */
   const SCREEN_PASS_STALE_MS = REVIEW_DEADLINE_MS;
-  const reviewStarted = new Map(); // approval_id -> when its latest review try began
-  /** Counted from the later of the request and its latest review try, so a review under way is never overdue. */
+  const reviewStarted = new Map(); // approval_id -> when its first review try began
+  /**
+   * Counted from the later of the request and its first review try: a review within its whole
+   * budget (every try and retry wait) is not overdue, and one past it stays overdue however often
+   * a hung pass restarts it.
+   */
   function reviewOverdue(approval) {
     const since = Date.parse(approval?.since ?? "");
     const opened = Math.min(Number.isFinite(since) ? since : Infinity, pendingSeen.get(approval?.approval_id) ?? Infinity);
@@ -2562,7 +2566,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (!screened || !approval.approval_id || approverAdvice.has(approval.approval_id)) continue;
         const failed = reviewFailures.get(approval.approval_id);
         if (failed && now() - failed.at < REVIEW_RETRY_MS) continue;
-        reviewStarted.set(approval.approval_id, now());
+        // Only the first try counts: a review that keeps hanging was restarted every stale pass, and
+        // a deadline measured from the latest try was never reached.
+        if (!reviewStarted.has(approval.approval_id)) reviewStarted.set(approval.approval_id, now());
         if (reviewStarted.size > 500) reviewStarted.delete(reviewStarted.keys().next().value);
         const request = describeRequest(approval);
         // The command advisor must not decide from a truncated command or permission scope.
