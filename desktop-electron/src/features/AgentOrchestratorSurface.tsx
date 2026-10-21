@@ -77,6 +77,12 @@ function ToolButton({ icon, label, onClick, disabled, primary, pressed }: { icon
   return <button type="button" className={`ao-tool${primary ? " is-primary" : ""}`} aria-label={label} title={label} aria-pressed={pressed} disabled={disabled} onClick={onClick}><Glyph name={icon} /></button>;
 }
 
+/**
+ * A chat message refused only for the moment: the chat started working again under it (its
+ * automatic retry), or the app window was not in front. The chat keeps it at the front of its queue
+ * and sends it as soon as it can, so it is no "Something went wrong".
+ */
+const QUIET_SEND_REFUSAL = /still running|focused app window/i;
 const OVERVIEW_RATIO_KEY = "coding-tools:ao:overview-ratio:v1";
 const OVERVIEW_DIVIDER = 8;
 
@@ -1560,7 +1566,14 @@ export function AgentOrchestratorSurface({ language, setError }: {
         setAutoStatus(startNotice(result) ? "idle" : typeof result.status === "string" ? result.status : "running");
         resolve();
         void Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]).catch(cause => setError(cause instanceof Error ? cause.message : String(cause)));
-      } catch (cause) { if (current() && !input.taskId) setPendingChat(null); reject(cause); throw cause; }
+      } catch (cause) {
+        if (current() && !input.taskId) setPendingChat(null);
+        reject(cause);
+        // Refused only for now (the chat started working again under the message, or the window was
+        // not in front): the chat queues the message and says so; no "Something went wrong" toast.
+        if (input.taskId && QUIET_SEND_REFUSAL.test(cause instanceof Error ? cause.message : String(cause))) return;
+        throw cause;
+      }
     });
   });
   // Steering goes straight to the running agent, outside run()'s one-action-at-a-time lock: it must
@@ -1575,7 +1588,12 @@ export function AgentOrchestratorSurface({ language, setError }: {
       return result.steered === true ? true : result.interrupted === true ? "interrupt" as const : result.restarted === true ? "restart" as const
         : result.starting === true ? "starting" as const
         : result.waiting === true ? "wait" as const : false;
-    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); throw cause; }
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      // The chat waits for focus and steers it in then (see QUIET_SEND_REFUSAL).
+      if (!QUIET_SEND_REFUSAL.test(message)) setError(message);
+      throw cause;
+    }
   };
   // Have the agent the next message needs running before it is sent, so sending does not wait half
   // a minute for a launch: the selected model's (or the team's orchestrator) on a new chat, and on an

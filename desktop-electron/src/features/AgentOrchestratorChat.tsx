@@ -657,7 +657,9 @@ export function AgentOrchestratorChat({
   const [title, setTitle] = useState("");
   const [sending, setSending] = useState(false);
   // Steers shown at once while they reach the agent (deliver), until the turn shows them itself.
-  const [pendingSteers, setPendingSteers] = useState<{ id: string; taskId: string | undefined; text: string; at: number }[]>([]);
+  // `waiting`: the agent was busy with a request of its own, so the steer waits in the chat's queue
+  // and goes in once the request is answered; it stays shown meanwhile.
+  const [pendingSteers, setPendingSteers] = useState<{ id: string; taskId: string | undefined; text: string; at: number; waiting?: boolean }[]>([]);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [attachNote, setAttachNote] = useState("");
   // Words selected in this chat's answers and added to the next message (ChatAnnotations).
@@ -771,7 +773,8 @@ export function AgentOrchestratorChat({
     [chatRuns, shownDescription, describeNode, activity, now, modelName],
   );
   // A steer shown at once gives way to the turn's own record of it (its live timeline, or the
-  // steers under its message once it is done), or after a minute at most.
+  // steers under its message once it is done), or after a minute at most. One still waiting in its
+  // chat's queue stays as long as it waits there.
   useEffect(() => {
     if (!pendingSteers.length) return;
     const seen = new Set<string>();
@@ -779,9 +782,11 @@ export function AgentOrchestratorChat({
       for (const steer of turn.user?.steers ?? []) seen.add(steer.text.trim());
       for (const step of turn.steps) for (const item of step.working?.timeline ?? []) if (item.kind === "steer") seen.add(item.text.trim());
     }
-    const keep = pendingSteers.filter((entry) => !seen.has(entry.text.trim()) && Date.now() - entry.at < 60_000);
+    const fresh = (entry: typeof pendingSteers[number]) => Date.now() - entry.at < 60_000
+      || Boolean(entry.waiting && entry.taskId && (CHAT_QUEUES.get(entry.taskId) ?? []).some((item) => item.message === entry.text));
+    const keep = pendingSteers.filter((entry) => !seen.has(entry.text.trim()) && fresh(entry));
     if (keep.length !== pendingSteers.length) setPendingSteers(keep);
-    const timer = window.setTimeout(() => setPendingSteers((list) => list.filter((entry) => Date.now() - entry.at < 60_000)), 60_000);
+    const timer = window.setTimeout(() => setPendingSteers((list) => list.filter(fresh)), 60_000);
     return () => window.clearTimeout(timer);
   }, [turns, pendingSteers]);
   // The stats line counts the latest turn and the unfinished attempts before it (chatStatsSpan).
@@ -810,7 +815,11 @@ export function AgentOrchestratorChat({
     if (!box || !content || typeof ResizeObserver === "undefined") return undefined;
     const observer = new ResizeObserver(() => {
       if (clicked.current) { clicked.current = false; setAtBottom(box.scrollHeight - box.scrollTop - box.clientHeight < 48); return; }
-      if (following.current) box.scrollTop = box.scrollHeight;
+      // Instant, like the follow above: setting scrollTop obeys the theme's smooth scrolling, and the
+      // animation's in-between scroll events read as "left the bottom" and ended following. Seen
+      // live: right after a send (the thread grows a lot at once) the view stopped on an older
+      // message and stayed there.
+      if (following.current) box.scrollTo({ top: box.scrollHeight, behavior: "instant" });
     });
     observer.observe(content);
     return () => observer.disconnect();
@@ -955,17 +964,26 @@ export function AgentOrchestratorChat({
     // ("Steering…") while it reaches the agent, which can take seconds (it waits out an approval
     // being answered). Until then the box held the text and the Stop button stayed.
     const steerNow = !goal && steering && Boolean(steer && selectedTaskId);
-    const pendingId = steerNow ? `steer-${Date.now()}-${Math.random().toString(36).slice(2)}` : "";
+    // A steer sent again from the queue keeps the bubble it already has, not a second one.
+    const pendingId = steerNow ? pendingSteers.find((entry) => entry.taskId === selectedTaskId && entry.text === message)?.id
+      ?? `steer-${Date.now()}-${Math.random().toString(36).slice(2)}` : "";
     if (steerNow) {
-      setPendingSteers((list) => [...list, { id: pendingId, taskId: selectedTaskId, text: message, at: Date.now() }]);
+      setPendingSteers((list) => list.some((entry) => entry.id === pendingId)
+        ? list.map((entry) => entry.id === pendingId ? { ...entry, at: Date.now() } : entry)
+        : [...list, { id: pendingId, taskId: selectedTaskId, text: message, at: Date.now() }]);
       if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
     } else setSending(true);
     const dropPending = () => { if (pendingId) setPendingSteers((list) => list.filter((entry) => entry.id !== pendingId)); };
     try {
       // A steer the turn outran (it ended first) is sent as an ordinary follow-up instead; a goal is never steered.
       const steered = steerNow ? await steer!({ taskId: selectedTaskId, message }) : false;
+      // The agent is busy with a request of its own (or still starting): the steer waits in the queue
+      // and goes in once it can. It stays shown as steering; a "Queued" card here read as if the
+      // message had not been sent at all ("it pop up as queued for no reason").
+      const waits = steered === "wait" || steered === "starting";
       // Delivered: it stays shown until the turn shows it (see pendingSteers); anything else drops it.
-      if (steered !== true) dropPending();
+      if (steered !== true && !waits) dropPending();
+      if (waits) setPendingSteers((list) => list.map((entry) => entry.id === pendingId ? { ...entry, waiting: true } : entry));
       if (steerNow && steered === false) setSending(true);
       if ((steered === "wait" || steered === "restart" || steered === "interrupt" || steered === "starting") && selectedTaskId) {
         // The agent was found waiting on its own request just now (the page had not seen it yet):
@@ -974,12 +992,12 @@ export function AgentOrchestratorChat({
         // message, and was stopped: the message goes as the same agent's next turn once it settles.
         setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what: "Message", message }));
         if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
-        if (here()) {
-          say(steered === "restart" ? "Restarting" : steered === "interrupt" ? "Interrupting" : "Queued", steered === "restart"
+        // A waiting steer shows under the turn as steering (above); a stopped turn says so.
+        if (here() && !waits) {
+          say(steered === "restart" ? "Restarting" : "Interrupting", steered === "restart"
             ? "The agent had stopped responding, so its turn was stopped; your message is sent as the next turn."
-            : steered === "interrupt" ? "A command was still running, so it was stopped; the same agent gets your message next, with everything it already knows."
-            : steered === "starting" ? "The agent is still starting; your message is steered in once it can take it."
-            : "The agent is waiting for an answer to its request; your message is steered in once that is answered.", chatMessageReadable(message));
+            : "A command was still running, so it was stopped; the same agent gets your message next, with everything it already knows.",
+            chatMessageReadable(message));
         }
         return true;
       }
@@ -998,10 +1016,11 @@ export function AgentOrchestratorChat({
           await send(selectedTaskId ? { taskId: selectedTaskId, message, ...(goal ? { goal } : {}) }
             : { title: title.trim() || undefined, message: first, ...(goal ? { goal } : {}) });
         } catch (error) {
-          // Not sent: it goes back where it was typed, unless something new was typed meanwhile.
+          // Not sent: it goes back where it was typed, unless something new was typed meanwhile, or
+          // it is only refused for now (it then waits in the queue; see the catch below).
           if (shown) {
             setOutgoing(null);
-            if (here() && !composing.current.draft) {
+            if (here() && !composing.current.draft && !/still running|focused app window/i.test(String((error as Error)?.message ?? error))) {
               setDraft(owner.draft); setAttachments(owner.attachments); setAnnotations(owner.annotations);
             }
           }
@@ -1018,10 +1037,29 @@ export function AgentOrchestratorChat({
       }
       if (here()) setAtBottom(true);
       return true;
-    } catch {
+    } catch (error) {
+      dropPending();
+      // Refused only for the moment, not for what it says: the chat started working again under it
+      // (seen live: "Retrying automatically in 5s" restarted the run as the message went, and "This
+      // chat is still running" sent it back to the composer), or the window was not in front (sends
+      // run only from the focused window). It waits at the front of the queue instead, steered in or
+      // sent as soon as it can be, or once the window is back in front.
+      const why = String((error as Error)?.message ?? error);
+      const busyNow = /still running/i.test(why), unfocused = /focused app window/i.test(why);
+      if (selectedTaskId && (busyNow || unfocused)) {
+        // Held until the chat's state changes (sentWhileFree): the chat could still read as free for a
+        // moment, and the queue would send it again and again into the same refusal.
+        if (busyNow) sentWhileFree.current = true;
+        setQueue(selectedTaskId, [{ what: "Message", message, ...(goal ? { goal } : {}) }, ...queueOf(selectedTaskId)]);
+        if (unfocused) setWindowFocused(false);
+        if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
+        if (here()) say("Queued", busyNow
+          ? "The chat started working again (its automatic retry), so your message waits: it's steered in or sent as soon as it can be."
+          : "It's sent when this window is in front again.", chatMessageReadable(message));
+        return true;
+      }
       // The surface already shows the error; keep the message so it can be sent again. A steer had
       // cleared the composer at once: what was typed comes back, unless something new was typed since.
-      dropPending();
       if (steerNow && here() && !composing.current.draft.trim() && !composing.current.attachments.length) {
         setDraft(owner.draft); setAttachments(owner.attachments); setAnnotations(owner.annotations);
       }
@@ -1080,6 +1118,13 @@ export function AgentOrchestratorChat({
     window.addEventListener("focus", on); window.addEventListener("blur", off);
     return () => { window.removeEventListener("focus", on); window.removeEventListener("blur", off); };
   }, []);
+  // Marked out of focus by a refused send while the window was in front all along, no focus event
+  // would ever come: the queue checks again every two seconds.
+  useEffect(() => {
+    if (windowFocused || typeof document === "undefined" || typeof document.hasFocus !== "function") return undefined;
+    const timer = window.setInterval(() => { if (document.hasFocus()) setWindowFocused(true); }, 2_000);
+    return () => window.clearInterval(timer);
+  }, [windowFocused]);
   useEffect(() => {
     const task = selectedTaskId, [next, ...rest] = queueOf(task);
     if (!task || !next || !accepts || busy || sending || sentWhileFree.current || !windowFocused) return;
@@ -1511,7 +1556,7 @@ export function AgentOrchestratorChat({
             {threadTurns}
             {pendingSteers.filter((entry) => entry.taskId === selectedTaskId).map((entry) => <div key={entry.id} className="cx-user cx-steer is-pending">
               <SentMessage text={entry.text} />
-              <span className="cx-stamp">Steering…</span>
+              <span className="cx-stamp">{entry.waiting ? "Steering… once the agent's request is answered" : "Steering…"}</span>
             </div>)}
             {(notice || notStarted) && latest && chat?.status === "queued" && !working ? (
               <div className="cx-card tone-error">

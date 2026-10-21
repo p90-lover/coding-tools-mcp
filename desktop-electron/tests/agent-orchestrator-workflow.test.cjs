@@ -5485,6 +5485,8 @@ test("a dated DeepSeek V4.1 Flash build from Cline Pass takes the same effort le
       // CPA's catalog lists "none" and "ultra" for some; GLM refused the one, OpenRouter the other.
       { id: "cline-pass/glm-5.3-flash", owned_by: "cline", supported_reasoning_levels: [{ effort: "low" }, { effort: "ultra" }] },
       { id: "commandcode-go/glm-5.3-flash", owned_by: "commandcode-go" },
+      // Antigravity's Claude: CPA lists no levels, yet the suffix turns its thinking on.
+      { id: "claude-sonnet-4-6", owned_by: "antigravity" },
     ] }) }),
   });
   const { capabilities } = await workflow.call("models", {});
@@ -5496,10 +5498,12 @@ test("a dated DeepSeek V4.1 Flash build from Cline Pass takes the same effort le
   assert.deepEqual(capabilities["cline-pass/kimi-k3"].efforts, openRouter);
   assert.deepEqual(capabilities["cline-pass/glm-5.3-flash"].efforts, openRouter, "not CPA's none/ultra");
   assert.equal(capabilities["cline-pass/glm-5.3-flash"].effortReason, undefined);
-  assert.deepEqual(capabilities["commandcode-go/glm-5.3-flash"].efforts, [], "Command Code's plugin still passes the name unchanged");
+  assert.deepEqual(capabilities["commandcode-go/glm-5.3-flash"].efforts, ["none", "low", "medium", "high", "max"],
+    "Command Code's plugin 1.0.0-codingtools.2 reads the suffix");
+  assert.deepEqual(capabilities["claude-sonnet-4-6"].efforts, ["low", "medium", "high", "max"]);
 });
 
-test("a Cline Pass model's picked effort reaches CPA as its suffix; Command Code's model still goes bare", async () => {
+test("a Cline Pass or Command Code model's picked effort reaches CPA as its suffix", async () => {
   // Plugin 0.1.0-codingtools.4 turns the suffix into the request's reasoning_effort for every Cline
   // model. Before, only DeepSeek V4.1 Flash took one, and the app sent GLM 5.3 Flash none.
   const spawned = [];
@@ -5514,7 +5518,9 @@ test("a Cline Pass model's picked effort reaches CPA as its suffix; Command Code
   };
   assert.equal(await warm("cpa/cline-pass/glm-5.3-flash", "medium"), "cline-pass/glm-5.3-flash(medium)");
   assert.equal(await warm("cpa/cline-pass/deepseek-v4.1-flash", "max"), "cline-pass/deepseek-v4.1-flash(max)");
-  assert.equal(await warm("cpa/commandcode-go/glm-5.3-flash", "high"), "commandcode-go/glm-5.3-flash");
+  assert.equal(await warm("cpa/commandcode-go/glm-5.3-flash", "high"), "commandcode-go/glm-5.3-flash(high)");
+  // Another plugin's model with no known level still goes by its bare name.
+  assert.equal(await warm("cpa/grok/grok-5", "high"), "grok/grok-5");
   workflow.dispose();
 });
 

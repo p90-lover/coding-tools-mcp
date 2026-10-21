@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "commandcode-go",
-  "version": "1.0.0-codingtools.1",
+  "version": "1.0.0-codingtools.2",
   "source": {
     "repository": "https://github.com/sperictao/cpa-plugin-commandcode-go",
     "commit": "444ee977daaa96e6fa6ef5155b14cac3a6f9cdc3",
@@ -14,18 +14,19 @@
   "changes": [
     "CPA auth-provider browser login and auth-file support",
     "CPA-selected credential per request",
-    "native CPA provider routing instead of authless model-router"
+    "native CPA provider routing instead of authless model-router",
+    "a reasoning level in the model's CPA suffix (glm-5.3-flash(high)) becomes the request's reasoning_effort; it was dropped"
   ],
   "build": {
-    "go": "1.26.8",
+    "go": "1.27.1",
     "cCompiler": "Zig 0.16.0",
     "mode": "c-shared"
   },
   "platforms": {
     "win32/x64": {
-      "path": "windows/amd64/commandcode-go-v1.0.0-codingtools.1.dll",
-      "sha256": "ffb690666d979bbeb529ce076291b808aac39b9091ef62f28b5c8e37285cb70c",
-      "size": 12664320
+      "path": "windows/amd64/commandcode-go-v1.0.0-codingtools.2.dll",
+      "sha256": "66a0facf99038fa844c1b1d90b3618eb4f531d59770ce770592806df5b6656c8",
+      "size": 7660032
     }
   },
   "studio": {

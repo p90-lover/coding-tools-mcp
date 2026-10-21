@@ -768,8 +768,17 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // took none: GLM 5.3 Flash's effort chip stayed greyed at "Auto" with no level to pick. Not "none"
   // (GLM always reasons: "Reasoning is mandatory") nor "ultra" (no OpenRouter level), though CPA's
   // catalog lists them for some of these models.
+  // Command Code's plugin (1.0.0-codingtools.2) reads the suffix too, as its own advertised levels;
+  // before, it dropped the suffix and a picked level never reached Command Code.
   const CLINE_EFFORT_MODELS = [[/^cline-pass\/deepseek-v4\.1-flash(?:-\d{4,8})?$/, ["none", "low", "high", "max"]],
-    [/^cline-pass\/[^()]+$/, ["minimal", "low", "medium", "high", "xhigh", "max"]]];
+    [/^cline-pass\/[^()]+$/, ["minimal", "low", "medium", "high", "xhigh", "max"]],
+    [/^commandcode-go\/[^()]+$/, ["none", "low", "medium", "high", "max"]]];
+  /**
+   * A Claude model on one of CPA's own providers (Antigravity) that CPA lists with no levels still
+   * takes its suffix: tried 2026-10-21, "claude-sonnet-4-6(low|medium|high|max)" and
+   * "claude-opus-4-6-thinking(low)" answered with a thinking block, and without one they did not.
+   */
+  const CLAUDE_SUFFIX_EFFORTS = ["low", "medium", "high", "max"];
   const CLINE_EFFORTS = { get: id => CLINE_EFFORT_MODELS.find(([pattern]) => pattern.test(String(id)))?.[1], has: id => Boolean(CLINE_EFFORTS.get(id)) };
   // Ids the last catalog read named a plugin as provider of, for launches that have only the id.
   let pluginModels = new Set();
@@ -1026,7 +1035,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       const provider = [entry.provider, entry.owned_by, entry.ownedBy].find(value => typeof value === "string" && value.trim());
       const verbatim = verbatimModel(id, provider) || verbatimModel(id, owners?.get(id));
       if (verbatim) plugins.add(id);
-      const efforts = CLINE_EFFORTS.get(id) ?? (verbatim ? [] : reportedEfforts(entry.supported_reasoning_levels ?? entry.thinking?.levels));
+      const reportedLevels = verbatim ? [] : reportedEfforts(entry.supported_reasoning_levels ?? entry.thinking?.levels);
+      const efforts = CLINE_EFFORTS.get(id) ?? (!verbatim && !reportedLevels.length && /^claude-/i.test(id) ? CLAUDE_SUFFIX_EFFORTS : reportedLevels);
       // context_window is the default the client starts with; max_context_window is how far the
       // model goes (Luna: 272K by default, up to 1M).
       // CPA gives every model of its provider plugins (cline-pass/…, commandcode-go/…) the same stock
