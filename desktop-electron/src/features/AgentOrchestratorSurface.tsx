@@ -1901,9 +1901,15 @@ export function AgentOrchestratorSurface({ language, setError }: {
       lastChatStatus.current[entry.taskId] = entry.status;
     }
   }, [missions]);
+  // The chat list's clock (its "5m ago" times, and the refresh of other open projects' chats) stops
+  // while the window is hidden and ticks as soon as it is shown again. Minimized, each tick's reads
+  // were refused ("Open the Coding Tools window (not minimized)": 9 board + runs pairs a minute
+  // apart in the launcher log).
   useEffect(() => {
-    const timer = window.setInterval(() => setListNow(Date.now()), 60_000);
-    return () => window.clearInterval(timer);
+    const tick = () => { if (!pageHidden()) setListNow(Date.now()); };
+    const timer = window.setInterval(tick, 60_000);
+    document.addEventListener("visibilitychange", tick);
+    return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", tick); };
   }, []);
   // Every message names how its card runs; working cards also show runtime and current step.
   // A single-model chat's one card is stored as the planner; it is no orchestrator, so no role is shown.

@@ -1507,3 +1507,25 @@ test("the approvals poll asks nothing about a run still selected from the previo
   await new Promise(setImmediate);
   assert.deepEqual(calls, [], "no poll starts until the run belongs to this project");
 });
+test("the chat list's clock stops while the window is hidden and ticks as soon as it is shown", () => {
+  // Seen in the launcher log: minimized, each minute's tick re-read other open projects' chats and
+  // was refused, "Open the Coding Tools window (not minimized)" (9 board + runs pairs).
+  let hidden = true, interval = null, cleared = false;
+  const listeners = new Map(), ticks = [];
+  const effect = rendererCallback("AgentOrchestratorSurface.tsx", "effect:setListNow(Date.now())", {
+    Date, pageHidden: () => hidden, setListNow: value => ticks.push(value),
+    window: { setInterval: (callback, ms) => { interval = { callback, ms }; return 7; }, clearInterval: id => { cleared = id === 7; } },
+    document: { addEventListener: (type, callback) => listeners.set(type, callback), removeEventListener: (type, callback) => { if (listeners.get(type) === callback) listeners.delete(type); } },
+  });
+  const cleanup = effect();
+  assert.equal(interval.ms, 60_000);
+  interval.callback();
+  assert.equal(ticks.length, 0, "no tick, so no reads, while minimized");
+  hidden = false;
+  listeners.get("visibilitychange")();
+  assert.equal(ticks.length, 1, "shown again, it ticks at once");
+  interval.callback();
+  assert.equal(ticks.length, 2, "and every minute while shown");
+  cleanup();
+  assert.ok(cleared && !listeners.has("visibilitychange"), "unmounting stops both");
+});
