@@ -1490,8 +1490,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
         if (!current()) { resolve(); return; }
         // The route is not kept here: picks are kept as they are made, and a follow-up in an older
         // chat runs on that chat's route, which must not become the next new chat's (or a rewind's).
-        await Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]);
-        if (!current()) { resolve(); return; }
+        // The board and missions reload in the background below: awaiting them here too (two more
+        // reads, then the same two again) held the sent message for seconds on a busy disk. The new
+        // run and the new chat's task are set from the answer meanwhile.
         const taskId = String(result.taskId);
         if (result.run) {
           const created = result.run as AoMission;

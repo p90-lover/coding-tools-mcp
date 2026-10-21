@@ -2233,6 +2233,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (/^preview_(?:open|read|screenshot|click|type|press|scroll|navigate|wait|console)$/.test(short)) {
       return "The chat's own preview browser: pages on this machine only, each new address allowed by you";
     }
+    // The user's own subagents (Runtime > Subagents): a subagent works in this project under the same
+    // safety rules, its requests answered as "Approve for me" answers them, so starting one does
+    // nothing the agent could not do itself. subagent_start carries the whole brief, longer than a
+    // review reads, so it waited for the person every time.
+    if (/^subagent_(?:list|start|result|status|stop)$/.test(short)) {
+      return "One of your own subagents (Runtime > Subagents), which runs under the same safety rules";
+    }
+    // The chat's own follow-up timer: it sends this chat a note later, and runs nothing.
+    if (short === "schedule_wakeup") return "A reminder the chat sends itself later; it runs nothing";
     if (!APP_TOOLS_ALLOWED.has(short)) return null;
     return short === "apply_patch" || short === "patch_check"
       ? "An edit through the app's tools, confined to the agent's worktree (like Claude's own edits)"
@@ -2314,7 +2323,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // folder or new rules are reviewed afresh. Only a model's answer is kept, never a failure.
   const REVIEW_CACHE_MS = 10 * 60_000;
   const reviewVerdicts = new Map(); // sha256(prompt) -> { at, action, reason }
-  async function askApprover({ approver, mission, approval }) {
+  /** `decide`: the reviewer already said "ask"; this time it must choose allow or deny. */
+  async function askApprover({ approver, mission, approval, decide = false }) {
     const { baseUrl, key } = connection();
     const catalog = await models();
     const all = reviewerModels(approver, catalog.models, catalog.hidden ?? []);
@@ -2337,8 +2347,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       `Request: ${describeRequest(approval)}`,
       approval.permissions ? `Permissions: ${JSON.stringify(approval.permissions).slice(0, 800)}` : "",
       ...scripts.map((script) => `Local script ${script.file} (from the request's working folder${script.truncated ? ", first 4 KB" : ""}):\n${script.text}`),
-      'Answer with JSON only: {"action":"allow"|"deny"|"ask","reason":"<one sentence for the user>"}.',
-      "allow: clearly safe and needed for the task. deny: destructive, outside the workspace, secret-touching or unrelated. ask: anything unclear.",
+      ...(decide ? [
+        'Answer with JSON only: {"action":"allow"|"deny","reason":"<one sentence for the user>"}.',
+        "Nobody else will look at this request: choose allow or deny. allow: safe and needed for the task. "
+          + "deny: destructive, outside the workspace, secret-touching, unrelated, or anything you are not sure is safe.",
+      ] : [
+        'Answer with JSON only: {"action":"allow"|"deny"|"ask","reason":"<one sentence for the user>"}.',
+        "allow: clearly safe and needed for the task. deny: destructive, outside the workspace, secret-touching or unrelated. ask: anything unclear.",
+      ]),
       scripts.length ? "Judge a command that runs a local script by the script's contents shown above." : "",
     ].filter(Boolean).join("\n");
     const verdictKey = createHash("sha256").update(prompt).digest("hex");
@@ -2442,7 +2458,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
                 ? { action: "allow", actor: "safety_rules", reason_code: "routine_command", reason: routineCommand(approval.command) }
                 // A reviewer that cannot answer is asked again (see REVIEW_TRIES); only then does the
                 // request go to the person, and its card says why.
-                : await askApprover({ approver, mission, approval }).catch((error) => ({ action: "failed", error }));
+                : await askApprover({ approver, mission, approval }).then(verdict => ({ ...verdict, reviewed: true }),
+                  (error) => ({ action: "failed", error }));
+        // The reviewer was unsure ("ask"): asked once more, it must choose allow or deny (deny when in
+        // doubt), so a request it could read whole no longer waits for the person for want of a decision.
+        if (advice.action === "ask" && advice.reviewed) {
+          const decided = await askApprover({ approver, mission, approval, decide: true }).catch(() => null);
+          if (decided && decided.action !== "ask") advice = { action: decided.action, reason: decided.reason };
+        }
         if (advice.action === "failed") {
           const tries = (reviewFailures.get(approval.approval_id)?.tries ?? 0) + 1;
           const why = publicText(advice.error?.message || advice.error, 160);
@@ -3989,7 +4012,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!latest) throw new Error("Owned mission disappeared while stopping");
     const external = latest.nodes.filter(node => externalAgent(node)
       && (["running","reserved"].includes(node.state) || node.request_key && node.state !== "finished" && node.receipt?.status !== "completed"));
-    if (external.some(node => !node.receipt?.thread_id)) throw new Error("Owned session identity is unknown; stop needs attention");
+    // Only a card still running or reserved without a session could have an agent nobody can name.
+    // One whose launch came back without a session (held with the failure, "Needs you") owns none:
+    // there is nothing to stop, and refusing here kept such a chat from ever being archived.
+    if (external.some(node => !node.receipt?.thread_id && ["running", "reserved"].includes(node.state))) {
+      throw new Error("Owned session identity is unknown; stop needs attention");
+    }
     const result = await requestHeadless("/api/v1/ao/control", {
       workspace_id: workspaceId, run_id: mission.id, action: "stop", confirm: true,
     }, { localConfirmation: true });
@@ -3997,7 +4025,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         || result.run.nodes.some(node => ["running", "reserved"].includes(node.state))) {
       throw new Error("Owned native stop was not acknowledged; no replacement was started");
     }
-    for (const node of external) await stopExternalTurn(node.receipt.thread_id);
+    for (const node of external) if (node.receipt?.thread_id) await stopExternalTurn(node.receipt.thread_id);
     return result.run;
   }
   async function resolveStoppedIntents(workspaceId,taskId,saved) {

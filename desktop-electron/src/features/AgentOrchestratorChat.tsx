@@ -721,9 +721,28 @@ export function AgentOrchestratorChat({
     const timer = window.setInterval(() => setNow(Date.now()), 10_000);
     return () => window.clearInterval(timer);
   }, [anyWorking]);
+  // The message being sent, shown at once as Claude Code shows it: the send (saving the chat,
+  // starting its run, reloading the board) took seconds, and the message sat in the composer
+  // meanwhile as if nothing happened. It shows as the chat's next message until the saved chat has it.
+  const [outgoing, setOutgoing] = useState<{ taskId: string; message: string; stamp: string; sent: boolean; at: number } | null>(null);
+  const savedDescription = descriptions[selectedTaskId] ?? pendingMessage;
+  const shownDescription = useMemo(() => {
+    if (!outgoing || outgoing.taskId !== (selectedTaskId ?? "")) return savedDescription;
+    if (!savedDescription) return outgoing.message;
+    if (savedDescription.endsWith(outgoing.message)) return savedDescription;
+    return `${savedDescription}\n\nFollow-up (${outgoing.stamp} UTC):\n${outgoing.message}`;
+  }, [savedDescription, outgoing, selectedTaskId]);
+  // Once sent, it gives way to the saved chat when that has it (or after a while, if it never reads back).
+  useEffect(() => {
+    if (!outgoing?.sent) return undefined;
+    const saved = descriptions[outgoing.taskId];
+    if (!outgoing.taskId || (saved && saved.endsWith(outgoing.message))) { setOutgoing(null); return undefined; }
+    const timer = window.setTimeout(() => setOutgoing((current) => (current === outgoing ? null : current)), Math.max(0, 20_000 - (Date.now() - outgoing.at)));
+    return () => window.clearTimeout(timer);
+  }, [outgoing, descriptions]);
   const turns: ChatTurn[] = useMemo(
-    () => chatTurns(chatRuns, descriptions[selectedTaskId] ?? pendingMessage, { describe: describeNode, activity, now, modelName }),
-    [chatRuns, descriptions, selectedTaskId, describeNode, activity, now, pendingMessage, modelName],
+    () => chatTurns(chatRuns, shownDescription, { describe: describeNode, activity, now, modelName }),
+    [chatRuns, shownDescription, describeNode, activity, now, modelName],
   );
   // The stats line counts the latest turn and the unfinished attempts before it (chatStatsSpan).
   const statsSpan = useMemo(() => chatStatsSpan(turns, chatRuns), [turns, chatRuns]);
@@ -904,12 +923,35 @@ export function AgentOrchestratorChat({
       }
       // A rewound chat's first message takes the earlier messages along ahead of it, as context.
       const first = !selectedTaskId && carried?.length ? [...carried, message].join("\n\n").slice(-8192) : message;
-      if (!steered) await send(selectedTaskId ? { taskId: selectedTaskId, message, ...(goal ? { goal } : {}) }
-        : { title: title.trim() || undefined, message: first, ...(goal ? { goal } : {}) });
+      // Shown at once: the message leaves the composer and appears in the chat while it is sent.
+      const shown = !steered && !goal && fromComposer && here();
+      if (shown) {
+        const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
+        setOutgoing({ taskId: selectedTaskId ?? "", message: selectedTaskId ? message : first, stamp, sent: false, at: Date.now() });
+        if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
+        setAtBottom(true);
+      }
+      if (!steered) {
+        try {
+          await send(selectedTaskId ? { taskId: selectedTaskId, message, ...(goal ? { goal } : {}) }
+            : { title: title.trim() || undefined, message: first, ...(goal ? { goal } : {}) });
+        } catch (error) {
+          // Not sent: it goes back where it was typed, unless something new was typed meanwhile.
+          if (shown) {
+            setOutgoing(null);
+            if (here() && !composing.current.draft) {
+              setDraft(owner.draft); setAttachments(owner.attachments); setAnnotations(owner.annotations);
+            }
+          }
+          throw error;
+        }
+        if (shown) setOutgoing((pending) => pending && { ...pending, sent: true });
+      }
       if (fromComposer && CHAT_DRAFTS.get(owner.taskId) === owner.draft) CHAT_DRAFTS.delete(owner.taskId);
       if (fromComposer && CHAT_ATTACHMENTS.get(owner.taskId) === owner.attachments) CHAT_ATTACHMENTS.delete(owner.taskId);
-      if (current()) {
-        setDraft(""); setTitle(""); setAttachments([]); setAnnotations([]); setAttachNote("");
+      if (current() || (shown && here())) {
+        if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
+        setTitle("");
         if (!selectedTaskId) setCarried(null);
       }
       if (here()) setAtBottom(true);

@@ -982,8 +982,11 @@ test("send completion preserves the next chat's draft and edits typed during the
       selectedTaskId: "task-a", draft: "sent text", attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(),
       setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: () => reply.promise,
       setDraft: set("draft"), setTitle() {}, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, setCarried() {},
+      // The message shows in the chat at once (setOutgoing) and leaves the composer before it is sent.
+      setOutgoing() {}, setAnnotations() {},
     });
     const sending = deliver("sent text");
+    assert.equal(state.draft, "", "the sent text leaves the composer at once, not when the send returns");
     state.draft = "new unsent text"; composing.current = { taskId, draft: state.draft, attachments };
     reply.resolve(); assert.equal(await sending, true);
     assert.equal(state.draft, "new unsent text", taskId);

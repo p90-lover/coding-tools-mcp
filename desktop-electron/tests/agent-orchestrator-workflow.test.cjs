@@ -100,6 +100,18 @@ test("archive cannot hide a cancelled-but-still-live external turn after an unce
   assert.ok(!world.calls.some(c=>c[1]?.change?.change?.operation==="set_visibility"));
 });
 
+test("a chat whose launch came back without a session can be archived: it owns no agent to stop", async()=>{
+  // Seen live: "Owned session identity is unknown; stop needs attention" kept a "Needs you" chat, whose
+  // card was held after its launch failed, from ever being archived.
+  const world=reconfigureWorld();
+  const lead=world.saved.runs[0].nodes[0];
+  lead.state="held"; lead.receipt={status:"failed",error:"launch timed out",request_key:"request-one"};
+  await world.workflow.call("archive_task",{workspaceId:"ws",taskId:"task"});
+  assert.ok(world.calls.some(c=>c[0]==="/api/v1/ao/control"&&c[1].action==="stop"),"the run is still stopped");
+  assert.ok(!world.calls.some(c=>c[0]==="interrupt"),"no session stop is attempted for a card that has none");
+  assert.ok(world.calls.some(c=>c[1]?.change?.change?.operation==="set_visibility"),"the chat is archived");
+});
+
 test("model edits preserve missed, uncertain and cancelled schedule holds rather than launching",async()=>{
   for(const state of ["missed","needs_attention","cancelled","claimed"]){
     const world=reconfigureWorld();
@@ -3245,7 +3257,8 @@ test("a single AO card set to Approve for me has its parked tool requests review
   assert.deepEqual(JSON.parse(JSON.stringify(resolved)).sort(), [["session-1", "push", "no"], ["session-1", "safe", "yes"]],
     "allowed once by the reviewer, git push denied by the hard rules, the unclear write left for the person; never an always-grant");
   assert.ok(advised.length >= 1 && advised.every(model => model === "test-model"), "the card's own CPA model reviews");
-  assert.equal(advised.length, 1, "the reviewer is asked only about the unclear write, never about the agent's question");
+  // Its "ask" gets one more review that must choose allow or deny; still undecided, the write waits.
+  assert.equal(advised.length, 2, "the reviewer is asked only about the unclear write (twice), never about the agent's question");
 });
 
 test("Approve for me is reviewed by codex-auto-review first, the card's model when CPA cannot serve it, and the person when neither answers", async () => {
@@ -5686,6 +5699,56 @@ test("Stop disables the local driver before a queued receipt snapshot can return
     state.stopped = true;
     releaseSnapshot();
     await stopping.catch(() => undefined);
+    workflow.dispose();
+  }
+});
+
+test("Approve for me runs the app's subagent and wake-up tools unasked, and asks its reviewer once more for allow or deny", async () => {
+  // Seen live: subagent_start (its brief longer than the review reads) waited for the person, and a
+  // reviewer's "ask" put plain commands in front of them.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "allow", kind: "allow_once", label: "Allow Once" }, { id: "reject", kind: "reject_once", label: "Deny" }];
+  const requests = [
+    { approval_id: "start", kind: "permission", tool: "mcp__coding-tools__subagent_start", reviewTruncated: true,
+      toolInput: JSON.stringify({ agent: "explorer", task: "Map the YOLO training state. ".repeat(80) }) },
+    { approval_id: "wake", kind: "permission", tool: "mcp__coding-tools__schedule_wakeup", toolInput: JSON.stringify({ minutes: 10, reason: "CI" }) },
+    { approval_id: "settles-allow", kind: "command", tool: "Bash", command: "python tools/calibrate.py" },
+    { approval_id: "settles-deny", kind: "command", tool: "Bash", command: "python tools/upload.py" },
+  ].map(request => ({ source: "ao", decisions, ...request }));
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+    { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const resolved = [], prompts = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
+      if (!String(url).endsWith("/chat/completions")) return { ok: false, status: 404, json: async () => ({}) };
+      const prompt = JSON.parse(init.body).messages[0].content;
+      prompts.push(prompt);
+      const decide = /allow or deny/i.test(prompt) && !/"ask"/.test(prompt);
+      const verdict = !decide ? { action: "ask", reason: "not sure" }
+        : prompt.includes("calibrate.py") ? { action: "allow", reason: "a project script" } : { action: "deny", reason: "uploads data" };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(verdict) } }] }) };
+    },
+    requestHeadless: async (endpoint) => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running",
+        approvals: requests.filter(request => !resolved.some(([id]) => id === request.approval_id)) }),
+      resolveApproval: async (_session, requestId, decisionId) => { resolved.push([requestId, decisionId]); return { ok: true }; },
+    },
+    confirm: async () => true,
+  });
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 400 && resolved.length < 4; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(Object.fromEntries(resolved), { start: "allow", wake: "allow", "settles-allow": "allow", "settles-deny": "reject" });
+    assert.ok(!prompts.some(prompt => prompt.includes("subagent_start") || prompt.includes("schedule_wakeup")), "the app's own tools need no review");
+    assert.equal(prompts.filter(prompt => prompt.includes("calibrate.py")).length, 2, "an ask is followed by one allow-or-deny review");
+  } finally {
+    mission.nodes[0].state = "finished";
     workflow.dispose();
   }
 });
