@@ -1455,6 +1455,7 @@ test("the approvals poll skips a card whose attempt changed mid-read instead of 
   const timers = [];
   const effect = rendererCallback("AgentOrchestratorSurface.tsx", "effect:approvalScope.current", {
     Error, STALE_OBSERVE: /AO receipt changed/, activeNodeIds: JSON.stringify(["old", "live"]),
+    // #463: the poll asks only for a run of this project (selectedRunHere).
     workspaceId: "w1", selectedRunId: "run1", selectedRunHere: true, autoStatus: "idle", surfaceHidden: () => false,
     approvalScope: { current: null }, selection: { current: { workspaceId: "w1", runId: "run1" } },
     setPendingApprovals: value => { state.approvals = value; }, setRuntimePolicies: value => { state.policies = value; },
