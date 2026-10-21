@@ -266,8 +266,9 @@ test("a pending item too large for any page still lets the chat be read (and sto
   });
   const observed = await upstream.observe("s");
   assert.equal(observed.turnState, "running");
+  // The second limit=10 read is the one with room for big items (compactConversation).
   assert.deepEqual(asked, ["limit=100&includePending=1", "limit=40&includePending=1", "limit=10&includePending=1",
-    "limit=3&includePending=1", "limit=1&includePending=1", "limit=10"]);
+    "limit=10&includePending=1", "limit=3&includePending=1", "limit=1&includePending=1", "limit=10"]);
 });
 
 test("one item over the limit among the newest ten no longer hides what came after it", async () => {
@@ -285,8 +286,8 @@ test("one item over the limit among the newest ten no longer hides what came aft
   });
   const observed = await upstream.observe("s");
   assert.equal(observed.turnState, "running");
-  assert.deepEqual(asked, ["limit=100&includePending=1", "limit=40&includePending=1", "limit=10&includePending=1", "limit=3&includePending=1"],
-    "three items, pending ones included, get past it");
+  assert.deepEqual(asked, ["limit=100&includePending=1", "limit=40&includePending=1", "limit=10&includePending=1",
+    "limit=10&includePending=1", "limit=3&includePending=1"], "three items, pending ones included, get past it");
 });
 
 test("a newest item over the limit on its own still fails the read, after every smaller page", async () => {
@@ -1016,6 +1017,58 @@ test("observes of one session that overlap share one conversation read; later on
   assert.deepEqual([...observed.map((entry) => entry.liveOutput)], ["read 1", "read 1", "read 1"]);
   await upstream.observe("s");
   assert.equal(reads, 2, "a landed read is never reused: the next observe reads afresh");
+});
+
+test("a chat whose newest items are each over the handler limit still shows its work, with their big fields cut", async () => {
+  // Seen live: two screenshot tool calls of 1.3 MB each among a chat's newest 20 items made every
+  // conversation read 2.7 MB; all sizes failed, and the chat showed nothing for 5 hours.
+  const screenshot = "data:image/png;base64," + "A".repeat(1_300_000);
+  const asked = [];
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint, _body, options) => {
+      if (!endpoint.includes("/conversation")) return { session: { id: "s", mode: "chat", status: "working" } };
+      asked.push(options?.maxBytes ?? null);
+      if (!options?.maxBytes) throw new Error("AO response exceeds the handler limit (GET /api/v1/sessions/s/conversation)");
+      return {
+        turns: [{ id: "t", state: "running" }],
+        messages: [{ id: "m", turnId: "t", sequence: 2, role: "assistant", text: "Took a screenshot of the game." }],
+        activities: [{ id: "shot", turnId: "t", sequence: 1, activityKind: "mcp_tool", status: "completed", summary: "capture_screenshot",
+          detail: { toolName: "mcp__coding-tools__capture_screenshot", output: "Captured 1920x1080.", content: [{ type: "image", data: screenshot }] } }],
+      };
+    },
+  });
+  const observed = await upstream.observe("s");
+  assert.ok(asked.slice(0, -1).every((value) => value === null), "the usual sizes are tried first");
+  assert.ok(asked.at(-1) > 2_000_000, "then one read with room for the big items");
+  const timeline = JSON.parse(JSON.stringify(observed.timeline));
+  assert.deepEqual(timeline.map((item) => item.id), ["shot", "m"], "the turn's work shows again");
+  assert.equal(timeline[0].output, "Captured 1920x1080.", "the tool's text output is kept");
+  assert.ok(JSON.stringify(observed).length < 100_000, "the image bytes are not carried along");
+});
+
+test("cutting a big page keeps an edit's source text, so a change deep in a large file still shows", async () => {
+  const lines = Array.from({ length: 4000 }, (_, at) => `line ${at} of a large file`);
+  const before = [...lines, "old tail"].join("\n"), after = [...lines, "new tail"].join("\n");
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint, _body, options) => {
+      if (!endpoint.includes("/conversation")) return { session: { id: "s", mode: "chat", status: "working" } };
+      if (!options?.maxBytes) throw new Error("AO response exceeds the handler limit (GET /api/v1/sessions/s/conversation)");
+      return {
+        turns: [{ id: "t", state: "running" }], messages: [],
+        activities: [
+          { id: "shot", turnId: "t", sequence: 1, activityKind: "mcp_tool", status: "completed", summary: "capture_screenshot",
+            detail: { output: "Captured.", content: [{ type: "image", data: "A".repeat(1_300_000) }] } },
+          // An ACP edit: its counts and diff are computed from the whole file before and after.
+          { id: "edit", turnId: "t", sequence: 2, activityKind: "mcp_tool", status: "completed", summary: "Edit",
+            detail: { toolName: "Edit", toolKind: "edit", content: [{ type: "diff", path: "C:\\app\\big.txt", oldText: before, newText: after }] } },
+        ],
+      };
+    },
+  });
+  const edit = JSON.parse(JSON.stringify((await upstream.observe("s")).timeline)).find((item) => item.id === "edit");
+  assert.equal(edit.files[0].additions, 1, "the changed last line is counted");
+  assert.equal(edit.files[0].deletions, 1);
+  assert.match(edit.files[0].diff, /-old tail\n\+new tail/);
 });
 
 test("an ACP edit opens on its changed lines, not the whole file, and a long message is not cut at 4 KB", async () => {

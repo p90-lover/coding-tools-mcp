@@ -1449,3 +1449,44 @@ test("a turn whose agent is waiting out a model error says so, instead of \"may 
   assert.equal(chat.dshRetryNote([{ key: "s", working: { timeline: [{ id: "a", kind: "command", status: "running", text: "npm test" }] } }]), "",
     "a card busy with a tool is not retrying");
 });
+test("the approvals poll skips a card whose attempt changed mid-read instead of raising an error", async () => {
+  const state = { approvals: null, policies: null, errors: [] };
+  const calls = [];
+  const timers = [];
+  const effect = rendererCallback("AgentOrchestratorSurface.tsx", "effect:approvalScope.current", {
+    Error, STALE_OBSERVE: /AO receipt changed/, activeNodeIds: JSON.stringify(["old", "live"]),
+    workspaceId: "w1", selectedRunId: "run1", autoStatus: "idle", surfaceHidden: () => false,
+    approvalScope: { current: null }, selection: { current: { workspaceId: "w1", runId: "run1" } },
+    setPendingApprovals: value => { state.approvals = value; }, setRuntimePolicies: value => { state.policies = value; },
+    setMissions: () => {}, setError: error => state.errors.push(error),
+    setInterval: callback => { timers.push(callback); return timers.length; }, clearInterval: () => {},
+    moduleCall: async (op, args) => {
+      calls.push(op + ":" + args.nodeId);
+      if (args.nodeId === "old") throw new Error("IPC_TRANSPORT_FAILED: apps.call failed: AO receipt changed; refresh before retrying");
+      return { ok: true, pending_approvals: [{ approval_id: "a1", tool: "shell" }] };
+    },
+  });
+  const cleanup = effect();
+  await new Promise(setImmediate);
+  assert.deepEqual(calls, ["observe:old", "observe:live"]);
+  assert.deepEqual(state.errors, [], "a stale observe is not shown as 'Something went wrong'");
+  assert.deepEqual(plain(state.approvals), [{ approval_id: "a1", tool: "shell", nodeId: "live" }],
+    "the other card's request still shows on the same tick");
+  cleanup();
+});
+
+test("the approvals poll still reports an observe failure that is not a changed attempt", async () => {
+  const errors = [];
+  const effect = rendererCallback("AgentOrchestratorSurface.tsx", "effect:approvalScope.current", {
+    Error, STALE_OBSERVE: /AO receipt changed/, activeNodeIds: JSON.stringify(["n1"]),
+    workspaceId: "w1", selectedRunId: "run1", autoStatus: "idle", surfaceHidden: () => false,
+    approvalScope: { current: null }, selection: { current: { workspaceId: "w1", runId: "run1" } },
+    setPendingApprovals: () => {}, setRuntimePolicies: () => {}, setMissions: () => {}, setError: error => errors.push(error),
+    setInterval: () => 1, clearInterval: () => {},
+    moduleCall: async () => { throw new Error("AO result is unavailable; inspect the run before retrying"); },
+  });
+  const cleanup = effect();
+  await new Promise(setImmediate);
+  assert.deepEqual(errors, ["AO result is unavailable; inspect the run before retrying"]);
+  cleanup();
+});

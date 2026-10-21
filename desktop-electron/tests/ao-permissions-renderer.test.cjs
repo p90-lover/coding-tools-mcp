@@ -613,3 +613,15 @@ test("picking a model fits the carried window to it", () => {
   pick("cpa/unknown");
   assert.equal(routes.at(-1).context_window, 1_000_000, "within an unreported range a picked window stays");
 });
+
+test("the selected run's polls ask only the project the run belongs to", () => {
+  // Seen live: 25 "AO run not found in this workspace" observe failures in the launcher log, from the
+  // approvals poll asking the newly opened project about a run still selected from the previous one.
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8");
+  assert.match(source, /const selectedRunHere = missions\.some\(\(mission\) => mission\.id === selectedRunId && mission\.workspace_id === workspaceId\);/);
+  const statusPoll = source.slice(source.indexOf("const selectedRunHere"), source.indexOf("const activeNodeIds"));
+  assert.match(statusPoll, /if \(!workspaceId \|\| !selectedRunId \|\| !selectedRunHere\)/, "the run-status poll waits for the run to be this project's");
+  const approvalsPoll = source.slice(source.indexOf("approvalScope.current = { workspaceId, runId: selectedRunId };"), source.indexOf("const taskName = "));
+  assert.match(approvalsPoll, /if \(!workspaceId \|\| !selectedRunId \|\| !selectedRunHere \|\| !ids\.length\) return;/, "so does the approvals poll");
+  assert.match(approvalsPoll, /\}, \[workspaceId, selectedRunId, selectedRunHere, activeNodeIds, autoStatus, setError\]\);/, "and starts once it is");
+});

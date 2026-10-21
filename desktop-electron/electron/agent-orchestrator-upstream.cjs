@@ -319,19 +319,23 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       },
     }) : null;
 
-  async function requestApi(method, endpoint, body) {
+  async function requestApi(method, endpoint, body, { maxBytes } = {}) {
     if (state !== "ready") throw new Error("Start the source-integrated AO runtime first");
     if (body?.length > 65536) throw new Error("AO API request exceeds 64 KiB");
     const response = await fetch(`http://127.0.0.1:${daemonPort}${endpoint}`, { method, headers: { "content-type": "application/json" }, body, redirect: "error", signal: AbortSignal.timeout(method === "GET" ? 30000 : 180000) });
     const text = await response.text();
-    if (Buffer.byteLength(text) > AO_RESPONSE_MAX_BYTES) throw new Error(`AO response exceeds the handler limit (${method} ${endpoint.split("?")[0]})`);
+    // A conversation read is trimmed below before anything uses it, so it may arrive larger; every
+    // other AO call keeps the 900 KB limit.
+    const conversation = /\/conversation(\?|$)/.test(endpoint);
+    const limit = maxBytes ?? (conversation ? AO_RESPONSE_MAX_BYTES : 900000);
+    if (Buffer.byteLength(text) > limit) throw new Error(`AO response exceeds the handler limit (${method} ${endpoint.split("?")[0]})`);
     // AO answers some failures with an empty or non-JSON body; keep the status instead of
     // failing on JSON.parse and losing it.
     let data = {};
     if (text) {
       try { data = JSON.parse(text); } catch { data = response.ok ? {} : { error: { message: text.slice(0, 300) } }; }
     }
-    if (/\/conversation(\?|$)/.test(endpoint)) dropInlineBlobs(data);
+    if (conversation) dropInlineBlobs(data);
     return { ok: response.ok, status: response.status, data };
   }
 
@@ -444,15 +448,23 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     // itself. Seen live: a 1.3 MB MCP page dump among the newest 10 failed every read, so a pending
     // approval behind it never showed, nobody answered it, and the chat sat "may be stuck" for 3 hours.
     const smallest = limits[limits.length - 1];
-    const sizes = [...limits, ...[3, 1].filter(size => size < smallest)];
-    for (const size of sizes) {
-      try {
-        // includePending: a request still waiting on an answer is always in the page, however much
-        // came after it; one that fell out of the newest items never showed and sat until it timed out.
-        return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${size}&includePending=1`);
-      } catch (error) {
-        if (!tooLarge(error)) throw error;
-      }
+    const tiny = [3, 1].filter(size => size < smallest);
+    // includePending: a request still waiting on an answer is always in the page, however much
+    // came after it; one that fell out of the newest items never showed and sat until it timed out.
+    const pending = async (size, options) => internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${size}&includePending=1`, undefined, options);
+    for (const size of limits) {
+      try { return await pending(size); } catch (error) { if (!tooLarge(error)) throw error; }
+    }
+    // Over the limit at every size the caller asked for: a finished tool call's stored result can be
+    // megabytes on its own (screenshot data: two 1.3 MB calls among a chat's newest 20 items, seen
+    // live), and the chat showed none of its work for hours. The page is read once with room for
+    // them and their big fields are cut (compactConversation), so the chat keeps its recent work
+    // rather than only the newest item or three; the chat never shows those bytes.
+    try {
+      return compactConversation(await pending(smallest, { maxBytes: CONVERSATION_COMPACT_READ_BYTES }));
+    } catch (error) { if (!tooLarge(error)) throw error; }
+    for (const size of tiny) {
+      try { return await pending(size); } catch (error) { if (!tooLarge(error)) throw error; }
     }
     // A pending item is in every page, so one that is itself over the limit (a stuck 1 MB screenshot
     // call, seen live) failed every read: the chat stopped updating and Stop could not be confirmed.
@@ -463,6 +475,33 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       catch (error) { if (!tooLarge(error)) throw error; failure = error; }
     }
     throw failure;
+  }
+  /**
+   * A conversation page with every string over COMPACT_FIELD_CHARS inside an activity's detail
+   * replaced by a short note of its size. The chat reads an activity's text output (toolDetails
+   * keeps 2,000 characters of it) and never its image data.
+   */
+  const CONVERSATION_COMPACT_READ_BYTES = 32 * 1024 * 1024;
+  const COMPACT_FIELD_CHARS = 64 * 1024;
+  // An edit's diff and its added/removed counts are computed from these (editedFiles): cut, an
+  // edit to a large file past its first 2,000 characters read as no change at all.
+  const EDIT_SOURCE_FIELDS = new Set(["oldText", "newText", "old_string", "new_string", "patch", "diff"]);
+  function compactConversation(conversation) {
+    const cut = (value, depth = 0, key = "") => {
+      if (typeof value === "string") {
+        return value.length > COMPACT_FIELD_CHARS && !EDIT_SOURCE_FIELDS.has(key)
+          ? `${value.slice(0, 2000)}… [${value.length - 2000} characters omitted]` : value;
+      }
+      if (!value || typeof value !== "object" || depth > 12) return value;
+      if (Array.isArray(value)) return value.map((item) => cut(item, depth + 1));
+      return Object.fromEntries(Object.entries(value).map(([field, item]) => [field, cut(item, depth + 1, field)]));
+    };
+    if (!conversation || !Array.isArray(conversation.activities)) return conversation;
+    return { ...conversation, activities: conversation.activities.map((activity) => (activity && typeof activity === "object"
+      ? { ...activity, ...(activity.detail !== undefined ? { detail: cut(activity.detail) } : {}),
+        ...(typeof activity.commandOutput === "string" ? { commandOutput: cut(activity.commandOutput) } : {}),
+        ...(typeof activity.streamedText === "string" ? { streamedText: cut(activity.streamedText) } : {}) }
+      : activity)) };
   }
   /**
    * The current turn as a Codex-style transcript: assistant messages, reasoning and tool calls
@@ -800,11 +839,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   }
 
   // Mission-owned AO calls. The run grant already covers them, so no extra dialog.
-  async function internalApi(method, endpoint, body) {
+  async function internalApi(method, endpoint, body, options) {
     // A write may change what a session read in flight is about to return (sharedObserveRead).
     if (method !== "GET") sharedReads.clear();
     await start();
-    const result = await requestApi(method, endpoint, body === undefined ? undefined : JSON.stringify(body));
+    const result = await requestApi(method, endpoint, body === undefined ? undefined : JSON.stringify(body), options);
     if (!result.ok) {
       const error = new Error(aoErrorMessage(result));
       error.status = result.status;

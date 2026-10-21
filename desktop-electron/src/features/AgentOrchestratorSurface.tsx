@@ -461,6 +461,9 @@ const NATIVE_ENTRY: AoHarness = { id: NATIVE_HARNESS, label: "Native Codex", run
 /** A project folder's git kind for the chat list's labels; one stable function, so each folder is read once. */
 const readProjectGit = (folder: string) => window.codexWebLauncher?.projectGit?.(folder) ?? Promise.resolve(null);
 
+/** The headless observe answer for a card whose attempt changed between the poll's read and its check. */
+const STALE_OBSERVE = /AO receipt changed/;
+
 /** A chat card's model as the composer's chip names it ("DeepSeek V4.1 Flash", "WebGPT High"). */
 const chatModelName = (model: string) => modelShortLabel(model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, ""), model.startsWith("cpa/")).name;
 
@@ -1332,16 +1335,28 @@ export function AgentOrchestratorSurface({ language, setError }: {
     const ids = JSON.parse(activeNodeIds) as string[];
     setPendingApprovals([]);
     approvalScope.current = { workspaceId, runId: selectedRunId };
-    if (!workspaceId || !selectedRunId || !ids.length) return;
+    // As the status poll above: a run still selected from the previous project was asked about in
+    // this one every 3 s ("AO run not found in this workspace", 25 times in the launcher log).
+    if (!workspaceId || !selectedRunId || !selectedRunHere || !ids.length) return;
     let live = true;
     let reading = false;
     const refresh = async () => {
       if (reading || surfaceHidden()) return;
       reading = true;
       try {
-        const results = await Promise.all(ids.map(async nodeId => ({
-          nodeId, result: await moduleCall(["running", "paused"].includes(autoStatus) ? "harness_status" : "observe", { workspaceId, runId: selectedRunId, nodeId }),
-        })));
+        // A card whose attempt moved on while this poll read it (a retry, the app restarting under it)
+        // answers "AO receipt changed; refresh before retrying": the next tick reads the new attempt.
+        // It showed as "Something went wrong" and, rejecting the whole batch, hid the other cards'
+        // requests for that tick.
+        const read = await Promise.all(ids.map(async nodeId => {
+          try {
+            return { nodeId, result: await moduleCall(["running", "paused"].includes(autoStatus) ? "harness_status" : "observe", { workspaceId, runId: selectedRunId, nodeId }) };
+          } catch (cause) {
+            if (STALE_OBSERVE.test(cause instanceof Error ? cause.message : String(cause))) return null;
+            throw cause;
+          }
+        }));
+        const results = read.filter((entry): entry is NonNullable<typeof entry> => entry !== null);
         if (!live || selection.current.workspaceId !== workspaceId || selection.current.runId !== selectedRunId) return;
         const approvals: AoApproval[] = [];
         let newest: AoMission | undefined;
@@ -1366,9 +1381,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
     const timer = setInterval(() => void refresh(), 3000);
     void refresh();
     return () => { live = false; clearInterval(timer); };
-  }, [workspaceId, selectedRunId, activeNodeIds, autoStatus, setError]);
+  }, [workspaceId, selectedRunId, selectedRunHere, activeNodeIds, autoStatus, setError]);
 
-  const taskName = (id: string) => board?.tasks.find((task) => task.id === id)?.title ?? id;
+  const taskName =(id: string) => board?.tasks.find((task) => task.id === id)?.title ?? id;
   const describeNode = (node: CanvasNode) => node.route.model.startsWith("chatgpt-web/") ? modelLabel(node.route.model)
     : `${harnessLabel(node.route.harness_id || NATIVE_HARNESS, harnesses)} · ${node.route.model}`;
   const moveCard = async (positions: { id: string; x: number; y: number }[], parentId?: string) => {
