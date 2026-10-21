@@ -382,21 +382,30 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     for (const key of tailReads.keys()) if (key.startsWith(`${id}|`)) tailReads.delete(key);
   }
   async function readConversationTail(id, limits) {
-    for (let at = 0; ; at += 1) {
+    const tooLarge = error => /exceeds the handler limit/.test(String(error?.message));
+    // Down to 3 items and then 1 past the caller's own sizes: one item can be over the limit by
+    // itself. Seen live: a 1.3 MB MCP page dump among the newest 10 failed every read, so a pending
+    // approval behind it never showed, nobody answered it, and the chat sat "may be stuck" for 3 hours.
+    const smallest = limits[limits.length - 1];
+    const sizes = [...limits, ...[3, 1].filter(size => size < smallest)];
+    for (const size of sizes) {
       try {
         // includePending: a request still waiting on an answer is always in the page, however much
         // came after it; one that fell out of the newest items never showed and sat until it timed out.
-        return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${limits[at]}&includePending=1`);
+        return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${size}&includePending=1`);
       } catch (error) {
-        if (!/exceeds the handler limit/.test(String(error?.message))) throw error;
-        if (at === limits.length - 1) {
-          // A pending item is in every page, so one that is itself over the limit (a stuck 1 MB
-          // screenshot call, seen live) failed every read: the chat stopped updating and Stop could
-          // not be confirmed. The newest items alone are read instead.
-          return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${limits[at]}`);
-        }
+        if (!tooLarge(error)) throw error;
       }
     }
+    // A pending item is in every page, so one that is itself over the limit (a stuck 1 MB screenshot
+    // call, seen live) failed every read: the chat stopped updating and Stop could not be confirmed.
+    // The newest items alone are read instead.
+    let failure;
+    for (const size of [smallest, ...[3, 1].filter(size => size < smallest)]) {
+      try { return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${size}`); }
+      catch (error) { if (!tooLarge(error)) throw error; failure = error; }
+    }
+    throw failure;
   }
   /**
    * The current turn as a Codex-style transcript: assistant messages, reasoning and tool calls

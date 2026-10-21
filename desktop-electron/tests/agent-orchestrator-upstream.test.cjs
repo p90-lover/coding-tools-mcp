@@ -241,7 +241,40 @@ test("a pending item too large for any page still lets the chat be read (and sto
   });
   const observed = await upstream.observe("s");
   assert.equal(observed.turnState, "running");
-  assert.deepEqual(asked, ["limit=100&includePending=1", "limit=40&includePending=1", "limit=10&includePending=1", "limit=10"]);
+  assert.deepEqual(asked, ["limit=100&includePending=1", "limit=40&includePending=1", "limit=10&includePending=1",
+    "limit=3&includePending=1", "limit=1&includePending=1", "limit=10"]);
+});
+
+test("one item over the limit among the newest ten no longer hides what came after it", async () => {
+  // Seen live (clash-of-clan-macro-60): a 1.3 MB MCP page dump was among the newest 10 items, so the
+  // reads of 100, 40 and 10 all failed, the chat showed "AO response exceeds the handler limit", and
+  // the pending approval behind it was never seen or answered: "may be stuck" for 3 hours.
+  const asked = [];
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => {
+      if (!endpoint.includes("/conversation")) return { session: { id: "s", mode: "chat", status: "working" } };
+      asked.push(endpoint.split("?")[1]);
+      if (Number(/limit=(\d+)/.exec(endpoint)[1]) >= 10) throw new Error("AO response exceeds the handler limit (GET /api/v1/sessions/s/conversation)");
+      return { turns: [{ id: "t", state: "running" }], messages: [] };
+    },
+  });
+  const observed = await upstream.observe("s");
+  assert.equal(observed.turnState, "running");
+  assert.deepEqual(asked, ["limit=100&includePending=1", "limit=40&includePending=1", "limit=10&includePending=1", "limit=3&includePending=1"],
+    "three items, pending ones included, get past it");
+});
+
+test("a newest item over the limit on its own still fails the read, after every smaller page", async () => {
+  const asked = [];
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => {
+      if (!endpoint.includes("/conversation")) return { session: { id: "s", mode: "chat", status: "working" } };
+      asked.push(endpoint.split("?")[1]);
+      throw new Error("AO response exceeds the handler limit (GET /api/v1/sessions/s/conversation)");
+    },
+  });
+  await assert.rejects(upstream.observe("s"), /exceeds the handler limit/);
+  assert.deepEqual(asked.slice(-3), ["limit=10", "limit=3", "limit=1"]);
 });
 
 test("observe shows the reply of a turn that ended while AO still flagged it as streaming", async () => {
