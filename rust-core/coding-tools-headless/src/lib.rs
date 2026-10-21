@@ -4931,7 +4931,6 @@ async fn ao_harness_observe(
                 failure.as_deref(),
             )
         })
-        .map_err(text_error)
     })
     .await;
     match saved {
@@ -4955,7 +4954,7 @@ async fn ao_harness_observe(
             }
             Json(json!({"ok":true,"run":run,"receipt":receipt})).into_response()
         }
-        _ => {
+        failed => {
             let settled = state.core.with_data(|store| {
                 store.refresh()?;
                 let run = store
@@ -4994,11 +4993,14 @@ async fn ao_harness_observe(
                 Ok((run, receipt)) => {
                     Json(json!({"ok":true,"run":run,"receipt":receipt})).into_response()
                 }
-                Err(_) => json_error(
-                    StatusCode::CONFLICT,
-                    "AO_OBSERVE_CHANGED",
-                    "AO receipt changed; refresh before retrying",
-                ),
+                Err(_) => match failed {
+                    Ok(Err(error)) => ao_receipt_save_error(error),
+                    _ => json_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "AO_RECEIPT_SAVE_FAILED",
+                        "AO receipt could not be saved; inspect local diagnostics before retrying",
+                    ),
+                },
             }
         }
     }
@@ -5195,7 +5197,6 @@ async fn ao_external_terminal(
                 body.failure.as_deref(),
             )
         })
-        .map_err(text_error)
     })
     .await;
     match saved {
@@ -5213,11 +5214,53 @@ async fn ao_external_terminal(
             }
             Json(json!({"ok":true,"run":run,"receipt":receipt})).into_response()
         }
-        _ => json_error(
+        Ok(Err(error)) => ao_receipt_save_error(error),
+        Err(_) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "AO_RECEIPT_SAVE_FAILED",
+            "AO receipt could not be saved; inspect local diagnostics before retrying",
+        ),
+    }
+}
+
+fn ao_receipt_save_error(error: coding_tools_core::error::AppError) -> Response {
+    if matches!(&error, coding_tools_core::error::AppError::Message(message)
+        if matches!(message.as_str(), "AO run not found" | "AO node is not running" | "AO native thread identity changed"))
+    {
+        return json_error(
             StatusCode::CONFLICT,
             "AO_OBSERVE_CHANGED",
             "AO receipt changed; refresh before retrying",
-        ),
+        );
+    }
+    json_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "AO_RECEIPT_SAVE_FAILED",
+        text_error(error),
+    )
+}
+
+#[cfg(test)]
+#[test]
+fn receipt_save_errors_distinguish_storage_failure_from_changed_identity() {
+    use coding_tools_core::error::AppError;
+    assert_eq!(
+        ao_receipt_save_error(AppError::Io(std::io::ErrorKind::AlreadyExists.into())).status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(
+        ao_receipt_save_error(AppError::Message("data file lock poisoned".into())).status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    for message in [
+        "AO run not found",
+        "AO node is not running",
+        "AO native thread identity changed",
+    ] {
+        assert_eq!(
+            ao_receipt_save_error(AppError::Message(message.into())).status(),
+            StatusCode::CONFLICT
+        );
     }
 }
 

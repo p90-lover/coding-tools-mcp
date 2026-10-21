@@ -483,10 +483,29 @@ fn concurrent_update_error() -> AppError {
     AppError::Message("Configuration changed concurrently; reload settings and retry".into())
 }
 
-fn lock_data_file() -> AppResult<std::sync::MutexGuard<'static, ()>> {
-    DATA_FILE_LOCK
+struct DataFileLock {
+    _file: std::fs::File,
+    _process: std::sync::MutexGuard<'static, ()>,
+}
+
+fn lock_data_file() -> AppResult<DataFileLock> {
+    let process = DATA_FILE_LOCK
         .lock()
-        .map_err(|_| AppError::Message("data file lock poisoned".into()))
+        .map_err(|_| AppError::Message("data file lock poisoned".into()))?;
+    let path = data_file_path()?.with_extension("lock");
+    std::fs::create_dir_all(path.parent().expect("data file parent"))?;
+    // Keep the OS lock on a stable sidecar: saving replaces the JSON file itself.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    fs2::FileExt::lock_exclusive(&file)?;
+    Ok(DataFileLock {
+        _file: file,
+        _process: process,
+    })
 }
 
 fn random_secret() -> String {
@@ -504,6 +523,90 @@ fn shared_value_for_key(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_lock_failure_does_not_run_the_update() {
+        let file = isolated_fixture();
+        std::fs::create_dir_all(file.with_extension("lock")).unwrap();
+        let mut called = false;
+        crate::data::with_test_file(file, || {
+            let result = DataStore::update_file(|_| {
+                called = true;
+                Ok(())
+            });
+            assert!(matches!(result, Err(AppError::Io(_))));
+        });
+        assert!(!called);
+    }
+
+    #[test]
+    fn profile_process_writer_child() {
+        let Some(path) = std::env::var_os("CODING_TOOLS_PROFILE_PROCESS_FIXTURE") else {
+            return;
+        };
+        crate::data::with_test_file(path.into(), || {
+            for _ in 0..25 {
+                DataStore::update_file(|data| {
+                    data.provider_registry_revision += 1;
+                    Ok(())
+                })
+                .expect("child update");
+            }
+        });
+    }
+
+    #[test]
+    fn separate_processes_preserve_all_profile_updates() {
+        let file = std::env::var_os("CARGO_TARGET_DIR")
+            .map(|root| {
+                std::path::PathBuf::from(root)
+                    .join("aiTemp/store-process-lock")
+                    .join(uuid::Uuid::new_v4().to_string())
+                    .join("profiles.json")
+            })
+            .unwrap_or_else(isolated_fixture);
+        crate::data::with_test_file(file.clone(), || {
+            DataStore::update_file(|data| {
+                data.last_workspace_id = "seed".into();
+                Ok(())
+            })
+            .unwrap();
+        });
+        let executable = std::env::current_exe().unwrap();
+        let canonical_file = std::fs::canonicalize(&file).unwrap();
+        let mut children = Vec::new();
+        for index in 0..3 {
+            children.push(
+                std::process::Command::new(&executable)
+                    .args([
+                        "--exact",
+                        "data::store::tests::profile_process_writer_child",
+                        "--nocapture",
+                    ])
+                    .env(
+                        "CODING_TOOLS_PROFILE_PROCESS_FIXTURE",
+                        if index == 1 { &canonical_file } else { &file },
+                    )
+                    .stdout(std::process::Stdio::null())
+                    .spawn()
+                    .expect("start writer child"),
+            );
+        }
+        let statuses: Vec<_> = children
+            .iter_mut()
+            .map(|child| child.wait().expect("writer exit"))
+            .collect();
+        assert!(
+            statuses.iter().all(|status| status.success()),
+            "all writers must finish: {statuses:?}"
+        );
+        crate::data::with_test_file(file, || {
+            assert_eq!(
+                DataStore::read_file(|data| Ok(data.provider_registry_revision)).unwrap(),
+                75
+            );
+        });
+    }
 
     #[test]
     fn workspace_secret_roundtrip() {
