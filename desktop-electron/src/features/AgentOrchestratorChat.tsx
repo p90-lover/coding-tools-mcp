@@ -1027,8 +1027,13 @@ export function AgentOrchestratorChat({
   // A message typed while the previous one is still being sent waits in the queue, as Claude Code
   // queues one typed during a response. Enter did nothing at all then, so a quick second message
   // looked dropped.
-  const queueWhileSending = sending && Boolean(selectedTaskId) && !steering;
-  const canSend = (!busy || steering || queueing || queueWhileSending) && (!sending || queueWhileSending) && !(deciding && !selectedTaskId)
+  // Also a steer typed while the last message is still being sent, and a message typed while the
+  // surface's one-action lock is held (a refresh, an approval): Enter did nothing for 2-5 s after a
+  // send ("it will stop then freeze"), as the new run turned the chat steerable before the send
+  // returned. The composer never refuses, as in Claude Code: it waits in the queued-message bar and
+  // goes (steered or sent) the moment the send or the lock is done.
+  const queueWhileSending = Boolean(selectedTaskId) && (sending || (busy && !steering));
+  const canSend = !(deciding && !selectedTaskId) && (!sending || queueWhileSending)
     && Boolean(draft.trim() || attachments.length || annotations.length) && (accepts || steering || queueing || queueWhileSending);
   const slash = chatSlashMatches(draft, { chat: Boolean(selectedTaskId), run: Boolean(latest), open: runOpen });
 
@@ -1802,6 +1807,9 @@ export function AgentOrchestratorChat({
           return changed ? <p className="cx-route-note" role="status">Changing the model or its settings starts a new agent that gets only a summary
             of this chat, not its memory. Switch back to <b>{running}{lead?.route?.effort ? ` · ${lead.route.effort}` : ""}</b> to keep the same agent.</p> : null;
         })()}
+        {/* Queued and steering messages wait above the branch picker, which belongs to the chat box (as
+            Codex's): under it, a steer sat between "main" and the box. */}
+        <QueuedMessageBar items={queuedBar} />
         {selectedTaskId ? <ChatBranchBar workspaceId={projectId} sessionId={agentSessions[0]?.id} /> : null}
         {/* A request waiting on the person sits right above the chat box, as wide as it, as DeepSeek
             Harness shows its approval panel: in the thread it took the thread's own margins and sat
@@ -1816,7 +1824,6 @@ export function AgentOrchestratorChat({
         </div> : null}
         {/* Outside the chat box's form: its comment box submits on Enter, and that must not send the message. */}
         {selectedTaskId ? <SelectionAnnotator root={scroller} annotations={annotations} onAdd={addAnnotation} onComment={commentAnnotation} /> : null}
-        <QueuedMessageBar items={queuedBar} />
         <form className="cx-composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}
           onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
           onDrop={(event) => { if (event.dataTransfer.files.length) { event.preventDefault(); void addFiles(event.dataTransfer.files); } }}>

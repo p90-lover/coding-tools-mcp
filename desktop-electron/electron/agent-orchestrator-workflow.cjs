@@ -3726,9 +3726,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * steering), like Codex's steer. It is kept in the chat under the latest message. If the turn
    * ended before it arrived, `steered` is false and the caller sends it as a normal follow-up.
    */
-  const STEER_STALL_MS = 3 * 60_000;
-  // With a tool call still "running": the chat's own "may be stuck" line (ao-chat's STALL_MS).
-  const STEER_TOOL_STALL_MS = 10 * 60_000;
+  // As long as the chat's own "may be stuck" (ao-chat's STALL_MS): a slow model thinking for three
+  // minutes (MiMo on a 400k context) had its turn stopped by a plain "keep going" ("Stopped by the
+  // user"), then the message waited seconds for the stop to settle. Claude Code never stops a turn
+  // because something was typed; only a turn the chat itself calls stuck is restarted, with or
+  // without a tool call still "running".
+  const STEER_STALL_MS = 10 * 60_000;
   // "Approve for me" answers a request within 20 s (its reviewer up to 25 s): a steer waits that long.
   const STEER_ANSWER_WAIT_MS = 30_000;
   const STEER_ANSWER_POLL_MS = 750;
@@ -3769,10 +3772,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       return { ok: true, steered: false, waiting: true, reason: "The agent is waiting for an answer to its request; your message is steered in once that is answered" };
     }
     // A turn whose agent hung (a model request that never came back, a retry loop) takes a steer and
-    // never reads it: "keep going" did nothing. Nothing new for STEER_STALL_MS with no tool call
-    // running stops that turn; the message is then sent as the chat's next turn, like a queued one.
-    // A tool call still running (a long build, a GUI it launched) is left to finish, and the agent
-    // reads the steer when it returns, unless it has been silent as long as a stuck turn.
+    // never reads it: "keep going" did nothing. Nothing new for STEER_STALL_MS stops that turn; the
+    // message is then sent as the chat's next turn, like a queued one. A tool call still running (a
+    // long build, a GUI it launched) is left to finish, and the agent reads the steer when it
+    // returns, unless it has been silent as long as a stuck turn.
     const idle = Number.isFinite(waiting?.lastActivityAt) ? now() - waiting.lastActivityAt : 0;
     // A notice (a provider retry's "Retrying Claude, attempt 7 of 10" stays "running") is no tool.
     // Nor is the model's reasoning: a stream that stopped mid-thought stays "running" too, so a
@@ -3780,10 +3783,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // the hung turn (blocking the composer for minutes) and never read.
     const toolRunning = Array.isArray(waiting?.timeline) && waiting.timeline.some(item => item?.status === "running"
       && !["message", "system", "reasoning", "thinking"].includes(item.kind));
-    // A tool call silent as long as the chat calls a turn stuck (STEER_TOOL_STALL_MS, the chat's
-    // "may be stuck") is stuck with it: the user, looking at "may be stuck", asked that a steer then
-    // retrigger the model rather than wait on a call that may never return.
-    if (idle > (toolRunning ? STEER_TOOL_STALL_MS : STEER_STALL_MS)) {
+    // A tool call silent as long as the chat calls a turn stuck (the chat's "may be stuck") is stuck
+    // with it: the user, looking at "may be stuck", asked that a steer then retrigger the model
+    // rather than wait on a call that may never return.
+    if (idle > STEER_STALL_MS) {
       await stopExternalTurn(card.receipt.thread_id);
       logger?.info?.("ao.steer_restarted_stalled_turn", { idleSeconds: Math.round(idle / 1000), toolRunning });
       return { ok: true, steered: false, waiting: true, restarted: true,

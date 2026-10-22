@@ -340,6 +340,22 @@ test("a working chat on a non-AO model is not offered steering; a message typed 
   assert.ok(!walk(view.render()).some((element) => String(element.props?.className).includes("cx-command-card")), "no notice card says it was queued");
 });
 
+test("Enter is never refused while another action holds the surface: the message waits in the queue, as in Claude Code", async () => {
+  // The user: "when sending a message, it will stop then freeze, wait for like 2-5 seconds to able
+  // to send". The surface's one-action lock (a refresh, an approval) left Send disabled meanwhile.
+  const { props, calls } = base({ selectedTaskId: "t", busy: true,
+    runs: [run("r1", "t", [node("w", "planner", "finished", { receipt: { answer: "done" } })], { execution_mode: "single" })] });
+  const view = mount(props);
+  const textarea = () => walk(view.render()).find((element) => element.type === "textarea");
+  textarea().props.onChange({ target: { value: "keep going" } });
+  const button = walk(view.render()).find((element) => element.type === "button" && element.props?.type === "submit");
+  assert.ok(button && !button.props.disabled, "Send stays live while the surface is busy");
+  await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+  assert.equal(calls.filter(([kind]) => kind === "send").length, 0, "it waits for the lock instead of being refused");
+  assert.equal(textarea().props.value, "", "the composer is free at once");
+  assert.match(text(walk(view.render()).find((element) => element.props?.["aria-label"] === "Queued messages")), /keep going/);
+});
+
 test("a queued message waits as Claude Code's queue row: greyed, Queued, Discard on hover, Send now on the first, click to edit", async () => {
   const { props, calls } = base({ selectedTaskId: "t-bar", working: true,
     runs: [run("r1", "t-bar", [node("w", "planner", "running", { route: { harness_id: "codex-native", model: "chatgpt-web/high" } })], { execution_mode: "single" })],

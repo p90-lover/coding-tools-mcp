@@ -4012,8 +4012,9 @@ test("a message sent to a hung turn stops it and goes as the next turn instead o
   const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
     nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
   const steered = [], interrupted = [];
-  let lastActivityAt = 1_000_000, timeline = [];
-  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 4 * 60_000,
+  let lastActivityAt = 1_000_000;
+  const timeline = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 11 * 60_000,
     aoHarness: {
       observe: async () => ({ turnId: "t1", turnState: interrupted.length ? "interrupted" : "running", status: interrupted.length ? "ready" : "working", lastActivityAt, timeline, approvals: [] }),
       steer: async (id, text) => { steered.push([id, text]); return { steered: true }; },
@@ -4024,13 +4025,30 @@ test("a message sent to a hung turn stops it and goes as the next turn instead o
   assert.equal(hung.restarted, true, "the chat queues it for the next turn");
   assert.deepEqual(interrupted, ["sess-1"], "the hung turn is stopped");
   assert.equal(steered.length, 0, "nothing is steered into a turn that cannot read it");
-  timeline = [{ kind: "tool", status: "running" }];
-  const building = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "and then lint" });
-  assert.equal(building.steered, true, "a tool call still running (a long build) is not a hang yet");
-  timeline = [];
   lastActivityAt = 1_000_000 + 3 * 60_000;
   assert.equal((await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "ok" })).steered, true, "a working agent is steered");
   assert.equal(interrupted.length, 1);
+});
+
+test("a steer into a slow model's quiet turn is steered in, never stops it: only a turn the chat calls stuck is restarted", async () => {
+  // Seen live: MiMo V2.6 Pro on a 400k context showed nothing for over three minutes while it
+  // thought; "keep going" stopped its turn ("Stopped by the user") and the message then waited
+  // seconds for the stop to settle. Claude Code never stops a turn because something was typed.
+  const route = { harness_id: "ao:claude-code", model: "cline-pass/mimo-v2.6-pro" };
+  const task = { id: "task-1", title: "Play Ero", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  const steered = [], interrupted = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 9 * 60_000,
+    aoHarness: {
+      observe: async () => ({ turnId: "t1", turnState: "running", status: "working", lastActivityAt: 1_000_000, timeline: [], approvals: [] }),
+      steer: async (id, text) => { steered.push([id, text]); return { steered: true }; },
+      interrupt: async id => { interrupted.push(id); },
+    } });
+  const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
+  assert.equal(result.steered, true, "nine quiet minutes is still a working turn");
+  assert.deepEqual(interrupted, [], "the turn is never stopped by a message");
+  assert.deepEqual(steered, [["sess-1", "keep going"]]);
 });
 
 test("a turn whose reasoning stream stopped mid-thought is restarted by a message, not waited on as a running tool", async () => {
@@ -4063,14 +4081,14 @@ test("a turn that has only been retrying its model request for minutes is restar
   // The retry notice is a running "system" row in the timeline (observe's lastActivityAt leaves it out).
   const timeline = [{ kind: "message", status: "completed", text: "Looking at it" },
     { kind: "system", status: "running", text: "Retrying Claude, attempt 7 of 10. API error 503. Trying again in 30s." }];
-  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 4 * 60_000,
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 11 * 60_000,
     aoHarness: {
       observe: async () => ({ turnId: "t1", turnState: interrupted.length ? "interrupted" : "running", status: interrupted.length ? "ready" : "working", lastActivityAt: 1_000_000, timeline, approvals: [] }),
       steer: async (id, text) => { steered.push([id, text]); return { steered: true }; },
       interrupt: async id => { interrupted.push(id); },
     } });
   const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "try again" });
-  assert.equal(result.restarted, true, "four minutes of retries only is a hang");
+  assert.equal(result.restarted, true, "eleven minutes of retries only is a hang");
   assert.deepEqual(interrupted, ["sess-1"]);
   assert.equal(steered.length, 0);
 });
@@ -5396,7 +5414,7 @@ test("a stalled steer does not report a restart while its acknowledged cancellat
   const world = chatWorld({ tasks: [{ id: "task", title: "Fixture", description: "read", state: "in_progress", clauses: [] }],
     runs: [{ id: "run", project_id: "task", cancelled: false, nodes: [
       { id: "one", role: "planner", state: "running", route, receipt: { thread_id: "s1" } }] }] });
-  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 4 * 60_000,
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 11 * 60_000,
     setTimer: (callback, ms) => ms === 250 ? setImmediate(callback) : setTimeout(callback, ms),
     aoHarness: { observe: async () => ({ turnState: "running", status: "working", lastActivityAt: 1_000_000, approvals: [] }),
       interrupt: async () => {} } });
@@ -5497,7 +5515,7 @@ test("a stalled steer never reports a restart when interruption failed", async (
   const world = chatWorld({ tasks: [{ id: "task", title: "Fixture", description: "read", state: "in_progress", clauses: [] }],
     runs: [{ id: "run", project_id: "task", cancelled: false, nodes: [
       { id: "one", role: "planner", state: "running", route, receipt: { thread_id: "s1" } }] }] });
-  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 4 * 60_000,
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 11 * 60_000,
     aoHarness: { observe: async () => ({ turnState: "running", lastActivityAt: 1_000_000, approvals: [] }),
       interrupt: async () => { throw new Error("fixture stop unavailable"); } } });
   try {
@@ -6165,7 +6183,7 @@ test("a hung turn whose interrupt lands after a few seconds is still restarted, 
     nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
   const interrupted = [];
   let readsAfterInterrupt = 0;
-  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 4 * 60_000,
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 11 * 60_000,
     setTimer: (callback) => { callback(); return 0; },
     aoHarness: {
       // The interrupt takes 20 more reads (5 s at 250 ms) to settle.
