@@ -192,7 +192,9 @@ export function AgentOrchestratorComposerControls({
   const harnessName = harness?.label ?? harnessLabel(route.harness_id, harnesses);
   const capability = caps[route.model];
   const { efforts, context, fullLimit, presets } = routeTuning(route, models === null ? undefined : capability);
-  const effortUnsupported = Boolean(route.effort && efforts && !efforts.includes(route.effort));
+  // "auto" is always takeable: the model runs at its own effort and nothing is sent (aoLaunchArgs).
+  const effortUnsupported = Boolean(route.effort && route.effort !== "auto" && efforts && !efforts.includes(route.effort));
+  const levels = (efforts ?? []).filter(effort => effort !== "auto");
   const setEffort = (effort: string | null) => { const next = { ...route }; if (effort) next.effort = effort; else delete next.effort; onRouteChange(next); };
   const setWindow = (tokens: number | null) => { const next = { ...route }; if (tokens) next.context_window = tokens; else delete next.context_window; onRouteChange(next); };
   const inRange = (tokens: number) => Boolean(context) && Number.isSafeInteger(tokens) && tokens >= context!.min && (context!.max === undefined || tokens <= context!.max);
@@ -294,22 +296,27 @@ export function AgentOrchestratorComposerControls({
         </div>}
       </ChipMenu> : <ChipMenu heading="Reasoning effort" popupClass="ao-tuning-popup" className={effortUnsupported ? "is-warning" : ""}
         ariaLabel={`Reasoning effort: ${effortLabel}`}
-        disabled={busy || (!efforts?.length && !route.effort)}
+        disabled={busy || (!levels.length && !route.effort)}
         title={!efforts ? capability?.effortReason || "This model's efforts are not known yet" : !efforts.length ? capability?.effortReason || "This model takes no effort setting"
           : route.effort ? "How hard the model thinks" : "The model's own effort until you pick one"}
         label={<span>{effortLabel}</span>}>
         {(close) => <div role="radiogroup" aria-label="Efforts">
+          {/* Auto on every model: no effort is sent, so CPA and the provider can never refuse the level
+              (a level a plugin lacked 400ed, and the chat's launch looked stuck). It is saved as "auto",
+              so the model's start effort (startEffort) never replaces it. */}
+          {levels.length ? <Option picked={route.effort === "auto"} disabled={busy}
+            onPick={() => { setEffort("auto"); close(); }}>Auto<small>the model's own</small></Option> : null}
           {/* Unpicked, the model's own effort shows as the pick; picking it again keeps it the model's own. */}
-          {(efforts ?? []).map(effort => <Option key={effort} picked={route.effort ? route.effort === effort : modelEffort === effort} disabled={busy}
+          {levels.map(effort => <Option key={effort} picked={route.effort ? route.effort === effort : modelEffort === effort} disabled={busy}
             onPick={() => { setEffort(!route.effort && modelEffort === effort ? null : effort); close(); }}>{effortWord(effort)}</Option>)}
           {/* With no efforts to pick, the menu says why instead of opening empty, and a carried
               effort the model cannot take can be cleared back to the model's own. */}
-          {!efforts?.length ? <p className="ao-popup-muted" role="status">{!efforts
+          {!levels.length ? <p className="ao-popup-muted" role="status">{!efforts
             ? capability?.effortReason || "This model's efforts are not known yet."
             : capability?.effortReason || "This model takes no effort setting."}</p> : null}
-          {!efforts?.length && route.effort ? <Option picked={false} disabled={busy} onPick={() => { setEffort(null); close(); }}>
+          {!levels.length && route.effort ? <Option picked={false} disabled={busy} onPick={() => { setEffort(null); close(); }}>
             Auto<small>the model's own</small></Option> : null}
-          {effortUnsupported && efforts?.length ? <p className="ao-popup-muted" role="status">This model doesn't take {effortWord(route.effort)}. Pick another above.</p> : null}
+          {effortUnsupported && levels.length ? <p className="ao-popup-muted" role="status">This model doesn't take {effortWord(route.effort)}. Pick another above.</p> : null}
         </div>}
       </ChipMenu>}
       <ChipMenu heading="Context window" popupClass="ao-tuning-popup" ariaLabel={`Context window: ${windowLabel}`} disabled={busy || !context}

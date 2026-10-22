@@ -10,10 +10,11 @@
  */
 import { useContext, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, StreamingMarkdown } from "./ChatToolParts";
+import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart } from "./ChatToolParts";
 import {
   dshActivity, dshDuration, dshItemDetail, dshLiveTitle, dshProcessTitle, dshQuietNote, dshRetryNote, dshSegments, dshThinkSummary, dshToolTitle,
-  tidyTimeline, withoutReplied, cpaRefusalNote, type ChatLiveItem, type ChatStep, type ChatTurn, type CpaRefusal, type DshActivity,
+  steerReader, steerReceipts, tidyTimeline, withoutReplied, cpaRefusalNote, type ChatLiveItem, type ChatStep, type ChatTurn, type CpaRefusal,
+  type DshActivity, type SteerReceipt,
 } from "./ao-chat";
 
 // Icons: ui-primitives/src/icons, 1px strokes on a 16 box, drawn 14px inside a 16px leading box.
@@ -173,14 +174,14 @@ function DshItem({ item }: { item: ChatLiveItem }) {
   if (item.answered) return <AnsweredRecord question={item.answered.question} answer={item.answered.answer} />;
   if (item.kind === "reasoning") return <DshThink item={item} />;
   if (item.kind === "message") return <div className="dsh-reply"><StreamingMarkdown text={item.text} live={item.status === "running"} /></div>;
-  if (item.kind === "steer") return <DshSteer text={item.text} />;
+  if (item.kind === "steer") return <DshSteer text={item.text} receipt={item.receipt} />;
   return <DshTool item={item} />;
 }
 
-/** A message steered into the turn, drawn as the chat draws any message the person sent. */
-function DshSteer({ text }: { text: string }) {
+/** A message steered into the turn, drawn as the chat draws any message the person sent, with its read receipt. */
+function DshSteer({ text, receipt }: { text: string; receipt?: SteerReceipt }) {
   const sent = useContext(SentMessageView);
-  return <div className="cx-user cx-steer">{sent(text)}</div>;
+  return <div className="cx-user cx-steer">{sent(text)}{receipt ? <div className="cx-msg-foot"><SteerReceiptMark receipt={receipt} /></div> : null}</div>;
 }
 
 /**
@@ -214,9 +215,9 @@ function DshGroup({ items, live }: { items: ChatLiveItem[]; live: boolean }) {
 }
 
 /** A card's work: flat while it runs (DeepSeek Harness keeps a running turn flat), grouped once done. */
-function DshFlow({ items, grouped, hideReply }: { items: ChatLiveItem[]; grouped: boolean; hideReply?: string }) {
+function DshFlow({ items, grouped, finished, hideReply }: { items: ChatLiveItem[]; grouped: boolean; finished: boolean; hideReply?: string }) {
   // The reply is the turn's messages joined: each one in it shows once, in the reply (withoutReplied).
-  const tidy = withoutReplied(tidyTimeline(items), hideReply);
+  const tidy = withoutReplied(tidyTimeline(steerReceipts(items, finished)), hideReply);
   if (!grouped) return <div className="dsh-flow">{tidy.map((item) => <DshItem key={item.id} item={item} />)}</div>;
   return <div className="dsh-flow">{dshSegments(tidy).map((segment) => segment.kind === "item"
     ? <DshItem key={segment.item.id} item={segment.item} />
@@ -229,7 +230,9 @@ function DshStepWork({ step, useWork, answer }: { step: ChatStep; useWork: UseSt
   // not shown at all here, and the other view drew them under the new attempt's work.
   const earlier = <EarlierRounds rounds={step.earlier} />;
   if (!work.length) return <>{earlier}{step.hasWork && !step.working ? <p className="dsh-hint">Loading…</p> : null}</>;
-  return <>{earlier}<DshFlow items={work} grouped={!step.working} hideReply={answer} /></>;
+  return <>{earlier}<SteerReader.Provider value={steerReader(step.detail)}>
+    <DshFlow items={work} grouped={!step.working} finished={!step.working && step.state === "finished"} hideReply={answer} />
+  </SteerReader.Provider></>;
 }
 
 /** A team card as one row: its name and what it is doing or how it ended, opening on its own work. */
@@ -245,7 +248,9 @@ function DshAgent({ step, useWork, answer }: { step: ChatStep; useWork: UseStepW
     open={open} expandable={Boolean(step.hasWork || work?.length || step.text || step.earlier?.length)} onToggle={() => setChosen(!open)}>
     <div className="dsh-agent-body">
       <EarlierRounds rounds={step.earlier} />
-      {work?.length ? <DshFlow items={work} grouped={!live} hideReply={answer} /> : null}
+      {work?.length ? <SteerReader.Provider value={steerReader(step.detail)}>
+        <DshFlow items={work} grouped={!live} finished={!live && step.state === "finished"} hideReply={answer} />
+      </SteerReader.Provider> : null}
       {step.text && step.text.trim() !== answer?.trim() ? <div className="dsh-reply"><ChatMarkdown text={step.text} /></div> : null}
     </div>
   </DshRow>;
@@ -259,6 +264,7 @@ function DshRunning({ since, divider, heardAt, retry = "", refusal = null }: { s
   // agent is waiting out a model error says that instead (dshRetryNote), or CPA refusing its model
   // (a subagent's requests too, which post no retry notice).
   const quietNote = retry || `${cpaRefusalNote(refusal, now)}${dshQuietNote(heardAt, now)}`;
+  const { onRestart, restarting } = useContext(TurnRestart);
   return <div className="dsh-running" role="status" aria-live="polite">
     {divider ? <span className="dsh-running-divider" aria-hidden="true" /> : null}
     <span className="dsh-running-content">
@@ -267,6 +273,9 @@ function DshRunning({ since, divider, heardAt, retry = "", refusal = null }: { s
         <svg className="dsh-whale-still" width="100%" height="100%" viewBox="0 0 16 16" fill="none"><path d={WHALE} stroke="currentColor" strokeWidth={1} /></svg>
       </span>
       <span className="dsh-shimmer is-deep">{since ? `Deep diving for ${dshDuration(now - since)}${quietNote} ···` : `Deep diving${quietNote}`}</span>
+      {/* A stuck turn has something to press here too (see TurnRunning). */}
+      {quietNote.includes("may be stuck") && onRestart ? <button type="button" className="cx-turn-restart" onClick={onRestart} disabled={restarting}
+        title="Stop this turn and have the same agent continue where it left off">{restarting ? "Restarting…" : "Restart"}</button> : null}
     </span>
   </div>;
 }

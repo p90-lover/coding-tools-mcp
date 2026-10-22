@@ -2,7 +2,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const { Worker } = require("node:worker_threads");
+const { spawn } = require("node:child_process");
 
 /**
  * Gives back the space of an AO database that is mostly empty pages. AO's janitors delete old
@@ -14,7 +14,7 @@ const { Worker } = require("node:worker_threads");
  * The first time, a mostly empty database is rewritten once (VACUUM) and switched to incremental
  * auto-vacuum; after that a start frees what accumulated, at most incrementalMaxBytes of it
  * (incremental_vacuum(N)), so a start never waits on a large rewrite. VACUUM is
- * synchronous and takes tens of seconds on a hard disk, so it runs in a worker thread.
+ * synchronous and takes tens of seconds on a hard disk, so it runs in a separate process.
  */
 const DEFAULTS = Object.freeze({
   // A full rewrite only for a file that is at least this much, and at least half, empty.
@@ -29,14 +29,17 @@ const DEFAULTS = Object.freeze({
   // over ten minutes and the disk froze the app. Free pages are reused anyway; the rest of the
   // space comes back over the next starts.
   incrementalMaxBytes: 32 * 1024 * 1024,
+  // AO starts only after this; past the limit the maintenance is stopped and AO starts without it.
+  timeoutMs: 90_000,
 });
 
-const WORKER = `
-const { parentPort, workerData } = require("node:worker_threads");
+// Runs in its own process: its input in AO_DB_MAINTENANCE_INPUT, its result one JSON line on stdout.
+const SCRIPT = `
 const { DatabaseSync } = require("node:sqlite");
 const fs = require("node:fs");
+const report = (result) => process.stdout.write(JSON.stringify(result) + "\\n");
 (() => {
-  const { file, minFreeBytes, minFreeRatio, maxUsedBytes, incrementalMinBytes, incrementalMaxBytes, diskFreeBytes } = workerData;
+  const { file, minFreeBytes, minFreeRatio, maxUsedBytes, incrementalMinBytes, incrementalMaxBytes, diskFreeBytes } = JSON.parse(process.env.AO_DB_MAINTENANCE_INPUT);
   let db = null;
   try {
     db = new DatabaseSync(file, { timeout: 2000 });
@@ -65,10 +68,10 @@ const fs = require("node:fs");
     if (action !== "none") db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
     db.close();
     db = null;
-    parentPort.postMessage({ action, ...(reason ? { reason } : {}), beforeBytes, afterBytes: fs.statSync(file).size, freeBytes, usedBytes, ms: Date.now() - started });
+    report({ action, ...(reason ? { reason } : {}), beforeBytes, afterBytes: fs.statSync(file).size, freeBytes, usedBytes, ms: Date.now() - started });
   } catch (error) {
     try { db?.close(); } catch {}
-    parentPort.postMessage({ action: "failed", error: String(error?.message || error).slice(0, 300) });
+    report({ action: "failed", error: String(error?.message || error).slice(0, 300) });
   }
 })();
 `;
@@ -80,20 +83,40 @@ function compactAoDatabase(dataRoot, options = {}) {
   if (!fs.existsSync(file)) return Promise.resolve({ action: "none", reason: "no database yet" });
   let diskFreeBytes = null;
   try { const stats = fs.statfsSync(dataRoot); diskFreeBytes = Number(stats.bavail) * Number(stats.bsize); } catch { /* unknown */ }
+  const input = JSON.stringify({ file, diskFreeBytes, minFreeBytes: settings.minFreeBytes, minFreeRatio: settings.minFreeRatio,
+    maxUsedBytes: settings.maxUsedBytes, incrementalMinBytes: settings.incrementalMinBytes, incrementalMaxBytes: settings.incrementalMaxBytes });
   return new Promise((resolve) => {
-    let settled = false;
-    const done = (result) => { if (!settled) { settled = true; resolve(result); } };
-    let worker;
+    let settled = false, timer = null, timedOut = null, output = "";
+    const done = (result) => { if (!settled) { settled = true; clearTimeout(timer); resolve(result); } };
+    let child;
     try {
-      worker = new Worker(WORKER, { eval: true, workerData: { file, diskFreeBytes, minFreeBytes: settings.minFreeBytes, minFreeRatio: settings.minFreeRatio,
-        maxUsedBytes: settings.maxUsedBytes, incrementalMinBytes: settings.incrementalMinBytes, incrementalMaxBytes: settings.incrementalMaxBytes } });
+      // In its own process, not a worker thread: AO starts only once this is done, and a run that
+      // never finished kept AO from starting at all (seen 2026-10-22: "starting" for over 10 minutes
+      // after an update, every chat stuck in "checking"). A worker cannot be stopped inside a native
+      // SQLite call such as VACUUM, so it went on holding the write lock after giving up on it; a
+      // killed process lets go of its locks, and SQLite drops the unfinished rewrite. In Electron the
+      // app's own executable runs as plain Node. scriptSource: tests only.
+      child = spawn(process.execPath, ["-e", settings.scriptSource ?? SCRIPT], {
+        windowsHide: true, stdio: ["ignore", "pipe", "ignore"],
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", AO_DB_MAINTENANCE_INPUT: input },
+      });
     } catch (error) {
       done({ action: "failed", error: String(error?.message || error).slice(0, 300) });
       return;
     }
-    worker.once("message", done);
-    worker.once("error", (error) => done({ action: "failed", error: String(error?.message || error).slice(0, 300) }));
-    worker.once("exit", () => done({ action: "failed", error: "the maintenance worker stopped" }));
+    child.stdout.on("data", (chunk) => { output = (output + chunk.toString()).slice(-4096); });
+    child.once("error", (error) => done({ action: "failed", error: String(error?.message || error).slice(0, 300) }));
+    child.once("exit", () => {
+      // Past the limit, AO starts only once the process is gone and its locks with it.
+      if (timedOut) { done(timedOut); return; }
+      const line = output.trim().split("\n").pop();
+      try { done(JSON.parse(line)); } catch { done({ action: "failed", error: "the maintenance process stopped" }); }
+    });
+    timer = setTimeout(() => {
+      timedOut = { action: "failed", error: `timed out after ${Math.round(settings.timeoutMs / 1000)} s; AO starts without it` };
+      child.kill();
+    }, settings.timeoutMs);
+    timer.unref?.();
   });
 }
 

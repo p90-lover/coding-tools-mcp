@@ -52,6 +52,47 @@ test("a mostly empty database is rewritten once, keeps its rows and their order,
   } finally { fixture.cleanup(); }
 });
 
+test("a compaction that never finishes is stopped at its limit, so AO still starts", async () => {
+  // Seen 2026-10-22: after an update AO stayed "starting" for over 10 minutes, waiting on this.
+  const fixture = mostlyEmpty();
+  try {
+    const started = Date.now();
+    const result = await compactAoDatabase(fixture.dir, { ...small, timeoutMs: 300,
+      scriptSource: "setInterval(() => {}, 1000);" });
+    assert.equal(result.action, "failed");
+    assert.match(result.error, /timed out after 0 s; AO starts without it/);
+    assert.ok(Date.now() - started < 5_000, "it does not wait past the limit");
+    // The database is untouched and usable.
+    const db = new DatabaseSync(fixture.file);
+    assert.equal(db.prepare("SELECT count(*) AS n FROM turns").get().n, 2);
+    db.close();
+  } finally { fixture.cleanup(); }
+});
+
+test("a compaction stopped mid-write lets go of the database before AO starts", async () => {
+  // Review on #484: a worker thread could not be stopped inside a native SQLite call, so after the
+  // timeout it still held the write lock and AO started against a locked database. The maintenance
+  // here takes the write lock and never lets go; once it is stopped, a new writer must get in.
+  const fixture = mostlyEmpty();
+  try {
+    const holdsTheLock = `
+      const { DatabaseSync } = require("node:sqlite");
+      const { file } = JSON.parse(process.env.AO_DB_MAINTENANCE_INPUT);
+      const db = new DatabaseSync(file);
+      db.exec("BEGIN IMMEDIATE; INSERT INTO turns (note) VALUES ('unfinished')");
+      for (;;) {}`;
+    const result = await compactAoDatabase(fixture.dir, { ...small, timeoutMs: 1_500, scriptSource: holdsTheLock });
+    assert.equal(result.action, "failed");
+    assert.match(result.error, /timed out/);
+    const db = new DatabaseSync(fixture.file, { timeout: 500 });
+    db.exec("BEGIN IMMEDIATE; INSERT INTO turns (note) VALUES ('ao')");
+    db.exec("COMMIT");
+    assert.deepEqual(db.prepare("SELECT note FROM turns ORDER BY id").all().map((row) => row.note), ["first", "second", "ao"],
+      "the stopped write was never committed, and AO's write goes through");
+    db.close();
+  } finally { fixture.cleanup(); }
+});
+
 test("one start gives back at most incrementalMaxBytes; the rest comes back over the next starts", async () => {
   // Seen live: an uncapped incremental_vacuum moved 443 MB through the WAL on a busy hard disk, and
   // AO, which waits for it, stayed down for over ten minutes.

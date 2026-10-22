@@ -244,12 +244,18 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   async function defaultToFolderMode(project) {
     if (folderModeChecked.has(project.id)) return;
     const endpoint = `/api/v1/projects/${encodeURIComponent(project.id)}`;
+    const settled = current => !current || (current.kind && current.kind !== "single_repo") || Boolean(current.config?.workspaceMode);
+    // Only a write waits its turn. Seen live: the first launch in a project after the app started
+    // waited 19 s behind its dependency-link sync just to read a mode that was already "folder".
+    if (settled(project) && project.config || settled((await internalApi("GET", endpoint))?.project)) {
+      folderModeChecked.add(project.id);
+      return;
+    }
     // On the dependency-link sync's queue: both rewrite the whole config.
     await dependencyLinks.exclusive(project.id, async () => {
       const current = (await internalApi("GET", endpoint))?.project;
-      if (!current || (current.kind && current.kind !== "single_repo")) return;
+      if (settled(current)) return;
       const config = current.config && typeof current.config === "object" ? current.config : {};
-      if (config.workspaceMode) return;
       await internalApi("PUT", `${endpoint}/config`, { config: { ...config, workspaceMode: "folder" } });
     });
     folderModeChecked.add(project.id);
@@ -319,10 +325,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       },
     }) : null;
 
-  async function requestApi(method, endpoint, body, { maxBytes } = {}) {
+  async function requestApi(method, endpoint, body, { maxBytes, timeoutMs } = {}) {
     if (state !== "ready") throw new Error("Start the source-integrated AO runtime first");
     if (body?.length > 65536) throw new Error("AO API request exceeds 64 KiB");
-    const response = await fetch(`http://127.0.0.1:${daemonPort}${endpoint}`, { method, headers: { "content-type": "application/json" }, body, redirect: "error", signal: AbortSignal.timeout(method === "GET" ? 30000 : 180000) });
+    const waitMs = Number.isSafeInteger(timeoutMs) && timeoutMs > 0 ? timeoutMs : method === "GET" ? 30000 : 180000;
+    const response = await fetch(`http://127.0.0.1:${daemonPort}${endpoint}`, { method, headers: { "content-type": "application/json" }, body, redirect: "error", signal: AbortSignal.timeout(waitMs) });
     const text = await response.text();
     // A conversation read is trimmed below before anything uses it, so it may arrive larger; every
     // other AO call keeps the 900 KB limit.
@@ -453,7 +460,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     const tiny = [3, 1].filter(size => size < smallest);
     // includePending: a request still waiting on an answer is always in the page, however much
     // came after it; one that fell out of the newest items never showed and sat until it timed out.
-    const pending = async (size, options) => internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${size}&includePending=1`, undefined, options);
+    // trimLargeFields: AO cuts any detail string over 64 KB to its first 2 KB and last 16 KB, all
+    // the chat (2 KB of a tool's output) and Terminal pane (16 KB of a command's) show. Screenshot
+    // data made one poll of a chat 3.5 MB; ten recent chats' pages went from 8.8 MB to 2.9 MB.
+    // Edit sources and prose are never cut. An AO without it ignores the parameter.
+    const pending = async (size, options) => internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${size}&includePending=1&trimLargeFields=1`, undefined, options);
     for (const size of limits) {
       try { return await pending(size); } catch (error) { if (!tooLarge(error)) throw error; }
     }
@@ -655,16 +666,20 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     const input = detail.input && typeof detail.input === "object" ? detail.input : {};
     const base = { id: String(activity.id), sequence: Number(activity.sequence) || 0, status: String(activity.status || "").slice(0, 32) };
     const summary = String(activity.summary || "");
+    // The timeout a tool call states for itself (Claude Code's Bash/PowerShell `timeout`), so the run
+    // loop can tell a long call still within it from one whose result never came back.
+    const stated = Number(input.timeout);
+    const timeout = Number.isFinite(stated) && stated > 0 ? { timeoutMs: Math.min(stated, 24 * 3600_000) } : {};
     // A file edit shows as Claude Code shows one: "Edited <file> +12 −3", opening on the diff.
     const edit = editedFiles(activity, detail, input);
     if (edit) return { ...base, kind: "edit", label: edit.label, text: utf8Prefix(edit.files.map(file => file.path).join(", "), 400), files: edit.files };
     // A shell call (Bash, PowerShell) shows as the command it ran, like Codex.
     if (activity.activityKind === "mcp_tool" && typeof input.command === "string" && input.command.trim()) {
-      return { ...base, kind: "command", text: utf8Prefix(input.command.trim(), 400), ...toolDetails(detail, input) };
+      return { ...base, kind: "command", text: utf8Prefix(input.command.trim(), 400), ...toolDetails(detail, input), ...timeout };
     }
     if (activity.activityKind === "mcp_tool") {
       return { ...base, kind: "tool", label: toolLabel(detail, summary), text: utf8Prefix(summary || detail.toolKind || "tool", 400),
-        ...toolDetails(detail, input) };
+        ...toolDetails(detail, input), ...timeout };
     }
     // The model's reasoning summary: AO streams it into the activity's text (detail.text); its
     // summary is only the word "Reasoning".
@@ -910,14 +925,17 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (!workspaceBoard) throw new Error("Coding Tools mission service is unavailable");
     const at = Date.now();
     const kept = projectBindings.get(workspaceId);
-    if (kept && at - kept.at < PROJECT_BINDING_TTL_MS) return kept.promise;
-    const entry = { at, promise: workspaceBoard.bind(workspaceId).then(binding => {
+    if (kept && at - kept.at < PROJECT_BINDING_TTL_MS) return kept.projectId ?? kept.promise;
+    // A workspace bound before keeps its project while the binding (git, the dependency-link sync,
+    // up to 3 s) is refreshed behind the launch: every send more than a minute after the last one
+    // waited for it. A failed refresh or start forgets the binding, so the next one binds afresh.
+    const entry = { at, projectId: kept?.projectId ?? null, promise: workspaceBoard.bind(workspaceId).then(binding => {
       if (!binding.projectId) throw new Error("AO harness workers need this workspace to be a git repository registered in AO");
       return binding.projectId;
     }) };
-    entry.promise.catch(() => forgetProject(workspaceId, entry));
+    entry.promise.then(projectId => { entry.projectId = projectId; }, () => forgetProject(workspaceId, entry));
     projectBindings.set(workspaceId, entry);
-    return entry.promise;
+    return entry.projectId ?? entry.promise;
   }
   // One send bound its workspace up to four times (model checks, the default window, the launch):
   // each listed AO's projects, ran git and synced dependency links for up to 3 s. A binding is kept
@@ -1006,7 +1024,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         ...(approvalMode ? { approvalMode } : {}),
         ...(brief ? { prompt: mode === "chat" ? brief : `${brief}\n\n${TUI_RESULT_INSTRUCTION}` } : {}),
         ...(model && model !== "default" ? { model: String(model).slice(0, 256) } : {}),
-        ...(effort && !gateway ? { effort: String(effort).slice(0, 32) } : {}),
+        // Through CPA too: the agent sends it in the request body (the workflow's aoLaunchArgs).
+        ...(effort ? { effort: String(effort).slice(0, 32) } : {}),
         ...(contextWindow != null ? { contextWindow } : {}),
         // A single-model chat is a plain assistant: AO adds none of its worker/orchestrator prompt.
         ...(plain ? { plainPrompt: true } : {}),
@@ -1258,11 +1277,29 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       }));
       return idle.filter(Boolean);
     },
+    /**
+     * Sessions of these workspaces' AO projects that nobody has used for at least `idleMs`: live
+     * (not terminated), not working, not pinned, with no message to them since, or since they were
+     * made. AO's board keeps every exited session, so old workers, subagents and replaced chats
+     * piled up there (35 over a week old on 2026-10-22). The activity time is no measure of use:
+     * it restarts with the daemon.
+     */
+    async staleSessions(workspaceIds, idleMs, now = Date.now()) {
+      const projects = new Set((await Promise.all(workspaceIds.map(id => projectFor(id).catch(() => null)))).filter(Boolean));
+      if (!projects.size) return [];
+      const list = await internalApi("GET", "/api/v1/sessions");
+      const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
+      const lastUse = session => Math.max(...[session.lastUserMessageAt, session.createdAt].map(stamp => Date.parse(stamp ?? "")).filter(Number.isFinite));
+      return sessions.filter(session => session && projects.has(session.projectId) && !session.isTerminated && session.isPinned !== true
+        && !["working", "spawning", "starting"].includes(session.status) && Number.isFinite(lastUse(session)) && now - lastUse(session) >= idleMs)
+        .map(session => String(session.id));
+    },
     /** Sends a follow-up as a new turn of the same session; AO de-duplicates by client message id. */
-    async send(id, text, clientMessageId) {
+    async send(id, text, clientMessageId, { timeoutMs } = {}) {
       forgetTail(id);
       const data = await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/messages`,
-        { text: utf8Prefix(String(text), 64 * 1024), ...(clientMessageId ? { clientMessageId: String(clientMessageId).slice(0, 200) } : {}) });
+        { text: utf8Prefix(String(text), 64 * 1024), ...(clientMessageId ? { clientMessageId: String(clientMessageId).slice(0, 200) } : {}) },
+        timeoutMs ? { timeoutMs } : undefined);
       if (typeof data?.turnId !== "string" || !data.turnId) throw new Error("AO did not start a turn for the follow-up");
       return { turnId: data.turnId, state: data.state };
     },
@@ -1553,6 +1590,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // space back (ao-db-maintenance.cjs). It runs in a worker, and anything it cannot do is skipped.
         if (!databaseCompacted) {
           databaseCompacted = true;
+          // Logged before it runs: a run that hung once left no trace while AO waited on it.
+          logger.info?.("ao.database_compaction_started", {});
           const compacted = await compactAoDatabase(dataRoot);
           if (compacted.action !== "none") logger.info?.("ao.database_compacted", compacted);
           checkStartup();

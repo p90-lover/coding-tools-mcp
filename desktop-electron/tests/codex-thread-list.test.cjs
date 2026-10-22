@@ -146,14 +146,17 @@ test("right after switching to a project, its list loads instead of saying No ch
   delete stored["coding-tools:ao:open-projects"];
 });
 
-test("a used chat rises to the top of its project, and its project to the top of Projects (pinned first)", () => {
+test("a used chat rises to the top of its project; projects stay where you put them (pinned first)", () => {
   const list = compile("ChatThreadList.tsx", (name) => name === "react" ? { useState() {}, useRef() {}, useEffect() {} } : name === "react/jsx-runtime" ? { jsx() {}, jsxs() {} } : name === "./ao-chat" ? chat : {});
   const projects = [{ id: "a" }, { id: "b" }, { id: "c" }];
   // The module runs in its own realm: compare plain copies.
   const plain = (value) => JSON.parse(JSON.stringify(value));
-  assert.deepEqual(plain(list.orderProjects(projects, [], {}).map((item) => item.id)), ["a", "b", "c"], "unused projects keep the list's order");
-  assert.deepEqual(plain(list.orderProjects(projects, [], { c: 5, b: 2 }).map((item) => item.id)), ["c", "b", "a"], "the most recently used comes first");
-  assert.deepEqual(plain(list.orderProjects(projects, ["a"], { c: 5 }).map((item) => item.id)), ["a", "c", "b"], "pinned projects stay first");
+  assert.deepEqual(plain(list.orderProjects(projects, [], []).map((item) => item.id)), ["a", "b", "c"], "unplaced projects keep the list's order");
+  assert.deepEqual(plain(list.orderProjects(projects, [], ["c", "a"]).map((item) => item.id)), ["c", "a", "b"], "the order you dragged them into; the rest after it");
+  assert.deepEqual(plain(list.orderProjects(projects, ["b"], ["c", "a"]).map((item) => item.id)), ["b", "c", "a"], "pinned projects stay first");
+  // Using a project (a message in one of its chats) never moves it: only a drag changes the order.
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/ChatThreadList.tsx"), "utf8");
+  assert.ok(!/project-used|setProjectUsedAt/.test(source), "no use-time ordering of projects is left");
 
   const chats = [{ taskId: "t1", latestRunId: "r1" }, { taskId: "t2", latestRunId: "r9" }];
   assert.deepEqual(plain(list.releaseUsedChats(["t1", "t2"], { t1: "r1", t2: "r2" }, chats)), { order: ["t1"], used: ["t2"] },
@@ -272,7 +275,7 @@ test("a drop lands before a row's upper half and after its lower half; Pinned an
 });
 
 // A drag event on a row 20px tall; the pointer on its upper or lower half.
-const dragEvent = (lower) => ({ preventDefault() {}, clientY: lower ? 15 : 5, dataTransfer: { setData() {} },
+const dragEvent = (lower) => ({ preventDefault() {}, stopPropagation() {}, clientY: lower ? 15 : 5, dataTransfer: { setData() {} },
   currentTarget: { getBoundingClientRect: () => ({ top: 0, height: 20 }) } });
 const rowOf = (view, title) => walk(view).find((element) => element.type === "li" && String(element.props.className).startsWith("cx-thread-row") && text(element).includes(title));
 

@@ -233,6 +233,21 @@ test("an image steered into a running turn shows as the image, not as its path",
   assert.match(html, /<p>switch number ,if met the number is unable to verify on text<\/p>/, "the typed words stay in the bubble");
 });
 
+test("a steer carries Claude Code's read receipt: Unread while the agent holds it, Read by Claude once read", () => {
+  const render = (timeline) => renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, {
+    runs: [{ id: "run", project_id: "task", cancelled: false, execution_mode: "single", nodes: [{ id: "lead", role: "planner", state: "running",
+      route: { harness_id: "ao:claude-code", model: "m" }, receipt: { thread_id: "sess-4", started_at_ms: Date.now() - 5_000 } }] }],
+    activity: { "run:lead": { activity: "working", timeline } },
+    tasks: [{ id: "task", title: "Task" }], selectedTaskId: "task", busy: false, approvals: [],
+    loadDescription: async () => "", send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "Claude Code · m", retryStart() {} }));
+  const item = (id, kind) => ({ id, kind, status: "completed", text: kind === "steer" ? "check the logs too" : "x" });
+  const unread = render([item("m1", "message"), item("s1", "steer")]);
+  assert.match(unread, /class="cx-receipt" data-receipt="unread" role="img" aria-label="Unread"/, "a faded check, Unread");
+  const read = render([item("m1", "message"), item("s1", "steer"), item("t1", "tool"), item("m2", "message")]);
+  assert.match(read, /data-receipt="read" role="img" aria-label="Read by Claude"/, "a double check, Read by Claude");
+  assert.ok(read.indexOf("cx-receipt") < read.indexOf("Copy message"), "the receipt leads the row, before Copy");
+});
+
 test("an open chat's composer carries the context meter; a new chat's does not", () => {
   const props = { runs: [{ id: "run", project_id: "task", cancelled: false, nodes: [{ id: "lead", role: "planner", state: "finished",
     route: { harness_id: "ao:claude-code", model: "m" }, receipt: { thread_id: "sess-1", answer: "ok" } }] }],

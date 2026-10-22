@@ -2027,10 +2027,12 @@ test("activity reports each working card's runtime and current step without adva
   const agent = { id: "w3", role: "worker", state: "running", route: { harness_id: "ao:codex", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" },
     receipt: { status: "submitted", thread_id: "sess-3" } };
   const done = { id: "p", role: "planner", state: "finished", route: native.route, receipt: { status: "completed" } };
+  const testing = { ...agent, id: "w4", receipt: { status: "submitted", thread_id: "sess-4" } };
+  const asking = { ...agent, id: "w5", receipt: { status: "submitted", thread_id: "sess-5" } };
   const workflow = createAgentOrchestratorWorkflow({
     requestHeadless: async (endpoint, body) => {
       calls.push(endpoint);
-      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [done, native, stuck, agent] }] };
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [done, native, stuck, agent, testing, asking] }] };
       if (endpoint === "/api/v1/ao/harness/status") {
         return { ok: true, status: { connected: true, live_output: body.node_id === "w1" ? "native partial Bearer SECRET_TOKEN npm run task-runner sk-abcdefghijklmnopqrst1234" : "", threads: body.node_id === "w1"
           ? [{ id: "thread-1", turn_id: "turn-1", activity: "running a command", activity_at_ms: 5_000, last_event_at_ms: 6_000 }]
@@ -2038,13 +2040,18 @@ test("activity reports each working card's runtime and current step without adva
       }
       throw new Error(`unexpected ${endpoint}`);
     },
-    aoHarness: { observe: async () => ({ turnState: "running", turnId: "t-3" }) },
+    aoHarness: { observe: async (session) => session === "sess-4"
+      ? { turnState: "running", turnId: "t-4", timeline: [{ id: "a1", kind: "command", status: "pending", text: "python -m pytest tests -q", timeoutMs: 300_000 }] }
+      // AO marks the session needs_input while a permission request waits: the card names the command.
+      : session === "sess-5" ? { turnState: "running", turnId: "t-5", needsInput: true, approvals: [{ approval_id: "r1", kind: "command", command: "npm run build", tool: "Bash" }] }
+      : { turnState: "running", turnId: "t-3" } },
     confirm: async () => true,
   });
   await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
   await new Promise(resolve => setImmediate(resolve));
   const result = await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
-  assert.deepEqual(Object.keys(result.nodes).sort(), ["w1", "w2", "w3"], "only working cards");
+  assert.deepEqual(Object.keys(result.nodes).sort(), ["w1", "w2", "w3", "w4", "w5"], "only working cards");
+  assert.equal(result.nodes.w5.activity, "waiting for approval: npm run build");
   assert.equal(result.nodes.w1.activity, "running a command");
   // "sk-" inside a word (task-runner) is not a key; a whole sk- token is.
   assert.equal(result.nodes.w1.output, "native partial [redacted] npm run task-runner [redacted]");
@@ -2053,7 +2060,10 @@ test("activity reports each working card's runtime and current step without adva
   assert.equal(result.nodes.w1.started_at_ms, 1_000);
   assert.equal(result.nodes.w2.activity, "waiting for the turn to start");
   assert.equal(result.nodes.w2.turn_started, false);
-  assert.equal(result.nodes.w3.activity, "running");
+  // An AO card says what its turn is doing, not just "running": waiting on the model, or the command
+  // it runs with that command's own timeout.
+  assert.equal(result.nodes.w3.activity, "waiting for the model");
+  assert.equal(result.nodes.w4.activity, "running python -m pytest tests -q (timeout 5m)");
   assert.ok(calls.every((endpoint) => endpoint === "/api/v1/ao/read" || endpoint === "/api/v1/ao/harness/status"), "read-only calls only");
 });
 
@@ -4536,6 +4546,54 @@ test("a new chat's first message runs in the session pre-warmed for its model, a
   assert.equal(spawned.length, 2, "nothing is spawned after dispose");
 });
 
+test("a warm agent that does not take the first message within seconds is ended and a fresh one gets it", async () => {
+  // Seen live: a warm agent ready for five minutes never started the turn; the send waited out AO's
+  // 180 s request timeout, then a fresh start took over a minute more, so the chat sat "launching".
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  const world = chatWorld();
+  const created = new Map();
+  const spawned = [], sendOptions = [], killed = [];
+  const request = async (endpoint, body, options) => {
+    if (endpoint === "/api/v1/ao/read" && body.run_id) {
+      const run = created.get(body.run_id) ?? { id: body.run_id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1,
+        grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+      created.set(body.run_id, run);
+      return { ok: true, runs: [run], worker_capacity: { [body.run_id]: 1 } };
+    }
+    const latest = [...created.values()].at(-1);
+    if (endpoint === "/api/v1/ao/grant") return { ok: true, run: latest, grant: { executable_sha256: "a".repeat(64) } };
+    if (endpoint === "/api/v1/ao/external/reserve") { latest.nodes[0].state = "reserved"; return { ok: true, request_key: "key-1", prompt: "fix the login" }; }
+    if (endpoint === "/api/v1/ao/external/submitted") { latest.nodes[0].state = "running"; latest.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run: latest }; }
+    if (endpoint === "/api/v1/ao/external/terminal") { latest.nodes[0].state = "finished"; return { ok: true, run: latest }; }
+    return world.requestHeadless(endpoint, body, options);
+  };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: request, findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    setTimer: (callback, delay) => delay === 90_000 ? { unref() {} } : setTimeout(callback, delay),
+    clearTimer: timer => clearTimeout(timer),
+    aoHarness: {
+      spawn: async input => { spawned.push(input); return `agent-${spawned.length}`; },
+      continuable: async () => true,
+      // The warm agent's send runs into its time limit (AO's request is aborted).
+      send: async (id, text, key, options) => { sendOptions.push(options); throw new Error("The operation was aborted due to timeout"); },
+      observe: async (id, expected) => ({ status: "idle", turnId: expected, turnState: "completed", answer: "fixed" }),
+      warmSessions: async () => [],
+      kill: async id => { killed.push(id); return { ok: true }; },
+    },
+  });
+  try {
+    assert.equal((await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route })).warmed, true);
+    await workflow.call("chat_send", { workspaceId: "ws-1", message: "fix the login", executionMode: "single", singleRoute: route });
+    for (let tries = 0; tries < 200 && spawned.length < 2; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(sendOptions, [{ timeoutMs: 10_000 }], "the warm agent gets seconds, not AO's 180 s request timeout");
+    assert.deepEqual(killed, ["agent-1"], "the stuck warm agent is ended");
+    assert.equal(spawned.length, 2);
+    assert.equal(spawned[1].prompt, "fix the login", "a fresh agent starts with the message");
+  } finally { workflow.dispose(); }
+});
+
 test("a pre-warmed session is used only by a launch that attaches the same app tools", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
@@ -5440,9 +5498,15 @@ test("team Stop and graph replacement require observed settlement after an inter
       ? workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" })
       : workflow.call("update_run", { workspaceId: "ws", change: { operation: "graph", run_id: "run", expected_revision: 3, change: { operation: "set_parents", node_id: "one", parents: [] } } }); };
     try {
-      await assert.rejects(invoke(), /still working|settlement.*unconfirmed/i, "ACK alone is insufficient");
-      // 60 settlement checks: 15 s at 250 ms (it was 8, 2 s, which gave up on interrupts that land later).
-      assert.equal(reads, action === "stop" ? 61 : 60, "one optional exited-host preflight plus bounded settlement checks");
+      if (action === "stop") {
+        // Stop ends the agent: after 3 s (12 checks) unsettled, its host's confirmed shutdown is the proof.
+        assert.equal((await invoke()).ok, true, "a confirmed agent shutdown stops what the interrupt did not");
+        assert.equal(reads, 13, "one exited-host preflight plus 3 s of settlement checks");
+      } else {
+        await assert.rejects(invoke(), /still working|settlement.*unconfirmed/i, "ACK alone is insufficient");
+        // 60 settlement checks: 15 s at 250 ms (it was 8, 2 s, which gave up on interrupts that land later).
+        assert.equal(reads, 60, "bounded settlement checks");
+      }
       assert.equal(updates, 0, "a live attempt cannot be replaced");
       assert.deepEqual(interrupted, ["s1"]);
       remainingBusy = 2; reads = 0;
@@ -5519,19 +5583,27 @@ test("Stop attempts every owned agent and reports an unconfirmed interrupt", asy
   const mission = { id: "run", workspace_id: "ws", nodes: ["s1", "s2"].map(id => ({
     id, state: "running", route, receipt: { thread_id: id },
   })) };
-  const interrupted = [];
-  const workflow = createAgentOrchestratorWorkflow({
-    requestHeadless: async endpoint => {
-      if (endpoint.endsWith("/control")) throw new Error("native control unavailable");
-      if (endpoint.endsWith("/read")) return { ok: true, runs: [structuredClone(mission)] };
-      throw new Error("unexpected " + endpoint);
-    },
-    aoHarness: { exitAgent: async () => ({ ok: true }), interrupt: async id => { interrupted.push(id); if (id === "s1") throw new Error("fixture stop unavailable"); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
-  });
-  try {
-    await assert.rejects(workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" }), /fixture stop unavailable/);
-    assert.deepEqual(interrupted, ["s1", "s2"]);
-  } finally { workflow.dispose(); }
+  // A refused interrupt is no longer the end: the agent's confirmed shutdown stops it. Only when
+  // that shutdown fails too is the Stop unconfirmed, and it says both.
+  for (const exitFails of [false, true]) {
+    const interrupted = [], exited = [];
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless: async endpoint => {
+        if (endpoint.endsWith("/control")) throw new Error("native control unavailable");
+        if (endpoint.endsWith("/read")) return { ok: true, runs: [structuredClone(mission)] };
+        throw new Error("unexpected " + endpoint);
+      },
+      aoHarness: { exitAgent: async id => { exited.push(id); if (exitFails && id === "s1") throw new Error("host shutdown failed"); return { ok: true }; },
+        interrupt: async id => { interrupted.push(id); if (id === "s1") throw new Error("fixture stop unavailable"); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
+    });
+    try {
+      const stop = workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" });
+      if (exitFails) await assert.rejects(stop, /fixture stop unavailable; host shutdown failed/);
+      else assert.equal((await stop).ok, true, "the refused agent was shut down instead");
+      assert.deepEqual(interrupted, ["s1", "s2"]);
+      assert.deepEqual(exited.sort(), ["s1", "s2"], "every owned agent is shut down");
+    } finally { workflow.dispose(); }
+  }
 });
 
 test("a working external card is not rewired when its interrupt fails", async () => {
@@ -5739,24 +5811,30 @@ test("a dated DeepSeek V4.1 Flash build from Cline Pass takes the same effort le
   assert.deepEqual(capabilities["claude-sonnet-4-6"].efforts, ["low", "medium", "high", "max"]);
 });
 
-test("a Cline Pass or Command Code model's picked effort reaches CPA as its suffix", async () => {
-  // Plugin 0.1.0-codingtools.4 turns the suffix into the request's reasoning_effort for every Cline
-  // model. Before, only DeepSeek V4.1 Flash took one, and the app sent GLM 5.3 Flash none.
+test("a CPA model's picked effort goes in the request body, never as a model suffix, and Auto sends none", async () => {
+  // A/B against CPA (2026-10-22): a suffix 400ed whenever the plugin lacked the level ("(auto)" on
+  // Cline, "(none)" on MiMo and GLM, "(medium)" on DeepSeek) and Claude Code's retries looked like a
+  // launch stuck for good; the body's output_config.effort was a 200 everywhere and honoured.
   const spawned = [];
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: chatWorld({ tasks: [], runs: [] }).requestHeadless,
-    aoHarness: { spawn: async input => { spawned.push(input.model); return `warm-${spawned.length}`; }, warmSessions: async () => [] } });
-  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local" };
-  const warm = async (model, effort) => {
+    aoHarness: { spawn: async input => { spawned.push({ model: input.model, effort: input.effort }); return `warm-${spawned.length}`; }, warmSessions: async () => [] } });
+  const warm = async (model, effort, harness = "ao:claude-code") => {
     const before = spawned.length;
-    await workflow.call("chat_prewarm", { workspaceId: `ws-${model}`, executionMode: "single", singleRoute: { ...route, model, effort } });
+    await workflow.call("chat_prewarm", { workspaceId: `ws-${harness}-${model}-${effort}`, executionMode: "single",
+      singleRoute: { harness_id: harness, provider_id: "agent-orchestrator", account_id: "ao-local", model, effort } });
     for (let tries = 0; tries < 50 && spawned.length === before; tries++) await new Promise(resolve => setTimeout(resolve, 10));
     return spawned.at(-1);
   };
-  assert.equal(await warm("cpa/cline-pass/glm-5.3-flash", "medium"), "cline-pass/glm-5.3-flash(medium)");
-  assert.equal(await warm("cpa/cline-pass/deepseek-v4.1-flash", "max"), "cline-pass/deepseek-v4.1-flash(max)");
-  assert.equal(await warm("cpa/commandcode-go/glm-5.3-flash", "high"), "commandcode-go/glm-5.3-flash(high)");
-  // Another plugin's model with no known level still goes by its bare name.
-  assert.equal(await warm("cpa/grok/grok-5", "high"), "grok/grok-5");
+  assert.deepEqual(await warm("cpa/cline-pass/glm-5.3-flash", "medium"), { model: "cline-pass/glm-5.3-flash", effort: "medium" });
+  assert.deepEqual(await warm("cpa/cline-pass/deepseek-v4.1-flash", "max"), { model: "cline-pass/deepseek-v4.1-flash", effort: "max" });
+  assert.deepEqual(await warm("cpa/commandcode-go/glm-5.3-flash", "high"), { model: "commandcode-go/glm-5.3-flash", effort: "high" });
+  // A level the model lacks runs at its nearest one (a tie goes up) instead of a 400.
+  assert.deepEqual(await warm("cpa/cline-pass/deepseek-v4.1-flash", "medium"), { model: "cline-pass/deepseek-v4.1-flash", effort: "high" });
+  // Auto: the model's own effort; nothing is sent, and no level saved in the model's name comes back.
+  assert.deepEqual(await warm("cpa/cline-pass/glm-5.3-flash", "auto"), { model: "cline-pass/glm-5.3-flash", effort: undefined });
+  assert.deepEqual(await warm("cpa/cline-pass/glm-5.3-flash(high)", "auto"), { model: "cline-pass/glm-5.3-flash", effort: undefined });
+  // Codex carries it in the body too (reasoning.effort, through AO's model_reasoning_effort).
+  assert.deepEqual(await warm("cpa/cline-pass/glm-5.3-flash", "low", "ao:codex"), { model: "cline-pass/glm-5.3-flash", effort: "low" });
   workflow.dispose();
 });
 
@@ -6086,6 +6164,34 @@ test("Stop retries failed descendant shutdown after the parent's host has alread
   } finally { workflow.dispose(); }
 });
 
+test("Stop shuts down an agent whose interrupt never settles or is refused, instead of failing", async () => {
+  // Seen live (2026-10-22): Stop on an agent still launching (its model retrying 429s) waited the
+  // whole settle window, failed "Owned turn is still working; stop needs attention", and the agent
+  // ran on. One whose controller had not started refused the interrupt and Stop failed outright.
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  for (const refuse of [false, true]) {
+    const mission = { id: "run", workspace_id: "ws", nodes: [
+      { id: "one", state: "cancelled", route, receipt: { thread_id: "launching", request_key: "k", status: "held" } },
+    ] };
+    let exited = false, reads = 0, interrupted = false;
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless: async endpoint => ({ ok: true, ...(endpoint.endsWith("/read") ? { runs: [mission] } : { run: mission }) }),
+      setTimer: (callback) => { callback(); return 0; },
+      aoHarness: {
+        observe: async () => { if (interrupted) reads++; return { exited, turnState: exited ? "interrupted" : "running", status: exited ? "exited" : "working" }; },
+        interrupt: async () => { if (refuse) throw new Error("CHAT_CONTROLLER_NOT_READY"); interrupted = true; },
+        exitAgent: async () => { exited = true; return { ok: true }; },
+      },
+    });
+    try {
+      const result = await workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" });
+      assert.equal(result.ok, true, refuse ? "a refused interrupt" : "an interrupt that never settles");
+      assert.equal(exited, true, "the agent's host is shut down");
+      assert.ok(reads <= 12, `it waits at most 3 s for the interrupt before shutting down (${reads} reads)`);
+    } finally { workflow.dispose(); }
+  }
+});
+
 test("Stop disables the local driver before a queued receipt snapshot can return", async () => {
   const route = { harness_id: "ao:claude-code", model: "fixture" };
   const mission = { id: "run", workspace_id: "ws", revision: 1, execution_mode: "single",
@@ -6243,6 +6349,58 @@ test("a hung turn whose interrupt lands after a few seconds is still restarted, 
   assert.deepEqual(interrupted, ["sess-1"]);
 });
 
+// Seen live 2026-10-22: a tool call that never returned held a chat "may be stuck" for 3h 39m. Its
+// interrupt never settled, so every "keep going" failed "stop needs attention" and came back.
+function stuckToolWorld({ settles = false, refuses = false, now = 1_000_000 + 30 * 60_000 } = {}) {
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  const interrupted = [], exited = [], steered = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => now,
+    setTimer: (callback) => { callback(); return 0; },
+    aoHarness: {
+      observe: async () => {
+        const ended = exited.length || (settles && interrupted.length);
+        return { turnId: "t1", turnState: ended ? "interrupted" : "running", status: ended ? "ready" : "working", exited: exited.length > 0,
+          lastActivityAt: 1_000_000, timeline: [{ kind: "tool_call", status: "running", title: "Find detection log files" }], approvals: [] };
+      },
+      steer: async (id, text) => { steered.push([id, text]); return { steered: true }; },
+      interrupt: async id => { interrupted.push(id); if (refuses) throw new Error("CHAT_CONTROLLER_NOT_READY"); },
+      exitAgent: async id => { exited.push(id); return { ok: true }; },
+    } });
+  return { workflow, interrupted, exited, steered };
+}
+
+test("a stuck tool call whose interrupt never settles is restarted by shutting its agent down, not left as 'stop needs attention'", async () => {
+  const world = stuckToolWorld();
+  const result = await world.workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
+  assert.equal(result.restarted, true, "the message goes as the next turn");
+  assert.deepEqual(world.interrupted, ["sess-1"], "the interrupt is tried first");
+  assert.deepEqual(world.exited, ["sess-1"], "then the agent's host is shut down; AO keeps the session to resume");
+  assert.deepEqual(world.steered, [], "nothing is steered into the hung turn");
+});
+
+test("a stuck turn whose interrupt is refused is still restarted", async () => {
+  const world = stuckToolWorld({ refuses: true });
+  const result = await world.workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
+  assert.equal(result.restarted, true);
+  assert.deepEqual(world.exited, ["sess-1"]);
+});
+
+test("Restart stops a turn that is not yet past its stall limit, and an interrupt that lands needs no shutdown", async () => {
+  // Restart is the person's call: the chat said "may be stuck", which the backend's longer tool limit has not reached.
+  const world = stuckToolWorld({ settles: true, now: 1_000_000 + 60_000 });
+  const plain = await world.workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "and lint" });
+  assert.equal(plain.steered, true, "a message without restart is steered in as before");
+  assert.deepEqual(world.interrupted, []);
+  const result = await world.workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "continue", restart: true });
+  assert.equal(result.restarted, true);
+  assert.match(result.reason, /message is sent as the next turn/i);
+  assert.deepEqual(world.interrupted, ["sess-1"]);
+  assert.deepEqual(world.exited, [], "the interrupt settled, so the agent keeps running");
+});
+
 test("a steer is never sent to an agent whose state could not be read", async () => {
   // Seen live: a turn waiting on an approval could not be read (its conversation was too large for
   // the old client), was taken for "not asking", and the steer wedged the chat in AO.
@@ -6262,4 +6420,49 @@ test("a steer is never sent to an agent whose state could not be read", async ()
   assert.equal(result.waiting, true, "it waits in the chat's queue and is steered in once the agent can be read");
   assert.deepEqual(steered, [], "nothing is steered blind");
   assert.deepEqual(interrupted, [], "nor is the turn stopped");
+});
+
+// Seen 2026-10-21: a turn "running" for hours after its model stream stopped (or after the agent had
+// already left it), and a pytest with a 5-minute timeout "checking" for an hour after its result
+// never came back. Nothing failed, so "Retry automatically" never ran; the chat sat until stopped.
+test("with Retry automatically on, a turn silent past its limit is stopped so its step is retried", async () => {
+  let clock = 2_000_000_000_000;
+  const interrupts = [];
+  let observed;
+  const node = { id: "w", role: "worker", task_id: "t", parents: [], state: "running",
+    route: { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/m", permission_profile: ":ao-default" },
+    receipt: { request_key: "k", status: "submitted", thread_id: "sess-1" } };
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    requestHeadless: async (endpoint) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run", workspace_id: "ws", revision: 1, cancelled: false, execution_mode: "single", nodes: [node] }] };
+      throw new Error(`Unexpected AO endpoint ${endpoint}`);
+    },
+    aoHarness: {
+      observe: async () => observed,
+      interrupt: async (session) => { interrupts.push(session); observed = { ...observed, turnState: "interrupted", status: "idle" }; },
+    },
+    confirm: async () => true,
+  });
+  const silent = (minutes, timeline = []) => ({ turnId: "turn-1", turnState: "running", status: "working",
+    lastActivityAt: clock - minutes * 60_000, timeline, approvals: [] });
+  const look = () => workflow.call("observe", { workspaceId: "ws", runId: "run", nodeId: "w" });
+
+  observed = silent(60);
+  await look();
+  assert.deepEqual(interrupts, [], "off by default: nothing is stopped behind the person's back");
+  await workflow.call("chat_auto_retry", { enabled: true });
+
+  observed = silent(8, [{ kind: "command", status: "pending", timeoutMs: 300_000 }]);
+  await look();
+  assert.deepEqual(interrupts, [], "a command still within its own 5-minute timeout and the margin is left to run");
+
+  observed = silent(11);
+  await look();
+  assert.deepEqual(interrupts, ["sess-1"], "silent 11 minutes with no tool running: the hung turn is stopped");
+
+  clock += 11 * 60_000;
+  observed = silent(40, [{ kind: "command", status: "pending", timeoutMs: 300_000 }]);
+  await look();
+  assert.deepEqual(interrupts, ["sess-1", "sess-1"], "a command long past its stated timeout is stopped too");
 });

@@ -140,7 +140,8 @@ test("a project that never chose where chats work gets the folder before its fir
 
 test("the folder default never overrides a project's own choice, and a choice is always saved", () => {
   const upstream = fs.readFileSync(path.join(__dirname, "..", "electron", "agent-orchestrator-upstream.cjs"), "utf8");
-  assert.match(upstream, /if \(config\.workspaceMode\) return;/);
+  assert.match(upstream, /Boolean\(current\.config\?\.workspaceMode\)/);
+  assert.match(upstream, /if \(settled\(current\)\) return;/);
   assert.match(upstream, /config: \{ \.\.\.config, workspaceMode: "folder" \}/);
   assert.match(upstream, /config: \{ \.\.\.config, workspaceMode: args\.mode \}/);
 });

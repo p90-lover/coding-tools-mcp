@@ -137,10 +137,19 @@ test("the effort and window chips show the pick and offer exactly what the model
   const effort = menuNamed(tree, "Reasoning effort");
   assert.match(text(effort.props.label), /High/);
   const efforts = optionsIn(effort);
-  assert.deepEqual(efforts.map(row => text(row.props.children)), ["Low", "High", "Extra high"], "no Model default row");
+  assert.deepEqual(efforts.map(row => text(row.props.children)), ["Autothe model's own", "Low", "High", "Extra high"],
+    "Auto first on every model, then exactly its levels; no Model default row");
   assert.equal(efforts.find(row => row.props.picked).props.children, "High");
-  efforts[2].props.onPick();
+  efforts[3].props.onPick();
   assert.equal(routes.at(-1).effort, "xhigh");
+  // Auto is saved as "auto", so the model's start effort never replaces it and nothing is sent.
+  efforts[0].props.onPick();
+  assert.equal(routes.at(-1).effort, "auto");
+  const auto = view.render("AgentOrchestratorComposerControls", { ...props, route: { ...route, effort: "auto" } }, composerState(["cpa/deepseek"], caps));
+  const autoMenu = menuNamed(auto, "Reasoning effort");
+  assert.equal(text(autoMenu.props.label), "Auto");
+  assert.equal(text(optionsIn(autoMenu).find(row => row.props.picked).props.children), "Autothe model's own");
+  assert.doesNotMatch(String(autoMenu.props.className), /is-warning/, "Auto is never an unsupported level");
   const window = menuNamed(tree, "Context window");
   assert.match(text(window.props.label), /400k/i, "an unpicked window reads as the 400K default");
   const sizes = optionsIn(window).map(row => text(row.props.children));

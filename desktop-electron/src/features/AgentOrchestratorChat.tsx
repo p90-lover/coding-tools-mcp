@@ -2,6 +2,7 @@ import { createContext, memo, useContext, useEffect, useMemo, useRef, useState }
 import { getCodingToolsClient } from "../api/client";
 import { Caret, Icon } from "../icons";
 import { AgentOrchestratorComposerControls, type ComposerControlsProps } from "./AgentOrchestratorComposerControls";
+import { modelShortLabel } from "./AgentOrchestratorRoleEditor";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { ChatMarkdown } from "./ChatMarkdown";
@@ -12,7 +13,7 @@ import { ChatContextMeter } from "./ChatContextMeter";
 import { ChatPet } from "./ChatPet";
 import { ChatTurnStats } from "./ChatTurnStats";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
-import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, StreamingMarkdown } from "./ChatToolParts";
+import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart } from "./ChatToolParts";
 import { PartErrorBoundary } from "../PartErrorBoundary";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
@@ -20,7 +21,8 @@ import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
-  activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshQuietNote, dshRetryNote, cpaRefusalNote, type ChatWakeup, type CpaRefusal,
+  activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshQuietNote, dshRetryNote, steerReader, steerReceipts,
+  cpaRefusalNote, type ChatWakeup, type CpaRefusal,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -105,8 +107,36 @@ const CARDS_WIDTH_KEY = "coding-tools:ao:cards-panel-width";
 /** Whether the chat's pet is shown ("off" hides it), kept on this computer. */
 const PET_KEY = "coding-tools:ao:pet";
 /** What an AO agent is started with; a follow-up with any of them changed gets a new agent (continuationCard). */
-const SESSION_ROUTE_FIELDS = ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile",
-  "approval_policy", "approvals_reviewer", "effort", "context_window"];
+type RouteFields = Record<string, unknown>;
+/** A route's model as the composer's picker names it ("MiMo V2.6 Pro"), not its id. */
+const routeModelName = (route: RouteFields) => {
+  const model = typeof route.model === "string" ? route.model : "";
+  return model ? modelShortLabel(model).name || model : "the agent";
+};
+const routeEffortName = (route: RouteFields) => {
+  const effort = typeof route.effort === "string" ? route.effort : "";
+  return `${!effort ? "Auto" : effort === "xhigh" ? "Extra high" : effort[0].toUpperCase() + effort.slice(1)} effort`;
+};
+const routeWindowName = (route: RouteFields) => typeof route.context_window === "number" && route.context_window > 0
+  ? `${Math.round(route.context_window / 1000)}K context` : "the default context";
+/**
+ * What differs between the agent's route and the picked one, in the composer's own words, and
+ * what to pick to get the agent back: "Max effort" / "Medium effort". The note showed the raw
+ * model id and asked to switch back to the very model already picked when only the effort changed.
+ */
+function routeChange(agent: RouteFields, picked: RouteFields): { now: string; back: string } | null {
+  const same = (field: string) => (agent[field] ?? null) === (picked[field] ?? null);
+  const parts: Array<[string, string]> = [];
+  if (!same("model") || !same("harness_id") || !same("provider_id") || !same("account_id")) parts.push([routeModelName(picked), routeModelName(agent)]);
+  if (!same("effort")) parts.push([routeEffortName(picked), routeEffortName(agent)]);
+  if (!same("context_window")) parts.push([routeWindowName(picked), routeWindowName(agent)]);
+  if (["permission_profile", "native_permission_profile", "approval_policy", "approvals_reviewer"].some((field) => !same(field))) {
+    parts.push(["Other permissions", "the earlier permissions"]);
+  }
+  if (!parts.length) return null;
+  const list = (items: string[]) => items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
+  return { now: list(parts.map(([now]) => now)), back: list(parts.map(([, back]) => back)) };
+}
 
 /** Thread actions the chat header, its ⋯ menu and its slash commands share with the thread list. */
 export type ChatThreadActions = {
@@ -126,6 +156,10 @@ export type ChatThreadActions = {
   togglePin: () => void;
   pinned: boolean;
 };
+
+/** What a stuck turn's Restart sends the same agent as its next turn. */
+export const RESTART_MESSAGE = "Your previous turn stopped responding and was restarted. Continue the same task from where you left off; "
+  + "do not start over or repeat work that is already done. If a command or tool call never returned, do not run it the same way again.";
 
 /**
  * How long since `since`, counting up once a second by itself while `live`: only this label
@@ -147,6 +181,8 @@ function Elapsed({ since, live = true, until, format = chatDuration }: { since: 
  * for" label sat at the turn's top, hundreds of steps up, so a stuck turn could not be told apart.
  */
 function TurnRunning({ turn, refusal }: { turn: ChatTurn; refusal?: CpaRefusal | null }) {
+  // Through context: the transcript around it is memoized and would keep a stale callback.
+  const { onRestart, restarting } = useContext(TurnRestart);
   const step = turn.steps.find((item) => item.working) ?? (turn.final?.working ? turn.final : undefined);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -162,11 +198,16 @@ function TurnRunning({ turn, refusal }: { turn: ChatTurn; refusal?: CpaRefusal |
   const note = `${retry || refused}${dshQuietNote(heardAt, now)}`;
   // A restart does not lift a rate limit or a refused sign-in: it says what does instead.
   const hint = refused && (refusal?.status === 429 || refusal?.status === 402) ? " · switch the model or wait"
-    : refused && (refusal?.status === 401 || refusal?.status === 403) ? " · sign in again in CPA"
-    : note.includes("may be stuck") ? " · send a message to restart it" : "";
+    : refused && (refusal?.status === 401 || refusal?.status === 403) ? " · sign in again in CPA" : "";
   return <p className={`cx-note cx-turn-running${step.working.stalled || refused ? " is-stalled" : ""}`} role="status" aria-live="polite">
     <span className="cx-shimmer">Working</span>{turn.startedAtMs ? <> for <Elapsed since={turn.startedAtMs} /></> : null}
     {` · ${step.name}${step.working.activity ? ` — ${step.working.activity}` : ""}${note}${hint}`}
+    {/* A stuck turn has a button of its own: the person looking at "may be stuck" had nothing to
+        press, and a tool call that never returned held a chat for hours (Restart: chat_steer's restart). */}
+    {!hint && note.includes("may be stuck") ? onRestart
+      ? <> · <button type="button" className="cx-turn-restart" onClick={onRestart} disabled={restarting}
+        title="Stop this turn and have the same agent continue where it left off">{restarting ? "Restarting…" : "Restart"}</button></>
+      : " · send a message to restart it" : ""}
   </p>;
 }
 
@@ -294,7 +335,7 @@ const sameFiles = (a: ChatLiveItem["files"], b: ChatLiveItem["files"]) => a === 
 const sameLiveItem = (a: ChatLiveItem, b: ChatLiveItem) => a === b || (a.id === b.id && a.kind === b.kind && a.status === b.status
   && a.text === b.text && a.label === b.label && a.description === b.description && a.approval === b.approval
   && a.answered?.question === b.answered?.question && a.answered?.answer === b.answered?.answer
-  && a.input === b.input && a.output === b.output && sameFiles(a.files, b.files));
+  && a.input === b.input && a.output === b.output && a.receipt === b.receipt && sameFiles(a.files, b.files));
 const LiveRow = memo(LiveRowView, (prev, next) => sameLiveItem(prev.item, next.item));
 
 function LiveRowView({ item }: { item: ChatLiveItem }) {
@@ -302,7 +343,9 @@ function LiveRowView({ item }: { item: ChatLiveItem }) {
     {item.answered ? <AnsweredRecord question={item.answered.question} answer={item.answered.answer} />
       // As any sent message: an attached image as its thumbnail, not "Attached image: <path>" text.
       // Claude Code shows a message the agent took mid-turn as an ordinary sent message, Copy and all.
-      : item.kind === "steer" ? <div className="cx-user cx-steer"><SentMessage text={item.text} /><MessageActions text={chatMessageReadable(item.text)} /></div>
+      // Its read receipt leads the row, as Claude Code's "Read by Claude" leads Copy (steerReceipts).
+      : item.kind === "steer" ? <div className="cx-user cx-steer"><SentMessage text={item.text} />
+        <div className="cx-msg-foot"><SteerReceiptMark receipt={item.receipt} /><MessageActions text={chatMessageReadable(item.text)} /></div></div>
       : item.kind === "message" ? <StreamingMarkdown text={item.text} live={item.status === "running"} />
       : item.kind === "reasoning" ? <ReasoningItem item={item} />
       : item.kind === "edit" ? <EditItem item={item} />
@@ -331,10 +374,10 @@ function ActivityGroup({ items, live }: { items: ChatLiveItem[]; live: boolean }
 }
 
 /** A role's turn, as Codex and Claude Code show it: thinking, tool calls and streamed messages. */
-function LiveTimeline({ items, live = false, reply }: { items: ChatLiveItem[]; live?: boolean; reply?: string }) {
+function LiveTimeline({ items, live = false, finished = false, reply }: { items: ChatLiveItem[]; live?: boolean; finished?: boolean; reply?: string }) {
   const compact = useContext(CompactActivity);
   // A message the reply below already holds is not shown twice (withoutReplied).
-  const tidy = withoutReplied(tidyTimeline(items), reply);
+  const tidy = withoutReplied(tidyTimeline(steerReceipts(items, finished)), reply);
   if (!compact) return <ol className="cx-live">{tidy.map((item) => <LiveRow key={item.id} item={item} />)}</ol>;
   const segments = groupTimeline(tidy);
   return <ol className="cx-live is-compact">
@@ -393,7 +436,9 @@ function StepRow({ step, runId, loadWork }: { step: ChatStep; runId: string; loa
       <span className="cx-step-dot" aria-hidden="true" />
       <span className="cx-step-name">{step.name}</span>
       <span className="cx-step-meta">
-        {step.working ? (step.working.stalled ? "may be stuck" : step.working.activity || "working") : step.error ? "failed" : step.verdict || (step.state === "finished" ? "done" : step.state)}
+        {/* A stalled card still says where: "may be stuck · running pytest … (timeout 5m)". */}
+        {step.working ? (step.working.stalled ? `may be stuck${step.working.activity ? ` · ${step.working.activity}` : ""}` : step.working.activity || "working")
+          : step.error ? "failed" : step.verdict || (step.state === "finished" ? "done" : step.state)}
         {step.working && step.startedAtMs ? <> · <Elapsed since={step.startedAtMs} /></> : null}
       </span>
       {body ? <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} /> : null}
@@ -404,7 +449,9 @@ function StepRow({ step, runId, loadWork }: { step: ChatStep; runId: string; loa
       {/* Its earlier rounds first, folded (oldest first), then the attempt now: a retried card's
           failed attempt showed under the new attempt's work, as if it came after it. */}
       <EarlierRounds rounds={step.earlier} />
-      {work?.length ? <LiveTimeline items={work} live={Boolean(step.working)} reply={step.text} /> : null}
+      {work?.length ? <SteerReader.Provider value={steerReader(step.detail)}>
+        <LiveTimeline items={work} live={Boolean(step.working)} finished={!step.working && step.state === "finished"} reply={step.text} />
+      </SteerReader.Provider> : null}
       {/* A held or failed card keeps the reply it gave: the error says why, the reply stays readable. */}
       {step.error ? <p className="cx-step-error">{step.error}</p> : null}
       {step.text ? <ChatMarkdown text={step.text} /> : null}
@@ -428,7 +475,9 @@ function AnswerWork({ step, runId, expanded, loadWork }: { step: ChatStep; runId
       {summary.additions || summary.deletions ? <DiffCount additions={summary.additions} deletions={summary.deletions} /> : null}
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
     </button>
-    {open ? work?.length ? <LiveTimeline items={work} reply={step.text} /> : <p className="cx-tool-empty">Loading…</p> : null}
+    {open ? work?.length ? <SteerReader.Provider value={steerReader(step.detail)}>
+      <LiveTimeline items={work} finished={!step.working && step.state === "finished"} reply={step.text} />
+    </SteerReader.Provider> : <p className="cx-tool-empty">Loading…</p> : null}
   </div>;
 }
 
@@ -618,7 +667,9 @@ function QueuedMessageBar({ items }: { items: QueuedBarItem[] }) {
           {index === head && item.onSendNow ? <button type="button" className="cx-queued-send-now" aria-label="Send now"
             data-tip={item.sendNowBlocked ?? "Send now"} disabled={Boolean(item.sendNowBlocked)} onClick={item.onSendNow}>Send now</button> : null}
           <span className="cx-queued-status">Queued</span>
-        </div> : null}
+        </div>
+          // On its way to the agent: Claude Code's "Sending…" under the message until the agent has it.
+          : <div className="cx-queued-meta"><span className="cx-queued-status" role="status">Sending…</span></div>}
       </li>)}
     </ol>
   </div>;
@@ -682,7 +733,8 @@ export function AgentOrchestratorChat({
   send: (input: { taskId?: string; title?: string; message: string; goal?: string }) => Promise<void>;
   /** Hands a message to the running agent at once (Codex's steer); false when its turn already ended. */
   /** true: steered; "wait": the agent waits on a request, so the message is queued; false: send it normally. */
-  steer?: (input: { taskId: string; message: string }) => Promise<boolean | "wait" | "restart" | "interrupt" | "starting">;
+  /** `restart`: stop the turn and send the message as its next turn, whatever its quiet time (Restart). */
+  steer?: (input: { taskId: string; message: string; restart?: boolean }) => Promise<boolean | "wait" | "restart" | "interrupt" | "starting">;
   openStructure: (runId: string) => void;
   approvals: ChatApproval[];
   approve: (approval: ChatApproval, reply: ApprovalReply) => void;
@@ -1060,7 +1112,8 @@ export function AgentOrchestratorChat({
    * Sends a message the way the composer does: into this chat, or as a new chat. A queued message
    * sent in the background (fromComposer false) leaves whatever the user is typing alone.
    */
-  const deliver = async (message: string, goal?: string, fromComposer = true) => {
+  /** `restart`: the stuck turn's Restart: stop it and send `message` as its next turn (chat_steer's restart). */
+  const deliver = async (message: string, goal?: string, fromComposer = true, restart = false) => {
     const owner = composing.current;
     const here = () => alive.current && composing.current.taskId === owner.taskId;
     // Only what was sent is cleared: a draft, file or annotation added while it was sending stays.
@@ -1069,7 +1122,7 @@ export function AgentOrchestratorChat({
     // A steer shows at once, as in Claude Code: the composer clears and the message waits in the
     // queued-message bar, pulsing, while it reaches the agent, which can take seconds (it waits out
     // an approval being answered). Until then the box held the text and the Stop button stayed.
-    const steerNow = !goal && steering && Boolean(steer && selectedTaskId);
+    const steerNow = !goal && (steering || restart) && Boolean(steer && selectedTaskId);
     // A steer sent again from the queue keeps the bubble it already has, not a second one.
     const pendingId = steerNow ? pendingSteers.find((entry) => entry.taskId === selectedTaskId && entry.text === message)?.id
       ?? `steer-${Date.now()}-${Math.random().toString(36).slice(2)}` : "";
@@ -1082,7 +1135,7 @@ export function AgentOrchestratorChat({
     const dropPending = () => { if (pendingId) setPendingSteers((list) => list.filter((entry) => entry.id !== pendingId)); };
     try {
       // A steer the turn outran (it ended first) is sent as an ordinary follow-up instead; a goal is never steered.
-      const steered = steerNow ? await steer!({ taskId: selectedTaskId, message }) : false;
+      const steered = steerNow ? await steer!({ taskId: selectedTaskId, message, ...(restart ? { restart: true } : {}) }) : false;
       // The agent is busy with a request of its own (or still starting): the steer waits in the queue
       // and goes in once it can. It stays shown as steering; a "Queued" card here read as if the
       // message had not been sent at all ("it pop up as queued for no reason").
@@ -1170,6 +1223,12 @@ export function AgentOrchestratorChat({
       return false;
     } finally { setSending(false); }
   };
+  // Restart on a stuck turn's foot: the same agent continues where it left off, told why.
+  const [restarting, setRestarting] = useState(false);
+  const restartTurn = steer && selectedTaskId ? () => {
+    setRestarting(true);
+    void deliver(RESTART_MESSAGE, undefined, false, true).finally(() => setRestarting(false));
+  } : undefined;
 
   const submit = async () => {
     // A whole draft that is a command runs it, even while the chat is working (/status, /goal pause);
@@ -1578,11 +1637,13 @@ export function AgentOrchestratorChat({
               {/* Messages steered into this turn. While it works they show in its live timeline, where
                   they were sent; once it is done, here under the turn's message. */}
               {turn.user?.steers?.length && !turn.steps.some((step) => step.working?.timeline?.some((item) => item.kind === "steer"))
-                ? turn.user.steers.map((steer, index) => <div key={`steer:${index}`} className="cx-user cx-steer">
+                ? <SteerReader.Provider value={steerReader(turn.steps[0]?.detail)}>{turn.user.steers.map((steer, index) => <div key={`steer:${index}`} className="cx-user cx-steer">
                   <SentMessage text={steer.text} />
-                  <MessageActions text={chatMessageReadable(steer.text)} />
+                  {/* Saved only once the agent took it; a turn that finished read it, one that stopped may not have. */}
+                  <div className="cx-msg-foot"><SteerReceiptMark receipt={turn.status === "done" ? "read" : liveTurn(turn) ? "unread" : undefined} />
+                    <MessageActions text={chatMessageReadable(steer.text)} /></div>
                   <span className="cx-stamp">{steer.stamp} UTC</span>
-                </div>) : null}
+                </div>)}</SteerReader.Provider> : null}
               {dsh && readWork
                 ? <DshWork key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} live={!idle && liveTurn(turn)} expanded={showWork} useWork={readWork}
                   errorShownBelow={turn === failedTurn} refusal={!idle && liveTurn(turn) ? cpaRefusal : null} />
@@ -1611,6 +1672,7 @@ export function AgentOrchestratorChat({
   }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn]);
 
   return (<Attachments.Provider value={attachmentAccess}><SentMessageView.Provider value={sentMessageView}><CompactActivity.Provider value={compactActivity}>
+    <TurnRestart.Provider value={{ onRestart: restartTurn, restarting }}>
     <div className={`cx-chat${showStructure && structure ? " has-structure" : ""}`}>
       <section className="cx-thread" aria-label={chat?.title || CHAT_DEFAULT_TITLE}>
         <header className="cx-thread-head">
@@ -1806,17 +1868,16 @@ export function AgentOrchestratorChat({
           const running = lead?.route?.model;
           const picked = composer?.mode === "single" ? composer.route?.model : undefined;
           if (runOpen && latest?.execution_mode === "single" && running && picked && picked !== running) {
-            return <p className="cx-route-note" role="status">This turn runs on <b>{running}</b>. Your next message uses <b>{picked}</b>.</p>;
+            return <p className="cx-route-note" role="status">This turn runs on <b>{routeModelName({ model: running })}</b>. Your next message uses <b>{routeModelName({ model: picked })}</b>.</p>;
           }
           // An agent keeps the model, effort, window and permissions it started with, so a follow-up
           // with any of them changed starts a new agent that gets only a summary of the chat (it
           // "forgot everything" after an effort switch from Max to High). Say so before it is sent.
           const route = composer?.mode === "single" ? composer.route : undefined;
-          const changed = !runOpen && latest?.execution_mode === "single" && lead?.route && route
-            && SESSION_ROUTE_FIELDS.some((field) => ((lead.route as Record<string, unknown>)[field] ?? null)
-              !== ((route as unknown as Record<string, unknown>)[field] ?? null));
-          return changed ? <p className="cx-route-note" role="status">New settings start a new agent with only a summary of this chat.
-            Switch back to <b>{running}{lead?.route?.effort ? ` · ${lead.route.effort}` : ""}</b> to keep this agent.</p> : null;
+          const change = !runOpen && latest?.execution_mode === "single" && lead?.route && route
+            ? routeChange(lead.route as unknown as RouteFields, route as unknown as RouteFields) : null;
+          return change ? <p className="cx-route-note" role="status"><b>{change.now}</b> starts a new agent with only a summary of this chat.
+            Switch back to <b>{change.back}</b> to keep this one.</p> : null;
         })()}
         {/* Queued and steering messages wait above the branch picker, which belongs to the chat box (as
             Codex's): under it, a steer sat between "main" and the box. */}
@@ -1937,5 +1998,5 @@ export function AgentOrchestratorChat({
       {workbench && selectedTaskId ? <ChatWorkbench sessions={agentSessions} workspaceId={projectId} tab={workbench} onTab={setWorkbench} onClose={() => setWorkbench(null)} /> : null}
       <ChatMenu menu={menu} onClose={() => setMenu(null)} />
     </div>
-  </CompactActivity.Provider></SentMessageView.Provider></Attachments.Provider>);
+  </TurnRestart.Provider></CompactActivity.Provider></SentMessageView.Provider></Attachments.Provider>);
 }

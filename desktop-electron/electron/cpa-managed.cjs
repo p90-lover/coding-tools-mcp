@@ -132,7 +132,7 @@ function yamlString(value) {
 }
 
 const COMMANDCODE_PLUGINS = [
-  { id: "cline-pass-switcher", file: "cline-pass-switcher-v0.1.0-codingtools.5.dll", sha256: "3a635fee93736fba27a1a444915ff08128031c798ffaef0bc582b994c15a5769" },
+  { id: "cline-pass-switcher", file: "cline-pass-switcher-v0.1.0-codingtools.6.dll", sha256: "1e165f43044d6bed967d027d86febb9261ae413e3bd3b3e194b7ac25ae1d0f56" },
   { id: "commandcode-go", file: "commandcode-go-v1.0.0-codingtools.3.dll", sha256: "7b50bd0f2879101c06732e98b6fc1a30ae8afa29a5fd8f6016473f0eb74ff343" },
   { id: "auth-commandcode", file: "auth-commandcode-v0.1.0-codingtools.1.dll", sha256: "b9ab54aa73d1c9fd4e9baaaa4960643aa81f2caecb2f69e5463fc3a62f079afc" },
   // CPA Helper (usage, costs, Codex keeper), rebuilt from walkingddd/CPA-Helper as a native plugin.

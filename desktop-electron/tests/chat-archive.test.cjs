@@ -85,3 +85,46 @@ test("listing archived chats moves those past their days to recoverable deletion
   await workflow.call("archived_chats", { workspaceIds: ["ws"] });
   assert.equal(updates.length, 1, "0 days keeps archived chats for good");
 });
+
+test("old AO sessions no chat still has leave the board on the archive's clock, at most hourly", async () => {
+  let now = 50 * DAY;
+  const card = (session, history = []) => ({ id: "n", role: "planner", state: "finished", receipt: { thread_id: session }, history: history.map((thread_id) => ({ thread_id })) });
+  const runs = [
+    { id: "r1", workspace_id: "ws", project_id: "kept", revision: 1, nodes: [card("chat-live", ["chat-live-earlier"])] },
+    { id: "r2", workspace_id: "ws", project_id: "shelved", revision: 1, nodes: [card("chat-archived")] },
+    { id: "r3", workspace_id: "ws", project_id: "gone", revision: 1, nodes: [card("chat-deleted")] },
+  ];
+  const lives = [
+    { workspace_id: "ws", task_id: "kept", revision: 1, visibility: "active" },
+    { workspace_id: "ws", task_id: "shelved", revision: 1, visibility: "archived" },
+    { workspace_id: "ws", task_id: "gone", revision: 1, visibility: "deleted" },
+  ];
+  const asked = [], killed = [];
+  const workflow = createAgentOrchestratorWorkflow({ now: () => now,
+    requestHeadless: async (endpoint) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: structuredClone(runs), task_lifecycle: structuredClone(lives) };
+      throw new Error(`Unexpected ${endpoint}`);
+    },
+    aoHarness: {
+      staleSessions: async (workspaceIds, idleMs) => {
+        asked.push([workspaceIds, idleMs]);
+        return ["chat-live", "chat-live-earlier", "chat-archived", "chat-deleted", "old-worker", "old-subagent"];
+      },
+      kill: async (session) => { killed.push(session); return { ok: true }; },
+    },
+  });
+  await workflow.call("archive_settings", { days: 7 });
+  await workflow.call("archived_chats", { workspaceIds: ["ws"] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(asked, [[["ws"], 7 * DAY]], "unused for the archive's days");
+  assert.deepEqual(killed, ["chat-deleted", "old-worker", "old-subagent"],
+    "a chat in the list or in Archived keeps every session it had; a deleted chat's and unowned ones end");
+  await workflow.call("archived_chats", { workspaceIds: ["ws"] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(asked.length, 1, "not again within the hour");
+  now += 61 * 60_000;
+  await workflow.call("archive_settings", { days: 0 });
+  await workflow.call("archived_chats", { workspaceIds: ["ws"] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(asked.length, 1, "0 days keeps them for good");
+});
