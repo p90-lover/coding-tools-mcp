@@ -12,7 +12,8 @@ const { Worker } = require("node:worker_threads");
  * lock within a moment, and AO starts as before.
  *
  * The first time, a mostly empty database is rewritten once (VACUUM) and switched to incremental
- * auto-vacuum; after that a start only frees what accumulated (incremental_vacuum). VACUUM is
+ * auto-vacuum; after that a start frees what accumulated, at most incrementalMaxBytes of it
+ * (incremental_vacuum(N)), so a start never waits on a large rewrite. VACUUM is
  * synchronous and takes tens of seconds on a hard disk, so it runs in a worker thread.
  */
 const DEFAULTS = Object.freeze({
@@ -23,6 +24,11 @@ const DEFAULTS = Object.freeze({
   maxUsedBytes: 1024 * 1024 * 1024,
   // Once incremental, free pages are given back when at least this much has accumulated.
   incrementalMinBytes: 64 * 1024 * 1024,
+  // ...and at most this much per start. AO waits for it, and an uncapped incremental_vacuum moved
+  // 443 MB through the write-ahead log at under 1 MB/s on a busy hard disk: AO stayed down for
+  // over ten minutes and the disk froze the app. Free pages are reused anyway; the rest of the
+  // space comes back over the next starts.
+  incrementalMaxBytes: 32 * 1024 * 1024,
 });
 
 const WORKER = `
@@ -30,7 +36,7 @@ const { parentPort, workerData } = require("node:worker_threads");
 const { DatabaseSync } = require("node:sqlite");
 const fs = require("node:fs");
 (() => {
-  const { file, minFreeBytes, minFreeRatio, maxUsedBytes, incrementalMinBytes, diskFreeBytes } = workerData;
+  const { file, minFreeBytes, minFreeRatio, maxUsedBytes, incrementalMinBytes, incrementalMaxBytes, diskFreeBytes } = workerData;
   let db = null;
   try {
     db = new DatabaseSync(file, { timeout: 2000 });
@@ -41,7 +47,10 @@ const fs = require("node:fs");
     const beforeBytes = fs.statSync(file).size, started = Date.now();
     let action = "none", reason = "";
     if (mode === 2) {
-      if (freeBytes >= incrementalMinBytes) { db.exec("PRAGMA incremental_vacuum"); action = "incremental"; }
+      if (freeBytes >= incrementalMinBytes) {
+        db.exec("PRAGMA incremental_vacuum(" + Math.max(1, Math.floor(incrementalMaxBytes / pageSize)) + ")");
+        action = "incremental";
+      }
     } else if (mode === 0 && freeBytes >= minFreeBytes && pages && free / pages >= minFreeRatio) {
       // The write-ahead log takes about the data's size again while the copy is written back.
       if (usedBytes > maxUsedBytes) reason = "too much data to rewrite at start";
@@ -77,7 +86,7 @@ function compactAoDatabase(dataRoot, options = {}) {
     let worker;
     try {
       worker = new Worker(WORKER, { eval: true, workerData: { file, diskFreeBytes, minFreeBytes: settings.minFreeBytes, minFreeRatio: settings.minFreeRatio,
-        maxUsedBytes: settings.maxUsedBytes, incrementalMinBytes: settings.incrementalMinBytes } });
+        maxUsedBytes: settings.maxUsedBytes, incrementalMinBytes: settings.incrementalMinBytes, incrementalMaxBytes: settings.incrementalMaxBytes } });
     } catch (error) {
       done({ action: "failed", error: String(error?.message || error).slice(0, 300) });
       return;
