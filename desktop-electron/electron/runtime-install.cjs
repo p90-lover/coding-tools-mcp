@@ -236,29 +236,56 @@ function validateRuntimeBundle(runtimeRoot, identity, options = {}) {
   return inspectRuntimeBundle(runtimeRoot, identity, options).runtimeRoot;
 }
 
+/** Where verified bundles are remembered (see verifiedSignatures), outside every bundle. */
+function runtimeVerifiedDir(coreHome) {
+  return path.join(coreHome, "runtime-verified");
+}
+
+/**
+ * This version's runtime as already installed under the core home, when it is whole. A packaged
+ * source with one stray, missing or edited file (a backup left beside cli.js, a hand edit, an
+ * interrupted update) stopped every launch although this copy, the one the app runs, was intact.
+ */
+function installedPackagedRuntime({ app, coreHome }) {
+  if (!app.isPackaged || !coreHome) return null;
+  const identity = { version: app.getVersion(), platform: process.platform, arch: process.arch };
+  const destination = path.join(coreHome, "versions", `${identity.version}-${identity.platform}-${identity.arch}`);
+  try { return validateRuntimeBundle(destination, identity, { stampDir: runtimeVerifiedDir(coreHome) }); } catch { return null; }
+}
+
 async function waitForPackagedRuntimeSource({
   app,
   resourcesPath,
+  onFallback = null,
   timeoutMs = DEFAULT_SOURCE_WAIT_TIMEOUT_MS,
   intervalMs = DEFAULT_SOURCE_WAIT_INTERVAL_MS,
+  // The bundle's platform: this machine's, except where a test checks another platform's bundle.
+  platform = process.platform,
+  arch = process.arch,
+  // The same remembered verification ensurePackagedRuntime uses: without it this wait hashed every
+  // runtime file again on each launch, before the window could open.
+  coreHome = null,
 }) {
   if (!app.isPackaged) return null;
   if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || !Number.isFinite(intervalMs) || intervalMs <= 0) {
     throw new Error("Packaged runtime source wait requires non-negative timeoutMs and positive intervalMs");
   }
   const source = path.join(resourcesPath, "runtime");
-  const identity = {
-    version: app.getVersion(),
-    platform: process.platform,
-    arch: process.arch,
-  };
+  const identity = { version: app.getVersion(), platform, arch };
+  const verify = coreHome ? { stampDir: runtimeVerifiedDir(coreHome) } : {};
   const deadline = Date.now() + timeoutMs;
   let lastError;
   for (;;) {
     try {
-      return validateRuntimeBundle(source, identity);
+      return validateRuntimeBundle(source, identity, verify);
     } catch (error) {
       lastError = error;
+      // A whole installed copy of this version runs the app; a damaged source is reported, not fatal.
+      const installed = installedPackagedRuntime({ app, coreHome });
+      if (installed) {
+        onFallback?.(error);
+        return installed;
+      }
     }
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
@@ -322,8 +349,16 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
   };
   const source = path.join(resourcesPath, "runtime");
   // Bundles already hashed are remembered here (see verifiedSignatures), outside every bundle.
-  const verify = { stampDir: path.join(coreHome, "runtime-verified") };
-  const sourceBundle = inspectRuntimeBundle(source, identity, verify);
+  const verify = { stampDir: runtimeVerifiedDir(coreHome) };
+  let sourceBundle;
+  try {
+    sourceBundle = inspectRuntimeBundle(source, identity, verify);
+  } catch (error) {
+    // The installed copy of this version, when whole, runs the app (installedPackagedRuntime).
+    const installed = installedPackagedRuntime({ app, coreHome });
+    if (installed) return installed;
+    throw error;
+  }
   const expectedIdentity = { ...identity, bundleId: sourceBundle.manifest.bundleId };
   const versionsRoot = path.join(coreHome, "versions");
   const destination = path.join(
@@ -380,7 +415,7 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
       renameAtomicFile(temporary, destination);
       validateRuntimeBundle(destination, expectedIdentity, verify);
     } catch (error) {
-      fs.rmSync(destination, { recursive: true, force: true });
+      try { fs.rmSync(destination, { recursive: true, force: true }); } catch { /* restored over below */ }
       if (previousMoved) {
         try {
           renameAtomicFile(previous, destination);
@@ -395,11 +430,13 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
       throw error;
     }
     if (previousMoved) {
-      fs.rmSync(previous, { recursive: true, force: true });
+      // The new runtime is in place and valid: removing the old one is cleanup, never a reason to
+      // stop the app (seen: "EPERM, Permission denied ...versions\<ver>.previous-..." at startup).
+      try { fs.rmSync(previous, { recursive: true, force: true }); } catch { /* left for a later start */ }
       previousMoved = false;
     }
   } finally {
-    fs.rmSync(temporary, { recursive: true, force: true });
+    try { fs.rmSync(temporary, { recursive: true, force: true }); } catch { /* left for a later start */ }
     if (previousMoved && fs.existsSync(previous) && !fs.existsSync(destination)) {
       renameAtomicFile(previous, destination);
       previousMoved = false;
@@ -411,6 +448,7 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
 
 module.exports = {
   ensurePackagedRuntime,
+  installedPackagedRuntime,
   validateRuntimeBundle,
   waitForPackagedRuntimeSource,
 };

@@ -1450,7 +1450,10 @@ pub fn prompt_for_node(data: &AppData, run: &Run, node_id: &str) -> AppResult<St
     if run.execution_mode == ExecutionMode::Single {
         // "Do not spawn or delegate to other agents" here kept every chat agent from ever using the
         // subagents the user set up (Runtime > Subagents): they are the one sanctioned way to delegate.
-        let mut prompt = format!("Single assistant task: {}\nWorkspace: {}\nComplete the requested task and report the result and verification. There are no team planning or review stages. Do not start other agent processes yourself; when the app's subagent tools are available (subagent_list, subagent_start), you may hand a self-contained part of the work to one of the user's subagents and use its report (subagent_result).\n\nTask: {}\n{}\n", run.id, run.workspace_id, task.title, task.description);
+        // Reasoning-heavy models (DeepSeek at max effort) kept every finding in private reasoning:
+        // one turn ran 162 tool calls over 104 minutes and wrote 332 visible characters, so the chat
+        // only ever read "thinking". The progress line asks for visible notes and a closing summary.
+        let mut prompt = format!("Single assistant task: {}\nWorkspace: {}\nComplete the requested task and report the result and verification. Keep the user informed in your visible replies, not only in your reasoning: after each finding or decision, and before a long step, write one or two plain sentences on what you found or are about to do. End with a short summary of what you did, what you verified, and anything left. There are no team planning or review stages. Do not start other agent processes yourself; when the app's subagent tools are available (subagent_list, subagent_start), you may hand a self-contained part of the work to one of the user's subagents and use its report (subagent_result).\n\nTask: {}\n{}\n", run.id, run.workspace_id, task.title, task.description);
         if !node.settings.instructions.is_empty() {
             prompt.push_str(&format!(
                 "\nInstructions:\n{}\n",

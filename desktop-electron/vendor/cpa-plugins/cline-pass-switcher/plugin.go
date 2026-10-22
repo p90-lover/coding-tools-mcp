@@ -34,7 +34,7 @@ const pluginID = "cline-pass-switcher"
 const apiPrefix = "/v0/management/" + pluginID
 const resourcePrefix = "/v0/resource/plugins/" + pluginID
 
-var pluginVersion = "0.1.0-codingtools.3"
+var pluginVersion = "0.1.0-codingtools.5"
 var hostAvailable atomic.Bool
 
 type envelope struct {
@@ -371,9 +371,19 @@ func management(raw []byte) ([]byte, error) {
 // 19 Oct) take the same reasoning levels.
 var deepseekV41Flash = regexp.MustCompile(`^cline-pass/deepseek-v4\.1-flash(-\d{4,8})?$`)
 
+// Every other Cline Pass model reaches OpenRouter, which takes these and maps them onto the model's
+// own reasoning (tried 2026-10-21 on GLM 5.3 Flash, MiniMax M3, Qwen 3.7 Plus, MiMo v2.6 Flash and
+// DeepSeek V4 Pro). Not "none": GLM always reasons and refused it ("Reasoning is mandatory"). Not
+// "ultra": OpenRouter has no such level. Without these the plugin refused any effort suffix, so no
+// level could be picked for those models at all.
+var openRouterEfforts = []string{"minimal", "low", "medium", "high", "xhigh", "max"}
+
 func modelEfforts(model string) []string {
 	if deepseekV41Flash.MatchString(model) {
 		return []string{"none", "low", "high", "max"}
+	}
+	if strings.HasPrefix(model, "cline-pass/") && !strings.Contains(model, "(") {
+		return openRouterEfforts
 	}
 	return nil
 }
@@ -449,7 +459,7 @@ func execute(raw []byte, stream bool) ([]byte, error) {
 	}
 	if levels := modelEfforts(model); len(levels) > 0 && effort != "" {
 		if !slices.Contains(levels, effort) {
-			return upstreamErrorEnvelope("unsupported_effort", "Supported reasoning levels are none, low, high, max", 400, false), nil
+			return upstreamErrorEnvelope("unsupported_effort", "Supported reasoning levels are "+strings.Join(levels, ", "), 400, false), nil
 		}
 		// The explicit suffix wins over CPA's generic conversion (max used to become xhigh).
 		body["reasoning_effort"] = effort
@@ -471,11 +481,16 @@ func execute(raw []byte, stream bool) ([]byte, error) {
 		out, _ := io.ReadAll(io.LimitReader(r.Body, 8192))
 		return upstreamErrorEnvelope("cline_upstream", string(out), r.StatusCode, r.StatusCode == 429 || r.StatusCode >= 500), nil
 	}
+	// Tool calls a model wrote as text become real calls (texttools.go); nil when no tools were offered.
+	sieve := newToolSieve(body)
 	if !stream {
 		defer r.Body.Close()
 		b, e = io.ReadAll(io.LimitReader(r.Body, 40<<20))
 		if e != nil {
 			return nil, e
+		}
+		if sieve != nil {
+			b = sieve.sieveMessage(b)
 		}
 		return okEnvelope(map[string]any{"Payload": b, "Headers": r.Header})
 	}
@@ -492,7 +507,7 @@ func execute(raw []byte, stream bool) ([]byte, error) {
 	framed := requestPath != "" && !strings.HasSuffix(requestPath, "/completions")
 	go func() {
 		defer r.Body.Close()
-		err := relaySSE(r.Body, framed, func(b []byte) error {
+		err := relaySSEWith(r.Body, framed, sieve, func(b []byte) error {
 			_, e := hostCall("host.stream.emit", map[string]any{"stream_id": req.StreamID, "payload": b})
 			return e
 		})
@@ -505,9 +520,21 @@ func execute(raw []byte, stream bool) ([]byte, error) {
 	return okEnvelope(map[string]any{"headers": r.Header})
 }
 func relaySSE(reader io.Reader, framed bool, emit func([]byte) error) error {
+	return relaySSEWith(reader, framed, nil, emit)
+}
+
+// relaySSEWith relays the stream, each chunk first through sieve when one is given.
+func relaySSEWith(reader io.Reader, framed bool, sieve *toolSieve, emit func([]byte) error) error {
 	sc := bufio.NewScanner(reader)
 	sc.Buffer(make([]byte, 64<<10), 4<<20)
 	parts := []string{}
+	send := func(payload []byte) error {
+		// The OpenAI host adds SSE framing; cross-format translators consume framed chunks.
+		if !framed {
+			return emit(payload)
+		}
+		return emit([]byte("data: " + string(payload) + "\n\n"))
+	}
 	flush := func() error {
 		if len(parts) == 0 {
 			return nil
@@ -521,11 +548,15 @@ func relaySSE(reader io.Reader, framed bool, emit func([]byte) error) error {
 		if err := json.Compact(&payload, b); err != nil {
 			return err
 		}
-		// The OpenAI host adds SSE framing; cross-format translators consume framed chunks.
-		if !framed {
-			return emit(payload.Bytes())
+		if sieve == nil {
+			return send(payload.Bytes())
 		}
-		return emit([]byte("data: " + payload.String() + "\n\n"))
+		for _, chunk := range sieve.sieveChunk(payload.Bytes()) {
+			if err := send(chunk); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	for sc.Scan() {
 		line := sc.Text()
@@ -540,7 +571,15 @@ func relaySSE(reader io.Reader, framed bool, emit func([]byte) error) error {
 	if e := sc.Err(); e != nil {
 		return e
 	}
-	return flush()
+	if e := flush(); e != nil {
+		return e
+	}
+	if sieve != nil {
+		if rest := sieve.drain(); rest != nil {
+			return send(rest)
+		}
+	}
+	return nil
 }
 func handleMethod(method string, raw []byte) ([]byte, error) {
 	switch method {

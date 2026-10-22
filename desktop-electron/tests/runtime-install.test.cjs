@@ -121,7 +121,7 @@ test("packaged runtime is installed once into a durable versioned directory", ()
   }
 });
 
-test("a launch after the runtime was hashed does not read its files again, and still catches a changed one", () => {
+test("a launch after the runtime was hashed does not read its files again, and still catches a changed one", async () => {
   // Seen live: hashing 6,002 runtime files (164 MB) twice on every launch kept the window from
   // opening for over two minutes on a hard disk.
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-verified-"));
@@ -138,6 +138,11 @@ test("a launch after the runtime was hashed does not read its files again, and s
     assert.equal(ensurePackagedRuntime({ app, coreHome, resourcesPath }), installed);
     assert.deepEqual(reads.filter(file => !file.endsWith("manifest.json") && !file.includes("runtime-verified")), [],
       "the next launch reads only the manifests and what it remembered");
+    // The startup wait before it checks the same packaged bundle, and remembers it the same way.
+    reads.length = 0;
+    await waitForPackagedRuntimeSource({ app, resourcesPath, coreHome });
+    assert.deepEqual(reads.filter(file => !file.endsWith("manifest.json") && !file.includes("runtime-verified")), [],
+      "the startup wait reads no runtime file either");
 
     // Same size, different content: its changed time moves, so it is hashed again and rejected.
     fs.writeFileSync(path.join(installed, "app", "cli.js"), "CLI");

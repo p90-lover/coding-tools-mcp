@@ -22,7 +22,7 @@ const SERVICE_ENDPOINTS = Object.freeze({
   cpa: Object.freeze({ endpoint: "http://127.0.0.1:8317/" }),
 });
 
-function resolveCpaProxyRoute(dataRoot, safeStorage) {
+function resolveCpaProxyRoute(dataRoot, safeStorage, componentId = "cpa") {
   const directory = path.join(path.dirname(dataRoot), "providers");
   const filePath = path.join(directory, "provider-network.json");
   let saved;
@@ -38,9 +38,14 @@ function resolveCpaProxyRoute(dataRoot, safeStorage) {
     filePath, keyPath: path.join(directory, "provider-network.key"), safeStorage,
   });
   const routing = store.snapshot().routing;
-  if (!routing.globalEnabled) return { profileId: null, url: "" };
-  const profile = store.activeProxy(routing.globalProfileId);
-  if (!profile) throw new Error("Selected global proxy is unavailable; CPA was not started");
+  const policy = componentId === "cpa"
+    ? routing.providers.find((entry) => entry.providerId === "cpa")
+    : null;
+  if (policy?.inheritGlobal === false) return { profileId: null, url: "" };
+  const profileId = policy?.profileId || (routing.globalEnabled ? routing.globalProfileId : null);
+  if (!profileId) return { profileId: null, url: "" };
+  const profile = store.activeProxy(profileId);
+  if (!profile) throw new Error("Selected network proxy is unavailable; CPA was not started");
   if (profile.endpoint.protocol === "socks4") {
     throw new Error("CPA needs an HTTP, HTTPS or SOCKS5 proxy profile");
   }
@@ -58,8 +63,8 @@ function resolveCpaProxyRoute(dataRoot, safeStorage) {
 
 function resolveManagedProxyEnvironment(componentId, dataRoot, safeStorage) {
   if (!MANAGED_PROXY_COMPONENTS.has(componentId)) return {};
-  const route = resolveCpaProxyRoute(dataRoot, safeStorage);
-  if (!route.url) throw new Error(`Select a global network proxy before starting ${componentId}`);
+  const route = resolveCpaProxyRoute(dataRoot, safeStorage, componentId);
+  if (!route.url) throw new Error(`Select a network proxy before starting ${componentId}`);
   const protocol = new URL(route.url).protocol;
   if (componentId !== "cpa" && protocol !== "http:" && protocol !== "https:") {
     throw new Error(`${componentId} needs an HTTP or HTTPS global proxy`);

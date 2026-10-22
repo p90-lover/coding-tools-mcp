@@ -8,6 +8,7 @@ const zlib = require("node:zlib");
 const { pipeline } = require("node:stream/promises");
 const { Readable } = require("node:stream");
 const { parseArgs } = require("node:util");
+const { validateRuntimeBundle } = require("../electron/runtime-install.cjs");
 const {
   hashFile, manifestAssetName, packAssetName, parseManifest, platformTag, safeInstallPath,
 } = require("../electron/app-update.cjs");
@@ -52,6 +53,8 @@ async function* records(root, rels) {
 }
 
 async function buildAppUpdate({ appRoot, output, version, electron, tag = platformTag("win32", "x64") }) {
+  if (tag !== platformTag("win32", "x64")) throw new Error(`Unsupported update platform: ${tag}`);
+  validateRuntimeBundle(path.join(appRoot, "resources", "runtime"), { version, platform: "win32", arch: "x64" });
   fs.mkdirSync(output, { recursive: true });
   const files = [];
   const byPack = new Map();

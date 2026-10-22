@@ -15,6 +15,7 @@ import { Icon, type IconName } from "./icons";
 import { appendLog, logKey, replaceLogs, useLogs } from "./log-store";
 import { ProviderCenterSurface } from "./features/ProviderHubSaasSurface";
 import { SurfaceHiddenContext } from "./features/page-visibility";
+import { PartErrorBoundary } from "./PartErrorBoundary";
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
 import { ProxyGatewaySurface } from "./features/ProxyGatewaySurface";
 import { ExternalServicesSurface } from "./features/ExternalServicesSurface";
@@ -438,7 +439,9 @@ function LauncherShell({
     const current = group.includes(surface);
     return current || group.some((id) => visitedSurfaces.has(id))
       ? <div className="surface-pane" hidden={!current}>
-        <SurfaceHiddenContext.Provider value={!current}>{render()}</SurfaceHiddenContext.Provider>
+        <SurfaceHiddenContext.Provider value={!current}>
+          <PartErrorBoundary label="This page">{render()}</PartErrorBoundary>
+        </SurfaceHiddenContext.Provider>
       </div>
       : null;
   };
@@ -2413,6 +2416,14 @@ function RtkSurface({ active, enabled, setError, updateState }: {
     }
   }, [setError]);
   useEffect(() => { if (active) void refresh(); }, [active, enabled, refresh]);
+  // The app installs a missing rtk by itself at startup: follow that install until it finishes.
+  const autoInstalling = Boolean(status?.installing) && !installing;
+  useEffect(() => {
+    if (!active || !autoInstalling) return;
+    const timer = window.setTimeout(() => void refresh(), 3_000);
+    return () => window.clearTimeout(timer);
+  }, [active, autoInstalling, status, refresh]);
+  const busy = installing || autoInstalling;
   const install = async () => {
     setInstalling(true);
     setNote("Installing rtk with winget…");
@@ -2429,14 +2440,14 @@ function RtkSurface({ active, enabled, setError, updateState }: {
       setInstalling(false);
     }
   };
-  const found = status?.installed ? `rtk ${status.version} · ${status.path}` : status ? "Not installed" : "Checking…";
+  const found = status?.installed ? `rtk ${status.version} · ${status.path}` : autoInstalling ? "Installing…" : status ? "Not installed" : "Checking…";
   return (
     <ContentSurface narrow title="RTK" subtitle="Compacts the output of the shell commands chat agents run, so the model reads a fraction of it: git, ls, cat, grep, tests and 100+ more (github.com/rtk-ai/rtk).">
       <SectionHeading label="Agents" />
       <div className="settings-list">
         <SettingRow body={status?.installed
           ? "On: every command a chat agent runs through Coding Tools' terminal goes through rtk first, whatever its harness, and Claude Code's own Bash tool gets rtk's hook in its session (new Claude Code sessions after the app restarts). Your own agent settings are never changed."
-          : "Install rtk to turn this on. Until then agents' commands run as written."}
+          : "The app installs rtk by itself when it starts (winget). Until it is in, agents' commands run as written."}
           label="Use RTK for agents' commands">
           <Switch checked={enabled} disabled={!status?.installed}
             onChange={(checked) => void api!.setPreference("rtkEnabled", checked).then(updateState).catch((cause) => setError(messageOf(cause)))} />
@@ -2444,8 +2455,8 @@ function RtkSurface({ active, enabled, setError, updateState }: {
         <SettingRow body={status?.installed ? `Version ${status.version} or later of ${status.minimum ?? "0.23.0"} is needed; this one works.` : note || `Install it from its own release with ${status?.installCommand ?? "winget install rtk-ai.rtk"}.`}
           flushAfter label={found}>
           <div className="inline-actions">
-            {!status?.installed ? <PrimaryButton disabled={installing || !status} onClick={() => void install()}>{installing ? "Installing…" : "Install rtk"}</PrimaryButton> : null}
-            <SecondaryButton disabled={installing} onClick={() => void refresh()}>Check again</SecondaryButton>
+            {!status?.installed ? <PrimaryButton disabled={busy || !status} onClick={() => void install()}>{busy ? "Installing…" : "Install rtk"}</PrimaryButton> : null}
+            <SecondaryButton disabled={busy} onClick={() => void refresh()}>Check again</SecondaryButton>
           </div>
         </SettingRow>
       </div>

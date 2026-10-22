@@ -12,11 +12,25 @@ test("Approve for me answers the app's own reads and worktree edits itself", () 
   }
 });
 
+test("every tool of the chat's own groups is covered by Approve for me as it is added; the terminal and the screen go to the reviewer", () => {
+  // The user: "it doesn't auto register chat harness tools for the auto review list". The groups are
+  // read from the tools' own modules, so a tool added there needs no second list here.
+  const { AGENT_TOOLS, TERMINAL_TOOLS, DESKTOP_TOOLS } = require("../electron/chat-agent-tools.cjs");
+  const { PREVIEW_TOOLS } = require("../electron/chat-preview.cjs");
+  const { SUBAGENT_TOOLS } = require("../electron/subagents.cjs");
+  for (const name of [...AGENT_TOOLS, ...PREVIEW_TOOLS, ...SUBAGENT_TOOLS]) assert.ok(routineAppTool(`mcp__coding-tools__${name}`), name);
+  for (const name of [...TERMINAL_TOOLS, ...DESKTOP_TOOLS].filter((tool) => !["check_exec_environment", "read_output"].includes(tool))) {
+    assert.equal(routineAppTool(`mcp__coding-tools__${name}`), null, `${name} is reviewed, not routine`);
+  }
+  assert.ok(SUBAGENT_TOOLS.size >= 5 && PREVIEW_TOOLS.size >= 10, "the groups are the real ones");
+});
+
 test("the terminal, the screen, unknown tools and look-alike servers still go to the person", () => {
   for (const name of [
     "mcp__coding-tools__exec_command", "mcp__coding-tools__write_stdin", "mcp__coding-tools__kill_command",
     "mcp__coding-tools__computer_click", "mcp__coding-tools__capture_screenshot", "mcp__coding-tools__list_windows",
-    "mcp__coding-tools__vision_status", "mcp__coding-tools__delete_everything",
+    "mcp__coding-tools__vision_status", "mcp__coding-tools__capture_process", "mcp__coding-tools__capture_window",
+    "mcp__coding-tools__delete_everything",
     "mcp__coding-tools-evil__read_file", "mcp__coding_tools__read_file", "mcp__other__read_file", "read_file",
     "mcp__coding-tools__read_file_extra", "", undefined,
   ]) assert.equal(routineAppTool(name), null, String(name));

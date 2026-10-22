@@ -38,12 +38,49 @@ const TIMELINE_ITEMS = 400;
 // and 2 KB a file's contents or a search's matches stopped a few lines in.
 const TOOL_INPUT_BYTES = 4 * 1024;
 const TOOL_OUTPUT_BYTES = 16 * 1024;
-// An AO response bigger than this fails, so the caller reads again with fewer items (requestApi).
-const RESPONSE_LIMIT = 900000;
-// Even a caller's last, cut-to-fit read (trimOver) refuses a body this big.
-const TRIM_CEILING = 32 * 1024 * 1024;
 // How much of AO's recent meaningful output stays in memory.
 const DAEMON_LINES_CHARS = 64 * 1024;
+// The largest AO reply the main process reads. At 900 KB two screenshot reads (~1 MB each, the
+// image kept twice as base64) among a chat's newest items failed every conversation read, so a
+// pending approval behind them never showed and a long task sat "may be stuck" for hours. Replies
+// stay in the main process: what reaches the window is the trimmed timeline, under IPC's own cap.
+const AO_RESPONSE_MAX_BYTES = 16 * 1024 * 1024;
+const INLINE_BLOB_MIN = 16 * 1024;
+/**
+ * Replaces inline base64 blobs (a screenshot a tool returned) in a conversation reply with a short
+ * note, including ones inside a JSON-encoded output string. Nothing in the app shows them, and
+ * older AO builds stored them whole; newer ones drop them before storing.
+ */
+function dropInlineBlobs(value) {
+  const blob = text => text.length >= INLINE_BLOB_MIN
+    && /^(data:[\w.+/-]+;base64,)?[A-Za-z0-9+/_=-]+$/.test(text.slice(0, 4096)) && /^[A-Za-z0-9+/_=-]*$/.test(text.slice(-4096));
+  const shrink = text => {
+    if (text.length < INLINE_BLOB_MIN) return text;
+    if (blob(text)) return `[${text.length >> 10} KB of inline binary data not shown]`;
+    const trimmed = text.trimStart();
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        const nested = JSON.parse(text);
+        if (walk(nested)) return JSON.stringify(nested);
+      } catch {}
+    }
+    return text;
+  };
+  const walk = node => {
+    let changed = false;
+    if (!node || typeof node !== "object") return false;
+    for (const key of Object.keys(node)) {
+      const item = node[key];
+      if (typeof item === "string") {
+        const next = shrink(item);
+        if (next !== item) { node[key] = next; changed = true; }
+      } else if (item && typeof item === "object" && walk(item)) changed = true;
+    }
+    return changed;
+  };
+  walk(value);
+  return value;
+}
 
 /**
  * Lines one text change added and removed, as a "+56 −26" count and a short diff: the lines the
@@ -286,27 +323,23 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       },
     }) : null;
 
-  /**
-   * One AO API call. A response over RESPONSE_LIMIT fails, so a caller reads again with fewer items
-   * and polls stay small; `trimOver` (a caller's last try) takes it anyway with every long string
-   * cut to what the chat shows (trimLongStrings), so a conversation whose newest few items are huge
-   * (screenshots, page dumps) still opens instead of showing a blank chat.
-   */
-  async function requestApi(method, endpoint, body, { trimOver = false } = {}) {
+  async function requestApi(method, endpoint, body, { maxBytes } = {}) {
     if (state !== "ready") throw new Error("Start the source-integrated AO runtime first");
     if (body?.length > 65536) throw new Error("AO API request exceeds 64 KiB");
     const response = await fetch(`http://127.0.0.1:${daemonPort}${endpoint}`, { method, headers: { "content-type": "application/json" }, body, redirect: "error", signal: AbortSignal.timeout(method === "GET" ? 30000 : 180000) });
     const text = await response.text();
-    const size = Buffer.byteLength(text);
-    const oversized = size > RESPONSE_LIMIT;
-    if (oversized && (!trimOver || size > TRIM_CEILING)) throw new Error(`AO response exceeds the handler limit (${method} ${endpoint.split("?")[0]})`);
+    // A conversation read is trimmed below before anything uses it, so it may arrive larger; every
+    // other AO call keeps the 900 KB limit.
+    const conversation = /\/conversation(\?|$)/.test(endpoint);
+    const limit = maxBytes ?? (conversation ? AO_RESPONSE_MAX_BYTES : 900000);
+    if (Buffer.byteLength(text) > limit) throw new Error(`AO response exceeds the handler limit (${method} ${endpoint.split("?")[0]})`);
     // AO answers some failures with an empty or non-JSON body; keep the status instead of
     // failing on JSON.parse and losing it.
     let data = {};
     if (text) {
       try { data = JSON.parse(text); } catch { data = response.ok ? {} : { error: { message: text.slice(0, 300) } }; }
     }
-    if (oversized) data = trimLongStrings(data, TIMELINE_TEXT_BYTES);
+    if (conversation) dropInlineBlobs(data);
     return { ok: response.ok, status: response.status, data };
   }
 
@@ -364,6 +397,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   }
   // continuable() checks in flight, by session (see there).
   const continuing = new Map();
+  // "exited" chat sessions already exited again this run to stop a leftover host (idleChatSessions).
+  const exitedReleased = new Set();
   /**
    * The newest items of a session's conversation. AO counts messages and tool activities alike,
    * and a tool's output can be tens of KB (an MCP browser tool's page dumps), so 100 items reached
@@ -376,21 +411,36 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   // the read in flight, and a result serves callers for TAIL_FRESH_MS; `maxAgeMs` lets a caller
   // that knows the session is idle take an older one.
   const TAIL_FRESH_MS = 900;
+  // A slow read stays fresh three times as long as it took, up to this. Seen live on 0.8.5: one
+  // working session's 507 KB tail took ~620 ms to serve; counted from when the read began, a result
+  // served only ~280 ms after it landed, so that session was read back to back and kept AO at
+  // 30-110% of a core. Light sessions (25 ms) keep their one-second updates.
+  const SLOW_TAIL_FRESH_MAX_MS = 3000;
+  const SLOW_TAIL_MS = 150; // a read slower than this is a slow one
   const IDLE_TAIL_MS = 30_000;
-  const tailReads = new Map(); // `${id}|${limits}` -> { at, read }
+  const tailReads = new Map(); // `${id}|${limits}` -> { read, landedAt (null in flight), fresh }
+  // A read in flight is always shared; a landed one serves for the caller's age or its own `fresh`.
+  const servesFor = (entry, maxAgeMs) => entry.landedAt === null
+    || Date.now() - entry.landedAt < Math.max(maxAgeMs, entry.fresh);
   function conversationTail(id, limits = [100, 40, 10], { maxAgeMs = TAIL_FRESH_MS } = {}) {
     const key = `${id}|${limits.join(",")}`;
     const known = tailReads.get(key);
-    if (known && Date.now() - known.at < maxAgeMs) return known.read;
+    if (known && servesFor(known, maxAgeMs)) return known.read;
     // A fresh read of more items serves a smaller ask too: a working chat's run loop reads 100
     // items each second and its Terminal pane 60 every two, the same session's tail twice over.
     for (const [other, entry] of tailReads) {
       if (other.startsWith(`${id}|`) && Number(other.slice(id.length + 1).split(",")[0]) >= limits[0]
-        && Date.now() - entry.at < maxAgeMs) return entry.read;
+        && servesFor(entry, maxAgeMs)) return entry.read;
     }
+    const startedAt = Date.now();
     const read = readConversationTail(id, limits);
-    tailReads.set(key, { at: Date.now(), read });
-    read.catch(() => { if (tailReads.get(key)?.read === read) tailReads.delete(key); });
+    const entry = { read, landedAt: null, fresh: 0 };
+    tailReads.set(key, entry);
+    read.then(() => {
+      entry.landedAt = Date.now();
+      const took = entry.landedAt - startedAt;
+      entry.fresh = took > SLOW_TAIL_MS ? Math.min(SLOW_TAIL_FRESH_MAX_MS, 3 * took) : 0;
+    }, () => { if (tailReads.get(key)?.read === read) tailReads.delete(key); });
     if (tailReads.size > 128) tailReads.delete(tailReads.keys().next().value);
     return read;
   }
@@ -399,28 +449,65 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     for (const key of tailReads.keys()) if (key.startsWith(`${id}|`)) tailReads.delete(key);
   }
   async function readConversationTail(id, limits) {
-    const tooLarge = (error) => /exceeds the handler limit/.test(String(error?.message));
-    for (let at = 0; at < limits.length; at += 1) {
-      try {
-        // includePending: a request still waiting on an answer is always in the page, however much
-        // came after it; one that fell out of the newest items never showed and sat until it timed out.
-        return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${limits[at]}&includePending=1`);
-      } catch (error) {
-        if (!tooLarge(error)) throw error;
-      }
+    const tooLarge = error => /exceeds the handler limit/.test(String(error?.message));
+    // Down to 3 items and then 1 past the caller's own sizes: one item can be over the limit by
+    // itself. Seen live: a 1.3 MB MCP page dump among the newest 10 failed every read, so a pending
+    // approval behind it never showed, nobody answered it, and the chat sat "may be stuck" for 3 hours.
+    const smallest = limits[limits.length - 1];
+    const tiny = [3, 1].filter(size => size < smallest);
+    // includePending: a request still waiting on an answer is always in the page, however much
+    // came after it; one that fell out of the newest items never showed and sat until it timed out.
+    const pending = async (size, options) => internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${size}&includePending=1`, undefined, options);
+    for (const size of limits) {
+      try { return await pending(size); } catch (error) { if (!tooLarge(error)) throw error; }
     }
-    const last = limits[limits.length - 1];
-    // Even the smallest page was too big (a few screenshots or page dumps among the newest items):
-    // it failed every read and the chat opened blank. It is read cut to fit (requestApi trimOver).
+    // Over the limit at every size the caller asked for: a finished tool call's stored result can be
+    // megabytes on its own (screenshot data: two 1.3 MB calls among a chat's newest 20 items, seen
+    // live), and the chat showed none of its work for hours. The page is read once with room for
+    // them and their big fields are cut (compactConversation), so the chat keeps its recent work
+    // rather than only the newest item or three; the chat never shows those bytes.
     try {
-      return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${last}&includePending=1`, undefined, { trimOver: true });
-    } catch (error) {
-      if (!tooLarge(error)) throw error;
+      return compactConversation(await pending(smallest, { maxBytes: CONVERSATION_COMPACT_READ_BYTES }));
+    } catch (error) { if (!tooLarge(error)) throw error; }
+    for (const size of tiny) {
+      try { return await pending(size); } catch (error) { if (!tooLarge(error)) throw error; }
     }
-    // A pending item is in every page, so one that is itself huge (a stuck screenshot call, seen
-    // live) failed every read: the chat stopped updating and Stop could not be confirmed. The
-    // newest items alone are read instead.
-    return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${last}`, undefined, { trimOver: true });
+    // A pending item is in every page, so one that is itself over the limit (a stuck 1 MB screenshot
+    // call, seen live) failed every read: the chat stopped updating and Stop could not be confirmed.
+    // The newest items alone are read instead.
+    let failure;
+    for (const size of [smallest, ...[3, 1].filter(size => size < smallest)]) {
+      try { return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${size}`); }
+      catch (error) { if (!tooLarge(error)) throw error; failure = error; }
+    }
+    throw failure;
+  }
+  /**
+   * A conversation page with every string over COMPACT_FIELD_CHARS inside an activity's detail
+   * replaced by a short note of its size. The chat reads an activity's text output (toolDetails
+   * keeps 2,000 characters of it) and never its image data.
+   */
+  const CONVERSATION_COMPACT_READ_BYTES = 32 * 1024 * 1024;
+  const COMPACT_FIELD_CHARS = 64 * 1024;
+  // An edit's diff and its added/removed counts are computed from these (editedFiles): cut, an
+  // edit to a large file past its first 2,000 characters read as no change at all.
+  const EDIT_SOURCE_FIELDS = new Set(["oldText", "newText", "old_string", "new_string", "patch", "diff"]);
+  function compactConversation(conversation) {
+    const cut = (value, depth = 0, key = "") => {
+      if (typeof value === "string") {
+        return value.length > COMPACT_FIELD_CHARS && !EDIT_SOURCE_FIELDS.has(key)
+          ? `${value.slice(0, 2000)}… [${value.length - 2000} characters omitted]` : value;
+      }
+      if (!value || typeof value !== "object" || depth > 12) return value;
+      if (Array.isArray(value)) return value.map((item) => cut(item, depth + 1));
+      return Object.fromEntries(Object.entries(value).map(([field, item]) => [field, cut(item, depth + 1, field)]));
+    };
+    if (!conversation || !Array.isArray(conversation.activities)) return conversation;
+    return { ...conversation, activities: conversation.activities.map((activity) => (activity && typeof activity === "object"
+      ? { ...activity, ...(activity.detail !== undefined ? { detail: cut(activity.detail) } : {}),
+        ...(typeof activity.commandOutput === "string" ? { commandOutput: cut(activity.commandOutput) } : {}),
+        ...(typeof activity.streamedText === "string" ? { streamedText: cut(activity.streamedText) } : {}) }
+      : activity)) };
   }
   /**
    * The current turn as a Codex-style transcript: assistant messages, reasoning and tool calls
@@ -456,9 +543,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   async function conversationPageBefore(id, beforeSequence) {
     for (const limit of [60, 20, 5, 1]) {
       try {
-        // The one-item page is read cut to fit (requestApi trimOver): its tool call shows, shortened.
-        return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${limit}&beforeSequence=${beforeSequence}`,
-          undefined, limit === 1 ? { trimOver: true } : undefined);
+        return await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${limit}&beforeSequence=${beforeSequence}`);
       } catch (error) {
         if (!/exceeds the handler limit/.test(String(error?.message))) return null;
       }
@@ -532,10 +617,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     }
     unsaved = Math.max(0, unsaved - images.length);
     const fromContent = texts.join("\n");
-    const output = (unsaved || images.length) ? fromContent
-      : typeof detail.output === "string" && detail.output.trim() ? detail.output.trim() : fromContent;
-    const shown = [output, unsaved ? `[${unsaved === 1 ? "An image" : `${unsaved} images`} came back that the agent's tool did not save]` : ""]
-      .filter(Boolean).join("\n");
+    const raw = typeof detail.output === "string" ? detail.output.trim() : "";
+    // An image result's own `output` can be the provider's JSON around the picture (its data cut to a
+    // note by dropInlineBlobs); its readable text is then the content's. A plain-text output (a tool
+    // saying what it captured) is kept.
+    const pictureJson = /^[[{]/.test(raw) && /"(source|data|mimeType)"\s*:/.test(raw);
+    const output = (unsaved || images.length) ? fromContent || (pictureJson ? "" : raw) : raw || fromContent;
+    const shown = output || (unsaved ? `[${unsaved === 1 ? "An image" : `${unsaved} images`} came back that the agent's tool did not save]` : "");
     return {
       ...(description ? { description: utf8Prefix(description, 200) } : {}),
       ...(args ? { input: args } : {}),
@@ -660,11 +748,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // summary (seen live: subjectKind "mcp_tool", toolKind "other"). Without it the input was
         // dropped, so the reviewer saw an exec_command with no command and answered "ask".
         const toolName = String(detail.toolName || activity.summary || "");
-        const toolInput = /^mcp__/.test(toolName) && Object.keys(input).length ? utf8Prefix(JSON.stringify(input), 1500) : "";
+        const rawToolInput = /^mcp__/.test(toolName) && Object.keys(input).length ? JSON.stringify(input) : "";
+        const toolInput = utf8Prefix(rawToolInput, 1500);
+        const reviewTruncated = Buffer.byteLength(command, "utf8") > 4000 || Buffer.byteLength(rawToolInput, "utf8") > 1500
+          || Buffer.byteLength(path, "utf8") > 1000 || Buffer.byteLength(String(input.description ?? ""), "utf8") > 500;
         return {
           approval_id: activity.requestId.slice(0, 200), source: "ao", kind: plan ? "plan" : command ? "command" : "permission",
           ...(plan ? { plan } : {}),
           ...(toolInput ? { toolInput } : {}),
+          ...(reviewTruncated ? { reviewTruncated: true } : {}),
           ...(typeof activity.createdAt === "string" ? { since: activity.createdAt } : {}),
           ...(command ? { command: utf8Prefix(command, 4000) } : {}), ...(path ? { path: utf8Prefix(path, 1000) } : {}),
           ...(typeof input.description === "string" ? { reason: utf8Prefix(input.description, 500) } : {}),
@@ -765,20 +857,6 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     while (cut > 0 && (bytes[cut] & 0xc0) === 0x80) cut -= 1;
     return bytes.toString("utf8", 0, cut);
   }
-  /**
-   * `value` with every string over `maxBytes` of UTF-8 cut to that, saying how much was left out.
-   * The chat never shows more of a field than TIMELINE_TEXT_BYTES, so nothing it shows is lost.
-   */
-  function trimLongStrings(value, maxBytes, depth = 0) {
-    if (typeof value === "string") {
-      const kept = utf8Prefix(value, maxBytes);
-      return kept.length === value.length ? value
-        : `${kept}\n… [${Math.round((Buffer.byteLength(value, "utf8") - Buffer.byteLength(kept, "utf8")) / 1024)} KB more not shown]`;
-    }
-    if (!value || typeof value !== "object" || depth > 32) return value;
-    if (Array.isArray(value)) return value.map((item) => trimLongStrings(item, maxBytes, depth + 1));
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, trimLongStrings(item, maxBytes, depth + 1)]));
-  }
   /** The longest suffix of `text` that is at most `maxBytes` of UTF-8: the newest part of live text. */
   function utf8Suffix(text, maxBytes) {
     const value = String(text);
@@ -798,7 +876,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (method !== "GET") sharedReads.clear();
     await start();
     const result = await requestApi(method, endpoint, body === undefined ? undefined : JSON.stringify(body), options);
-    if (!result.ok) throw new Error(aoErrorMessage(result));
+    if (!result.ok) {
+      const error = new Error(aoErrorMessage(result));
+      error.status = result.status;
+      const code = result.data?.code ?? result.data?.error?.code;
+      if (typeof code === "string" && /^[A-Z0-9_]{1,80}$/.test(code)) error.code = code;
+      throw error;
+    }
     return result.data;
   }
   const agentId = (value) => {
@@ -1093,20 +1177,53 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       // started a fresh session beside the agent coming back. Callers share the first check.
       const key = sessionId(id);
       if (!continuing.has(key)) continuing.set(key, (async () => {
-        const record = await internalApi("GET", `/api/v1/sessions/${key}`).catch(() => null);
-        const status = record?.session?.status;
-        if (!record?.session || record.session.mode === "tui" || record.session.isTerminated || ["terminated", "killed", "errored"].includes(status)) return false;
-        if (status === "exited") {
-          // An agent released while idle (exitAgent) keeps its session, worktree and conversation:
-          // bring it back (a few seconds) rather than start over and replay the whole chat.
-          // AO holds a chat's tool servers only while its daemon runs: one resumed after a restart
-          // came back without the app's tools. Fresh ones for the session go with the resume.
+        const uncertain = cause => Object.assign(new Error("The existing agent's restoration could not be confirmed; retry this chat without starting a replacement"),
+          { code: "AO_SESSION_RESTORE_UNCONFIRMED", cause });
+        const read = async () => {
+          try {
+            const record = await internalApi("GET", `/api/v1/sessions/${key}`);
+            if (!record?.session) throw uncertain();
+            return record.session;
+          } catch (error) { if (error.status === 404 && error.code === "SESSION_NOT_FOUND") return null; throw uncertain(error); }
+        };
+        const invalid = session => !session || session.mode === "tui" || session.isTerminated
+          || ["terminated", "killed", "errored"].includes(session.status) || session.provisionState === "failed";
+        let session = await read();
+        if (invalid(session)) return false;
+        if (session.id !== key) throw uncertain();
+        if (session.status === "exited") {
+          // Startup may already own restoration. A conflict is not readiness: wait for this
+          // exact session's observable live state, without issuing a second resume or new launch.
           const renewed = await Promise.resolve().then(() => agentTools?.renew?.(key)).catch(() => null);
-          const resume = body => internalApi("POST", `/api/v1/sessions/${key}/resume-agent`, body).catch(() => null);
-          let resumed = await resume(renewed?.servers?.length ? { mcpServers: renewed.servers } : {});
-          // An AO from before resume took servers refuses the field; resume as before then.
-          if (resumed?.ok !== true && renewed?.servers?.length) resumed = await resume({});
-          if (resumed?.ok !== true) return false;
+          let body = renewed?.servers?.length ? { mcpServers: renewed.servers } : {};
+          try {
+            let resumed;
+            try { resumed = await internalApi("POST", `/api/v1/sessions/${key}/resume-agent`, body); }
+            catch (error) {
+              // Only the known old-schema rejection may retry without the optional servers.
+              if (!body.mcpServers || !/unknown field [\\"']?mcpServers/.test(String(error?.message))) throw error;
+              resumed = await internalApi("POST", `/api/v1/sessions/${key}/resume-agent`, {});
+            }
+            if (resumed?.ok !== true) throw uncertain();
+          } catch (error) {
+            if (["SESSION_NOT_RESTORABLE", "SESSION_TERMINATED", "SESSION_NOT_FOUND"].includes(error.code)) return false;
+            if (error.status !== 409 || error.code !== "AGENT_RESUME_IN_PROGRESS") throw uncertain(error);
+          }
+          const deadline = Date.now() + 30000;
+          for (let attempt = 0; attempt < 150 && Date.now() < deadline; attempt++) {
+            session = await read();
+            if (invalid(session)) return false;
+            if (session.id !== key) throw uncertain();
+            // Status is a display value: an idle live agent may show its pull request state.
+            const activity = session.activity?.state;
+            const live = activity == null
+              ? ["idle", "working", "needs_input", "pr_open", "draft", "ci_failed", "review_pending", "changes_requested", "approved", "mergeable", "merged"].includes(session.status)
+              : ["idle", "active", "waiting_input", "blocked"].includes(activity);
+            if (live && (!session.statusReadiness || session.statusReadiness === "ready") && session.provisionState !== "provisioning"
+              && !(await chatHostGone(key))) return true;
+            await new Promise(resolve => setTimeout(resolve, 200));
+          }
+          throw uncertain();
         }
         return !(await chatHostGone(key));
       })().finally(() => continuing.delete(key)));
@@ -1118,7 +1235,18 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
      */
     async exitAgent(id) {
       agentTools?.cancelSessionCalls?.(id);
-      await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/exit-agent`, {});
+      let outcome;
+      try { outcome = await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/exit-agent`, {}); }
+      catch (error) {
+        if (!/\bAGENT_EXITED\b/.test(String(error?.message))) throw error;
+        // AO stopped any host the exited session still had; the idle sweep need not ask again.
+        exitedReleased.add(String(id));
+        if (exitedReleased.size > 2000) exitedReleased.delete(exitedReleased.values().next().value);
+        outcome = { ok: true, ...await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`) };
+      }
+      if (outcome?.ok !== true || outcome.session?.id !== id || outcome.session?.status !== "exited") {
+        throw new Error(`Agent ${id} shutdown is unconfirmed`);
+      }
       return { ok: true };
     },
     /**
@@ -1128,7 +1256,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     async idleChatSessions(idleMs, now = Date.now()) {
       const list = await internalApi("GET", "/api/v1/sessions");
       const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
-      const candidates = sessions.filter(session => session?.mode === "chat" && session.status === "idle" && !session.isTerminated);
+      // An "exited" chat can still have its agent running: AO marks it exited when the daemon
+      // restarts, but its chat host lives on for a reattach that never comes (five such agents held
+      // 1.4 GB on 2026-10-21). Exiting it again stops that host (AO's ExitAgent), once per app run.
+      const candidates = sessions.filter(session => session?.mode === "chat" && !session.isTerminated
+        && (session.status === "idle" || (session.status === "exited" && !exitedReleased.has(String(session.id)))));
       const idle = await Promise.all(candidates.map(async session => {
         const conversation = await internalApi("GET", `/api/v1/sessions/${sessionId(session.id)}/conversation?limit=1`).catch(() => null);
         const turns = Array.isArray(conversation?.turns) ? conversation.turns : [];
@@ -1445,7 +1577,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         for (const key of Object.keys(environment)) if (key.startsWith("AO_")) delete environment[key];
         // Coding Tools-managed CLIs (e.g. agy) are found by AO's harness probes without a global install.
         // Tool-scoped values (e.g. the agy proxy) live only in the daemon's memory.
-        Object.assign(environment, extraEnv());
+        // It may wait briefly (rtk's automatic install), so the start is checked again after it.
+        Object.assign(environment, await extraEnv());
+        checkStartup();
         const toolBin = extraPath();
         if (toolBin) {
           const pathKey = Object.keys(environment).find(key => key.toUpperCase() === "PATH") || "PATH";
@@ -1882,4 +2016,4 @@ function steadyContext(readings, id, usage, compactedAt) {
   return steady;
 }
 
-module.exports = { steadyContext, agentCatalog, createAgentOrchestratorUpstream, createAgentInventory, API_OPERATIONS };
+module.exports = { steadyContext, agentCatalog, createAgentOrchestratorUpstream, createAgentInventory, API_OPERATIONS, dropInlineBlobs };

@@ -87,8 +87,13 @@ async function main() {
   const lock = JSON.parse(fs.readFileSync(path.join(sourceRoot, "frontend", "package-lock.json")));
   const excluded = new Set(["@aoagents/product-ui", "@sentry/electron", "@workos-inc/node", "better-sqlite3", "electron-updater"]);
   const buildTools = ["@tailwindcss/vite", "@tanstack/router-plugin", "@vitejs/plugin-react", "tailwindcss", "tw-animate-css", "typescript", "vite", "vitest"];
+  // Packages the renderer imports by name that AO declares only through another package: its code
+  // highlighter imports highlight.js's languages, which come with lowlight. A fresh install put
+  // highlight.js under lowlight's own folder, and the build could not resolve the import.
+  const importedTransitive = ["highlight.js"];
   const dependencies = {};
-  for (const name of [...Object.keys(upstream.dependencies).filter((name) => !excluded.has(name)), ...buildTools]) {
+  for (const name of [...Object.keys(upstream.dependencies).filter((name) => !excluded.has(name)), ...buildTools,
+    ...importedTransitive.filter((name) => lock.packages[`node_modules/${name}`])]) {
     const entry = lock.packages[`node_modules/${name}`];
     assert.ok(entry?.version && entry.resolved?.startsWith("https://registry.npmjs.org/"), `Non-registry dependency: ${name}`);
     dependencies[name] = entry.version;

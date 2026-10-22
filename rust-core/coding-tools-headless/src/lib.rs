@@ -395,7 +395,8 @@ impl ServiceState {
         let mut contexts = self
             .contexts
             .lock()
-            .map_err(|_| "context cache unavailable")?;
+            // A cache: a panic while it was held must not refuse every later tool call.
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let profile = self
             .core
             .with_data(|store| {
@@ -2687,7 +2688,8 @@ async fn workspace_remove(
         let mut contexts = state
             .contexts
             .lock()
-            .map_err(|_| "context cache unavailable")?;
+            // A cache: a panic while it was held must not refuse every later tool call.
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let prefix = format!("{}\n", body.workspace_id);
         let keys: Vec<_> = contexts
             .keys()
@@ -4931,7 +4933,6 @@ async fn ao_harness_observe(
                 failure.as_deref(),
             )
         })
-        .map_err(text_error)
     })
     .await;
     match saved {
@@ -4955,7 +4956,7 @@ async fn ao_harness_observe(
             }
             Json(json!({"ok":true,"run":run,"receipt":receipt})).into_response()
         }
-        _ => {
+        failed => {
             let settled = state.core.with_data(|store| {
                 store.refresh()?;
                 let run = store
@@ -4994,11 +4995,14 @@ async fn ao_harness_observe(
                 Ok((run, receipt)) => {
                     Json(json!({"ok":true,"run":run,"receipt":receipt})).into_response()
                 }
-                Err(_) => json_error(
-                    StatusCode::CONFLICT,
-                    "AO_OBSERVE_CHANGED",
-                    "AO receipt changed; refresh before retrying",
-                ),
+                Err(_) => match failed {
+                    Ok(Err(error)) => ao_receipt_save_error(error),
+                    _ => json_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "AO_RECEIPT_SAVE_FAILED",
+                        "AO receipt could not be saved; inspect local diagnostics before retrying",
+                    ),
+                },
             }
         }
     }
@@ -5195,7 +5199,6 @@ async fn ao_external_terminal(
                 body.failure.as_deref(),
             )
         })
-        .map_err(text_error)
     })
     .await;
     match saved {
@@ -5213,11 +5216,53 @@ async fn ao_external_terminal(
             }
             Json(json!({"ok":true,"run":run,"receipt":receipt})).into_response()
         }
-        _ => json_error(
+        Ok(Err(error)) => ao_receipt_save_error(error),
+        Err(_) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "AO_RECEIPT_SAVE_FAILED",
+            "AO receipt could not be saved; inspect local diagnostics before retrying",
+        ),
+    }
+}
+
+fn ao_receipt_save_error(error: coding_tools_core::error::AppError) -> Response {
+    if matches!(&error, coding_tools_core::error::AppError::Message(message)
+        if matches!(message.as_str(), "AO run not found" | "AO node is not running" | "AO native thread identity changed"))
+    {
+        return json_error(
             StatusCode::CONFLICT,
             "AO_OBSERVE_CHANGED",
             "AO receipt changed; refresh before retrying",
-        ),
+        );
+    }
+    json_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "AO_RECEIPT_SAVE_FAILED",
+        text_error(error),
+    )
+}
+
+#[cfg(test)]
+#[test]
+fn receipt_save_errors_distinguish_storage_failure_from_changed_identity() {
+    use coding_tools_core::error::AppError;
+    assert_eq!(
+        ao_receipt_save_error(AppError::Io(std::io::ErrorKind::AlreadyExists.into())).status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(
+        ao_receipt_save_error(AppError::Message("data file lock poisoned".into())).status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    for message in [
+        "AO run not found",
+        "AO node is not running",
+        "AO native thread identity changed",
+    ] {
+        assert_eq!(
+            ao_receipt_save_error(AppError::Message(message.into())).status(),
+            StatusCode::CONFLICT
+        );
     }
 }
 
@@ -5805,16 +5850,7 @@ async fn operation_read(
         Ok(lease) => lease,
         Err(response) => return *response,
     };
-    let operations = match state.operations.lock() {
-        Ok(operations) => operations,
-        Err(_) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "OPERATIONS_UNAVAILABLE",
-                "Operation store unavailable",
-            )
-        }
-    };
+    let operations = state.operations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     match operations.records.get(&request_id) {
         Some(receipt) => Json(json!({"ok":true,"operation":receipt})).into_response(),
         None => json_error(
@@ -5965,16 +6001,7 @@ async fn tool_call(
         )
     );
     {
-        let operations = match state.operations.lock() {
-            Ok(operations) => operations,
-            Err(_) => {
-                return json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "OPERATIONS_UNAVAILABLE",
-                    "Operation store unavailable",
-                )
-            }
-        };
+        let operations = state.operations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(existing) = operations.records.get(&body.request_id) {
             if existing.fingerprint != fingerprint {
                 return json_error(
@@ -6014,16 +6041,7 @@ async fn tool_call(
     };
     let admitted_at_ms = now_ms();
     {
-        let mut operations = match state.operations.lock() {
-            Ok(operations) => operations,
-            Err(_) => {
-                return json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "OPERATIONS_UNAVAILABLE",
-                    "Operation store unavailable",
-                )
-            }
-        };
+        let mut operations = state.operations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         operations.insert(OperationReceipt {
             request_id: body.request_id.clone(),
             fingerprint: fingerprint.clone(),
@@ -6076,9 +6094,11 @@ async fn tool_call(
         error,
         automatic_replay: false,
     };
-    if let Ok(mut operations) = state.operations.lock() {
-        operations.insert(receipt.clone());
-    }
+    state
+        .operations
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(receipt.clone());
     Json(json!({"ok":true,"operation":receipt,"replayed":false,"redispatched":false}))
         .into_response()
 }

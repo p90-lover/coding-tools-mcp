@@ -321,7 +321,9 @@ function getGptBrowser(logger) {
     }),
     attachView: (view) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.contentView.addChildView(view); },
     detachView: (view) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.contentView.removeChildView(view); },
-    openExternal: (url) => openWebUrl(url),
+    // The pane hands only mailto: links out (to the mail app); openWebUrl refuses them, so every
+    // mailto click failed as an unhandled rejection and the mail app never opened.
+    openExternal: (url) => (/^mailto:/i.test(String(url)) ? shell.openExternal(String(url)) : openWebUrl(url)),
     onChange: (status) => send("launcher:gpt-browser-changed", status),
   });
   return gptBrowser;
@@ -400,8 +402,15 @@ function startBridgeWatchdog(logger, stateStore) {
   if (IS_DEV_PROFILE || bridgeWatchdogTimer) return;
   bridgeWatchdogTimer = setInterval(async () => {
     if (quitting || shutdownInProgress || bridgeWatchdogBusy || !runtimeSupervisor || !runtimeHost) return;
-    if (!runtimeHost.runtimeConfigSnapshot().configured || runtimeHost.currentOperation()) return;
-    const config = runtimeSupervisor.readConfig();
+    // A config file mid-write or unreadable is skipped this minute, not thrown from the timer.
+    let config;
+    try {
+      if (!runtimeHost.runtimeConfigSnapshot().configured || runtimeHost.currentOperation()) return;
+      config = runtimeSupervisor.readConfig();
+    } catch (error) {
+      logger.warn("runtime.watchdog_config_unreadable", { message: error instanceof Error ? error.message : String(error) });
+      return;
+    }
     if (!config) return;
     bridgeWatchdogBusy = true;
     try {
@@ -561,7 +570,13 @@ async function autoConnectExistingMcpIfReady({ logger, stateStore, health }) {
 function startCatalogVerificationMonitor({ logger, stateStore }) {
   stopCatalogVerificationMonitor();
   let reportedFailure = null;
+  // Once the catalog is verified, the monitor only waits for an idle, signed-in browser to connect
+  // MCP. That can take as long as the browser is in use, and asking the bridge's health every 2 s
+  // the whole time cost the main process a connection and a config read each time; it asks every
+  // 15 s while waiting.
+  let nextCheckAt = 0;
   const check = async () => {
+    if (Date.now() < nextCheckAt) return;
     const current = stateStore.read();
     if (current.coreSetupComplete !== true || (current.codexCatalogVerified === true && !current.autoConnectExistingMcp)) {
       stopCatalogVerificationMonitor();
@@ -613,7 +628,10 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
         publishOperation({ name: "catalog-verification", status: "completed", message: "Codex model catalog loaded" });
       }
       }
-      if (await autoConnectExistingMcpIfReady({ logger, stateStore, health })) return;
+      if (await autoConnectExistingMcpIfReady({ logger, stateStore, health })) {
+        nextCheckAt = Date.now() + 15_000;
+        return;
+      }
       stopCatalogVerificationMonitor();
     } catch (error) {
       logger.debug("codex.model_catalog_verification_pending", {
@@ -2494,7 +2512,7 @@ function registerIpc({ logger, stateStore }) {
   });
   // Runtime > RTK: whether rtk is installed and on, its savings, and installing it (winget).
   handle("rtk:status", async () => rtk.status() ?? { enabled: false, installed: false, path: null, version: null });
-  handle("rtk:gain", async () => rtk.gain() ?? { available: false });
+  handle("rtk:gain", async () => (await rtk.gain()) ?? { available: false });
   handle("rtk:install", async (event) => {
     // Installing software is the person's own click in the visible app.
     assertFocusedMainWindow(event, true);
@@ -2683,7 +2701,9 @@ async function start() {
 
   // An update still swapping files in is waited out first (app-update-worker.cjs).
   if (app.isPackaged) await waitForUpdateApply(path.dirname(process.execPath)).catch(() => false);
-  await waitForPackagedRuntimeSource({ app, resourcesPath: process.resourcesPath });
+  let runtimeSourceFallback = null;
+  await waitForPackagedRuntimeSource({ app, resourcesPath: process.resourcesPath, coreHome: CORE_HOME,
+    onFallback: (error) => { runtimeSourceFallback = error instanceof Error ? error.message : String(error); } });
   let installedRuntimeRoot = null;
   let runtimeRootResolved = false;
   const runtimeRootProvider = () => {
@@ -2766,9 +2786,32 @@ async function start() {
     publish: (record) => send("launcher:log", record),
   });
   quitLogger = logger;
+  // A throw in a timer or an event handler, or a promise nobody awaits, used to reach Electron's
+  // default handler: a modal "A JavaScript error occurred in the main process" box that holds the
+  // whole app until clicked (with the window in the tray it simply looked hung). It is logged
+  // instead, once a minute per message, and the app goes on; start() still owns startup failures.
+  const reportedFaults = new Map(); // message -> when last logged
+  const reportFault = (event, error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    const now = Date.now();
+    if (now - (reportedFaults.get(message) ?? 0) < 60_000) return;
+    reportedFaults.set(message, now);
+    if (reportedFaults.size > 200) reportedFaults.delete(reportedFaults.keys().next().value);
+    try {
+      logger.error(event, { message: message.slice(0, 500), stack: error instanceof Error ? String(error.stack || "").slice(0, 2000) : undefined });
+    } catch { /* a failing log must not become a second fault */ }
+  };
+  process.on("uncaughtException", (error) => reportFault("launcher.uncaught_exception", error));
+  process.on("unhandledRejection", (reason) => reportFault("launcher.unhandled_rejection", reason));
+  if (runtimeSourceFallback) logger.warn("runtime.packaged_source_damaged", { message: runtimeSourceFallback, using: "installed copy" });
   // Runtime > RTK: the person's installed rtk compacts the commands chat agents run (rtk.cjs).
   const rtk = require("./rtk.cjs").createRtk({ getEnabled: () => stateStore.read().rtkEnabled !== false, logger });
   rtkService = rtk;
+  // Missing rtk is installed now, without a click (a failed try waits a day); AO's start waits for it.
+  try {
+    void rtk.autoInstall({ lastAttemptAt: stateStore.read().rtkAutoInstallAt,
+      record: (at) => { stateStore.update({ rtkAutoInstallAt: at }); } });
+  } catch (error) { logger.warn("rtk.auto_install_failed", { message: String(error?.message ?? error) }); }
   // The GPU process (or a utility process) dying is logged with its reason; Chromium restarts it.
   app.on("child-process-gone", (_event, details) => {
     logger.warn("launcher.child_process_gone", { type: details?.type, reason: details?.reason, exitCode: details?.exitCode, name: details?.name });
@@ -3160,7 +3203,10 @@ async function start() {
 
       // rtk's folder too: a command RTK rewrote in an agent's own shell calls `rtk`.
       extraPath: () => [antigravityCli.binDir(), rtk.binDir()].filter(Boolean).join(path.delimiter),
-      extraEnv: () => {
+      extraEnv: async () => {
+        // An rtk install still running (the automatic one at startup) finishes first, up to 15 s:
+        // the daemon's PATH and Claude's hook are fixed for its whole run.
+        try { await rtk.ready(15_000); } catch { /* starts without waiting */ }
         let env = {};
         try { env = shimProxyEnvironment(antigravityProxyEnvironment()); } catch { /* no proxy for agy */ }
         // RTK's Claude Code hook, which AO puts in each Claude session's own settings (empty: off).
@@ -3201,6 +3247,8 @@ async function start() {
     const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
       // Stop agents that sat idle for a while; their chats resume them on the next message.
       releaseIdleAgents: true,
+      // Files the person attached (saved by launcher:save-attachment): reading one needs no review.
+      chatAttachmentsDir: path.join(app.getPath("userData"), "chat-attachments"),
       // One run read serves the activity poll, the run loop and their checks for 300 ms.
       runReadFreshMs: 300,
       // Each launch logs where its time went (ao.launch_timing).
@@ -3440,10 +3488,16 @@ async function start() {
     codexRouteEnabled: () => stateStore.read().codexRoute !== false,
     refreshBrowserDescriptor: () => browserHost?.writeDescriptor(),
   });
-  const configuredInteractionMode = runtimeHost.runtimeConfigSnapshot().config?.browserInteractionMode;
-  if ((configuredInteractionMode === "automatic" || configuredInteractionMode === "manual")
-    && stateStore.read().browserInteractionMode !== configuredInteractionMode) {
-    stateStore.update({ browserInteractionMode: configuredInteractionMode });
+  // Only a preference sync: an unreadable or invalid setup config (seen: a byte order mark) keeps
+  // the saved mode and the app starts, as the same read a few lines on already does.
+  try {
+    const configuredInteractionMode = runtimeHost.runtimeConfigSnapshot().config?.browserInteractionMode;
+    if ((configuredInteractionMode === "automatic" || configuredInteractionMode === "manual")
+      && stateStore.read().browserInteractionMode !== configuredInteractionMode) {
+      stateStore.update({ browserInteractionMode: configuredInteractionMode });
+    }
+  } catch (error) {
+    logger.warn("runtime.config_unreadable", { message: error instanceof Error ? error.message : String(error) });
   }
   let lastPublishedBrowserAuth = false;
   browserHost = new BrowserHost({

@@ -4,6 +4,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const test = require("node:test");
+const { createHash } = require("node:crypto");
 
 const {
   combineUpdateControllers, combinedUpdateState, createAppUpdateController, createAutoInstaller, extractPack,
@@ -11,6 +12,7 @@ const {
   sweepUpdateLeftovers,
 } = require("../electron/app-update.cjs");
 const { swapIn } = require("../electron/app-update-worker.cjs");
+const { waitForPackagedRuntimeSource } = require("../electron/runtime-install.cjs");
 const { buildAppUpdate, packFor } = require("../scripts/package-app-update.cjs");
 
 const workerPath = path.join(__dirname, "..", "electron", "app-update-worker.cjs");
@@ -26,6 +28,51 @@ function writeTree(root, files) {
     fs.writeFileSync(full, content);
   }
 }
+
+function writeRuntime(appRoot, version) {
+  writeTree(appRoot, {
+    "resources/runtime/runtime/bun.exe": "bun fixture",
+    "resources/runtime/app/cli.js": "cli fixture",
+    "resources/runtime/app/browser-helper.cjs": "helper fixture",
+    "resources/runtime/bin/codex-chatgpt-web.cmd": "@echo off",
+  });
+  const runtime = path.join(appRoot, "resources", "runtime");
+  const files = fs.readdirSync(runtime, { recursive: true })
+    .filter(rel => rel !== "manifest.json" && fs.statSync(path.join(runtime, rel)).isFile())
+    .map(rel => {
+      const content = fs.readFileSync(path.join(runtime, rel));
+      return { path: rel.split(path.sep).join("/"), size: content.length,
+        sha256: createHash("sha256").update(content).digest("hex") };
+    })
+    .sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  const digest = createHash("sha256");
+  for (const file of files) digest.update(file.path + "\0" + file.size + "\0" + file.sha256 + "\0");
+  fs.writeFileSync(path.join(runtime, "manifest.json"), JSON.stringify({
+    schemaVersion: 2, appVersion: version, platform: "win32", arch: "x64",
+    bunVersion: "1.4.0", playwright: "1.62.0", launcher: "bin/codex-chatgpt-web.cmd",
+    entrypoint: "app/cli.js", bundleId: digest.digest("hex"), files,
+  }));
+}
+
+test("update publication rejects an older or corrupt runtime before writing any release asset", async () => {
+  const root = tempRoot();
+  try {
+    const appRoot = path.join(root, "app");
+    const output = path.join(root, "out");
+    writeTree(appRoot, { "resources/app.asar": "launcher rc23 fixture" });
+    writeRuntime(appRoot, "0.7.0-rc.22");
+    await assert.rejects(buildAppUpdate({ appRoot, output, version: "0.7.0-rc.23", electron: "41.10.7" }),
+      /identity mismatch.*0\.7\.0-rc\.23.*0\.7\.0-rc\.22/s);
+    assert.equal(fs.existsSync(output), false);
+    writeRuntime(appRoot, "0.7.0-rc.23");
+    fs.writeFileSync(path.join(appRoot, "resources", "runtime", "runtime", "bun.exe"), "bad fixture");
+    await assert.rejects(buildAppUpdate({ appRoot, output, version: "0.7.0-rc.23", electron: "41.10.7" }),
+      /checksum mismatch/);
+    assert.equal(fs.existsSync(output), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 const read = (root, rel) => fs.readFileSync(path.join(root, ...rel.split("/")), "utf8");
 
@@ -67,6 +114,8 @@ test("a release update installs only the files that changed", async () => {
       "resources/agent-orchestrator/renderer/index.html": "<html>v1</html>",
       "resources/runtime/app/gone.js": "dropped",
     });
+    writeRuntime(next, "0.8.0");
+    writeRuntime(installed, "0.8.0");
     const built = await buildAppUpdate({ appRoot: next, output: assets, version: "0.8.0", electron: "41.10.7" });
     const manifestText = fs.readFileSync(path.join(assets, built.manifestName), "utf8");
     const manifest = parseManifest(manifestText, { version: "0.8.0", tag: "win_x64" });
@@ -78,9 +127,11 @@ test("a release update installs only the files that changed", async () => {
       onProgress: (done, total) => checks.push([done, total]),
     });
     // Every non-framework file is checked once, and the count climbs to the total.
-    assert.deepEqual(checks, [[1, 5], [2, 5], [3, 5], [4, 5], [5, 5]]);
+    const checkedFiles = manifest.files.length - 1;
+    assert.deepEqual(checks, Array.from({ length: checkedFiles }, (_, i) => [i + 1, checkedFiles]));
     assert.deepEqual(plan.changed.map((file) => file.path).sort(), [
       "resources/agent-orchestrator/renderer/index.html", "resources/app.asar", "resources/empty.txt", "resources/runtime/app/new.js",
+      "resources/runtime/manifest.json",
     ]);
     assert.deepEqual(plan.obsolete, ["resources/runtime/app/gone.js"]);
     assert.equal(plan.withFramework, false, "the same Electron keeps its own files");
@@ -100,7 +151,12 @@ test("a release update installs only the files that changed", async () => {
     assert.equal(read(installed, "Coding Tools.exe"), "exe v1 stamp");
     assert.equal(fs.existsSync(path.join(installed, "resources", "runtime", "app", "gone.js")), false);
     assert.equal(read(installed, "resources/app.asar.old-123"), "asar v1", "the old file is set aside, not lost");
-    assert.equal(journal.filter((entry) => entry.aside).length, 3);
+    assert.equal(journal.filter((entry) => entry.aside).length, 4);
+    // The fixture is a Windows x64 bundle, checked as one on every CI runner (Linux and macOS too).
+    assert.equal(await waitForPackagedRuntimeSource({
+      app: { isPackaged: true, getVersion: () => "0.8.0" },
+      resourcesPath: path.join(installed, "resources"), timeoutMs: 0, platform: "win32", arch: "x64",
+    }), path.join(installed, "resources", "runtime"));
 
     const newElectron = await planUpdate({ manifest, installRoot: installed, electronVersion: "40.0.0" });
     assert.deepEqual(newElectron.changed.map((file) => file.path), ["Coding Tools.exe"], "a new Electron replaces its own files");
@@ -113,6 +169,7 @@ test("a corrupt pack file is refused", async () => {
   const root = tempRoot();
   try {
     writeTree(path.join(root, "app"), { "resources/app.asar": "asar" });
+    writeRuntime(path.join(root, "app"), "1.0.0");
     const built = await buildAppUpdate({ appRoot: path.join(root, "app"), output: path.join(root, "out"), version: "1.0.0", electron: "1" });
     const wanted = new Map([["resources/app.asar", { size: 4, sha256: "0".repeat(64) }]]);
     await assert.rejects(
@@ -209,6 +266,8 @@ test("the controller stages the update, starts the worker and closes the app kee
     const assets = path.join(root, "assets");
     writeTree(installRoot, { "Coding Tools.exe": "exe", "resources/app.asar": "v1", "resources/runtime/a.js": "same" });
     writeTree(path.join(root, "next"), { "Coding Tools.exe": "exe2", "resources/app.asar": "v2", "resources/runtime/a.js": "same" });
+    writeRuntime(installRoot, "0.8.0");
+    writeRuntime(path.join(root, "next"), "0.8.0");
     const built = await buildAppUpdate({ appRoot: path.join(root, "next"), output: assets, version: "0.8.0", electron: "41.10.7" });
     fs.writeFileSync(path.join(assets, "SHA256SUMS.txt"), `${built.sums.join("\n")}\n`);
     const names = fs.readdirSync(assets);

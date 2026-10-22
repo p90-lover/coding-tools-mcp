@@ -45,7 +45,8 @@ const BACKEND_MODULES = Object.freeze([
   "antigravity-cli.cjs",
   "antigravity-auth-browser.cjs",
   "ao-session-events.cjs",
-  // Required by agent-orchestrator-upstream.cjs; left out, an installed backend could not load AO.
+  // agent-orchestrator-upstream.cjs requires both; without them a deployed bundle failed to load
+  // ("Cannot find module './ao-daemon-log.cjs'").
   "ao-daemon-log.cjs",
   "ao-db-maintenance.cjs",
   "ao-dependency-links.cjs",
@@ -129,7 +130,13 @@ function createBackendBundles({
   // A fresh install ships its own backend, which is newer than any bundle deployed before it.
   if (installId && readJson(installPath)?.installId !== installId) {
     try { fs.rmSync(pointerPath, { force: true }); } catch {}
-    writeJson(installPath, { installId, at: new Date().toISOString() });
+    // With the pointer gone the built-in backend runs either way; failing to record the install
+    // (a full disk, the file held) stopped the first start after every update.
+    try {
+      writeJson(installPath, { installId, at: new Date().toISOString() });
+    } catch (error) {
+      logger?.warn?.("backend.install_record_failed", { message: error instanceof Error ? error.message : String(error) });
+    }
     logger?.info?.("backend.install_detected", { installId });
   }
 

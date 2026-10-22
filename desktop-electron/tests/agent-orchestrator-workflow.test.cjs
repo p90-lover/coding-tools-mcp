@@ -100,6 +100,18 @@ test("archive cannot hide a cancelled-but-still-live external turn after an unce
   assert.ok(!world.calls.some(c=>c[1]?.change?.change?.operation==="set_visibility"));
 });
 
+test("a chat whose launch came back without a session can be archived: it owns no agent to stop", async()=>{
+  // Seen live: "Owned session identity is unknown; stop needs attention" kept a "Needs you" chat, whose
+  // card was held after its launch failed, from ever being archived.
+  const world=reconfigureWorld();
+  const lead=world.saved.runs[0].nodes[0];
+  lead.state="held"; lead.receipt={status:"failed",error:"launch timed out",request_key:"request-one"};
+  await world.workflow.call("archive_task",{workspaceId:"ws",taskId:"task"});
+  assert.ok(world.calls.some(c=>c[0]==="/api/v1/ao/control"&&c[1].action==="stop"),"the run is still stopped");
+  assert.ok(!world.calls.some(c=>c[0]==="interrupt"),"no session stop is attempted for a card that has none");
+  assert.ok(world.calls.some(c=>c[1]?.change?.change?.operation==="set_visibility"),"the chat is archived");
+});
+
 test("model edits preserve missed, uncertain and cancelled schedule holds rather than launching",async()=>{
   for(const state of ["missed","needs_attention","cancelled","claimed"]){
     const world=reconfigureWorld();
@@ -1261,7 +1273,7 @@ test("starting a mission whose card is held retries that card first", async () =
   await assert.rejects(workflow.call("control_run", { workspaceId: "ws-1", runId: "r1", action: "rewind" }), /Choose a mission control/);
 });
 
-function heldMissionWorld({ history = [], error = "ChatGPT did not confirm that the prompt was sent", executionMode = undefined } = {}) {
+function heldMissionWorld({ history = [], error = "ChatGPT did not confirm that the prompt was sent", executionMode = undefined, grant = undefined } = {}) {
   const world = { reads: 0, controls: [], controlBodies: [], grants: 0, held: false };
   world.requestHeadless = async (endpoint, body) => {
     if (endpoint === "/api/v1/ao/read") {
@@ -1269,7 +1281,7 @@ function heldMissionWorld({ history = [], error = "ChatGPT did not confirm that 
       // The first start sees a pending card; the loop then finds it held until a retry re-queues it.
       if (world.reads === 2 && !world.controls.length) world.held = true;
       return { ok: true, team: null, worker_capacity: { r1: 1 }, runs: [{ id: "r1", workspace_id: "ws-1", project_id: "task-1", revision: 2, cancelled: false,
-        ...(executionMode ? { execution_mode: executionMode } : {}),
+        ...(executionMode ? { execution_mode: executionMode } : {}), ...(grant ? { grant } : {}),
         nodes: [{ id: "lead", role: "planner", state: world.held ? "held" : "pending", route: { model: "chatgpt-web/high", provider_id: "chatgpt-web" },
           history, receipt: world.held ? { error } : null }] }] };
     }
@@ -1300,6 +1312,35 @@ test("a held card is handed to the recovery helper, which retries it and restart
   assert.deepEqual(world.controls, ["retry"]);
   assert.equal(world.grants, 2, "the mission was started again after the retry");
   assert.match(asked[0], /did not confirm that the prompt was sent/);
+});
+
+test("a run's loop that loses a local connection picks the run up again instead of leaving it undriven", async () => {
+  // Seen live: another program held every loopback port in TIME_WAIT, a read failed with
+  // "connect EADDRINUSE", the loop ended and the chat said "running" for an hour with nothing watching.
+  const world = heldMissionWorld();
+  let calls = 0;
+  const requestHeadless = async (endpoint, body) => {
+    if (endpoint === "/api/v1/ao/read" && ++calls === 2) throw Object.assign(new Error("connect EADDRINUSE 127.0.0.1:64174"), { code: "EADDRINUSE" });
+    return world.requestHeadless(endpoint, body);
+  };
+  const states = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless, findCodexExecutable: () => "C:/Codex/codex.exe",
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/v1/models")) return { ok: true, json: async () => ({ data: [{ id: "gpt-6-luna" }] }) };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"retry","reason":"The send timed out"}' } }] }) };
+    },
+    webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
+    onRunState: (update) => states.push(String(update?.detail ?? "")),
+    resolveHarness: async () => ({ expected_sha256: "a".repeat(64), executable: path.resolve("codex.exe") }) });
+  const waitFor = async (check, ms) => { for (const end = Date.now() + ms; !check() && Date.now() < end;) await new Promise((resolve) => setTimeout(resolve, 20)); };
+  await workflow.call("start_run", { workspaceId: "ws-1", runId: "r1" });
+  await waitFor(() => states.some((detail) => /Lost a local connection/.test(detail)), 2_000);
+  assert.ok(states.some((detail) => /Lost a local connection \(EADDRINUSE\); checking the run again in 2s/.test(detail)), states.join(" | "));
+  assert.equal((await workflow.call("run_status", { workspaceId: "ws-1", runId: "r1" })).status, "running", "not left for a click meanwhile");
+  await waitFor(() => world.grants >= 2, 8_000);
+  assert.deepEqual(world.controls, ["retry"], "the loop came back and recovered the run as usual");
+  assert.equal(world.grants, 2);
 });
 
 test("a card interrupted by an app restart is retried directly, without asking the helper", async () => {
@@ -1357,6 +1398,30 @@ test("with Retry automatically on, a step that lost the local proxy waits and is
   assert.deepEqual(world.controls, ["retry"]);
   assert.equal(world.controlBodies[0].node_id ?? world.controlBodies[0].nodeId, "lead", "a team retries only the failed card");
   assert.equal(asked, 0);
+});
+
+test("with Retry automatically on, a single chat whose failed launch spent its one turn is retried on a fresh grant", async () => {
+  // Seen live: "Launch failed: The operation was aborted due to timeout" on a single chat held for
+  // hours with the switch on. The launch had used the grant's one turn, and the retry relaunched on
+  // that spent grant, which headless refuses.
+  const spent = { executable_sha256: "a".repeat(64), max_turns: 1, turns_started: 1, granted_at_ms: Date.now(), expires_at_ms: Date.now() + 3_600_000 };
+  const world = heldMissionWorld({ error: "Launch failed: The operation was aborted due to timeout", executionMode: "single", grant: spent });
+  let offset = 0;
+  const states = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/Codex/codex.exe",
+    fetchImpl: async () => { throw new Error("the helper must not be asked"); },
+    webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
+    onRunState: (update) => states.push(String(update?.detail ?? "")),
+    now: () => Date.now() + offset,
+    resolveHarness: async () => ({ expected_sha256: "a".repeat(64), executable: path.resolve("codex.exe") }) });
+  await workflow.call("chat_auto_retry", { enabled: true });
+  await workflow.call("start_run", { workspaceId: "ws-1", runId: "r1" });
+  await until(() => states.some(detail => /Retrying automatically in/.test(detail)));
+  assert.equal(world.grants, 1);
+  offset = 11_000;
+  await until(() => world.grants >= 2);
+  assert.deepEqual(world.controls, ["retry"]);
+  assert.equal(world.grants, 2, "the retry asked for a fresh grant instead of relaunching on the spent one");
 });
 
 test("a lost connection is retried even on a card with many finished rounds, but never a sign-in failure", async () => {
@@ -1966,7 +2031,7 @@ test("activity reports each working card's runtime and current step without adva
       calls.push(endpoint);
       if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [done, native, stuck, agent] }] };
       if (endpoint === "/api/v1/ao/harness/status") {
-        return { ok: true, status: { connected: true, live_output: body.node_id === "w1" ? "native partial Bearer SECRET_TOKEN" : "", threads: body.node_id === "w1"
+        return { ok: true, status: { connected: true, live_output: body.node_id === "w1" ? "native partial Bearer SECRET_TOKEN npm run task-runner sk-abcdefghijklmnopqrst1234" : "", threads: body.node_id === "w1"
           ? [{ id: "thread-1", turn_id: "turn-1", activity: "running a command", activity_at_ms: 5_000, last_event_at_ms: 6_000 }]
           : [{ id: "thread-2", turn_id: null, activity: null, started_at_ms: 2_000 }] } };
       }
@@ -1980,7 +2045,8 @@ test("activity reports each working card's runtime and current step without adva
   const result = await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
   assert.deepEqual(Object.keys(result.nodes).sort(), ["w1", "w2", "w3"], "only working cards");
   assert.equal(result.nodes.w1.activity, "running a command");
-  assert.equal(result.nodes.w1.output, "native partial [redacted]");
+  // "sk-" inside a word (task-runner) is not a key; a whole sk- token is.
+  assert.equal(result.nodes.w1.output, "native partial [redacted] npm run task-runner [redacted]");
   assert.doesNotMatch(JSON.stringify(result), /SECRET_TOKEN/);
   assert.equal(result.nodes.w1.last_event_at_ms, 6_000);
   assert.equal(result.nodes.w1.started_at_ms, 1_000);
@@ -2209,6 +2275,31 @@ test("a request the reviewer answers is marked as being reviewed, not shown to t
   assert.equal((await status()).some((item) => item.awaiting_review), false);
 });
 
+test("a request no review ever reached goes to the person after the review deadline", async () => {
+  // Seen live: a DeepSeek chat sat 85 minutes on a PowerShell request marked "being reviewed" while
+  // no review ran; hidden from the person and never answered, the chat looked like it was thinking.
+  let clock = Date.parse("2026-10-21T12:27:56Z");
+  const pending = [{ approval_id: "cmd", kind: "command", command: "Invoke-RestMethod http://127.0.0.1:7411/api/action", since: "2026-10-21T12:27:56Z" }];
+  const saved = { id: "run", workspace_id: "ws", cancelled: false, nodes: [
+    { id: "approver", role: "approver", state: "finished", receipt: { verdict: "APPROVED" }, settings: { auto_decide: true } },
+    { id: "worker", role: "worker", state: "running", route: { harness_id: "codex-native", model: "chatgpt-web/high" } }] };
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    requestHeadless: async (endpoint) => {
+      if (endpoint.endsWith("/harness/status")) return { ok: true, status: { connected: true, pending_approvals: structuredClone(pending) } };
+      if (endpoint.endsWith("/ao/read")) return { ok: true, runs: [structuredClone(saved)] };
+      return { ok: true };
+    },
+  });
+  const shown = async () => (await workflow.call("harness_status", { workspaceId: "ws", runId: "run", nodeId: "worker" })).status.pending_approvals[0];
+  clock += 60_000;
+  assert.equal((await shown()).awaiting_review, true, "a minute in, the reviewer may still answer it");
+  clock += 85 * 60_000;
+  const late = await shown();
+  assert.equal(late.awaiting_review, undefined, "past the deadline the person sees it");
+  assert.equal(late.recommendation, undefined, "and nothing answered it for them");
+});
+
 test("AO typed approval cancelled in the local confirmation never forwards", async () => {
   let sent = 0;
   const workflow = createAgentOrchestratorWorkflow({
@@ -2260,14 +2351,14 @@ test("AO connection forwards saved native policy and rejects a resolver substitu
 });
 
 test("background command approver leaves typed non-command, truncated and unoffered grants for the person", async () => {
-  for (const scenario of ["non-command", "unoffered", "truncated"]) {
+  for (const scenario of ["non-command", "unoffered", "truncated", "failed-answer"]) {
     const route = { harness_id: "codex-native", provider_id: "cliproxyapi-antigravity",
       model: "test-model", permission_profile: ":read-only" };
     const pending = scenario === "non-command"
       ? ["permissions", "questions", "file_change", "mcp_form", "mcp_url", "file_write"].map(kind =>
         ({ approval_id: kind, kind, method: "native/" + kind }))
       : [{ approval_id: scenario, kind: "command", command: "Get-Content test.txt", cwd: "C:/outside",
-        request: { availableDecisions: ["decline"],
+        request: { availableDecisions: scenario === "failed-answer" ? ["accept", "decline"] : ["decline"],
           ...(scenario === "truncated" ? { additionalPermissions: "requested".repeat(150),
             networkApprovalContext: { host: "outside.invalid", protocol: "https" } } : {}) } }];
     const mission = { id: "run", workspace_id: "ws", revision: 3, grant: { executable_sha256: "a".repeat(64) }, nodes: [
@@ -2276,7 +2367,9 @@ test("background command approver leaves typed non-command, truncated and unoffe
       { id: "worker", role: "worker", state: "running", parents: ["approver"], route },
     ] };
     let finished = false, sent = 0, asked = 0;
+    const events = [];
     const workflow = createAgentOrchestratorWorkflow({
+      logger: { info: (event, detail) => events.push([event, detail]) },
       findCodexExecutable: () => process.execPath,
       resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
       cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
@@ -2291,7 +2384,11 @@ test("background command approver leaves typed non-command, truncated and unoffe
           if (finished) mission.nodes[1].state = "finished";
           return { ok: true, pending_approvals: finished ? [] : pending };
         }
-        if (endpoint.endsWith("/approval")) { sent++; throw new Error("A non-command/unoffered grant must not auto-submit"); }
+        if (endpoint.endsWith("/approval")) {
+          sent++;
+          if (scenario === "failed-answer") return { ok: true, result: { ok: false } };
+          throw new Error("A non-command/unoffered grant must not auto-submit");
+        }
         throw new Error("Unexpected endpoint " + endpoint);
       },
     });
@@ -2307,8 +2404,9 @@ test("background command approver leaves typed non-command, truncated and unoffe
     finished = true;
     assert.equal(status.status, "running", scenario + ": " + JSON.stringify(status));
     assert.match(status.detail, /Waiting for your tool approval|checking it yourself/, scenario);
-    assert.equal(sent, 0, scenario);
-    if (scenario !== "unoffered") assert.equal(asked, 0, scenario + " must not send incomplete/native form scope to command advisor");
+    assert.equal(sent, scenario === "failed-answer" ? 1 : 0, scenario);
+    assert.ok(!events.some(([event]) => event === "ao.approval_decided"), "a failed answer is not logged as a decision");
+    if (!["unoffered", "failed-answer"].includes(scenario)) assert.equal(asked, 0, scenario + " must not send incomplete/native form scope to command advisor");
     for (let tries = 0; tries < 70; tries++) {
       if ((await workflow.call("run_status", { workspaceId: "ws", runId: "run" })).status === "finished") break;
       await new Promise(resolve => setTimeout(resolve, 10));
@@ -2926,23 +3024,37 @@ test("a start blocked on the browser returns its reason instead of a generic tra
 
 // ---- Codex slash commands: /goal, /compact, /diff ----
 
-const { goalVerdict, closingAnswers, createGoalStore, goalPrompt } = require("../electron/chat-goals.cjs");
+const { closingAnswers, createGoalStore, goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck } = require("../electron/chat-goals.cjs");
 
-test("a goal reads the closing cards' verdicts: a team's reviewer, a Single card, or a solo orchestrator", () => {
-  assert.equal(goalVerdict(["Done.\nGOAL: ACHIEVED — all tests pass"]), "achieved");
-  assert.equal(goalVerdict(["**GOAL: CONTINUE** — two tests still fail"]), "continue");
-  assert.equal(goalVerdict(["no verdict at all"]), null);
-  assert.equal(goalVerdict(["GOAL: CONTINUE — x", "GOAL: ACHIEVED"]), "achieved", "any closing card that saw it achieved wins");
+test("a goal round says what Claude Code's /goal says: the condition first, then stop-hook feedback with the evaluator's reason", () => {
+  assert.equal(goalMessage("ship it", 1), "ship it", "the first round is the condition itself");
+  assert.equal(goalMessage("ship it", 2, "Two tests still fail in auth.test.ts."), "Stop hook feedback:\n[ship it]: Two tests still fail in auth.test.ts.");
+  assert.match(goalMessage("ship it", 3, ""), /^Stop hook feedback:\n\[ship it\]: The condition is not met yet/);
+  // The evaluator reads the closing cards: a team's reviewer, a Single card, or a solo orchestrator.
   const team = { nodes: [
     { id: "lead", role: "planner", parents: [], receipt: { answer: "plan" } },
-    { id: "w", role: "worker", parents: ["lead"], receipt: { answer: "GOAL: ACHIEVED (a worker can't close it)" } },
-    { id: "rev", role: "reviewer", parents: ["w"], receipt: { answer: "APPROVED\nGOAL: CONTINUE — docs" } },
-    { id: "retry", role: "retry", parents: ["lead"], receipt: { answer: "GOAL: ACHIEVED" } },
+    { id: "w", role: "worker", parents: ["lead"], receipt: { answer: "all done (a worker can't close it)" } },
+    { id: "rev", role: "reviewer", parents: ["w"], receipt: { answer: "APPROVED, docs missing" } },
+    { id: "retry", role: "retry", parents: ["lead"], receipt: { answer: "done" } },
   ] };
-  assert.deepEqual(closingAnswers(team), ["APPROVED\nGOAL: CONTINUE — docs"], "only the reviewer closes a team; workers and the retry sidecar don't");
-  assert.equal(goalVerdict(closingAnswers({ ...team, solo: true })), "continue");
-  assert.deepEqual(closingAnswers({ nodes: [{ id: "one", role: "planner", parents: [], receipt: { answer: "GOAL: ACHIEVED" } }] }), ["GOAL: ACHIEVED"]);
-  assert.match(goalPrompt("ship it", 2, 6), /^Continue pursuing the goal \(round 2 of 6\)[\s\S]*Goal: ship it[\s\S]*GOAL: ACHIEVED[\s\S]*GOAL: CONTINUE/);
+  assert.deepEqual(closingAnswers(team), ["APPROVED, docs missing"], "only the reviewer closes a team; workers and the retry sidecar don't");
+  assert.deepEqual(closingAnswers({ ...team, solo: true }), ["APPROVED, docs missing", "plan"]);
+  const transcript = roundTranscript("ship it", ["Built and tested; 40/40 pass."]);
+  assert.equal(transcript, "User:\nship it\n\nAssistant:\nBuilt and tested; 40/40 pass.");
+  assert.equal(roundTranscript("x", []), "User:\nx\n\nAssistant:\n(no final answer)");
+  const long = roundTranscript("x", ["a".repeat(30_000) + "THE END"]);
+  assert.ok(long.length <= 24_001 && long.endsWith("THE END"), "a long round keeps its end, where the conclusion is");
+  const prompt = goalCheckPrompt("make every test pass", transcript);
+  assert.match(prompt, /Condition: make every test pass/);
+  assert.match(prompt, /only from the transcript/);
+  assert.match(prompt, /Answer with JSON only: \{"met": true\|false, "reason"/);
+  assert.ok(prompt.endsWith(transcript));
+  // The evaluator's verdict.
+  assert.deepEqual(parseGoalCheck('{"met": true, "reason": "All 40 tests pass, shown in the output."}'), { met: true, reason: "All 40 tests pass, shown in the output." });
+  assert.deepEqual(parseGoalCheck('Sure.\n```json\n{"met": false,\n "reason": "Two tests   fail."}\n```'), { met: false, reason: "Two tests fail." });
+  assert.deepEqual(parseGoalCheck('{"met": false}'), { met: false, reason: "The condition is not met yet." });
+  assert.throws(() => parseGoalCheck("I think it is done."), /no verdict/);
+  assert.throws(() => parseGoalCheck('{"met": "yes"}'), /no verdict/);
 });
 
 test("goals are kept per chat in a file and survive a restart", () => {
@@ -2954,6 +3066,7 @@ test("goals are kept per chat in a file and survive a restart", () => {
     const again = createGoalStore({ file });
     assert.equal(again.get("ws-1", "task-1").objective, "make the build green");
     assert.equal(again.get("ws-1", "task-1").round, 2);
+    assert.equal(again.get("ws-1", "task-1").rounds, 0, "no round limit, as in Claude Code");
     assert.deepEqual(Object.keys(again.forWorkspace("ws-1")), ["task-1"]);
     assert.deepEqual(again.forWorkspace("ws-2"), {});
     assert.throws(() => again.set("ws-1", "task-2", "   "), /Describe your goal/);
@@ -2970,7 +3083,8 @@ test("/goal starts the chat's first round with the goal and keeps it for the cha
   const sent = await workflow.call("chat_send", { workspaceId: "ws-1", message: "make every test pass", goal: "make every test pass", executionMode: "single", singleRoute: route });
   assert.equal(sent.taskId, "task-1");
   assert.equal(world.tasks[0].title, "make every test pass", "the chat is named after the goal, not the round's instructions");
-  assert.match(world.tasks[0].description, /^Goal \(round 1 of 6\):\nGoal: make every test pass[\s\S]*GOAL: ACHIEVED/);
+  assert.match(world.tasks[0].description, /^make every test pass/, "the first round is the condition itself");
+  assert.doesNotMatch(world.tasks[0].description, /GOAL:/, "the agent is not asked to grade itself");
   const { goals } = await workflow.call("runs", { workspaceId: "ws-1" });
   assert.equal(goals["task-1"].objective, "make every test pass");
   assert.equal(goals["task-1"].status, "active");
@@ -2978,82 +3092,117 @@ test("/goal starts the chat's first round with the goal and keeps it for the cha
   await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", message: "x", goal: "   " }), /Describe your goal/);
 });
 
-/** A chat whose goal was set with its first round; tests push settled runs and call goalAfterRun. */
-async function goalChat() {
+/**
+ * A chat whose goal was set with its first round; tests push settled runs and call goalAfterRun.
+ * The goal evaluator (a CPA model) is a stand-in: met when the round's answer says "ALL DONE".
+ */
+async function goalChat({ evaluator = (prompt) => /ALL DONE/.test(prompt)
+  ? { met: true, reason: "The transcript shows every test passing." } : { met: false, reason: "Two tests still fail." } } = {}) {
   const world = chatWorld({ tasks: [{ id: "task-1", title: "Green build", description: "x", state: "in_progress", clauses: [] }], runs: [] });
+  const checks = [];
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/codex.exe",
-    resolveHarness: async () => { throw new Error("stop before the background loop"); } });
+    resolveHarness: async () => { throw new Error("stop before the background loop"); },
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
+    fetchImpl: async (url, init) => {
+      // The pool the chats' own models come from too (the next round checks its model is offered).
+      if (String(url).endsWith("/v1/models")) return { ok: true, json: async () => ({ data: [{ id: "gpt-6-luna" }, { id: "deepseek-v4" }, { id: "gemini-3-flash" }] }) };
+      const body = JSON.parse(init.body);
+      checks.push(body);
+      const verdict = evaluator(body.messages[0].content);
+      if (verdict instanceof Error) return { ok: false, status: 503, json: async () => ({}) };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(verdict) } }] }) };
+    } });
   await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "build green", goal: "build green" });
-  return { world, workflow };
+  return { world, workflow, checks };
 }
 const goalOf = async (workflow) => (await workflow.call("runs", { workspaceId: "ws-1" })).goals["task-1"];
 
 test("after a round without the goal achieved, the chat runs the next round with the same Single model", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default", effort: "max" };
-  const { world, workflow } = await goalChat();
+  const { world, workflow, checks } = await goalChat();
   world.runs.push({ id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
-    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { answer: "Fixed 3 of 5.\nGOAL: CONTINUE — 2 tests fail" } }] });
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { answer: "Fixed 3 of 5; the rest is done too." } }] });
   const updatesBefore = world.updates.length;
   await workflow.goalAfterRun("ws-1", "r1", "finished", null);
+  // A separate evaluator judged the round, not the agent's own word ("the rest is done too").
+  assert.equal(checks.length, 1);
+  assert.equal(checks[0].model, "gemini-3-flash", "a small, fast model, as Claude Code's evaluator");
+  assert.match(checks[0].messages[0].content, /Condition: build green[\s\S]*User:\nbuild green\n\nAssistant:\nFixed 3 of 5; the rest is done too\./);
   const next = world.updates.slice(updatesBefore);
   assert.equal(next.length, 1, "one new round");
   assert.equal(next[0].execution_mode, "single");
   assert.deepEqual(next[0].single_route, route, "the same Single model, effort and permissions");
-  assert.match(world.edits.at(-1).description, /Continue pursuing the goal \(round 2 of 6\)/);
+  assert.match(world.edits.at(-1).description, /Stop hook feedback:\n\[build green\]: Two tests still fail\./, "Claude Code's stop-hook feedback");
   const goal = await goalOf(workflow);
   assert.equal(goal.status, "active");
   assert.equal(goal.round, 2);
+  assert.equal(goal.feedback, "Two tests still fail.");
   // The same settled run is not evaluated twice.
   await workflow.goalAfterRun("ws-1", "r1", "finished", null);
   assert.equal(world.updates.length, updatesBefore + 1);
 });
 
-test("a team's goal round continues on the chat's team; an achieved, failed, stopped or spent goal stops", async () => {
+test("a team's goal round continues on the chat's team; an achieved, failed or stopped goal stops, and there is no round limit", async () => {
   const teamRun = (id, answer) => ({ id, workspace_id: "ws-1", project_id: "task-1", cancelled: false, team: { id: "team-1", revision: 7 }, nodes: [
     { id: "lead", role: "planner", parents: [], state: "finished", receipt: { answer: "plan" } },
     { id: "rev", role: "reviewer", parents: ["lead"], state: "finished", receipt: { answer } }] });
-  let { world, workflow } = await goalChat();
-  world.runs.push(teamRun("t1", "APPROVED\nGOAL: CONTINUE — docs"));
+  let { world, workflow, checks } = await goalChat();
+  world.runs.push(teamRun("t1", "APPROVED, docs missing"));
   const before = world.updates.length;
   await workflow.goalAfterRun("ws-1", "t1", "finished", null);
   assert.equal(world.updates.length, before + 1);
   assert.equal(world.updates.at(-1).operation, "create_from_team");
   assert.equal(world.updates.at(-1).team_id, "team-1", "the next round keeps the chat's team");
+  assert.match(checks[0].messages[0].content, /Assistant:\nAPPROVED, docs missing$/, "the reviewer's answer is what the evaluator reads");
 
   ({ world, workflow } = await goalChat());
-  world.runs.push(teamRun("t2", "APPROVED\nGOAL: ACHIEVED"));
+  world.runs.push(teamRun("t2", "APPROVED. ALL DONE: 40/40 tests pass."));
   await workflow.goalAfterRun("ws-1", "t2", "finished", null);
-  assert.equal((await goalOf(workflow)).status, "achieved");
+  const achieved = await goalOf(workflow);
+  assert.equal(achieved.status, "achieved");
+  assert.equal(achieved.note, "The transcript shows every test passing.", "the evaluator's reason is shown");
 
   for (const [status, attention, expected] of [["failed", "error", "stalled"], ["held", null, "stalled"], ["held", "stopped", "paused"]]) {
-    ({ world, workflow } = await goalChat());
+    ({ world, workflow, checks } = await goalChat());
     world.runs.push(teamRun("t3", "anything"));
     const count = world.updates.length;
     await workflow.goalAfterRun("ws-1", "t3", status, attention);
     assert.equal((await goalOf(workflow)).status, expected, `${status}/${attention}`);
     assert.equal(world.updates.length, count, "no new round");
+    assert.equal(checks.length, 0, "nothing to evaluate");
   }
 
+  // The evaluator cannot be reached: the goal waits instead of going round blind.
+  ({ world, workflow } = await goalChat({ evaluator: () => new Error("down") }));
+  world.runs.push(teamRun("t6", "anything"));
+  const quiet = world.updates.length;
+  await workflow.goalAfterRun("ws-1", "t6", "finished", null);
+  assert.equal((await goalOf(workflow)).status, "stalled");
+  assert.match((await goalOf(workflow)).note, /The goal could not be checked \(the evaluator returned HTTP 503\); \/goal resume tries again/);
+  assert.equal(world.updates.length, quiet);
+
   ({ world, workflow } = await goalChat());
-  // Spend every round: the goal stops as limited, and /goal resume allows more.
-  for (let round = 0; round < 10 && (await goalOf(workflow)).status === "active"; round++) {
-    world.runs.push(teamRun(`t4-${round}`, "GOAL: CONTINUE"));
+  // No round limit, as in Claude Code: it goes on until the condition holds, or the person stops it.
+  for (let round = 0; round < 10; round++) {
+    world.runs.push(teamRun(`t4-${round}`, "more to do"));
     await workflow.goalAfterRun("ws-1", `t4-${round}`, "finished", null);
   }
   let goal = await goalOf(workflow);
-  assert.equal(goal.status, "limited");
-  assert.equal(goal.round, 6);
-  const resumed = await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" });
-  assert.equal(resumed.goal.status, "active");
-  assert.equal(resumed.goal.rounds, 12, "resuming a spent goal allows as many rounds again");
-  assert.equal(resumed.goal.round, 7, "and starts the next round right away");
+  assert.equal(goal.status, "active");
+  assert.equal(goal.round, 11);
+  assert.equal(goal.rounds, 0);
   await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "edit", objective: "build green on CI" });
   assert.equal((await goalOf(workflow)).objective, "build green on CI");
-  assert.equal((await goalOf(workflow)).round, 7, "editing starts no round");
+  assert.equal((await goalOf(workflow)).round, 11, "editing starts no round");
   await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" });
   goal = await goalOf(workflow);
   assert.equal(goal.status, "paused");
-  world.runs.push(teamRun("t5", "GOAL: CONTINUE"));
+  const resumed = await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" });
+  assert.equal(resumed.goal.status, "active");
+  assert.equal(resumed.goal.round, 12, "resume starts the next round right away");
+  assert.match(world.edits.at(-1).description, /Stop hook feedback:\n\[build green on CI\]: Two tests still fail\./, "with the last feedback");
+  await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" });
+  world.runs.push(teamRun("t5", "more"));
   const paused = world.updates.length;
   await workflow.goalAfterRun("ws-1", "t5", "finished", null);
   assert.equal(world.updates.length, paused, "a paused goal starts no round");
@@ -3211,6 +3360,45 @@ test("/compact replaces a long chat's context with Codex's handoff summary; /dif
   assert.deepEqual([...diff.files], ["x"]);
 });
 
+test("Approve for me reviews a card's requests when its chat observes it, even with no run loop driving it", async () => {
+  // Seen live: a reviewer's routine `ao report --done` sat "awaiting review" for 33 hours: its run's
+  // loop had ended, and only a loop reviewed requests.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
+  const requests = [
+    { approval_id: "tests", source: "ao", kind: "command", command: "npm test", tool: "Bash", summary: "Bash", decisions },
+    { approval_id: "push", source: "ao", kind: "command", command: "git push origin main", tool: "Bash", summary: "Bash", decisions },
+  ];
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+    { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const resolved = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"allow","reason":"the project tests"}' } }] }) };
+    },
+    requestHeadless: async (endpoint) => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running",
+        approvals: requests.filter((request) => !resolved.some(([id]) => id === request.approval_id)) }),
+      resolveApproval: async (_session, requestId, decisionId) => { resolved.push([requestId, decisionId]); return { ok: true }; },
+    },
+  });
+  assert.equal((await workflow.call("run_status", { workspaceId: "ws", runId: "run" })).driven, false, "no loop drives it");
+  // The chat's approvals poll observes the card.
+  const seen = await workflow.call("observe", { workspaceId: "ws", runId: "run", nodeId: "one" });
+  assert.equal(seen.pending_approvals.length, 2, "the requests are shown as before");
+  for (let tries = 0; tries < 200 && resolved.length < 2; tries++) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(Object.fromEntries(resolved), { tests: "yes", push: "no" }, "reviewed and answered: allowed by the reviewer, git push refused by the safety rules");
+  // A second observe while nothing is left reviews nothing more.
+  await workflow.call("observe", { workspaceId: "ws", runId: "run", nodeId: "one" });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(resolved.length, 2);
+});
+
 test("a single AO card set to Approve for me has its parked tool requests reviewed and answered through AO", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
@@ -3258,7 +3446,8 @@ test("a single AO card set to Approve for me has its parked tool requests review
   assert.deepEqual(JSON.parse(JSON.stringify(resolved)).sort(), [["session-1", "push", "no"], ["session-1", "safe", "yes"]],
     "allowed once by the reviewer, git push denied by the hard rules, the unclear write left for the person; never an always-grant");
   assert.ok(advised.length >= 1 && advised.every(model => model === "test-model"), "the card's own CPA model reviews");
-  assert.equal(advised.length, 1, "the reviewer is asked only about the unclear write, never about the agent's question");
+  // Its "ask" gets one more review that must choose allow or deny; still undecided, the write waits.
+  assert.equal(advised.length, 2, "the reviewer is asked only about the unclear write (twice), never about the agent's question");
 });
 
 test("Approve for me is reviewed by codex-auto-review first, the card's model when CPA cannot serve it, and the person when neither answers", async () => {
@@ -3449,6 +3638,122 @@ test("Approve for me asks a reviewer that failed again before involving the pers
   mission.nodes[0].state = "finished";
 });
 
+test("Approve for me reviews complete scripts and leaves incomplete or failed reviews pending after 20 seconds", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once" }, { id: "no", kind: "reject_once" }];
+  const command = (`python -c "\n${"print(1)\n".repeat(27)}#`).padEnd(1490, "x") + '"';
+  assert.equal(command.length, 1491);
+  assert.equal(command.split("\n").length, 29);
+  const requests = [
+    { approval_id: "complete", command },
+    { approval_id: "truncated", command: "npm test", reviewTruncated: true },
+    { approval_id: "mcp-cut", kind: "permission", tool: "mcp__coding-tools__exec_command", toolInput: '{"cmd":"npm test"}', reviewTruncated: true },
+    { approval_id: "redacted", command: "python inspect.py fixture-secret" },
+    { approval_id: "oversized", command: "echo " + "x".repeat(25000) },
+    { approval_id: "unavailable", command: "python unavailable.py" },
+    { approval_id: "malformed", command: "python malformed.py" },
+  ].map(request => ({ source: "ao", kind: "command", tool: "PowerShell", since: "2000-01-01T00:00:00Z", decisions, ...request }));
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) },
+    nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "s", request_key: "k" } }] };
+  const resolved = [], prompts = [], events = [];
+  let observed = 0;
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-secret" }),
+    logger: { info: (event, detail) => events.push([event, detail]) },
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) };
+      const prompt = JSON.parse(init.body).messages[0].content;
+      prompts.push(prompt);
+      if (prompt.includes("unavailable.py")) return { ok: false, status: 503 };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: prompt.includes("malformed.py")
+        ? "not a decision" : '{"action":"allow","reason":"fixture-secret should never be logged"}' } }] }) };
+    },
+    requestHeadless: async endpoint => endpoint.endsWith("/read")
+      ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async () => { observed++; return { status: "working", turnId: "t", turnState: "running",
+        approvals: requests.filter(request => !resolved.some(([id]) => id === request.approval_id)) }; },
+      resolveApproval: async (_session, id, decision) => { resolved.push([id, decision]); return { ok: true }; },
+    },
+    confirm: async () => true,
+  });
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 300 && observed < 3; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(observed >= 3, "the stale-answer pass ran repeatedly");
+    assert.deepEqual(resolved, [["complete", "yes"]], "only the complete script received a reviewer decision");
+    assert.ok(prompts.some(prompt => prompt.includes(command)), "the reviewer sees the complete script");
+    assert.equal(prompts.length, 3, "actual truncation is not submitted as a complete review");
+    const decision = events.find(([event, detail]) => event === "ao.approval_decided" && detail.approval_id === "complete");
+    assert.ok(decision, "a successful decision records its actor");
+    assert.equal(decision[1].actor, "reviewer");
+    assert.equal(decision[1].decision, "allow");
+    assert.ok(!JSON.stringify(events).includes("fixture-secret"), "diagnostics omit model reasons and credentials");
+  } finally {
+    mission.nodes[0].state = "finished";
+    workflow.dispose();
+  }
+});
+
+test("a review that keeps hanging still hands its request to the person at the deadline from its first try", async () => {
+  let clock = Date.parse("2026-10-21T12:00:00Z");
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
+  const request = { approval_id: "hung", source: "ao", kind: "permission", tool: "Write", path: "C:/elsewhere/hung",
+    since: new Date(clock).toISOString(), decisions };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+    { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+  let reviews = 0;
+  const hung = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) };
+      reviews++;
+      // The reviewer does not answer until the test ends.
+      return new Promise(resolve => hung.push(() => resolve({ ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"deny","reason":"fixture"}' } }] }) })));
+    },
+    requestHeadless: async endpoint => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+      if (endpoint.endsWith("/harness/status")) return { ok: true, status: { connected: false } };
+      return { ok: true, run: mission };
+    },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: [request] }),
+      resolveApproval: async () => ({ ok: true }),
+    },
+    confirm: async () => true,
+  });
+  const shown = async () => (await workflow.call("harness_status", { workspaceId: "ws", runId: "run", nodeId: "one" })).status?.pending_approvals?.[0];
+  const waitFor = async (check) => { for (let tries = 0; tries < 500 && !check(); tries++) await new Promise(resolve => setTimeout(resolve, 10)); };
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    await waitFor(() => reviews >= 1);
+    assert.equal(reviews, 1, "the review began");
+    // The pass hangs; once it is stale a later pass starts the review again.
+    clock += 128_000;
+    await waitFor(() => reviews >= 2);
+    assert.equal(reviews, 2, "a later pass tried again");
+    assert.equal((await shown()).awaiting_review, undefined,
+      "past the deadline from the first try the person sees it, though a new try just began");
+  } finally {
+    for (const release of hung) release();
+    mission.nodes[0].state = "finished";
+    for (let tries = 0; tries < 100; tries++) {
+      if ((await workflow.call("run_status", { workspaceId: "ws", runId: "run" })).status !== "running") break;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    workflow.dispose();
+  }
+});
+
 test("Approve for me answers what the safety rules or its reviewer decide, and leaves a reviewer's ask to the person", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
@@ -3456,7 +3761,7 @@ test("Approve for me answers what the safety rules or its reviewer decide, and l
   // Each has waited far longer than the 20 s after which nobody answering lets the agent go on.
   const since = "2000-01-01T00:00:00.000Z";
   const requests = [
-    // Longer than the rules and the reviewer read: git push sits past the cut.
+    // Longer than the reviewer reads, but the safety rules read the whole command: git push past the cut is refused.
     { approval_id: "long", source: "ao", kind: "command", tool: "Bash", command: `echo ${"x".repeat(1600)} && git push origin main`, since, decisions },
     // An MCP tool's arguments arrive as JSON, where the newline before git push reads "\n".
     { approval_id: "json", source: "ao", kind: "permission", tool: "mcp__coding-tools__exec_command",
@@ -3500,11 +3805,11 @@ test("Approve for me answers what the safety rules or its reviewer decide, and l
     for (let tries = 0; tries < 300 && !answered().json; tries++) await new Promise(resolve => setTimeout(resolve, 10));
     // Several more passes of the run loop, long after the old 20 s answer would have fired.
     await new Promise(resolve => setTimeout(resolve, 1500));
-    assert.deepEqual(answered(), { json: "no" },
-      "git push in JSON is refused by the safety rules; the cut-off script and the plain request, left at ask, wait for the person");
+    assert.deepEqual(answered(), { long: "no", json: "no" },
+      "git push is refused by the safety rules, past the review's cut or in JSON; the plain request, left at ask, waits for the person");
     const shown = (await workflow.call("harness_status", { workspaceId: "ws", runId: "run", nodeId: "one" })).status?.pending_approvals ?? [];
-    assert.deepEqual([...shown.filter((request) => !request.awaiting_review).map((request) => request.approval_id)].sort(), ["long", "plain"],
-      "both show to the person as questions");
+    assert.deepEqual([...shown.filter((request) => !request.awaiting_review).map((request) => request.approval_id)].sort(), ["plain"],
+      "the plain request shows to the person as a question");
     releaseSlow("deny");
     for (let tries = 0; tries < 300 && !answered().slow; tries++) await new Promise(resolve => setTimeout(resolve, 10));
     assert.equal(answered().slow, "no", "the reviewer still on a request answers it; nobody allowed it meanwhile");
@@ -3675,6 +3980,8 @@ test("steering hands the message to the running AO agent and notes it in the cha
   const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "use pnpm, not npm" });
   assert.equal(result.steered, true);
   assert.deepEqual(steered, [["sess-1", "use pnpm, not npm"]]);
+  // The note is written after replying (the reply no longer waits on it).
+  for (let tick = 0; tick < 100 && !world.edits.length; tick += 1) await new Promise((resolve) => setImmediate(resolve));
   assert.match(world.edits[0].description, /^first ask\n\n↳ Steer \([^)]+ UTC\): use pnpm, not npm$/);
   ended = true;
   assert.equal((await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "late" })).steered, false,
@@ -4091,7 +4398,8 @@ test("a card stopped while its agent launched also stops that agent once its ses
     aoHarness: {
       // The user stops the card while AO is still launching its agent.
       spawn: async () => { mission.cancelled = true; mission.nodes[0].state = "cancelled"; return "late-session"; },
-      interrupt: async (id) => { interrupted.push(id); },
+      interrupt: async () => {},
+      exitAgent: async (id) => { interrupted.push(id); return { ok: true }; },
       observe: async () => ({ status: "idle", turnState: "completed" }),
     },
   });
@@ -4432,16 +4740,63 @@ test("a project has one warm start in flight at a time; the latest model picked 
   starts[1](); starts[2]();
 });
 
-test("a send does not wait for its model's warm session that is still starting, and no warm start begins beside a launch", async () => {
+test("a send waits for its model's warm session that is still starting instead of starting a second agent beside it", async () => {
+  // Seen live: the warm start was 5 s old when the message was sent; the launch started its own
+  // beside it and both took over a minute on a busy machine, where one alone took 20 s.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  const { request } = launchWorld(route);
+  const spawned = [], sent = [], logs = [];
+  let finishWarm = null;
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: request, findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    logger: { info: (event, fields) => logs.push([event, fields]) },
+    aoHarness: {
+      spawn: input => {
+        spawned.push(input);
+        return input.warm ? new Promise(resolve => { finishWarm = () => resolve("warm-1"); }) : Promise.resolve("fresh-1");
+      },
+      continuable: async () => true,
+      send: async (id, text, key) => { sent.push([id, text, key]); return { turnId: "turn-1", state: "running" }; },
+      observe: async (id, expected) => ({ status: "idle", turnId: expected, turnState: "completed", answer: "fixed" }),
+      warmSessions: async () => [],
+      kill: async () => ({ ok: true }),
+    },
+  });
+  await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route });
+  await until(() => spawned.length === 1);
+  await workflow.call("chat_send", { workspaceId: "ws-1", message: "fix the login", executionMode: "single", singleRoute: route });
+  await tick();
+  assert.equal(spawned.length, 1, "no second agent starts beside the warm one");
+  // While the launch waits, picking another model starts nothing in this project either.
+  assert.equal((await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: { ...route, model: "cpa/other-model" } })).warmed, false);
+  finishWarm();
+  await until(() => sent.length === 1);
+  assert.equal(sent[0][0], "warm-1", "the message is the warm session's first turn");
+  assert.equal(sent[0][1], "fix the login");
+  assert.equal(spawned.length, 1);
+  assert.ok(logs.some(([event, fields]) => event === "ao.warm" && fields.event === "waited"), "the wait is logged");
+  await until(() => logs.some(([event]) => event === "ao.launch_timing"));
+  assert.equal(logs.find(([event]) => event === "ao.launch_timing")[1].via, "warm");
+  workflow.dispose();
+});
+
+test("a send stops waiting for a warm start past its budget and starts its own; no warm start begins beside a launch", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
   const { request } = launchWorld(route);
   const spawned = [], sent = [], logs = [];
   let finishWarm = null, finishLaunch = null;
+  const timers = [];
   const workflow = createAgentOrchestratorWorkflow({
     requestHeadless: request, findCodexExecutable: () => process.execPath,
     resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
     logger: { info: (event, fields) => logs.push([event, fields]) },
+    // Timers run only when the test fires them: the warm start's budget runs out on cue.
+    setTimer: (callback, delay) => { const timer = { callback, delay, cleared: false }; timers.push(timer); return timer; },
+    clearTimer: timer => { if (timer) timer.cleared = true; },
+    releaseIdleAgents: false,
     aoHarness: {
       spawn: input => {
         spawned.push(input);
@@ -4458,10 +4813,14 @@ test("a send does not wait for its model's warm session that is still starting, 
   await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route });
   await until(() => spawned.length === 1);
   assert.equal(spawned[0].warm, true);
-  // The warm session is still starting when the message is sent: the launch starts its own at once.
+  // The warm session is still starting when the message is sent, and stays stuck: once its budget
+  // runs out the launch starts its own.
   await workflow.call("chat_send", { workspaceId: "ws-1", message: "fix the login", executionMode: "single", singleRoute: route });
+  await until(() => timers.some(timer => !timer.cleared && timer.delay > 40_000 && timer.delay <= 45_000));
+  assert.equal(spawned.length, 1, "the launch waits for the warm start first");
+  timers.find(timer => !timer.cleared && timer.delay > 40_000 && timer.delay <= 45_000).callback();
   await until(() => spawned.length === 2);
-  assert.equal(spawned.length, 2, "the launch did not wait for the warm start");
+  assert.equal(spawned.length, 2, "past the budget the launch starts its own");
   assert.equal(spawned[1].warm, undefined);
   assert.equal(spawned[1].prompt, "fix the login");
   assert.deepEqual(sent, [], "the unready warm session never takes the message");
@@ -4672,13 +5031,14 @@ test("an agent's request answered in the chat is confirmed by the tool-request c
   const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) },
     nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1" } }] };
   const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
-  const resolved = [], general = [], toolRequests = [];
+  const resolved = [], general = [], toolRequests = [], events = [];
   let answer = true;
   const workflow = createAgentOrchestratorWorkflow({
     requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } }
       : endpoint.endsWith("/harness/status") ? { ok: true, status: { connected: false } } : { ok: true, run: mission },
     confirm: async input => { general.push(input.message); return true; },
     confirmToolRequest: async input => { toolRequests.push(input.message); return answer; },
+    logger: { info: (event, detail) => events.push([event, detail]) },
     aoHarness: {
       observe: async () => ({ status: "needs_input", turnState: "running", approvals: [{ approval_id: "req", source: "ao", kind: "command", tool: "PowerShell",
         command: "git status", decisions }] }),
@@ -4693,6 +5053,8 @@ test("an agent's request answered in the chat is confirmed by the tool-request c
   assert.deepEqual(resolved, ["yes", "no"]);
   answer = false;
   assert.equal((await workflow.call("approve_harness", { ...input, allow: true })).cancelled, true, "Cancel in that dialog answers nothing");
+  assert.deepEqual(events, [["ao.approval_decided", { approval_id: "req", actor: "user", decision: "allow" }],
+    ["ao.approval_decided", { approval_id: "req", actor: "user", decision: "deny" }]], "only confirmed successful user decisions are recorded");
   assert.deepEqual(resolved, ["yes", "no"]);
 });
 
@@ -4720,6 +5082,30 @@ test("a model picked mid-chat is what Retry and the next goal round run on, neve
   assert.equal(next.length, 1);
   assert.equal(next[0].execution_mode, "single");
   assert.deepEqual(next[0].single_route, picked, "the next round uses the newly picked model");
+});
+
+test("Approve for me: reading a file the person attached needs no review; reading anywhere else outside the project still does", () => {
+  // Seen live: an attached screenshot, handed to the agent by its path, was "outside the workspace
+  // folder" to the reviewer, which denied the read; the agent never saw the image.
+  // The host's own absolute paths (the CI runs this on Linux and macOS too).
+  const app = path.resolve(path.sep, "ct-app-data");
+  const attachments = path.join(app, "chat-attachments");
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }), findCodexExecutable: () => "C:/codex.exe", chatAttachmentsDir: attachments });
+  // A native request as pendingApprovals builds it: the file in `path`, no toolInput.
+  const native = (tool, file) => workflow.attachedFileRead({ kind: "permission", tool, path: file });
+  const read = (tool, input) => workflow.attachedFileRead({ kind: "permission", tool, toolInput: JSON.stringify(input) });
+  const shot = path.join(attachments, "2026-10-21", "image-ab863fa4.png");
+  assert.ok(native("Read", shot), "Claude's own Read of an attachment");
+  assert.ok(native("read", shot), "named by its ACP kind");
+  assert.ok(native(`Read ${shot}`, shot), "named by its summary");
+  assert.ok(read("mcp__coding-tools__view_image", { path: path.join(attachments, "2026-10-21", "shot.png") }), "the app's image view");
+  assert.equal(native("Read", path.join(app, "settings.json")), null, "not the app's other files");
+  assert.equal(native("Read", `${attachments}${path.sep}..${path.sep}secrets.json`), null, "no way out of the folder");
+  assert.equal(native("Write", path.join(attachments, "x.png")), null, "only reads");
+  assert.equal(native("Read", "image.png"), null, "an absolute path only");
+  assert.equal(workflow.attachedFileRead({ kind: "command", tool: "Read", path: shot }), null, "never a command");
+  const without = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }), findCodexExecutable: () => "C:/codex.exe" });
+  assert.equal(without.attachedFileRead({ tool: "Read", toolInput: JSON.stringify({ file_path: path.join(attachments, "a.png") }) }), null, "no folder given, no exception");
 });
 
 test("Approve for me: the chat's preview tools and routine commands through the app's terminal pass; anything else asks", () => {
@@ -4808,7 +5194,7 @@ test("a delayed Stop cannot interrupt a newer run that reused the stopped sessio
         if (endpoint.endsWith("/control")) { old.cancelled = true; old.nodes[0].state = "cancelled"; old.nodes[0].receipt.status = "held"; old.updated_at = Date.now(); return { ok: true, run: structuredClone(old) }; }
         throw new Error("unexpected " + endpoint);
       },
-      aoHarness: { interrupt: async () => { interrupted.push(turn); working = false; },
+      aoHarness: { exitAgent: async () => ({ ok: true }), interrupt: async () => { interrupted.push(turn); working = false; },
         observe: async () => ({ turnId: turn, turnState: working ? "running" : "interrupted", status: working ? "working" : "ready" }) },
     };
     try {
@@ -4846,7 +5232,7 @@ test("Stop respects session transfer before the newer dispatch receipt is saved"
       if (endpoint.endsWith("/external/submitted")) { submitted(); await hold; next.nodes[0].state = "running"; next.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run: structuredClone(next) }; }
       throw new Error("unexpected " + endpoint);
     },
-    aoHarness: { spawn: async () => { turn = "turn-b"; working = true; return "shared"; },
+    aoHarness: { exitAgent: async () => ({ ok: true }), spawn: async () => { turn = "turn-b"; working = true; return "shared"; },
       interrupt: async () => { interrupted.push(turn); working = false; },
       observe: async () => ({ turnId: turn, turnState: working ? "running" : "interrupted", status: working ? "working" : "ready" }) },
   });
@@ -4893,7 +5279,7 @@ test("a continued chat waits for an owned Stop's observation and claims its sess
       }
       return world.requestHeadless(endpoint, body, options);
     },
-    aoHarness: { continuable: async () => true,
+    aoHarness: { exitAgent: async () => ({ ok: true }), continuable: async () => true,
       send: async () => { sendCount++; turn = "turn-b"; sendStarted(); await sendGate; return { turnId: "turn-b" }; },
       spawn: async () => { throw new Error("a continuation must reuse its session"); },
       interrupt: async () => { interrupted.push(turn); },
@@ -4974,7 +5360,7 @@ test("team Stop and graph replacement require observed settlement after an inter
     const route = { harness_id: "ao:claude-code", model: "fixture" };
     const mission = { id: "run", workspace_id: "ws", revision: 3, nodes: [{ id: "one", state: "running", role: "planner", parents: [], route,
       receipt: { thread_id: "s1", status: "submitted" } }] };
-    let reads = 0, remainingBusy = Infinity, updates = 0;
+    let reads = 0, remainingBusy = Infinity, updates = 0, signalled = false;
     const interrupted = [];
     const workflow = createAgentOrchestratorWorkflow({
       setTimer: (callback, ms) => ms === 250 ? setImmediate(callback) : setTimeout(callback, ms),
@@ -4984,20 +5370,21 @@ test("team Stop and graph replacement require observed settlement after an inter
         if (endpoint.endsWith("/update")) { updates++; mission.nodes[0].state = "pending"; return { ok: true, run: structuredClone(mission) }; }
         throw new Error("unexpected " + endpoint);
       },
-      aoHarness: { interrupt: async id => { interrupted.push(id); },
-        observe: async () => { reads++; return { turnState: "interrupted", status: remainingBusy-- > 0 ? "working" : "ready" }; } },
+      aoHarness: { exitAgent: async () => ({ ok: true }), interrupt: async id => { interrupted.push(id); signalled = true; },
+        observe: async () => { reads++; return { turnState: "interrupted", status: !signalled || remainingBusy-- > 0 ? "working" : "ready" }; } },
     });
-    const invoke = () => action === "stop"
+    const invoke = () => { signalled = false; return action === "stop"
       ? workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" })
-      : workflow.call("update_run", { workspaceId: "ws", change: { operation: "graph", run_id: "run", expected_revision: 3, change: { operation: "set_parents", node_id: "one", parents: [] } } });
+      : workflow.call("update_run", { workspaceId: "ws", change: { operation: "graph", run_id: "run", expected_revision: 3, change: { operation: "set_parents", node_id: "one", parents: [] } } }); };
     try {
       await assert.rejects(invoke(), /still working|settlement.*unconfirmed/i, "ACK alone is insufficient");
-      assert.equal(reads, 8, "settlement checks are bounded");
+      // 60 settlement checks: 15 s at 250 ms (it was 8, 2 s, which gave up on interrupts that land later).
+      assert.equal(reads, action === "stop" ? 61 : 60, "one optional exited-host preflight plus bounded settlement checks");
       assert.equal(updates, 0, "a live attempt cannot be replaced");
       assert.deepEqual(interrupted, ["s1"]);
       remainingBusy = 2; reads = 0;
       assert.equal((await invoke()).ok, true);
-      assert.equal(reads, 3, "success waits until the terminal turn's busy status clears");
+      assert.equal(reads, action === "stop" ? 4 : 3, "success waits until the terminal turn's busy status clears");
       assert.equal(updates, action === "rewire" ? 1 : 0);
     } finally { workflow.dispose(); }
   });
@@ -5056,7 +5443,7 @@ test("Stop interrupts external receipts after the engine has marked their nodes 
       }
       throw new Error("unexpected " + endpoint);
     },
-    aoHarness: { interrupt: async id => { interrupted.push(id); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
+    aoHarness: { exitAgent: async () => ({ ok: true }), interrupt: async id => { interrupted.push(id); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
   });
   try {
     assert.equal((await workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" })).ok, true);
@@ -5076,7 +5463,7 @@ test("Stop attempts every owned agent and reports an unconfirmed interrupt", asy
       if (endpoint.endsWith("/read")) return { ok: true, runs: [structuredClone(mission)] };
       throw new Error("unexpected " + endpoint);
     },
-    aoHarness: { interrupt: async id => { interrupted.push(id); if (id === "s1") throw new Error("fixture stop unavailable"); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
+    aoHarness: { exitAgent: async () => ({ ok: true }), interrupt: async id => { interrupted.push(id); if (id === "s1") throw new Error("fixture stop unavailable"); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
   });
   try {
     await assert.rejects(workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" }), /fixture stop unavailable/);
@@ -5131,6 +5518,7 @@ test("a late abandoned launch reports cancellation failure instead of claiming i
     },
     confirm: async () => true,
     aoHarness: { spawn: async () => { mission.cancelled = true; mission.nodes[0].state = "cancelled"; return "late-session"; },
+      observe: async () => ({ exited: false, turnState: "running", status: "working" }),
       interrupt: async () => { throw new Error("fixture stop unavailable"); } },
   });
   try {
@@ -5161,7 +5549,7 @@ test("a local Stop cancels a late submitted session even when native cancellatio
       }
       return { ok: true, run: structuredClone(mission) };
     },
-    aoHarness: { spawn: async () => { spawnStarted(); return session; }, interrupt: async id => { interrupted.push(id); },
+    aoHarness: { exitAgent: async () => ({ ok: true }), spawn: async () => { spawnStarted(); return session; }, interrupt: async id => { interrupted.push(id); },
       observe: async () => ({ status: "idle", turnState: "interrupted" }) },
   });
   try {
@@ -5190,12 +5578,12 @@ test("Stop interrupts the run's working agents even when the service refuses the
       if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], teams: [], worker_capacity: {} };
       return { ok: true };
     },
-    aoHarness: { interrupt: async id => { interrupted.push(id); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
+    aoHarness: { exitAgent: async () => ({ ok: true }), interrupt: async id => { interrupted.push(id); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
     confirm: async () => true,
   });
   const stopped = await workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" });
   assert.equal(stopped.ok, true);
-  assert.deepEqual(interrupted, ["session-1"], "only the working agent is interrupted");
+  assert.deepEqual(interrupted, ["session-1"], "only working turns are interrupted; completed hosts are released separately");
   // Other controls still report the refusal.
   await assert.rejects(workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "pause" }), /revision changed/);
   // A run the service does not know either is not pretended stopped.
@@ -5267,10 +5655,548 @@ test("a dated DeepSeek V4.1 Flash build from Cline Pass takes the same effort le
       { id: "cline-pass/deepseek-v4.1-flash", owned_by: "cline" },
       { id: "cline-pass/deepseek-v4.1-flash-1017", owned_by: "cline" },
       { id: "cline-pass/kimi-k3", owned_by: "cline" },
+      // CPA's catalog lists "none" and "ultra" for some; GLM refused the one, OpenRouter the other.
+      { id: "cline-pass/glm-5.3-flash", owned_by: "cline", supported_reasoning_levels: [{ effort: "low" }, { effort: "ultra" }] },
+      { id: "commandcode-go/glm-5.3-flash", owned_by: "commandcode-go" },
+      // Antigravity's Claude: CPA lists no levels, yet the suffix turns its thinking on.
+      { id: "claude-sonnet-4-6", owned_by: "antigravity" },
     ] }) }),
   });
   const { capabilities } = await workflow.call("models", {});
   assert.deepEqual(capabilities["cline-pass/deepseek-v4.1-flash-1017"].efforts, ["none", "low", "high", "max"]);
   assert.deepEqual(capabilities["cline-pass/deepseek-v4.1-flash"].efforts, ["none", "low", "high", "max"]);
-  assert.deepEqual(capabilities["cline-pass/kimi-k3"].efforts, [], "another Cline model still passes its name unchanged");
+  // Seen live: GLM 5.3 Flash's effort chip stayed greyed at "Auto". Plugin 0.1.0-codingtools.4 takes
+  // OpenRouter's levels for every other Cline Pass model.
+  const openRouter = ["minimal", "low", "medium", "high", "xhigh", "max"];
+  assert.deepEqual(capabilities["cline-pass/kimi-k3"].efforts, openRouter);
+  assert.deepEqual(capabilities["cline-pass/glm-5.3-flash"].efforts, openRouter, "not CPA's none/ultra");
+  assert.equal(capabilities["cline-pass/glm-5.3-flash"].effortReason, undefined);
+  assert.deepEqual(capabilities["commandcode-go/glm-5.3-flash"].efforts, ["none", "low", "medium", "high", "max"],
+    "Command Code's plugin 1.0.0-codingtools.2 reads the suffix");
+  assert.deepEqual(capabilities["claude-sonnet-4-6"].efforts, ["low", "medium", "high", "max"]);
+});
+
+test("a Cline Pass or Command Code model's picked effort reaches CPA as its suffix", async () => {
+  // Plugin 0.1.0-codingtools.4 turns the suffix into the request's reasoning_effort for every Cline
+  // model. Before, only DeepSeek V4.1 Flash took one, and the app sent GLM 5.3 Flash none.
+  const spawned = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: chatWorld({ tasks: [], runs: [] }).requestHeadless,
+    aoHarness: { spawn: async input => { spawned.push(input.model); return `warm-${spawned.length}`; }, warmSessions: async () => [] } });
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local" };
+  const warm = async (model, effort) => {
+    const before = spawned.length;
+    await workflow.call("chat_prewarm", { workspaceId: `ws-${model}`, executionMode: "single", singleRoute: { ...route, model, effort } });
+    for (let tries = 0; tries < 50 && spawned.length === before; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    return spawned.at(-1);
+  };
+  assert.equal(await warm("cpa/cline-pass/glm-5.3-flash", "medium"), "cline-pass/glm-5.3-flash(medium)");
+  assert.equal(await warm("cpa/cline-pass/deepseek-v4.1-flash", "max"), "cline-pass/deepseek-v4.1-flash(max)");
+  assert.equal(await warm("cpa/commandcode-go/glm-5.3-flash", "high"), "commandcode-go/glm-5.3-flash(high)");
+  // Another plugin's model with no known level still goes by its bare name.
+  assert.equal(await warm("cpa/grok/grok-5", "high"), "grok/grok-5");
+  workflow.dispose();
+});
+
+test("\"Retry automatically\" retries a failed step by itself once its pause is over, with no click", async () => {
+  // The run stopped on the first pass after the failure ("No card is ready"), so the countdown it
+  // showed never ended and the failed step waited for a click after all.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", cancelled: false,
+    grant: { executable_sha256: "a".repeat(64), expires_at_ms: Date.now() + 3_600_000 },
+    nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, history: [], receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const controls = [];
+  let clock = 1_000_000;
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "test-model" }] }) }),
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+      if (endpoint === "/api/v1/ao/control") {
+        controls.push(body.action);
+        // AO retries the step; here it finishes at once, which settles the run.
+        mission.nodes[0] = { ...mission.nodes[0], state: "finished", history: [{ error: "launch timed out" }] };
+        mission.revision++;
+      }
+      return { ok: true, run: mission };
+    },
+    aoHarness: { observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: [] }) },
+    confirm: async () => true,
+  });
+  await workflow.call("chat_auto_retry", { enabled: true });
+  await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  const status = () => workflow.call("run_status", { workspaceId: "ws", runId: "run" });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    // The launch fails: AO holds the step.
+    mission.nodes[0] = { ...mission.nodes[0], state: "held", receipt: { ...mission.nodes[0].receipt, error: "launch timed out" } };
+    let detail = "";
+    for (let tries = 0; tries < 100 && !/Retrying automatically in/.test(detail); tries++) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+      detail = String((await status()).detail ?? "");
+    }
+    assert.match(detail, /Retrying automatically in \d+s \(attempt 1 of 3\)/);
+    await new Promise(resolve => setTimeout(resolve, 600));
+    assert.deepEqual(controls, [], "nothing is retried before the pause is over");
+    clock += 11_000;
+    for (let tries = 0; tries < 200 && !controls.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(controls, ["retry"], "the failed step was retried by itself");
+  } finally {
+    mission.nodes[0].state = "finished";
+    for (let tries = 0; tries < 100 && (await status()).status === "running"; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  }
+});
+test("\"Retry automatically\" also restarts a chat whose run ended on an error, within the attempt limit", async () => {
+  // A launch that timed out threw out of the run before the failed step was looked at, so nothing
+  // was left to retry it.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
+  function setup(history) {
+    const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", cancelled: false,
+      grant: { executable_sha256: "a".repeat(64), expires_at_ms: Date.now() + 3_600_000 },
+      nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, history, receipt: { thread_id: "session-1", request_key: "k" } }] };
+    const controls = [], timers = [];
+    let lost = false;
+    const workflow = createAgentOrchestratorWorkflow({
+      // Only the auto-retry pauses (10 s per attempt); other timers are not this test's.
+      setTimer: (fn, ms) => { if ([10_000, 20_000, 30_000].includes(ms)) timers.push({ fn, ms }); return { unref() {} }; },
+      findCodexExecutable: () => process.execPath,
+      resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+      cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+      fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "test-model" }] }) }),
+      requestHeadless: async (endpoint, body) => {
+        if (endpoint.endsWith("/read")) {
+          if (lost) { lost = false; return { ok: true, runs: [], worker_capacity: { run: 1 } }; }
+          return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+        }
+        if (endpoint === "/api/v1/ao/control") {
+          controls.push(body.action);
+          mission.nodes[0] = { ...mission.nodes[0], state: "finished" };
+          mission.revision++;
+        }
+        return { ok: true, run: mission };
+      },
+      aoHarness: { observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: [] }) },
+      confirm: async () => true,
+    });
+    const fail = () => {
+      mission.nodes[0] = { ...mission.nodes[0], state: "held", receipt: { ...mission.nodes[0].receipt, error: "launch timed out" } };
+      lost = true; // the next read fails, ending the run on an error
+    };
+    return { workflow, mission, controls, timers, fail };
+  }
+  const settle = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+  const first = setup([]);
+  await first.workflow.call("chat_auto_retry", { enabled: true });
+  await first.workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  await settle(100);
+  first.fail();
+  for (let tries = 0; tries < 200 && !first.timers.length; tries++) await settle(10);
+  assert.deepEqual(first.timers.map(timer => timer.ms), [10_000], "a restart is scheduled after the first pause");
+  first.timers[0].fn();
+  for (let tries = 0; tries < 200 && !first.controls.length; tries++) await settle(10);
+  assert.deepEqual(first.controls, ["retry"]);
+
+  // A second failure waits longer, as autoRetryStep's countdown does.
+  const second = setup([{}]);
+  await second.workflow.call("chat_auto_retry", { enabled: true });
+  await second.workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  await settle(100);
+  second.fail();
+  for (let tries = 0; tries < 200 && !second.timers.length; tries++) await settle(10);
+  assert.deepEqual(second.timers.map(timer => timer.ms), [20_000], "the pause grows with each attempt");
+  second.mission.nodes[0].state = "finished";
+
+  // A backend replaced during the pause (dispose) never restarts the run through its old harness.
+  const replaced = setup([]);
+  await replaced.workflow.call("chat_auto_retry", { enabled: true });
+  await replaced.workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  await settle(100);
+  replaced.fail();
+  for (let tries = 0; tries < 200 && !replaced.timers.length; tries++) await settle(10);
+  assert.equal(replaced.timers.length, 1);
+  replaced.workflow.dispose();
+  replaced.timers[0].fn();
+  await settle(200);
+  assert.deepEqual(replaced.controls, [], "a disposed backend starts nothing");
+  replaced.mission.nodes[0].state = "finished";
+
+  // Its third retry already used: the limit holds, and the step waits for the person.
+  const spent = setup([{}, {}, {}]);
+  await spent.workflow.call("chat_auto_retry", { enabled: true });
+  await spent.workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  await settle(100);
+  spent.fail();
+  await settle(300);
+  assert.deepEqual(spent.timers, [], "no restart is scheduled past the limit");
+  assert.deepEqual(spent.controls, [], "no retry past the limit");
+  spent.mission.nodes[0].state = "finished";
+});
+
+test("Stop releases owned completed hosts and descendants without touching a newer owner", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const mission = { id: "old", workspace_id: "ws", nodes: [
+    { id: "one", state: "finished", route, receipt: { thread_id: "idle", request_key: "k1", status: "completed" } },
+    { id: "two", state: "finished", route, receipt: { thread_id: "reused", request_key: "k2", status: "completed" } },
+  ] };
+  const newer = { id: "new", workspace_id: "ws", nodes: [
+    { id: "next", state: "running", route, receipt: { thread_id: "reused", request_key: "k3" } },
+  ] };
+  const exited = [], children = [], interrupted = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async endpoint => ({ ok: true, ...(endpoint.endsWith("/read") ? { runs: [mission, newer] } : { run: mission }) }),
+    aoHarness: { exitAgent: async id => { exited.push(id); return { ok: true }; },
+      interrupt: async id => { interrupted.push(id); }, observe: async () => ({ turnState: "completed", status: "ready" }) },
+    subagents: { stopParent: async id => { children.push(id); } },
+  });
+  try {
+    await workflow.call("control_run", { workspaceId: "ws", runId: "old", action: "stop" });
+    assert.deepEqual(exited, ["idle"]);
+    assert.deepEqual(children, ["idle"]);
+    assert.deepEqual(interrupted, [], "completed turns need no interrupt");
+    assert.equal(newer.nodes[0].state, "running");
+  } finally { workflow.dispose(); }
+});
+
+test("Stop never releases a replacement receipt returned after its captured identity", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const mission = { id: "run", workspace_id: "ws", nodes: [
+    { id: "one", state: "running", route, receipt: { thread_id: "before", request_key: "k1" } },
+  ] };
+  const touched = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async endpoint => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [structuredClone(mission)] };
+      mission.nodes[0].state = "cancelled";
+      mission.nodes[0].receipt = { thread_id: "replacement", request_key: "k2" };
+      return { ok: true, run: structuredClone(mission) };
+    },
+    aoHarness: { exitAgent: async id => { touched.push(id); return { ok: true }; },
+      interrupt: async id => { touched.push(id); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
+    subagents: { stopParent: async id => { touched.push(id); } },
+  });
+  try {
+    await assert.rejects(workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" }), /identity changed/);
+    assert.deepEqual(touched, []);
+  } finally { workflow.dispose(); }
+});
+
+test("Stop attempts every owned host and descendant while reporting shutdown failures", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const mission = { id: "run", workspace_id: "ws", nodes: ["one", "two"].map(id =>
+    ({ id, state: "running", route, receipt: { thread_id: id, request_key: id } })) };
+  const exited = [], children = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async endpoint => ({ ok: true, ...(endpoint.endsWith("/read") ? { runs: [mission] } : { run: mission }) }),
+    aoHarness: { interrupt: async () => {}, observe: async () => ({ turnState: "interrupted", status: "ready" }),
+      exitAgent: async id => { exited.push(id); if (id === "one") throw new Error("host shutdown failed"); return { ok: true }; } },
+    subagents: { stopParent: async id => { children.push(id); if (id === "two") throw new Error("child shutdown failed"); } },
+  });
+  try {
+    await assert.rejects(workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" }), /host shutdown failed|child shutdown failed/);
+    assert.deepEqual(exited.sort(), ["one", "two"]);
+    assert.deepEqual(children.sort(), ["one", "two"]);
+  } finally { workflow.dispose(); }
+});
+
+function workflowInternals(options) {
+  // Test-only access to existing closures; production exposes no additional API.
+  const filename = path.join(__dirname, "../electron/agent-orchestrator-workflow.cjs");
+  const Module = require("node:module");
+  const fixture = new Module(filename, module);
+  fixture.filename = filename;
+  fixture.paths = module.paths;
+  const source = fs.readFileSync(filename, "utf8").replace("return Object.freeze({ call, restoreSchedules,",
+    "return Object.freeze({ takeWarm, chatPrewarm, dispatchExternal, stopExternalTurn, continuations, warm, warmKey, backgroundRuns, runKey, driveRun, call, restoreSchedules,");
+  fixture._compile(source, filename);
+  return fixture.exports.createAgentOrchestratorWorkflow(options);
+}
+
+test("restoration uncertainty reaches all three continuation callers without launching a replacement", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const previous = { id: "old", workspace_id: "ws", project_id: "task", execution_mode: "single",
+    nodes: [{ id: "one", role: "planner", state: "finished", route, receipt: { thread_id: "existing" } }] };
+  for (const caller of ["warm", "prewarm", "dispatch"]) {
+    const uncertainty = Object.assign(new Error("restore pending"), { code: "AO_SESSION_RESTORE_UNCONFIRMED" });
+    let spawned = 0;
+    const workflow = workflowInternals({
+      requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [previous] }
+        : endpoint.endsWith("/reserve") ? { ok: true, request_key: "k", prompt: "follow-up" } : { ok: true, run: previous },
+      aoHarness: { continuable: async () => { throw uncertainty; }, spawn: async () => { spawned++; return "replacement"; } },
+    });
+    try {
+      workflow.warm.set(workflow.warmKey("ws", route, true), { session: "existing", route, promise: Promise.resolve("existing"), started: 0 });
+      workflow.continuations.set("new", { session: "existing", text: "follow-up" });
+      const result = caller === "warm" ? workflow.takeWarm("ws", route, true)
+        : caller === "prewarm" ? workflow.chatPrewarm({ workspaceId: "ws", taskId: "task", executionMode: "single", singleRoute: route })
+        : workflow.dispatchExternal("ws", "new", { id: "next", role: "planner", route }, 1, true, true);
+      await assert.rejects(result, error => error.code === uncertainty.code, caller);
+      assert.equal(spawned, 0, caller + " never starts a replacement under uncertainty");
+      if (caller === "dispatch") assert.equal(workflow.continuations.get("new")?.session, "existing", "retry retains the captured conversation");
+    } finally { workflow.dispose(); }
+  }
+});
+
+test("concurrent host-release upgrades recheck the in-flight stop after its first settlement", async () => {
+  let releaseObservation, observationStarted;
+  const observed = new Promise(resolve => { observationStarted = resolve; });
+  const gate = new Promise(resolve => { releaseObservation = resolve; });
+  let interrupts = 0, exits = 0, children = 0, reads = 0;
+  const workflow = workflowInternals({
+    aoHarness: { interrupt: async () => { interrupts++; }, observe: async () => {
+      if (++reads === 1) { observationStarted(); await gate; }
+      return { turnState: "interrupted", status: "ready" };
+    }, exitAgent: async () => { exits++; return { ok: true }; } },
+    subagents: { stopParent: async () => { children++; } },
+  });
+  try {
+    const initial = workflow.stopExternalTurn("existing");
+    await observed;
+    const one = workflow.stopExternalTurn("existing", { owner: "same", releaseAgent: true });
+    const two = workflow.stopExternalTurn("existing", { owner: "same", releaseAgent: true });
+    releaseObservation();
+    await Promise.all([initial, one, two]);
+    assert.equal(exits, 1, "one verified host exit after the interrupt-only operation");
+    assert.equal(children, 1, "one descendant shutdown");
+    assert.equal(interrupts, 2, "the two release upgrades share their settlement check");
+  } finally { releaseObservation(); workflow.dispose(); }
+});
+
+test("follow-ups and warmed sessions wait for Stop to exit the host before checking its restoration", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  for (const warmed of [false, true]) {
+    let finishExit, exitStarted, alive = true, resumes = 0, spawns = 0;
+    const hostExiting = new Promise(resolve => { exitStarted = resolve; });
+    const exitGate = new Promise(resolve => { finishExit = resolve; });
+    const sent = [], checks = [];
+    const workflow = workflowInternals({
+      requestHeadless: async endpoint => endpoint.endsWith("/reserve") ? { ok: true, request_key: "k", prompt: "follow-up" } : { ok: true, run: {} },
+      aoHarness: {
+        observe: async () => ({ exited: !alive, turnState: "completed", status: alive ? "idle" : "exited" }),
+        exitAgent: async () => { exitStarted(); await exitGate; alive = false; return { ok: true }; },
+        continuable: async () => { checks.push(alive); if (!alive) { resumes++; alive = true; } return true; },
+        send: async id => { if (!alive) throw new Error("CHAT_CONTROLLER_NOT_READY"); sent.push(id); return { turnId: "next-turn" }; },
+        spawn: async () => { spawns++; return "replacement"; },
+      },
+    });
+    try {
+      const stopping = workflow.stopExternalTurn("existing", { owner: "old", releaseAgent: true, completed: true });
+      await hostExiting;
+      if (warmed) workflow.warm.set(workflow.warmKey("ws", route, true), { session: "existing", route, promise: Promise.resolve("existing"), started: 0 });
+      else workflow.continuations.set("new", { session: "existing", text: "follow-up" });
+      const dispatching = workflow.dispatchExternal("ws", "new", { id: "next", role: "planner", route }, 1, true, true);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.deepEqual(checks, [], "readiness must not be sampled while the old Stop will still exit this host");
+      finishExit();
+      await Promise.all([stopping, dispatching]);
+      assert.deepEqual(sent, ["existing"]);
+      assert.equal(resumes, 1, "the exact retained session is resumed after host shutdown");
+      assert.equal(spawns, 0, "no replacement or context loss");
+    } finally { finishExit(); workflow.dispose(); }
+  }
+});
+
+test("Stop retries failed descendant shutdown after the parent's host has already exited", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const mission = { id: "run", workspace_id: "ws", nodes: [
+    { id: "one", state: "cancelled", route, receipt: { thread_id: "parent", request_key: "k", status: "held" } },
+  ] };
+  let exited = false, childAttempts = 0, interrupts = 0;
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async endpoint => ({ ok: true, ...(endpoint.endsWith("/read") ? { runs: [mission] } : { run: mission }) }),
+    aoHarness: {
+      observe: async () => ({ exited, turnState: "interrupted", status: exited ? "exited" : "ready" }),
+      interrupt: async () => { interrupts++; if (exited) throw new Error("CHAT_CONTROLLER_NOT_READY"); },
+      exitAgent: async () => { exited = true; return { ok: true }; },
+    },
+    subagents: { stopParent: async () => { if (++childAttempts === 1) throw new Error("descendant shutdown failed"); } },
+  });
+  const stop = () => workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" });
+  try {
+    await assert.rejects(stop(), /descendant shutdown failed/);
+    assert.equal(exited, true);
+    assert.equal((await stop()).ok, true);
+    assert.equal(childAttempts, 2, "the failed child is retried even though its parent is already gone");
+    assert.equal(interrupts, 1, "an observed exited parent needs no nonexistent-controller interrupt");
+  } finally { workflow.dispose(); }
+});
+
+test("Stop disables the local driver before a queued receipt snapshot can return", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const mission = { id: "run", workspace_id: "ws", revision: 1, execution_mode: "single",
+    nodes: [{ id: "next", role: "planner", state: "pending", parents: [], route }] };
+  let releaseSnapshot, snapshotStarted, reads = 0, dispatched = 0;
+  const snapshot = new Promise(resolve => { releaseSnapshot = resolve; });
+  const started = new Promise(resolve => { snapshotStarted = resolve; });
+  const state = { stopped: false, status: "running" };
+  const workflow = workflowInternals({
+    requestHeadless: async endpoint => {
+      if (endpoint.endsWith("/read")) {
+        if (++reads === 1) { snapshotStarted(); await snapshot; }
+        return { ok: true, runs: [structuredClone(mission)], worker_capacity: { run: 1 } };
+      }
+      if (endpoint.endsWith("/reserve")) return { ok: true, request_key: "k", prompt: "next card" };
+      if (endpoint.endsWith("/submitted")) { mission.nodes[0].state = "finished"; return { ok: true, run: structuredClone(mission) }; }
+      return { ok: true, run: structuredClone(mission) };
+    },
+    aoHarness: { spawn: async () => { dispatched++; return "unwanted"; }, exitAgent: async () => ({ ok: true }),
+      observe: async () => ({ exited: true, turnState: "completed", status: "exited" }) },
+  });
+  workflow.backgroundRuns.set(workflow.runKey("ws", "run"), state);
+  const stopping = workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" });
+  try {
+    await started;
+    await workflow.driveRun("ws", "run", process.execPath, state);
+    assert.equal(dispatched, 0, "the driver must not dispatch another card while Stop's receipt read is queued");
+    assert.equal(state.stopped, true);
+    assert.equal(reads, 1, "the stopped driver must not start another read");
+  } finally {
+    state.stopped = true;
+    releaseSnapshot();
+    await stopping.catch(() => undefined);
+    workflow.dispose();
+  }
+});
+
+test("Approve for me runs the app's subagent and wake-up tools unasked, and asks its reviewer once more for allow or deny", async () => {
+  // Seen live: subagent_start (its brief longer than the review reads) waited for the person, and a
+  // reviewer's "ask" put plain commands in front of them.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "allow", kind: "allow_once", label: "Allow Once" }, { id: "reject", kind: "reject_once", label: "Deny" }];
+  const requests = [
+    { approval_id: "start", kind: "permission", tool: "mcp__coding-tools__subagent_start", reviewTruncated: true,
+      toolInput: JSON.stringify({ agent: "explorer", task: "Map the YOLO training state. ".repeat(80) }) },
+    { approval_id: "wake", kind: "permission", tool: "mcp__coding-tools__schedule_wakeup", toolInput: JSON.stringify({ minutes: 10, reason: "CI" }) },
+    { approval_id: "settles-allow", kind: "command", tool: "Bash", command: "python tools/calibrate.py" },
+    { approval_id: "settles-deny", kind: "command", tool: "Bash", command: "python tools/upload.py" },
+  ].map(request => ({ source: "ao", decisions, ...request }));
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+    { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const resolved = [], prompts = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
+      if (!String(url).endsWith("/chat/completions")) return { ok: false, status: 404, json: async () => ({}) };
+      const prompt = JSON.parse(init.body).messages[0].content;
+      prompts.push(prompt);
+      const decide = /allow or deny/i.test(prompt) && !/"ask"/.test(prompt);
+      const verdict = !decide ? { action: "ask", reason: "not sure" }
+        : prompt.includes("calibrate.py") ? { action: "allow", reason: "a project script" } : { action: "deny", reason: "uploads data" };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(verdict) } }] }) };
+    },
+    requestHeadless: async (endpoint) => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running",
+        approvals: requests.filter(request => !resolved.some(([id]) => id === request.approval_id)) }),
+      resolveApproval: async (_session, requestId, decisionId) => { resolved.push([requestId, decisionId]); return { ok: true }; },
+    },
+    confirm: async () => true,
+  });
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 400 && resolved.length < 4; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(Object.fromEntries(resolved), { start: "allow", wake: "allow", "settles-allow": "allow", "settles-deny": "reject" });
+    assert.ok(!prompts.some(prompt => prompt.includes("subagent_start") || prompt.includes("schedule_wakeup")), "the app's own tools need no review");
+    assert.equal(prompts.filter(prompt => prompt.includes("calibrate.py")).length, 2, "an ask is followed by one allow-or-deny review");
+  } finally {
+    mission.nodes[0].state = "finished";
+    workflow.dispose();
+  }
+});
+// retireOpenRuns, run on its own: a fake loop map, clock and timer, and a board that records cancels.
+function retireHarness({ runs: list, live = {}, endLoopAfter = Infinity, fresh = null }) {
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.resolve(__dirname, "../electron/agent-orchestrator-workflow.cjs"), "utf8");
+  const slice = source.slice(source.indexOf("const RUN_WIND_DOWN_MS"), source.indexOf("async function createTeamRun"));
+  let clock = 0, ticks = 0;
+  const cancels = [];
+  const backgroundRuns = new Map(Object.entries(live));
+  const context = {
+    backgroundRuns, runKey: (id, run) => `${id}:${run}`, runSettled: (run) => run.cancelled === true,
+    now: () => clock,
+    setTimer: (resolve, ms) => { clock += ms; ticks += 1; if (ticks >= endLoopAfter) backgroundRuns.clear(); resolve(); },
+    runs: async () => ({ runs: fresh ?? list }),
+    updateRun: async ({ change }) => { cancels.push(change); },
+  };
+  vm.runInNewContext(`${slice}\nthis.retireOpenRuns = retireOpenRuns;`, context);
+  return { retire: () => context.retireOpenRuns("ws", "task", list), cancels, ticks: () => ticks };
+}
+
+test("a follow-up waits out a run whose cards stopped but whose loop is still winding down, then cancels it", async () => {
+  // Seen in the launcher log: a steer stopped a stalled turn, and its queued message was refused twice
+  // within a second ("This chat is still running") while the run's loop was ending.
+  const run = { id: "r1", project_id: "task", revision: 3, nodes: [{ id: "w", state: "held" }] };
+  const harness = retireHarness({ runs: [run], live: { "ws:r1": { driving: true, status: "held" } }, endLoopAfter: 3,
+    fresh: [{ ...run, revision: 5 }] });
+  await harness.retire();
+  assert.equal(harness.ticks(), 3, "it waited for the loop to end");
+  assert.deepEqual(harness.cancels.map((change) => ({ ...change })), [{ operation: "cancel", run_id: "r1", expected_revision: 5 }],
+    "cancelled at the revision the loop left it at");
+});
+
+test("a follow-up is still refused at once while a card works or the run starts, and after the wind-down limit", async () => {
+  const working = retireHarness({ runs: [{ id: "r1", project_id: "task", revision: 1, nodes: [{ id: "w", state: "running" }] }] });
+  await assert.rejects(working.retire(), /still running/);
+  assert.equal(working.ticks(), 0, "a card at work is not waited for");
+  const starting = retireHarness({ runs: [{ id: "r1", project_id: "task", revision: 1, nodes: [{ id: "w", state: "pending" }] }],
+    live: { "ws:r1": { starting: true } } });
+  await assert.rejects(starting.retire(), /still running/);
+  assert.equal(starting.ticks(), 0, "a run still starting is not waited for");
+  const stuck = retireHarness({ runs: [{ id: "r1", project_id: "task", revision: 1, nodes: [{ id: "w", state: "held" }] }],
+    live: { "ws:r1": { driving: true } } });
+  await assert.rejects(stuck.retire(), /still running/);
+  assert.equal(stuck.ticks(), 40, "a loop that never ends is waited for 10 s at most");
+  assert.deepEqual(stuck.cancels, []);
+});
+
+test("a hung turn whose interrupt lands after a few seconds is still restarted, not left as 'stop needs attention'", async () => {
+  // Seen live: the stall restart gave up after 2 s ("Owned turn is still working; stop needs
+  // attention"), though AO had the turn ended a little later; the chat sat for 8 more minutes.
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  const interrupted = [];
+  let readsAfterInterrupt = 0;
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 4 * 60_000,
+    setTimer: (callback) => { callback(); return 0; },
+    aoHarness: {
+      // The interrupt takes 20 more reads (5 s at 250 ms) to settle.
+      observe: async () => {
+        const ended = interrupted.length && ++readsAfterInterrupt > 20;
+        return { turnId: "t1", turnState: ended ? "interrupted" : "running", status: ended ? "ready" : "working", lastActivityAt: 1_000_000, timeline: [], approvals: [] };
+      },
+      steer: async () => ({ steered: true }),
+      interrupt: async id => { interrupted.push(id); },
+    } });
+  const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
+  assert.equal(result.restarted, true, "the hung turn is stopped and the message goes as the next turn");
+  assert.deepEqual(interrupted, ["sess-1"]);
+});
+
+test("a steer is never sent to an agent whose state could not be read", async () => {
+  // Seen live: a turn waiting on an approval could not be read (its conversation was too large for
+  // the old client), was taken for "not asking", and the steer wedged the chat in AO.
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  const steered = [], interrupted = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless,
+    aoHarness: {
+      observe: async () => { throw new Error("AO response exceeds the handler limit"); },
+      steer: async (id, text) => { steered.push([id, text]); return { steered: true }; },
+      interrupt: async id => { interrupted.push(id); },
+    } });
+  const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
+  assert.equal(result.steered, false);
+  assert.equal(result.waiting, true, "it waits in the chat's queue and is steered in once the agent can be read");
+  assert.deepEqual(steered, [], "nothing is steered blind");
+  assert.deepEqual(interrupted, [], "nor is the turn stopped");
 });

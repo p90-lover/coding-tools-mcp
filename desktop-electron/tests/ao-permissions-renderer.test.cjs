@@ -397,6 +397,31 @@ test("questions and MCP form or URL replies use method-specific response shapes"
   assert.deepEqual(replies.pop(), { action: "cancel" });
 });
 
+test("an AO agent's tool request is answered by clicking an option: no Submit or Deny button, and only once", () => {
+  const view = renderer("AgentOrchestratorApproval.tsx");
+  const replies = [];
+  const approval = { nodeId: "lead", approval_id: "ask", source: "ao", kind: "command", tool: "PowerShell", command: "Get-ChildItem",
+    decisions: [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "always", kind: "allow_always", label: "Always allow" }, { id: "no", kind: "reject_once", label: "Reject" }] };
+  // The approval renders Codex's card (AoAsk), whose options are a CdxOptions element.
+  const card = () => {
+    const outer = view.render("AgentOrchestratorApproval", { approval, busy: false, approve: (_, reply) => replies.push(plain(reply)), actor: "DeepSeek" });
+    return outer.type(outer.props);
+  };
+  let tree = card();
+  assert.deepEqual(elements(tree, item => item.type === "button").map(text), [], "the card itself has no Submit or Deny button");
+  const options = () => elements(tree, item => typeof item.type === "function" && item.type.name === "CdxOptions")[0];
+  let buttons = elements(options().type(options().props), item => item.type === "button");
+  assert.deepEqual(buttons.map(button => text(button.props.children[1])), ["Allow once", "Allow this conversation", "Deny"]);
+  buttons[1].props.onClick();
+  assert.deepEqual(replies, [{ decisionId: "always" }], "one click answers");
+  tree = card();
+  buttons = elements(options().type(options().props), item => item.type === "button");
+  assert.ok(buttons.every(button => button.props.disabled), "the answered card takes no second answer");
+  assert.equal(options().props.picked[0], "always", "and shows the answer picked");
+  buttons[2].props.onClick();
+  assert.equal(replies.length, 1);
+});
+
 test("native decision objects are forwarded unchanged and unscoped requests are disabled", () => {
   const view = renderer("AgentOrchestratorApproval.tsx");
   const decision = { acceptWithExecpolicyAmendment: { execpolicy_amendment: ["git", "status"] } };
@@ -587,4 +612,27 @@ test("picking a model fits the carried window to it", () => {
   assert.equal(routes.at(-1).context_window, 262144, "clamped to the new model's limit");
   pick("cpa/unknown");
   assert.equal(routes.at(-1).context_window, 1_000_000, "within an unreported range a picked window stays");
+});
+
+test("the selected run's polls ask only the project the run belongs to", () => {
+  // Seen live: 25 "AO run not found in this workspace" observe failures in the launcher log, from the
+  // approvals poll asking the newly opened project about a run still selected from the previous one.
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8");
+  assert.match(source, /const selectedRunHere = missions\.some\(\(mission\) => mission\.id === selectedRunId && mission\.workspace_id === workspaceId\);/);
+  const statusPoll = source.slice(source.indexOf("const selectedRunHere"), source.indexOf("const activeNodeIds"));
+  assert.match(statusPoll, /if \(!workspaceId \|\| !selectedRunId \|\| !selectedRunHere\)/, "the run-status poll waits for the run to be this project's");
+  const approvalsPoll = source.slice(source.indexOf("approvalScope.current = { workspaceId, runId: selectedRunId };"), source.indexOf("const taskName = "));
+  assert.match(approvalsPoll, /if \(!workspaceId \|\| !selectedRunId \|\| !selectedRunHere \|\| !ids\.length\) return;/, "so does the approvals poll");
+  assert.match(approvalsPoll, /\}, \[workspaceId, selectedRunId, selectedRunHere, activeNodeIds, autoStatus, setError\]\);/, "and starts once it is");
+});
+test("a card clicked after its request was answered or withdrawn just goes, for every way approve_harness says so", () => {
+  // Seen in the launcher log: "AO tool request is no longer pending" showed as an error on a card
+  // clicked while its reviewer was still answering.
+  const surface = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8");
+  const quiet = new RegExp(surface.match(/if \(\/([^/]+)\/\.test\(cause instanceof Error/)[1]);
+  const workflow = fs.readFileSync(path.resolve(__dirname, "../electron/agent-orchestrator-workflow.cjs"), "utf8");
+  const gone = [...workflow.matchAll(/throw new Error\("([^"]*no longer (?:pending|waiting)[^"]*)"\)/g)].map(match => match[1]);
+  assert.ok(gone.includes("AO tool request is no longer pending"), "the AO tool request's own wording is among them");
+  for (const message of gone) assert.match(message, quiet, `"${message}" closes the card quietly`);
+  assert.doesNotMatch("AO result is unavailable; inspect the run before retrying", quiet, "a real failure is still reported");
 });

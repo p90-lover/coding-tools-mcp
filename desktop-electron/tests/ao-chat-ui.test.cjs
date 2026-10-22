@@ -29,7 +29,7 @@ const clawd = load("Clawd.tsx");
 const pet = load("ChatPet.tsx", { "./ao-chat": chat, "./Clawd": clawd });
 const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null, Caret: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
   "./ChatContextMeter": meter, "./DshTranscript": dsh, "./ChatToolParts": toolParts,
-  "./ChatPet": pet,
+  "./ChatPet": pet, "../PartErrorBoundary": load("../PartErrorBoundary.tsx"),
   "./ChatTurnStats": load("ChatTurnStats.tsx", { "./ao-chat": chat, "../api/client": client }),
   "./codex-prompts": load("codex-prompts.ts"),
   // The branch bar reads git asynchronously and renders nothing until then, as here; composer
@@ -71,6 +71,17 @@ test("a DeepSeek turn renders as DeepSeek Harness's: flat rows and Deep diving w
   const earlier = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn: settled("older"), live: false, expanded: false, useWork: doneWork }));
   assert.match(earlier, /dsh-turn-process-label">Completed<\/span>/, "an earlier turn says Completed");
   assert.doesNotMatch(earlier, /dsh-group/, "and stays folded until opened");
+});
+
+test("a retried single DeepSeek card shows its earlier attempt above the attempt now", () => {
+  const timeline = [{ id: "c1", kind: "command", status: "running", text: "npm test", description: "Run the tests" }];
+  const step = { key: "s", nodeId: "n", role: "planner", name: "MiMo V2.6 Pro", detail: "", state: "running", startedAtMs: Date.now() - 5_000,
+    working: { detail: "", stalled: false, timeline }, earlier: [{ label: "Attempt 1", verdict: "failed", text: "The agent's process ended." }] };
+  const turn = { key: "retried", runId: "run", steps: [step], status: "running", solo: false, startedAtMs: Date.now() - 5_000 };
+  const html = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn, live: true, expanded: false, useWork: (item) => item.working?.timeline ?? null }));
+  const attempt = html.indexOf("Attempt 1"), work = html.indexOf("Run the tests");
+  assert.ok(attempt >= 0, "the earlier attempt is shown");
+  assert.ok(work > attempt, "and comes before the new attempt's work");
 });
 
 test("every new card starts with instructions and an expected output for its role", () => {
@@ -192,6 +203,36 @@ test("mission inspectors keep Retry structural changes in saved team templates",
 });
 
 
+test("a retried step shows its failed attempt above the attempt now running, not under it", () => {
+  // Seen live: "Attempt 1 failed · The agent's process ended before it finished" sat under the new
+  // attempt's thinking, as if it had come after it.
+  const props = { runs: [{ id: "run", project_id: "task", cancelled: false, execution_mode: "single", nodes: [{ id: "lead", role: "planner", state: "running",
+    route: { harness_id: "ao:claude-code", model: "m" }, receipt: { thread_id: "sess-2", started_at_ms: Date.now() - 57_000 },
+    history: [{ error: "The agent's process ended before it finished (the app restarted); retry this card." }] }] }],
+    activity: { "run:lead": { activity: "working", timeline: [{ id: "m1", kind: "message", status: "running", text: "Opening the preview again." }] } },
+    tasks: [{ id: "task", title: "Task" }], selectedTaskId: "task", busy: false, approvals: [],
+    loadDescription: async () => "", send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {} };
+  const html = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, props));
+  const earlier = html.indexOf("Attempt 1"), now = html.indexOf("Opening the preview again.");
+  assert.ok(earlier >= 0 && now >= 0, "both show");
+  assert.ok(earlier < now, "the failed attempt comes first");
+});
+
+test("an image steered into a running turn shows as the image, not as its path", () => {
+  // Seen live (before #457 reached the app): "Attached image: G:\AppData\Coding Tools\chat-attachments\…png"
+  // printed as text in the steer's bubble inside the turn's work.
+  const steer = "switch number ,if met the number is unable to verify on text\n\nAttached image: G:\\AppData\\Coding Tools\\chat-attachments\\2026-10-21\\image-df19f6fe.png";
+  const props = { runs: [{ id: "run", project_id: "task", cancelled: false, execution_mode: "single", nodes: [{ id: "lead", role: "planner", state: "running",
+    route: { harness_id: "ao:claude-code", model: "m" }, receipt: { thread_id: "sess-3", started_at_ms: Date.now() - 5_000 } }] }],
+    activity: { "run:lead": { activity: "working", timeline: [{ id: "s1", kind: "steer", status: "completed", text: steer }] } },
+    tasks: [{ id: "task", title: "Task" }], selectedTaskId: "task", busy: false, approvals: [],
+    loadDescription: async () => "", send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {} };
+  const html = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, props));
+  assert.match(html, /cx-user cx-steer"><div class="cx-sent-attachments">/, "the steer's image is drawn as an attachment");
+  assert.equal(html.includes("Attached image:"), false, "its path line is not printed");
+  assert.match(html, /<p>switch number ,if met the number is unable to verify on text<\/p>/, "the typed words stay in the bubble");
+});
+
 test("an open chat's composer carries the context meter; a new chat's does not", () => {
   const props = { runs: [{ id: "run", project_id: "task", cancelled: false, nodes: [{ id: "lead", role: "planner", state: "finished",
     route: { harness_id: "ao:claude-code", model: "m" }, receipt: { thread_id: "sess-1", answer: "ok" } }] }],
@@ -253,7 +294,7 @@ test("an answer's Markdown is parsed once per text, not on every chat re-render"
   assert.equal(parses, 1);
 });
 
-test("an AO agent's question and tool request show as Codex's cards: numbered options to pick, then Submit", () => {
+test("an AO agent's question and tool request show as Codex's cards: numbered options; a tool request's answer is one click", () => {
   const approvalUi = load("AgentOrchestratorApproval.tsx", { "./ChatMarkdown": markdown });
   const question = { nodeId: "one", approval_id: "ask", source: "ao", kind: "question", message: "Please answer the following questions.",
     fields: [
@@ -282,8 +323,9 @@ test("an AO agent's question and tool request show as Codex's cards: numbered op
   assert.match(ask, /<span>Reason<\/span><p>Parse recent refresh and recovery task results/);
   assert.match(ask, /<span>Reviewer<\/span><p>Inspect the complete native command yourself/);
   assert.deepEqual([...ask.matchAll(/class="cdx-option-label">([^<]+)</g)].map((match) => match[1]), ["Allow once", "Allow this conversation", "Deny"], "Codex's words");
-  assert.match(ask, /<button[^>]*disabled=""[^>]*>Submit <kbd class="cdx-kbd">Enter<\/kbd><\/button>/, "nothing picked yet");
-  assert.match(ask, />Deny <kbd class="cdx-kbd">Esc<\/kbd><\/button>/);
+  // Clicking an option answers at once, as Claude Code's prompt does: no Submit or Deny button.
+  assert.doesNotMatch(ask, />Submit </);
+  assert.doesNotMatch(ask, /cdx-foot/);
 });
 
 test("a question the person answered shows as Claude Code shows one: the question, then the answer", () => {

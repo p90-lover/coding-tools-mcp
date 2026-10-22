@@ -45,8 +45,9 @@ function mount(props) {
       : name === "./ChatMenu" ? { ChatMenu: "ChatMenu", ChatGlyph: "Glyph", FloatingLayer: "FloatingLayer" } : name === "./AgentOrchestratorComposerControls" ? { AgentOrchestratorComposerControls: "Controls" }
         : name === "./AgentOrchestratorApproval" ? { AgentOrchestratorApproval: "Approval" }
           : name === "./ChatWorkbench" ? { ChatWorkbench: "Workbench", useWorkbenchAutoOpen: () => openPage }
-            // The image parts the chat shares with the DeepSeek view; its Provider wraps the chat.
-            : name === "./ChatToolParts" ? { Attachments: react.createContext({}), SentImage: "SentImage", ToolImages: "ToolImages", ImageLightbox: "ImageLightbox" } : {},
+            // The parts the chat shares with the DeepSeek view; its Providers wrap the chat.
+            : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), Attachments: react.createContext({}),
+              SentImage: "SentImage", ToolImages: "ToolImages", ImageLightbox: "ImageLightbox" } : {},
   { window: { setTimeout: () => 0, setInterval: () => 0, clearInterval() {}, confirm: () => true }, document: { querySelector: () => null }, navigator: {} });
   return { render: (next = {}) => { cursor = 0; return module.AgentOrchestratorChat({ ...props, ...next }); } };
 }
@@ -334,7 +335,93 @@ test("a working chat on a non-AO model is not offered steering; a message typed 
   await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0, "nothing is sent while the turn runs");
   assert.equal(textarea().props.value, "", "the composer is free for the next message");
-  assert.match(text(walk(view.render()).find((element) => String(element.props?.className).includes("cx-command-card"))), /^Queuedalso check the logsIt's sent when the current turn finishes/, "the card quotes the queued message");
+  // As Claude Code shows it: in the queued-message bar above the composer, not in a notice card.
+  const bar = walk(view.render()).find((element) => element.props?.["aria-label"] === "Queued messages");
+  assert.ok(bar, "the queued-message bar shows");
+  assert.match(text(bar), /also check the logs/, "the bar shows the queued message");
+  assert.ok(!walk(view.render()).some((element) => String(element.props?.className).includes("cx-command-card")), "no notice card says it was queued");
+});
+
+test("a queued message waits in Claude Code's queued-message bar: greyed, with Remove from queue, Edit in composer and Send now", async () => {
+  const { props, calls } = base({ selectedTaskId: "t-bar", working: true,
+    runs: [run("r1", "t-bar", [node("w", "planner", "running", { route: { harness_id: "codex-native", model: "chatgpt-web/high" } })], { execution_mode: "single" })],
+    steer: async () => { throw new Error("not steerable"); } });
+  const view = mount(props);
+  const all = () => walk(view.render());
+  const textarea = () => all().find((element) => element.type === "textarea");
+  const queue = async (message) => {
+    textarea().props.onChange({ target: { value: message } });
+    await all().find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+  };
+  await queue("first note");
+  const rows = () => all().filter((element) => element.type === "li" && element.props.className === "cx-queued-row");
+  assert.equal(rows().length, 1);
+  assert.equal(rows()[0].props["data-state"], "queued", "drawn in Claude's queued state (greyed text)");
+  const status = all().find((element) => element.props?.role === "status" && element.props.className === "cx-sr-only");
+  assert.equal(text(status), "1 message queued. Will send after the current response.", "Claude Code's status line, for screen readers");
+  const action = (label) => walk(rows()[0]).find((element) => element.type === "button" && element.props["aria-label"] === label);
+  assert.deepEqual(walk(rows()[0]).filter((element) => element.type === "button").map((element) => element.props["aria-label"]),
+    ["Remove from queue", "Edit in composer", "Send now"], "Claude Code's three actions, in its order");
+  // The agent can't be steered and the turn still runs: Send now waits, and says why.
+  assert.equal(action("Send now").props.disabled, true);
+  assert.equal(action("Send now").props["data-tip"], "Sent when the current turn finishes");
+  // Edit in composer takes it out of the queue and back into the box, ahead of anything typed.
+  textarea().props.onChange({ target: { value: "typed meanwhile" } });
+  action("Edit in composer").props.onClick();
+  assert.equal(rows().length, 0, "it leaves the queue");
+  assert.equal(textarea().props.value, "first note\n\ntyped meanwhile");
+  // Remove from queue drops it; nothing is sent.
+  textarea().props.onChange({ target: { value: "" } });
+  await queue("second note");
+  assert.equal(rows().length, 1);
+  action("Remove from queue").props.onClick();
+  assert.equal(rows().length, 0);
+  assert.equal(all().some((element) => element.props?.["aria-label"] === "Queued messages"), false, "an empty queue shows no bar");
+  assert.equal(calls.filter(([kind]) => kind === "send").length, 0);
+});
+
+test("Edit in composer gives a queued message's annotations back as the composer's own, not as the block the agent reads", async () => {
+  const { props } = base({ selectedTaskId: "t-notes", working: true,
+    runs: [run("r1", "t-notes", [node("w", "planner", "running", { route: { harness_id: "codex-native", model: "chatgpt-web/high" } })], { execution_mode: "single" })],
+    steer: async () => { throw new Error("not steerable"); } });
+  const view = mount(props);
+  const all = () => walk(view.render());
+  const annotator = () => all().find((element) => typeof element.props?.onAdd === "function");
+  const tray = () => all().find((element) => Array.isArray(element.props?.annotations) && typeof element.props?.onRemove === "function");
+  const id = annotator().props.onAdd("the parser drops tabs");
+  annotator().props.onComment(id, "fix this too");
+  all().find((element) => element.type === "textarea").props.onChange({ target: { value: "first note" } });
+  await all().find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+  assert.equal(tray().props.annotations.length, 0, "the annotation went with the queued message");
+  // A new selection made meanwhile stays, after the queued message's own.
+  annotator().props.onAdd("another line");
+  const row = all().find((element) => element.type === "li" && element.props.className === "cx-queued-row");
+  walk(row).find((element) => element.props?.["aria-label"] === "Edit in composer").props.onClick();
+  assert.equal(all().find((element) => element.type === "textarea").props.value, "first note", "only the text goes in the box");
+  assert.deepEqual(JSON.parse(JSON.stringify(tray().props.annotations.map((item) => [item.text, item.comment]))),
+    [["the parser drops tabs", "fix this too"], ["another line", ""]], "its annotations come back as chips, ahead of the new one");
+});
+
+test("a steer on its way pulses in the queued-message bar; once taken it is an ordinary sent message", async () => {
+  let release;
+  const { props } = base({ selectedTaskId: "t-steer", working: false,
+    runs: [run("r1", "t-steer", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/m" } })], { execution_mode: "single" })],
+    steer: () => new Promise((resolve) => { release = resolve; }) });
+  const view = mount(props);
+  const all = () => walk(view.render());
+  all().find((element) => element.type === "textarea").props.onChange({ target: { value: "use the other API" } });
+  const sending = all().find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+  const row = all().find((element) => element.type === "li" && element.props.className === "cx-queued-row");
+  assert.equal(row?.props["data-state"], "pending", "on its way: Claude's pending state");
+  assert.match(text(row), /use the other API/);
+  assert.equal(walk(row).filter((element) => element.type === "button" && element.props["aria-label"] !== "Copy message").length, 0,
+    "nothing to act on while it is delivered");
+  assert.ok(!text(all()).includes("Steering…"), "no Steering… bubble at the end of the chat");
+  release(true);
+  await sending;
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
+  assert.ok(!source.includes("Steered · "), "a steered message shows its time as any sent message does");
+  assert.match(source, /<SentMessage text=\{steer\.text\} \/>\s*<MessageActions text=\{chatMessageReadable\(steer\.text\)\} \/>/, "and its Copy action");
 });
 
 test("after an app restart a running AO card is still steered, though the page isn't driving its run", async () => {

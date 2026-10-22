@@ -105,6 +105,11 @@ test("a DeepSeek turn's live heading, Think line and durations read as DeepSeek 
   assert.equal(chat.dshLiveTitle([item("reasoning", { text: "x" }), item("command", { status: "running", text: "npm test" })]).label, "Running commands · npm test");
   assert.equal(chat.dshLiveTitle([item("command"), item("reasoning", { text: "First idea.\n\n**Second** idea" })]).label,
     "Analyzing the request · Second idea", "no call running: the latest thought's last paragraph, ** dropped");
+  // A request nobody answered holds the turn; it said "Running commands" for 85 minutes.
+  const waiting = chat.dshLiveTitle([item("command", { status: "running", text: "Invoke-RestMethod :7411" }), item("approval", { status: "pending", text: "PowerShell" })]);
+  assert.deepEqual(plain(waiting), { activity: "questions", label: "Waiting for approval · Invoke-RestMethod :7411" });
+  assert.equal(chat.dshLiveTitle([item("approval", { status: "resolved" }), item("command", { status: "running", text: "ls" })]).label, "Running commands · ls",
+    "an answered request no longer holds it");
   // ReasoningRow.tsx: settled, the first line; streaming, the newest completed paragraph's first line.
   assert.equal(chat.dshThinkSummary("**Checking health**\nmore", false), "Checking health");
   assert.equal(chat.dshThinkSummary("Let me check health.\nok\n\nNow the configs\nstill typing", true), "Now the configs");
@@ -143,7 +148,9 @@ test("a chat the app restart left behind resumes when its project opens, single 
   assert.equal(chat.restartResume(single(node("p", "planner", "held", { receipt: { error: "API Error: 503" } }))), null, "a real failure waits");
   assert.equal(chat.restartResume(single(node("p", "planner", "held", { receipt: restarted }), { cancelled: true })), null, "a stopped chat stays stopped");
   assert.equal(chat.restartResume(single(node("p", "planner", "held", { receipt: restarted }), { paused: true })), null);
-  assert.equal(chat.restartResume(single(node("p", "planner", "held", { receipt: restarted, history: [{}, {}] }))), null, "attempts used up");
+  assert.equal(chat.restartResume(single(node("p", "planner", "held", { receipt: restarted, history: [{}, {}, {}] }))), "retry",
+    "restarts are not the step's fault: within the main process's budget of eight attempts");
+  assert.equal(chat.restartResume(single(node("p", "planner", "held", { receipt: restarted, history: Array.from({ length: 8 }, () => ({})) }))), null, "attempts used up");
   assert.equal(chat.restartResume(single(node("p", "planner", "finished"))), null, "a finished chat stays finished");
   assert.equal(chat.restartResume(single(node("p", "planner", "pending"))), "continue", "a chat whose step never started");
   // Seen live: after a restart a team's workers finished on hosts that outlived the app, and its
@@ -155,6 +162,25 @@ test("a chat the app restart left behind resumes when its project opens, single 
   assert.equal(chat.restartResume(team([node("p", "planner", "finished"), node("v", "reviewer", "held", { receipt: { error: "needs you" } }), node("w", "worker", "pending")])), null,
     "a card held for the person keeps the team waiting");
   assert.equal(chat.restartResume(team([node("p", "planner", "reserved"), node("w", "worker", "pending")])), null, "a card mid-launch");
+});
+
+test("with Retry automatically on, a single chat's failed step that nothing retried resumes, within the retry budget", () => {
+  // Seen live: "Launch failed: The operation was aborted due to timeout" held a single chat for hours
+  // with the switch on; its loop had ended and only a restart-interrupted step was ever resumed.
+  const failed = (extra = {}) => node("p", "planner", "held", { receipt: { error: "Launch failed: The operation was aborted due to timeout" }, ...extra });
+  const single = (card) => run("r", "t", [card], { execution_mode: "single" });
+  const on = { autoRetry: true };
+  assert.equal(chat.restartResume(single(failed()), Date.now()), null, "switch off: it waits for the person, as before");
+  assert.equal(chat.restartResume(single(failed()), Date.now(), on), "retry");
+  assert.equal(chat.restartResume(single(failed({ history: [{}, {}] })), Date.now(), on), "retry", "a third attempt");
+  assert.equal(chat.restartResume(single(failed({ history: [{}, {}, {}] })), Date.now(), on), null, "three attempts: the person decides");
+  assert.equal(chat.restartResume(single(node("p", "planner", "held", { receipt: { error: "API error 401: auth_unavailable" } })), Date.now(), on), null,
+    "a sign-in or account-pool failure is never retried by itself");
+  assert.equal(chat.restartResume(run("r", "t", [failed()], { execution_mode: "single", paused: true }), Date.now(), on), null, "a paused chat stays paused");
+  // A team's failed steps are its own loop's (and its helper's) call; a blanket retry would requeue
+  // every card a review set aside.
+  assert.equal(chat.restartResume(run("r", "t", [node("p", "planner", "finished"), node("w", "worker", "held", { receipt: { error: "timeout" } })],
+    { execution_mode: "team" }), Date.now(), on), null);
 });
 
 test("archived and deleted task metadata hides chats without losing explicit history or scheduled status", () => {
@@ -343,7 +369,7 @@ test("a new chat's prompt is Codex's \"Do anything\" in either mode; follow-up a
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
     exports: component, require: name => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : name === "./ao-chat" ? chat
       : name === "./ChatWorkbench" ? { useWorkbenchAutoOpen() {} }
-        : name === "./ChatToolParts" ? { Attachments: react.createContext({}) } : {},
+      : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), Attachments: react.createContext({}) } : {},
   });
   const walk = item => !item || typeof item !== "object" ? [] : Array.isArray(item) ? item.flatMap(walk) : [item, ...walk(item.props?.children)];
   const base = { runs: [], tasks: [], selectedTaskId: "", busy: false, loadDescription: async () => "", send: async () => {}, openStructure() {}, approvals: [], approve() {}, describeRoute: () => "", retryStart() {} };
@@ -994,36 +1020,15 @@ test("send completion preserves the next chat's draft and edits typed during the
     const deliver = rendererCallback("AgentOrchestratorChat.tsx", "deliver", {
       selectedTaskId: "task-a", draft: "sent text", attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(),
       setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: () => reply.promise,
-      setDraft: set("draft"), setTitle() {}, setAttachments() {}, setAnnotations() {}, setAttachNote() {}, setAtBottom() {}, setCarried() {},
-      setOutgoing() {}, descriptions: {}, chatMessagesFromDescription: chat.chatMessagesFromDescription,
+      setDraft: set("draft"), setTitle() {}, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, setCarried() {},
+      // The message shows in the chat at once (setOutgoing) and leaves the composer before it is sent.
+      setOutgoing() {}, setAnnotations() {},
     });
     const sending = deliver("sent text");
-    // As in Claude Code, the box empties the moment the message is sent.
-    assert.equal(state.draft, "", taskId);
-    state.draft = "new unsent text"; composing.current = { taskId, draft: state.draft, attachments, annotations };
+    assert.equal(state.draft, "", "the sent text leaves the composer at once, not when the send returns");
+    state.draft = "new unsent text"; composing.current = { taskId, draft: state.draft, attachments };
     reply.resolve(); assert.equal(await sending, true);
     assert.equal(state.draft, "new unsent text", taskId);
-  }
-});
-
-test("a send that fails puts the message back in the box, unless something new was typed there", async () => {
-  for (const typedMeanwhile of ["", "new unsent text"]) {
-    const reply = delayedReply(), attachments = [], annotations = [], composing = { current: { taskId: "task-a", draft: "sent text", attachments, annotations } };
-    const state = { draft: "sent text", outgoing: null }, set = key => value => { state[key] = typeof value === "function" ? value(state[key]) : value; };
-    const deliver = rendererCallback("AgentOrchestratorChat.tsx", "deliver", {
-      selectedTaskId: "task-a", draft: "sent text", attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(),
-      setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: () => reply.promise,
-      setDraft: set("draft"), setTitle() {}, setAttachments() {}, setAnnotations() {}, setAttachNote() {}, setAtBottom() {}, setCarried() {},
-      setOutgoing: set("outgoing"), descriptions: { "task-a": "first message" }, chatMessagesFromDescription: chat.chatMessagesFromDescription,
-    });
-    const sending = deliver("sent text");
-    // The follow-up shows in the chat at once, as the chat's second message.
-    assert.equal(state.outgoing.text, "sent text");
-    assert.equal(state.outgoing.after, 1);
-    state.draft = typedMeanwhile; composing.current = { taskId: "task-a", draft: typedMeanwhile, attachments, annotations };
-    reply.reject(new Error("bridge refused")); assert.equal(await sending, false);
-    assert.equal(state.outgoing, null, "the message no longer shows as sent");
-    assert.equal(state.draft, typedMeanwhile || "sent text");
   }
 });
 
@@ -1084,6 +1089,40 @@ test("opening a project resumes a team whose loop died with the app, once per se
   rendererCallback("AgentOrchestratorSurface.tsx", "effect:settledRuns.current.add(key)", fresh)();
   for (let i = 0; i < 5; i += 1) await new Promise(setImmediate);
   assert.deepEqual(calls.filter((call) => call.startsWith("fresh:")), ["fresh:run_status"]);
+});
+
+test("with Retry automatically on, opening a project retries a single chat's failed step that no loop is driving", async () => {
+  // Seen live: "Launch failed: The operation was aborted due to timeout", held for hours, driven: false.
+  const mission = { id: "r", workspace_id: "a", execution_mode: "single", cancelled: false, nodes: [
+    { id: "p", role: "planner", state: "held", history: [], receipt: { error: "Launch failed: The operation was aborted due to timeout", started_at_ms: Date.now() - 3_600_000 } }] };
+  for (const [autoRetry, expected] of [[true, ["run_status", "chat_auto_retry", "runs", "control_run", "start_run"]], [false, ["run_status", "chat_auto_retry", "runs"]]]) {
+    const calls = [];
+    const context = {
+      workspaceId: "a", mounted: { current: true }, missions: [mission], settledRuns: { current: new Set() }, resumedRuns: { current: new Set() },
+      selection: { current: { workspaceId: "a" } }, restartResume: chat.restartResume, executableArg: () => ({}),
+      moduleCall: async (operation, args) => {
+        calls.push(operation);
+        if (operation === "run_status") return { driven: false, status: "held" };
+        if (operation === "chat_auto_retry") return { ok: true, autoRetry };
+        if (operation === "runs") return { runs: [mission] };
+        if (operation === "control_run") assert.equal(args.action, "retry");
+        return { ok: true };
+      },
+      loadMissions: async () => {}, setTimeout,
+    };
+    rendererCallback("AgentOrchestratorSurface.tsx", "effect:settledRuns.current.add(key)", context)();
+    for (let i = 0; i < 6; i += 1) await new Promise(setImmediate);
+    assert.deepEqual(calls, expected, autoRetry ? "retried and started" : "switch off: left for the person");
+  }
+  // While a loop of this session holds it (waiting out its retry pause), it is looked at again later.
+  const settledRuns = { current: new Set() };
+  rendererCallback("AgentOrchestratorSurface.tsx", "effect:settledRuns.current.add(key)", {
+    workspaceId: "a", mounted: { current: true }, missions: [mission], settledRuns, resumedRuns: { current: new Set() },
+    selection: { current: { workspaceId: "a" } }, restartResume: chat.restartResume, executableArg: () => ({}),
+    moduleCall: async () => ({ driven: true, status: "held" }), loadMissions: async () => {}, setTimeout,
+  })();
+  for (let i = 0; i < 3; i += 1) await new Promise(setImmediate);
+  assert.equal(settledRuns.current.size, 0);
 });
 
 test("an old terminal read cannot advance a newly selected command's output cursor", async () => {
@@ -1262,8 +1301,24 @@ test("a card's timeline keeps the steps that fell out of the newest poll, and a 
   const later = chat.mergeTimeline(seen, [{ ...item("3"), status: "running" }, item("4")]);
   assert.deepEqual(ids(later), ["1", "2", "3", "4"]);
   assert.equal(later[2].status, "running", "an item still in the window takes its latest state");
-  // A retry reuses the card's key; its first poll shares nothing with the old attempt.
-  assert.deepEqual(ids(chat.mergeTimeline(later, [item("9")])), ["9"]);
+  // A poll sharing nothing with what is kept is the same turn moving fast (more items than a poll's
+  // window between two polls): everything already seen stays. A retry is kept apart by its start.
+  assert.deepEqual(ids(chat.mergeTimeline(later, [item("9")])), ["1", "2", "3", "4", "9"]);
+});
+
+test("a live turn keeps at most its newest steps, so a long run stays light to redraw", () => {
+  const item = (id) => ({ id: String(id), kind: "tool", status: "completed", text: `call ${id}` });
+  const cap = chat.LIVE_TIMELINE_ITEMS;
+  // Hours of work: every poll's window moved on, and the kept list grew past the cap.
+  let kept = Array.from({ length: cap }, (_, index) => item(index));
+  kept = chat.mergeTimeline(kept, [item(cap - 1), item(cap), item(cap + 1)]);
+  assert.equal(kept.length, cap);
+  assert.equal(kept[0].id, "2", "the oldest steps fall out first");
+  assert.equal(kept.at(-1).id, String(cap + 1));
+  // A finished turn read back whole is not capped: its earliest commands stay readable.
+  const whole = Array.from({ length: cap + 50 }, (_, index) => item(index));
+  assert.equal(chat.mergeTimeline(null, whole, { cap: Infinity }).length, cap + 50);
+  assert.equal(chat.mergeTimeline(kept, whole, { cap: Infinity })[0].id, "0");
 });
 
 test("a single-model chat's card is named by its model, a team's by its role", () => {
@@ -1316,5 +1371,196 @@ test("a reviewer reset to pending by its own rework still shows its last review"
   assert.ok(step, "the pending reviewer is not dropped from the turn");
   assert.equal(step.text, `Last review:\n\n${verdict}`, "its newest verdict, labelled as a review");
   const worker = node("w", "worker", "held", { history: [{ answer: "first try" }] });
-  assert.equal(chat.chatTurns([run("run2", "t1", [worker])], "x", { now: 0 })[0].steps[0].text, "Earlier attempt:\n\nfirst try");
+  const held = plain(chat.chatTurns([run("run2", "t1", [worker])], "x", { now: 0 })[0].steps[0]);
+  assert.equal(held.text, undefined, "a team worker's earlier report is not copied up");
+  assert.deepEqual(held.earlier, [{ label: "Attempt 1", text: "first try" }], "it stays folded under its attempt");
+});
+
+test("a failed team worker opens on its error with every attempt folded, not on a whole earlier report", () => {
+  // Seen live (clash of clan macro, 2026-10-21): a worker failed on its seventh try (the proxy
+  // refused), opened by itself, and showed attempt 6's whole report under "Earlier attempt:", left
+  // out of the attempts list, so it read as a message from nowhere.
+  const worker = node("w", "worker", "failed", {
+    receipt: { error: "API Error: 500 proxyconnect tcp: dial tcp 127.0.0.1:17891: connection refused" },
+    history: [{ error: "500" }, { error: "500" }, { error: "500" },
+      { answer: "Report 4", error: "500" }, { answer: "Report 5", error: "500" }, { answer: "Report 6", error: "500" }],
+  });
+  const [turn] = plain(chat.chatTurns([run("r1", "t", [node("p", "planner", "finished", { receipt: { answer: "plan" } }), worker],
+    { execution_mode: "team" })], "go", { now: 0 }));
+  const step = turn.steps.find((item) => item.role === "worker");
+  assert.equal(step.text, undefined);
+  assert.match(step.error, /17891/);
+  assert.deepEqual(step.earlier.map((round) => `${round.label}:${round.verdict}`),
+    ["Attempt 1:failed", "Attempt 2:failed", "Attempt 3:failed", "Attempt 4:failed", "Attempt 5:failed", "Attempt 6:failed"]);
+  assert.equal(step.earlier[5].text, "Report 6", "the newest report is the last attempt, folded");
+  const running = node("w", "worker", "running", { receipt: { started_at_ms: 1 }, history: [{ answer: "Report 1" }] });
+  const live = plain(chat.chatTurns([run("r1", "t", [running], { execution_mode: "team" })], "go", { now: 2 })[0].steps[0]);
+  assert.equal(live.text, undefined, "a retrying worker shows its new attempt, the old report folded");
+  assert.deepEqual(live.earlier, [{ label: "Attempt 1", text: "Report 1" }]);
+});
+
+test("Claude Code's auto-mode billing notice is left out of replies, folded attempts and live messages", () => {
+  const notice = "**Warning:** We're changing auto mode to no longer charge for classifier requests in Claude Code. However, this session isn't eligible because your requests go through 127.0.0.1:8317, which isn't compatible with this update. Nothing breaks: auto mode keeps working, and its classifier requests are billed as before. To fix it and access the new version of auto mode, ask your gateway to implement: https://code.claude.com/docs/en/auto-mode-classifier-billing";
+  assert.equal(chat.withoutHarnessNotices(`${notice}\n\nWorker Report: Part 1`), "Worker Report: Part 1");
+  assert.equal(chat.withoutHarnessNotices(`Plan below.\n\n${notice}\n\nDone.`), "Plan below.\n\nDone.");
+  assert.equal(chat.withoutHarnessNotices(notice.replace(/\*\*/g, "")), "", "the plain form too");
+  const untouched = "Warning: the tests are slow.\n\nDone.";
+  assert.equal(chat.withoutHarnessNotices(untouched), untouched, "the agent's own warnings stay");
+  const planner = node("p", "planner", "finished", { receipt: { answer: `${notice}\n\nThe plan.` } });
+  const worker = node("w", "worker", "failed", { receipt: { error: "500" }, history: [{ answer: `${notice}\n\nReport 1` }] });
+  const [turn] = plain(chat.chatTurns([run("r1", "t", [planner, worker], { execution_mode: "team" })], "go", { now: 0 }));
+  assert.equal(turn.steps[0].text, "The plan.");
+  assert.equal(turn.steps[1].earlier[0].text, "Report 1");
+  const tidy = plain(chat.tidyTimeline([
+    { id: "a", kind: "message", status: "completed", text: notice },
+    { id: "b", kind: "message", status: "completed", text: `${notice}\n\nReading the files.` },
+    { id: "c", kind: "command", status: "completed", text: "ls" },
+  ]));
+  assert.deepEqual(tidy.map((item) => `${item.id}:${item.text}`), ["b:Reading the files.", "c:ls"]);
+});
+
+test("a single model's messages show once: in its reply, not again in its work above it", () => {
+  // Seen live (MiMo V2.6 Pro, 2026-10-21): Claude Code's reply is the turn's messages joined, and the
+  // chat showed "埠 8000 已有服務在跑…" between the tool calls and again in the answer.
+  const message = (id, text) => ({ id, kind: "message", status: "completed", text });
+  const items = [
+    message("m1", "我先核實現況。"), { id: "c1", kind: "command", status: "completed", text: "netstat -ano" },
+    message("m2", "埠 8000 已有服務在跑,\n直接開預覽。"), { id: "t1", kind: "tool", status: "completed", text: "preview_open" },
+    message("m3", "預覽已開好。"), message("m4", "A note the reply does not repeat."),
+  ];
+  const reply = "我先核實現況。\n\n埠 8000 已有服務在跑, 直接開預覽。\n\n預覽已開好。";
+  assert.deepEqual(chat.withoutReplied(items, reply).map((item) => item.id), ["c1", "t1", "m4"]);
+  assert.deepEqual(chat.withoutReplied(items, undefined).map((item) => item.id), items.map((item) => item.id), "no reply, nothing hidden");
+  assert.deepEqual(chat.withoutReplied(items, "   ").length, items.length);
+});
+
+test("a review's rework block (the card ids the engine reads) is not shown", () => {
+  // Seen live: a review ended with "rework" and `["7394f7d6-3cb1-491d-a715-f1dd90bc79e2"]`.
+  const review = "CHANGES_REQUIRED: Worker 1 must list all 316 entries.";
+  assert.equal(chat.withoutReworkBlock(`${review}\n\nrework\n\`["7394f7d6-3cb1-491d-a715-f1dd90bc79e2"]\``), review);
+  assert.equal(chat.withoutReworkBlock(`${review}\n\`\`\`rework\n["w1"]\n\`\`\``), review);
+  assert.equal(chat.withoutReworkBlock(`${review}\nrework\n["w1", "w2"]`), review);
+  assert.equal(chat.withoutReworkBlock("We should rework the parser.\nDone."), "We should rework the parser.\nDone.", "the word in prose stays");
+  const reviewer = node("r", "reviewer", "finished", { receipt: { answer: `${review}\n\`\`\`rework\n["w1"]\n\`\`\``, verdict: "CHANGES_REQUIRED" },
+    history: [{ answer: `older\nrework\n\`["w1"]\``, verdict: "CHANGES_REQUIRED" }] });
+  const [turn] = plain(chat.chatTurns([run("r1", "t", [node("p", "planner", "finished", { receipt: { answer: "plan" } }), reviewer],
+    { execution_mode: "team" })], "go", { now: 0 }));
+  assert.equal(turn.final.text, review);
+  assert.equal(turn.final.verdict, "CHANGES_REQUIRED", "the verdict still shows");
+  assert.equal(turn.final.earlier[0].text, "older");
+  const worker = node("w", "worker", "finished", { receipt: { answer: "Report\nrework\n[\"x\"]" } });
+  assert.equal(plain(chat.chatTurns([run("r1", "t", [worker], { execution_mode: "team" })], "go", { now: 0 })[0].steps[0].text),
+    "Report\nrework\n[\"x\"]", "only a review's block is the engine's");
+});
+test("a turn whose agent is waiting out a model error says so, instead of \"may be stuck\"", () => {
+  // Seen live: a chat rate-limited by its model (Claude Code backing off from 429s for 20 minutes)
+  // said only "nothing new for 10m 38s, may be stuck".
+  const retrying = (text, status = "running") => ({ key: "s", working: { timeline: [
+    { id: "a", kind: "command", status: "completed", text: "ls" },
+    { id: "r", kind: "system", status, text } ] } });
+  assert.equal(chat.dshRetryNote([retrying("Retrying Claude, attempt 8 of 10. API error 429. Trying again in 38.6s.")]),
+    " · the model is rate-limited (429), retrying (8 of 10)");
+  assert.equal(chat.dshRetryNote([retrying("Retrying Claude, attempt 2 of 10. API error 503. Trying again in 2s.")]),
+    " · the model's service is failing (503), retrying (2 of 10)");
+  assert.equal(chat.dshRetryNote([retrying("Retrying Claude, attempt 2 of 10.", "completed")]), "", "a retry that is over says nothing");
+  assert.equal(chat.dshRetryNote([{ key: "s", working: { timeline: [{ id: "a", kind: "command", status: "running", text: "npm test" }] } }]), "",
+    "a card busy with a tool is not retrying");
+});
+test("the approvals poll skips a card whose attempt changed mid-read instead of raising an error", async () => {
+  const state = { approvals: null, policies: null, errors: [] };
+  const calls = [];
+  const timers = [];
+  const effect = rendererCallback("AgentOrchestratorSurface.tsx", "effect:approvalScope.current", {
+    Error, STALE_OBSERVE: /AO receipt changed/, activeNodeIds: JSON.stringify(["old", "live"]),
+    // #463: the poll asks only for a run of this project (selectedRunHere).
+    workspaceId: "w1", selectedRunId: "run1", selectedRunHere: true, autoStatus: "idle", surfaceHidden: () => false,
+    approvalScope: { current: null }, selection: { current: { workspaceId: "w1", runId: "run1" } },
+    setPendingApprovals: value => { state.approvals = value; }, setRuntimePolicies: value => { state.policies = value; },
+    setMissions: () => {}, setError: error => state.errors.push(error),
+    setInterval: callback => { timers.push(callback); return timers.length; }, clearInterval: () => {},
+    moduleCall: async (op, args) => {
+      calls.push(op + ":" + args.nodeId);
+      if (args.nodeId === "old") throw new Error("IPC_TRANSPORT_FAILED: apps.call failed: AO receipt changed; refresh before retrying");
+      return { ok: true, pending_approvals: [{ approval_id: "a1", tool: "shell" }] };
+    },
+  });
+  const cleanup = effect();
+  await new Promise(setImmediate);
+  assert.deepEqual(calls, ["observe:old", "observe:live"]);
+  assert.deepEqual(state.errors, [], "a stale observe is not shown as 'Something went wrong'");
+  assert.deepEqual(plain(state.approvals), [{ approval_id: "a1", tool: "shell", nodeId: "live" }],
+    "the other card's request still shows on the same tick");
+  cleanup();
+});
+
+test("the approvals poll still reports an observe failure that is not a changed attempt", async () => {
+  const errors = [];
+  const effect = rendererCallback("AgentOrchestratorSurface.tsx", "effect:approvalScope.current", {
+    Error, STALE_OBSERVE: /AO receipt changed/, activeNodeIds: JSON.stringify(["n1"]),
+    workspaceId: "w1", selectedRunId: "run1", selectedRunHere: true, autoStatus: "idle", surfaceHidden: () => false,
+    approvalScope: { current: null }, selection: { current: { workspaceId: "w1", runId: "run1" } },
+    setPendingApprovals: () => {}, setRuntimePolicies: () => {}, setMissions: () => {}, setError: error => errors.push(error),
+    setInterval: () => 1, clearInterval: () => {},
+    moduleCall: async () => { throw new Error("AO result is unavailable; inspect the run before retrying"); },
+  });
+  const cleanup = effect();
+  await new Promise(setImmediate);
+  assert.deepEqual(errors, ["AO result is unavailable; inspect the run before retrying"]);
+  cleanup();
+});
+
+test("the approvals poll asks nothing for a run the open project does not have yet (#463)", async () => {
+  // Right after a project switch the selected run still belongs to the previous project: asking the
+  // new one for it failed ("AO run not found in this workspace") and showed an error toast.
+  const calls = [], errors = [];
+  const effect = rendererCallback("AgentOrchestratorSurface.tsx", "effect:approvalScope.current", {
+    Error, STALE_OBSERVE: /AO receipt changed/, activeNodeIds: JSON.stringify(["n1"]),
+    workspaceId: "w2", selectedRunId: "run-from-w1", selectedRunHere: false, autoStatus: "idle", surfaceHidden: () => false,
+    approvalScope: { current: null }, selection: { current: { workspaceId: "w2", runId: "run-from-w1" } },
+    setPendingApprovals: () => {}, setRuntimePolicies: () => {}, setMissions: () => {}, setError: error => errors.push(error),
+    setInterval: () => 1, clearInterval: () => {},
+    moduleCall: async (op) => { calls.push(op); throw new Error("AO run not found in this workspace"); },
+  });
+  const cleanup = effect();
+  await new Promise(setImmediate);
+  assert.deepEqual(calls, [], "no observe for a run of another project");
+  assert.deepEqual(errors, []);
+  cleanup?.();
+});
+test("the approvals poll asks nothing about a run still selected from the previous project", async () => {
+  // Seen in the launcher log: 25 observe and 35 harness_status failures "AO run not found in this workspace".
+  const calls = [];
+  const effect = rendererCallback("AgentOrchestratorSurface.tsx", "effect:approvalScope.current", {
+    Error, STALE_OBSERVE: /AO receipt changed/, activeNodeIds: JSON.stringify(["n1"]),
+    workspaceId: "w2", selectedRunId: "run-from-w1", selectedRunHere: false, autoStatus: "running", surfaceHidden: () => false,
+    approvalScope: { current: null }, selection: { current: { workspaceId: "w2", runId: "run-from-w1" } },
+    setPendingApprovals: () => {}, setRuntimePolicies: () => {}, setMissions: () => {}, setError: () => {},
+    setInterval: () => { calls.push("timer"); return 1; }, clearInterval: () => {},
+    moduleCall: async (op) => { calls.push(op); return {}; },
+  });
+  effect();
+  await new Promise(setImmediate);
+  assert.deepEqual(calls, [], "no poll starts until the run belongs to this project");
+});
+test("the chat list's clock stops while the window is hidden and ticks as soon as it is shown", () => {
+  // Seen in the launcher log: minimized, each minute's tick re-read other open projects' chats and
+  // was refused, "Open the Coding Tools window (not minimized)" (9 board + runs pairs).
+  let hidden = true, interval = null, cleared = false;
+  const listeners = new Map(), ticks = [];
+  const effect = rendererCallback("AgentOrchestratorSurface.tsx", "effect:setListNow(Date.now())", {
+    Date, pageHidden: () => hidden, setListNow: value => ticks.push(value),
+    window: { setInterval: (callback, ms) => { interval = { callback, ms }; return 7; }, clearInterval: id => { cleared = id === 7; } },
+    document: { addEventListener: (type, callback) => listeners.set(type, callback), removeEventListener: (type, callback) => { if (listeners.get(type) === callback) listeners.delete(type); } },
+  });
+  const cleanup = effect();
+  assert.equal(interval.ms, 60_000);
+  interval.callback();
+  assert.equal(ticks.length, 0, "no tick, so no reads, while minimized");
+  hidden = false;
+  listeners.get("visibilitychange")();
+  assert.equal(ticks.length, 1, "shown again, it ticks at once");
+  interval.callback();
+  assert.equal(ticks.length, 2, "and every minute while shown");
+  cleanup();
+  assert.ok(cleared && !listeners.has("visibilitychange"), "unmounting stops both");
 });

@@ -131,11 +131,11 @@ function yamlString(value) {
   return JSON.stringify(String(value));
 }
 
-// The Go plugins are rebuilt with Go 1.26.10: before it, crypto/x509 trusted chains through
-// distrusted intermediates (CVE-2026-111943, the leaked emSign CA keys).
+// Every Go plugin is built with Go 1.26.10/1.27.3 or later: before them, crypto/x509 trusted chains
+// through distrusted intermediates (CVE-2026-111943, the leaked emSign CA keys).
 const COMMANDCODE_PLUGINS = [
-  { id: "cline-pass-switcher", file: "cline-pass-switcher-v0.1.0-codingtools.4.dll", sha256: "20d865c73d65dbc1da7748066af7978e51d5c8c8917556135545a89f6dff95bb" },
-  { id: "commandcode-go", file: "commandcode-go-v1.0.0-codingtools.2.dll", sha256: "27075e8b31d23f9b2691f47d1b50ea706f58a4fd9cab1d2900e70488ffe13578" },
+  { id: "cline-pass-switcher", file: "cline-pass-switcher-v0.1.0-codingtools.5.dll", sha256: "3a635fee93736fba27a1a444915ff08128031c798ffaef0bc582b994c15a5769" },
+  { id: "commandcode-go", file: "commandcode-go-v1.0.0-codingtools.3.dll", sha256: "7b50bd0f2879101c06732e98b6fc1a30ae8afa29a5fd8f6016473f0eb74ff343" },
   { id: "auth-commandcode", file: "auth-commandcode-v0.1.0-codingtools.2.dll", sha256: "0d24aa57f4415db4163ece11fa95ab785e7f061bee657894cef1e14b9dc9bf31" },
   // CPA Helper (usage, costs, Codex keeper), rebuilt from walkingddd/CPA-Helper as a native plugin.
   { id: "cpa-helper", file: "cpa-helper-v0.1.0.dll", sha256: "3e1c57168b1bef6f789041026a2437482e540d8be3b7c5e4a2b943011c1eb55c" },
@@ -257,9 +257,13 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     "debug: false",
     "request-log: false",
     // No main.log: it took ~10 MB every two days, half of it warnings nobody reads. CPA then logs
-    // to its output, which the launcher discards for a persistent CPA. Failed requests still leave
-    // their error-*.log (error-logs-max-files).
+    // to its output, which the launcher discards for a persistent CPA.
     "logging-to-file: false",
+    // No request logger at all. Even with request-log off, CPA copied every request body over
+    // 1 MiB (and every chunked one) into logs/request-log-parts-* in case the request failed, then
+    // deleted it: a disk write per agent turn. Commercial mode only drops that logger (and the
+    // error-*.log files it wrote on failures, which nothing here reads).
+    "commercial-mode: true",
     "usage-statistics-enabled: true",
     ...cpaLongRunYamlLines(),
     "",
@@ -267,8 +271,12 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
   if (!savedSource.trim()) return generated;
   const managed = (yaml.parse ?? yaml.load)(generated);
   // User settings survive restarts; listener, credentials, bundled plugin paths and file logging
-  // stay managed (an older build saved logging-to-file: true).
-  const owned = ["host", "port", "auth-dir", "api-keys", "proxy-url", "remote-management", "plugins", "logging-to-file"];
+  // stay managed (an older build saved logging-to-file: true; none saved commercial-mode). So do
+  // config v8's grouped forms of the same security settings: a saved `server` (host 0.0.0.0, or
+  // commercial-mode off), `management` or `access` block would otherwise reopen what the flat keys
+  // above keep closed.
+  const owned = ["host", "port", "auth-dir", "api-keys", "proxy-url", "remote-management", "plugins", "logging-to-file",
+    "commercial-mode", "server", "management", "access"];
   const retained = Object.fromEntries(Object.entries(saved).filter(([key]) => !owned.includes(key)));
   const merged = {
     ...managed, ...retained,

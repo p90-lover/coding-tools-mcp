@@ -11,7 +11,7 @@ import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "
 import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
-import { GOAL_SUMMARY, approvalAnsweredForYou, chatArchived, chatList, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatRunStopping, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatWakeup, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
+import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatRunStopping, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatWakeup, type ChatNode, type ChatRun, type TaskLifecycleView } from "./ao-chat";
 import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { createLatestConfigQueue } from "./ao-config";
 import {
@@ -77,6 +77,15 @@ function ToolButton({ icon, label, onClick, disabled, primary, pressed }: { icon
   return <button type="button" className={`ao-tool${primary ? " is-primary" : ""}`} aria-label={label} title={label} aria-pressed={pressed} disabled={disabled} onClick={onClick}><Glyph name={icon} /></button>;
 }
 
+// How long a request the "Approve for me" reviewer has not answered stays hidden. One review takes
+// at most ~50 s (25 s, then 25 s more to decide); past that, nothing is screening it.
+const REVIEW_GRACE_MS = 120_000;
+/**
+ * A chat message refused only for the moment: the chat started working again under it (its
+ * automatic retry), or the app window was not in front. The chat keeps it at the front of its queue
+ * and sends it as soon as it can, so it is no "Something went wrong".
+ */
+const QUIET_SEND_REFUSAL = /still running|focused app window/i;
 const OVERVIEW_RATIO_KEY = "coding-tools:ao:overview-ratio:v1";
 const OVERVIEW_DIVIDER = 8;
 
@@ -458,6 +467,9 @@ const NATIVE_ENTRY: AoHarness = { id: NATIVE_HARNESS, label: "Native Codex", run
 /** A project folder's git kind for the chat list's labels; one stable function, so each folder is read once. */
 const readProjectGit = (folder: string) => window.codexWebLauncher?.projectGit?.(folder) ?? Promise.resolve(null);
 
+/** The headless observe answer for a card whose attempt changed between the poll's read and its check. */
+const STALE_OBSERVE = /AO receipt changed/;
+
 /** A chat card's model as the composer's chip names it ("DeepSeek V4.1 Flash", "WebGPT High"). */
 const chatModelName = (model: string) => modelShortLabel(model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, ""), model.startsWith("cpa/")).name;
 
@@ -585,7 +597,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
   // reading it while this filter runs during render threw "Cannot access … before initialization"
   // (the window's render error, every time a request was pending).
   const approvalRun = missions.find((mission) => mission.id === selectedRunId);
-  const shownApprovals = pendingApprovalsHere.filter((approval) => !approval.awaiting_review && !approvalAnsweredForYou(approval,
+  // A request still awaiting review after REVIEW_GRACE_MS is shown after all: when nothing was
+  // screening it (the run's loop had stopped, or its reads of the chat failed), it stayed hidden while
+  // the agent waited on it, and a long task sat "may be stuck" for hours.
+  const shownApprovals = pendingApprovalsHere.filter((approval) => !(approval.awaiting_review && Date.now() - seenAt(approval) < REVIEW_GRACE_MS) && !approvalAnsweredForYou(approval,
     approvalRun?.nodes.find((node) => node.id === approval.nodeId)?.route as { approval_policy?: string; approvals_reviewer?: string } | undefined,
     Date.now() - seenAt(approval), Boolean(approvalRun?.nodes.some((node) => node.role === "approver")))).map((approval) => {
     const note = dependencyInstallNote(approval.command, dependencyLinks?.workspaceId === workspaceId ? dependencyLinks.links : null);
@@ -735,14 +750,24 @@ export function AgentOrchestratorSurface({ language, setError }: {
       const running = mission.nodes.filter((node) => node.state === "running");
       const key = `${workspaceId}:${mission.id}`;
       // A run with work left but nothing running (its next cards never started) is just as orphaned.
+      // Whether it could resume at all; "Retry automatically" is read below, once a run qualifies.
       if (mission.workspace_id !== workspaceId || mission.cancelled || settledRuns.current.has(key)
-        || (!running.length && !restartResume(mission))) continue;
+        || (!running.length && !restartResume(mission, Date.now(), { autoRetry: true }))) continue;
       settledRuns.current.add(key);
+      // A failed step a loop is still holding (it waits out its retry pause) is looked at again on a
+      // later update: if that loop ends without retrying, this is what picks the chat up.
+      const held = !running.length && mission.nodes.some((node) => node.state === "held");
       void (async () => {
         const status = await moduleCall("run_status", { workspaceId, runId: mission.id });
         if (!mounted.current || selection.current.workspaceId !== workspaceId) { settledRuns.current.delete(key); return; }
         // A loop in this app session drives it (or is starting it).
-        if (status.driven !== false || ["starting", "running"].includes(String(status.status))) return;
+        if (status.driven !== false || ["starting", "running"].includes(String(status.status))) {
+          if (held) settledRuns.current.delete(key);
+          return;
+        }
+        // Read only where it decides anything: a single chat with a failed step.
+        const autoRetry = held && mission.execution_mode === "single"
+          ? await moduleCall("chat_auto_retry", {}).then((result) => result.autoRetry === true, () => false) : false;
         let nodes = running;
         let still: AoMission | undefined = mission;
         for (;;) {
@@ -751,7 +776,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
           const after = await moduleCall("runs", { workspaceId, runId: mission.id }).catch(() => null);
           still = (after?.runs as AoMission[] | undefined)?.find((run) => run.id === mission.id);
           // Resumable now: its loop takes over the cards still running and starts the next ones.
-          if (still && !resumedRuns.current.has(key) && restartResume(still)) break;
+          if (still && !resumedRuns.current.has(key) && restartResume(still, Date.now(), { autoRetry })) break;
           nodes = still && !still.cancelled ? still.nodes.filter((node) => node.state === "running" && node.route?.harness_id?.startsWith("ao:")) : [];
           // Done once nothing is left running here, another project is open, or a loop took the run over.
           if (!nodes.length || !mounted.current || selection.current.workspaceId !== workspaceId
@@ -761,9 +786,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
         // Left for another project with the card still running: watch it again when it is back.
         if (nodes.length && (!mounted.current || selection.current.workspaceId !== workspaceId)) settledRuns.current.delete(key);
         // A chat the app restart interrupted picks up where it was, the way "Retry failed step"
-        // does, and one with work left continues; teams too. A new background grant still asks in
+        // does, and one with work left continues; teams too. With "Retry automatically" on, so does a
+        // single chat's failed step that nothing retried. A new background grant still asks in
         // this window.
-        const resume = still && !resumedRuns.current.has(key) ? restartResume(still) : null;
+        const resume = still && !resumedRuns.current.has(key) ? restartResume(still, Date.now(), { autoRetry }) : null;
         if (mounted.current && selection.current.workspaceId === workspaceId && resume) {
           resumedRuns.current.add(key);
           if (resume === "retry") await moduleCall("control_run", { workspaceId, runId: mission.id, action: "retry", ...executableArg() });
@@ -1317,16 +1343,28 @@ export function AgentOrchestratorSurface({ language, setError }: {
     const ids = JSON.parse(activeNodeIds) as string[];
     setPendingApprovals([]);
     approvalScope.current = { workspaceId, runId: selectedRunId };
-    if (!workspaceId || !selectedRunId || !ids.length) return;
+    // As the status poll above: a run still selected from the previous project was asked about in
+    // this one every 3 s ("AO run not found in this workspace", 25 times in the launcher log).
+    if (!workspaceId || !selectedRunId || !selectedRunHere || !ids.length) return;
     let live = true;
     let reading = false;
     const refresh = async () => {
       if (reading || surfaceHidden()) return;
       reading = true;
       try {
-        const results = await Promise.all(ids.map(async nodeId => ({
-          nodeId, result: await moduleCall(["running", "paused"].includes(autoStatus) ? "harness_status" : "observe", { workspaceId, runId: selectedRunId, nodeId }),
-        })));
+        // A card whose attempt moved on while this poll read it (a retry, the app restarting under it)
+        // answers "AO receipt changed; refresh before retrying": the next tick reads the new attempt.
+        // It showed as "Something went wrong" and, rejecting the whole batch, hid the other cards'
+        // requests for that tick.
+        const read = await Promise.all(ids.map(async nodeId => {
+          try {
+            return { nodeId, result: await moduleCall(["running", "paused"].includes(autoStatus) ? "harness_status" : "observe", { workspaceId, runId: selectedRunId, nodeId }) };
+          } catch (cause) {
+            if (STALE_OBSERVE.test(cause instanceof Error ? cause.message : String(cause))) return null;
+            throw cause;
+          }
+        }));
+        const results = read.filter((entry): entry is NonNullable<typeof entry> => entry !== null);
         if (!live || selection.current.workspaceId !== workspaceId || selection.current.runId !== selectedRunId) return;
         const approvals: AoApproval[] = [];
         let newest: AoMission | undefined;
@@ -1351,9 +1389,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
     const timer = setInterval(() => void refresh(), 3000);
     void refresh();
     return () => { live = false; clearInterval(timer); };
-  }, [workspaceId, selectedRunId, activeNodeIds, autoStatus, setError]);
+  }, [workspaceId, selectedRunId, selectedRunHere, activeNodeIds, autoStatus, setError]);
 
-  const taskName = (id: string) => board?.tasks.find((task) => task.id === id)?.title ?? id;
+  const taskName =(id: string) => board?.tasks.find((task) => task.id === id)?.title ?? id;
   const describeNode = (node: CanvasNode) => node.route.model.startsWith("chatgpt-web/") ? modelLabel(node.route.model)
     : `${harnessLabel(node.route.harness_id || NATIVE_HARNESS, harnesses)} · ${node.route.model}`;
   const moveCard = async (positions: { id: string; x: number; y: number }[], parentId?: string) => {
@@ -1518,7 +1556,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
         if (!current()) { resolve(); return; }
         // The route is not kept here: picks are kept as they are made, and a follow-up in an older
         // chat runs on that chat's route, which must not become the next new chat's (or a rewind's).
-        // The started run is shown from the reply; the board and runs reload behind it (below).
+        // The board and missions reload in the background below: awaiting them here too (two more
+        // reads, then the same two again) held the sent message for seconds on a busy disk. The new
+        // run and the new chat's task are set from the answer meanwhile.
         const taskId = String(result.taskId);
         if (result.run) {
           const created = result.run as AoMission;
@@ -1537,7 +1577,14 @@ export function AgentOrchestratorSurface({ language, setError }: {
         setAutoStatus(startNotice(result) ? "idle" : typeof result.status === "string" ? result.status : "running");
         resolve();
         void Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]).catch(cause => setError(cause instanceof Error ? cause.message : String(cause)));
-      } catch (cause) { if (current() && !input.taskId) setPendingChat(null); reject(cause); throw cause; }
+      } catch (cause) {
+        if (current() && !input.taskId) setPendingChat(null);
+        reject(cause);
+        // Refused only for now (the chat started working again under the message, or the window was
+        // not in front): the chat queues the message and says so; no "Something went wrong" toast.
+        if (input.taskId && QUIET_SEND_REFUSAL.test(cause instanceof Error ? cause.message : String(cause))) return;
+        throw cause;
+      }
     });
   });
   // Steering goes straight to the running agent, outside run()'s one-action-at-a-time lock: it must
@@ -1552,7 +1599,12 @@ export function AgentOrchestratorSurface({ language, setError }: {
       return result.steered === true ? true : result.interrupted === true ? "interrupt" as const : result.restarted === true ? "restart" as const
         : result.starting === true ? "starting" as const
         : result.waiting === true ? "wait" as const : false;
-    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); throw cause; }
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      // The chat waits for focus and steers it in then (see QUIET_SEND_REFUSAL).
+      if (!QUIET_SEND_REFUSAL.test(message)) setError(message);
+      throw cause;
+    }
   };
   // Have the agent the next message needs running before it is sent, so sending does not wait half
   // a minute for a launch: the selected model's (or the team's orchestrator) on a new chat, and on an
@@ -1566,10 +1618,22 @@ export function AgentOrchestratorSurface({ language, setError }: {
     try { execution = aoChatExecution(composerMode, singleRoute, savedTeams, composerTeamId); } catch { return; }
     // Wait for the picker to settle so trying models does not start an agent for each.
     const timer = setTimeout(() => {
+      lastPrewarm.current = Date.now();
       void moduleCall("chat_prewarm", { workspaceId, ...execution, ...(chatTaskId ? { taskId: chatTaskId } : {}) }).catch(() => undefined);
     }, 600);
     return () => clearTimeout(timer);
   }, [prewarmKey, savedTeams.length]);
+  // Warmed again when the user starts typing (at most every 30 s): an agent left idle is released,
+  // and the message then waited for a whole launch (4-59 s, measured live) after it was sent. The
+  // backend keeps a warm or running agent as it is, so asking again costs nothing then.
+  const lastPrewarm = useRef(0);
+  const prewarmOnTyping = useCallback(() => {
+    if (!prewarmKey || Date.now() - lastPrewarm.current < 30_000) return;
+    let execution: JsonObject;
+    try { execution = aoChatExecution(composerMode, singleRoute, savedTeams, composerTeamId); } catch { return; }
+    lastPrewarm.current = Date.now();
+    void moduleCall("chat_prewarm", { workspaceId, ...execution, ...(chatTaskId ? { taskId: chatTaskId } : {}) }).catch(() => undefined);
+  }, [prewarmKey, composerMode, singleRoute, savedTeams, composerTeamId, workspaceId, chatTaskId]);
   const retryChatStart = (runId: string) => void run("start-run", async () => {
     const taskId = missions.find((mission) => mission.id === runId)?.project_id ?? "";
     try {
@@ -1771,8 +1835,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
             : { response: reply as JsonObject, threadId: approval.thread_id!, turnId: approval.turn_id! }) })
         // Answered already (by the reviewer, or in another window) before this click arrived: the
         // card just goes, as the next poll would take it away; it is not an error to report.
+        // An AO tool request says "AO tool request is no longer pending": seen in the launcher log on a
+        // list_windows card clicked while its reviewer was still answering, it showed as an error.
         .catch((cause: unknown) => {
-          if (/CHAT_REQUEST_NOT_PENDING|no longer waiting/.test(cause instanceof Error ? cause.message : String(cause))) return {} as Record<string, unknown>;
+          if (/CHAT_REQUEST_NOT_PENDING|no longer waiting|no longer pending/.test(cause instanceof Error ? cause.message : String(cause))) return {} as Record<string, unknown>;
           throw cause;
         });
       if (!result.cancelled && mounted.current && selection.current.workspaceId === owner.workspaceId && selection.current.runId === owner.runId) {
@@ -1787,13 +1853,16 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const visibleNodes = aoVisibleNodes(selectedRun?.nodes ?? [], showInactive);
   const showingHistory = !showInactive && visibleNodes.length > 0 && visibleNodes.every(node => ["cancelled", "archived"].includes(node.state));
   const workers = selectedRun?.nodes.filter(node => node.role === "worker") ?? [];
-  const chooseWorkspace = (id: string) => {
-    // Another project's chat still loading to open gives way to the project chosen now.
-    switchTarget.current = "";
-    if (pendingSelect.current && pendingSelect.current.workspaceId !== id) pendingSelect.current = null;
+  const switchToWorkspace = (id: string) => {
     setWorkspaceId(id);
     setChatTaskId(null);
     try { localStorage.setItem("coding-tools:ao:workspace", id); } catch { /* Selection still works for this session. */ }
+  };
+  const chooseWorkspace = (id: string) => {
+    // A chat clicked in a project still loading gives way to whatever is chosen now: a project, a
+    // new chat in one, a conversation continued there. Only that click's own switch keeps it.
+    switchTarget.current = ""; pendingSelect.current = null;
+    switchToWorkspace(id);
   };
   // A chat opened from another project's rows in the list. As in Codex the open chat stays until the
   // clicked one can show: that project's board and runs are read first, then the switch applies them
@@ -1814,7 +1883,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
       }, () => undefined)
       .then(() => {
         // A failed read switches anyway; the project then loads as any switch does.
-        if (switchTarget.current === id) chooseWorkspace(id);
+        if (switchTarget.current !== id) return;
+        switchTarget.current = "";
+        switchToWorkspace(id);
       });
   };
   useEffect(() => {
@@ -1825,9 +1896,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
       // Gone from the project once it loaded (archived or deleted meanwhile): open what a switch opens.
       if (loadedWorkspace !== workspaceId || boardWorkspace.current !== workspaceId) return;
       pendingSelect.current = null;
+      // Opened as a click opens a chat, so the chat view shows it even from the board or overview.
       const latest = chatList(missions.filter((mission) => mission.workspace_id === workspaceId), board?.tasks ?? [], taskLifecycle)[0];
-      setChatTaskId(latest?.taskId ?? "");
-      if (latest) setSelectedRunId(latest.latestRunId);
+      if (latest) selectChat(latest.taskId);
+      else { setChatTaskId(""); setView("chat"); }
       return;
     }
     pendingSelect.current = null;
@@ -1848,9 +1920,15 @@ export function AgentOrchestratorSurface({ language, setError }: {
       lastChatStatus.current[entry.taskId] = entry.status;
     }
   }, [missions]);
+  // The chat list's clock (its "5m ago" times, and the refresh of other open projects' chats) stops
+  // while the window is hidden and ticks as soon as it is shown again. Minimized, each tick's reads
+  // were refused ("Open the Coding Tools window (not minimized)": 9 board + runs pairs a minute
+  // apart in the launcher log).
   useEffect(() => {
-    const timer = window.setInterval(() => setListNow(Date.now()), 60_000);
-    return () => window.clearInterval(timer);
+    const tick = () => { if (!pageHidden()) setListNow(Date.now()); };
+    const timer = window.setInterval(tick, 60_000);
+    document.addEventListener("visibilitychange", tick);
+    return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", tick); };
   }, []);
   // Every message names how its card runs; working cards also show runtime and current step.
   // A single-model chat's one card is stored as the planner; it is no orchestrator, so no role is shown.
@@ -1962,7 +2040,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
         for (const node of latestRun.nodes) rows.push([node.settings?.name || node.role, `${describeChatNode(node as unknown as ChatNode, latestRun as unknown as ChatRun)} · ${node.state}`]);
       } else rows.push(["Mode", composerMode === "single" ? `Single model · ${singleRoute.model}` : "Team"]);
       if (chatTaskId) rows.push(["Context", `${description.length.toLocaleString("en-US")} of ${CHAT_CONTEXT_LIMIT.toLocaleString("en-US")} characters (${Math.round(description.length / CHAT_CONTEXT_LIMIT * 100)}% full)`]);
-      rows.push(["Goal", goal ? `${GOAL_SUMMARY[goal.status]} · round ${goal.round} of ${goal.rounds} · ${goalElapsed(goal.startedAt)} · ${goal.objective}` : "None"]);
+      rows.push(["Goal", goal ? `${GOAL_SUMMARY[goal.status]} · round ${goalRounds(goal)} · ${goalElapsed(goal.startedAt)} · ${goal.objective}` : "None"]);
       rows.push(["Plan mode", planMode ? "On" : "Off"]);
       return { title: "Status", rows };
     },
@@ -2207,7 +2285,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
             ? <div className="ao-empty-state"><p>{copy.noWorkspace}</p><button className="button-primary" type="button" onClick={() => setSheet("settings")}>{copy.settings}</button></div>
             : <AgentOrchestratorChat
                 runs={chatRuns}
-                tasks={allTasks} selectedTaskId={chatTaskId ?? ""} deciding={chatTaskId === null}
+                tasks={allTasks} selectedTaskId={chatTaskId ?? ""} deciding={chatTaskId === null} onComposing={prewarmOnTyping}
                 projectName={workspaces.find((item) => item.id === workspaceId)?.name} projectBranch={projectBranch}
                 stop={stopChat} restart={restartChat} loadWork={loadChatWork}
                 thread={chatThread}

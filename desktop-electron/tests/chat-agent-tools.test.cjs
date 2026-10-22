@@ -6,7 +6,7 @@ const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { createChatAgentTools, dialogText, displaySafe, parsePatch, patchTargets, toolResult, windowsQuirk } = require("../electron/chat-agent-tools.cjs");
+const { createChatAgentTools, dialogText, displaySafe, parsePatch, patchTargets, processWindow, toolResult, windowsQuirk } = require("../electron/chat-agent-tools.cjs");
 
 const WINDOWS = process.platform === "win32";
 const tool = (name) => ({ name, description: name, inputSchema: { type: "object" } });
@@ -302,7 +302,7 @@ test("a chat agent's tool list leaves out routing, revision and consent fields a
   ] };
   const { tools, calls } = fixture({ root: tree.root, catalog });
   try {
-    const { url, auth } = await session(tools, { agent: "claude-code" });
+    const { url, auth } = await session(tools, { agent: "codex" });
     const list = (await post(url, { jsonrpc: "2.0", id: 2, method: "tools/list" }, auth)).body.result.tools;
     assert.deepEqual(list.map((entry) => entry.name).filter((name) => name !== "show_in_chat"), ["read_file", "search_text"],
       "grep_text runs search_text and tool_search names headless's catalog, so neither is listed");
@@ -347,11 +347,34 @@ test("project instructions a session already received come back once as text, th
   assert.equal(toolResult("read_file", {}, withInstructions("r1")).structuredContent.project_instructions.instructions, "Use pnpm.");
 });
 
+test("Claude Code is not offered the file, git and plan tools its own harness has, but can still call them", async () => {
+  // Every request repeats the tool list: a new chat sent 53,000-66,000 tokens before the user's message.
+  const tree = tempTree();
+  const { tools, calls } = fixture({ root: tree.root });
+  try {
+    const claude = await session(tools, { agent: "claude-code" });
+    const listed = (await post(claude.url, { jsonrpc: "2.0", id: 2, method: "tools/list" }, claude.auth)).body.result.tools.map((entry) => entry.name);
+    assert.deepEqual(listed, ["view_image", "show_in_chat"], "read_file, apply_patch, git_status and update_plan are Claude Code's own");
+    const init = await post(claude.url, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "1" } } }, claude.auth);
+    assert.match(init.body.result.instructions, /use your own tools: Read, Grep, Glob, Edit, Write, and Bash for git/);
+    assert.doesNotMatch(init.body.result.instructions, /read_file|search_text|apply_patch/, "it is not told about tools it is not shown");
+    const called = await callTool(claude.url, claude.auth, "read_file", { path: "src/a.txt" });
+    assert.equal(called.isError, false, "a call naming one still works");
+    assert.equal(calls.at(-1).body.tool, "read_file");
+
+    const codex = await session(tools, { agent: "codex" });
+    const codexListed = (await post(codex.url, { jsonrpc: "2.0", id: 2, method: "tools/list" }, codex.auth)).body.result.tools.map((entry) => entry.name);
+    assert.deepEqual(codexListed, ["read_file", "apply_patch", "git_status", "view_image", "update_plan", "show_in_chat"], "other agents keep them");
+  } finally {
+    tree.cleanup?.();
+  }
+});
+
 test("the MCP endpoint answers initialize, lists the agent tools and calls them in the session's worktree", async () => {
   const tree = tempTree();
   const { tools, calls } = fixture({ root: tree.root });
   try {
-    const { url, auth } = await session(tools, { agent: "claude-code" });
+    const { url, auth } = await session(tools, { agent: "codex" });
     const init = await post(url, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "1" } } }, auth);
     assert.equal(init.status, 200);
     assert.equal(init.body.result.protocolVersion, "2025-03-26");
@@ -1485,7 +1508,7 @@ test("desktop tools are hidden and refused unless the user opts in, and every sc
       "a session started without the desktop group does not gain it");
     const opted = await session(tools, { id: "ao-2" });
     assert.deepEqual((await listed(opted.url, opted.auth)).filter((name) => !["read_file", "apply_patch", "git_status", "view_image", "update_plan", "show_in_chat"].includes(name)),
-      ["capture_screenshot", "list_windows", "computer_snapshot", "computer_action", "vision_status"]);
+      ["capture_screenshot", "list_windows", "computer_snapshot", "computer_action", "vision_status", "capture_process"]);
     const init = await post(opted.url, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, opted.auth);
     assert.match(init.body.result.instructions, /confirms each screen capture/);
 
@@ -1547,6 +1570,75 @@ test("under Approve for me on Claude Code, screen tools its reviewer already jud
     await callTool(codex.url, codex.auth, "list_windows");
     assert.equal(confirmations.length, 1);
     assert.match(confirmations[0].message, /list the windows/);
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("capture_process picks the named program's focused (else largest) visible window, never a minimized or empty one", () => {
+  const windows = [
+    { window_id: 1, pid: 10, app_name: "Notepad", title: "a.txt - Notepad", width: 800, height: 600, minimized: false, focused: false },
+    { window_id: 2, pid: 10, app_name: "Notepad", title: "b.txt - Notepad", width: 400, height: 300, minimized: false, focused: true },
+    { window_id: 3, pid: 20, app_name: "chrome", title: "Docs", width: 1900, height: 1000, minimized: false, focused: false },
+    { window_id: 4, pid: 20, app_name: "chrome", title: "Mail", width: 2000, height: 1100, minimized: true, focused: false },
+    { window_id: 5, pid: 20, app_name: "chrome", title: "", width: 0, height: 0, minimized: false, focused: false },
+  ];
+  assert.equal(processWindow(windows, { processName: "notepad.EXE" }).window_id, 2, "the focused window, the name matched without .exe and case");
+  assert.equal(processWindow(windows, { processName: "notepad", titleContains: "A.TXT" }).window_id, 1);
+  assert.equal(processWindow(windows, { pid: 20 }).window_id, 3, "the largest visible one; minimized and empty windows are skipped");
+  assert.equal(processWindow(windows, { pid: 20, titleContains: "mail" }), null, "a minimized window is never taken");
+  assert.equal(processWindow(windows, { processName: "code" }), null);
+  assert.equal(processWindow(windows, { pid: 10, processName: "chrome" }).pid, 10, "a pid wins over a name");
+  assert.equal(processWindow(null, { pid: 10 }), null);
+});
+
+test("capture_process is a reviewed screen observation that returns the window as an inline image, never a file", async () => {
+  const tree = tempTree();
+  let approve = true;
+  const windows = [
+    { window_id: 7, pid: 4242, app_name: "Clash of Clans", title: "Clash of Clans", width: 1280, height: 720, minimized: false, focused: false },
+    { window_id: 8, pid: 99, app_name: "explorer", title: "Desktop", width: 2560, height: 1440, minimized: false, focused: true },
+  ];
+  const { tools, calls, confirmations } = fixture({ root: tree.root, desktop: () => true, confirm: async () => approve, results: {
+    list_windows: { state: "completed", result: { ok: true, windows, truncated: false } },
+    capture_window: { state: "completed", result: { ok: true, mime_type: "image/png", base64: "iVBORw0K", width: 1280, height: 720,
+      persisted: false, capture_storage: "memory_only" } },
+  } });
+  try {
+    const chat = await session(tools, { id: "ao-1" });
+    assert.ok((await listed(chat.url, chat.auth)).includes("capture_process"));
+    const shot = await callTool(chat.url, chat.auth, "capture_process", { process_name: "clash of clans", max_width: 640,
+      output: "file", save_path: "C:/shot.png" });
+    assert.equal(shot.isError, false);
+    assert.equal(shot.content[0].type, "image", "the image goes to the model inline");
+    assert.equal(shot.content[0].data, "iVBORw0K");
+    const meta = JSON.parse(shot.content[1].text);
+    assert.equal(meta.capture_storage, "memory_only");
+    assert.deepEqual(meta.process, { pid: 4242, app_name: "Clash of Clans", title: "Clash of Clans" });
+    assert.ok(!JSON.stringify(shot).includes("base64\""), "no second copy of the image in the text");
+    assert.equal(confirmations.length, 1, "asked before anything is seen");
+    assert.match(confirmations[0].message, /capture a program's window/);
+    assert.match(confirmations[0].detail, /clash of clans/);
+    const toolCalls = calls.filter((call) => call.endpoint === "/api/v1/tools/call");
+    assert.deepEqual(toolCalls.map((call) => call.body.tool), ["list_windows", "capture_window"]);
+    assert.deepEqual(toolCalls[1].body.arguments, { window_id: 7, expected_pid: 4242, output: "mcp_image", max_width: 640 },
+      "that window, by id and expected pid, and only as an inline image: no file or path argument reaches the service");
+
+    approve = false;
+    const before = calls.length;
+    assert.match((await callTool(chat.url, chat.auth, "capture_process", { pid: 4242 })).content[0].text, /declined/);
+    assert.equal(calls.length, before, "a declined capture lists nothing and captures nothing");
+
+    approve = true;
+    const missing = await callTool(chat.url, chat.auth, "capture_process", { process_name: "notepad" });
+    assert.equal(missing.isError, true);
+    assert.match(missing.content[0].text, /No visible window of "notepad"/);
+    assert.equal(calls.at(-1).body.tool, "list_windows", "nothing else is captured in its place");
+    assert.match((await callTool(chat.url, chat.auth, "capture_process", {})).content[0].text, /Name the program/);
+
+    // Under "Approve for me" on Claude Code the chat's reviewer judged the call: it is not asked again.
+    const reviewed = await session(tools, { agent: "claude-code", autoReview: true, id: "ao-2" });
+    const asked = confirmations.length;
+    assert.equal((await callTool(reviewed.url, reviewed.auth, "capture_process", { pid: 4242 })).isError, false);
+    assert.equal(confirmations.length, asked);
   } finally { await tools.close(); tree.cleanup(); }
 });
 
