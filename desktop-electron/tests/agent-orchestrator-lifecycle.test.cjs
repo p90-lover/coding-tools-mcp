@@ -33,6 +33,8 @@ function createHarness(hooks = {}) {
   const warnings = [];
   const opened = [];
   const binary = Buffer.from("fake source-built Go daemon");
+  const files = hooks.files ?? new Map();
+  const daemonReads = [];
   const resourceRoot = path.resolve("ao-lifecycle-fixture/resources");
   const dataRoot = path.resolve("ao-lifecycle-fixture/data");
   const manifest = { localOnly: true, standaloneInstall: false, daemonSha256: crypto.createHash("sha256").update(binary).digest("hex"), ...hooks.manifest };
@@ -121,6 +123,24 @@ function createHarness(hooks = {}) {
         return binary;
       },
       mkdirSync(directory) { assert.equal(directory, dataRoot); },
+      // The daemon is hashed from a stream; daemon-verified.json lives in `files` (shared when a
+      // test passes its own, like a data folder kept across launches).
+      createReadStream(filename) {
+        assert.equal(filename, path.join(resourceRoot, process.platform === "win32" ? "ao-daemon.exe" : "ao-daemon"));
+        daemonReads.push(filename);
+        const stream = new EventEmitter();
+        setImmediate(() => { stream.emit("data", hooks.binary ?? binary); stream.emit("end"); });
+        return stream;
+      },
+      promises: {
+        async stat() { return { size: (hooks.binary ?? binary).length, mtimeMs: hooks.mtimeMs ?? 1 }; },
+        async readFile(filename) {
+          if (!files.has(filename)) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+          return files.get(filename);
+        },
+        async mkdir(directory) { assert.equal(directory, dataRoot); },
+        async writeFile(filename, content) { files.set(filename, String(content)); },
+      },
     },
     "node:net": {
       createServer() {
@@ -226,7 +246,7 @@ function createHarness(hooks = {}) {
     agentTools: hooks.agentTools,
     logger: { warn: (...entry) => warnings.push(entry) },
   });
-  return { controller, children, gateways, reservations, views, requests, events, warnings, parent, opened };
+  return { controller, children, gateways, reservations, views, requests, events, warnings, parent, opened, daemonReads, files };
 }
 
 test("Runtime opens the original AO board and keeps the selected project", async () => {
@@ -460,6 +480,26 @@ test("daemon exit during a readiness response cannot publish ready and startup f
   assert.equal(harness.gateways[0].closed, true);
   exitDuringReadiness = false;
   assert.equal((await controller.start()).state, "ready");
+});
+
+test("the daemon is hashed once per install: a later launch trusts the stamp, a changed file is hashed again", async (context) => {
+  // Hashing the 41 MB daemon on every launch froze the app for 17-28 s on a busy hard disk.
+  const files = new Map();
+  const first = createHarness({ files });
+  context.after(() => first.controller.stop());
+  await first.controller.start();
+  assert.equal(first.daemonReads.length, 1);
+  await first.controller.stop();
+  const relaunch = createHarness({ files });
+  context.after(() => relaunch.controller.stop());
+  assert.equal((await relaunch.controller.start()).state, "ready");
+  assert.equal(relaunch.daemonReads.length, 0, "the same daemon is not read again");
+  await relaunch.controller.stop();
+  // A swapped daemon has another time: it is hashed and refused.
+  const swapped = createHarness({ files, mtimeMs: 2, binary: Buffer.from("another daemon") });
+  await assert.rejects(swapped.controller.start(), /does not match its build manifest/);
+  assert.equal(swapped.daemonReads.length, 1);
+  assert.equal(swapped.children.length, 0);
 });
 
 test("lifecycle changes preserve manifest validation, daemon environment, and stop confirmation", async (context) => {

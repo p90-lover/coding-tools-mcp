@@ -362,7 +362,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
    */
   async function chatHostGone(id) {
     let address;
-    try { address = JSON.parse(fs.readFileSync(path.join(dataRoot, "chat-hosts", sessionId(id), "host.json"), "utf8")).address; }
+    try { address = JSON.parse(await fs.promises.readFile(path.join(dataRoot, "chat-hosts", sessionId(id), "host.json"), "utf8")).address; }
     catch { return false; }
     const match = /^127\.0\.0\.1:(\d{1,5})$/.exec(String(address));
     if (!match) return false;
@@ -1543,6 +1543,30 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     throw new Error("This desktop operation is unavailable; manage runtime lifecycle from the Coding Tools host bar");
   }
 
+  // { file, size, mtimeMs, digest } of the daemon last hashed. It is kept in dataRoot too, so a
+  // launch of the same install does not read the 41 MB file again; an update or a swapped daemon
+  // changes its size or time and is hashed anew.
+  let verifiedDaemon = null;
+  const verifiedDaemonFile = path.join(dataRoot, "daemon-verified.json");
+  async function daemonDigest(file) {
+    const stat = await fs.promises.stat(file);
+    if (!verifiedDaemon) {
+      try { verifiedDaemon = JSON.parse(await fs.promises.readFile(verifiedDaemonFile, "utf8")); } catch { /* none yet */ }
+    }
+    if (verifiedDaemon && verifiedDaemon.file === file && verifiedDaemon.size === stat.size && verifiedDaemon.mtimeMs === stat.mtimeMs
+      && typeof verifiedDaemon.digest === "string") {
+      return verifiedDaemon.digest;
+    }
+    const digest = await new Promise((resolve, reject) => {
+      const hash = crypto.createHash("sha256");
+      fs.createReadStream(file).on("error", reject).on("data", (chunk) => hash.update(chunk)).on("end", () => resolve(hash.digest("hex")));
+    });
+    verifiedDaemon = { file, size: stat.size, mtimeMs: stat.mtimeMs, digest };
+    fs.promises.mkdir(dataRoot, { recursive: true, mode: 0o700 })
+      .then(() => fs.promises.writeFile(verifiedDaemonFile, JSON.stringify(verifiedDaemon)))
+      .catch(() => { /* hashed again next launch */ });
+    return digest;
+  }
   async function start() {
     if (stopping) await stopping;
     if (state === "ready") return snapshot();
@@ -1562,7 +1586,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         const manifest = JSON.parse(fs.readFileSync(path.join(resourceRoot, "manifest.json"), "utf8"));
         if (manifest.localOnly !== true || manifest.standaloneInstall !== false) throw new Error("AO local-only source bundle is required");
         const executable = path.join(resourceRoot, process.platform === "win32" ? "ao-daemon.exe" : "ao-daemon");
-        const digest = crypto.createHash("sha256").update(fs.readFileSync(executable)).digest("hex");
+        // Read in chunks off the main thread: the 41 MB daemon read in one readFileSync on a busy
+        // hard disk froze the whole app for 17-28 s while AO started. A file unchanged since it was
+        // verified is not read again.
+        const digest = await daemonDigest(executable);
+        checkStartup();
         if (digest !== manifest.daemonSha256) throw new Error("AO daemon does not match its build manifest");
         fs.mkdirSync(dataRoot, { recursive: true, mode: 0o700 });
         // Once per app session, before AO opens it: a database that is mostly empty pages gives the
