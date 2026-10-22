@@ -47,7 +47,7 @@ function mount(props) {
           // The picker's short name: the model id without its "cpa/<provider>/" prefix.
           : name === "./AgentOrchestratorRoleEditor" ? { modelShortLabel: (model) => ({ group: "", name: model.replace(/^cpa\/(?:[^/]+\/)?/, "") }) }
           : name === "./ChatWorkbench" ? { ChatWorkbench: "Workbench", useWorkbenchAutoOpen: () => openPage }
-            : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null) } : {},
+            : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), SteerReader: react.createContext("Claude"), SteerReceiptMark: "SteerReceiptMark" } : {},
   { window: { setTimeout: () => 0, setInterval: () => 0, clearInterval() {}, confirm: () => true }, document: { querySelector: () => null }, navigator: {} });
   return { render: (next = {}) => { cursor = 0; return module.AgentOrchestratorChat({ ...props, ...next }); } };
 }
@@ -424,6 +424,7 @@ test("a steer on its way pulses in the queued-message bar; once taken it is an o
   const row = all().find((element) => element.type === "li" && element.props.className === "cx-queued-row");
   assert.equal(row?.props["data-state"], "pending", "on its way: Claude's pending state");
   assert.match(text(row), /use the other API/);
+  assert.equal(text(walk(row).find((element) => element.props?.className === "cx-queued-status")), "Sending…", "Claude Code's Sending… under it");
   assert.equal(walk(row).filter((element) => element.type === "button" && element.props["aria-label"] !== "Copy message").length, 0,
     "nothing to act on while it is delivered");
   assert.ok(!text(all()).includes("Steering…"), "no Steering… bubble at the end of the chat");
@@ -431,7 +432,8 @@ test("a steer on its way pulses in the queued-message bar; once taken it is an o
   await sending;
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
   assert.ok(!source.includes("Steered · "), "a steered message shows its time as any sent message does");
-  assert.match(source, /<SentMessage text=\{steer\.text\} \/>\s*<MessageActions text=\{chatMessageReadable\(steer\.text\)\} \/>/, "and its Copy action");
+  assert.match(source, /<SentMessage text=\{steer\.text\} \/>[\s\S]{0,400}?<MessageActions text=\{chatMessageReadable\(steer\.text\)\} \/>/, "and its Copy action");
+  assert.match(source, /<SteerReceiptMark receipt=\{turn\.status === "done" \? "read"/, "and its read receipt: a finished turn read it");
 });
 
 test("after an app restart a running AO card is still steered, though the page isn't driving its run", async () => {

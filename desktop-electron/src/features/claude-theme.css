@@ -123,7 +123,7 @@
 .ao-workflow .cx-chat .cx-bubble { max-width: 85%; padding: 10px 16px; border-radius: 16px; background: var(--claude-bubble); color: var(--claude-text); }
 .ao-workflow .cx-chat .cx-bubble p { font-size: 15px; line-height: 1.6; }
 .ao-workflow .cx-chat .cx-stamp { font-size: 11px; color: var(--claude-text-2); }
-.ao-workflow .cx-chat .cx-msg-actions button { color: var(--claude-text-2); }
+.ao-workflow .cx-chat .cx-msg-actions button, .ao-workflow .cx-chat .cx-receipt { color: var(--claude-text-2); }
 
 /* The answer: plain text on the page, no card. */
 .ao-workflow .cx-chat .cx-answer { gap: 6px; }
