@@ -4770,9 +4770,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function archivedChats({ workspaceIds } = {}) {
     if (!Array.isArray(workspaceIds) || workspaceIds.length > 100) throw new Error("Choose the projects to list");
     const chats=[];
-    for (const id of [...new Set(workspaceIds.map(value=>clean(value,128)))]) {
+    const ids=[...new Set(workspaceIds.map(value=>clean(value,128)))];
+    const read=new Map(); // workspace -> { saved, deleted: task ids }
+    for (const id of ids) {
       let saved;
       try { saved=await runs({workspaceId:id}); } catch { continue; }
+      const deleted=new Set();
+      read.set(id,{ saved, deleted });
       // A chat is a task with runs; a board task that never ran is not one.
       const chatTasks=new Set(saved.runs.map(run=>run.project_id));
       for (const life of saved.task_lifecycle ?? []) {
@@ -4788,11 +4792,47 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             logger?.warn?.("ao.archived_chat_delete_failed",{message:publicText(error?.message||error,200)});
           }
         }
+        if (visibility === "deleted") deleted.add(life.task_id);
         chats.push({ workspaceId:id, taskId:life.task_id, title:String(life.title||""), visibility,
           ...(visibility === "archived" ? { archivedAt:archive.since(id,life.task_id) } : {}) });
       }
     }
+    // Every project's chats must be known: a session is ended only when no chat still uses it.
+    if (read.size === ids.length) void endOldSessions(read).catch(error =>
+      logger?.warn?.("ao.old_sessions_failed",{message:publicText(error?.message||error,200)}));
     return { ok:true, days:archive.days(), chats };
+  }
+  /**
+   * Old AO sessions leave AO's board on the archive's clock (archive.days(); 0 keeps them). The
+   * archive moved old chats away, but AO kept every session they and their workers, subagents
+   * and reviewers ever had: 191 on the board, 35 unused for over a week, on 2026-10-22. A session
+   * is ended (AO's kill, which Restore undoes) when it has not been used for that many days and no
+   * chat in the list or in Archived still has it, so continuing a chat keeps its agent's context.
+   * At most once an hour; a session an active run owns is never touched.
+   */
+  const OLD_SESSION_SWEEP_MS = 60 * 60_000;
+  let oldSessionSweepAt = 0;
+  async function endOldSessions(read) {
+    const days = archive.days(), service = aoHarness;
+    if (!days || typeof service?.staleSessions !== "function" || now() - oldSessionSweepAt < OLD_SESSION_SWEEP_MS) return 0;
+    oldSessionSweepAt = now();
+    const kept = new Set();
+    for (const { saved, deleted } of read.values()) {
+      for (const run of saved.runs ?? []) {
+        if (deleted.has(run.project_id)) continue;
+        for (const node of run.nodes ?? []) {
+          for (const receipt of [node.receipt, ...(node.history ?? [])]) if (receipt?.thread_id) kept.add(String(receipt.thread_id));
+        }
+      }
+    }
+    let ended = 0;
+    for (const session of await service.staleSessions([...read.keys()], days * 24 * 60 * 60_000)) {
+      if (kept.has(session) || sessionOwners.has(session)) continue;
+      try { await service.kill(session); ended += 1; }
+      catch (error) { logger?.warn?.("ao.old_session_end_failed", { message: publicText(error?.message || error, 200) }); }
+    }
+    if (ended) logger?.info?.("ao.old_sessions_ended", { count: ended, days });
+    return ended;
   }
   function dispose() {
     schedulerDisposed = true;
