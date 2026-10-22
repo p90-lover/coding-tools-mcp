@@ -1102,12 +1102,24 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       // the same way and the card can be resumed. (AO's wording: storage/sqlite/queries/
       // conversations.sql, SettleOrphanedConversationTurns.)
       const reconciled = turn?.state === "failed" && turn.errorMessage === "controller ended before the turn completed";
-      if (reconciled || ((settling || settled) && await chatHostGone(id))) {
+      // AO drops a session's controller when its agent process exits (seen live 2026-10-22: a
+      // MiMo turn whose requests kept failing with 429), but leaves the turn "running" until the
+      // daemon restarts. The chat then read "may be stuck" for half an hour, and every steer or
+      // Stop hit "the agent controller for this session is not running". The snapshot says so
+      // itself (controller "stopped" while nothing is provisioning): the turn is over.
+      const agentGone = conversation?.controller === "stopped" && session?.session?.provisionState !== "provisioning";
+      const lastFailure = (Array.isArray(conversation?.activities) ? conversation.activities : [])
+        .filter(item => item.turnId === turn?.id && item.activityKind === "system" && item.detail?.event === "provider.failure"
+          && typeof item.detail.text === "string" && item.detail.text.trim()).at(-1)?.detail.text.trim();
+      const deadAgent = agentGone && turn?.state === "running";
+      if (reconciled || deadAgent || ((settling || settled) && await chatHostGone(id))) {
         if (settling) await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/interrupt`, {}).catch(() => undefined);
         return {
           status, turnId: turn.id, turnState: "interrupted",
-          error: "The agent's process ended before it finished (the app restarted); retry this card.",
-          needsInput: false, exited: false, answer: "", liveOutput: utf8Prefix(liveOutput, 4096), timeline,
+          error: deadAgent
+            ? `The agent's process stopped mid-turn${lastFailure ? ` after: ${utf8Prefix(lastFailure, 160)}` : ""}. Retry or send a message to continue.`
+            : "The agent's process ended before it finished (the app restarted); retry this card.",
+          needsInput: false, exited: false, agentGone: deadAgent || undefined, answer: "", liveOutput: utf8Prefix(liveOutput, 4096), timeline,
         };
       }
       // When the turn last showed any sign of life (a message, a tool step): a turn whose agent hung
@@ -1131,6 +1143,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         ...(stamps.length ? { lastActivityAt: Math.max(...stamps) } : {}),
         ...(toolStarts.length ? { toolSince: Math.min(...toolStarts) } : {}),
         needsInput: status === "needs_input", exited: ["exited", "terminated"].includes(status),
+        // No agent process behind this session (released while idle, or it exited): nothing runs,
+        // so a stop has nothing to wait for and a steer nothing to reach.
+        ...(agentGone ? { agentGone: true } : {}),
         answer: answer.slice(0, 12000), liveOutput: utf8Prefix(liveOutput, 4096), timeline,
         // A question the agent asked waits like an approval: the chat shows it and the card needs you.
         approvals: [...pendingApprovals(conversation), ...pendingInputs(conversation)],
@@ -1360,7 +1375,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         if (record?.session?.provisionState === "provisioning") {
           await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/kill`, {});
           agentTools?.forgetSession?.(id);
-        } else await interrupt();
+          return;
+        }
+        // Not starting and no controller: the agent's process has exited, so nothing is running
+        // to interrupt. Asking again threw the same refusal into the chat ("the agent controller
+        // for this session is not running") and Stop never finished. One that came up meanwhile
+        // is interrupted.
+        await interrupt().catch((again) => { if (!/CHAT_CONTROLLER_NOT_READY/.test(String(again?.message))) throw again; });
       });
     },
     // A standalone AO terminal running one program (e.g. the Antigravity CLI) with

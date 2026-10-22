@@ -4051,6 +4051,50 @@ test("a steer into a slow model's quiet turn is steered in, never stops it: only
   assert.deepEqual(steered, [["sess-1", "keep going"]]);
 });
 
+test("a steer into a chat whose agent process stopped goes as its next turn at once, with nothing to interrupt", async () => {
+  // Seen live: "keep going" on a MiMo chat whose agent had died after 429s showed "the agent
+  // controller for this session is not running" and the message never went.
+  const route = { harness_id: "ao:claude-code", model: "cline-pass/mimo-v2.6-pro" };
+  const task = { id: "task-1", title: "Play Ero", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  const interrupted = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000,
+    aoHarness: {
+      observe: async () => ({ turnId: "t1", turnState: "interrupted", status: "working", agentGone: true, lastActivityAt: 1_000_000, timeline: [], approvals: [] }),
+      steer: async () => { throw new Error("the agent controller for this session is not running (CHAT_CONTROLLER_NOT_READY)"); },
+      interrupt: async id => { interrupted.push(id); },
+    } });
+  const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
+  assert.equal(result.steered, false);
+  assert.equal(result.restarted, true, "the chat sends it as the next turn");
+  assert.deepEqual(interrupted, [], "a gone agent is not interrupted");
+});
+
+test("Stop on a chat whose agent process stopped finishes at once instead of waiting for its turn row to settle", async () => {
+  const route = { harness_id: "ao:claude-code", model: "cline-pass/mimo-v2.6-pro" };
+  const task = { id: "task-1", title: "Play Ero", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  let interrupted = false, readsAfter = 0;
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 11 * 60_000,
+    setTimer: (callback) => { callback(); return 0; },
+    aoHarness: {
+      // A hung turn: the stop's interrupt ends the agent's process, but AO leaves the turn row
+      // "running"; only the snapshot's controller says nothing is left.
+      observe: async () => {
+        if (interrupted) readsAfter++;
+        return { turnId: "t1", turnState: "running", status: "working", agentGone: interrupted || undefined, lastActivityAt: 1_000_000, timeline: [], approvals: [] };
+      },
+      steer: async () => ({ steered: true }),
+      interrupt: async () => { interrupted = true; },
+    } });
+  // The stall restart stops the turn through the same stopExternalTurn as Stop.
+  const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
+  assert.equal(result.restarted, true, "the stop is confirmed, not 'stop needs attention'");
+  assert.equal(readsAfter, 1, "settled on the first read after the interrupt, not after 15 s of reads");
+});
+
 test("a turn whose reasoning stream stopped mid-thought is restarted by a message, not waited on as a running tool", async () => {
   // Seen live: a DeepSeek turn's "Deep diving" reasoning ended mid-sentence and showed nothing for
   // 23 minutes; its reasoning row stayed "running", so every steer went to the hung turn.

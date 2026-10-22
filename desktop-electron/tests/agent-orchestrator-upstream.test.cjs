@@ -1253,6 +1253,44 @@ test("interrupt is idempotent for an ended turn and cancels a queued start only 
   ]);
 });
 
+test("interrupting a session whose agent process exited has nothing to stop, and never throws the refusal", async () => {
+  // Seen live: Stop and steer on a MiMo chat whose agent had died showed "the agent controller for
+  // this session is not running" and never finished.
+  const calls = [];
+  const dead = observeHarness({
+    internalApi: async (method, endpoint) => {
+      calls.push(endpoint);
+      if (endpoint.endsWith("/interrupt")) throw new Error("CHAT_CONTROLLER_NOT_READY");
+      return { session: { provisionState: "ready" } };
+    },
+  });
+  await dead.interrupt("s");
+  assert.equal(calls.filter(endpoint => endpoint.endsWith("/kill")).length, 0, "a session that is not starting is never killed");
+});
+
+test("a running turn with no agent process behind it is over: interrupted, with the last provider failure as the reason", async () => {
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {
+      controller: "stopped", turns: [{ id: "t", state: "running" }], messages: [],
+      activities: [{ id: "r1", turnId: "t", sequence: 2, activityKind: "system", status: "running", summary: "Retrying Claude, attempt 10 of 10.",
+        detail: { event: "provider.failure", text: "API error 429. Trying again in 30s." } }],
+    } : endpoint.endsWith("/conversation/interrupt") ? Promise.reject(new Error("CHAT_CONTROLLER_NOT_READY"))
+      : { session: { id: "s", mode: "chat", status: "working", provisionState: "ready" } },
+  });
+  const seen = await upstream.observe("s");
+  assert.equal(seen.turnState, "interrupted", "the card can retry instead of sitting on 'may be stuck'");
+  assert.equal(seen.agentGone, true);
+  assert.match(seen.error, /process stopped mid-turn after: API error 429/);
+  const starting = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1")
+      ? { controller: "stopped", turns: [{ id: "t", state: "running" }], messages: [], activities: [] }
+      : { session: { id: "s", mode: "chat", status: "working", provisionState: "provisioning" } },
+  });
+  const coming = await starting.observe("s");
+  assert.equal(coming.turnState, "running", "an agent still starting has no controller yet, and is not gone");
+  assert.equal(coming.agentGone, undefined);
+});
+
 test("a send binds its workspace in AO once, not for every catalog read and the launch", async () => {
   const vm = require("node:vm");
   const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");

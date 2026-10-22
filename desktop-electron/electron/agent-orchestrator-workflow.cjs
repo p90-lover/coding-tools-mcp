@@ -3760,7 +3760,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (waiting === null) {
       return { ok: true, steered: false, waiting: true, reason: "Couldn't read the agent's state. Your message is sent once it can be read." };
     }
-    const asking = (state) => Boolean(state?.approvals?.length || state?.needsInput);
+    // The agent's process is gone (its turn reads "interrupted" from here on): there is nothing to
+    // steer and nothing to stop. Steering it failed with "the agent controller for this session is
+    // not running"; the message goes as the chat's next turn, which starts the agent again.
+    if (waiting?.agentGone === true) {
+      return { ok: true, steered: false, waiting: true, restarted: true,
+        reason: "The agent's process had stopped. Your message starts its next turn." };
+    }
+    const asking =(state) => Boolean(state?.approvals?.length || state?.needsInput);
     // A steer never stops what the agent is doing (the user: "it shouldnt stop the model action,
     // wait it done to steer"). Declining the waiting request made the agent's tool call fail with
     // "The user doesn't want to take this action right now. STOP…"; the steer now waits for it.
@@ -4370,7 +4377,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const tries = Math.ceil(STOP_SETTLE_MS / STOP_SETTLE_POLL_MS);
         for (let attempt = 0; attempt < tries; attempt++) {
           const observation = await service.observe(session);
-          if (observation?.exited === true || (["completed", "failed", "interrupted", "cancelled"].includes(observation?.turnState)
+          // No agent process left behind the session (it exited, or a start was cancelled): nothing
+          // can still be working. Waiting the full 15 s for its turn row (which AO leaves "running"
+          // until it restarts) made Stop take half a minute.
+          if (observation?.exited === true || observation?.agentGone === true || (["completed", "failed", "interrupted", "cancelled"].includes(observation?.turnState)
             && !["working", "running", "starting"].includes(observation?.status))) { stopped = true; break; }
           if (attempt < tries - 1) await new Promise(resolve => setTimer(resolve, STOP_SETTLE_POLL_MS));
         }
