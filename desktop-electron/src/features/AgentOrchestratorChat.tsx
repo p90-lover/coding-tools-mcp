@@ -18,7 +18,7 @@ import { PartErrorBoundary } from "../PartErrorBoundary";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
-  CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen,
+  CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalDetail, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
   activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshQuietNote, dshRetryNote, steerReader, steerReceipts, type ChatWakeup,
@@ -1363,7 +1363,8 @@ export function AgentOrchestratorChat({
           const action = arg.toLowerCase();
           if (!arg) {
             setCard(goal ? { title: GOAL_SUMMARY[goal.status], rows: [["Goal", goal.objective], ["Round", goalRounds(goal)],
-              ["Running for", goalElapsed(goal.startedAt)], ...(goal.note ? [["Note", goal.note] as [string, string]] : [])] }
+              ["Running for", goalElapsed(goal.startedAt)], ...(goal.note ? [["Note", goal.note] as [string, string]] : []),
+              ...(goal.feedback ? [["Last check", goal.feedback] as [string, string]] : [])] }
               : { title: "Goal", text: "No goal is currently set.\nUsage: /goal <objective> | pause | resume | edit | clear\nExample: /goal make every test in this project pass" });
             break;
           }
@@ -1783,9 +1784,10 @@ export function AgentOrchestratorChat({
             <GoalGlyph name="target" />
             <span className="cx-goal-state" title={commands.goal.note || `Round ${goalRounds(commands.goal)}`}>{GOAL_SUMMARY[commands.goal.status]}</span>
             <span className="cx-goal-objective" title={commands.goal.objective}>{commands.goal.objective}</span>
-            {commands.goal.note ? <span className="cx-goal-note" title={commands.goal.note}>{commands.goal.note}</span> : null}
+            {goalDetail(commands.goal) ? <span className="cx-goal-note" title={goalDetail(commands.goal)}>{goalDetail(commands.goal)}</span> : null}
             <span className="cx-goal-meta" title={`Round ${goalRounds(commands.goal)}`}>
-              {/* A goal being pursued counts to the second, as Codex shows it; the label ticks alone. */}
+              {/* Which round it is on, then how long it has run, to the second as Codex shows it. */}
+              <span className="cx-goal-round">Round {goalRounds(commands.goal)} · </span>
               <Elapsed since={commands.goal.startedAt} live={commands.goal.status === "active"} until={commands.goal.updatedAt}
                 format={(ms) => goalElapsed(0, ms)} /></span>
             <button type="button" className="cx-goal-icon" title="Clear goal" aria-label="Clear goal" onClick={() => void runCommand("goal", "clear")}><GoalGlyph name="trash" /></button>

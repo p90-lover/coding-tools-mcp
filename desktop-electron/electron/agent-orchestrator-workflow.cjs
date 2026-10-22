@@ -3,7 +3,7 @@
 const { createHash, randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
-const { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAnswers, cleanObjective, createGoalStore } = require("./chat-goals.cjs");
+const { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, roundAnswers, cleanObjective, createGoalStore, ROUND_LIMITS } = require("./chat-goals.cjs");
 const { wakePrompt, wakeupAction, createWakeupStore } = require("./chat-wakeups.cjs");
 const { chatDescriptionWithout, createChatEditStore } = require("./chat-edits.cjs");
 const { createChatArchiveStore } = require("./chat-archive.cjs");
@@ -302,8 +302,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // Background-run observations for MCP event incidents (stall, held, approval waits).
   // An observer failure must never affect the run it watches.
   function reportRun(workspaceId, runId, state, mission, attention = null) {
-    // A settled round of a chat with a goal decides what the goal does next.
-    if (["finished", "failed", "held"].includes(state.status)) void goalAfterRun(workspaceId, runId, state.status, attention).catch(() => undefined);
+    // A settled round of a chat with a goal decides what the goal does next. Only a round that has
+    // ended (the drive loop marks it `settled`) or one the person stopped counts: "held" is also
+    // reported mid-run, while a step waits out its automatic retry or a lost connection.
+    const goalOutcome = state.stopped ? "stopped" : state.settled ? state.status : null;
+    if (goalOutcome) void goalAfterRun(workspaceId, runId, goalOutcome).catch(() => undefined);
     // A wake-up that came due while its chat's turn was still running fires once that turn settles
     // (not while it is held on the user: their answer comes first).
     if (["finished", "failed"].includes(state.status)) void wakeupAfterRun(workspaceId, runId).catch(() => undefined);
@@ -3284,6 +3287,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const observing = new Map();
     const nodeAttention = new Map(); // running node id -> its last observed attention (or null)
     state.driving = true;
+    state.settled = false;
     try {
       for (;;) {
         if (state.stopped) { reportRun(workspaceId, runId, state, null); return; }
@@ -3423,6 +3427,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           const failed = mission.nodes.some(node => node.state === "failed");
           state.status = failed ? "failed" : mission.cancelled ? "held" : "finished";
           state.detail = failed ? "Review contains failed or blocked work; inspect partial results before continuing" : undefined;
+          state.settled = true;
           reportRun(workspaceId, runId, state, mission, failed ? "error" : null); return;
         }
         const running = mission.nodes.some(node => ["running", "reserved"].includes(node.state));
@@ -3430,6 +3435,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           state.status = "held";
           state.detail ||= mission.nodes.some(node => node.role === "worker" && node.state === "pending" && blockedByFailure(mission, node))
             ? "Queued work is blocked by a failed dependency; inspect partial results" : "No card is ready; inspect dependencies and failed steps";
+          state.settled = true;
           reportRun(workspaceId, runId, state, mission, "stopped"); return;
         }
         if (mission.paused) { state.status = "paused"; state.detail = "Paused; queued work will not start"; }
@@ -3438,7 +3444,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           state.status = "running";
           if (mission.grant?.expires_at_ms && Date.now() >= mission.grant.expires_at_ms) {
             state.status = "held"; state.detail = "Run grant expired; already-sent turns may finish, but queued work needs local approval";
-            if (!running) { reportRun(workspaceId, runId, state, mission, "stopped"); return; }
+            if (!running) { state.settled = true; reportRun(workspaceId, runId, state, mission, "stopped"); return; }
           }
         }
         const pending = [...observing.values()].filter(entry => !entry.done).map(entry => entry.promise);
@@ -3468,6 +3474,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         return;
       }
       state.status = "held"; state.detail = publicText(error?.message || error, 500);
+      // With automatic retry on, the run is tried again and has not ended; without it, it has.
+      state.settled = !chatPreferences.get().autoRetry;
       reportRun(workspaceId, runId, state, null, state.stopped ? null : "error");
       if (!state.stopped) scheduleAutoRetry(workspaceId, runId, executable, state);
     } finally { state.driving = false; }
@@ -3578,12 +3586,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       state.status = "running";
       state.starting = false;
       state.detail = undefined;
+      state.settled = false;
       void driveRun(id, run, selectedExecutable, state);
       return { ok: true, started: true, status: "running" };
     } catch (error) {
       state.status = "failed";
       state.starting = false;
       state.detail = publicText(error?.message || error, 500);
+      state.settled = true;
       reportRun(id, run, state, null, "error");
       throw error;
     }
@@ -4050,7 +4060,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       handoffs.set(runId, { workspaceId: id, taskId: task });
       if (handoffs.size > 200) handoffs.delete(handoffs.keys().next().value);
     }
-    if (objective) { goals.set(id, task, objective); goals.update(id, task, { round: 1, lastRunId: runId }); }
+    if (objective) {
+      goals.set(id, task, objective, { rounds: ROUND_LIMITS[executionMode === "single" ? "single" : "team"] });
+      goals.update(id, task, { round: 1, lastRunId: runId, lastMessage: text });
+    }
     if (deferStart === true) {
       // Keep the normal authorization path: an expired/missing local approval fails visibly.
       void startRun({ workspaceId: id, runId, executable: selectedExecutable }).then(() => {
@@ -4089,12 +4102,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       : {});
   async function continueGoal(id, task, goal, previous) {
     const round = goal.round + 1;
-    // A model picked while the goal ran (chat_goal "route") takes over from the next round on.
-    const selection = followUpSelection(previous, goal.route);
-    goals.update(id, task, { round, note: "" });
+    // A model or team picked while the goal ran (chat_goal "route") takes over from the next round
+    // on. A team is named by id only: its current revision is used, so editing the team mid-goal
+    // does not stall the goal.
+    const selection = goal.team?.id ? { teamId: goal.team.id } : followUpSelection(previous, goal.route);
+    const message = goalMessage(goal.objective, round, goal.feedback);
+    // The reason it goes on stays readable (feedback) while the round runs; the note is for states.
+    goals.update(id, task, { round, note: "", lastMessage: message });
     try {
       // Started in the background: a failed start settles the run, which marks the goal stalled.
-      const result = await chatSend({ workspaceId: id, taskId: task, message: goalMessage(goal.objective, round, goal.feedback), ...selection, deferStart: true });
+      const result = await chatSend({ workspaceId: id, taskId: task, message, ...selection, deferStart: true });
       if (result?.ok === false) { goals.update(id, task, { status: "stalled", note: String(result.reason || "The next round could not start") }); return; }
       goals.update(id, task, { lastRunId: String(result.runId || ""), note: result.status === "failed" ? String(result.detail || "The next round could not start") : "" });
       if (result.status === "failed") goals.update(id, task, { status: "stalled" });
@@ -4109,28 +4126,60 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * settled, the message it was sent and the closing cards' answers, and says whether the condition
    * holds, with its reason. The reason is what the agent is told next when it does not.
    */
+  /**
+   * The models a goal check tries, in order: a quick one first (Claude Code checks with a fast
+   * model), then any other, then Codex's own review model. None is billed to the person's Codex
+   * quota (codexQuotaModel): a check runs after every round, and picking by name alone ("mini")
+   * chose a ChatGPT-account model. A model that just failed waits REVIEWER_DOWN_MS, as for reviews.
+   */
+  function goalCheckModels(catalog, hidden = []) {
+    const free = catalog.filter(model => !codexQuotaModel(model) && model !== AUTO_REVIEW_MODEL);
+    const quick = free.filter(model => /haiku|flash|mini|lite|fast/i.test(model));
+    const review = catalog.includes(AUTO_REVIEW_MODEL) || hidden.includes(AUTO_REVIEW_MODEL) ? [AUTO_REVIEW_MODEL] : [];
+    const up = model => !(reviewerDown.get(model) > now());
+    const order = [...new Set([...quick, ...free, ...review])];
+    return [...order.filter(up), ...order.filter(model => !up(model))].slice(0, 3);
+  }
   async function checkGoal(goal, mission) {
     const { baseUrl, key } = connection();
-    const catalog = (await models()).models;
-    const model = catalog.find((id) => /haiku|flash|mini|lite/i.test(id)) ?? catalog[0];
-    if (!model) throw new Error("CPA has no model to check the goal with");
-    const message = goalMessage(goal.objective, goal.round, goal.feedback);
-    const prompt = goalCheckPrompt(goal.objective, roundTranscript(message, closingAnswers(mission)));
-    const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, temperature: 0, max_tokens: 500, messages: [{ role: "user", content: prompt }] }),
-      signal: AbortSignal.timeout(60_000),
-    });
-    if (!response.ok) throw new Error(`the evaluator returned HTTP ${response.status}`);
-    const check = parseGoalCheck((await response.json())?.choices?.[0]?.message?.content);
-    logger?.info?.("ao.goal_checked", { met: check.met, model, round: goal.round });
-    return check;
+    const catalog = await models();
+    const candidates = goalCheckModels(catalog.models ?? [], catalog.hidden ?? []);
+    if (!candidates.length) throw new Error("CPA has no model to check the goal with");
+    // Judged from what the round was actually sent: after an edit the objective differs.
+    const message = goal.lastMessage || goalMessage(goal.objective, goal.round, goal.feedback);
+    const prompt = goalCheckPrompt(goal.objective, roundTranscript(message, roundAnswers(mission)));
+    let failure = null;
+    for (const model of candidates) {
+      try {
+        const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ model, temperature: 0, max_tokens: 500, messages: [{ role: "user", content: prompt }] }),
+          signal: AbortSignal.timeout(60_000),
+        });
+        if (!response.ok) throw new Error(`the evaluator returned HTTP ${response.status}`);
+        const check = parseGoalCheck((await response.json())?.choices?.[0]?.message?.content);
+        logger?.info?.("ao.goal_checked", { met: check.met, model, round: goal.round });
+        return { ...check, model };
+      } catch (error) {
+        failure = error;
+        reviewerDown.set(model, now() + REVIEWER_DOWN_MS);
+        logger?.warn?.("ao.goal_check_failed", { model, message: publicText(error?.message || error, 200) });
+      }
+    }
+    throw failure;
   }
 
   const goalChecks = new Set();
-  // When a chat's latest run settles, its goal is achieved, stalled, limited, or goes another round.
-  async function goalAfterRun(workspaceId, runId, status, attention) {
+  /**
+   * When a chat's latest round has settled, its goal is achieved, stalled, limited, paused, or goes
+   * another round. `outcome` is how the round ended: "finished", "failed", "held" (it ended needing
+   * the person: no card is ready, or the run grant ran out) or "stopped" (the person pressed Stop).
+   * Only settled rounds come here (reportRun's `settled`): a round that waited out an automatic
+   * retry or a reviewer used to be judged mid-run, which stalled the goal and then blocked the real
+   * finish from being judged.
+   */
+  async function goalAfterRun(workspaceId, runId, outcome) {
     // Most projects have no goal: nothing to read then.
     if (!Object.values(goals.forWorkspace(workspaceId)).some(goal => goal.status === "active")) return;
     const guard = runKey(workspaceId, runId);
@@ -4144,10 +4193,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (!goal || goal.status !== "active" || goal.evaluatedRunId === runId) return;
       const latest = saved.runs.filter(run => run.project_id === task).at(-1);
       if (latest?.id !== runId) return;
-      goals.update(workspaceId, task, { evaluatedRunId: runId });
-      if (attention === "stopped") { goals.update(workspaceId, task, { status: "paused", note: "Stopped; /goal resume picks it up again" }); return; }
-      if (status === "failed") { goals.update(workspaceId, task, { status: "stalled", note: "The last round failed; retry it, then /goal resume" }); return; }
-      if (status === "held") { goals.update(workspaceId, task, { status: "stalled", note: "The last round needs you; answer it, then /goal resume" }); return; }
+      // Stopped by the person: the goal waits for them, and the round is judged on resume.
+      if (outcome === "stopped") { goals.update(workspaceId, task, { status: "paused", note: "Stopped by you; resume carries on from here" }); return; }
+      if (outcome === "failed") {
+        goals.update(workspaceId, task, { status: "stalled", evaluatedRunId: runId, note: "The last round failed; retry it or resume the goal" });
+        return;
+      }
+      if (outcome === "held") {
+        goals.update(workspaceId, task, { status: "stalled", evaluatedRunId: runId, note: "The last round needs you; answer it, then resume the goal" });
+        return;
+      }
       // The agent asked to be woken later (schedule_wakeup): as Claude Code defers its check while
       // background work runs, the goal is judged when the agent has woken and finished, not now.
       if (wakeups.get(workspaceId, task)?.runId === runId) return;
@@ -4157,36 +4212,84 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       try {
         check = await checkGoal(goal, mission);
       } catch (error) {
+        // Not marked judged: resume (or the next sweep after the person resumes) checks it again.
         goals.update(workspaceId, task, { status: "stalled",
-          note: `The goal could not be checked (${publicText(error?.message || error, 200)}); /goal resume tries again` });
+          note: `The goal could not be checked (${publicText(error?.message || error, 200)}); resume tries again` });
         return;
       }
+      goals.update(workspaceId, task, { evaluatedRunId: runId, checkedAt: now() });
       if (check.met) { goals.update(workspaceId, task, { status: "achieved", note: check.reason, feedback: "" }); return; }
       goals.update(workspaceId, task, { feedback: check.reason });
-      // A goal an earlier version saved with a round limit keeps it; a new goal has none.
-      if (goal.rounds > 0 && goal.round >= goal.rounds) { goals.update(workspaceId, task, { status: "limited", note: `Stopped after ${goal.rounds} rounds; /goal resume allows more` }); return; }
+      if (goal.rounds > 0 && goal.round >= goal.rounds) {
+        goals.update(workspaceId, task, { status: "limited", note: `Stopped after ${goal.round} rounds; resume allows ${goal.rounds} more` });
+        return;
+      }
       await continueGoal(workspaceId, task, goals.get(workspaceId, task), mission);
     } finally { goalChecks.delete(guard); }
   }
 
+  /** How a settled run ended, for its goal: as reportRun would have said when it settled. */
+  function settledOutcome(run) {
+    if (run.cancelled) return "stopped";
+    return (run.nodes ?? []).some(node => node.role !== "retry" && node.state === "failed") ? "failed" : "finished";
+  }
+
+  /**
+   * Goals whose round settled with nobody to judge it: the app was closed or restarted while the
+   * round ran, or its last drive pass was lost. Each read of a project's runs (the chat polls them)
+   * judges such a round once, so an active goal never stays "Pursuing" with nothing running.
+   */
+  function sweepGoals(workspaceId, runsOfWorkspace) {
+    const active = Object.entries(goals.forWorkspace(workspaceId)).filter(([, goal]) => goal.status === "active");
+    for (const [task, goal] of active) {
+      const latest = runsOfWorkspace.filter(run => run.project_id === task).at(-1);
+      if (!latest || latest.id === goal.evaluatedRunId || !runSettled(latest) || chatWorking(workspaceId, task, runsOfWorkspace)) continue;
+      // A run this session still drives reports its own settle; only an orphaned one is swept.
+      const live = backgroundRuns.get(runKey(workspaceId, latest.id));
+      if (live && (live.starting || live.driving)) continue;
+      void goalAfterRun(workspaceId, latest.id, settledOutcome(latest)).catch(() => undefined);
+    }
+  }
+
   // /goal clear | pause | resume (setting one goes through chat_send with `goal`).
-  async function chatGoal({ workspaceId, taskId, action, objective, singleRoute } = {}) {
+  async function chatGoal({ workspaceId, taskId, action, objective, singleRoute, teamId } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
     const goal = goals.get(id, task);
     if (action === "clear") return { ok: true, cleared: goals.clear(id, task) };
     if (!goal) throw new Error("No goal is currently set");
-    // The model picker changed while the goal runs: its next round uses the new model.
-    if (action === "route") return { ok: true, goal: goals.update(id, task, { route: checkedSingleRoute(singleRoute) }) };
-    if (action === "pause") return { ok: true, goal: goals.update(id, task, { status: "paused", note: "" }) };
-    // Edit goal: a new objective for the rounds still to come; the running round is left alone.
-    if (action === "edit") return { ok: true, goal: goals.update(id, task, { objective: cleanObjective(objective) }) };
+    // The model or team picker changed while the goal runs: its next round uses the new pick.
+    if (action === "route") {
+      if (teamId !== undefined) {
+        const team = clean(teamId, 80);
+        const saved = await runs({ workspaceId: id });
+        if (!(saved.teams ?? (saved.team ? [saved.team] : [])).some(item => item?.id === team)) throw new Error("Saved team was not found; refresh before choosing it");
+        return { ok: true, goal: goals.update(id, task, { team: { id: team }, route: null }) };
+      }
+      return { ok: true, goal: goals.update(id, task, { route: checkedSingleRoute(singleRoute), team: null }) };
+    }
+    if (action === "pause") return { ok: true, goal: goals.update(id, task, { status: "paused", note: "The current round finishes, then the goal waits" }) };
+    // Edit goal: a new objective for the rounds still to come; the running round is left alone. An
+    // achieved or stopped goal waits paused with the new objective, so Resume pursues it.
+    if (action === "edit") {
+      const edited = { objective: cleanObjective(objective) };
+      if (goal.status !== "active") Object.assign(edited, { status: "paused", note: "Edited; resume pursues the new goal" });
+      return { ok: true, goal: goals.update(id, task, edited) };
+    }
     if (action !== "resume") throw new Error("Choose clear, pause, resume, edit or route");
-    // Resuming a goal that ran out of rounds (one saved with a limit) allows it as many more again.
-    const rounds = goal.status === "limited" && goal.rounds > 0 ? goal.round + goal.rounds : goal.rounds;
+    // A goal that used up its rounds (limited, or limited and then edited) gets as many more again.
+    const rounds = goal.rounds > 0 && goal.round >= goal.rounds ? goal.round + goal.rounds : goal.rounds;
     goals.update(id, task, { status: "active", rounds, note: "" });
     const saved = await runs({ workspaceId: id });
+    // The round still running is judged when it settles (its reportRun).
     if (chatWorking(id, task, saved.runs)) return { ok: true, goal: goals.get(id, task) };
     const latest = saved.runs.filter(run => run.project_id === task).at(-1);
+    // A round nobody judged yet (it ran while paused, was stopped part-way, or its check failed) is
+    // judged first: it may already have met the goal. One already judged, or one that failed (the
+    // person resumes to have the agent carry on past it), goes straight to the next round.
+    if (latest && runSettled(latest) && latest.id !== goal.evaluatedRunId && settledOutcome(latest) !== "failed") {
+      await goalAfterRun(id, latest.id, "finished");
+      return { ok: true, goal: goals.get(id, task) };
+    }
     await continueGoal(id, task, goals.get(id, task), latest);
     return { ok: true, goal: goals.get(id, task) };
   }
@@ -4868,6 +4971,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       case "runs": {
         const saved = await runs(args);
+        // A goal whose round settled unwatched (the app was closed meanwhile) is judged now.
+        if (!args.runId) sweepGoals(clean(args.workspaceId, 128), saved.runs);
         // The runs of deleted chat messages stay in AO's history but are not shown in their chat.
         return { ...saved, runs: chatEdits.visible(clean(args.workspaceId, 128), saved.runs), goals: goals.forWorkspace(clean(args.workspaceId, 128)),
           wakeups: wakeups.forWorkspace(clean(args.workspaceId, 128)) };

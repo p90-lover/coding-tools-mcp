@@ -3046,7 +3046,7 @@ test("a start blocked on the browser returns its reason instead of a generic tra
 
 // ---- Codex slash commands: /goal, /compact, /diff ----
 
-const { closingAnswers, createGoalStore, goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck } = require("../electron/chat-goals.cjs");
+const { closingAnswers, createGoalStore, goalMessage, roundAnswers, roundTranscript, goalCheckPrompt, parseGoalCheck } = require("../electron/chat-goals.cjs");
 
 test("a goal round says what Claude Code's /goal says: the condition first, then stop-hook feedback with the evaluator's reason", () => {
   assert.equal(goalMessage("ship it", 1), "ship it", "the first round is the condition itself");
@@ -3111,6 +3111,7 @@ test("/goal starts the chat's first round with the goal and keeps it for the cha
   assert.equal(goals["task-1"].objective, "make every test pass");
   assert.equal(goals["task-1"].status, "active");
   assert.equal(goals["task-1"].round, 1);
+  assert.equal(goals["task-1"].rounds, 30, "a Single goal stops itself after 30 rounds");
   await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", message: "x", goal: "   " }), /Describe your goal/);
 });
 
@@ -3164,7 +3165,7 @@ test("after a round without the goal achieved, the chat runs the next round with
   assert.equal(world.updates.length, updatesBefore + 1);
 });
 
-test("a team's goal round continues on the chat's team; an achieved, failed or stopped goal stops, and there is no round limit", async () => {
+test("a team's goal round continues on the chat's team; an achieved, failed or stopped goal stops, and a team goal stops after 10 rounds", async () => {
   const teamRun = (id, answer) => ({ id, workspace_id: "ws-1", project_id: "task-1", cancelled: false, team: { id: "team-1", revision: 7 }, nodes: [
     { id: "lead", role: "planner", parents: [], state: "finished", receipt: { answer: "plan" } },
     { id: "rev", role: "reviewer", parents: ["lead"], state: "finished", receipt: { answer } }] });
@@ -3184,44 +3185,50 @@ test("a team's goal round continues on the chat's team; an achieved, failed or s
   assert.equal(achieved.status, "achieved");
   assert.equal(achieved.note, "The transcript shows every test passing.", "the evaluator's reason is shown");
 
-  for (const [status, attention, expected] of [["failed", "error", "stalled"], ["held", null, "stalled"], ["held", "stopped", "paused"]]) {
+  // How the round ended: failed or needing the person stalls the goal; the person's Stop pauses it.
+  for (const [outcome, expected, note] of [["failed", "stalled", /failed/], ["held", "stalled", /needs you/], ["stopped", "paused", /Stopped by you/]]) {
     ({ world, workflow, checks } = await goalChat());
     world.runs.push(teamRun("t3", "anything"));
     const count = world.updates.length;
-    await workflow.goalAfterRun("ws-1", "t3", status, attention);
-    assert.equal((await goalOf(workflow)).status, expected, `${status}/${attention}`);
+    await workflow.goalAfterRun("ws-1", "t3", outcome);
+    assert.equal((await goalOf(workflow)).status, expected, outcome);
+    assert.match((await goalOf(workflow)).note, note);
     assert.equal(world.updates.length, count, "no new round");
     assert.equal(checks.length, 0, "nothing to evaluate");
   }
 
-  // The evaluator cannot be reached: the goal waits instead of going round blind.
-  ({ world, workflow } = await goalChat({ evaluator: () => new Error("down") }));
+  // The evaluator cannot be reached: the goal waits instead of going round blind. Every model it may
+  // use is tried, never one billed to the person's Codex quota (gpt-6-luna).
+  ({ world, workflow, checks } = await goalChat({ evaluator: () => new Error("down") }));
   world.runs.push(teamRun("t6", "anything"));
   const quiet = world.updates.length;
-  await workflow.goalAfterRun("ws-1", "t6", "finished", null);
+  await workflow.goalAfterRun("ws-1", "t6", "finished");
+  assert.deepEqual(checks.map((check) => check.model), ["gemini-3-flash", "deepseek-v4"]);
   assert.equal((await goalOf(workflow)).status, "stalled");
-  assert.match((await goalOf(workflow)).note, /The goal could not be checked \(the evaluator returned HTTP 503\); \/goal resume tries again/);
+  assert.match((await goalOf(workflow)).note, /The goal could not be checked \(the evaluator returned HTTP 503\); resume tries again/);
   assert.equal(world.updates.length, quiet);
 
   ({ world, workflow } = await goalChat());
-  // No round limit, as in Claude Code: it goes on until the condition holds, or the person stops it.
+  // A team goal stops itself after 10 rounds: a condition never met would otherwise run (several
+  // agents a round) until the chat is full.
   for (let round = 0; round < 10; round++) {
     world.runs.push(teamRun(`t4-${round}`, "more to do"));
-    await workflow.goalAfterRun("ws-1", `t4-${round}`, "finished", null);
+    await workflow.goalAfterRun("ws-1", `t4-${round}`, "finished");
   }
   let goal = await goalOf(workflow);
-  assert.equal(goal.status, "active");
-  assert.equal(goal.round, 11);
-  assert.equal(goal.rounds, 0);
+  assert.equal(goal.status, "limited");
+  assert.equal(goal.round, 10);
+  assert.equal(goal.rounds, 10);
+  assert.match(goal.note, /Stopped after 10 rounds; resume allows 10 more/);
   await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "edit", objective: "build green on CI" });
-  assert.equal((await goalOf(workflow)).objective, "build green on CI");
-  assert.equal((await goalOf(workflow)).round, 11, "editing starts no round");
-  await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" });
   goal = await goalOf(workflow);
-  assert.equal(goal.status, "paused");
+  assert.equal(goal.objective, "build green on CI");
+  assert.equal(goal.round, 10, "editing starts no round");
+  assert.equal(goal.status, "paused", "an edited goal that had stopped waits for Resume");
   const resumed = await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" });
   assert.equal(resumed.goal.status, "active");
-  assert.equal(resumed.goal.round, 12, "resume starts the next round right away");
+  assert.equal(resumed.goal.round, 11, "resume starts the next round right away (the last one was judged)");
+  assert.equal(resumed.goal.rounds, 20, "with as many rounds again");
   assert.match(world.edits.at(-1).description, /Stop hook feedback:\n\[build green on CI\]: Two tests still fail\./, "with the last feedback");
   await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" });
   world.runs.push(teamRun("t5", "more"));
@@ -3231,6 +3238,66 @@ test("a team's goal round continues on the chat's team; an achieved, failed or s
   assert.equal((await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "clear" })).cleared, true);
   assert.equal(await goalOf(workflow), undefined);
   await assert.rejects(workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" }), /No goal is currently set/);
+});
+
+test("resuming a goal first judges the round nobody judged: one that ran while paused, or was stopped part-way", async () => {
+  const single = (id, answer, extra = {}) => ({ id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", receipt: { answer } }], ...extra });
+  // Paused mid-round; the round then finished with the goal met. Resume finds that out, starts nothing.
+  let { world, workflow, checks } = await goalChat();
+  await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" });
+  world.runs.push(single("p1", "ALL DONE: 40/40 pass."));
+  await workflow.goalAfterRun("ws-1", "p1", "finished");
+  assert.equal(checks.length, 0, "a paused goal judges nothing");
+  let before = world.updates.length;
+  let resumed = await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" });
+  assert.equal(checks.length, 1, "the round that ran while paused is judged on resume");
+  assert.equal(resumed.goal.status, "achieved");
+  assert.equal(world.updates.length, before, "no extra round on a goal already met");
+
+  // Stopped by the person: paused, not stalled; resume judges the part done, then goes on with its reason.
+  ({ world, workflow, checks } = await goalChat());
+  world.runs.push(single("s1", "half way", { cancelled: true }));
+  await workflow.goalAfterRun("ws-1", "s1", "stopped");
+  assert.equal((await goalOf(workflow)).status, "paused");
+  before = world.updates.length;
+  resumed = await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" });
+  assert.equal(checks.length, 1);
+  assert.equal(resumed.goal.status, "active");
+  assert.equal(resumed.goal.round, 2);
+  assert.equal(world.updates.length, before + 1, "the next round started");
+  assert.match(world.edits.at(-1).description, /Stop hook feedback:\n\[build green\]: Two tests still fail\./);
+  assert.equal(resumed.goal.feedback, "Two tests still fail.", "the reason it goes on stays readable while the round runs");
+});
+
+test("a round that settled while nobody watched (the app was closed) is judged on the next read of the chat", async () => {
+  const { world, workflow, checks } = await goalChat();
+  world.runs.push({ id: "w1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", receipt: { answer: "ALL DONE: shipped." } }] });
+  // A run still going is left alone.
+  world.runs.push({ id: "w0", workspace_id: "ws-1", project_id: "other", cancelled: false, nodes: [{ id: "x", role: "planner", parents: [], state: "running" }] });
+  await workflow.call("runs", { workspaceId: "ws-1" });
+  for (let tick = 0; tick < 20 && (await goalOf(workflow)).status === "active"; tick++) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(checks.length, 1);
+  assert.equal((await goalOf(workflow)).status, "achieved");
+  await workflow.call("runs", { workspaceId: "ws-1" });
+  assert.equal(checks.length, 1, "judged once");
+});
+
+test("a team round's evaluator reads every card's answer, named by its card, with the closing answer last", () => {
+  const mission = { nodes: [
+    { id: "lead", role: "planner", title: "Lead", parents: [], receipt: { answer: "plan: fix auth, then docs" } },
+    { id: "w", role: "worker", title: "Fix auth", parents: ["lead"], receipt: { answer: "x".repeat(5000) + "npm test: 40/40 pass" } },
+    { id: "rev", role: "reviewer", title: "Review", parents: ["w"], receipt: { answer: "APPROVED" } },
+    { id: "ap", role: "approver", parents: [], receipt: { answer: "allow" } },
+  ] };
+  const answers = roundAnswers(mission);
+  assert.deepEqual(answers.map((answer) => (typeof answer === "string" ? answer : answer.label)), ["Lead", "Fix auth", "APPROVED"]);
+  assert.ok(answers[1].text.endsWith("npm test: 40/40 pass") && answers[1].text.length <= 3001, "a long worker answer keeps its end");
+  const transcript = roundTranscript("ship it", answers);
+  assert.match(transcript, /Assistant \(Fix auth\):\n…x+npm test: 40\/40 pass/);
+  assert.ok(transcript.endsWith("Assistant:\nAPPROVED"), "the closing answer comes last, where a cut keeps it");
+  assert.deepEqual(roundAnswers({ nodes: [{ id: "one", role: "planner", parents: [], receipt: { answer: "done" } }] }), ["done"], "a Single round is its one answer");
 });
 
 // ---- schedule_wakeup ----
@@ -3532,7 +3599,10 @@ test("Approve for me is reviewed by codex-auto-review first, the card's model wh
   assert.deepEqual(codexCard.asked, ["codex-auto-review", "cline-pass/deepseek-v4.1-flash"], "never the chat's Codex model");
   assert.deepEqual(codexCard.resolved, ["yes"]);
   const onlyCodex = await review(["codex-auto-review"], { model: "cpa/gpt-6.1-sol", catalog: ["gpt-6.1-sol", "codex-auto-review"] });
-  assert.deepEqual(onlyCodex.asked, ["codex-auto-review"], "with no other model the person decides rather than a paid review");
+  // Its own retry (REVIEW_RETRY_MS later) may come inside the test's wait on a slow machine; what
+  // matters is that only the free review model is ever asked.
+  assert.ok(onlyCodex.asked.length >= 1 && onlyCodex.asked.every((model) => model === "codex-auto-review"),
+    `with no other model the person decides rather than a paid review (asked ${onlyCodex.asked.join(", ")})`);
   assert.deepEqual(onlyCodex.resolved, []);
 });
 

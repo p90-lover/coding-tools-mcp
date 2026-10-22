@@ -233,7 +233,11 @@ test("Codex slash commands run from the composer in a Single chat or a team, wit
   assert.match(text(cardOf(teamChat)), /Queued: it's sent when the current turn finishes/, "a command that sends queues behind the working turn");
   assert.equal(busy.calls.filter((call) => call[0] === "send").length, 0, "nothing is sent while the turn works");
   const pill = walk(teamChat.render({ commands: commands() })).find((element) => String(element.props?.className).startsWith("cx-goal "));
-  assert.match(text(pill), /^Pursuing goalship the release5m \d+s$/, "Codex's goal bar: state, objective, running time");
+  assert.match(text(pill), /^Pursuing goalship the releaseRound \d+( of \d+)? · 5m \d+s$/, "Codex's goal bar: state, objective, round, running time");
+  // While pursued, the bar says why the last check found the goal not met yet.
+  const told = walk(teamChat.render({ commands: { ...commands(), goal: { ...commands().goal, feedback: "Two tests still fail." } } }))
+    .find((element) => String(element.props?.className).startsWith("cx-goal "));
+  assert.match(text(told), /Not met yet: Two tests still fail\./);
   assert.deepEqual(walk(pill).filter((element) => element.type === "button").map((button) => button.props.title), ["Clear goal", "Pause goal", "Edit goal"]);
   walk(pill).find((element) => element.type === "button" && element.props.title === "Pause goal").props.onClick();
   await settle(); await settle();

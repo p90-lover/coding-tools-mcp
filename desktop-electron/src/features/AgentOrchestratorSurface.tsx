@@ -1002,12 +1002,19 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [wakeups, setWakeups] = useState<Record<string, ChatWakeup>>({});
   // A model picked while the open chat's goal runs is used from its next round on (the running
   // round keeps the model it started with; the composer says so).
-  const goalRouteKey = chatTaskId && composerMode === "single" && goals[chatTaskId]?.status === "active"
-    ? JSON.stringify([workspaceId, chatTaskId, singleRoute]) : "";
+  // A team picked the same way runs the next rounds as that team (its current revision then).
+  const goalActive = Boolean(chatTaskId && goals[chatTaskId]?.status === "active");
+  const goalRouteKey = !goalActive ? ""
+    : composerMode === "single" ? JSON.stringify([workspaceId, chatTaskId, "single", singleRoute])
+    : composerTeamId ? JSON.stringify([workspaceId, chatTaskId, "team", composerTeamId]) : "";
   useEffect(() => {
-    if (!goalRouteKey || !chatTaskId || !singleRoute.model || singleRoute.model === "default") return;
+    if (!goalRouteKey || !chatTaskId) return;
+    const pick: JsonObject | null = composerMode === "single"
+      ? (singleRoute.model && singleRoute.model !== "default" ? { singleRoute: { ...singleRoute } as unknown as JsonObject } : null)
+      : { teamId: composerTeamId };
+    if (!pick) return;
     const timer = setTimeout(() => {
-      void moduleCall("chat_goal", { workspaceId, taskId: chatTaskId, action: "route", singleRoute: { ...singleRoute } as unknown as JsonObject }).catch(() => undefined);
+      void moduleCall("chat_goal", { workspaceId, taskId: chatTaskId, action: "route", ...pick }).catch(() => undefined);
     }, 600);
     return () => clearTimeout(timer);
   }, [goalRouteKey]);

@@ -1347,7 +1347,17 @@ export function chatSlashParse(draft: string): { name: string; arg: string } | n
 export type ChatGoal = {
   objective: string; status: "active" | "paused" | "achieved" | "stalled" | "limited";
   round: number; rounds: number; startedAt: number; updatedAt: number; note?: string;
+  /** The evaluator's last "not met yet" reason: what the running round was told to do. */
+  feedback?: string;
 };
+/**
+ * The line the goal bar shows under its state: the state's own note (why it stalled, what was
+ * achieved), else, while it is pursued, why the last check said it is not met yet.
+ */
+export function goalDetail(goal: Pick<ChatGoal, "status" | "note" | "feedback">): string {
+  if (goal.note) return goal.note;
+  return goal.status === "active" && goal.feedback ? `Not met yet: ${goal.feedback}` : "";
+}
 /** A chat's pending wake-up (its agent's schedule_wakeup), as the bridge keeps it. */
 export type ChatWakeup = { id: string; minutes: number; reason: string; scheduledAt: number; dueAt: number; due?: boolean };
 /** 42_000 -> "Wakes in 42s"; 185_000 -> "Wakes in 3m"; 10_680_000 -> "Wakes in 2h 58m"; a due one waits for its turn to end. */
@@ -1361,7 +1371,7 @@ export function wakeupLabel(wakeup: Pick<ChatWakeup, "dueAt" | "due">, now = Dat
 export const GOAL_SUMMARY: Record<ChatGoal["status"], string> = {
   active: "Pursuing goal", paused: "Paused goal", achieved: "Goal achieved", stalled: "Goal stalled", limited: "Goal limited",
 };
-/** "3" for a goal with no round limit (Claude Code's), "3 of 6" for one saved with a limit. */
+/** "3 of 30" for a goal with a round limit (Single 30, team 10), "3" for one without. */
 export function goalRounds(goal: Pick<ChatGoal, "round" | "rounds">): string {
   return goal.rounds > 0 ? `${goal.round} of ${goal.rounds}` : String(goal.round);
 }
