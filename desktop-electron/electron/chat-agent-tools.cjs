@@ -839,7 +839,10 @@ function paneRulesFor(groups) {
   // tools, or asked the user to open them, and never opened the Preview pane.
   if (groups.includes("preview")) {
     rules.push("BROWSER / GUI PREVIEW: this chat has its own browser, the Preview pane (what the user calls the browser, "
-      + "the sandbox browser, the preview or the frontend). Whenever you build or change anything with a user interface "
+      + "the sandbox browser, the preview or the frontend). When the user asks to open, show or see the browser, the "
+      + "preview or the frontend, they mean this pane: call show_pane with pane \"preview\" when a page is open in it, "
+      + "else start the app's dev server and call preview_open with its URL; not a browser window of your own. "
+      + "Whenever you build or change anything with a user interface "
       + "(a web page, a frontend, a web app's GUI), or the user asks you to look at, test or show it, check it there: "
       + "1) start the dev server (with exec_command when you have it) and note its port; 2) call preview_open with its URL, "
       + "e.g. http://localhost:5173/ or http://127.0.0.1:8000/ (this opens the Preview pane for the user); 3) call "
@@ -920,6 +923,9 @@ function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview
       ? "Subagents: for a self-contained piece of work (exploring part of the codebase, an independent change, a review) you can "
         + "start a subagent with subagent_start and keep working; it runs in this project on its own model and ends with a report "
         + "you read with subagent_result. It cannot see this conversation, so give it the whole task. Several may run in parallel. "
+        + "subagent_inspect shows what one is doing; subagent_message steers it while it works or gives a finished one its next task "
+        + "in the same session. You may pick its model, effort and context window (subagent_models; it then runs on Claude Code), "
+        + "or give subagent_start a saved team (subagent_list) to do the task as one subagent. "
         + (subagents ? `Available: ${String(subagents).slice(0, 1500)}. ` : "subagent_list shows the ones the user set up. ")
       : "")
     // Every poll of a slow job is another round of tokens; a turn that ends costs nothing while it waits.
@@ -2226,13 +2232,14 @@ function createChatAgentTools({
     },
     /**
      * The session worktree's changes for the side panel's Changes tab: git's status (with new files)
-     * and the diff of tracked files, as headless reads them in that worktree.
+     * and the diff of tracked files, as headless reads them in that worktree. With `summary` only the
+     * files: the chat's Overview polls it for a count and never shows the diff.
      */
-    async changes({ sessionId, workspaceId } = {}) {
+    async changes({ sessionId, workspaceId, summary = false } = {}) {
       const entry = paneEntry(sessionId, workspaceId);
       if (!entry) throw new Error("That chat agent's session has ended");
       const status = await invokeAsUser(entry, "git_status", { include_untracked: true, max_entries: 500 });
-      const diff = await invokeAsUser(entry, "git_diff", { context_lines: 3, max_bytes: 512 * 1024 });
+      const diff = summary ? null : await invokeAsUser(entry, "git_diff", { context_lines: 3, max_bytes: 512 * 1024 });
       return {
         ok: true, root: entry.root?.path ?? null, branch: typeof status?.branch === "string" ? status.branch : "",
         entries: Array.isArray(status?.entries) ? status.entries.slice(0, 500) : [],

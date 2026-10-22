@@ -1,5 +1,5 @@
 const path = require("node:path");
-const { spawnSync } = require("node:child_process");
+const { execFile, spawnSync } = require("node:child_process");
 
 const DETACH_OWNED_CHILD = process.platform !== "win32";
 
@@ -68,8 +68,47 @@ function terminateOwnedProcessTree(child, signal = "SIGTERM") {
   }
 }
 
+function runTaskkillAsync(taskkill, args) {
+  return new Promise((resolve) => {
+    execFile(taskkill, args, { windowsHide: true, timeout: 10_000 }, (error) => {
+      // execFile reports a non-zero exit as an error with a numeric code; a spawn failure has none.
+      if (!error) resolve({ status: 0 });
+      else if (typeof error.code === "number") resolve({ status: error.code });
+      else resolve({ error, status: null });
+    });
+  });
+}
+
+/**
+ * terminateOwnedProcessTree without blocking the caller's thread: the same polite-then-forced
+ * taskkill, run as child processes, and the same errors (rejects). The synchronous form waited
+ * up to two 10 s taskkill runs plus a 400 ms pause on the app's main thread; on a busy machine
+ * that froze the whole app while a bridge, helper or control process was stopped.
+ */
+async function terminateOwnedProcessTreeAsync(child, signal = "SIGTERM") {
+  if (!child) return;
+  const pid = child.pid;
+  if (process.platform !== "win32" || !Number.isInteger(pid) || pid < 1) {
+    terminateOwnedProcessTree(child, signal);
+    return;
+  }
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT || "C:\\Windows";
+  const taskkill = path.join(systemRoot, "System32", "taskkill.exe");
+  const graceful = await runTaskkillAsync(taskkill, ["/PID", String(pid), "/T"]);
+  if ((!graceful.error && graceful.status === 0) || !processRunning(pid)) return;
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  if (!processRunning(pid)) return;
+  const forced = await runTaskkillAsync(taskkill, ["/PID", String(pid), "/T", "/F"]);
+  if ((forced.error || forced.status !== 0) && processRunning(pid)) {
+    const detail = forced.error?.message || `taskkill exited with status ${forced.status ?? "unknown"}`;
+    throw new Error(`Could not terminate owned Windows process tree ${pid}: ${detail}`);
+  }
+}
+
 module.exports = {
   DETACH_OWNED_CHILD,
   processRunning,
   terminateOwnedProcessTree,
+  terminateOwnedProcessTreeAsync,
 };

@@ -19,6 +19,15 @@ export type DraftAnnotation = ChatAnnotation & { id: number; anchor?: { answer: 
 // switch (their annotations come back with the chat) and are rebuilt from anchors when stale.
 const RANGES = new Map<number, Range>();
 const HIGHLIGHT = "cx-annotation";
+// Each chat's highlighted words, by chat: split view shows several chats, and one chat setting the
+// shared highlight to its own words alone erased the others'.
+const LIVE_RANGES = new Map<object, Range[]>();
+function paintHighlights() {
+  const api = highlightApi();
+  if (!api) return;
+  const all = [...LIVE_RANGES.values()].flat();
+  if (all.length) api.registry.set(HIGHLIGHT, new api.Highlight(...all)); else api.registry.delete(HIGHLIGHT);
+}
 /** The longest selection kept; a whole answer selected is still context, not a quote to resend. */
 const MAX_TEXT = 4000;
 /**
@@ -89,6 +98,8 @@ export function SelectionAnnotator({ root, annotations, onAdd, onComment }: {
   const [editing, setEditing] = useState<{ id: number; draft: string } | null>(null);
   // Bumped when anything moves (a scroll, a resize, the transcript growing): positions are read again.
   const [, setLayout] = useState(0);
+  // This chat's place in LIVE_RANGES.
+  const highlightOwner = useRef({});
 
   // A selection made in the transcript offers "Add to chat"; any other selection, or none, hides it.
   useEffect(() => {
@@ -130,8 +141,8 @@ export function SelectionAnnotator({ root, annotations, onAdd, onComment }: {
     const area = root.current;
     const api = highlightApi();
     if (!area || !api) return;
-    const live = annotations.map((item) => rangeFor(area, item)).filter((range): range is Range => Boolean(range));
-    if (live.length) api.registry.set(HIGHLIGHT, new api.Highlight(...live)); else api.registry.delete(HIGHLIGHT);
+    LIVE_RANGES.set(highlightOwner.current, annotations.map((item) => rangeFor(area, item)).filter((range): range is Range => Boolean(range)));
+    paintHighlights();
   });
   useEffect(() => {
     // Kept ranges are bounded: the oldest go first (a gone one is found again from its anchor).
@@ -154,7 +165,7 @@ export function SelectionAnnotator({ root, annotations, onAdd, onComment }: {
       if (frame) window.cancelAnimationFrame(frame);
     };
   }, [root, annotations.length, Boolean(offer), Boolean(editing)]);
-  useEffect(() => () => { highlightApi()?.registry.delete(HIGHLIGHT); }, []);
+  useEffect(() => () => { LIVE_RANGES.delete(highlightOwner.current); paintHighlights(); }, []);
 
   const area = root.current;
   if (!area) return null;

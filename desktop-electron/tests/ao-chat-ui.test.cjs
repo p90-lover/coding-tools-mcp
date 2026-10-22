@@ -437,6 +437,28 @@ test("edits on the Subagents page survive leaving the page and coming back befor
   assert.match(source, /setDraft\(current => keptDraft\(current, previous, config\)\)/, "the page's reload goes through it");
 });
 
+test("the Subagents page saves each change by itself, and keeps edits made while a save was on its way", () => {
+  // Reported 2026-10-22: a change made without pressing Save was not saved.
+  const page = load("SubagentsSurface.tsx", { "./AgentOrchestratorSurface": {}, "./AgentOrchestratorRoleEditor": roles });
+  const sent = { settings: { enabled: true, maxConcurrent: 50, maxPerChat: 3, timeoutMinutes: 30, permission: "auto", releaseWhenDone: true, defaultRoute: null },
+    agents: [{ id: "explorer", name: "Explorer", enabled: true, description: "", instructions: "", route: null }] };
+  const kept = { ...sent, settings: { ...sent.settings, maxConcurrent: 50 } };
+  const after = page.draftAfterSave(structuredClone(sent), sent, kept);
+  assert.deepEqual(after, kept, "nothing edited meanwhile: the draft is what was saved");
+  assert.notEqual(after, kept, "as its own copy");
+  const typedOn = { ...sent, agents: [{ ...sent.agents[0], name: "Explorer 2" }] };
+  assert.equal(page.draftAfterSave(typedOn, sent, kept), typedOn, "an edit made while saving is kept for the next save");
+  assert.ok(page.AUTOSAVE_MS > 0 && page.AUTOSAVE_MS <= 1500, "a moment after the last edit");
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/SubagentsSurface.tsx"), "utf8");
+  assert.match(source, /window\.setTimeout\(\(\) => void save\(sent\), AUTOSAVE_MS\)/, "a change schedules its own save");
+  assert.match(source, /failedDraft\.current === JSON\.stringify\(draft\)/, "a draft that failed to save is not resent in a loop");
+  assert.doesNotMatch(source, />\{busy \? "Saving…" : "Save"\}</, "no Save button to forget");
+  // The banner and the save bar line up with the page's column.
+  const css = fs.readFileSync(path.resolve(__dirname, "../src/features/subagents.css"), "utf8");
+  assert.doesNotMatch(css, /\.sa-notice, \.sa-warning \{ margin: /, "a shorthand margin reset the column's auto side margins");
+  assert.match(css, /\.sa-savebar \{[^}]*padding: 12px max\(32px, calc\(\(100% - 820px\) \/ 2\)\)/);
+});
+
 test("an answer citing an annotation (Codex's :codex-annotation directive) shows its number as a badge, never the raw directive", () => {
   const html = renderToStaticMarkup(React.createElement(markdown.ChatMarkdown, { text: 'Both gates matter :codex-annotation{index="1"} and the installer waits :codex-annotation{index="2"}.' }));
   assert.match(html, /<span class="cx-annotation-ref" title="Your annotation 1">1<\/span>/);
@@ -502,6 +524,19 @@ test("the pet stays where it stands while the chat box grows and shrinks a line 
   assert.equal(pet.reanchor(short, tall, 2 * 740 + 87 + 20), 2 * 740 + 159 + 20);
   // Shrinking back puts it where it was.
   assert.equal(pet.reanchor(tall, short, grown), right);
+});
+
+test("a walking pet reads no layout per frame and is redrawn at most 60 times a second", () => {
+  // Seen 2026-10-23 on a 165 Hz screen: each walk step set the pet's spot and then read the box's
+  // rect, a forced layout every frame (1,917 layouts and 3,933 style recalcs in 20 s).
+  const source = fs.readFileSync(path.join(__dirname, "../src/features/ChatPet.tsx"), "utf8");
+  const walk = source.slice(source.indexOf("const walkTo ="), source.indexOf("const nextSpot ="));
+  const step = walk.slice(walk.indexOf("const frame = (now: number)"));
+  assert.match(walk, /const box = composer\.current\?\.getBoundingClientRect\(\);[\s\S]*const frame = \(now: number\)/, "the box is read once, before the walk");
+  assert.doesNotMatch(step, /getBoundingClientRect|obstacles\(\)/, "no layout read inside a step");
+  assert.match(step, /blocked\(atNow\.current, rects, box\)/);
+  assert.match(step, /if \(arrived \|\| now - shown >= 1000 \/ WALK_FPS\) \{ shown = now; setAt\(atNow\.current\); \}/);
+  assert.match(source, /const WALK_FPS = 60;/);
 });
 
 test("a reviewer keeps every earlier cycle, oldest first and folded, not only the last review", () => {

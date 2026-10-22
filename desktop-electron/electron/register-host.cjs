@@ -5,7 +5,7 @@ const path = require("node:path");
 const http = require("node:http");
 const { spawn } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
-const { DETACH_OWNED_CHILD, terminateOwnedProcessTree } = require("./process-tree.cjs");
+const { DETACH_OWNED_CHILD, terminateOwnedProcessTreeAsync } = require("./process-tree.cjs");
 const { browserViewVisible } = require("./browser-state.cjs");
 
 const PARTITION = "persist:coding-tools-register";
@@ -229,11 +229,11 @@ function createRegisterHost({
     if (record.termination) return record.termination;
     record.stopping = true;
     record.termination = (async () => {
-      if (!record.ended) terminateOwnedProcessTree(record.child);
+      if (!record.ended) await terminateOwnedProcessTreeAsync(record.child);
       const deadline = Date.now() + 1500;
       while (!record.ended && Date.now() < deadline) await delay(20);
       if (!record.ended) {
-        terminateOwnedProcessTree(record.child, "SIGKILL");
+        await terminateOwnedProcessTreeAsync(record.child, "SIGKILL");
         const forcedDeadline = Date.now() + 1500;
         while (!record.ended && Date.now() < forcedDeadline) await delay(20);
       }

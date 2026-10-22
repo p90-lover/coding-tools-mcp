@@ -1378,9 +1378,11 @@ export type ChatCommandCard = {
 export type ChatCommands = {
   goal?: ChatGoal | null;
   goalAction: (action: "pause" | "resume" | "clear") => Promise<void>;
-  /** The wake-up the chat's agent asked for (schedule_wakeup), and cancelling it. */
+  /** The wake-up the chat's agent asked for (schedule_wakeup); the user can edit or delete it. */
   wakeup?: ChatWakeup | null;
   cancelWakeup?: () => Promise<void>;
+  /** Saves the wake-up's note and the minutes from now it fires in. */
+  editWakeup?: (change: { reason: string; minutes: number }) => Promise<void>;
   /** Edit goal: saves a new objective for the rounds still to come. */
   goalEdit: (objective: string) => Promise<void>;
   /** Compacts the chat's context; says what happened. */

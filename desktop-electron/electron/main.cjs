@@ -47,7 +47,7 @@ const {
 } = require("./logging.cjs");
 const { RuntimeHost } = require("./runtime.cjs");
 const { createCodingToolsShellBridge } = require("./coding-tools-shell-bridge.cjs");
-const { ensurePackagedRuntime, waitForPackagedRuntimeSource } = require("./runtime-install.cjs");
+const { ensurePackagedRuntime, pruneOldRuntimes, waitForPackagedRuntimeSource } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { assertLauncherRuntimeVersion, terminateLauncherSmoke } = require("./smoke-exit.cjs");
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
@@ -1029,7 +1029,7 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
     logger.warn("launcher.window_state_write_failed", {
       message: error instanceof Error ? error.message : String(error),
     });
-  });
+  }, { quitting: () => quitting });
   logger.info("launcher.window_created", { platform: process.platform, cdpPort });
   return window;
 }
@@ -2504,7 +2504,7 @@ function registerIpc({ logger, stateStore }) {
     return { state, credentialsRequired: false, targetMode: mode };
   });
   // Runtime > RTK: whether rtk is installed and on, its savings, and installing it (winget).
-  handle("rtk:status", async () => rtk.status() ?? { enabled: false, installed: false, path: null, version: null });
+  handle("rtk:status", async () => (await rtk.status()) ?? { enabled: false, installed: false, path: null, version: null });
   handle("rtk:gain", async () => (await rtk.gain()) ?? { available: false });
   handle("rtk:install", async (event) => {
     // Installing software is the person's own click in the visible app.
@@ -2713,6 +2713,8 @@ async function start() {
     return installedRuntimeRoot;
   };
   installedRuntimeRoot = runtimeRootProvider();
+  // Older versions' runtime copies (165 MB each) are removed in the background (pruneOldRuntimes).
+  void pruneOldRuntimes({ app, coreHome: CORE_HOME }).catch(() => undefined);
 
   cdpPort = await findFreePort();
   if (process.platform === "linux") {
@@ -3053,6 +3055,10 @@ async function start() {
         harness: () => agentOrchestratorUpstream?.harness ?? null,
         blockedRequest: (text) => missionWorkflowRuntime?.blockedRequest?.(text) ?? true,
         recommendedAnswer: (approval) => missionWorkflowRuntime?.recommendedAnswer?.(approval) ?? { action: "decline" },
+        // A model the chat agent picks runs on Claude Code and is checked against its catalog; a
+        // saved team can run as one subagent.
+        models: (workspaceId) => missionWorkflowRuntime?.call("models", { harness: "ao:claude-code", workspaceId }) ?? null,
+        teams: () => missionWorkflowRuntime?.subagentTeams ?? null,
         logger,
       });
       app.on("will-quit", () => subagentsService?.dispose());
