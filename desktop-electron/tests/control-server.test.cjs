@@ -760,6 +760,51 @@ test("the Codex model catalog is served from the last good copy when the live re
   }
 });
 
+test("an unchanged Codex model catalog is not written again, and other sign-ins' old copies are pruned", async () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const os = require("node:os");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ct-models-"));
+  const old = path.join(dir, "old-sign-in.json"), stray = path.join(dir, "x.json.1.tmp"), recent = path.join(dir, "recent.json");
+  for (const file of [old, stray, recent]) fs.writeFileSync(file, "{}");
+  const weekAgo = new Date(Date.now() - 8 * 24 * 60 * 60_000);
+  fs.utimesSync(old, weekAgo, weekAgo);
+  fs.utimesSync(stray, weekAgo, weekAgo);
+  let catalog = "a";
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    getBrowserHost: () => null,
+    getPreferences: () => ({}),
+    modelsCacheDir: dir,
+    modelsCacheWaitMs: 50,
+    fetchNative: async () => new Response(JSON.stringify({ models: [catalog] }), { headers: { "content-type": "application/json" } }),
+  }).start();
+  const { endpoint, token } = server.descriptor();
+  const ask = () => fetch(`${endpoint}/v1/network/native-fetch`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "x-native-url": "https://chatgpt.com/backend-api/codex/models?client_version=1",
+      "x-native-authorization": "Bearer account-a", "x-native-method": "GET" },
+  }).then((response) => response.json());
+  const saved = () => fs.readdirSync(dir).filter((name) => name.endsWith(".json") && !["recent.json"].includes(name)).map((name) => path.join(dir, name));
+  try {
+    await ask();
+    assert.ok(!fs.existsSync(old) && !fs.existsSync(stray), "a sign-in's copy unused for a week and a stray temporary are removed");
+    assert.ok(fs.existsSync(recent), "a recent copy for another sign-in stays");
+    const [file] = saved();
+    const first = fs.statSync(file).mtimeMs;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await ask();
+    assert.equal(fs.statSync(file).mtimeMs, first, "the same catalog is not written again");
+    catalog = "b";
+    await ask();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.match(fs.readFileSync(file, "utf8"), /\\"b\\"/, "a changed catalog is saved");
+  } finally {
+    await server.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a native fetch aborted before its response arrives fails instead of hanging", async () => {
   const { EventEmitter } = require("node:events");
   const { fetchNativeWithProxyAuth } = require("../electron/control-server.cjs");

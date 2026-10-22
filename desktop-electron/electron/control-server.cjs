@@ -11,6 +11,8 @@ const path = require("node:path");
 // finishes in the background and refreshes it.
 const MODELS_CACHE_WAIT_MS = 3_500;
 const MODELS_CACHE_MAX_BYTES = 4 * 1024 * 1024;
+// A catalog cached for a sign-in not used this long is gone with it (tokens rotate).
+const MODELS_CACHE_KEEP_MS = 7 * 24 * 60 * 60_000;
 const { releaseRetainedConversation } = require("./retained-turn-release.cjs");
 
 const MAX_BODY_BYTES = 16 * 1024;
@@ -649,9 +651,26 @@ class BrowserControlServer {
     } catch { return null; }
   }
 
-  writeModelsCache(file, contentType, body) {
+  // A catalog that has not changed is not written again. Codex asks for it at every start and
+  // refresh, and each answer (~600 KB) was rewritten in full: 9 times in 3 minutes on 2026-10-22,
+  // about 2 GB a day to the disk for nothing. Files for older sign-ins (one per token) and stray
+  // temporaries are dropped once per run.
+  writeModelsCache(file, contentType, body, cached = null) {
+    if (cached?.body === body && cached?.contentType === contentType) return;
     try {
       fs.mkdirSync(this.modelsCacheDir, { recursive: true });
+      if (!this.modelsCachePruned) {
+        this.modelsCachePruned = true;
+        const now = Date.now();
+        for (const name of fs.readdirSync(this.modelsCacheDir)) {
+          const other = path.join(this.modelsCacheDir, name);
+          if (other === file) continue;
+          try {
+            const age = now - fs.statSync(other).mtimeMs;
+            if (name.endsWith(".tmp") ? age > 60 * 60_000 : age > MODELS_CACHE_KEEP_MS) fs.rmSync(other, { force: true });
+          } catch {}
+        }
+      }
       const temporary = `${file}.${process.pid}.tmp`;
       fs.writeFileSync(temporary, JSON.stringify({ contentType, body, savedAt: new Date().toISOString() }), { mode: 0o600 });
       fs.renameSync(temporary, file);
@@ -670,7 +689,7 @@ class BrowserControlServer {
         signal: AbortSignal.timeout(60_000) });
       const buffer = Buffer.from(await upstream.arrayBuffer());
       const contentType = upstream.headers.get("content-type") || "application/json";
-      if (upstream.status === 200 && buffer.length <= MODELS_CACHE_MAX_BYTES) this.writeModelsCache(file, contentType, buffer.toString("utf8"));
+      if (upstream.status === 200 && buffer.length <= MODELS_CACHE_MAX_BYTES) this.writeModelsCache(file, contentType, buffer.toString("utf8"), cached);
       return { status: upstream.status, buffer, headers: [...upstream.headers] };
     })();
     live.catch(() => undefined);
