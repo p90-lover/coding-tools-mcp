@@ -431,21 +431,20 @@ function StepRow({ step, runId, loadWork }: { step: ChatStep; runId: string; loa
   const work = useStepWork(step, runId, open, loadWork);
   const compact = useContext(CompactActivity);
   const body = step.error || step.text || (work?.length || step.hasWork || step.earlier?.length ? "work" : "");
+  // One line from its dot: the card's name, then how it runs (harness · provider · model · effort ·
+  // context). A working card says nothing more here: what it runs and for how long is at the turn's
+  // foot (TurnRunning), and its tool calls are right below. Any other state leads the line.
+  const state = step.working ? (step.working.stalled ? "may be stuck" : "")
+    : step.error ? "failed" : step.verdict || (step.state === "finished" ? "done" : step.state);
   return <li className={`cx-step tone-${stepTone(step)}`}>
     <button type="button" className="cx-step-head" aria-expanded={open} disabled={!body && !step.working} onClick={() => setOpen(!open)}
-      title={step.working?.detail || undefined}>
+      title={step.working?.detail || step.detail || undefined}>
       <span className="cx-step-dot" aria-hidden="true" />
       <span className="cx-step-name">{step.name}</span>
-      <span className="cx-step-meta">
-        {/* A stalled card still says where: "may be stuck · running pytest … (timeout 5m)". */}
-        {step.working ? (step.working.stalled ? `may be stuck${step.working.activity ? ` · ${step.working.activity}` : ""}` : step.working.activity || "working")
-          : step.error ? "failed" : step.verdict || (step.state === "finished" ? "done" : step.state)}
-        {step.working && step.startedAtMs ? <> · <Elapsed since={step.startedAtMs} /></> : null}
-      </span>
+      <span className="cx-step-meta">{[state, step.detail].filter(Boolean).join(" · ")}</span>
       {body ? <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} /> : null}
     </button>
     {open ? <div className="cx-step-body">
-      {step.detail ? <p className="cx-step-detail">{step.detail}</p> : null}
       {step.working && !compact ? <p className="cx-step-detail">{step.working.detail}</p> : null}
       {/* Its earlier rounds first, folded (oldest first), then the attempt now: a retried card's
           failed attempt showed under the new attempt's work, as if it came after it. */}
@@ -529,16 +528,15 @@ function WorkGroupView({ turn, idle = false, expanded = false, loadWork }: WorkG
     return !idle && (turn.status === "running" || turn.status === "queued")
       ? <div className="cx-work is-live"><span className="cx-shimmer">Starting…</span></div> : null;
   }
-  const label = working
-    ? <>{working.working!.stalled ? "May be stuck" : "Working"}{turn.startedAtMs ? <> for <Elapsed since={turn.startedAtMs} /></> : null}
-      {` · ${working.name}${working.working!.activity ? ` — ${working.working!.activity}` : ""}`}</>
-    : `Worked · ${turn.steps.length} ${turn.steps.length === 1 ? "step" : "steps"}`;
+  // While it works the turn has no head of its own: its steps start at their dots, and how long it
+  // has worked and on what is said once, at the turn's foot (TurnRunning). Once done it folds under
+  // "Worked · N steps".
   return <div className={`cx-work${working ? " is-live" : ""}${working?.working?.stalled ? " is-stalled" : ""}`}>
-    <button type="button" className="cx-work-head" aria-expanded={open} onClick={() => setChosen(!open)}>
-      <span className={working ? "cx-shimmer" : undefined}>{label}</span>
+    {working ? null : <button type="button" className="cx-work-head" aria-expanded={open} onClick={() => setChosen(!open)}>
+      <span>{`Worked · ${turn.steps.length} ${turn.steps.length === 1 ? "step" : "steps"}`}</span>
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
-    </button>
-    {open ? <ol className="cx-steps">{turn.steps.map((step) => <StepRow key={step.key} step={step} runId={turn.runId} loadWork={loadWork} />)}</ol> : null}
+    </button>}
+    {open || working ? <ol className="cx-steps">{turn.steps.map((step) => <StepRow key={step.key} step={step} runId={turn.runId} loadWork={loadWork} />)}</ol> : null}
   </div>;
 }
 

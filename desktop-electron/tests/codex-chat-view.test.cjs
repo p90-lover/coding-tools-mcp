@@ -124,8 +124,12 @@ test("a turn shows the user bubble, the live work line and a stop button; Esc st
   });
   const chatView = mount(props);
   const view = chatView.render();
-  const work = walk(view).find((element) => element.props?.className === "cx-work-head");
-  assert.match(text(work), /^Working for 1m · Worker — running a command$/);
+  // No head over live work: the steps start at their dots, and the turn's foot says what runs.
+  assert.equal(walk(view).find((element) => element.props?.className === "cx-work-head"), undefined);
+  const step = walk(view).find((element) => element.props?.className === "cx-step-head" && text(element).startsWith("Worker"));
+  assert.ok(step, "the working card's line starts at its dot");
+  assert.doesNotMatch(text(step), /running a command/, "its activity is not repeated on its line");
+  assert.match(text(walk(view).find((element) => String(element.props?.className).startsWith("cx-note cx-turn-running"))), /Working for 1m · Worker — running a command/);
   const stop = walk(view).find((element) => element.props?.["aria-label"] === "Stop (Esc)");
   assert.ok(stop, "a running chat shows Stop in place of Send");
   stop.props.onClick();

@@ -526,8 +526,9 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-step.tone-working .cx-step-dot { background: var(--ao-green); animation: cx-pulse 1.4s ease-in-out infinite; }
 .cx-step.tone-stalled .cx-step-dot { background: var(--ao-amber); }
 .cx-step.tone-error .cx-step-dot, .cx-step.tone-held .cx-step-dot { background: var(--ao-red); }
-.cx-step-name { font-weight: 500; }
-.cx-step-meta { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--ao-muted); text-overflow: ellipsis; white-space: nowrap; }
+/* The name stays whole on the dot's line; how the card runs takes the rest and ellipsizes. */
+.cx-step-name { flex: 0 0 auto; font-weight: 500; white-space: nowrap; }
+.cx-step-meta { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--ao-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .cx-step.tone-stalled .cx-step-meta { color: var(--ao-amber); }
 .cx-step.tone-error .cx-step-meta { color: var(--ao-red); }
 .cx-step-body { margin: 2px 0 8px 22px; color: var(--color-text-primary); }
