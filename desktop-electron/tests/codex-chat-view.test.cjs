@@ -342,7 +342,7 @@ test("a working chat on a non-AO model is not offered steering; a message typed 
   assert.ok(!walk(view.render()).some((element) => String(element.props?.className).includes("cx-command-card")), "no notice card says it was queued");
 });
 
-test("a queued message waits in Claude Code's queued-message bar: greyed, with Remove from queue, Edit in composer and Send now", async () => {
+test("a queued message waits as Claude Code's queue row: greyed, Queued, Discard on hover, Send now on the first, click to edit", async () => {
   const { props, calls } = base({ selectedTaskId: "t-bar", working: true,
     runs: [run("r1", "t-bar", [node("w", "planner", "running", { route: { harness_id: "codex-native", model: "chatgpt-web/high" } })], { execution_mode: "single" })],
     steer: async () => { throw new Error("not steerable"); } });
@@ -359,22 +359,32 @@ test("a queued message waits in Claude Code's queued-message bar: greyed, with R
   assert.equal(rows()[0].props["data-state"], "queued", "drawn in Claude's queued state (greyed text)");
   const status = all().find((element) => element.props?.role === "status" && element.props.className === "cx-sr-only");
   assert.equal(text(status), "1 message queued. Will send after the current response.", "Claude Code's status line, for screen readers");
-  const action = (label) => walk(rows()[0]).find((element) => element.type === "button" && element.props["aria-label"] === label);
+  const action = (label, row = rows()[0]) => walk(row).find((element) => element.props?.["aria-label"] === label);
   assert.deepEqual(walk(rows()[0]).filter((element) => element.type === "button").map((element) => element.props["aria-label"]),
-    ["Remove from queue", "Edit in composer", "Send now"], "Claude Code's three actions, in its order");
+    ["Discard queued message", "Send now"], "Claude Code's row: its X, and Send now on the first queued message");
+  assert.equal(text(walk(rows()[0]).find((element) => element.props?.className === "cx-queued-status")), "Queued");
+  assert.equal(action("Edit in composer").props.role, "button", "the bubble itself puts the message back to edit");
   // The agent can't be steered and the turn still runs: Send now waits, and says why.
   assert.equal(action("Send now").props.disabled, true);
   assert.equal(action("Send now").props["data-tip"], "Sent when the current turn finishes");
+  // A click on a control inside the bubble (an attachment's preview or file button) is that control's:
+  // the message stays queued.
+  const bubble = { closest: () => bubble };
+  const attachmentButton = { closest: () => attachmentButton };
+  action("Edit in composer").props.onClick({ target: attachmentButton, currentTarget: bubble });
+  assert.equal(rows().length, 1, "opening an attachment does not dequeue the message");
+  action("Edit in composer").props.onKeyDown({ key: "Enter", target: attachmentButton, currentTarget: bubble, preventDefault() {} });
+  assert.equal(rows().length, 1, "nor does Enter on that control");
   // Edit in composer takes it out of the queue and back into the box, ahead of anything typed.
   textarea().props.onChange({ target: { value: "typed meanwhile" } });
-  action("Edit in composer").props.onClick();
+  action("Edit in composer").props.onClick({ target: bubble, currentTarget: bubble });
   assert.equal(rows().length, 0, "it leaves the queue");
   assert.equal(textarea().props.value, "first note\n\ntyped meanwhile");
-  // Remove from queue drops it; nothing is sent.
+  // Discard drops it; nothing is sent. Only the first queued message has Send now.
   textarea().props.onChange({ target: { value: "" } });
   await queue("second note");
   assert.equal(rows().length, 1);
-  action("Remove from queue").props.onClick();
+  action("Discard queued message").props.onClick();
   assert.equal(rows().length, 0);
   assert.equal(all().some((element) => element.props?.["aria-label"] === "Queued messages"), false, "an empty queue shows no bar");
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0);
@@ -396,7 +406,7 @@ test("Edit in composer gives a queued message's annotations back as the composer
   // A new selection made meanwhile stays, after the queued message's own.
   annotator().props.onAdd("another line");
   const row = all().find((element) => element.type === "li" && element.props.className === "cx-queued-row");
-  walk(row).find((element) => element.props?.["aria-label"] === "Edit in composer").props.onClick();
+  walk(row).find((element) => element.props?.["aria-label"] === "Edit in composer").props.onClick({ target: null, currentTarget: null });
   assert.equal(all().find((element) => element.type === "textarea").props.value, "first note", "only the text goes in the box");
   assert.deepEqual(JSON.parse(JSON.stringify(tray().props.annotations.map((item) => [item.text, item.comment]))),
     [["the parser drops tabs", "fix this too"], ["another line", ""]], "its annotations come back as chips, ahead of the new one");

@@ -51,6 +51,32 @@ test("a mostly empty database is rewritten once, keeps its rows and their order,
   } finally { fixture.cleanup(); }
 });
 
+test("one start gives back at most incrementalMaxBytes; the rest comes back over the next starts", async () => {
+  // Seen live: an uncapped incremental_vacuum moved 443 MB through the WAL on a busy hard disk, and
+  // AO, which waits for it, stayed down for over ten minutes.
+  const fixture = mostlyEmpty();
+  try {
+    assert.equal((await compactAoDatabase(fixture.dir, small)).action, "vacuum");
+    let db = new DatabaseSync(fixture.file);
+    db.exec("DELETE FROM events WHERE rowid % 2 = 0; INSERT INTO events (kind, body) SELECT 'chunk', zeroblob(2000000) FROM (SELECT 1); DELETE FROM events WHERE kind = 'chunk'");
+    const pageSize = pragma(db, "page_size");
+    const freeBefore = pragma(db, "freelist_count");
+    db.close();
+    const cap = 16 * pageSize;
+    assert.ok(freeBefore > 32, `enough free pages to need two starts: ${freeBefore}`);
+    const first = await compactAoDatabase(fixture.dir, { ...small, incrementalMinBytes: 1, incrementalMaxBytes: cap });
+    assert.equal(first.action, "incremental", JSON.stringify(first));
+    db = new DatabaseSync(fixture.file);
+    const freeAfter = pragma(db, "freelist_count");
+    db.close();
+    assert.equal(freeBefore - freeAfter, 16, "exactly the capped number of pages was given back");
+    await compactAoDatabase(fixture.dir, { ...small, incrementalMinBytes: 1, incrementalMaxBytes: cap });
+    db = new DatabaseSync(fixture.file);
+    assert.equal(pragma(db, "freelist_count"), freeAfter - 16, "the next start gives back the next part");
+    db.close();
+  } finally { fixture.cleanup(); }
+});
+
 test("a database with little free space, none at all, or held by another connection is left alone", async () => {
   const fixture = mostlyEmpty();
   try {

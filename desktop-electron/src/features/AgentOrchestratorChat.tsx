@@ -20,7 +20,7 @@ import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
-  activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, type ChatWakeup,
+  activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshQuietNote, dshRetryNote, type ChatWakeup,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -139,6 +139,28 @@ function Elapsed({ since, live = true, until, format = chatDuration }: { since: 
     return () => window.clearInterval(timer);
   }, [live]);
   return <>{format((live ? now : until ?? now) - since)}</>;
+}
+
+/**
+ * A running turn's state at its foot, where a long turn is read: how long it has worked, which card
+ * is on what, and how long nothing new has come (or that its model is being retried). The "Working
+ * for" label sat at the turn's top, hundreds of steps up, so a stuck turn could not be told apart.
+ */
+function TurnRunning({ turn }: { turn: ChatTurn }) {
+  const step = turn.steps.find((item) => item.working) ?? (turn.final?.working ? turn.final : undefined);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 5_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  if (!step?.working) return null;
+  const heardAt = Math.max(0, ...[...turn.steps, ...(turn.final ? [turn.final] : [])].map((item) => item.working?.heardAtMs ?? 0)) || undefined;
+  const note = dshRetryNote(turn.steps) || dshQuietNote(heardAt, now);
+  return <p className={`cx-note cx-turn-running${step.working.stalled ? " is-stalled" : ""}`} role="status" aria-live="polite">
+    <span className="cx-shimmer">Working</span>{turn.startedAtMs ? <> for <Elapsed since={turn.startedAtMs} /></> : null}
+    {` · ${step.name}${step.working.activity ? ` — ${step.working.activity}` : ""}${note}`}
+    {note.includes("may be stuck") ? " · send a message to restart it" : ""}
+  </p>;
 }
 
 function stepTone(step: ChatStep): string {
@@ -511,40 +533,60 @@ type QueuedBarItem = {
   onRemove?: () => void; onEdit?: () => void; onSendNow?: () => void; sendNowBlocked?: string;
 };
 
-/** The queued-message actions' glyphs: Remove from queue (X), Edit in composer (pencil), Send now (arrow up). */
-function QueuedGlyph({ name }: { name: "remove" | "edit" | "send" }) {
-  return <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-    {name === "remove" ? <path d="M18 6 6 18M6 6l12 12" />
-      : name === "edit" ? <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
-      : <path d="M12 19V5M5 12l7-7 7 7" />}
+/** Whether a click inside a queued bubble came from a control of its own (an attachment's button, link or image). */
+function queuedNestedControl(target: EventTarget | null, bubble: EventTarget | null): boolean {
+  const element = target as { closest?: (selector: string) => unknown } | null;
+  const control = typeof element?.closest === "function" ? element.closest("button, a, input, img, [role='button'], [role='link']") : null;
+  return Boolean(control) && control !== bubble;
+}
+
+/** The X of Claude Code's "Discard queued message" (its cds "X" icon, 16 px). */
+function QueuedDiscardGlyph() {
+  return <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M18 6 6 18M6 6l12 12" />
   </svg>;
 }
 
 /**
- * Claude Code's queued-message bar (claude.ai's QueuedMessageBar): a message sent while the agent
- * works waits right above the composer, newest last, as the person's own bubble with its text
- * greyed, until the agent takes it; from then on the chat shows it as any sent message. A waiting
- * one has Remove from queue, Edit in composer and Send now beside it; one on its way pulses.
- * Screen readers hear Claude Code's own status line. It replaced the "Queued" notice cards and the
- * "Steering…" bubble at the end of the chat.
+ * Claude Code's queued messages (claude.ai's composer queue rows, data-testid "pending-queue-row"):
+ * a message sent while the agent works waits right above the composer, newest last, as the
+ * person's own bubble collapsed to one line with its text greyed, and "Queued" under it. Its X
+ * ("Discard queued message") shows on hover or focus just past the bubble's end; the first one also
+ * has "Send now". One on its way to the agent pulses and has no actions. Screen readers hear Claude
+ * Code's own status line. Not in Claude Code: clicking a queued bubble puts it back in the composer
+ * to edit (the earlier bar's "Edit in composer").
  */
 function QueuedMessageBar({ items }: { items: QueuedBarItem[] }) {
   if (!items.length) return null;
   const waiting = items.filter((item) => item.state === "queued").length;
+  const head = items.findIndex((item) => item.state === "queued");
   return <div className="cx-queued">
-    <ol className="cx-queued-list" aria-label="Queued messages">
-      {items.map((item) => <li key={item.key} className="cx-queued-row" data-state={item.state}>
-        {item.state === "queued" ? <div className="cx-queued-actions" role="toolbar" aria-label="Queued message actions">
-          <button type="button" aria-label="Remove from queue" data-tip="Remove from queue" onClick={item.onRemove}><QueuedGlyph name="remove" /></button>
-          <button type="button" aria-label="Edit in composer" data-tip="Edit in composer" onClick={item.onEdit}><QueuedGlyph name="edit" /></button>
-          <button type="button" aria-label="Send now" data-tip={item.sendNowBlocked ?? "Send now"} disabled={Boolean(item.sendNowBlocked)}
-            onClick={item.onSendNow}><QueuedGlyph name="send" /></button>
-        </div> : null}
-        <div className="cx-user cx-queued-message"><SentMessage text={item.text} /></div>
-      </li>)}
-    </ol>
     <span className="cx-sr-only" role="status">{waiting === 0 ? "" : waiting === 1 ? "1 message queued. Will send after the current response."
       : `${waiting} messages queued. Will send after the current response.`}</span>
+    <ol className="cx-queued-list" aria-label="Queued messages">
+      {items.map((item, index) => <li key={item.key} className="cx-queued-row" data-state={item.state}>
+        <div className="cx-queued-bubble">
+          {item.state === "queued" && item.onEdit
+            ? <div className="cx-user cx-queued-message" role="button" tabIndex={0} aria-label="Edit in composer" title="Edit in composer"
+              // A click on the message's own attachment (an image preview, a file) is for that control:
+              // bubbled up, it dequeued the message and unmounted the preview it had just opened.
+              onClick={(event) => { if (!queuedNestedControl(event.target, event.currentTarget)) item.onEdit?.(); }}
+              onKeyDown={(event) => {
+                if ((event.key === "Enter" || event.key === " ") && event.target === event.currentTarget) { event.preventDefault(); item.onEdit?.(); }
+              }}>
+              <SentMessage text={item.text} /></div>
+            : <div className="cx-user cx-queued-message"><SentMessage text={item.text} /></div>}
+          {item.state === "queued" ? <span className="cx-queued-discard">
+            <button type="button" aria-label="Discard queued message" data-tip="Discard queued message" onClick={item.onRemove}><QueuedDiscardGlyph /></button>
+          </span> : null}
+        </div>
+        {item.state === "queued" ? <div className="cx-queued-meta">
+          {index === head && item.onSendNow ? <button type="button" className="cx-queued-send-now" aria-label="Send now"
+            data-tip={item.sendNowBlocked ?? "Send now"} disabled={Boolean(item.sendNowBlocked)} onClick={item.onSendNow}>Send now</button> : null}
+          <span className="cx-queued-status">Queued</span>
+        </div> : null}
+      </li>)}
+    </ol>
   </div>;
 }
 
@@ -955,8 +997,12 @@ export function AgentOrchestratorChat({
   // A steer goes straight to the agent and a queued message waits here: neither takes the surface's
   // one-action lock (busy), which an approval or a refresh holds often while a chat runs. Waiting on
   // it kept the Stop button in place of Steer while the user typed.
-  const canSend = (!busy || steering || queueing) && !sending && !(deciding && !selectedTaskId)
-    && Boolean(draft.trim() || attachments.length || annotations.length) && (accepts || steering || queueing);
+  // A message typed while the previous one is still being sent waits in the queue, as Claude Code
+  // queues one typed during a response. Enter did nothing at all then, so a quick second message
+  // looked dropped.
+  const queueWhileSending = sending && Boolean(selectedTaskId) && !steering;
+  const canSend = (!busy || steering || queueing || queueWhileSending) && (!sending || queueWhileSending) && !(deciding && !selectedTaskId)
+    && Boolean(draft.trim() || attachments.length || annotations.length) && (accepts || steering || queueing || queueWhileSending);
   const slash = chatSlashMatches(draft, { chat: Boolean(selectedTaskId), run: Boolean(latest), open: runOpen });
 
   // What a command shows above the composer (its result, or why it couldn't run).
@@ -1097,7 +1143,7 @@ export function AgentOrchestratorChat({
       say("Too long", `This message is ${text.length.toLocaleString()} characters with its annotations; the limit is ${CHAT_MESSAGE_LIMIT.toLocaleString()}. Remove an annotation or select less.`);
       return;
     }
-    if (queueing) {
+    if (queueing || queueWhileSending) {
       // Several messages typed during one turn go together, in order.
       setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what: "Message", message: text }));
       setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote("");
@@ -1119,7 +1165,9 @@ export function AgentOrchestratorChat({
   // One queued item per free spell: right after a send the chat may still read as free for a moment,
   // and the next item must wait for the turn that send started.
   const sentWhileFree = useRef(false);
-  useEffect(() => { sentWhileFree.current = false; }, [accepts, selectedTaskId]);
+  // Also on a new run: a send refused as "still running" while the chat read free held the queue
+  // until `accepts` changed, and when it never did, the message sat queued for no reason.
+  useEffect(() => { sentWhileFree.current = false; }, [accepts, selectedTaskId, latest?.id]);
   // A send runs only from the focused app window. A turn that ended while the user was in another
   // app had its queued message refused and dropped back into the composer; it now waits for focus.
   const [windowFocused, setWindowFocused] = useState(() => typeof document === "undefined" || typeof document.hasFocus !== "function" || document.hasFocus());
@@ -1496,6 +1544,7 @@ export function AgentOrchestratorChat({
                 ? <DshWork key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} live={!idle && liveTurn(turn)} expanded={showWork} useWork={readWork}
                   errorShownBelow={turn === failedTurn} />
                 : <WorkGroup key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} idle={idle} expanded={showWork} loadWork={loadWork} />}
+              {!dsh && !idle && liveTurn(turn) ? <TurnRunning turn={turn} /> : null}
               {turn.final && !(dsh && turn.final.working) ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`}>
                 {/* DeepSeek Harness names no agent above its reply; a team's verdict still shows. */}
                 {dsh ? (turn.final.verdict ? <div className="cx-answer-meta"><span className={`cx-verdict is-${turn.final.verdict.toLowerCase()}`}>{turn.final.verdict}</span></div> : null)

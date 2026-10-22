@@ -1546,12 +1546,16 @@ export function AgentOrchestratorSurface({ language, setError }: {
           throw new Error("This chat belongs to another project. Open it from its own project, or start a new chat here.");
         }
         const execution = aoChatExecution(composerMode, singleRoute, savedTeams, composerTeamId);
-        // A new chat shows its message and "Starting" the moment it is sent, as Claude Code does; it
-        // used to wait for the start and two reloads. A follow-up shows its own (AgentOrchestratorChat).
+        // A new chat shows its message and "Starting" the moment it is sent, as Claude Code does,
+        // before the answer below. A follow-up shows its own (AgentOrchestratorChat).
         if (!input.taskId) setPendingChat({ title: input.title || "New task", message: input.message });
+        // deferStart: the answer comes once the run exists, and it starts in the background. Waiting
+        // for the start too (resolving the agent, the grant, two more run reads) held the send button
+        // and Enter for seconds after every message. A start that fails is still told: the run's
+        // status says why (run_status detail), as the chat's notice.
         const result = await moduleCall("chat_send", { workspaceId, message: input.message,
           ...(input.taskId ? { taskId: input.taskId } : input.title ? { title: input.title } : {}),
-          ...execution, ...executableArg(), ...(input.goal ? { goal: input.goal } : {}) });
+          ...execution, ...executableArg(), ...(input.goal ? { goal: input.goal } : {}), deferStart: true });
         if (result.cancelled) throw new Error("Message start cancelled; no new attempt confirmed.");
         if (!current()) { resolve(); return; }
         // The route is not kept here: picks are kept as they are made, and a follow-up in an older
