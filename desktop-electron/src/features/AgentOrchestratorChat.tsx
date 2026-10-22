@@ -415,7 +415,9 @@ function StepRow({ step, runId, loadWork }: { step: ChatStep; runId: string; loa
       <span className="cx-step-dot" aria-hidden="true" />
       <span className="cx-step-name">{step.name}</span>
       <span className="cx-step-meta">
-        {step.working ? (step.working.stalled ? "may be stuck" : step.working.activity || "working") : step.error ? "failed" : step.verdict || (step.state === "finished" ? "done" : step.state)}
+        {/* A stalled card still says where: "may be stuck · running pytest … (timeout 5m)". */}
+        {step.working ? (step.working.stalled ? `may be stuck${step.working.activity ? ` · ${step.working.activity}` : ""}` : step.working.activity || "working")
+          : step.error ? "failed" : step.verdict || (step.state === "finished" ? "done" : step.state)}
         {step.working && step.startedAtMs ? <> · <Elapsed since={step.startedAtMs} /></> : null}
       </span>
       {body ? <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} /> : null}
