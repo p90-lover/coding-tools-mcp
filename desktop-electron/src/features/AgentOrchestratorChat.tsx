@@ -616,62 +616,100 @@ type QueuedBarItem = {
   onRemove?: () => void; onEdit?: () => void; onSendNow?: () => void; sendNowBlocked?: string;
 };
 
-/** Whether a click inside a queued bubble came from a control of its own (an attachment's button, link or image). */
-function queuedNestedControl(target: EventTarget | null, bubble: EventTarget | null): boolean {
-  const element = target as { closest?: (selector: string) => unknown } | null;
-  const control = typeof element?.closest === "function" ? element.closest("button, a, input, img, [role='button'], [role='link']") : null;
-  return Boolean(control) && control !== bubble;
-}
-
-/** The X of Claude Code's "Discard queued message" (its cds "X" icon, 16 px). */
-function QueuedDiscardGlyph() {
-  return <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-    <path d="M18 6 6 18M6 6l12 12" />
+/** Claude Code's queue glyphs (its Anthropicons ArrowReturn, Edit, X, DotsVertical and CaretDown, as outlines). */
+function QueuedGlyph({ name, size = 16 }: { name: "send" | "edit" | "remove" | "more" | "caret"; size?: number }) {
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    {name === "send" ? <><path d="m9 10-5 5 5 5" /><path d="M20 4v7a4 4 0 0 1-4 4H4" /></>
+      : name === "edit" ? <path d="M21.17 6.81a2.82 2.82 0 0 0-3.99-3.99L3.84 16.17a2 2 0 0 0-.5.83l-1.32 4.35a.5.5 0 0 0 .62.62l4.35-1.32a2 2 0 0 0 .83-.5z" />
+      : name === "remove" ? <path d="M18 6 6 18M6 6l12 12" />
+      : name === "more" ? <><circle cx="12" cy="5" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="12" cy="19" r="1" /></>
+      : <path d="m6 9 6 6 6-6" />}
   </svg>;
 }
 
+/** A queued message on one line, as Claude Code previews it: its readable text, whitespace collapsed. */
+const queuedPreview = (text: string) => chatMessageReadable(text).replace(/\s+/g, " ").trim() || "…";
+
+/** Claude Code's pressed Send now: a busy spinner, read as "Sending…", until the agent has the message. */
+function QueuedSending() {
+  return <span className="cx-queued-sending" role="status" aria-label="Sending…"><span className="cx-queued-spinner" aria-hidden="true" /></span>;
+}
+
 /**
- * Claude Code's queued messages (claude.ai's composer queue rows, data-testid "pending-queue-row"):
- * a message sent while the agent works waits right above the composer, newest last, as the
- * person's own bubble collapsed to one line with its text greyed, and "Queued" under it. Its X
- * ("Discard queued message") shows on hover or focus just past the bubble's end; the first one also
- * has "Send now". One on its way to the agent pulses and has no actions. Screen readers hear Claude
- * Code's own status line. Not in Claude Code: clicking a queued bubble puts it back in the composer
- * to edit (the earlier bar's "Edit in composer").
+ * Claude Code's queued-message bar (its Code tab's QueuedMessageBar): a band right above the
+ * composer, above the branch bar. One message is one row: "1 message queued", the message greyed
+ * on one line, then Send now (↵), Edit in composer and Remove from queue; one on its way to the
+ * agent spins instead. Two or more collapse to "N messages queued · Next: …", which opens the list:
+ * each message on up to two lines with a ⋮ menu (Edit in composer, Send now, Remove from queue),
+ * and Clear all. Only the first queued message can be sent now.
  */
-function QueuedMessageBar({ items }: { items: QueuedBarItem[] }) {
+function QueuedMessageBar({ items, onMenu, onClearAll }: {
+  items: QueuedBarItem[]; onMenu: (owner: HTMLElement, items: ChatMenuItem[]) => void; onClearAll?: () => void;
+}) {
+  const [open, setOpen] = useState(false);
   if (!items.length) return null;
-  const waiting = items.filter((item) => item.state === "queued").length;
   const head = items.findIndex((item) => item.state === "queued");
+  const sendNow = (item: QueuedBarItem, index: number) => index === head ? item.onSendNow : undefined;
+  if (items.length === 1) {
+    const [item] = items;
+    return <div className="cx-queued">
+      <div className="cx-queued-band" role="group" aria-label="Queued messages" data-state={item.state} aria-busy={item.state === "pending" || undefined}>
+        <span className="cx-queued-count">1 message queued</span>
+        <span className="cx-queued-preview">{queuedPreview(item.text)}</span>
+        {item.state === "pending" ? <QueuedSending /> : <>
+          {sendNow(item, 0) ? <button type="button" className="cx-queued-icon" aria-label="Send now" data-tip={item.sendNowBlocked ?? "Send now"}
+            disabled={Boolean(item.sendNowBlocked)} onMouseDown={(event) => event.preventDefault()} onClick={item.onSendNow}><QueuedGlyph name="send" /></button> : null}
+          {item.onEdit ? <button type="button" className="cx-queued-icon" aria-label="Edit in composer" data-tip="Edit in composer"
+            onMouseDown={(event) => event.preventDefault()} onClick={item.onEdit}><QueuedGlyph name="edit" /></button> : null}
+          {item.onRemove ? <button type="button" className="cx-queued-icon" aria-label="Remove from queue" data-tip="Remove from queue"
+            onMouseDown={(event) => event.preventDefault()} onClick={item.onRemove}><QueuedGlyph name="remove" /></button> : null}
+        </>}
+      </div>
+    </div>;
+  }
+  const count = `${items.length} messages queued`;
+  if (!open) {
+    return <div className="cx-queued">
+      <button type="button" className="cx-queued-band cx-queued-stack" aria-expanded={false} onClick={() => setOpen(true)}>
+        <span className="cx-queued-count">{count}</span>
+        <span className="cx-queued-preview">Next: {queuedPreview(items[0].text)}</span>
+        <span className="cx-queued-caret" aria-hidden="true"><QueuedGlyph name="caret" /></span>
+      </button>
+    </div>;
+  }
+  // The ⋮ menu of one message: Claude Code's Edit in composer, Send now, then Remove from queue.
+  const actions = (item: QueuedBarItem, index: number): ChatMenuItem[] => {
+    const send = sendNow(item, index);
+    const list: ChatMenuItem[] = [
+      ...(item.onEdit ? [{ label: "Edit in composer", run: item.onEdit }] : []),
+      ...(send ? [item.sendNowBlocked ? { label: "Send now", reason: item.sendNowBlocked } : { label: "Send now", run: send }] : []),
+    ];
+    return item.onRemove ? [...list, ...(list.length ? [{ kind: "separator" as const }] : []), { label: "Remove from queue", danger: true, run: item.onRemove }] : list;
+  };
   return <div className="cx-queued">
-    <span className="cx-sr-only" role="status">{waiting === 0 ? "" : waiting === 1 ? "1 message queued. Will send after the current response."
-      : `${waiting} messages queued. Will send after the current response.`}</span>
-    <ol className="cx-queued-list" aria-label="Queued messages">
-      {items.map((item, index) => <li key={item.key} className="cx-queued-row" data-state={item.state}>
-        <div className="cx-queued-bubble">
-          {item.state === "queued" && item.onEdit
-            ? <div className="cx-user cx-queued-message" role="button" tabIndex={0} aria-label="Edit in composer" title="Edit in composer"
-              // A click on the message's own attachment (an image preview, a file) is for that control:
-              // bubbled up, it dequeued the message and unmounted the preview it had just opened.
-              onClick={(event) => { if (!queuedNestedControl(event.target, event.currentTarget)) item.onEdit?.(); }}
-              onKeyDown={(event) => {
-                if ((event.key === "Enter" || event.key === " ") && event.target === event.currentTarget) { event.preventDefault(); item.onEdit?.(); }
-              }}>
-              <SentMessage text={item.text} /></div>
-            : <div className="cx-user cx-queued-message"><SentMessage text={item.text} /></div>}
-          {item.state === "queued" ? <span className="cx-queued-discard">
-            <button type="button" aria-label="Discard queued message" data-tip="Discard queued message" onClick={item.onRemove}><QueuedDiscardGlyph /></button>
-          </span> : null}
-        </div>
-        {item.state === "queued" ? <div className="cx-queued-meta">
-          {index === head && item.onSendNow ? <button type="button" className="cx-queued-send-now" aria-label="Send now"
-            data-tip={item.sendNowBlocked ?? "Send now"} disabled={Boolean(item.sendNowBlocked)} onClick={item.onSendNow}>Send now</button> : null}
-          <span className="cx-queued-status">Queued</span>
-        </div>
-          // On its way to the agent: Claude Code's "Sending…" under the message until the agent has it.
-          : <div className="cx-queued-meta"><span className="cx-queued-status" role="status">Sending…</span></div>}
-      </li>)}
-    </ol>
+    <div className="cx-queued-card">
+      <div className="cx-queued-head">
+        <span className="cx-queued-count">{count}</span>
+        <button type="button" className="cx-queued-icon is-collapse" aria-expanded aria-label="Collapse queued messages" data-tip="Collapse queued messages"
+          onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(false)}><QueuedGlyph name="caret" /></button>
+      </div>
+      <div className="cx-queued-list" role="list" aria-label="Queued messages">
+        {items.map((item, index) => {
+          const menu = item.state === "queued" ? actions(item, index) : [];
+          return <div key={item.key} role="listitem" className="cx-queued-row" data-state={item.state} aria-busy={item.state === "pending" || undefined}>
+            <span className="cx-queued-text">{queuedPreview(item.text)}</span>
+            {item.state === "pending" ? <span className="cx-queued-actions is-shown"><QueuedSending /></span>
+              : menu.length ? <span className="cx-queued-actions">
+                <button type="button" className="cx-queued-icon is-sm" aria-label="Queued message actions" aria-haspopup="menu"
+                  onClick={(event) => onMenu(event.currentTarget, menu)}><QueuedGlyph name="more" size={14} /></button>
+              </span> : null}
+          </div>;
+        })}
+      </div>
+      {onClearAll && items.some((item) => item.state === "queued" && item.onRemove)
+        ? <div className="cx-queued-foot"><button type="button" className="cx-queued-clear" onMouseDown={(event) => event.preventDefault()} onClick={onClearAll}>Clear all</button></div>
+        : null}
+    </div>
   </div>;
 }
 
@@ -1352,8 +1390,9 @@ export function AgentOrchestratorChat({
     say(what, `Queued. It's sent when this turn finishes.${latest && runOpen && stop ? " Send /stop to end the turn now." : ""}`);
     return "queued";
   };
-  // The queued-message bar: this chat's queued messages (a command or a goal waits out of sight, as
-  // before), then the steers still on their way to the agent. Send now steers a message in at once,
+  // The queued-message bar: the steers still on their way to the agent (Claude Code's head of the
+  // queue, which goes first), then this chat's queued messages (a command or a goal waits out of
+  // sight, as before). Send now steers a message in at once,
   // or sends it when the chat is free; while the agent waits on its own request steering would
   // cancel that request, so it waits too.
   const sendNowBlocked = busy || sending ? "Another message is being sent"
@@ -1365,6 +1404,10 @@ export function AgentOrchestratorChat({
     return item;
   };
   const queuedBar: QueuedBarItem[] = [
+    // A steer that waits for the agent's own request is in the queue too: it shows once, as queued.
+    ...pendingSteers.filter((entry) => entry.taskId === selectedTaskId
+      && !queued.some((item) => item.what === "Message" && item.message === entry.text))
+      .map((entry): QueuedBarItem => ({ key: entry.id, text: entry.text, state: "pending" })),
     ...queued.flatMap((item, index): QueuedBarItem[] => item.what !== "Message" || item.goal ? [] : [{
       key: `queued:${index}:${item.message.length}`, text: item.message, state: "queued", sendNowBlocked,
       onRemove: () => { takeQueued(index); },
@@ -1385,10 +1428,6 @@ export function AgentOrchestratorChat({
         void deliver(taken.message, undefined, false).then((sent) => { if (!sent) setQueue(task, [taken, ...queueOf(task)]); });
       },
     }]),
-    // A steer that waits for the agent's own request is in the queue too: it shows once, as queued.
-    ...pendingSteers.filter((entry) => entry.taskId === selectedTaskId
-      && !queued.some((item) => item.what === "Message" && item.message === entry.text))
-      .map((entry): QueuedBarItem => ({ key: entry.id, text: entry.text, state: "pending" })),
   ];
   // The messages /rewind can go back to, oldest first, with the turn each one opened.
   const rewindPoints = turns.flatMap((turn, turnIndex) => turn.user ? [{ turnIndex, messageIndex: turn.messageIndex ?? turnIndex, text: chatMessageReadable(turn.user.text) }] : []);
@@ -1879,9 +1918,11 @@ export function AgentOrchestratorChat({
           return change ? <p className="cx-route-note" role="status"><b>{change.now}</b> starts a new agent with only a summary of this chat.
             Switch back to <b>{change.back}</b> to keep this one.</p> : null;
         })()}
-        {/* Queued and steering messages wait above the branch picker, which belongs to the chat box (as
-            Codex's): under it, a steer sat between "main" and the box. */}
-        <QueuedMessageBar items={queuedBar} />
+        {/* Queued and steering messages wait above the branch picker, as Claude Code's queued bar sits
+            above its branch (PR) bar: under it, a steer sat between "main" and the box. */}
+        <QueuedMessageBar items={queuedBar}
+          onMenu={(owner, items) => toggleMenu(owner, (box) => ({ x: box.right - 180, y: box.bottom + 4, label: "Queued message actions", items }))}
+          onClearAll={() => setQueue(selectedTaskId, queueOf(selectedTaskId).filter((item) => item.what !== "Message" || item.goal))} />
         {selectedTaskId ? <ChatBranchBar workspaceId={projectId} sessionId={agentSessions[0]?.id} /> : null}
         {/* A request waiting on the person sits right above the chat box, as wide as it, as DeepSeek
             Harness shows its approval panel: in the thread it took the thread's own margins and sat
