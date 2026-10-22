@@ -4279,7 +4279,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
 
   // Replacement and hide paths retain proof for every owned external turn.
-  async function stopOwned(workspaceId, mission) {
+  async function stopOwned(workspaceId, mission, { hiding = false } = {}) {
     const state = backgroundRuns.get(runKey(workspaceId, mission.id));
     if (state) { state.stopped = true; state.status = "held"; }
     const keys = () => [...dispatching].some(key => {
@@ -4295,8 +4295,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // Only a card still running or reserved without a session could have an agent nobody can name.
     // One whose launch came back without a session (held with the failure, "Needs you") owns none:
     // there is nothing to stop, and refusing here kept such a chat from ever being archived.
+    // Archiving or deleting a chat (`hiding`) starts nothing new, and no launch is pending any more
+    // (waited out above), so such a card is a launch that died before it had a session: the native
+    // stop below settles it. Refusing made those chats impossible to archive ("Owned session
+    // identity is unknown", seen live). A replacement still refuses: it would start a second agent.
     if (external.some(node => !node.receipt?.thread_id && ["running", "reserved"].includes(node.state))) {
-      throw new Error("Owned session identity is unknown; stop needs attention");
+      if (!hiding) throw new Error("Owned session identity is unknown; stop needs attention");
+      logger?.warn?.("ao.stop.unnamed_card", { run: mission.id });
     }
     const result = await requestHeadless("/api/v1/ao/control", {
       workspace_id: workspaceId, run_id: mission.id, action: "stop", confirm: true,
@@ -4530,7 +4535,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (visibility !== "active") {
       for (const mission of saved.runs.filter(run=>run.project_id===task && (!runSettled(run)
         || run.nodes.some(node=>["running","reserved"].includes(node.state)
-          || node.request_key && node.state !== "finished" && node.receipt?.status !== "completed")))) await stopOwned(id,mission);
+          || node.request_key && node.state !== "finished" && node.receipt?.status !== "completed")))) await stopOwned(id,mission,{hiding:true});
     }
     const life=await resolveStoppedIntents(id,task,await runs({workspaceId:id}));
     const result=await lifecycleMutation(id,visibility === "active"

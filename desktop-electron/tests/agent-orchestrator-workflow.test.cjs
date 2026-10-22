@@ -112,6 +112,18 @@ test("a chat whose launch came back without a session can be archived: it owns n
   assert.ok(world.calls.some(c=>c[1]?.change?.change?.operation==="set_visibility"),"the chat is archived");
 });
 
+test("a chat whose card still reads running but never got a session can be archived", async()=>{
+  // Seen live (2026-10-21): archive_task failed with "Owned session identity is unknown; stop needs
+  // attention" for chats whose launch died mid-way (an app restart), so Archive did nothing.
+  const world=reconfigureWorld();
+  const lead=world.saved.runs[0].nodes[0];
+  lead.state="running"; lead.receipt={status:"running",request_key:"request-one"};
+  await world.workflow.call("archive_task",{workspaceId:"ws",taskId:"task"});
+  assert.ok(world.calls.some(c=>c[0]==="/api/v1/ao/control"&&c[1].action==="stop"),"the run is still stopped natively");
+  assert.ok(!world.calls.some(c=>c[0]==="interrupt"),"there is no session to interrupt");
+  assert.ok(world.calls.some(c=>c[1]?.change?.change?.operation==="set_visibility"),"the chat is archived");
+});
+
 test("model edits preserve missed, uncertain and cancelled schedule holds rather than launching",async()=>{
   for(const state of ["missed","needs_attention","cancelled","claimed"]){
     const world=reconfigureWorld();

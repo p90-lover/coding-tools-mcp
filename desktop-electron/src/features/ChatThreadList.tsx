@@ -157,6 +157,16 @@ export function orderProjects<T extends { id: string }>(items: T[], pinned: stri
   return [...items].sort((a, b) => Number(pinned.includes(b.id)) - Number(pinned.includes(a.id)) || rank(a) - rank(b));
 }
 
+/**
+ * The kept project order with every project not placed yet (new, or still loading when the order
+ * was first kept) added at the end, where it then stays: left to the list's own order it could
+ * still move. The same array when nothing is new.
+ */
+export function placeNewProjects(saved: string[], ids: string[]): string[] {
+  const unplaced = ids.filter((id) => !saved.includes(id));
+  return unplaced.length ? [...saved, ...unplaced] : saved;
+}
+
 /** The order a project list had when projects still rose with use: kept once as where they stand. */
 export function projectsByLastUse<T extends { id: string }>(items: T[], usedAt: Record<string, number>): string[] {
   const index = new Map(items.map((item, at) => [item.id, at]));
@@ -392,8 +402,13 @@ export function ChatThreadList(props: ThreadListProps) {
     try { localStorage.setItem(PROJECT_ORDER_KEY, JSON.stringify(next)); localStorage.removeItem(PROJECT_USED_KEY); } catch { /* per-session only */ }
   };
   useEffect(() => {
-    if (projectOrderSaved !== null || !workspaces.length) return;
-    saveProjectOrder(projectsByLastUse(workspaces, readStored(PROJECT_USED_KEY, {}, isTimes)));
+    if (!workspaces.length) return;
+    if (projectOrderSaved === null) {
+      saveProjectOrder(projectsByLastUse(workspaces, readStored(PROJECT_USED_KEY, {}, isTimes)));
+      return;
+    }
+    const placed = placeNewProjects(projectOrderSaved, workspaces.map((item) => item.id));
+    if (placed !== projectOrderSaved) saveProjectOrder(placed);
   }, [projectOrderSaved, workspaces]);
   // A chat that got a new run was just used: it rises to the top of its project, as in Codex. Its
   // project stays where it is.

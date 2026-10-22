@@ -156,6 +156,12 @@ test("a used chat rises to the top of its project; projects stay where they were
   assert.deepEqual(plain(list.orderProjects(projects, ["b"], ["c", "a", "b"]).map((item) => item.id)), ["b", "c", "a"], "pinned projects stay first");
   // The order projects had by last use is kept once, so nothing moves on the update.
   assert.deepEqual(plain(list.projectsByLastUse(projects, { c: 5, b: 2 })), ["c", "b", "a"]);
+  // A project the kept order doesn't have yet takes the next place at the end and keeps it; nothing
+  // else moves, whichever project's chat is opened.
+  const kept = ["c", "a"];
+  assert.deepEqual(plain(list.placeNewProjects(kept, ["a", "b", "c", "d"])), ["c", "a", "b", "d"]);
+  assert.equal(list.placeNewProjects(kept, ["a", "c"]), kept, "unchanged when every project is placed");
+  assert.deepEqual(plain(list.orderProjects(projects, [], list.placeNewProjects(kept, ["b", "a", "c"])).map((item) => item.id)), ["c", "a", "b"]);
 
   const chats = [{ taskId: "t1", latestRunId: "r1" }, { taskId: "t2", latestRunId: "r9" }];
   assert.deepEqual(plain(list.releaseUsedChats(["t1", "t2"], { t1: "r1", t2: "r2" }, chats)), { order: ["t1"], used: ["t2"] },
