@@ -117,6 +117,8 @@ const WORKSPACE_MODES = new Set(["worktree", "shared", "folder"]);
 // Agents without an AO chat controller run in their own terminal UI and report here.
 // How often the harness list re-runs AO's install checks, so a newly installed CLI shows up.
 const AGENT_RECHECK_MS = 60_000;
+// How long a started AO daemon that is still running may take to answer /readyz (see start).
+const AO_READY_TIMEOUT_MS = 90_000;
 
 // A plain GET lists only the agents whose install check has finished, which right after the
 // daemon starts is often just one; the list was then read once and Codex, opencode and others
@@ -184,7 +186,7 @@ async function allocatePort() {
 }
 
 function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, cpaQuota = null, cpaUsage = null, logger = console,
-  readySlowMs = 30000, readyLimitMs = 300000 }) {
+  readySlowMs = 30000, readyLimitMs = AO_READY_TIMEOUT_MS }) {
   let child = null;
   let gateway = null;
   let view = null;
@@ -1678,17 +1680,16 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
             error = `AO exited (${code})${daemonLines ? `: ${daemonLines.trimEnd().slice(-600)}` : ""}`;
           }
         });
-        // AO answers /readyz once it listens, after opening its database. On a busy hard disk that
-        // took over 30 s, and killing it then made the next start redo the same work: AO stayed
-        // down for 12 minutes (16 starts) and the chats that outlived an update were dropped.
-        // A daemon that is still running is waited for; one that exited fails at once.
+        // A daemon that exits fails at once (checkStartup); one still starting is waited for. 30 s
+        // was too short on this machine's HDD: on 2026-10-22, right after an update (with the
+        // database compaction running), the first start was given up as "AO readiness timed out",
+        // its daemon killed and a new one started from nothing, and the chats that outlived the
+        // update were not reattached. Earlier that day AO stayed down 12 minutes (16 such starts).
+        // ao.start_slow records how long a slow start really takes, to tell whether the limit fits.
         const startedAt = Date.now();
         let slowLogged = false;
         while (Date.now() - startedAt < readyLimitMs) {
           checkStartup();
-          if (currentChild.exitCode !== null || currentChild.signalCode !== null) {
-            throw new Error(error || `AO exited (${currentChild.exitCode ?? currentChild.signalCode}) before it was ready`);
-          }
           if (!slowLogged && Date.now() - startedAt >= readySlowMs) {
             slowLogged = true;
             logger.warn?.("ao.start_slow", { waitedMs: Date.now() - startedAt, output: logTail.slice(-300) });

@@ -211,6 +211,8 @@ function createHarness(hooks = {}) {
     require(name) { assert.ok(Object.hasOwn(dependencies, name), `Unexpected dependency: ${name}`); return dependencies[name]; },
     process: { platform: process.platform, env: { PATH: "fixture", AO_PORT: "1", AO_REMOTE: "inherited-value" } },
     Buffer, URL, URLSearchParams, AbortSignal, setTimeout, clearTimeout,
+    // A test may give the module its own clock (a daemon slow to start, without waiting for real).
+    ...(hooks.Date ? { Date: hooks.Date } : {}),
     async fetch(url, options) {
       const endpoint = new URL(url);
       assert.equal(endpoint.hostname, "127.0.0.1");
@@ -336,6 +338,28 @@ for (const stage of ["portListen", "portClose", "gatewayListen", "readyFetch", "
     assert.deepEqual(harness.warnings, [], "intentional cancellation is not a startup failure");
   });
 }
+
+test("a daemon still starting after 30 s is waited for, not killed and started again", async (context) => {
+  // Seen 2026-10-22, right after an update on an HDD machine: "AO readiness timed out" after 30 s,
+  // the daemon killed and another started from nothing, and the surviving chats not reattached.
+  let clock = Date.now();
+  const started = clock;
+  class SlowClock extends Date { static now() { return clock; } }
+  const harness = createHarness({
+    Date: SlowClock,
+    // Each readiness poll finds the daemon still starting and moves the clock 5 s, until it is
+    // 45 s old.
+    readyFetch: () => { clock += 5_000; if (clock - started < 45_000) throw new Error("connect ECONNREFUSED"); },
+  });
+  const { controller } = harness;
+  context.after(async () => { await controller.stop(); });
+  assert.equal((await controller.start()).state, "ready");
+  assert.equal(harness.children.length, 1, "one daemon, never replaced");
+  assert.equal(harness.children[0].kills, 0, "the slow daemon was not killed");
+  // The slow start is reported once, so the log shows how long a real one takes.
+  assert.deepEqual(harness.warnings.map(([event]) => event), ["ao.start_slow"]);
+  assert.ok(harness.warnings[0][1].waitedMs >= 30_000);
+});
 
 test("concurrent stops share cleanup and a new start waits for the old gateway", async (context) => {
   const closing = deferred();
@@ -481,22 +505,6 @@ test("daemon exit during a readiness response cannot publish ready and startup f
   assert.equal(harness.gateways[0].closed, true);
   exitDuringReadiness = false;
   assert.equal((await controller.start()).state, "ready");
-});
-
-test("a daemon still opening its database past the slow mark is waited for, not killed and restarted", async (context) => {
-  // On a busy hard disk AO took over 30 s to listen; killing it then made every retry redo the
-  // same work, and AO stayed down for 12 minutes.
-  let listening = false;
-  setTimeout(() => { listening = true; }, 250);
-  const harness = createHarness({ readySlowMs: 50, readyLimitMs: 5000, readyFetch: () => { if (!listening) throw new Error("ECONNREFUSED"); } });
-  const { controller } = harness;
-  context.after(() => controller.stop());
-  assert.equal((await controller.start()).state, "ready");
-  assert.equal(harness.children.length, 1, "one daemon start");
-  assert.equal(harness.children[0].kills, 0, "the slow daemon was not killed");
-  const slow = harness.warnings.filter(([event]) => event === "ao.start_slow");
-  assert.equal(slow.length, 1, "the slow start is reported once");
-  assert.ok(slow[0][1].waitedMs >= 50);
 });
 
 test("a daemon that exits while starting fails at once instead of waiting out the limit", async (context) => {
