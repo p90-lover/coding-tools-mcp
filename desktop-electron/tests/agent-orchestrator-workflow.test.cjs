@@ -2038,10 +2038,12 @@ test("activity reports each working card's runtime and current step without adva
   const agent = { id: "w3", role: "worker", state: "running", route: { harness_id: "ao:codex", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" },
     receipt: { status: "submitted", thread_id: "sess-3" } };
   const done = { id: "p", role: "planner", state: "finished", route: native.route, receipt: { status: "completed" } };
+  const testing = { ...agent, id: "w4", receipt: { status: "submitted", thread_id: "sess-4" } };
+  const asking = { ...agent, id: "w5", receipt: { status: "submitted", thread_id: "sess-5" } };
   const workflow = createAgentOrchestratorWorkflow({
     requestHeadless: async (endpoint, body) => {
       calls.push(endpoint);
-      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [done, native, stuck, agent] }] };
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [done, native, stuck, agent, testing, asking] }] };
       if (endpoint === "/api/v1/ao/harness/status") {
         return { ok: true, status: { connected: true, live_output: body.node_id === "w1" ? "native partial Bearer SECRET_TOKEN npm run task-runner sk-abcdefghijklmnopqrst1234" : "", threads: body.node_id === "w1"
           ? [{ id: "thread-1", turn_id: "turn-1", activity: "running a command", activity_at_ms: 5_000, last_event_at_ms: 6_000 }]
@@ -2049,13 +2051,18 @@ test("activity reports each working card's runtime and current step without adva
       }
       throw new Error(`unexpected ${endpoint}`);
     },
-    aoHarness: { observe: async () => ({ turnState: "running", turnId: "t-3" }) },
+    aoHarness: { observe: async (session) => session === "sess-4"
+      ? { turnState: "running", turnId: "t-4", timeline: [{ id: "a1", kind: "command", status: "pending", text: "python -m pytest tests -q", timeoutMs: 300_000 }] }
+      // AO marks the session needs_input while a permission request waits: the card names the command.
+      : session === "sess-5" ? { turnState: "running", turnId: "t-5", needsInput: true, approvals: [{ approval_id: "r1", kind: "command", command: "npm run build", tool: "Bash" }] }
+      : { turnState: "running", turnId: "t-3" } },
     confirm: async () => true,
   });
   await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
   await new Promise(resolve => setImmediate(resolve));
   const result = await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
-  assert.deepEqual(Object.keys(result.nodes).sort(), ["w1", "w2", "w3"], "only working cards");
+  assert.deepEqual(Object.keys(result.nodes).sort(), ["w1", "w2", "w3", "w4", "w5"], "only working cards");
+  assert.equal(result.nodes.w5.activity, "waiting for approval: npm run build");
   assert.equal(result.nodes.w1.activity, "running a command");
   // "sk-" inside a word (task-runner) is not a key; a whole sk- token is.
   assert.equal(result.nodes.w1.output, "native partial [redacted] npm run task-runner [redacted]");
@@ -2064,7 +2071,10 @@ test("activity reports each working card's runtime and current step without adva
   assert.equal(result.nodes.w1.started_at_ms, 1_000);
   assert.equal(result.nodes.w2.activity, "waiting for the turn to start");
   assert.equal(result.nodes.w2.turn_started, false);
-  assert.equal(result.nodes.w3.activity, "running");
+  // An AO card says what its turn is doing, not just "running": waiting on the model, or the command
+  // it runs with that command's own timeout.
+  assert.equal(result.nodes.w3.activity, "waiting for the model");
+  assert.equal(result.nodes.w4.activity, "running python -m pytest tests -q (timeout 5m)");
   assert.ok(calls.every((endpoint) => endpoint === "/api/v1/ao/read" || endpoint === "/api/v1/ao/harness/status"), "read-only calls only");
 });
 
@@ -6223,4 +6233,49 @@ test("a steer is never sent to an agent whose state could not be read", async ()
   assert.equal(result.waiting, true, "it waits in the chat's queue and is steered in once the agent can be read");
   assert.deepEqual(steered, [], "nothing is steered blind");
   assert.deepEqual(interrupted, [], "nor is the turn stopped");
+});
+
+// Seen 2026-10-21: a turn "running" for hours after its model stream stopped (or after the agent had
+// already left it), and a pytest with a 5-minute timeout "checking" for an hour after its result
+// never came back. Nothing failed, so "Retry automatically" never ran; the chat sat until stopped.
+test("with Retry automatically on, a turn silent past its limit is stopped so its step is retried", async () => {
+  let clock = 2_000_000_000_000;
+  const interrupts = [];
+  let observed;
+  const node = { id: "w", role: "worker", task_id: "t", parents: [], state: "running",
+    route: { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/m", permission_profile: ":ao-default" },
+    receipt: { request_key: "k", status: "submitted", thread_id: "sess-1" } };
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    requestHeadless: async (endpoint) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run", workspace_id: "ws", revision: 1, cancelled: false, execution_mode: "single", nodes: [node] }] };
+      throw new Error(`Unexpected AO endpoint ${endpoint}`);
+    },
+    aoHarness: {
+      observe: async () => observed,
+      interrupt: async (session) => { interrupts.push(session); observed = { ...observed, turnState: "interrupted", status: "idle" }; },
+    },
+    confirm: async () => true,
+  });
+  const silent = (minutes, timeline = []) => ({ turnId: "turn-1", turnState: "running", status: "working",
+    lastActivityAt: clock - minutes * 60_000, timeline, approvals: [] });
+  const look = () => workflow.call("observe", { workspaceId: "ws", runId: "run", nodeId: "w" });
+
+  observed = silent(60);
+  await look();
+  assert.deepEqual(interrupts, [], "off by default: nothing is stopped behind the person's back");
+  await workflow.call("chat_auto_retry", { enabled: true });
+
+  observed = silent(8, [{ kind: "command", status: "pending", timeoutMs: 300_000 }]);
+  await look();
+  assert.deepEqual(interrupts, [], "a command still within its own 5-minute timeout and the margin is left to run");
+
+  observed = silent(11);
+  await look();
+  assert.deepEqual(interrupts, ["sess-1"], "silent 11 minutes with no tool running: the hung turn is stopped");
+
+  clock += 11 * 60_000;
+  observed = silent(40, [{ kind: "command", status: "pending", timeoutMs: 300_000 }]);
+  await look();
+  assert.deepEqual(interrupts, ["sess-1", "sess-1"], "a command long past its stated timeout is stopped too");
 });

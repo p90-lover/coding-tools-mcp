@@ -146,14 +146,14 @@ test("right after switching to a project, its list loads instead of saying No ch
   delete stored["coding-tools:ao:open-projects"];
 });
 
-test("a used chat rises to the top of its project; projects stay where they were put (pinned first)", () => {
+test("a used chat rises to the top of its project; projects stay where you put them (pinned first)", () => {
   const list = compile("ChatThreadList.tsx", (name) => name === "react" ? { useState() {}, useRef() {}, useEffect() {} } : name === "react/jsx-runtime" ? { jsx() {}, jsxs() {} } : name === "./ao-chat" ? chat : {});
   const projects = [{ id: "a" }, { id: "b" }, { id: "c" }];
   // The module runs in its own realm: compare plain copies.
   const plain = (value) => JSON.parse(JSON.stringify(value));
   assert.deepEqual(plain(list.orderProjects(projects, [], []).map((item) => item.id)), ["a", "b", "c"], "unplaced projects keep the list's order");
-  assert.deepEqual(plain(list.orderProjects(projects, [], ["c", "a"]).map((item) => item.id)), ["c", "a", "b"], "dragged projects keep their order, new ones follow");
-  assert.deepEqual(plain(list.orderProjects(projects, ["b"], ["c", "a", "b"]).map((item) => item.id)), ["b", "c", "a"], "pinned projects stay first");
+  assert.deepEqual(plain(list.orderProjects(projects, [], ["c", "a"]).map((item) => item.id)), ["c", "a", "b"], "the order you dragged them into; the rest after it");
+  assert.deepEqual(plain(list.orderProjects(projects, ["b"], ["c", "a"]).map((item) => item.id)), ["b", "c", "a"], "pinned projects stay first");
   // The order projects had by last use is kept once, so nothing moves on the update.
   assert.deepEqual(plain(list.projectsByLastUse(projects, { c: 5, b: 2 })), ["c", "b", "a"]);
   // A project the kept order doesn't have yet takes the next place at the end and keeps it; nothing
@@ -162,6 +162,10 @@ test("a used chat rises to the top of its project; projects stay where they were
   assert.deepEqual(plain(list.placeNewProjects(kept, ["a", "b", "c", "d"])), ["c", "a", "b", "d"]);
   assert.equal(list.placeNewProjects(kept, ["a", "c"]), kept, "unchanged when every project is placed");
   assert.deepEqual(plain(list.orderProjects(projects, [], list.placeNewProjects(kept, ["b", "a", "c"])).map((item) => item.id)), ["c", "a", "b"]);
+  // Using a project (a message in one of its chats) never moves it: only a drag changes the order.
+  // The old use times are only read once, to seed that order.
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/ChatThreadList.tsx"), "utf8");
+  assert.ok(!/setProjectUsedAt|\[workspaceId\]: Date\.now\(\)/.test(source), "no use-time ordering of projects is left");
 
   const chats = [{ taskId: "t1", latestRunId: "r1" }, { taskId: "t2", latestRunId: "r9" }];
   assert.deepEqual(plain(list.releaseUsedChats(["t1", "t2"], { t1: "r1", t2: "r2" }, chats)), { order: ["t1"], used: ["t2"] },
@@ -280,7 +284,7 @@ test("a drop lands before a row's upper half and after its lower half; Pinned an
 });
 
 // A drag event on a row 20px tall; the pointer on its upper or lower half.
-const dragEvent = (lower) => ({ preventDefault() {}, clientY: lower ? 15 : 5, dataTransfer: { setData() {} },
+const dragEvent = (lower) => ({ preventDefault() {}, stopPropagation() {}, clientY: lower ? 15 : 5, dataTransfer: { setData() {} },
   currentTarget: { getBoundingClientRect: () => ({ top: 0, height: 20 }) } });
 const rowOf = (view, title) => walk(view).find((element) => element.type === "li" && String(element.props.className).startsWith("cx-thread-row") && text(element).includes(title));
 
@@ -364,14 +368,11 @@ test("a project dragged onto another project moves there: each sits in its own <
   for (const key of Object.keys(stored)) delete stored[key];
   const { props } = fixture();
   const list = mount("ChatThreadList.tsx", props);
-  const projectRow = (view, name) => walk(view).find((element) => String(element.props?.className ?? "").startsWith("cx-project-row") && text(element).includes(name));
-  const projectsList = walk(list.render()).find((element) => element.props?.className === "cx-projects");
-  assert.equal(projectsList.props["data-drag-list"], "projects", "the shared project list names itself as the drag boundary");
-  // Codex review: the row's parent is its own <li>, so it must not be the boundary.
-  const listEl = { contains: (node) => node === "beta-row" };
-  const event = (lower) => ({ ...dragEvent(lower), target: "beta-row", currentTarget: { ...dragEvent(lower).currentTarget,
-    parentElement: { contains: (node) => node === "alpha-row" },
-    closest: (selector) => (selector === '[data-drag-list="projects"]' ? listEl : null) } });
+  // The whole project <li> drags, so the list it sits in is the shared project list.
+  const projectRow = (view, name) => walk(view).find((element) => element.type === "li" && String(element.props?.className ?? "").startsWith("cx-project-item") && text(element).includes(name));
+  // Codex review: a drop over another project counts, because both sit in that list.
+  const projectsList = { contains: (node) => node === "alpha-row" || node === "beta-row" };
+  const event = (lower) => ({ ...dragEvent(lower), target: "beta-row", currentTarget: { ...dragEvent(lower).currentTarget, parentElement: projectsList } });
   projectRow(list.render(), "Alpha").props.onDragStart(event(false));
   projectRow(list.render(), "Beta").props.onDragOver(event(true));
   walk(list.render()).find((element) => element.props?.className === "cx-threads").props.onDrop(event(true));

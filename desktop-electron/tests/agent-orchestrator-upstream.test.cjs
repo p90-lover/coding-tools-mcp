@@ -80,7 +80,7 @@ test("callers reading one session's conversation at once share one read, and a r
   let reads = 0;
   const upstream = observeHarness({ tailFreshMs: 900,
     internalApi: async (_method, endpoint) => {
-      if (endpoint.endsWith("/conversation?limit=100&includePending=1")) {
+      if (endpoint.endsWith("/conversation?limit=100&includePending=1&trimLargeFields=1")) {
         reads += 1;
         await new Promise(resolve => setTimeout(resolve, 20));
         return { turns: [{ id: "t", state: "running" }], messages: [] };
@@ -237,7 +237,7 @@ test("actual upstream observe exposes bounded current streaming output separatel
     internalApi: async (method, endpoint) => {
       assert.equal(method, "GET");
       if (endpoint === "/api/v1/sessions/owned-session") return { session: { id: "owned-session", mode: "chat", status: "working" } };
-      if (endpoint === "/api/v1/sessions/owned-session/conversation?limit=100&includePending=1") return { turns: [{ id: turn, state: "running" }], messages };
+      if (endpoint === "/api/v1/sessions/owned-session/conversation?limit=100&includePending=1&trimLargeFields=1") return { turns: [{ id: turn, state: "running" }], messages };
       throw new Error("Session is not owned");
     },
   });
@@ -260,15 +260,15 @@ test("a pending item too large for any page still lets the chat be read (and sto
     internalApi: async (_method, endpoint) => {
       if (!endpoint.includes("/conversation")) return { session: { id: "s", mode: "chat", status: "working" } };
       asked.push(endpoint.split("?")[1]);
-      if (endpoint.includes("includePending=1")) throw new Error("AO response exceeds the handler limit (GET /api/v1/sessions/s/conversation)");
+      if (endpoint.includes("includePending=1&trimLargeFields=1")) throw new Error("AO response exceeds the handler limit (GET /api/v1/sessions/s/conversation)");
       return { turns: [{ id: "t", state: "running" }], messages: [] };
     },
   });
   const observed = await upstream.observe("s");
   assert.equal(observed.turnState, "running");
   // The second limit=10 read is the one with room for big items (compactConversation).
-  assert.deepEqual(asked, ["limit=100&includePending=1", "limit=40&includePending=1", "limit=10&includePending=1",
-    "limit=10&includePending=1", "limit=3&includePending=1", "limit=1&includePending=1", "limit=10"]);
+  assert.deepEqual(asked, ["limit=100&includePending=1&trimLargeFields=1", "limit=40&includePending=1&trimLargeFields=1", "limit=10&includePending=1&trimLargeFields=1",
+    "limit=10&includePending=1&trimLargeFields=1", "limit=3&includePending=1&trimLargeFields=1", "limit=1&includePending=1&trimLargeFields=1", "limit=10"]);
 });
 
 test("one item over the limit among the newest ten no longer hides what came after it", async () => {
@@ -286,8 +286,8 @@ test("one item over the limit among the newest ten no longer hides what came aft
   });
   const observed = await upstream.observe("s");
   assert.equal(observed.turnState, "running");
-  assert.deepEqual(asked, ["limit=100&includePending=1", "limit=40&includePending=1", "limit=10&includePending=1",
-    "limit=10&includePending=1", "limit=3&includePending=1"], "three items, pending ones included, get past it");
+  assert.deepEqual(asked, ["limit=100&includePending=1&trimLargeFields=1", "limit=40&includePending=1&trimLargeFields=1", "limit=10&includePending=1&trimLargeFields=1",
+    "limit=10&includePending=1&trimLargeFields=1", "limit=3&includePending=1&trimLargeFields=1"], "three items, pending ones included, get past it");
 });
 
 test("a newest item over the limit on its own still fails the read, after every smaller page", async () => {
@@ -306,7 +306,7 @@ test("a newest item over the limit on its own still fails the read, after every 
 test("observe shows the reply of a turn that ended while AO still flagged it as streaming", async () => {
   // Seen live: a provider error ended the turn mid-stream and AO kept streaming=true on its reply.
   const upstream = observeHarness({
-    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1&trimLargeFields=1") ? {
       turns: [{ id: "t", state: "failed", errorMessage: "provider error" }],
       messages: [
         { id: "m0", role: "user", turnId: "t", sequence: 1, text: "the prompt" },
@@ -323,7 +323,7 @@ test("a turn AO failed because its controller died with the app reads as a resta
   // Seen live after an in-app update: AO's daemon closed with the app and, starting again, failed
   // the running turn as "controller ended before the turn completed"; the chat could not resume it.
   const upstream = observeHarness({
-    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1&trimLargeFields=1") ? {
       turns: [{ id: "t", state: "failed", errorMessage: "controller ended before the turn completed" }],
       messages: [{ id: "m0", role: "user", turnId: "t", sequence: 1, text: "the prompt" }],
     } : { session: { id: "s", mode: "chat", status: "idle" } },
@@ -335,7 +335,7 @@ test("a turn AO failed because its controller died with the app reads as a resta
 
 test("observe returns the current turn's reasoning, tool calls and messages in order", async () => {
   const upstream = observeHarness({
-    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1&trimLargeFields=1") ? {
       turns: [{ id: "t", state: "running" }],
       messages: [
         { id: "m0", role: "user", turnId: "t", sequence: 1, text: "the prompt" },
@@ -369,7 +369,7 @@ test("a running turn whose chat host is gone is interrupted, even when its PID w
   const upstream = observeHarness({ dataRoot,
     internalApi: async (method, endpoint) => {
       calls.push(`${method} ${endpoint}`);
-      if (endpoint.endsWith("/conversation?limit=100&includePending=1")) return { turns: [{ id: "t", state: turnState }], messages: [] };
+      if (endpoint.endsWith("/conversation?limit=100&includePending=1&trimLargeFields=1")) return { turns: [{ id: "t", state: turnState }], messages: [] };
       if (endpoint.endsWith("/interrupt")) return {};
       return { session: { id: "s", mode: "chat", status: "working" } };
     },
@@ -509,7 +509,7 @@ test("observe lists the agent's parked tool requests with AO's offered decisions
   const upstream = observeHarness({
     internalApi: async (method, endpoint, body) => {
       calls.push([method, endpoint, body]);
-      if (endpoint.endsWith("/conversation?limit=100&includePending=1")) return {
+      if (endpoint.endsWith("/conversation?limit=100&includePending=1&trimLargeFields=1")) return {
         turns: [{ id: "t", state: "running" }], messages: [],
         activities: [
           { id: "a1", turnId: "t", sequence: 2, activityKind: "approval", status: "pending", requestId: "req-1", summary: "Bash",
@@ -538,7 +538,7 @@ test("observe lists the agent's parked tool requests with AO's offered decisions
 // value": a request AO held outside a turn carried turn_id: undefined, and the whole status read failed.
 test("a request AO holds outside a turn has no turn_id key, so the status read passes the IPC schema", async () => {
   const upstream = observeHarness({
-    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1&trimLargeFields=1") ? {
       turns: [{ id: "t", state: "running" }], messages: [],
       activities: [
         { id: "a1", sequence: 2, activityKind: "approval", status: "pending", requestId: "req-1", summary: "Bash",
@@ -568,7 +568,7 @@ test("approval input bounds explicitly identify truncation without expanding rev
     { path: "x".repeat(1001) },
   ];
   const upstream = observeHarness({
-    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1&trimLargeFields=1") ? {
       turns: [{ id: "t", state: "running" }], messages: [],
       activities: inputs.map((input, index) => ({ activityKind: "approval", status: "pending", requestId: "req-" + index,
         summary: index === 2 ? "mcp__coding-tools__exec_command" : "PowerShell",
@@ -586,7 +586,7 @@ test("approval input bounds explicitly identify truncation without expanding rev
 
 test("an MCP tool approval named only by its summary keeps its input for the reviewer", async () => {
   const upstream = observeHarness({
-    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1&trimLargeFields=1") ? {
       turns: [{ id: "t", state: "running" }], messages: [],
       activities: [{ id: "a1", turnId: "t", sequence: 2, activityKind: "approval", status: "pending", requestId: "req-cd",
         summary: "mcp__coding-tools__exec_command",
@@ -606,7 +606,7 @@ test("a follow-up turn is observed only once AO shows it; send and steer use AO'
   const upstream = observeHarness({
     internalApi: async (method, endpoint, body) => {
       calls.push([method, endpoint, body]);
-      if (endpoint.endsWith("/conversation?limit=100&includePending=1")) return { turns,
+      if (endpoint.endsWith("/conversation?limit=100&includePending=1&trimLargeFields=1")) return { turns,
         messages: [{ id: "m", role: "assistant", turnId: "old", sequence: 1, text: "the previous answer" }], activities: [] };
       if (endpoint.endsWith("/conversation/messages")) return { turnId: "new", state: "running" };
       if (endpoint.endsWith("/conversation/steer")) { if (steerError) throw steerError; return { providerTurnId: "new" }; }
@@ -630,7 +630,7 @@ test("a follow-up turn is observed only once AO shows it; send and steer use AO'
 
 test("a steered message reads as the user's own words in the live timeline", async () => {
   const upstream = observeHarness({
-    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1&trimLargeFields=1") ? {
       turns: [{ id: "t", state: "running" }], messages: [],
       activities: [{ id: "s1", turnId: "t", sequence: 3, activityKind: "system", status: "completed", summary: "use pnpm…",
         detail: { event: "steer", text: "use pnpm, not npm" } },
@@ -644,7 +644,7 @@ test("a steered message reads as the user's own words in the live timeline", asy
 test("a provider retry says why it retries, such as a rate limit", async () => {
   // As AO stored it live (coding-tools-mcp-27): the summary alone never said it was a 429.
   const upstream = observeHarness({
-    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1&trimLargeFields=1") ? {
       turns: [{ id: "t", state: "running" }], messages: [],
       activities: [{ id: "r1", turnId: "t", sequence: 2, activityKind: "system", status: "running", summary: "Retrying Claude, attempt 2 of 10.",
         detail: { category: "limit", event: "provider.failure", severity: "warning", text: "API error 429. Trying again in 1s." } }],
@@ -660,7 +660,7 @@ test("a turn that only retries its model request shows no new sign of life, so a
   // nothing else. Each notice refreshed lastActivityAt, so chat_steer never saw the hang.
   const at = minutes => new Date(Date.parse("2026-10-18T10:00:00Z") + minutes * 60_000).toISOString();
   const upstream = observeHarness({
-    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1&trimLargeFields=1") ? {
       // AO may touch the turn itself with each activity, retries included.
       turns: [{ id: "t", state: "running", createdAt: at(0), startedAt: at(0), updatedAt: at(5) }],
       messages: [{ id: "m", turnId: "t", role: "assistant", text: "Looking at the parser.", streaming: false, createdAt: at(1), updatedAt: at(1) }],
@@ -719,7 +719,7 @@ test("a tool's row carries its arguments and output well past a few lines", asyn
 test("observe says when the tool call still running began, so a steer can stop a long one", async () => {
   const at = minutes => new Date(Date.parse("2026-10-20T04:00:00Z") + minutes * 60_000).toISOString();
   const conversation = (activities) => observeHarness({
-    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1") ? {
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1&trimLargeFields=1") ? {
       turns: [{ id: "t", state: "running", createdAt: at(0), startedAt: at(0) }], messages: [], activities,
     } : { session: { id: "s", mode: "chat", status: "working" } },
   });

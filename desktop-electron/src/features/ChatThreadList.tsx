@@ -145,16 +145,15 @@ export function orderChats<T extends { taskId: string; status: ChatStatus }>(cha
 }
 
 /**
- * The Projects list's order: pinned projects first, then the order you dragged them into, then the
- * list's own order for projects not placed yet. A project stays where it is until you move it: it
- * used to rise whenever it looked used, and opening another project's chat (whose fuller chat list
- * then arrived) counted as a use, so the list reshuffled on every switch.
+ * The Projects list's order: pinned projects first, then the order you dragged projects into, then
+ * the list's own order for projects you have not placed. A project no longer moves by itself: it
+ * jumped to the top whenever one of its chats got a message (the user: "it shouldnt be change if
+ * not me moving it").
  */
 export function orderProjects<T extends { id: string }>(items: T[], pinned: string[], manual: string[]): T[] {
   const index = new Map(items.map((item, at) => [item.id, at]));
-  const placed = new Map(manual.map((id, at) => [id, at]));
-  const rank = (item: T) => placed.get(item.id) ?? manual.length + (index.get(item.id) ?? 0);
-  return [...items].sort((a, b) => Number(pinned.includes(b.id)) - Number(pinned.includes(a.id)) || rank(a) - rank(b));
+  const placed = (id: string) => { const at = manual.indexOf(id); return at < 0 ? manual.length + (index.get(id) ?? 0) : at; };
+  return [...items].sort((a, b) => Number(pinned.includes(b.id)) - Number(pinned.includes(a.id)) || placed(a.id) - placed(b.id));
 }
 
 /**
@@ -411,7 +410,7 @@ export function ChatThreadList(props: ThreadListProps) {
     if (placed !== projectOrderSaved) saveProjectOrder(placed);
   }, [projectOrderSaved, workspaces]);
   // A chat that got a new run was just used: it rises to the top of its project, as in Codex. Its
-  // project stays where it is.
+  // project stays where it is; projects move only when you drag them.
   const seenRuns = useRef<{ workspaceId: string; runs: Record<string, string> }>({ workspaceId, runs: {} });
   useEffect(() => {
     if (seenRuns.current.workspaceId !== workspaceId) seenRuns.current = { workspaceId, runs: {} };
@@ -590,11 +589,10 @@ export function ChatThreadList(props: ThreadListProps) {
       draggable: true,
       "data-drop": sameList && dragging?.id !== id && dropAt?.id === id ? (dropAt.after ? "after" : "before") : undefined,
       onDragStart: (event: ReactDragEvent<HTMLElement>) => {
-        // The list element the row sits in: drops count only over it (inSourceList). A project row
-        // sits in its own <li>, so the shared project list names itself with data-drag-list; chat
-        // rows nested inside a project do not match it and keep their own list.
-        const listEl = event.currentTarget.closest?.<HTMLElement>(`[data-drag-list="${drag.list}"]`) ?? event.currentTarget.parentElement;
-        setDragging({ list: drag.list, id, drag, listEl: listEl ?? null });
+        // A chat row sits inside its project's row, which drags too: the drag is the chat's only.
+        event.stopPropagation();
+        // The list element the row sits in: drops count only over it (inSourceList).
+        setDragging({ list: drag.list, id, drag, listEl: event.currentTarget.parentElement ?? null });
         event.dataTransfer.effectAllowed = "move";
         event.dataTransfer.setData("text/plain", id);
         // The browser's own drag image is a see-through copy of the row a few pixels off it, which
@@ -694,7 +692,7 @@ export function ChatThreadList(props: ThreadListProps) {
     onKeyDown={(event) => { if (event.key === "Enter") commitNaming(); if (event.key === "Escape") setNaming(null); }}
     onBlur={commitNaming} />;
   const projectOrder = orderProjects(workspaces, props.pinnedProjects, projectOrderSaved ?? []);
-  // Projects are dragged into your own order like chats; pinned ones stay first regardless.
+  // Projects are dragged into place like chats, and only within Projects; that order is kept.
   const projectsDrag: DragList = { list: "projects", order: projectOrder.map((item) => item.id), save: saveProjectOrder };
   return (
     <aside className="cx-threads" aria-label="Projects and chats" onDragOver={listDragOver} onDrop={listDrop}>
@@ -734,14 +732,13 @@ export function ChatThreadList(props: ThreadListProps) {
               <Icon name="settings" width="13" height="13" />
             </button>
           </div>
-          <ul className="cx-projects" data-drag-list="projects">
+          <ul className="cx-projects">
             {projectOrder.map((item) => {
               const current = item.id === workspaceId;
               const open = current ? !collapsed.has(item.id) : openOthers.has(item.id);
               const git = projectGitLabel(item.path ? gits[item.path] : null);
-              return <li key={item.id}>
-                <div className={`cx-project-row${isDragged(item.id, projectsDrag) ? " is-dragging" : ""}`} {...dragRow(item.id, projectsDrag)}
-                  onMouseEnter={(event) => hoverProject(item, event.currentTarget)} onMouseLeave={leaveProject}>
+              return <li key={item.id} {...dragRow(item.id, projectsDrag)} className={`cx-project-item${isDragged(item.id, projectsDrag) ? " is-dragging" : ""}`}>
+                <div className="cx-project-row" onMouseEnter={(event) => hoverProject(item, event.currentTarget)} onMouseLeave={leaveProject}>
                   <button type="button" className="cx-project" aria-expanded={open}
                     onClick={() => clickProject(item.id)} onContextMenu={(event) => openMenu(event, projectMenu(item), item.name)}>
                     <ChatGlyph name="folder" size={15} />
