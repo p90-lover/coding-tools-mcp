@@ -54,6 +54,8 @@ const DASH = 2.8;
 /** How near (px) the pointer must come before Bit turns its eyes to it, and before it leaps on. */
 const NOTICE = 180;
 const REACH = 70;
+/** How often (ms), while the pointer moves, Bit checks where it is (every frame only while riding it). */
+const LOOK_EVERY_MS = 100;
 /** Between two leaps onto the pointer, so it plays now and then rather than pestering. */
 const PLAY_EVERY = 15_000;
 /** A ride lasts at most this long (ms) before it jumps off by itself; a click, Escape or a quick
@@ -685,39 +687,46 @@ export function ChatPet({ mood, context, onHide }: {
   useEffect(() => {
     if (still) return undefined;
     let frame = 0;
+    let timer = 0;
     let moved = 0;
     const onMove = (event: PointerEvent) => {
       moved += event.clientX - pointer.current.x;
       pointer.current = { x: event.clientX, y: event.clientY };
-      if (frame) return;
-      frame = window.requestAnimationFrame(() => {
-        frame = 0;
-        const { x, y } = pointer.current;
-        const dx = moved;
-        moved = 0;
-        if (rideNow.current) {
-          // Aboard, it goes wherever the pointer goes, facing the way it is carried.
-          if (rideNow.current.mode !== "riding") return;
-          // Shaken hard, it lets go and jumps back to the box.
-          if (Math.abs(dx) > SHAKE) { say("Whoa!", 900); leave(); return; }
-          setRide((current) => current && { ...current, x, y, look: dx < -1 ? -1 : dx > 1 ? 1 : current.look });
-          return;
-        }
-        const body = box.current?.getBoundingClientRect();
-        if (!body || asleepNow.current || drag.current || heldNow.current) return;
-        const middle = body.left + body.width / 2;
-        const distance = Math.hypot(x - middle, y - (body.top + body.height / 2));
-        const calm = moodNow.current === "idle" || moodNow.current === "done";
-        if (calm && distance < REACH && !homeNow.current && Date.now() - lastPlay.current > PLAY_EVERY && Math.random() < 0.6) {
-          lastPlay.current = Date.now();
-          board(Math.random() < 0.5 ? 1200 : 2200 + Math.random() * 1800);
-          return;
-        }
-        setPose((current) => {
-          if (current.walking || current.sit) return current;
-          const look: Pose["look"] = distance > NOTICE ? 0 : x < middle - 12 ? -1 : x > middle + 12 ? 1 : 0;
-          return current.look === look ? current : { ...current, look };
-        });
+      if (frame || timer) return;
+      // Aboard, it follows the pointer every frame. Otherwise it only turns its head or starts a
+      // game, which ten checks a second cover: a frame asked for on every move made the whole window
+      // lay out and paint at the screen's rate (136 times a second) whenever the mouse moved.
+      if (rideNow.current) frame = window.requestAnimationFrame(check);
+      else timer = window.setTimeout(check, LOOK_EVERY_MS);
+    };
+    const check = () => {
+      frame = 0;
+      timer = 0;
+      const { x, y } = pointer.current;
+      const dx = moved;
+      moved = 0;
+      if (rideNow.current) {
+        // Aboard, it goes wherever the pointer goes, facing the way it is carried.
+        if (rideNow.current.mode !== "riding") return;
+        // Shaken hard, it lets go and jumps back to the box.
+        if (Math.abs(dx) > SHAKE) { say("Whoa!", 900); leave(); return; }
+        setRide((current) => current && { ...current, x, y, look: dx < -1 ? -1 : dx > 1 ? 1 : current.look });
+        return;
+      }
+      const body = box.current?.getBoundingClientRect();
+      if (!body || asleepNow.current || drag.current || heldNow.current) return;
+      const middle = body.left + body.width / 2;
+      const distance = Math.hypot(x - middle, y - (body.top + body.height / 2));
+      const calm = moodNow.current === "idle" || moodNow.current === "done";
+      if (calm && distance < REACH && !homeNow.current && Date.now() - lastPlay.current > PLAY_EVERY && Math.random() < 0.6) {
+        lastPlay.current = Date.now();
+        board(Math.random() < 0.5 ? 1200 : 2200 + Math.random() * 1800);
+        return;
+      }
+      setPose((current) => {
+        if (current.walking || current.sit) return current;
+        const look: Pose["look"] = distance > NOTICE ? 0 : x < middle - 12 ? -1 : x > middle + 12 ? 1 : 0;
+        return current.look === look ? current : { ...current, look };
       });
     };
     let lastTyped = 0;
@@ -731,7 +740,11 @@ export function ChatPet({ mood, context, onHide }: {
     };
     window.addEventListener("pointermove", onMove);
     form?.addEventListener("input", onInput);
-    return () => { window.removeEventListener("pointermove", onMove); form?.removeEventListener("input", onInput); if (frame) window.cancelAnimationFrame(frame); };
+    return () => {
+      window.removeEventListener("pointermove", onMove); form?.removeEventListener("input", onInput);
+      if (frame) window.cancelAnimationFrame(frame);
+      if (timer) window.clearTimeout(timer);
+    };
   }, [still]);
 
   // While it rides: any click or Escape makes it jump off, and it hops, winks and looks about.

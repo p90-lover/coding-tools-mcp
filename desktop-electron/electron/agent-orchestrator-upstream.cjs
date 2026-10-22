@@ -185,7 +185,8 @@ async function allocatePort() {
   return port;
 }
 
-function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, cpaQuota = null, cpaUsage = null, logger = console }) {
+function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, cpaQuota = null, cpaUsage = null, logger = console,
+  readySlowMs = 30000, readyLimitMs = AO_READY_TIMEOUT_MS }) {
   let child = null;
   let gateway = null;
   let view = null;
@@ -1686,10 +1687,16 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // was too short on this machine's HDD: on 2026-10-22, right after an update (with the
         // database compaction running), the first start was given up as "AO readiness timed out",
         // its daemon killed and a new one started from nothing, and the chats that outlived the
-        // update were not reattached.
-        const deadline = Date.now() + AO_READY_TIMEOUT_MS;
-        while (Date.now() < deadline) {
+        // update were not reattached. Earlier that day AO stayed down 12 minutes (16 such starts).
+        // ao.start_slow records how long a slow start really takes, to tell whether the limit fits.
+        const startedAt = Date.now();
+        let slowLogged = false;
+        while (Date.now() - startedAt < readyLimitMs) {
           checkStartup();
+          if (!slowLogged && Date.now() - startedAt >= readySlowMs) {
+            slowLogged = true;
+            logger.warn?.("ao.start_slow", { waitedMs: Date.now() - startedAt, output: logTail.slice(-300) });
+          }
           try {
             const response = await fetch(`http://127.0.0.1:${daemonPort}/readyz`, { redirect: "error", signal: AbortSignal.timeout(1000) });
             checkStartup();

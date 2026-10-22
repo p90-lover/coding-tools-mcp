@@ -247,6 +247,7 @@ function createHarness(hooks = {}) {
     openAuth: hooks.openAuth,
     agentTools: hooks.agentTools,
     logger: { warn: (...entry) => warnings.push(entry) },
+    readySlowMs: hooks.readySlowMs, readyLimitMs: hooks.readyLimitMs,
   });
   return { controller, children, gateways, reservations, views, requests, events, warnings, parent, opened, daemonReads, files };
 }
@@ -354,7 +355,10 @@ test("a daemon still starting after 30 s is waited for, not killed and started a
   context.after(async () => { await controller.stop(); });
   assert.equal((await controller.start()).state, "ready");
   assert.equal(harness.children.length, 1, "one daemon, never replaced");
-  assert.deepEqual(harness.warnings, []);
+  assert.equal(harness.children[0].kills, 0, "the slow daemon was not killed");
+  // The slow start is reported once, so the log shows how long a real one takes.
+  assert.deepEqual(harness.warnings.map(([event]) => event), ["ao.start_slow"]);
+  assert.ok(harness.warnings[0][1].waitedMs >= 30_000);
 });
 
 test("concurrent stops share cleanup and a new start waits for the old gateway", async (context) => {
@@ -501,6 +505,23 @@ test("daemon exit during a readiness response cannot publish ready and startup f
   assert.equal(harness.gateways[0].closed, true);
   exitDuringReadiness = false;
   assert.equal((await controller.start()).state, "ready");
+});
+
+test("a daemon that exits while starting fails at once instead of waiting out the limit", async (context) => {
+  const harness = createHarness({ readySlowMs: 50, readyLimitMs: 60000, readyFetch: (child) => { child.exit(3); throw new Error("ECONNREFUSED"); } });
+  const { controller } = harness;
+  context.after(() => controller.stop());
+  const begun = Date.now();
+  await assert.rejects(controller.start(), /AO exited \(3\)/);
+  assert.ok(Date.now() - begun < 5000, "no wait for a daemon that is gone");
+});
+
+test("a daemon that never listens fails at the limit", async (context) => {
+  const harness = createHarness({ readySlowMs: 20, readyLimitMs: 300, readyFetch: () => { throw new Error("ECONNREFUSED"); } });
+  const { controller } = harness;
+  context.after(() => controller.stop());
+  await assert.rejects(controller.start(), /AO readiness timed out/);
+  assert.equal(controller.snapshot().state, "error");
 });
 
 test("the daemon is hashed once per install: a later launch trusts the stamp, a changed file is hashed again", async (context) => {

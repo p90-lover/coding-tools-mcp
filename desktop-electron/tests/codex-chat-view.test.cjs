@@ -126,6 +126,8 @@ test("a turn shows the user bubble, the live work line and a stop button; Esc st
   const view = chatView.render();
   const work = walk(view).find((element) => element.props?.className === "cx-work-head");
   assert.match(text(work), /^Working for 1m · Worker — running a command$/);
+  // The shimmer repaints its box every frame, so it covers the verb only, not the whole line.
+  assert.deepEqual(walk(work).filter((element) => element.props?.className === "cx-shimmer").map(text), ["Working"]);
   const stop = walk(view).find((element) => element.props?.["aria-label"] === "Stop (Esc)");
   assert.ok(stop, "a running chat shows Stop in place of Send");
   stop.props.onClick();

@@ -521,13 +521,16 @@ function WorkGroupView({ turn, idle = false, expanded = false, loadWork }: WorkG
     return !idle && (turn.status === "running" || turn.status === "queued")
       ? <div className="cx-work is-live"><span className="cx-shimmer">Starting…</span></div> : null;
   }
+  // Only the verb shimmers, as in Claude Code: the shimmer repaints its whole box every frame, and
+  // over the full label (time, agent and activity, up to two lines) it held a core on a 165 Hz screen.
   const label = working
-    ? <>{working.working!.stalled ? "May be stuck" : "Working"}{turn.startedAtMs ? <> for <Elapsed since={turn.startedAtMs} /></> : null}
+    ? <><span className="cx-shimmer">{working.working!.stalled ? "May be stuck" : "Working"}</span>
+      {turn.startedAtMs ? <> for <Elapsed since={turn.startedAtMs} /></> : null}
       {` · ${working.name}${working.working!.activity ? ` — ${working.working!.activity}` : ""}`}</>
     : `Worked · ${turn.steps.length} ${turn.steps.length === 1 ? "step" : "steps"}`;
   return <div className={`cx-work${working ? " is-live" : ""}${working?.working?.stalled ? " is-stalled" : ""}`}>
     <button type="button" className="cx-work-head" aria-expanded={open} onClick={() => setChosen(!open)}>
-      <span className={working ? "cx-shimmer" : undefined}>{label}</span>
+      <span>{label}</span>
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
     </button>
     {open ? <ol className="cx-steps">{turn.steps.map((step) => <StepRow key={step.key} step={step} runId={turn.runId} loadWork={loadWork} />)}</ol> : null}
