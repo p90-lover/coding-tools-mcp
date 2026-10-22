@@ -659,6 +659,9 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-turn-stats span { padding: 0 10px; white-space: nowrap; transition: color .15s ease; }
 .cx-turn-stats span + span { border-left: 1px solid color-mix(in srgb, var(--ao-muted) 35%, transparent); }
 .cx-turn-stats span:hover { color: var(--color-text-primary); }
+/* CPA refusing the turn's model (ChatTurnStats): amber, so a rate limit reads apart from slow work. */
+.cx-turn-stats span.is-warn, .cx-turn-stats span.is-warn:hover { color: var(--ao-amber, #c98a12); }
+.cx-turn-stats.is-dsh span.is-warn { border-color: color-mix(in srgb, var(--ao-amber, #c98a12) 45%, transparent); }
 .cx-turn-stats.is-running span:first-child::before { display: inline-block; width: 6px; height: 6px; margin: 0 6px 1px 0; border-radius: 50%;
   background: var(--ao-green, #2e9d5b); content: ""; animation: cx-pulse 1.4s ease-in-out infinite; }
 @keyframes cx-turn-stats-in { from { opacity: 0; transform: translateY(-3px); } }

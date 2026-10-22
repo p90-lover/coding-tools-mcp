@@ -1097,6 +1097,32 @@ export function dshRetryNote(steps: ChatStep[]): string {
   return "";
 }
 
+/** The failed requests in a row since the turn's model last answered through CPA (cpa-usage.cjs refusalOf). */
+export type CpaRefusal = { streak: number; status: number | null; statuses?: Record<string, number>; since: number | null; lastAt: number | null };
+
+/** What an HTTP status from CPA means to the person waiting on the turn. */
+export function cpaStatusWord(status: number | null): string {
+  if (status === 429) return "rate limited (429)";
+  if (status === 401 || status === 403) return `sign-in refused (${status})`;
+  if (status === 402) return "out of credit (402)";
+  if (status !== null && status >= 500) return `model service error (${status})`;
+  return status ? `HTTP ${status}` : "failed";
+}
+
+/**
+ * Why a running turn is quiet when CPA keeps refusing its model: from CPA Helper's request records,
+ * so it covers a Claude Code subagent's requests too, whose retries never reach the chat as a
+ * "Retrying…" notice. Seen live 2026-10-22: a MiMo turn sat on "may be stuck" for half an hour
+ * while its requests failed, and nothing said why. Two failures in a row before it says so: a single
+ * one is usually retried at once.
+ */
+export function cpaRefusalNote(refusal: CpaRefusal | null | undefined, now: number): string {
+  if (!refusal || refusal.streak < 2) return "";
+  const age = refusal.lastAt ? now - refusal.lastAt : null;
+  const when = age === null ? "" : age < 60_000 ? ", just now" : `, latest ${dshDuration(age)} ago`;
+  return ` · CPA refused the last ${refusal.streak} requests: ${cpaStatusWord(refusal.status)}${when}`;
+}
+
 /** A tool row's title (ui-tool tool-call-model.ts): its variant's word, or the tool's own. */
 export function dshToolTitle(item: ChatLiveItem): string {
   const name = dshToolName(item);

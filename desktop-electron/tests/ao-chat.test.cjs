@@ -1454,6 +1454,16 @@ test("a turn whose agent is waiting out a model error says so, instead of \"may 
   assert.equal(chat.dshRetryNote([{ key: "s", working: { timeline: [{ id: "a", kind: "command", status: "running", text: "npm test" }] } }]), "",
     "a card busy with a tool is not retrying");
 });
+test("a quiet turn whose model CPA keeps refusing says so, with what the refusal means", () => {
+  const now = 1_000_000_000;
+  assert.equal(chat.cpaRefusalNote({ streak: 6, status: 429, since: now - 300_000, lastAt: now - 125_000 }, now),
+    " · CPA refused the last 6 requests: rate limited (429), latest 2m 5s ago");
+  assert.equal(chat.cpaRefusalNote({ streak: 2, status: 503, since: now - 20_000, lastAt: now - 5_000 }, now),
+    " · CPA refused the last 2 requests: model service error (503), just now");
+  assert.equal(chat.cpaRefusalNote({ streak: 3, status: 401, since: null, lastAt: null }, now), " · CPA refused the last 3 requests: sign-in refused (401)");
+  assert.equal(chat.cpaRefusalNote({ streak: 1, status: 429, since: now, lastAt: now }, now), "", "one failure is usually retried at once");
+  assert.equal(chat.cpaRefusalNote(null, now), "");
+});
 test("the approvals poll skips a card whose attempt changed mid-read instead of raising an error", async () => {
   const state = { approvals: null, policies: null, errors: [] };
   const calls = [];

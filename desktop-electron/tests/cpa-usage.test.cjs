@@ -263,7 +263,29 @@ test("a turn's model requests sum to its steps, model time, first-token time, sp
   assert.equal(stats.tokensPerSecond, Math.round((400 / 3200) * 1000), "speed is output over the streaming part");
   assert.equal(stats.cacheHit, 6000 / 15700);
   assert.deepEqual([stats.inputTokens, stats.outputTokens], [15700, 400]);
-  assert.deepEqual(summarizeRecords([]), { steps: 0, failed: 0, latencyMs: 0, ttftMs: null, tokensPerSecond: null, cacheHit: null, inputTokens: 0, outputTokens: 0, cachedTokens: 0 });
+  assert.deepEqual(summarizeRecords([]), { steps: 0, failed: 0, latencyMs: 0, ttftMs: null, tokensPerSecond: null, cacheHit: null, inputTokens: 0, outputTokens: 0, cachedTokens: 0, refusal: null });
+});
+
+test("a turn's refusal is the run of failed requests since its model last answered, with their HTTP status", () => {
+  // Seen live 2026-10-22: a MiMo turn sat on "may be stuck" while CPA refused its requests.
+  const at = (seconds) => NOW - 600_000 + seconds * 1000;
+  const stats = summarizeRecords([
+    // Out of order on purpose: CPA Helper's page order is not the turn's.
+    { ts: at(30), failed: true, status_code: 429 },
+    { ts: at(10), latency_ms: 900, output_tokens: 20 },
+    { ts: at(20), failed: true, status_code: 429 },
+    { ts: at(40), failed: true, status_code: 503 },
+    { ts: at(5), failed: true, status_code: 429 },
+  ]);
+  assert.deepEqual(stats.refusal, { streak: 3, status: 503, statuses: { 429: 2, 503: 1 }, since: at(20), lastAt: at(40) },
+    "the failure before the success is not part of the run; the newest status leads");
+  assert.equal(summarizeRecords([{ ts: at(1), failed: true, status_code: 429 }, { ts: at(2), latency_ms: 10 }]).refusal, null,
+    "a model that answered after its failures is not refusing");
+  assert.equal(summarizeRecords([{ failed: true, status_code: 429 }]).refusal, null, "records without a time say nothing about order");
+  const { recordTime } = require("../electron/cpa-usage.cjs");
+  assert.equal(recordTime({ ts: 1_792_600_000 }), 1_792_600_000_000, "seconds");
+  assert.equal(recordTime({ ts: 1_792_600_000_123 }), 1_792_600_000_123, "milliseconds");
+  assert.equal(recordTime({ ts: "2026-10-22T01:00:00Z" }), Date.parse("2026-10-22T01:00:00Z"), "ISO");
 });
 
 test("a turn's stats read CPA Helper's records for its model since it started, without the cpa/ prefix or an effort suffix", async () => {

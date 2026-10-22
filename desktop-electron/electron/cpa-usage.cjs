@@ -425,6 +425,40 @@ function createCpaUsage({ getConnection, quota = null, fetchImpl = fetch, now = 
   return Object.freeze({ read, turnStats });
 }
 
+/** A record's time (CPA Helper's `ts`) in Unix ms, from ms, seconds or an ISO date; null when absent. */
+function recordTime(item) {
+  const value = item?.ts;
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) return value < 1e12 ? value * 1000 : value;
+  if (typeof value === "string" && value) { const parsed = Date.parse(value); return Number.isFinite(parsed) ? parsed : null; }
+  return null;
+}
+
+/**
+ * The run of failed requests since the turn's model last answered: how many, with which HTTP status,
+ * from when to when. A turn whose requests (its own, or a subagent's on the same model) CPA keeps
+ * refusing shows nothing in the chat, where it read as a slow start or "may be stuck"; seen live
+ * 2026-10-22 on MiMo V2.6 Pro. Only timed records count, newest last. Null without a failure there.
+ */
+function refusalOf(items) {
+  const timed = items.filter((item) => item && typeof item === "object" && recordTime(item) !== null)
+    .sort((a, b) => recordTime(a) - recordTime(b));
+  let streak = 0;
+  for (let index = timed.length - 1; index >= 0 && timed[index].failed === true; index -= 1) streak += 1;
+  if (!streak) return null;
+  const run = timed.slice(-streak);
+  const statuses = {};
+  for (const item of run) {
+    const code = Number.isInteger(item.status_code) && item.status_code >= 100 && item.status_code < 600 ? String(item.status_code) : "none";
+    statuses[code] = (statuses[code] ?? 0) + 1;
+  }
+  const latest = run.at(-1);
+  return {
+    streak,
+    status: Number.isInteger(latest.status_code) && latest.status_code >= 100 && latest.status_code < 600 ? latest.status_code : null,
+    statuses, since: recordTime(run[0]), lastAt: recordTime(latest),
+  };
+}
+
 /** CPA Helper records -> one turn's totals; failed requests count as steps but not as speed. */
 function summarizeRecords(items) {
   let steps = 0, failed = 0, latencyMs = 0, ttftSum = 0, ttftCount = 0, inputTokens = 0, outputTokens = 0, cachedTokens = 0;
@@ -450,9 +484,10 @@ function summarizeRecords(items) {
     tokensPerSecond: speedMs ? Math.round((speedTokens / speedMs) * 1000) : null,
     cacheHit: inputTokens ? Math.min(1, cachedTokens / inputTokens) : null,
     inputTokens, outputTokens, cachedTokens,
+    refusal: refusalOf(items),
   };
 }
 
 module.exports = Object.freeze({
-  createCpaUsage, aggregateUsage, summarizeRecords, clineQuotaOf, priceFor, estimateCost, cellCost, modelKey, RANGES,
+  createCpaUsage, aggregateUsage, summarizeRecords, refusalOf, recordTime, clineQuotaOf, priceFor, estimateCost, cellCost, modelKey, RANGES,
 });

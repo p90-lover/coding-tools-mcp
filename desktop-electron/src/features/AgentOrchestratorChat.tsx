@@ -20,7 +20,7 @@ import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
-  activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshQuietNote, dshRetryNote, type ChatWakeup,
+  activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshQuietNote, dshRetryNote, cpaRefusalNote, type ChatWakeup, type CpaRefusal,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -146,7 +146,7 @@ function Elapsed({ since, live = true, until, format = chatDuration }: { since: 
  * is on what, and how long nothing new has come (or that its model is being retried). The "Working
  * for" label sat at the turn's top, hundreds of steps up, so a stuck turn could not be told apart.
  */
-function TurnRunning({ turn }: { turn: ChatTurn }) {
+function TurnRunning({ turn, refusal }: { turn: ChatTurn; refusal?: CpaRefusal | null }) {
   const step = turn.steps.find((item) => item.working) ?? (turn.final?.working ? turn.final : undefined);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -155,11 +155,18 @@ function TurnRunning({ turn }: { turn: ChatTurn }) {
   }, []);
   if (!step?.working) return null;
   const heardAt = Math.max(0, ...[...turn.steps, ...(turn.final ? [turn.final] : [])].map((item) => item.working?.heardAtMs ?? 0)) || undefined;
-  const note = dshRetryNote(turn.steps) || dshQuietNote(heardAt, now);
-  return <p className={`cx-note cx-turn-running${step.working.stalled ? " is-stalled" : ""}`} role="status" aria-live="polite">
+  // Claude Code's own retry notice first; else CPA refusing the model (a subagent's requests too,
+  // which post no notice); then how long nothing new has come.
+  const retry = dshRetryNote(turn.steps);
+  const refused = retry ? "" : cpaRefusalNote(refusal, now);
+  const note = `${retry || refused}${dshQuietNote(heardAt, now)}`;
+  // A restart does not lift a rate limit or a refused sign-in: it says what does instead.
+  const hint = refused && (refusal?.status === 429 || refusal?.status === 402) ? " · switch the model or wait"
+    : refused && (refusal?.status === 401 || refusal?.status === 403) ? " · sign in again in CPA"
+    : note.includes("may be stuck") ? " · send a message to restart it" : "";
+  return <p className={`cx-note cx-turn-running${step.working.stalled || refused ? " is-stalled" : ""}`} role="status" aria-live="polite">
     <span className="cx-shimmer">Working</span>{turn.startedAtMs ? <> for <Elapsed since={turn.startedAtMs} /></> : null}
-    {` · ${step.name}${step.working.activity ? ` — ${step.working.activity}` : ""}${note}`}
-    {note.includes("may be stuck") ? " · send a message to restart it" : ""}
+    {` · ${step.name}${step.working.activity ? ` — ${step.working.activity}` : ""}${note}${hint}`}
   </p>;
 }
 
@@ -459,7 +466,7 @@ export function sameWork(prev: WorkGroupProps, next: WorkGroupProps): boolean {
 const WorkGroup = memo(WorkGroupView, sameWork);
 /** A DeepSeek turn's work (DshTranscript), skipped on re-render by the same check as WorkGroup. */
 const DshWork = memo(DshTurnWork, (prev: DshTurnWorkProps, next: DshTurnWorkProps) => prev.live === next.live
-  && prev.useWork === next.useWork && prev.errorShownBelow === next.errorShownBelow && sameWork({ turn: prev.turn, expanded: prev.expanded }, { turn: next.turn, expanded: next.expanded }));
+  && prev.useWork === next.useWork && prev.errorShownBelow === next.errorShownBelow && prev.refusal === next.refusal && sameWork({ turn: prev.turn, expanded: prev.expanded }, { turn: next.turn, expanded: next.expanded }));
 
 function WorkGroupView({ turn, idle = false, expanded = false, loadWork }: WorkGroupProps) {
   const working = turn.steps.find((step) => step.working);
@@ -742,6 +749,10 @@ export function AgentOrchestratorChat({
   const [draft, setDraft] = useState("");
   const [title, setTitle] = useState("");
   const [sending, setSending] = useState(false);
+  // CPA refusing the running turn's model, as the line under the chat box reads it (ChatTurnStats):
+  // the turn's status line says so instead of only "may be stuck".
+  const [cpaRefusal, setCpaRefusal] = useState<CpaRefusal | null>(null);
+  useEffect(() => { setCpaRefusal(null); }, [selectedTaskId]);
   // Steers shown at once while they reach the agent (deliver), until the turn shows them itself.
   // `waiting`: the agent was busy with a request of its own, so the steer waits in the chat's queue
   // and goes in once the request is answered; it stays shown meanwhile.
@@ -1574,9 +1585,9 @@ export function AgentOrchestratorChat({
                 </div>) : null}
               {dsh && readWork
                 ? <DshWork key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} live={!idle && liveTurn(turn)} expanded={showWork} useWork={readWork}
-                  errorShownBelow={turn === failedTurn} />
+                  errorShownBelow={turn === failedTurn} refusal={!idle && liveTurn(turn) ? cpaRefusal : null} />
                 : <WorkGroup key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} idle={idle} expanded={showWork} loadWork={loadWork} />}
-              {!dsh && !idle && liveTurn(turn) ? <TurnRunning turn={turn} /> : null}
+              {!dsh && !idle && liveTurn(turn) ? <TurnRunning turn={turn} refusal={cpaRefusal} /> : null}
               {turn.final && !(dsh && turn.final.working) ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`}>
                 {/* DeepSeek Harness names no agent above its reply; a team's verdict still shows. */}
                 {dsh ? (turn.final.verdict ? <div className="cx-answer-meta"><span className={`cx-verdict is-${turn.final.verdict.toLowerCase()}`}>{turn.final.verdict}</span></div> : null)
@@ -1907,7 +1918,7 @@ export function AgentOrchestratorChat({
           </div>
         </form>
         {selectedTaskId ? <ChatTurnStats model={agentSessions[0]?.model} rounds={turns.filter((turn) => turn.runId).length}
-          from={statsSpan.from} models={statsSpan.models} running={runOpen} /> : null}
+          from={statsSpan.from} models={statsSpan.models} running={runOpen} onRefusal={setCpaRefusal} /> : null}
       </section>
       {showStructure && structure ? <aside className="cx-structure" aria-label="Cards" style={cardsWidth ? { flexBasis: cardsWidth } : undefined}>
         <div className="cx-structure-resize" role="separator" aria-orientation="vertical" aria-label="Resize the cards panel" tabIndex={0}
