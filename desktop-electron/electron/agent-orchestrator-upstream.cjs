@@ -1251,6 +1251,23 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       }));
       return idle.filter(Boolean);
     },
+    /**
+     * Sessions of these workspaces' AO projects that nobody has used for at least `idleMs`: live
+     * (not terminated), not working, not pinned, with no message to them since, or since they were
+     * made. AO's board keeps every exited session, so old workers, subagents and replaced chats
+     * piled up there (35 over a week old on 2026-10-22). The activity time is no measure of use:
+     * it restarts with the daemon.
+     */
+    async staleSessions(workspaceIds, idleMs, now = Date.now()) {
+      const projects = new Set((await Promise.all(workspaceIds.map(id => projectFor(id).catch(() => null)))).filter(Boolean));
+      if (!projects.size) return [];
+      const list = await internalApi("GET", "/api/v1/sessions");
+      const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
+      const lastUse = session => Math.max(...[session.lastUserMessageAt, session.createdAt].map(stamp => Date.parse(stamp ?? "")).filter(Number.isFinite));
+      return sessions.filter(session => session && projects.has(session.projectId) && !session.isTerminated && session.isPinned !== true
+        && !["working", "spawning", "starting"].includes(session.status) && Number.isFinite(lastUse(session)) && now - lastUse(session) >= idleMs)
+        .map(session => String(session.id));
+    },
     /** Sends a follow-up as a new turn of the same session; AO de-duplicates by client message id. */
     async send(id, text, clientMessageId) {
       forgetTail(id);

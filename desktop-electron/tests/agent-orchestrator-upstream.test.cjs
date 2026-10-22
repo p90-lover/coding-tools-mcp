@@ -751,6 +751,40 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
   await assert.rejects(upstream.continuable("old"), error => error.code === "AO_SESSION_RESTORE_UNCONFIRMED", "an uncertain resume cannot replace the retained conversation");
 });
 
+test("stale sessions are this project's live, unpinned, idle ones with no message (or creation) within the limit", async () => {
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("    async continuable(id)");
+  const end = source.indexOf("    /** Sends a follow-up as a new turn", start);
+  const methods = source.slice(start, end).trim().replace(/,$/, "");
+  const helpers = source.slice(source.indexOf("  async function chatHostGone"), source.indexOf("  // Mission-owned AO calls."));
+  const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
+  const states = source.match(/const TERMINAL_TURN_STATES = .*;/)[0];
+  const now = Date.parse("2026-10-22T10:00:00Z");
+  const daysAgo = days => new Date(now - days * 86_400_000).toISOString();
+  const sessions = [
+    { id: "old-worker", projectId: "proj", status: "exited", createdAt: daysAgo(12) },
+    { id: "old-chat-written-to", projectId: "proj", status: "idle", createdAt: daysAgo(20), lastUserMessageAt: daysAgo(2) },
+    { id: "new-worker", projectId: "proj", status: "exited", createdAt: daysAgo(3) },
+    { id: "old-working", projectId: "proj", status: "working", createdAt: daysAgo(12) },
+    { id: "old-pinned", projectId: "proj", status: "exited", createdAt: daysAgo(12), isPinned: true },
+    { id: "old-terminated", projectId: "proj", status: "terminated", createdAt: daysAgo(12), isTerminated: true },
+    { id: "other-project", projectId: "elsewhere", status: "exited", createdAt: daysAgo(12) },
+    { id: "no-times", projectId: "proj", status: "exited" },
+  ];
+  const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
+    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), Date, Math, Number, Promise, Set, agentTools: null,
+    exitedReleased: new Set(),
+    projectFor: async workspaceId => { if (workspaceId === "ws") return "proj"; throw new Error("not a git repository"); },
+    internalApi: async (method, endpoint) => {
+      assert.deepEqual([method, endpoint], ["GET", "/api/v1/sessions"]);
+      return { sessions };
+    },
+  });
+  assert.deepEqual([...await upstream.staleSessions(["ws", "not-bound"], 7 * 86_400_000, now)], ["old-worker"]);
+  assert.deepEqual([...await upstream.staleSessions(["not-bound"], 7 * 86_400_000, now)], [], "no bound project, nothing listed");
+});
+
 test("a resumed chat gets the app's tools again, and an AO that refuses them still resumes it", async () => {
   const vm = require("node:vm");
   const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
