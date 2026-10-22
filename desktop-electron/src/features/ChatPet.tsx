@@ -26,6 +26,21 @@ const POSITION_KEY = "coding-tools:ao:pet-around";
 // falls onto the box's top edge under where it was dropped, faster the shorter the drop.
 const LIFT_KEY = "coding-tools:ao:pet-lift";
 const FALL_MS = 420;
+/** The squash on landing and the dust it kicks up (codex-chat.css cx-pet-land, cx-pet-dust). */
+const LAND_MS = 420;
+/** How a drop lands: how hard it squashes and kicks up dust (0 none, 1 the most), whether it bounces
+ *  back up with a hop once it has squashed, and what it says (null: nothing). */
+type Landing = { impact: number; hop: boolean; line: string | null };
+/** The landing for a drop from `height` px above the box's top edge (0: let go level with it or below). */
+function landingFor(height: number): Landing {
+  // Harder with the drop's square root, as its fall time grows, so small drops still show; even let
+  // go at the edge, a little squash. A middling drop bounces back up with a hop; a big one flattens
+  // it too much to bounce.
+  const impact = Math.min(1, 0.15 + 0.85 * Math.sqrt(height / 400));
+  if (height >= 300) return { impact, hop: false, line: "Oof!" };
+  if (height >= 80) return { impact, hop: true, line: height >= 160 ? "Nailed it" : null };
+  return { impact, hop: false, line: null };
+}
 const NAP_MS = 45_000;
 const CHEER_MS = 6_000;
 // Props and the house use the same pixels as Clawd's quadrants: half a terminal cell, twice as tall
@@ -80,7 +95,9 @@ const P = { frame: "#3d3d3a", screen: "#1f2a33", glow: "#7fd1ff", key: "#b4b2a7"
   page: "#faf9f5", cover: "#6a9bcc", wood: "#8a5a3c", metal: "#5b5a55", lens: "#bfe3f5", box: "#c8a26b", boxDark: "#9b7a48",
   roof: "#b85c3f", roofEdge: "#8f4430", wall: "#e3cfa6", wallEdge: "#b89b6a", door: "#5a3a26", knob: "#f5c451",
   glass: "#3d5a73", lit: "#f5c451", frameLight: "#faf9f5",
-  inside: "#d6bf92", insideEdge: "#bfa576", floor: "#9c6b47", rug: "#7f9db8", shade: "#e8dcb8", leaf: "#7fa36b" };
+  // The room: walls a shade darker than the house's outside, so the furniture stands out against them.
+  inside: "#cfb586", insideEdge: "#a8895a", floor: "#8a5a3c", plank: "#74482e", rug: "#4f7fb3", rugEdge: "#c0563f",
+  shelf: "#5a3a26", sky: "#9fd3f0", leaf: "#5f9a4c", leafDark: "#3f7a34" };
 
 /** What Clawd is busy with: a prop beside it (or on its head) and how its arms move. */
 type Job = "none" | "laptop" | "search" | "build" | "carry" | "coffee" | "read";
@@ -121,24 +138,30 @@ const houseSvg = (parts: ReactElement[]) =>
 /**
  * Clawd's house is a doll's house with its front swung open, so you can see in: its rooms are drawn
  * behind Clawd (HouseInside) and its roof and side walls in front (House). Clawd stands in the
- * middle of the room, on a rug, with a bookshelf and a picture to its left and a window and a lamp
- * to its right; it fills the room's middle (18 of its 28 pixels), and its walls (rows 6-12) are a
- * row taller than Clawd.
+ * middle of the room (columns 8-25 of its 3-30), on a rug, in front of a framed landscape, with a
+ * bookshelf and a plant on it to its left and a window over a cabinet to its right; its walls (rows
+ * 6-12) are a row taller than Clawd. Each piece is a few pixels across, in colours that stand out
+ * from the walls (the user: at a pixel each, the room read as having no furniture).
  */
 function HouseInside({ home, asleep }: { home: boolean; asleep: boolean }) {
   const r = rect;
   const lit = home && !asleep;
   return houseSvg([
-    // Back wall with a darker band at its foot, then the floor and the rug Clawd stands on.
-    r(3, 6, 28, 6, P.inside, "back"), r(3, 10, 28, 1, P.insideEdge, "dado"), r(3, 12, 28, 1, P.floor, "floor"), r(9, 12, 16, 1, P.rug, "rug"),
-    // Left: a framed picture over a bookshelf of three books and a plant.
-    r(4, 7, 3, 2, P.wood, "picture"), r(5, 7, 1, 1, P.lens, "picture-sky"), r(5, 8, 1, 1, P.leaf, "picture-hill"),
-    // Left: a framed landscape over a bookshelf of four books.
-    r(3, 9, 4, 3, P.wood, "shelf"), r(3, 10, 1, 1, P.cover, "book-1"), r(4, 10, 1, 1, P.roof, "book-2"), r(5, 10, 1, 1, P.leaf, "book-3"),
-    r(6, 10, 1, 1, P.page, "book-4"),
-    // Right: a window (lit while Clawd is home awake) and a lamp beside it, lit with it.
-    r(26, 7, 4, 3, P.frameLight, "window-frame"), r(27, 7, 2, 2, lit ? P.lit : P.glass, "window"),
-    r(28, 10, 3, 1, lit ? P.lit : P.shade, "lamp-shade"), r(29, 11, 1, 1, P.metal, "lamp-stand"),
+    // Back wall with a skirting board, a planked floor and the rug Clawd stands on.
+    r(3, 6, 28, 6, P.inside, "back"), r(3, 11, 28, 1, P.insideEdge, "skirting"), r(3, 12, 28, 1, P.floor, "floor"),
+    ...[5, 9, 22, 28].map((x) => r(x, 12, 1, 1, P.plank, `plank${x}`)),
+    r(9, 12, 16, 1, P.rug, "rug"), r(9, 12, 1, 1, P.rugEdge, "rug-l"), r(24, 12, 1, 1, P.rugEdge, "rug-r"),
+    // Middle: a framed landscape over where Clawd stands, so the room is not bare while it is out.
+    r(13, 7, 8, 4, P.wood, "picture"), r(14, 8, 6, 2, P.sky, "picture-sky"), r(14, 9, 6, 1, P.leaf, "picture-hill"),
+    r(17, 8, 2, 1, P.leaf, "picture-hilltop"),
+    // Left: a bookshelf, two shelves of books, a plant on top.
+    r(3, 7, 5, 5, P.shelf, "shelf"),
+    r(4, 8, 1, 1, P.cover, "book-1"), r(5, 8, 1, 1, P.roof, "book-2"), r(6, 8, 1, 1, P.knob, "book-3"),
+    r(4, 10, 1, 1, P.leaf, "book-4"), r(5, 10, 1, 1, P.page, "book-5"), r(6, 10, 1, 1, P.cover, "book-6"),
+    r(4, 6, 3, 1, P.leaf, "plant"), r(5, 6, 1, 1, P.leafDark, "plant-middle"),
+    // Right: a window (lit while Clawd is home awake) on its sill, over a cabinet.
+    r(26, 6, 4, 3, P.frameLight, "window-frame"), r(27, 7, 2, 1, lit ? P.lit : P.sky, "window"), r(26, 9, 4, 1, P.wood, "window-sill"),
+    r(26, 10, 4, 2, P.shelf, "cabinet"), r(28, 10, 1, 1, P.knob, "cabinet-knob"),
   ]);
 }
 
@@ -234,6 +257,27 @@ function spotAt(loop: Loop, at: number): { x: number; y: number; side: 0 | 1 | 2
   if (s < 2 * w + h) return { x: w - (s - w - h), y: h, side: 2 };
   return { x: 0, y: h - (s - 2 * w - h), side: 3 };
 }
+/**
+ * `at` on a box that has just resized: the same spot on the same side and the same lap. The box
+ * grows and shrinks from its top as text is typed or sent, so on the top edge it keeps its distance
+ * from the left corner (riding the edge up and down), and on the sides it keeps its distance from
+ * the bottom, which stays put. (Kept as a bare distance, every line typed slid it to another side
+ * and turned it a quarter: the user saw it go crazy.)
+ */
+export function reanchor(from: Loop, to: Loop, at: number): number {
+  const lap = Math.floor(at / from.length);
+  const { x, y, side } = spotAt(from, at);
+  const { width: w, height: h } = to;
+  const clamp = (value: number, max: number) => Math.max(0, Math.min(max, value));
+  // Its height down the side, from the top, at the same distance from the bottom as before.
+  const down = clamp(h - (from.height - y), h);
+  const along = side === 0 ? clamp(x, w)
+    : side === 1 ? w + down
+    : side === 2 ? w + h + (w - clamp(x, w))
+    : 2 * w + h + (h - down);
+  // A spot at the very end of a side is the next side's start; keep it under one lap.
+  return lap * to.length + Math.min(along, to.length - 0.001);
+}
 /** Where the house stands on the top edge (with no room beside the box): its left side, in from the box's right end. */
 const houseLeft = (loop: Loop) => Math.max(0, loop.width - HOUSE_W - HOUSE_INSET);
 /** The house's top-left corner, from the box's: beside the box on its right, its floor level with
@@ -262,6 +306,10 @@ export function ChatPet({ mood, context, onHide }: {
   const [held, setHeld] = useState<{ x: number; y: number; fall: number } | null>(null);
   const heldNow = useRef(held);
   heldNow.current = held;
+  // Where along the box's top edge a fall lands (px from its left), for the shadow growing there.
+  const [dropX, setDropX] = useState(0);
+  // Just landed: how hard (0–1), squashing it and kicking up dust until the squash ends (null: not).
+  const [landing, setLanding] = useState<number | null>(null);
   const [loop, setLoop] = useState<Loop | null>(null);
   const [pose, setPose] = useState<Pose>(REST);
   const [job, setJob] = useState<Job>("none");
@@ -294,6 +342,8 @@ export function ChatPet({ mood, context, onHide }: {
   const bubbleTimer = useRef<number | undefined>(undefined);
   const napTimer = useRef<number | undefined>(undefined);
   const walkFrame = useRef(0);
+  // Where the walk under way ends (a distance around), moved with the box when it resizes.
+  const walkTarget = useRef(0);
   // Every scheduled behaviour (the next stroll, an arrival, an action's frames), cleared together.
   const plans = useRef<number[]>([]);
   const seq = useRef(0);
@@ -346,8 +396,18 @@ export function ChatPet({ mood, context, onHide }: {
       if (width <= 0 || height <= 0) return;
       const room = (clip ? clip.getBoundingClientRect().right : window.innerWidth) - parent.getBoundingClientRect().right;
       const beside = room >= HOUSE_GAP + HOUSE_W;
-      setLoop((current) => current && current.width === width && current.height === height && current.beside === beside
-        ? current : { width, height, length: 2 * (width + height), beside });
+      const current = loopNow.current;
+      if (current && current.width === width && current.height === height && current.beside === beside) return;
+      const next: Loop = { width, height, length: 2 * (width + height), beside };
+      // Resized (the box grows a line at a time as text is typed): it stays where it stands, and a
+      // walk under way still heads for the same spot.
+      if (current && !Number.isNaN(atNow.current)) {
+        atNow.current = reanchor(current, next, atNow.current);
+        setAt(atNow.current);
+        if (walkFrame.current) walkTarget.current = reanchor(current, next, walkTarget.current);
+      }
+      loopNow.current = next;
+      setLoop(next);
     };
     measure();
     const observer = new ResizeObserver(measure);
@@ -431,14 +491,16 @@ export function ChatPet({ mood, context, onHide }: {
     stopWalking();
     const rects = obstacles();
     const direction = target >= atNow.current ? 1 : -1;
+    walkTarget.current = target;
     setPose({ ...REST, walking: true, look: direction > 0 ? 1 : -1 });
     let last = performance.now();
     const frame = (now: number) => {
       const elapsed = Math.min(0.05, (now - last) / 1000);
       last = now;
+      const end = walkTarget.current;
       const next = atNow.current + direction * speed * (blocked(atNow.current, rects) ? DASH : 1) * elapsed;
-      const arrived = direction > 0 ? next >= target : next <= target;
-      atNow.current = arrived ? target : next;
+      const arrived = direction > 0 ? next >= end : next <= end;
+      atNow.current = arrived ? end : next;
       setAt(atNow.current);
       if (!arrived) { walkFrame.current = window.requestAnimationFrame(frame); return; }
       walkFrame.current = 0;
@@ -781,7 +843,9 @@ export function ChatPet({ mood, context, onHide }: {
   };
   /**
    * Let go, it falls onto the box's top edge under where it was dropped (as far as the box reaches),
-   * from wherever on the screen it was let go, then hops off any button it landed on.
+   * from wherever on the screen it was let go: arms up and feet kicking, its shadow growing where it
+   * will land. It lands with a squash and a puff of dust (landingFor: harder the higher), a hop after
+   * a middling drop, then hops off any button it landed on.
    */
   const dragDrop = () => {
     const state = drag.current;
@@ -789,28 +853,39 @@ export function ChatPet({ mood, context, onHide }: {
     if (!state?.moved) { if (!asleepNow.current) wander(); return; }
     const current = loopNow.current;
     const frame = composer.current?.getBoundingClientRect();
-    setPose(REST);
-    if (!current || !frame) { setHeld(null); wander(); return; }
+    if (!current || !frame) { setPose(REST); setHeld(null); wander(); return; }
+    setPose({ ...REST, arms: "both", walking: true });
     const x = Math.max(WIDTH / 2, Math.min(current.width - WIDTH / 2, state.lastX - frame.left));
-    const landing = nearLap(current, x, atNow.current);
+    const spot = nearLap(current, x, atNow.current);
     const to = { x: frame.left + x, y: frame.top - HEIGHT / 2 };
+    // How far above the box's top edge it was let go (0 level with it or below).
+    const height = Math.max(0, Math.round(to.y - state.lastY));
     // A longer drop takes longer, as a fall does: 420 ms from 400 px.
     const distance = Math.hypot(to.x - state.lastX, to.y - state.lastY);
     const fallMs = still ? 0 : Math.round(Math.min(1100, Math.max(260, FALL_MS * Math.sqrt(Math.max(distance, 1) / 400))));
-    say("Wheee", 900);
+    if (height > 40) say("Wheee", 900);
+    setDropX(x);
     // Two frames later, so the fall starts from where it was let go.
     window.requestAnimationFrame(() => window.requestAnimationFrame(() => setHeld({ ...to, fall: fallMs })));
     // Its own timer: a mood change clears the wander plans, and must not leave it in the air.
     window.clearTimeout(fallTimer.current);
     fallTimer.current = window.setTimeout(() => {
-      atNow.current = landing;
-      setAt(landing);
+      atNow.current = spot;
+      setAt(spot);
       setHeld(null);
-      play("jump");
+      setPose(REST);
+      const { impact, hop, line } = landingFor(height);
+      const squashed = !still && impact > 0;
+      if (squashed) setLanding(Math.min(1, impact));
+      if (line) say(line, 1100);
       poke();
-      const free = freeNear(atNow.current);
-      if (free !== atNow.current) walkTo(free, SCURRY * DASH, () => { remember(); wander(); });
-      else { remember(); wander(); }
+      // Once the squash is over, a hop if it bounces, then off any button and on with its day.
+      later(squashed ? LAND_MS : 0, () => {
+        if (hop) play("jump");
+        const free = freeNear(atNow.current);
+        if (free !== atNow.current) walkTo(free, SCURRY * DASH, () => { remember(); wander(); });
+        else { remember(); wander(); }
+      });
     }, fallMs + 34);
   };
 
@@ -871,11 +946,14 @@ export function ChatPet({ mood, context, onHide }: {
         transformOrigin: `${WIDTH / 2}px ${HEIGHT}px` };
     })() : { visibility: "hidden" };
   const pet = <div ref={box} className={`cx-pet side-${side}${held ? " is-held" : ""}${ride ? ` is-riding ride-${ride.mode}` : ""}${home ? " is-home" : ""}`}
-    style={placement}>
+    style={{ ...placement, ...(landing !== null ? { "--cx-pet-impact": landing } as CSSProperties : {}) }}>
     {bubble ? <span className="cx-pet-bubble" role="status">{bubble}</span> : null}
+    {landing !== null ? <><span className="cx-pet-dust is-left" aria-hidden="true" /><span className="cx-pet-dust is-right" aria-hidden="true" /></> : null}
     {busy ? <span className="cx-pet-spinner" aria-hidden="true">{SPINNER[spin]}</span> : null}
     {floaters.map((item) => <span key={item.id} className="cx-pet-float" style={{ left: item.offset }} aria-hidden="true">{item.text}</span>)}
-    <button type="button" className={`cx-pet-body is-${shown}${asleep ? " is-asleep" : ""}${pose.walking ? " is-walking" : ""}${job !== "none" ? ` is-${job}` : ""}`}
+    <button type="button" className={`cx-pet-body is-${shown}${asleep ? " is-asleep" : ""}${pose.walking ? " is-walking" : ""}${job !== "none" ? ` is-${job}` : ""}${landing !== null ? " is-landing" : ""}`}
+      // The squash ends itself, so no cancelled plan can leave it squashed.
+      onAnimationEnd={(event) => { if (event.animationName === "cx-pet-land") setLanding(null); }}
       aria-label={`Bit the pet: ${asleep ? "napping" : LINES[shown]}${percent !== null ? ` Context ${percent}%.` : ""}`}
       title={asleep ? "Napping. Click to wake" : `${LINES[shown]}${percent !== null ? ` · ${percent}% context` : ""}\nClick to pet · double-click to feed · drag it anywhere on the screen`}
       onPointerDown={onPointerDown}
@@ -914,5 +992,8 @@ export function ChatPet({ mood, context, onHide }: {
     </div>
   </> : null;
   // Aboard the pointer or carried, it lives on the page itself, so no panel's edge clips it.
-  return <>{house}{(ride || held) && typeof document !== "undefined" ? createPortal(pet, document.body) : pet}</>;
+  // Falling, its shadow grows on the box's top edge where it will land.
+  const shadow = held?.fall ? <span className="cx-pet-drop-shadow" aria-hidden="true"
+    style={{ left: dropX, animationDuration: `${held.fall}ms` }} /> : null;
+  return <>{house}{shadow}{(ride || held) && typeof document !== "undefined" ? createPortal(pet, document.body) : pet}</>;
 }
