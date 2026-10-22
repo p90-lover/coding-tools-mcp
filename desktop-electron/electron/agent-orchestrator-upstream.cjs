@@ -1532,6 +1532,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // space back (ao-db-maintenance.cjs). It runs in a worker, and anything it cannot do is skipped.
         if (!databaseCompacted) {
           databaseCompacted = true;
+          // Logged before it runs: a run that hung once left no trace while AO waited on it.
+          logger.info?.("ao.database_compaction_started", {});
           const compacted = await compactAoDatabase(dataRoot);
           if (compacted.action !== "none") logger.info?.("ao.database_compacted", compacted);
           checkStartup();

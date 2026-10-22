@@ -51,6 +51,23 @@ test("a mostly empty database is rewritten once, keeps its rows and their order,
   } finally { fixture.cleanup(); }
 });
 
+test("a compaction that never finishes is stopped at its limit, so AO still starts", async () => {
+  // Seen 2026-10-22: after an update AO stayed "starting" for over 10 minutes, waiting on this.
+  const fixture = mostlyEmpty();
+  try {
+    const started = Date.now();
+    const result = await compactAoDatabase(fixture.dir, { ...small, timeoutMs: 300,
+      workerSource: "setInterval(() => {}, 1000);" });
+    assert.equal(result.action, "failed");
+    assert.match(result.error, /timed out after 0 s; AO starts without it/);
+    assert.ok(Date.now() - started < 5_000, "it does not wait past the limit");
+    // The database is untouched and usable.
+    const db = new DatabaseSync(fixture.file);
+    assert.equal(db.prepare("SELECT count(*) AS n FROM turns").get().n, 2);
+    db.close();
+  } finally { fixture.cleanup(); }
+});
+
 test("a database with little free space, none at all, or held by another connection is left alone", async () => {
   const fixture = mostlyEmpty();
   try {

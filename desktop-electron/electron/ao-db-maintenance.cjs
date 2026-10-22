@@ -23,6 +23,8 @@ const DEFAULTS = Object.freeze({
   maxUsedBytes: 1024 * 1024 * 1024,
   // Once incremental, free pages are given back when at least this much has accumulated.
   incrementalMinBytes: 64 * 1024 * 1024,
+  // AO starts only after this; past the limit the worker is stopped and AO starts without it.
+  timeoutMs: 90_000,
 });
 
 const WORKER = `
@@ -72,16 +74,26 @@ function compactAoDatabase(dataRoot, options = {}) {
   let diskFreeBytes = null;
   try { const stats = fs.statfsSync(dataRoot); diskFreeBytes = Number(stats.bavail) * Number(stats.bsize); } catch { /* unknown */ }
   return new Promise((resolve) => {
-    let settled = false;
-    const done = (result) => { if (!settled) { settled = true; resolve(result); } };
+    let settled = false, timer = null;
+    const done = (result) => { if (!settled) { settled = true; clearTimeout(timer); resolve(result); } };
     let worker;
     try {
-      worker = new Worker(WORKER, { eval: true, workerData: { file, diskFreeBytes, minFreeBytes: settings.minFreeBytes, minFreeRatio: settings.minFreeRatio,
+      // workerSource: tests only.
+      worker = new Worker(settings.workerSource ?? WORKER, { eval: true, workerData: { file, diskFreeBytes, minFreeBytes: settings.minFreeBytes, minFreeRatio: settings.minFreeRatio,
         maxUsedBytes: settings.maxUsedBytes, incrementalMinBytes: settings.incrementalMinBytes } });
     } catch (error) {
       done({ action: "failed", error: String(error?.message || error).slice(0, 300) });
       return;
     }
+    // AO starts only once this is done. A run that never finished kept AO from starting at all
+    // (seen 2026-10-22: "starting" for over 10 minutes after an update, the app idle, every chat
+    // stuck in "checking" and no steer reaching its agent). Past the limit the worker is stopped,
+    // which leaves an unfinished rewrite uncommitted, and AO starts without it.
+    timer = setTimeout(() => {
+      done({ action: "failed", error: `timed out after ${Math.round(settings.timeoutMs / 1000)} s; AO starts without it` });
+      void worker.terminate().catch(() => {});
+    }, settings.timeoutMs);
+    timer.unref?.();
     worker.once("message", done);
     worker.once("error", (error) => done({ action: "failed", error: String(error?.message || error).slice(0, 300) }));
     worker.once("exit", () => done({ action: "failed", error: "the maintenance worker stopped" }));
