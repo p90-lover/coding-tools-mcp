@@ -63,7 +63,7 @@ const SPECS = Object.freeze({
   chat_prewarm: { readOnly: false, description: "Start an AO agent for the new chat's selected model (or its team's orchestrator) ahead of the first message, so it does not launch on send." },
   chat_steer: { readOnly: false, description: "Hand a message to the chat's running AO agent at once (steer), without waiting for its turn to end." },
   chat_goal: { readOnly: false, description: "Pause, resume, edit or clear a chat's goal (/goal); a resumed goal starts its next round." },
-  chat_wakeup: { readOnly: false, description: "Cancel the wake-up a chat's agent scheduled to resume itself later." },
+  chat_wakeup: { readOnly: false, description: "Edit (its note, the minutes from now) or cancel the wake-up a chat's agent scheduled to resume itself later." },
   chat_auto_retry: { readOnly: false, description: "Read or set \"Retry automatically\": a failed single-model step runs again by itself, up to three times." },
   compact_chat: { readOnly: false, description: "Replace a settled chat's context with a handoff summary (/compact)." },
   chat_delete_message: { readOnly: false, description: "Delete one message of a settled chat with its reply: the message leaves the task, its run is hidden from the chat, and the next turn starts a fresh agent session." },

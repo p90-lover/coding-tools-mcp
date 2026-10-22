@@ -1605,3 +1605,27 @@ test("an exited chat whose agent may live on is exited again once, so AO stops i
   assert.deepEqual(exits, ["leftover"]);
   assert.deepEqual([...await upstream.idleChatSessions(30 * 60_000, now)], [], "and it is not asked again this run");
 });
+
+test("chats AO still calls working with no agent activity for long are listed, so their stranded hosts can be stopped", async () => {
+  // Seen 2026-10-22: two chat hosts and their agents ran on, quiet 8 hours and a day, their sessions
+  // "working" for good after their turns died with a restart; nothing looked at working sessions.
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("    async quietWorkingChatSessions(");
+  const end = source.indexOf("    /**", start);
+  const method = source.slice(start, end).trim().replace(/,$/, "");
+  const now = Date.parse("2026-10-22T10:30:00Z");
+  const ago = minutes => new Date(now - minutes * 60_000).toISOString();
+  const sessions = [
+    { id: "stranded", mode: "chat", status: "working", activity: { state: "active", lastActivityAt: ago(24 * 60) } },
+    { id: "busy", mode: "chat", status: "working", activity: { state: "active", lastActivityAt: ago(5) } },
+    { id: "idle", mode: "chat", status: "idle", activity: { state: "idle", lastActivityAt: ago(24 * 60) } },
+    { id: "ended", mode: "chat", status: "working", isTerminated: true, activity: { lastActivityAt: ago(24 * 60) } },
+    { id: "worker", mode: "worker", status: "working", activity: { lastActivityAt: ago(24 * 60) } },
+    { id: "unknown", mode: "chat", status: "working", activity: {} },
+  ];
+  const upstream = vm.runInNewContext("({" + method + "})", { Date, Number, Array, String,
+    internalApi: async (method, endpoint) => { assert.equal(endpoint, "/api/v1/sessions"); return { sessions }; } });
+  assert.deepEqual([...await upstream.quietWorkingChatSessions(2 * 60 * 60_000, now)], ["stranded"],
+    "only a live chat quiet past the limit: not a busy one, an idle or ended one, a non-chat, or one with no activity time");
+});

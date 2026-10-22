@@ -2211,6 +2211,12 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
       await moduleCall("chat_wakeup", { workspaceId, taskId: chatTaskId, action: "cancel", id: wakeup.id });
       await loadMissions(workspaceId);
     },
+    editWakeup: async ({ reason, minutes }) => {
+      const wakeup = chatTaskId ? wakeups[chatTaskId] : undefined;
+      if (!chatTaskId || !wakeup) throw new Error("This wake-up already fired");
+      await moduleCall("chat_wakeup", { workspaceId, taskId: chatTaskId, action: "edit", id: wakeup.id, reason, minutes });
+      await loadMissions(workspaceId);
+    },
     goalEdit: async (objective) => {
       if (!chatTaskId) throw new Error("Open a chat first");
       await moduleCall("chat_goal", { workspaceId, taskId: chatTaskId, action: "edit", objective });

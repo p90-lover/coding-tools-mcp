@@ -1293,6 +1293,24 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return idle.filter(Boolean);
     },
     /**
+     * Chat sessions AO still calls "working" whose agent has done nothing for `quietMs`. A turn that
+     * dies with an app or daemon restart leaves its session "working" for good, and its chat host
+     * waits for a controller that never comes: neither the idle sweep (idle and exited only) nor AO's
+     * reaper (exited only) stopped it. Seen 2026-10-22: two hosts and their agents, quiet 8 hours and
+     * a day, while their chats had moved on to new sessions. A working agent reports activity with
+     * every tool call; AO's activity time restarts with the host, which only makes it look newer.
+     */
+    async quietWorkingChatSessions(quietMs, now = Date.now()) {
+      const list = await internalApi("GET", "/api/v1/sessions");
+      const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
+      return sessions.filter(session => session?.mode === "chat" && !session.isTerminated && session.status === "working")
+        .filter(session => {
+          const at = Date.parse(session.activity?.lastActivityAt ?? "");
+          return Number.isFinite(at) && now - at >= quietMs;
+        })
+        .map(session => String(session.id));
+    },
+    /**
      * Sessions of these workspaces' AO projects that nobody has used for at least `idleMs`: live
      * (not terminated), not working, not pinned, with no message to them since, or since they were
      * made. AO's board keeps every exited session, so old workers, subagents and replaced chats
