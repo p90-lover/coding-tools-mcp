@@ -3120,6 +3120,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
 
   const POOL_EXHAUSTED = /auth_unavailable|invalid[_ -]?auth|account[^\n]*(?:exhaust|unavail)|pool[^\n]*exhaust|sign[- ]?in|reauth|HTTP (?:401|403)/i;
+  // CPA answers "unknown provider for model X" when nothing serves X at all: a model it retired
+  // (gpt-5.5, 2026-10-22), not one cooling down (that one is still routed, and gets a 429). Kept from
+  // memory for 30 days, it stayed in the menu and each try spent a full launch (65 s) to fail again;
+  // a retry cannot fix it. The model is forgotten, so the menu drops it until CPA lists it again.
+  const MODEL_RETIRED = /unknown provider for model ([^\s"'\\,;]+)/i;
+  function forgetRetiredModel(error) {
+    const id = MODEL_RETIRED.exec(error)?.[1]?.replace(/\([^()]*\)$/, "");
+    if (!id || !knownModels[id]) return null;
+    delete knownModels[id];
+    saveKnownModels();
+    cpaCatalogCache = null;
+    return id;
+  }
   function blockedByFailure(mission, node, depth = 0) {
     return depth < mission.nodes.length && (node.parents || []).some(id => {
       const parent = mission.nodes.find(entry => entry.id === id);
@@ -3143,6 +3156,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!node) return null;
     const error = String(node.receipt?.error || "");
     if (POOL_EXHAUSTED.test(error)) return { detail: "This failure needs you (the account pool or a sign-in); automatic retry does not help it" };
+    if (MODEL_RETIRED.test(error)) return { detail: "CPA no longer serves this model; choose another model and send again" };
     const attempt = (node.history?.length ?? 0) + 1;
     if (attempt > AUTO_RETRY_LIMIT) return { detail: `Retried automatically ${AUTO_RETRY_LIMIT} times; inspect the saved answer and retry explicitly` };
     const key = `${mission.id}:${node.id}:${attempt}`;
@@ -3165,7 +3179,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!chatPreferences.get().autoRetry || !mission || mission.cancelled || mission.paused || mission.execution_mode !== "single") return false;
     if (mission.nodes.some(node => ["running", "reserved"].includes(node.state))) return false;
     const node = mission.nodes.find(entry => entry.state === "held" && entry.role !== "retry") ?? mission.nodes.find(entry => entry.state === "held");
-    return Boolean(node) && !POOL_EXHAUSTED.test(String(node.receipt?.error || "")) && (node.history?.length ?? 0) + 1 <= AUTO_RETRY_LIMIT;
+    const error = String(node?.receipt?.error || "");
+    return Boolean(node) && !POOL_EXHAUSTED.test(error) && !MODEL_RETIRED.test(error) && (node.history?.length ?? 0) + 1 <= AUTO_RETRY_LIMIT;
   }
   // A step that failed because the way out was down for a moment: the local proxy every CPA model
   // and the ChatGPT browser go through (seen live: ProxyBridge restarted, and for three minutes CPA
@@ -3205,6 +3220,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function recoverHeld(workspaceId, mission, state = {}) {
     const held = mission.nodes.filter(node => node.state === "held");
     if (!held.length || mission.cancelled) return null;
+    for (const node of held) {
+      const retired = forgetRetiredModel(String(node.receipt?.error || ""));
+      if (retired) logger?.info?.("cpa.model_retired", { model: retired });
+    }
     // A sign-in or account-pool failure (some arrive as a 5xx) is the person's, never a lost connection.
     const outage = chatPreferences.get().autoRetry
       ? held.find(node => node.role !== "retry" && NETWORK_OUTAGE.test(String(node.receipt?.error || ""))
