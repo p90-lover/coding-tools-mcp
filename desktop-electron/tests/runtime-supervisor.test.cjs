@@ -226,6 +226,31 @@ test("DEV runtime supervision ignores launcher version mismatch and starts only 
   }
 });
 
+test("a process is inspected without blocking the main thread", { skip: process.platform !== "win32" }, async () => {
+  // PowerShell through spawnSync (10 s timeout) froze the app while the bridge started or recovered.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-process-info-"));
+  try {
+    const supervisor = new RuntimeSupervisor({
+      app: { getVersion: () => "0.2.0", isPackaged: false },
+      logger: { info() {}, warn() {}, error() {} },
+      sourceRoot: root,
+      coreHome: root,
+      browserDescriptorPath: path.join(root, "runtime", "launcher-browser.json"),
+    });
+    let ticks = 0;
+    const ticker = setInterval(() => { ticks += 1; }, 5);
+    const pending = supervisor.processInfo(process.pid);
+    assert.ok(pending instanceof Promise);
+    const info = await pending;
+    clearInterval(ticker);
+    assert.ok(ticks > 0, "timers kept running while PowerShell ran");
+    assert.ok(info === null || path.basename(info.executablePath).toLowerCase() === path.basename(process.execPath).toLowerCase(), JSON.stringify(info));
+    assert.equal(await supervisor.processInfo(-1), null);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("the runtime config is parsed once per change, not on every monitor read", () => {
   // The monitors read config.json every 2-60 s; on a busy hard disk each synchronous read stalled the app.
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-config-cache-"));
