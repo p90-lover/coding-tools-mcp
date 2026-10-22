@@ -68,12 +68,13 @@ function FailedStepCard({ step, notice, busy, onRetry }: {
   step?: { name?: string; error?: string }; notice?: string; busy: boolean; onRetry: () => void;
 }) {
   const reason = notice || step?.error || "The step stopped before it finished.";
-  return <section className="cx-card tone-error cx-fail-card" aria-labelledby="cx-fail-title">
+  // Named by its own words, not an id: two split view panes can each show a failed step.
+  return <section className="cx-card tone-error cx-fail-card" aria-label={`Step failed${step?.name ? `: ${step.name}` : ""}`}>
     <svg className="cx-fail-icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
       <circle cx="12" cy="12" r="9" /><path d="M12 7.5v5.5M12 16.4v.1" />
     </svg>
     <div className="cx-fail-body">
-      <p className="cx-fail-title" id="cx-fail-title">Step failed{step?.name ? <span className="cx-fail-step">{step.name}</span> : null}</p>
+      <p className="cx-fail-title">Step failed{step?.name ? <span className="cx-fail-step">{step.name}</span> : null}</p>
       <p className="cx-fail-reason">{reason}</p>
       <div className="cx-card-actions">
         <button className="button-primary" type="button" disabled={busy} onClick={onRetry}>
@@ -697,8 +698,10 @@ export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
   projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, onPickProject, onAddProject, projectBranch: branch, steer,
-  pendingMessage, pendingTitle, pendingCreation = false, deciding = false, onComposing, commands, loadWork,
+  pendingMessage, pendingTitle, pendingCreation = false, deciding = false, onComposing, commands, loadWork, onClosePane,
 }: {
+  /** Close split view: set on every pane while the window is split (ChatSplit). */
+  onClosePane?: () => void;
   /** A finished card's thinking and tool calls, read back from its AO session (turn_timeline). */
   loadWork?: LoadWork;
   /** Codex slash commands that need the page: goal, compact, diff, MCP, status, recent chats, plan mode. */
@@ -1499,8 +1502,9 @@ export function AgentOrchestratorChat({
         case "stop": if (latest && runOpen) stop?.(latest.id); break;
         case "retry": if (latest) restart?.(latest.id); break;
         case "model":
-          (document.querySelector<HTMLButtonElement>('.cx-composer [aria-label="Choose model"]')
-            ?? document.querySelector<HTMLButtonElement>('.cx-composer [aria-label="Choose saved team"]'))?.click();
+          // This chat's own picker: in split view every pane has one.
+          ((chatRoot.current ?? document).querySelector<HTMLButtonElement>('.cx-composer [aria-label="Choose model"]')
+            ?? (chatRoot.current ?? document).querySelector<HTMLButtonElement>('.cx-composer [aria-label="Choose saved team"]'))?.click();
           break;
         case "structure": setShowStructure((value) => !value); break;
         case "board": onOpenMissionBoard?.(); break;
@@ -1556,6 +1560,7 @@ export function AgentOrchestratorChat({
     shownPreviews.current = now;
   }, [attachments]);
 
+  const chatRoot = useRef<HTMLDivElement>(null);
   const headerMenu = (): ChatMenuItem[] => [
     ...(thread && chat ? [
       { label: "Rename", shortcut: "Alt+Ctrl+R", run: () => setRenaming(chat.title) },
@@ -1578,6 +1583,7 @@ export function AgentOrchestratorChat({
     ...(thread && chat ? [{ kind: "separator" }, chat.status === "running"
       ? { label: "Archive", reason: "Stop the running mission before archiving this chat" }
       : { label: "Archive", shortcut: "Ctrl+Shift+A", run: thread.archive }] as ChatMenuItem[] : []),
+    ...(onClosePane ? [{ kind: "separator" }, { label: "Close split view", shortcut: "Ctrl+Alt+W", run: onClosePane }] as ChatMenuItem[] : []),
   ];
 
   const commitRename = async () => {
@@ -1656,7 +1662,7 @@ export function AgentOrchestratorChat({
 
   return (<Attachments.Provider value={attachmentAccess}><SentMessageView.Provider value={sentMessageView}><CompactActivity.Provider value={compactActivity}>
     <TurnRestart.Provider value={{ onRestart: restartTurn, restarting }}>
-    <div className={`cx-chat${showStructure && structure ? " has-structure" : ""}`}>
+    <div ref={chatRoot} className={`cx-chat${showStructure && structure ? " has-structure" : ""}`}>
       <section className="cx-thread" aria-label={chat?.title || CHAT_DEFAULT_TITLE}>
         <header className="cx-thread-head">
           <span className="cx-head-folder" title={projectName}><ChatGlyph name="folder" size={15} /></span>
@@ -1699,6 +1705,9 @@ export function AgentOrchestratorChat({
             }}><ChatGlyph name="section" size={16} /></button> : null}
           <button type="button" className="cx-icon-button" title="More" aria-label="More chat actions" aria-haspopup="menu"
             onClick={(event) => toggleMenu(event.currentTarget, (box) => ({ x: box.right - 240, y: box.bottom + 4, items: headerMenu(), label: "Chat actions" }))}>⋯</button>
+          {/* Claude Code's pane close: on every split view pane, the window's own chat included. */}
+          {onClosePane ? <button type="button" className="cx-icon-button cx-pane-close" aria-label="Close split view" title="Close split view (Ctrl+Alt+W)"
+            onMouseDown={(event) => event.preventDefault()} onClick={onClosePane}><Icon name="close" width="14" height="14" /></button> : null}
         </header>
         {details ? (() => {
           const nodes = latest?.nodes ?? [];
