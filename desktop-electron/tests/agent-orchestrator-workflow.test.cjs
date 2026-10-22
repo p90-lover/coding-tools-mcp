@@ -5700,24 +5700,30 @@ test("a dated DeepSeek V4.1 Flash build from Cline Pass takes the same effort le
   assert.deepEqual(capabilities["claude-sonnet-4-6"].efforts, ["low", "medium", "high", "max"]);
 });
 
-test("a Cline Pass or Command Code model's picked effort reaches CPA as its suffix", async () => {
-  // Plugin 0.1.0-codingtools.4 turns the suffix into the request's reasoning_effort for every Cline
-  // model. Before, only DeepSeek V4.1 Flash took one, and the app sent GLM 5.3 Flash none.
+test("a CPA model's picked effort goes in the request body, never as a model suffix, and Auto sends none", async () => {
+  // A/B against CPA (2026-10-22): a suffix 400ed whenever the plugin lacked the level ("(auto)" on
+  // Cline, "(none)" on MiMo and GLM, "(medium)" on DeepSeek) and Claude Code's retries looked like a
+  // launch stuck for good; the body's output_config.effort was a 200 everywhere and honoured.
   const spawned = [];
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: chatWorld({ tasks: [], runs: [] }).requestHeadless,
-    aoHarness: { spawn: async input => { spawned.push(input.model); return `warm-${spawned.length}`; }, warmSessions: async () => [] } });
-  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local" };
-  const warm = async (model, effort) => {
+    aoHarness: { spawn: async input => { spawned.push({ model: input.model, effort: input.effort }); return `warm-${spawned.length}`; }, warmSessions: async () => [] } });
+  const warm = async (model, effort, harness = "ao:claude-code") => {
     const before = spawned.length;
-    await workflow.call("chat_prewarm", { workspaceId: `ws-${model}`, executionMode: "single", singleRoute: { ...route, model, effort } });
+    await workflow.call("chat_prewarm", { workspaceId: `ws-${harness}-${model}-${effort}`, executionMode: "single",
+      singleRoute: { harness_id: harness, provider_id: "agent-orchestrator", account_id: "ao-local", model, effort } });
     for (let tries = 0; tries < 50 && spawned.length === before; tries++) await new Promise(resolve => setTimeout(resolve, 10));
     return spawned.at(-1);
   };
-  assert.equal(await warm("cpa/cline-pass/glm-5.3-flash", "medium"), "cline-pass/glm-5.3-flash(medium)");
-  assert.equal(await warm("cpa/cline-pass/deepseek-v4.1-flash", "max"), "cline-pass/deepseek-v4.1-flash(max)");
-  assert.equal(await warm("cpa/commandcode-go/glm-5.3-flash", "high"), "commandcode-go/glm-5.3-flash(high)");
-  // Another plugin's model with no known level still goes by its bare name.
-  assert.equal(await warm("cpa/grok/grok-5", "high"), "grok/grok-5");
+  assert.deepEqual(await warm("cpa/cline-pass/glm-5.3-flash", "medium"), { model: "cline-pass/glm-5.3-flash", effort: "medium" });
+  assert.deepEqual(await warm("cpa/cline-pass/deepseek-v4.1-flash", "max"), { model: "cline-pass/deepseek-v4.1-flash", effort: "max" });
+  assert.deepEqual(await warm("cpa/commandcode-go/glm-5.3-flash", "high"), { model: "commandcode-go/glm-5.3-flash", effort: "high" });
+  // A level the model lacks runs at its nearest one (a tie goes up) instead of a 400.
+  assert.deepEqual(await warm("cpa/cline-pass/deepseek-v4.1-flash", "medium"), { model: "cline-pass/deepseek-v4.1-flash", effort: "high" });
+  // Auto: the model's own effort; nothing is sent, and no level saved in the model's name comes back.
+  assert.deepEqual(await warm("cpa/cline-pass/glm-5.3-flash", "auto"), { model: "cline-pass/glm-5.3-flash", effort: undefined });
+  assert.deepEqual(await warm("cpa/cline-pass/glm-5.3-flash(high)", "auto"), { model: "cline-pass/glm-5.3-flash", effort: undefined });
+  // Codex carries it in the body too (reasoning.effort, through AO's model_reasoning_effort).
+  assert.deepEqual(await warm("cpa/cline-pass/glm-5.3-flash", "low", "ao:codex"), { model: "cline-pass/glm-5.3-flash", effort: "low" });
   workflow.dispose();
 });
 

@@ -40,6 +40,7 @@ func TestDeepSeekEffortCatalogAndTransport(t *testing.T) {
 			return
 		}
 		calls++
+		sent = nil // Decode merges into a live map, so an earlier request's effort would linger.
 		if err := json.NewDecoder(r.Body).Decode(&sent); err != nil {
 			t.Error(err)
 		}
@@ -84,16 +85,36 @@ func TestDeepSeekEffortCatalogAndTransport(t *testing.T) {
 			t.Fatalf("%s sent wrong model/effort: %v", effort, sent)
 		}
 	}
-	before := calls
+	// A level the model lacks runs at its nearest one instead of failing the request (it was a 400,
+	// and the chat's launch looked stuck): xhigh is as near high as max, and a tie goes up.
 	req, _ := json.Marshal(map[string]any{"Model": "cline-pass/deepseek-v4.1-flash(xhigh)", "Payload": []byte(`{}`)})
 	reply, err := execute(req, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var rejected envelope
-	_ = json.Unmarshal(reply, &rejected)
-	if rejected.OK || rejected.Error == nil || rejected.Error.HTTPStatus != 400 || calls != before {
-		t.Fatal("unsupported effort was sent upstream")
+	result(t, reply)
+	if sent["model"] != "cline-pass/deepseek-v4.1-flash" || sent["reasoning_effort"] != "max" {
+		t.Fatalf("xhigh sent wrong model/effort: %v", sent)
+	}
+	// CPA's own conversion (a Claude Code thinking budget became "medium") is fitted the same way.
+	req, _ = json.Marshal(map[string]any{"Model": "cline-pass/deepseek-v4.1-flash", "Payload": []byte(`{"reasoning_effort":"medium"}`)})
+	if reply, err = execute(req, false); err != nil {
+		t.Fatal(err)
+	}
+	result(t, reply)
+	if sent["reasoning_effort"] != "high" {
+		t.Fatalf("medium was not fitted to DeepSeek's levels: %v", sent)
+	}
+	// "(auto)" and no level at all leave the model's own: nothing goes upstream.
+	for _, model := range []string{"cline-pass/deepseek-v4.1-flash(auto)", "cline-pass/deepseek-v4.1-flash"} {
+		req, _ = json.Marshal(map[string]any{"Model": model, "Payload": []byte(`{}`)})
+		if reply, err = execute(req, false); err != nil {
+			t.Fatal(err)
+		}
+		result(t, reply)
+		if _, has := sent["reasoning_effort"]; has || sent["model"] != "cline-pass/deepseek-v4.1-flash" {
+			t.Fatalf("%s sent %v", model, sent)
+		}
 	}
 	// Any other Cline model: the suffix becomes the body's effort (refused before, so none could be set).
 	req, _ = json.Marshal(map[string]any{"Model": "cline-pass/unknown(medium)", "Payload": []byte(`{"messages":[{"role":"user","content":"OK"}]}`)})
@@ -104,16 +125,36 @@ func TestDeepSeekEffortCatalogAndTransport(t *testing.T) {
 	if sent["model"] != "cline-pass/unknown" || sent["reasoning_effort"] != "medium" {
 		t.Fatalf("medium sent wrong model/effort: %v", sent)
 	}
-	// "none" is DeepSeek V4.1 Flash's alone: GLM refused it upstream ("Reasoning is mandatory").
-	before = calls
+	// "none" is DeepSeek V4.1 Flash's alone: GLM refused it upstream ("Reasoning is mandatory"), so
+	// another model runs at its lowest level instead.
 	req, _ = json.Marshal(map[string]any{"Model": "cline-pass/unknown(none)", "Payload": []byte(`{}`)})
 	if reply, err = execute(req, false); err != nil {
 		t.Fatal(err)
 	}
-	rejected = envelope{}
-	_ = json.Unmarshal(reply, &rejected)
-	if rejected.OK || rejected.Error == nil || rejected.Error.HTTPStatus != 400 || calls != before {
-		t.Fatal("none was sent upstream for a model that may not take it")
+	result(t, reply)
+	if sent["reasoning_effort"] != "minimal" {
+		t.Fatalf("none was not fitted to the model's levels: %v", sent)
+	}
+}
+
+func TestTakenEffortFitsEveryLevelToTheModel(t *testing.T) {
+	deepseek := []string{"none", "low", "high", "max"}
+	for _, c := range []struct{ in, want string }{
+		{"", ""}, {"auto", ""}, {"AUTO", ""}, {"bogus", ""},
+		{"none", "none"}, {"low", "low"}, {"medium", "high"}, {"high", "high"}, {"xhigh", "max"}, {"ultra", "max"},
+		{"minimal", "low"},
+	} {
+		if got := takenEffort(c.in, deepseek); got != c.want {
+			t.Errorf("deepseek %q -> %q, want %q", c.in, got, c.want)
+		}
+	}
+	for _, c := range []struct{ in, want string }{{"none", "minimal"}, {"ultra", "max"}, {"medium", "medium"}} {
+		if got := takenEffort(c.in, openRouterEfforts); got != c.want {
+			t.Errorf("openrouter %q -> %q, want %q", c.in, got, c.want)
+		}
+	}
+	if got := takenEffort("high", nil); got != "" {
+		t.Errorf("a model with no levels must take none, got %q", got)
 	}
 }
 

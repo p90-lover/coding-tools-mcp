@@ -1014,7 +1014,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         ...(approvalMode ? { approvalMode } : {}),
         ...(brief ? { prompt: mode === "chat" ? brief : `${brief}\n\n${TUI_RESULT_INSTRUCTION}` } : {}),
         ...(model && model !== "default" ? { model: String(model).slice(0, 256) } : {}),
-        ...(effort && !gateway ? { effort: String(effort).slice(0, 32) } : {}),
+        // Through CPA too: the agent sends it in the request body (the workflow's aoLaunchArgs).
+        ...(effort ? { effort: String(effort).slice(0, 32) } : {}),
         ...(contextWindow != null ? { contextWindow } : {}),
         // A single-model chat is a plain assistant: AO adds none of its worker/orchestrator prompt.
         ...(plain ? { plainPrompt: true } : {}),
