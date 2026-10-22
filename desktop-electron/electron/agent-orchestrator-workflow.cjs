@@ -2717,6 +2717,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       .catch(() => null);
     return typeof where?.projectFolder === "string" ? where.projectFolder : typeof where?.root === "string" ? where.root : null;
   }
+  const REVIEW_TASK_LIMIT = 2000;
+  /**
+   * What the user asked in the chat a request serves, latest last, or "": the chat's task holds its
+   * first message, then each follow-up and steer. Without it the reviewer judged "needed for the
+   * task" blind. Seen live 2026-10-22: asked to "kill the backend first, after the test reopen it",
+   * the agent's `taskkill /PID 31332 /T /F` was denied as "not enough context to verify that PID
+   * 31332 is safe to stop", then so were Stop-Process and the chat terminal's own kill.
+   */
+  async function requestTask(mission) {
+    if (!mission.project_id) return "";
+    const detail = await board({ workspaceId: mission.workspace_id, taskId: mission.project_id }).catch(() => null);
+    return publicText(detail?.task?.description ?? "", REVIEW_TASK_LIMIT, true).trim();
+  }
   /** `decide`: the reviewer already said "ask"; this time it must choose allow or deny. */
   async function askApprover({ approver, mission, approval, decide = false }) {
     const { baseUrl, key } = connection();
@@ -2727,13 +2740,20 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const candidates = [...all.filter(model => !(reviewerDown.get(model) > now())), ...all.filter(model => reviewerDown.get(model) > now())];
     if (!candidates.length) throw new Error("CPA has no model for the command approver");
     const deadline = now() + REVIEW_BUDGET_MS;
-    const folder = await requestFolder(approval, mission);
+    const [folder, task] = await Promise.all([requestFolder(approval, mission), requestTask(mission)]);
     const scripts = reviewScriptExcerpts(approval, folder);
+    const request = describeRequest(approval);
+    // A shell command is reviewed as its bare command line, which leaves out the agent's own
+    // description of it ("Kill uvicorn backend process tree").
+    const purpose = typeof approval.reason === "string" && approval.reason.trim() && !request.includes(approval.reason)
+      ? publicText(approval.reason.trim(), 300) : "";
     const prompt = [
       "You are the command approver for an orchestrated coding mission. A worker asks to run a tool request.",
       `Workspace: ${mission.workspace_id}. Approver rules: ${String(approver.settings?.instructions || "none").slice(0, 1500)}`,
       folder ? `Workspace folder: ${folder}. Paths inside this folder, and relative paths, are inside the workspace; a command with no working folder runs there.` : "",
-      `Request: ${describeRequest(approval)}`,
+      task ? `What the user asked in this chat (their own words, latest last; this is the task):\n${task}` : "",
+      `Request: ${request}`,
+      purpose ? `The worker describes this request as: ${purpose}` : "",
       approval.permissions ? `Permissions: ${JSON.stringify(approval.permissions).slice(0, 800)}` : "",
       ...scripts.map((script) => `Local script ${script.file} (from the request's working folder${script.truncated ? ", first 4 KB" : ""}):\n${script.text}`),
       ...(decide ? [
@@ -4585,7 +4605,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         || result.run.nodes.some(node => ["running", "reserved"].includes(node.state))) {
       throw new Error("Owned native stop was not acknowledged; no replacement was started");
     }
-    for (const node of external) if (node.receipt?.thread_id) await stopExternalTurn(node.receipt.thread_id);
+    for (const node of external) {
+      if (!node.receipt?.thread_id) continue;
+      // An agent whose controller is not running has no turn to stop, and its run was stopped just
+      // above. Seen live 2026-10-22: that refusal (CHAT_CONTROLLER_NOT_READY) failed Archive twice.
+      await stopExternalTurn(node.receipt.thread_id).catch((error) => {
+        if (!/\bCHAT_CONTROLLER_NOT_READY\b/.test(String(error?.message))) throw error;
+        logger?.info?.("ao.stop_owned_no_controller", { run: mission.id });
+      });
+    }
     return result.run;
   }
   async function resolveStoppedIntents(workspaceId,taskId,saved) {
