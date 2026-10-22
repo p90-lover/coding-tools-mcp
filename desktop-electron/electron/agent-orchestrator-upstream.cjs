@@ -751,8 +751,14 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // summary (seen live: subjectKind "mcp_tool", toolKind "other"). Without it the input was
         // dropped, so the reviewer saw an exec_command with no command and answered "ask".
         const toolName = String(detail.toolName || activity.summary || "");
-        const rawToolInput = /^mcp__/.test(toolName) && Object.keys(input).length ? JSON.stringify(input) : "";
-        const toolInput = utf8Prefix(rawToolInput, 1500);
+        const arguments_ = Object.keys(input).length ? JSON.stringify(input) : "";
+        const rawToolInput = /^mcp__/.test(toolName) ? arguments_ : "";
+        // The harness's own tools (Claude Code's Monitor, WebFetch, Skill, and each one it adds later)
+        // reached the reviewer as a bare name with nothing to judge, so a new one was answered blind.
+        // Their arguments now go along when short. One with a command, a file or a plan is still shown
+        // by that, and a long one is left out rather than cut (it never made a request incomplete).
+        const nativeInput = !rawToolInput && !command && !path && !plan && Buffer.byteLength(arguments_, "utf8") <= 1500 ? arguments_ : "";
+        const toolInput = utf8Prefix(rawToolInput, 1500) || nativeInput;
         const reviewTruncated = Buffer.byteLength(command, "utf8") > 4000 || Buffer.byteLength(rawToolInput, "utf8") > 1500
           || Buffer.byteLength(path, "utf8") > 1000 || Buffer.byteLength(String(input.description ?? ""), "utf8") > 500;
         return {

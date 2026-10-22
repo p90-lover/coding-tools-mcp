@@ -665,6 +665,35 @@ test("an MCP tool approval named only by its summary keeps its input for the rev
   assert.equal(approval.toolInput, '{"cmd":"cd"}');
 });
 
+test("a harness tool's own short arguments reach the reviewer; a command, file or long input is shown as before", async () => {
+  // The user: "when new chat harness tools came out ... it keeps asking for permission". Claude Code's
+  // newer tools (Monitor, WebFetch) reached the reviewer as a bare name, so it judged them blind.
+  const inputs = [
+    { tool: "WebFetch", input: { url: "http://127.0.0.1:5173/", prompt: "Is the page up?" } },
+    { tool: "Bash", input: { command: "npm test", description: "Run the tests" } },
+    { tool: "Read", input: { file_path: "C:/repo/a.txt" } },
+    { tool: "Skill", input: { skill: "x".repeat(1600) } },
+    { tool: "SomeNewTool", input: {} },
+  ];
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1&trimLargeFields=1") ? {
+      turns: [{ id: "t", state: "running" }], messages: [],
+      activities: inputs.map(({ tool, input }, index) => ({ activityKind: "approval", status: "pending", requestId: "req-" + index,
+        summary: tool, detail: { toolName: tool, input, decisions: [{ id: "allow", kind: "allow_once" }] } })),
+    } : { session: { id: "s", mode: "chat", status: "working" } },
+  });
+  const approvals = JSON.parse(JSON.stringify((await upstream.observe("s")).approvals));
+  assert.equal(approvals[0].toolInput, JSON.stringify(inputs[0].input));
+  assert.equal(approvals[0].kind, "permission");
+  assert.equal(approvals[1].toolInput, undefined, "a command is shown as the command");
+  assert.equal(approvals[1].command, "npm test");
+  assert.equal(approvals[2].toolInput, undefined, "a file is shown as its path");
+  assert.equal(approvals[2].path, "C:/repo/a.txt");
+  assert.equal(approvals[3].toolInput, undefined, "too long: left out, never cut");
+  assert.equal(approvals[3].reviewTruncated, undefined, "and no reason to ask the person");
+  assert.equal(approvals[4].toolInput, undefined, "no arguments, nothing to show");
+});
+
 test("a follow-up turn is observed only once AO shows it; send and steer use AO's conversation routes", async () => {
   const calls = [];
   let turns = [{ id: "old", state: "completed" }];
