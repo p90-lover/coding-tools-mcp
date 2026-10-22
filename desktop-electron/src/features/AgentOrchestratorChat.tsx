@@ -13,7 +13,7 @@ import { ChatContextMeter } from "./ChatContextMeter";
 import { ChatPet } from "./ChatPet";
 import { ChatTurnStats } from "./ChatTurnStats";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
-import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, StreamingMarkdown } from "./ChatToolParts";
+import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown } from "./ChatToolParts";
 import { PartErrorBoundary } from "../PartErrorBoundary";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
@@ -21,7 +21,7 @@ import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
-  activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshQuietNote, dshRetryNote, type ChatWakeup,
+  activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshQuietNote, dshRetryNote, steerReader, steerReceipts, type ChatWakeup,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -316,7 +316,7 @@ const sameFiles = (a: ChatLiveItem["files"], b: ChatLiveItem["files"]) => a === 
 const sameLiveItem = (a: ChatLiveItem, b: ChatLiveItem) => a === b || (a.id === b.id && a.kind === b.kind && a.status === b.status
   && a.text === b.text && a.label === b.label && a.description === b.description && a.approval === b.approval
   && a.answered?.question === b.answered?.question && a.answered?.answer === b.answered?.answer
-  && a.input === b.input && a.output === b.output && sameFiles(a.files, b.files));
+  && a.input === b.input && a.output === b.output && a.receipt === b.receipt && sameFiles(a.files, b.files));
 const LiveRow = memo(LiveRowView, (prev, next) => sameLiveItem(prev.item, next.item));
 
 function LiveRowView({ item }: { item: ChatLiveItem }) {
@@ -324,7 +324,9 @@ function LiveRowView({ item }: { item: ChatLiveItem }) {
     {item.answered ? <AnsweredRecord question={item.answered.question} answer={item.answered.answer} />
       // As any sent message: an attached image as its thumbnail, not "Attached image: <path>" text.
       // Claude Code shows a message the agent took mid-turn as an ordinary sent message, Copy and all.
-      : item.kind === "steer" ? <div className="cx-user cx-steer"><SentMessage text={item.text} /><MessageActions text={chatMessageReadable(item.text)} /></div>
+      // Its read receipt leads the row, as Claude Code's "Read by Claude" leads Copy (steerReceipts).
+      : item.kind === "steer" ? <div className="cx-user cx-steer"><SentMessage text={item.text} />
+        <div className="cx-msg-foot"><SteerReceiptMark receipt={item.receipt} /><MessageActions text={chatMessageReadable(item.text)} /></div></div>
       : item.kind === "message" ? <StreamingMarkdown text={item.text} live={item.status === "running"} />
       : item.kind === "reasoning" ? <ReasoningItem item={item} />
       : item.kind === "edit" ? <EditItem item={item} />
@@ -353,10 +355,10 @@ function ActivityGroup({ items, live }: { items: ChatLiveItem[]; live: boolean }
 }
 
 /** A role's turn, as Codex and Claude Code show it: thinking, tool calls and streamed messages. */
-function LiveTimeline({ items, live = false, reply }: { items: ChatLiveItem[]; live?: boolean; reply?: string }) {
+function LiveTimeline({ items, live = false, finished = false, reply }: { items: ChatLiveItem[]; live?: boolean; finished?: boolean; reply?: string }) {
   const compact = useContext(CompactActivity);
   // A message the reply below already holds is not shown twice (withoutReplied).
-  const tidy = withoutReplied(tidyTimeline(items), reply);
+  const tidy = withoutReplied(tidyTimeline(steerReceipts(items, finished)), reply);
   if (!compact) return <ol className="cx-live">{tidy.map((item) => <LiveRow key={item.id} item={item} />)}</ol>;
   const segments = groupTimeline(tidy);
   return <ol className="cx-live is-compact">
@@ -428,7 +430,9 @@ function StepRow({ step, runId, loadWork }: { step: ChatStep; runId: string; loa
       {/* Its earlier rounds first, folded (oldest first), then the attempt now: a retried card's
           failed attempt showed under the new attempt's work, as if it came after it. */}
       <EarlierRounds rounds={step.earlier} />
-      {work?.length ? <LiveTimeline items={work} live={Boolean(step.working)} reply={step.text} /> : null}
+      {work?.length ? <SteerReader.Provider value={steerReader(step.detail)}>
+        <LiveTimeline items={work} live={Boolean(step.working)} finished={!step.working && step.state === "finished"} reply={step.text} />
+      </SteerReader.Provider> : null}
       {/* A held or failed card keeps the reply it gave: the error says why, the reply stays readable. */}
       {step.error ? <p className="cx-step-error">{step.error}</p> : null}
       {step.text ? <ChatMarkdown text={step.text} /> : null}
@@ -452,7 +456,9 @@ function AnswerWork({ step, runId, expanded, loadWork }: { step: ChatStep; runId
       {summary.additions || summary.deletions ? <DiffCount additions={summary.additions} deletions={summary.deletions} /> : null}
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
     </button>
-    {open ? work?.length ? <LiveTimeline items={work} reply={step.text} /> : <p className="cx-tool-empty">Loading…</p> : null}
+    {open ? work?.length ? <SteerReader.Provider value={steerReader(step.detail)}>
+      <LiveTimeline items={work} finished={!step.working && step.state === "finished"} reply={step.text} />
+    </SteerReader.Provider> : <p className="cx-tool-empty">Loading…</p> : null}
   </div>;
 }
 
@@ -642,7 +648,9 @@ function QueuedMessageBar({ items }: { items: QueuedBarItem[] }) {
           {index === head && item.onSendNow ? <button type="button" className="cx-queued-send-now" aria-label="Send now"
             data-tip={item.sendNowBlocked ?? "Send now"} disabled={Boolean(item.sendNowBlocked)} onClick={item.onSendNow}>Send now</button> : null}
           <span className="cx-queued-status">Queued</span>
-        </div> : null}
+        </div>
+          // On its way to the agent: Claude Code's "Sending…" under the message until the agent has it.
+          : <div className="cx-queued-meta"><span className="cx-queued-status" role="status">Sending…</span></div>}
       </li>)}
     </ol>
   </div>;
@@ -1593,11 +1601,13 @@ export function AgentOrchestratorChat({
               {/* Messages steered into this turn. While it works they show in its live timeline, where
                   they were sent; once it is done, here under the turn's message. */}
               {turn.user?.steers?.length && !turn.steps.some((step) => step.working?.timeline?.some((item) => item.kind === "steer"))
-                ? turn.user.steers.map((steer, index) => <div key={`steer:${index}`} className="cx-user cx-steer">
+                ? <SteerReader.Provider value={steerReader(turn.steps[0]?.detail)}>{turn.user.steers.map((steer, index) => <div key={`steer:${index}`} className="cx-user cx-steer">
                   <SentMessage text={steer.text} />
-                  <MessageActions text={chatMessageReadable(steer.text)} />
+                  {/* Saved only once the agent took it; a turn that finished read it, one that stopped may not have. */}
+                  <div className="cx-msg-foot"><SteerReceiptMark receipt={turn.status === "done" ? "read" : liveTurn(turn) ? "unread" : undefined} />
+                    <MessageActions text={chatMessageReadable(steer.text)} /></div>
                   <span className="cx-stamp">{steer.stamp} UTC</span>
-                </div>) : null}
+                </div>)}</SteerReader.Provider> : null}
               {dsh && readWork
                 ? <DshWork key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} live={!idle && liveTurn(turn)} expanded={showWork} useWork={readWork}
                   errorShownBelow={turn === failedTurn} />
