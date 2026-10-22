@@ -1,5 +1,4 @@
 "use strict";
-require("./support/temp-dirs.cjs"); // removes the temp folders this file makes when it ends
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
@@ -172,8 +171,9 @@ test("a subagent preserves the model's none effort when saved and launched", asy
     assert.equal(saved.settings.defaultRoute.effort, "none");
     const started = await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read the source" });
     assert.equal(started.isError, false);
-    // Claude Code sends the bare model and the effort in the request body.
-    assert.deepEqual([w.spawned[0].gateway.model, w.spawned[0].effort], ["cline-pass/deepseek-v4.1-flash", "none"]);
+    // Claude Code sends the effort in the request body (#498), not as a "(none)" model suffix.
+    assert.equal(w.spawned[0].gateway.model, "cline-pass/deepseek-v4.1-flash");
+    assert.equal(w.spawned[0].effort, "none");
     assert.equal(w.service.config().settings.defaultRoute.effort, "none");
   } finally { w.cleanup(); }
 });

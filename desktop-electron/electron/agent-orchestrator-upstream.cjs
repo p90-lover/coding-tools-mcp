@@ -117,6 +117,8 @@ const WORKSPACE_MODES = new Set(["worktree", "shared", "folder"]);
 // Agents without an AO chat controller run in their own terminal UI and report here.
 // How often the harness list re-runs AO's install checks, so a newly installed CLI shows up.
 const AGENT_RECHECK_MS = 60_000;
+// How long a started AO daemon that is still running may take to answer /readyz (see start).
+const AO_READY_TIMEOUT_MS = 90_000;
 
 // A plain GET lists only the agents whose install check has finished, which right after the
 // daemon starts is often just one; the list was then read once and Codex, opencode and others
@@ -1698,7 +1700,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
             error = `AO exited (${code})${daemonLines ? `: ${daemonLines.trimEnd().slice(-600)}` : ""}`;
           }
         });
-        const deadline = Date.now() + 30000;
+        // A daemon that exits fails at once (checkStartup); one still starting is waited for. 30 s
+        // was too short on this machine's HDD: on 2026-10-22, right after an update (with the
+        // database compaction running), the first start was given up as "AO readiness timed out",
+        // its daemon killed and a new one started from nothing, and the chats that outlived the
+        // update were not reattached.
+        const deadline = Date.now() + AO_READY_TIMEOUT_MS;
         while (Date.now() < deadline) {
           checkStartup();
           try {
