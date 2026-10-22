@@ -4419,22 +4419,6 @@ test("a chat over the board's byte limit in fewer characters compacts too, and a
     /9,000 bytes; a chat message can be at most 8,192/, "one message over the limit by itself says so, not that the chat is full");
 });
 
-test("a steer into a stalled turn whose agent has no controller waits for it instead of failing", async () => {
-  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
-  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
-  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", execution_mode: "single", cancelled: false, nodes: [
-    { id: "card", role: "worker", state: "running", route, receipt: { thread_id: "session-1" } }] }] });
-  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless,
-    aoHarness: {
-      observe: async () => ({ lastActivityAt: Date.now() - 60 * 60_000, timeline: [] }),
-      interrupt: async () => { throw new Error("the agent controller for this session is not running (CHAT_CONTROLLER_NOT_READY)"); },
-      steer: async () => { throw new Error("not reached"); },
-    } });
-  const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
-  assert.equal(result.steered, false);
-  assert.equal(result.starting, true, "the chat queues the message and steers it in later");
-});
-
 test("a card stopped while its agent launched also stops that agent once its session arrives", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
   const mission = { id: "run", workspace_id: "ws", revision: 1, execution_mode: "single", cancelled: false, grant: { executable_sha256: "a".repeat(64) },
@@ -6281,6 +6265,58 @@ test("a hung turn whose interrupt lands after a few seconds is still restarted, 
   const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
   assert.equal(result.restarted, true, "the hung turn is stopped and the message goes as the next turn");
   assert.deepEqual(interrupted, ["sess-1"]);
+});
+
+// Seen live 2026-10-22: a tool call that never returned held a chat "may be stuck" for 3h 39m. Its
+// interrupt never settled, so every "keep going" failed "stop needs attention" and came back.
+function stuckToolWorld({ settles = false, refuses = false, now = 1_000_000 + 30 * 60_000 } = {}) {
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  const interrupted = [], exited = [], steered = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => now,
+    setTimer: (callback) => { callback(); return 0; },
+    aoHarness: {
+      observe: async () => {
+        const ended = exited.length || (settles && interrupted.length);
+        return { turnId: "t1", turnState: ended ? "interrupted" : "running", status: ended ? "ready" : "working", exited: exited.length > 0,
+          lastActivityAt: 1_000_000, timeline: [{ kind: "tool_call", status: "running", title: "Find detection log files" }], approvals: [] };
+      },
+      steer: async (id, text) => { steered.push([id, text]); return { steered: true }; },
+      interrupt: async id => { interrupted.push(id); if (refuses) throw new Error("CHAT_CONTROLLER_NOT_READY"); },
+      exitAgent: async id => { exited.push(id); return { ok: true }; },
+    } });
+  return { workflow, interrupted, exited, steered };
+}
+
+test("a stuck tool call whose interrupt never settles is restarted by shutting its agent down, not left as 'stop needs attention'", async () => {
+  const world = stuckToolWorld();
+  const result = await world.workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
+  assert.equal(result.restarted, true, "the message goes as the next turn");
+  assert.deepEqual(world.interrupted, ["sess-1"], "the interrupt is tried first");
+  assert.deepEqual(world.exited, ["sess-1"], "then the agent's host is shut down; AO keeps the session to resume");
+  assert.deepEqual(world.steered, [], "nothing is steered into the hung turn");
+});
+
+test("a stuck turn whose interrupt is refused is still restarted", async () => {
+  const world = stuckToolWorld({ refuses: true });
+  const result = await world.workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
+  assert.equal(result.restarted, true);
+  assert.deepEqual(world.exited, ["sess-1"]);
+});
+
+test("Restart stops a turn that is not yet past its stall limit, and an interrupt that lands needs no shutdown", async () => {
+  // Restart is the person's call: the chat said "may be stuck", which the backend's longer tool limit has not reached.
+  const world = stuckToolWorld({ settles: true, now: 1_000_000 + 60_000 });
+  const plain = await world.workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "and lint" });
+  assert.equal(plain.steered, true, "a message without restart is steered in as before");
+  assert.deepEqual(world.interrupted, []);
+  const result = await world.workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "continue", restart: true });
+  assert.equal(result.restarted, true);
+  assert.match(result.reason, /your message is sent as the next turn/);
+  assert.deepEqual(world.interrupted, ["sess-1"]);
+  assert.deepEqual(world.exited, [], "the interrupt settled, so the agent keeps running");
 });
 
 test("a steer is never sent to an agent whose state could not be read", async () => {
