@@ -20,7 +20,7 @@ import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
-  activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, type ChatWakeup,
+  activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshQuietNote, dshRetryNote, type ChatWakeup,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -139,6 +139,28 @@ function Elapsed({ since, live = true, until, format = chatDuration }: { since: 
     return () => window.clearInterval(timer);
   }, [live]);
   return <>{format((live ? now : until ?? now) - since)}</>;
+}
+
+/**
+ * A running turn's state at its foot, where a long turn is read: how long it has worked, which card
+ * is on what, and how long nothing new has come (or that its model is being retried). The "Working
+ * for" label sat at the turn's top, hundreds of steps up, so a stuck turn could not be told apart.
+ */
+function TurnRunning({ turn }: { turn: ChatTurn }) {
+  const step = turn.steps.find((item) => item.working) ?? (turn.final?.working ? turn.final : undefined);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 5_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  if (!step?.working) return null;
+  const heardAt = Math.max(0, ...[...turn.steps, ...(turn.final ? [turn.final] : [])].map((item) => item.working?.heardAtMs ?? 0)) || undefined;
+  const note = dshRetryNote(turn.steps) || dshQuietNote(heardAt, now);
+  return <p className={`cx-note cx-turn-running${step.working.stalled ? " is-stalled" : ""}`} role="status" aria-live="polite">
+    <span className="cx-shimmer">Working</span>{turn.startedAtMs ? <> for <Elapsed since={turn.startedAtMs} /></> : null}
+    {` · ${step.name}${step.working.activity ? ` — ${step.working.activity}` : ""}${note}`}
+    {note.includes("may be stuck") ? " · send a message to restart it" : ""}
+  </p>;
 }
 
 function stepTone(step: ChatStep): string {
@@ -1523,6 +1545,7 @@ export function AgentOrchestratorChat({
                 ? <DshWork key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} live={!idle && liveTurn(turn)} expanded={showWork} useWork={readWork}
                   errorShownBelow={turn === failedTurn} />
                 : <WorkGroup key={`${turn.key}:${showWork ? "open" : "folded"}`} turn={turn} idle={idle} expanded={showWork} loadWork={loadWork} />}
+              {!dsh && !idle && liveTurn(turn) ? <TurnRunning turn={turn} /> : null}
               {turn.final && !(dsh && turn.final.working) ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`}>
                 {/* DeepSeek Harness names no agent above its reply; a team's verdict still shows. */}
                 {dsh ? (turn.final.verdict ? <div className="cx-answer-meta"><span className={`cx-verdict is-${turn.final.verdict.toLowerCase()}`}>{turn.final.verdict}</span></div> : null)

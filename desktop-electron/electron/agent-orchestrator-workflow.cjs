@@ -2261,7 +2261,57 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     "select-object", "select", "where-object", "where", "sort-object", "sort", "measure-object", "measure", "select-string", "sls",
     "format-table", "ft", "format-list", "fl", "out-string", "convertfrom-json", "convertto-json", "get-location", "pwd", "resolve-path",
     "split-path", "join-path", "get-filehash", "findstr", "head", "tail", "wc", "rg", "grep", "write-output", "echo", "write-host",
-    "if", "else", "elseif", "-not"]);
+    "if", "else", "elseif", "-not",
+    // Seen live (2026-10-21, 824 of 862 shell requests went to the paid model reviewer): agents start
+    // nearly every command by moving into the project (`cd "<project>"; …`, 353 of them) and wrap reads
+    // in try/catch. Moving inside the workspace changes nothing (the path check below keeps it there).
+    "cd", "chdir", "set-location", "sl", "push-location", "pushd", "pop-location", "popd", "try", "catch", "finally",
+    // What runs on this machine and which ports listen: status reads that change nothing.
+    "get-process", "gps", "ps", "get-nettcpconnection", "netstat", "tasklist", "get-ciminstance", "get-service", "get-psdrive",
+    "get-date", "get-command", "start-sleep", "sleep", "foreach-object", "group-object", "select-xml", "foreach"]);
+  // Methods a read may call on what it read: dates, strings, comparisons. Nothing that deletes,
+  // writes, starts or stops.
+  const SAFE_METHODS = new Set(["addhours", "addminutes", "adddays", "addseconds", "addmilliseconds", "tostring", "trim", "trimstart",
+    "trimend", "split", "substring", "contains", "startswith", "endswith", "tolower", "toupper", "replace", "indexof", "lastindexof",
+    "padleft", "padright", "equals", "gettype", "toshortdatestring", "tolongdatestring", "touniversaltime", "tolocaltime"]);
+  // Web requests a read may make: to a service on this machine only, and sending or writing nothing
+  // (seen live: `try { $r = Invoke-WebRequest -Uri "http://127.0.0.1:7373/api/health" …` health checks).
+  const WEB_READ_VERBS = new Set(["invoke-webrequest", "iwr", "invoke-restmethod", "irm", "curl", "curl.exe"]);
+  // The only options a web read may carry (review: a denylist missed curl's --output and --data).
+  // PowerShell's are matched in any case; curl's exactly, since curl tells -i from -I.
+  const PS_WEB_OPTIONS = new Map([["-uri", "url"], ["-timeoutsec", "value"], ["-usebasicparsing", "flag"], ["-erroraction", "value"],
+    ["-method", "get"]]);
+  const CURL_OPTIONS = new Map([["-s", "flag"], ["-S", "flag"], ["-sS", "flag"], ["-f", "flag"], ["-fsS", "flag"], ["-i", "flag"], ["-I", "flag"],
+    ["--silent", "flag"], ["--show-error", "flag"], ["--fail", "flag"], ["--include", "flag"], ["--head", "flag"],
+    ["-m", "value"], ["--max-time", "value"], ["--connect-timeout", "value"]]);
+  const LOOPBACK_URL = /^https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d{1,5})?(?:[/?#]|$)/i;
+  /**
+   * Whether one web command (its words, quoted values read back through `value`) asks only a service
+   * on this machine and sends and writes nothing. Each destination is the command's own, written with
+   * its scheme (review: a loopback URL printed by another statement passed `curl.exe example.com`).
+   */
+  function loopbackRead(tokens, value) {
+    const curl = /^curl(?:\.exe)?$/i.test(tokens[0]);
+    let destinations = 0;
+    for (let at = 1; at < tokens.length; at += 1) {
+      const token = tokens[at];
+      if (token.startsWith("-")) {
+        const kind = (curl ? CURL_OPTIONS.get(token) : undefined) ?? PS_WEB_OPTIONS.get(token.toLowerCase());
+        if (!kind) return false;
+        if (kind === "flag") continue;
+        const next = tokens[at += 1];
+        if (next === undefined) return false;
+        if (kind === "get" && !/^get$/i.test(value(next))) return false;
+        if (kind === "url") { if (!LOOPBACK_URL.test(value(next))) return false; destinations += 1; }
+        continue;
+      }
+      if (!LOOPBACK_URL.test(value(token))) return false;
+      destinations += 1;
+    }
+    return destinations > 0;
+  }
+  // git's read-only subcommands; any other (checkout, reset, commit, push, clean…) still goes to review.
+  const GIT_READS = new Set(["status", "diff", "log", "show", "rev-parse", "ls-files", "blame", "cat-file", "describe", "shortlog", "grep"]);
   // The pipeline's own item and fixed values: no other variable (one could hold anything, and $env:
   // holds the app's keys).
   const INSPECTION_VARIABLE = /^\$(?:_|PSItem|\?|true|false|null)(?:\.[A-Za-z_]\w*)*$/i;
@@ -2277,24 +2327,97 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
   /** Why `command` (run in `cwd`) is read-only inspection inside `folder` "Approve for me" may run, or null. */
   function readOnlyInspection(command, folder, cwd = null) {
-    const text = String(command ?? "").trim();
-    if (!text || !folder || text.length > 800 || /[\n\r`<>]|::|\$\(|@[({]|&|\[|=/.test(text)) return null;
+    // Errors shown with the output (2>&1) or dropped (2>$null) write no file; any other redirect still fails.
+    let text = String(command ?? "").replace(/\s+[12]?>&[12](?=\s|;|\||$)|\s+2>\s*\$null\b/gi, "").trim();
+    // A script on several lines: each line is a statement, comment lines are left out. A here-string
+    // (@" … "@) can hold anything, so it still goes to the reviewer.
+    if (/@["']/.test(text)) return null;
+    text = text.split(/\r?\n/).filter((line) => !/^\s*#/.test(line)).join("; ");
+    // "&&" only chains (cd "<project>" && git diff); a lone "&" (call operator, background) still fails.
+    text = text.replace(/\s*&&\s*/g, "; ");
+    // A catch block's "failed: $($_.Exception.Message)" only reads the pipeline item's properties: that
+    // one form of $( ) is read as the property itself; any other still fails below.
+    text = text.replace(/\$\(\s*(\$(?:_|PSItem)(?:\.[A-Za-z_]\w*)*)\s*\)/gi, "$1");
+    if (!text || !folder || text.length > 1500 || /[`<>]|\$\(|@[({]|&/.test(text)) return null;
     if (cwd && !insideFolder(cwd, folder)) return null;
     // Quoted arguments are set aside (a path, a filter, a pattern); what is left must be plain words.
+    // A double-quoted one expands its variables: only the pipeline's item may appear there too
+    // ("$env:CPA_KEY" in quotes passed before and would have printed the key).
+    // Each quoted value becomes ⟦n⟧ (its index), so a web command's quoted URL can be read back.
+    if (text.includes("⟦")) return null;
     const quoted = [];
-    const bare = text.replace(/"([^"]*)"|'([^']*)'/g, (_, double, single) => { quoted.push(double ?? single); return " Q "; });
-    if (/["']/.test(bare) || /[\w)\]]\s*\.\s*[A-Za-z_]\w*\s*\(/.test(bare)) return null;
+    let expands = false;
+    const bare = text.replace(/"([^"]*)"|'([^']*)'/g, (_, double, single) => {
+      if (double !== undefined && /\$(?!_\b|PSItem\b)/i.test(double)) expands = true;
+      quoted.push(double ?? single);
+      return ` ⟦${quoted.length - 1}⟧ `;
+    });
+    const isQuoted = (word) => /^⟦\d+⟧$/.test(word);
+    const valueOf = (word) => isQuoted(word) ? quoted[Number(word.slice(1, -1))] : word;
+    // Variables this command sets itself (`$r = Invoke-WebRequest …`, `foreach ($f in …)`). Never the
+    // environment's or PowerShell's own ($env:, $profile…).
+    const locals = new Set([...bare.matchAll(/\$([A-Za-z_]\w*)\s*=(?!=)/g), ...bare.matchAll(/\bforeach\s*\(\s*\$([A-Za-z_]\w*)\s+in\b/gi)]
+      .map((match) => match[1].toLowerCase())
+      .filter((name) => !/^(?:env|global|script|using|args|input|this|home|profile|pshome|executioncontext|host|psitem|_)$/.test(name)));
+    const localName = (word) => /^\$([A-Za-z_]\w*)(?:\.[A-Za-z_]\w*)*=?$/.exec(word)?.[1]?.toLowerCase();
+    const localVariable = (word) => locals.has(localName(word) ?? "");
+    // A local holding a literal (`$p = "<project>\x"`, `foreach ($f in "a","b")`) is that checked value; one
+    // holding what a command printed may hold any path (review: `$p = Get-Content paths.txt; Get-Content
+    // $p`), so it may be printed or read from, never passed to a command.
+    const statements = bare.split(/[;|{}()]/).map((statement) => statement.trim().split(/\s+/).filter(Boolean));
+    const derived = new Set();
+    const literalOnly = (rest) => rest.length > 0 && rest.join(" ").split(/\s*,\s*/).every((item) => isQuoted(item) || /^[\w.\\/:-]+$/.test(item));
+    for (const tokens of statements) {
+      const name = localName(tokens[0] ?? "");
+      if (name && locals.has(name) && (tokens[0].endsWith("=") || tokens[1] === "=")) {
+        if (!literalOnly(tokens.slice(tokens[0].endsWith("=") ? 1 : 2))) derived.add(name);
+      } else if (name && locals.has(name) && tokens[1]?.toLowerCase() === "in" && !literalOnly(tokens.slice(2))) derived.add(name);
+    }
+    // Outside quotes: no assignment (but to a local), type literal or static .NET call
+    // ([IO.File]::WriteAllText). A long option's value (--porcelain=v1) is no assignment.
+    const unassigned = bare.replace(/\$[A-Za-z_]\w*\s*=(?!=)/g, " ").replace(/(^|\s)--?[\w-]+=/g, "$1");
+    if (expands || /["']/.test(bare) || /::|\[|=/.test(unassigned)) return null;
+    // Methods only from the harmless few ((Get-Date).AddHours(-14), $_.Name.Trim()); .Delete(), .Kill()… fail.
+    for (const call of bare.matchAll(/[\w)\]]\s*\.\s*([A-Za-z_]\w*)\s*\(/g)) if (!SAFE_METHODS.has(call[1].toLowerCase())) return null;
     const words = bare.split(/[\s;|{}()]+/).filter(Boolean);
-    if (words.some((word) => word.includes("$") && !INSPECTION_VARIABLE.test(word))) return null;
+    if (words.some((word) => word.includes("$") && !/^\$[A-Za-z_]\w*=?$/.test(word) && !INSPECTION_VARIABLE.test(word) && !localVariable(word))) return null;
+    if (words.some((word) => /^\$[A-Za-z_]\w*=?$/.test(word) && !INSPECTION_VARIABLE.test(word) && !localVariable(word.replace(/=$/, "")))) return null;
     // `-Path:<value>` would carry a path past the check below.
     if (words.some((word) => /^-[\w-]+:/.test(word))) return null;
     // Each statement starts with a read-only verb, a condition on the pipeline's item, or is a string
-    // it prints (`{ 'missing' }`).
-    for (const statement of bare.split(/[;|{}()]/)) {
-      const first = statement.trim().split(/\s+/).filter(Boolean)[0];
-      if (first && first !== "Q" && !READ_VERBS.has(first.toLowerCase()) && !INSPECTION_VARIABLE.test(first)) return null;
+    // it prints (`{ 'missing' }`). `$local = <statement>` is judged by its statement.
+    for (let tokens of statements) {
+      if (tokens[0] && localVariable(tokens[0]) && (tokens[0].endsWith("=") || tokens[1] === "=")) {
+        tokens = tokens.slice(tokens[0].endsWith("=") ? 1 : 2);
+      } else if (tokens[0] && localVariable(tokens[0]) && tokens[1]?.toLowerCase() === "in") continue; // foreach's ($x in …)
+      // A command's output held in a local is never an argument (see `derived`).
+      if (tokens.slice(1).some((token) => derived.has(localName(token) ?? ""))) return null;
+      const [first, second] = tokens;
+      if (first && WEB_READ_VERBS.has(first.toLowerCase())) {
+        // A request to a service on this machine that sends and writes nothing.
+        if (!loopbackRead(tokens, valueOf)) return null;
+        continue;
+      }
+      // ForEach-Object runs a script block, checked as statements here; its -MemberName (or a bare
+      // member name: `ForEach-Object Delete`, `foreach Kill`) calls a method unseen (review).
+      if (first && /^(?:foreach-object|foreach|%)$/i.test(first) && tokens.length > 1) return null;
+      if (first && first.toLowerCase() === "git") {
+        // `git status --porcelain`, `git diff --stat`, `git log -5`: a read-only subcommand only.
+        if (!second || !GIT_READS.has(second.toLowerCase())) return null;
+        continue;
+      }
+      // A fragment that cannot start a command: a member after a parenthesis ((Get-Date).AddHours), a
+      // number or an operator or switch ((-14), -not).
+      if (first && /^(?:\.[A-Za-z_]\w*|[-+]?\d+(?:\.\d+)?|-[A-Za-z]\w*)$/.test(first)) continue;
+      if (first && !isQuoted(first) && !READ_VERBS.has(first.toLowerCase()) && !INSPECTION_VARIABLE.test(first) && !localVariable(first)) return null;
     }
-    if (![...quoted, ...words.filter((word) => word !== "Q" && !word.startsWith("$"))].every((value) => insideFolder(value, folder))) return null;
+    // Paths stay inside the folder, an option's value (--git-dir=…) and a URL's host aside: a URL is
+    // judged by loopbackRead.
+    // A member name after a parenthesis (.AddHours, .Count) is no path; "..\x" or ".\x" still is.
+    const values = [...quoted, ...words.filter((word) => !isQuoted(word) && !word.startsWith("$") && !/^\.[A-Za-z_]\w*$/.test(word) && word !== "=")]
+      .map((value) => /^--?[\w-]+=/.test(value) ? value.slice(value.indexOf("=") + 1) : value)
+      .filter((value) => !/^https?:\/\//i.test(value));
+    if (!values.every((value) => insideFolder(value, folder))) return null;
     return "Read-only inspection inside the workspace folder";
   }
   /** Why `command` is a routine project command "Approve for me" may run, or null. */
@@ -3604,6 +3727,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * ended before it arrived, `steered` is false and the caller sends it as a normal follow-up.
    */
   const STEER_STALL_MS = 3 * 60_000;
+  // With a tool call still "running": the chat's own "may be stuck" line (ao-chat's STALL_MS).
+  const STEER_TOOL_STALL_MS = 10 * 60_000;
   // "Approve for me" answers a request within 20 s (its reviewer up to 25 s): a steer waits that long.
   const STEER_ANSWER_WAIT_MS = 30_000;
   const STEER_ANSWER_POLL_MS = 750;
@@ -3646,8 +3771,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // A turn whose agent hung (a model request that never came back, a retry loop) takes a steer and
     // never reads it: "keep going" did nothing. Nothing new for STEER_STALL_MS with no tool call
     // running stops that turn; the message is then sent as the chat's next turn, like a queued one.
-    // A tool call still running (a long build, a GUI it launched) is never stopped by a steer: the
-    // agent reads the steer when that call returns.
+    // A tool call still running (a long build, a GUI it launched) is left to finish, and the agent
+    // reads the steer when it returns, unless it has been silent as long as a stuck turn.
     const idle = Number.isFinite(waiting?.lastActivityAt) ? now() - waiting.lastActivityAt : 0;
     // A notice (a provider retry's "Retrying Claude, attempt 7 of 10" stays "running") is no tool.
     // Nor is the model's reasoning: a stream that stopped mid-thought stays "running" too, so a
@@ -3655,11 +3780,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // the hung turn (blocking the composer for minutes) and never read.
     const toolRunning = Array.isArray(waiting?.timeline) && waiting.timeline.some(item => item?.status === "running"
       && !["message", "system", "reasoning", "thinking"].includes(item.kind));
-    if (!toolRunning && idle > STEER_STALL_MS) {
+    // A tool call silent as long as the chat calls a turn stuck (STEER_TOOL_STALL_MS, the chat's
+    // "may be stuck") is stuck with it: the user, looking at "may be stuck", asked that a steer then
+    // retrigger the model rather than wait on a call that may never return.
+    if (idle > (toolRunning ? STEER_TOOL_STALL_MS : STEER_STALL_MS)) {
       await stopExternalTurn(card.receipt.thread_id);
-      logger?.info?.("ao.steer_restarted_stalled_turn", { idleSeconds: Math.round(idle / 1000) });
+      logger?.info?.("ao.steer_restarted_stalled_turn", { idleSeconds: Math.round(idle / 1000), toolRunning });
       return { ok: true, steered: false, waiting: true, restarted: true,
-        reason: `The agent had shown nothing for ${Math.round(idle / 60_000)} minutes, so its turn was stopped; your message is sent as the next turn` };
+        reason: `The agent had shown nothing for ${Math.round(idle / 60_000)} minutes${toolRunning ? " (a tool call never returned)" : ""}, so its turn was stopped; your message is sent as the next turn` };
     }
     // A chat's session is created in the background (spawn's async): its card runs, with the session,
     // while the agent is still starting, and AO has no controller to steer yet. The message waits
