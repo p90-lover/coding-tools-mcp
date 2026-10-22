@@ -298,10 +298,10 @@ function createOriginalUiCore({
     return { configured: true, length: key.length, value: key };
   }
 
-  function copyCpaManagementKey(clipboard) {
+  async function copyCpaManagementKey(clipboard) {
     const { value, length } = cpaManagementKey();
     if (!clipboard?.writeText) throw new Error("Clipboard is unavailable");
-    clipboard.writeText(value);
+    await clipboard.writeText(value);
     return { copied: true, length };
   }
 

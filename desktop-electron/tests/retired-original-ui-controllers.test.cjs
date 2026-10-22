@@ -84,6 +84,6 @@ test("original UI retains CPA but rejects retired IDs before service or open", a
   const cpa = await controller.inspect("cpa");
   assert.equal(cpa.id, "cpa");
   assert.deepEqual(calls, ["inspect:cpa", "snapshot"]);
-  assert.equal(controller.copyCpaManagementKey({ writeText(value) { assert.equal(value, "test-key"); } }).copied, true);
+  assert.equal((await controller.copyCpaManagementKey({ async writeText(value) { assert.equal(value, "test-key"); } })).copied, true);
   controller.dispose();
 });

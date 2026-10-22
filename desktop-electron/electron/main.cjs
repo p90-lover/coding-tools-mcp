@@ -1412,7 +1412,8 @@ function registerIpc({ logger, stateStore }) {
     if (credential.ok !== true || typeof credential.value !== "string" || !credential.value) {
       throw new Error("Workspace credential is unavailable");
     }
-    clipboard.writeText(credential.value);
+    // Electron 44+ writes the clipboard asynchronously; report "copied" only after it lands.
+    await clipboard.writeText(credential.value);
     return { ok: true, copied: true, key: input.key };
   });
   handle("coding-tools:permissions:snapshot", (event, input) => codingTools.permissionsSnapshot(event, input));
