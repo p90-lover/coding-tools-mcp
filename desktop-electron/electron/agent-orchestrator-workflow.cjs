@@ -638,14 +638,36 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   const IDLE_EARLY_SWEEPS_MS = [60_000, 3 * 60_000];
   let idleTimer = null;
   let idleStopped = false;
+  // A chat AO still calls "working" with nothing from its agent this long has lost its turn to an
+  // app or daemon restart (see quietWorkingChatSessions); a stuck turn of a live run shows "may be
+  // stuck" long before this, and such a run's sessions are never released here.
+  const STALE_WORKING_MS = 2 * 60 * 60_000;
+  /** Sessions of the runs this app drives now, or null when one of them could not be read. */
+  async function drivenSessions() {
+    const driven = new Set();
+    for (const [key, live] of backgroundRuns) {
+      if (!(live?.starting || live?.driving || live?.status === "running")) continue;
+      const [workspaceId, runId] = JSON.parse(key);
+      const saved = await runs({ workspaceId, runId }).catch(() => null);
+      const mission = saved?.runs?.find(run => run.id === runId);
+      if (!mission) return null;
+      for (const node of mission.nodes ?? []) if (node.receipt?.thread_id) driven.add(String(node.receipt.thread_id));
+    }
+    return driven;
+  }
   async function releaseIdle() {
     const ours = new Set([...warm.values()].map(entry => entry.session).filter(Boolean));
     const idle = await harnessService().idleChatSessions?.(IDLE_RELEASE_MS, now()).catch(() => []) ?? [];
+    const quiet = await harnessService().quietWorkingChatSessions?.(STALE_WORKING_MS, now()).catch(() => []) ?? [];
+    // Only when every driven run could be read: a session one of them still uses is never stopped.
+    const driven = quiet.length ? await drivenSessions() : new Set();
+    const stale = driven ? quiet.filter(id => !driven.has(id)) : [];
     const released = [];
-    for (const id of idle) {
-      if (ours.has(id)) continue;
+    for (const id of [...idle, ...stale]) {
+      if (ours.has(id) || released.includes(id)) continue;
       if (await harnessService().exitAgent?.(id).then(() => true, () => false)) released.push(id);
     }
+    if (stale.length) logger?.info?.("ao.stale_working_released", { count: released.filter(id => stale.includes(id)).length, quiet: quiet.length });
     return released;
   }
   function scheduleIdleRelease(delay, early = [...IDLE_EARLY_SWEEPS_MS]) {
