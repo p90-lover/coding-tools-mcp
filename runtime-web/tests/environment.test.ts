@@ -866,6 +866,32 @@ describe("trusted Codex task environment continuity", () => {
     expect(resolvePreTurnCompaction(elsewhere, null, "01a13e27-f41e-7db1-8804-670775eca2a0").cwd).toBe(root);
   });
 
+  // The 2026-10-21 goal round itself, item for item: the kept objective and "retry" from earlier
+  // turns, this turn's AGENTS.md + environment, the unstamped compaction, the deferred-tools notice,
+  // then Codex's own CRLF goal block as the instruction, with no time or page context.
+  test("a goal round after an unstamped automatic compaction resolves its cwd from the rollout", () => {
+    const { codexHome, request } = resumedRootFixture();
+    const turn = { internal_chat_message_metadata_passthrough: { turn_id: rolloutTurnId } };
+    const developer = (id: string, text: string) => ({ type: "message", id, role: "developer", ...turn, content: [{ type: "input_text", text }] });
+    (request._rawBody as { input: unknown[] }).input = [
+      { type: "message", id: "msg_objective", role: "user", internal_chat_message_metadata_passthrough: { turn_id: "01a15768-e439-7390-a691-57ddbf363d8d" },
+        content: [{ type: "input_text", text: "ensure auto upgrade works on every account" }] },
+      developer("msg_app_context", "<app-context># Codex desktop context</app-context>"),
+      developer("msg_role", "<multi_agent_role>You are `/root`.</multi_agent_role>"),
+      { type: "message", id: "msg_world", role: "user", ...turn, content: [
+        { type: "input_text", text: "# AGENTS.md instructions\n\n<INSTRUCTIONS>Use the repository tools.</INSTRUCTIONS>" },
+        { type: "input_text", text: environmentXml },
+      ] },
+      { type: "message", id: "msg_retry", role: "user", internal_chat_message_metadata_passthrough: { turn_id: "01a159fa-9453-7512-871b-9d593e303a48" },
+        content: [{ type: "input_text", text: "retry" }] },
+      { type: "compaction", id: "cmp_goal", encrypted_content: "opaque" },
+      developer("msg_tools", "<tools>\nAdded deferred tool namespaces:\n- mcp__code_review\n</tools>"),
+      { type: "message", id: "msg_goal", role: "user", ...turn, content: [{ type: "input_text",
+        text: "<codex_internal_context source=\"goal\">\nContinue working toward the active thread goal.\r\n\r\n<objective>\r\nensure auto upgrade works\r\n</objective>\r\n\n</codex_internal_context>" }] },
+    ];
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request).cwd).toBe(root);
+  });
+
   test.skipIf(process.platform !== "win32")("resumed Windows tasks accept the same indexed rollout with either path namespace", () => {
     for (const namespaceHome of [false, true]) for (const namespaceRollout of [false, true]) {
       const { codexHome, request, rolloutPath } = resumedRootFixture();

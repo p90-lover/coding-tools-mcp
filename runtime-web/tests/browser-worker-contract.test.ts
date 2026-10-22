@@ -6,7 +6,7 @@ import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright-core";
 import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptDetachedTurnIdentity, chatGptAcceptedUserTurnCount, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_FILE_INPUT_SELECTOR, ensureChatGptPersonalizedConnectorAccess } from "../src/adapters/chatgpt-web/browser-worker";
-import { observeChatGptMarkdown } from "../src/adapters/chatgpt-web/browser-worker";
+import { chatGptComposerPromptText, observeChatGptMarkdown } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
@@ -1117,6 +1117,43 @@ test("large Markdown-rich context uses one plain-text editing command before exa
     ["evaluateOptions", { timeout: 20_000 }],
   ]);
   expect(asserted).toBe(prompt);
+});
+
+// Seen live (2026-10-22): a goal round's plain prompt failed with "did not preserve the complete
+// prompt (expectedChars=13575, actualChars=13575, commonPrefixChars=7067)". Codex's goal block uses
+// CRLF; ChatGPT's composer turns each \r into its own line break, so the readback kept the length
+// but not the text, at the block's first \r.
+test("a CRLF prompt is sent with one line break per CRLF, so the composer reads back what was sent", async () => {
+  const goal = "<codex_internal_context source=\"goal\">\nContinue working toward the active thread goal.\r\n\r\nBudget:\r\n- Tokens used: 8268043\r\n\n</codex_internal_context>";
+  const prompt = `${"summary ".repeat(870)}\n\n${goal}\n\nkeep going`;
+  let inserted = "";
+  const composer = {
+    fill: async (value: string) => { inserted = value; },
+    focus: async () => {},
+    evaluate: async (_fn: unknown, value: string) => { inserted += value; return true; },
+  };
+  // What ChatGPT's editor holds after an insert: no carriage returns, each one a line break.
+  const readback = (): string => inserted.replace(/\r/g, "\n");
+  const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+    activeComposer: async () => composer,
+    attachedPromptText: async () => readback(),
+  }) as ChatGptBrowserWorker;
+  const attachPrompt = (ChatGptBrowserWorker.prototype as unknown as {
+    attachPrompt(page: unknown, prompt: string, localTools: boolean): Promise<void>;
+  }).attachPrompt;
+  const promptTextEquivalent = (ChatGptBrowserWorker.prototype as unknown as {
+    promptTextEquivalent(expected: string, observed: string): boolean;
+  }).promptTextEquivalent;
+
+  // The old transport: same length, different text from the first \r on.
+  expect(prompt.replace(/\r/g, "\n").length).toBe(prompt.length);
+  expect(promptTextEquivalent.call(worker, prompt, prompt.replace(/\r/g, "\n"))).toBeFalse();
+
+  await attachPrompt.call(worker, {}, prompt, false);
+  expect(inserted).toBe(chatGptComposerPromptText(prompt));
+  expect(inserted).not.toContain("\r");
+  expect(inserted).toContain("thread goal.\n\nBudget:\n- Tokens used: 8268043\n\n</codex_internal_context>");
+  expect(chatGptComposerPromptText("a\rb\r\nc\nd")).toBe("a\nb\nc\nd");
 });
 
 test("plain-text editing command fails closed when the focused composer rejects it", async () => {

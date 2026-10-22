@@ -2274,6 +2274,16 @@ export function chatGptPromptFilePayloads(
 }
 
 /**
+ * The prompt as ChatGPT's composer can hold it. The editor has no carriage return: each `\r` of a
+ * CRLF becomes its own line break, so the composer reads back `\n\n` where `\r\n` was sent, the
+ * same length but different text. Codex's goal-continuation block arrives with CRLF line endings
+ * on Windows, which failed every goal round's prompt check. Send one `\n` per line break instead.
+ */
+export function chatGptComposerPromptText(prompt: string): string {
+  return prompt.replace(/\r\n?/g, "\n");
+}
+
+/**
  * Insert `value` at the caret of an already-resolved ChatGPT composer, returning whether the edit
  * was applied. Runs inside the page, so it may reference only globals and its two arguments.
  *
@@ -3541,6 +3551,7 @@ export class ChatGptBrowserWorker {
     requireThink = false,
   ): Promise<void> {
     throwIfPromptAttachmentAborted(abortSignal);
+    prompt = chatGptComposerPromptText(prompt);
     const connectorMode = chatGptConnectorAttachmentMode(localTools, reuseConnector);
     let composerMutationStarted = false;
     try {
