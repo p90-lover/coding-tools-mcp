@@ -430,6 +430,7 @@ class RuntimeSupervisor {
       ? getRuntimeEnvironment
       : () => ({});
     this.configPath = path.join(coreHome, "config.json");
+    this.configCache = null; // { size, mtimeMs, value }: see readConfigJson
     this.statePath = path.join(coreHome, "runtime", "launcher-supervisor.json");
     this.daemon = null;
     this.tunnel = null;
@@ -456,10 +457,28 @@ class RuntimeSupervisor {
     this.daemonLogPath = path.join(coreHome, "runtime", "daemon.log");
   }
 
+  /**
+   * config.json as parsed JSON (a fresh copy each call), or undefined when it does not exist.
+   * Monitors read it every 2-60 s, each through readSetupConfig and readConfig; on a busy hard disk
+   * those four synchronous calls stalled the whole app. It is parsed again only when its size or
+   * time changes, whoever wrote it.
+   */
+  readConfigJson() {
+    let stat;
+    try { stat = fs.statSync(this.configPath); } catch { this.configCache = null; return undefined; }
+    const cached = this.configCache;
+    if (!cached || cached.size !== stat.size || cached.mtimeMs !== stat.mtimeMs) {
+      this.configCache = null;
+      this.configCache = { size: stat.size, mtimeMs: stat.mtimeMs, value: readJson(this.configPath) };
+    }
+    return structuredClone(this.configCache.value);
+  }
+
   readConfig() {
-    if (!fs.existsSync(this.configPath)) return null;
+    const config = this.readConfigJson();
+    if (config === undefined) return null;
     return validateConfig(
-      readJson(this.configPath),
+      config,
       this.browserDescriptorPath,
       this.platform,
       this.launcherProfile,
@@ -467,8 +486,8 @@ class RuntimeSupervisor {
   }
 
   readSetupConfig() {
-    if (!fs.existsSync(this.configPath)) return null;
-    const config = readJson(this.configPath);
+    const config = this.readConfigJson();
+    if (config === undefined) return null;
     if (!config || typeof config !== "object" || Array.isArray(config)) {
       throw new Error("Runtime configuration is not an object");
     }

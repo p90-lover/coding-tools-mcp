@@ -123,10 +123,11 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
     })
     : async (...args) => run(...args);
 
-  // locate() for the command path: the cached answer, refreshed without blocking when it is stale.
+  // locate() for the command path: the cached answer, refreshed without blocking when it is stale
+  // (or always, with `force`; a refresh already running is joined).
   let refreshing = null;
-  function locateAsync() {
-    if (now() - checkedAt < FIND_TTL_MS) return Promise.resolve(found);
+  function locateAsync(force = false) {
+    if (!force && now() - checkedAt < FIND_TTL_MS) return Promise.resolve(found);
     refreshing ??= (async () => {
       let next = null;
       for (const file of candidates()) {
@@ -212,8 +213,12 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
     return { available: true, text: String(text?.stdout ?? "").slice(0, 20_000), data };
   }
 
-  function status() {
-    const tool = locate(true);
+  /**
+   * The RTK page's status (resolves). rtk is looked up afresh, without blocking: `rtk --version`
+   * through spawnSync (5 s timeout per candidate) froze the app each time the page asked.
+   */
+  async function status() {
+    const tool = await locateAsync(true);
     return { enabled: enabled(), installed: Boolean(tool), installing: Boolean(installing), path: tool?.path ?? null, version: tool?.version ?? null,
       minimum: MIN_VERSION.join("."), installCommand: platform === "win32" ? "winget install rtk-ai.rtk" : "brew install rtk" };
   }
@@ -233,7 +238,7 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
         installing = null;
         checkedAt = -Infinity;
         logger?.info?.("rtk.install_finished", { code });
-        resolve({ code, output: output.trim().slice(-2_000), status: status() });
+        status().then((current) => resolve({ code, output: output.trim().slice(-2_000), status: current }), reject);
       });
     });
     return installing;
