@@ -485,14 +485,53 @@ function surfaceComposer(seed = {}) {
     "./AgentOrchestratorCanvas": { AgentOrchestratorCanvas: "Canvas" },
     "./AgentOrchestratorOriginalSurface": { AgentOrchestratorOriginalSurface: "OriginalBoard" },
     "./ao-chat": chat,
+    "./chat-split": feature("chat-split.ts"),
     "./page-visibility": { useSurfaceHidden: () => () => false, pageHidden: () => false, onAoPush: () => () => {} },
   };
-  const surface = loadSurface(react, { localStorage: { getItem: () => "w", setItem() {} }, structuredClone }, imports);
+  const surface = loadSurface(react,{ localStorage: { getItem: () => "w", setItem() {} }, structuredClone, crypto: globalThis.crypto }, imports);
   const walk = item => !item || typeof item !== "object" ? [] : Array.isArray(item) ? item.flatMap(walk) : [item, ...walk(item.props?.children)];
   const render = () => { cursor = 0; refCursor = 0; return surface.AgentOrchestratorSurface({ language: "en", setError() {} }); };
   const currentChat = () => walk(render()).find(item => item.type === "Chat");
   return { state, calls, render, walk, currentChat };
 }
+
+test("split view: Split view and New chat add panes, the sidebar fills the focused pane, and closing the window's chat promotes the next", () => {
+  const fixture = surfaceComposer({ chatTaskId: "t1" });
+  const list = () => fixture.walk(fixture.render()).find(item => item.props?.actions?.openSplit);
+  const panes = () => plain(fixture.state.splitPanes.map(item => [item.taskId, item.col, item.row]));
+  assert.equal(fixture.currentChat().props.onClosePane, undefined, "one chat alone has no Close split view");
+
+  list().props.actions.openSplit("w", "t2");
+  assert.deepEqual(panes(), [["t2", 1, 0]], "Open in ▸ Split view: a column to the right");
+  assert.equal(fixture.state.focusedPane, fixture.state.splitPanes[0].id, "and it is focused");
+  list().props.actions.openSplit("w", "t1");
+  assert.equal(fixture.state.focusedPane, "main", "a chat already open is focused, never opened twice");
+  assert.deepEqual(plain(list().props.openTaskIds), ["t1", "t2"], "the sidebar offers no Split view for them");
+
+  // The user's rule: New chat in a split window opens one more pane instead of replacing a chat.
+  list().props.actions.newChat();
+  assert.deepEqual(panes(), [["t2", 1, 0], ["", 0, 1]], "two columns full: below the window's chat");
+  assert.equal(fixture.state.chatTaskId, "t1", "the window's own chat stays");
+  const draft = fixture.state.splitPanes[1];
+  assert.equal(fixture.state.focusedPane, draft.id);
+
+  // A sidebar click goes to the focused pane.
+  list().props.actions.select("t3");
+  assert.deepEqual(panes(), [["t2", 1, 0], ["t3", 0, 1]]);
+  assert.equal(list().props.selectedTaskId, "t3", "the sidebar marks the focused pane's chat");
+
+  const host = fixture.walk(fixture.render()).find(item => Array.isArray(item.props?.panes));
+  assert.deepEqual(plain(host.props.panes.map(item => [item.content.props.pane.workspaceId, item.content.props.pane.taskId])), [["w", "t2"], ["w", "t3"]],
+    "each pane is a Surface of its own, told which chat to show");
+  assert.equal(typeof fixture.currentChat().props.onClosePane, "function", "while split the window's chat has Close split view too");
+
+  // Closing the window's chat: the first pane with a chat, by column then row, takes its place.
+  fixture.currentChat().props.onClosePane();
+  assert.equal(fixture.state.chatTaskId, "t3");
+  assert.deepEqual(panes(), [["t2", 1, 0]]);
+  host.props.panes[0].content.props.pane.onClose();
+  assert.deepEqual(panes(), [], "closing the last pane leaves one chat");
+});
 
 test("Surface defaults to red Single and sends only one explicit route without saving a reusable team", async () => {
   const fixture = surfaceComposer();
