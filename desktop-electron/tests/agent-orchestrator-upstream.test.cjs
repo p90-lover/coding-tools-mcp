@@ -200,6 +200,69 @@ test("a session's project folder is named for its tools only for the chat's own 
   assert.equal(await folderModeRoot(session, folder, "w1"), null, "a project that never chose");
 });
 
+test("the folder default waits behind the project's dependency-link sync only when it has to write", async () => {
+  // Seen live: the first launch in a project after the app started waited 19 s behind its link
+  // sync just to read a mode that was already "folder".
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("  const folderModeChecked = new Set();");
+  const fn = source.slice(start, source.indexOf("  /** The project folder a folder-mode session works in", start));
+  const calls = [];
+  const stored = { p2: { id: "p2", kind: "single_repo", config: { workspaceMode: "worktree" } }, p3: { id: "p3", kind: "single_repo", config: { other: 1 } } };
+  const defaultToFolderMode = vm.runInNewContext(`${fn}; defaultToFolderMode`, {
+    internalApi: async (method, endpoint, body) => {
+      calls.push(`${method} ${endpoint}`);
+      return method === "GET" ? { project: stored[endpoint.split("/").pop()] } : { ok: true, body };
+    },
+    dependencyLinks: { exclusive: async (_id, work) => { calls.push("queued"); return work(); } },
+  });
+  await defaultToFolderMode({ id: "p1", kind: "single_repo", config: { workspaceMode: "folder" } });
+  assert.deepEqual(calls, [], "a mode the project list already shows needs no read and no queue");
+  await defaultToFolderMode({ id: "p2", kind: "single_repo" });
+  assert.deepEqual(calls, ["GET /api/v1/projects/p2"], "a chosen mode is read once, outside the queue");
+  calls.length = 0;
+  await defaultToFolderMode({ id: "p3", kind: "single_repo" });
+  assert.deepEqual(calls, ["GET /api/v1/projects/p3", "queued", "GET /api/v1/projects/p3", "PUT /api/v1/projects/p3/config"],
+    "only a project that never chose is written, on the sync's queue");
+  calls.length = 0;
+  await defaultToFolderMode({ id: "p3", kind: "single_repo" });
+  assert.deepEqual(calls, [], "checked once per project");
+});
+
+test("a workspace's known AO project is used at once while its binding is refreshed behind the launch", async () => {
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("  async function projectFor");
+  const fn = source.slice(start, source.indexOf("  async function chatTools", start));
+  let clock = 1_000_000, binds = 0;
+  const pending = [];
+  const { projectFor, forgetProject } = vm.runInNewContext(`${fn}; ({ projectFor, forgetProject })`, {
+    Map, Error, Date: { now: () => clock },
+    workspaceBoard: { bind: () => { binds += 1; return new Promise((resolve, reject) => pending.push({ resolve, reject })); } },
+  });
+  const first = projectFor("w1");
+  pending.shift().resolve({ projectId: "p1" });
+  assert.equal(await first, "p1", "the first launch waits for its binding");
+  assert.equal(await projectFor("w1"), "p1");
+  assert.equal(binds, 1, "kept for a minute");
+  clock += 61_000;
+  assert.equal(await projectFor("w1"), "p1", "a stale binding answers at once");
+  assert.equal(binds, 2, "and is refreshed");
+  assert.equal(await projectFor("w1"), "p1", "a launch during the refresh does not wait for it either");
+  assert.equal(binds, 2);
+  pending.shift().reject(new Error("AO project registration failed"));
+  await new Promise((resolve) => setImmediate(resolve));
+  const afresh = projectFor("w1");
+  assert.equal(binds, 3, "a failed refresh is forgotten; the next launch binds afresh");
+  pending.shift().resolve({ projectId: "p9" });
+  assert.equal(await afresh, "p9");
+  forgetProject("w1");
+  const again = projectFor("w1");
+  pending.shift().resolve({ projectId: "p9" });
+  assert.equal(await again, "p9");
+  assert.equal(binds, 4, "a forgotten binding (a failed start) is waited for again");
+});
+
 test("a session AO runs in the chat workspace's own folder is named a project folder, whatever its project lookup says", async () => {
   // Seen live (project "reg-machine"): an exec_command failed with "not one of AO's worktrees"
   // although the chat ran in the project's own folder; the folder-mode lookup could not confirm it.
