@@ -259,7 +259,10 @@
 /* ---------- Composer ---------- */
 /* The queued bar's ink is Claude's text; its muted text stays Claude Code's gray-400 (#898781). */
 .ao-workflow .cx-chat .cx-queued { --cq-ink: var(--claude-text); }
-.ao-workflow .cx-chat .cx-composer, .ao-workflow .cx-chat .cx-context-strip, .ao-workflow .cx-chat .cx-command-card, .ao-workflow .cx-chat .cx-queued,
+/* Edit goal in Claude's palette: its raised surface, line and shadow, and Claude's text as ink. */
+.ao-workflow .cx-chat .cx-goal-edit { --ge-ink: var(--claude-text); border-color: var(--claude-line); background: var(--claude-raised); box-shadow: var(--claude-shadow); }
+.ao-workflow .cx-chat .cx-goal-edit-save { color: var(--claude-raised); }
+.ao-workflow .cx-chat .cx-composer, .ao-workflow .cx-chat .cx-context-strip, .ao-workflow .cx-chat .cx-command-card, .ao-workflow .cx-chat .cx-queued, .ao-workflow .cx-chat .cx-goal-edit,
 .ao-workflow .cx-chat .cx-composer-modes, .ao-workflow .cx-chat .cx-route-note,
 /* The approval card docks above the composer at its exact width, as Codex's does (it was 40px wider). */
 .ao-workflow .cx-chat .cx-approval-dock { max-width: 740px; }

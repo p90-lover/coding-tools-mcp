@@ -222,6 +222,12 @@ test("Codex slash commands run from the composer in a Single chat or a team, wit
   const option = walk(newChat.render({ commands: commands() })).find((element) => element.props?.role === "option");
   walk(option).find((element) => element.type === "button").props.onClick();
   assert.equal(walk(newChat.render({ commands: commands() })).find((element) => element.type === "textarea").props.value, "/goal ");
+  // A bare /goal with no goal set shows no usage card: it waits for the objective in the box, where
+  // the line under it says how /goal is used.
+  type(newChat, "/goal"); await enter(newChat);
+  assert.doesNotMatch(text(cardOf(newChat)), /Usage|No goal/, "no card repeating the usage line");
+  assert.equal(walk(newChat.render({ commands: commands() })).find((element) => element.type === "textarea").props.value, "/goal ");
+  type(newChat, "");
 
   // A working team chat: /status, /goal pause and /compact's refusal still run; a goal shows its pill.
   goal = { objective: "ship the release", status: "active", round: 2, rounds: 6, startedAt: Date.now() - 5 * 60_000, updatedAt: Date.now(), note: "" };
@@ -252,6 +258,11 @@ test("Codex slash commands run from the composer in a Single chat or a team, wit
   await settle(); await settle();
   assert.deepEqual(actions.at(-1), ["edit", "ship the release with notes"]);
   assert.equal(editor(), undefined, "the editor closes after saving");
+  // A bare /goal with a goal opens the same editor; Esc closes it unsaved.
+  type(teamChat, "/goal"); await enter(teamChat);
+  assert.equal(walk(editor()).find((element) => element.type === "textarea").props.value, "ship the release");
+  walk(editor()).find((element) => element.type === "textarea").props.onKeyDown({ key: "Escape", preventDefault() {} });
+  assert.equal(editor(), undefined);
   // A paused goal offers Resume instead of Pause.
   goal = { ...goal, status: "paused" };
   const pausedPill = walk(teamChat.render({ commands: commands() })).find((element) => String(element.props?.className).startsWith("cx-goal "));

@@ -1472,10 +1472,11 @@ export function AgentOrchestratorChat({
         case "goal": {
           const goal = commands?.goal;
           const action = arg.toLowerCase();
+          // A bare /goal opens the goal to edit, or with none set waits for one in the box: the line
+          // under the box already says how /goal is used, and a card repeating it only got in the way.
           if (!arg) {
-            setCard(goal ? { title: GOAL_SUMMARY[goal.status], rows: [["Goal", goal.objective], ["Round", goalRounds(goal)],
-              ["Running for", goalElapsed(goal.startedAt)], ...(goal.note ? [["Note", goal.note] as [string, string]] : [])] }
-              : { title: "Goal", text: "No goal set.\nUsage: /goal <objective> | pause | resume | edit | clear\nExample: /goal make every test in this project pass" });
+            if (goal) { setCard(null); setGoalEditing(goal.objective); }
+            else { setDraft("/goal "); input.current?.focus(); }
             break;
           }
           if (["pause", "resume", "clear"].includes(action)) {
@@ -1885,15 +1886,28 @@ export function AgentOrchestratorChat({
           <footer><button type="button" className="cx-text-button" onClick={() => setDeleting(null)}>Cancel</button>
             <button type="button" className="cx-primary-button" disabled={Boolean(deleteBlocked) || deletingBusy} onClick={() => void confirmDelete()}>Delete</button></footer>
         </section> : null}
-        {goalEditing !== null && commands?.goal ? <section className="cx-command-card cx-goal-editor" aria-label="Edit goal">
-          <header><strong>Edit goal</strong>
-            <button type="button" className="cx-icon-button" aria-label="Cancel" onClick={() => setGoalEditing(null)}><Icon name="close" width="12" height="12" /></button></header>
-          <textarea aria-label="Goal" rows={4} maxLength={2000} value={goalEditing} placeholder="Describe your goal, define measurable outcomes for best results"
-            onChange={(event) => setGoalEditing(event.target.value)} />
-          <footer><button type="button" className="cx-text-button" onClick={() => setGoalEditing(null)}>Cancel</button>
-            <button type="button" className="cx-primary-button" disabled={!goalEditing.trim() || goalEditing.trim() === commands.goal.objective}
-              onClick={() => void commands.goalEdit(goalEditing.trim()).then(() => setGoalEditing(null), (cause) => say("Edit goal", cause instanceof Error ? cause.message : String(cause)))}>Save</button></footer>
-        </section> : null}
+        {goalEditing !== null && commands?.goal ? (() => {
+          // The goal bar opened for editing: its target and "Edit goal", the objective in a box that
+          // grows with it, then how long it may be, Cancel and Save. Ctrl+Enter saves, Esc cancels.
+          const next = goalEditing.trim();
+          const changed = Boolean(next) && next !== commands.goal.objective;
+          const save = () => {
+            if (changed) void commands.goalEdit(next).then(() => setGoalEditing(null), (cause) => say("Edit goal", cause instanceof Error ? cause.message : String(cause)));
+          };
+          return <section className="cx-goal-edit" aria-label="Edit goal">
+            <header><GoalGlyph name="target" /><strong>Edit goal</strong>
+              <button type="button" className="cx-goal-icon" aria-label="Cancel" title="Cancel (Esc)" onClick={() => setGoalEditing(null)}><Icon name="close" width="12" height="12" /></button></header>
+            <textarea aria-label="Goal" autoFocus rows={2} maxLength={2000} value={goalEditing} placeholder="What should be true when it's done? Name an outcome you can check."
+              onChange={(event) => setGoalEditing(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); save(); }
+                else if (event.key === "Escape") { event.preventDefault(); setGoalEditing(null); }
+              }} />
+            <footer><span className="cx-goal-edit-hint">{goalEditing.length > 1600 ? `${goalEditing.length} / 2000` : "Ctrl+Enter to save"}</span>
+              <button type="button" className="cx-goal-edit-cancel" onClick={() => setGoalEditing(null)}>Cancel</button>
+              <button type="button" className="cx-goal-edit-save" disabled={!changed} onClick={save}>Save</button></footer>
+          </section>;
+        })() : null}
         {wakeupEditing !== null && commands?.wakeup && commands.editWakeup ? (() => {
           const minutes = Number(wakeupEditing.minutes);
           const valid = wakeupEditing.reason.trim() !== "" && Number.isSafeInteger(minutes) && minutes >= 1 && minutes <= 720;

@@ -1099,8 +1099,35 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-goal > svg { flex: 0 0 auto; color: var(--ao-muted); }
 .cx-goal-state { font-weight: 500; color: var(--color-text-primary); }
 .cx-goal-objective { color: var(--ao-muted); }
-.cx-goal .cx-goal-icon { display: inline-grid; place-items: center; width: 24px; height: 24px; padding: 0; border-radius: 6px; color: var(--ao-muted); }
+/* Its icons get room: 26 px targets 4 px apart, and 6 px between the running time and the first. */
+.cx-goal .cx-goal-icon { display: inline-grid; flex: 0 0 auto; place-items: center; width: 26px; height: 26px; padding: 0; border-radius: 6px; color: var(--ao-muted); }
 .cx-goal .cx-goal-icon:hover { background: var(--cx-hover); color: var(--color-text-primary); }
+.cx-goal .cx-goal-icon + .cx-goal-icon { margin-left: 4px; }
+.cx-goal .cx-goal-meta { margin-right: 6px; font-variant-numeric: tabular-nums; }
+/* Edit goal: the goal bar opened up. Its target and title, the objective in a soft box that grows
+   with its text (up to 40% of the window), then a hint, Cancel and an ink Save. */
+.cx-goal-edit { width: calc(100% - 48px); max-width: 780px; margin: 0 auto 8px; padding: 10px 12px 12px; box-sizing: border-box;
+  border: 1px solid var(--ao-line); border-radius: 12px; background: var(--color-bg-primary); box-shadow: 0 6px 18px rgb(16 24 40 / 6%);
+  --ge-ink: var(--color-text-primary); color: var(--ge-ink); font-size: 13px; }
+.cx-goal-edit header { display: flex; align-items: center; gap: 8px; }
+.cx-goal-edit header > svg { flex: 0 0 auto; color: var(--ao-muted); }
+.cx-goal-edit header strong { flex: 1 1 auto; font-size: 13px; font-weight: 500; }
+.cx-goal-edit .cx-goal-icon { display: inline-grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 6px;
+  background: transparent; color: var(--ao-muted); cursor: pointer; }
+.cx-goal-edit .cx-goal-icon:hover { background: var(--cx-hover); color: var(--ge-ink); }
+.cx-goal-edit textarea { display: block; width: 100%; min-height: 64px; max-height: 40vh; margin: 8px 0 0; padding: 8px 10px; box-sizing: border-box;
+  border: 1px solid transparent; border-radius: 8px; outline: none; background: color-mix(in srgb, var(--ge-ink) 4%, transparent); color: var(--ge-ink);
+  font: inherit; font-size: 13px; line-height: 20px; resize: none; field-sizing: content; overflow-wrap: anywhere; }
+.cx-goal-edit textarea:focus { border-color: color-mix(in srgb, var(--ge-ink) 18%, transparent); background: transparent; }
+.cx-goal-edit textarea::placeholder { color: var(--ao-muted); }
+.cx-goal-edit footer { display: flex; align-items: center; gap: 6px; margin-top: 10px; }
+.cx-goal-edit-hint { flex: 1 1 auto; min-width: 0; color: var(--ao-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.cx-goal-edit-cancel, .cx-goal-edit-save { height: 28px; padding: 0 12px; border: 0; border-radius: 8px; font: inherit; font-size: 12px; font-weight: 500; cursor: pointer; }
+.cx-goal-edit-cancel { background: transparent; color: var(--ao-muted); }
+.cx-goal-edit-cancel:hover { background: var(--cx-hover); color: var(--ge-ink); }
+.cx-goal-edit-save { background: var(--ge-ink); color: var(--color-bg-primary); }
+.cx-goal-edit-save:disabled { opacity: .3; cursor: default; }
+.cx-goal-edit :is(button, textarea):focus-visible { outline: 2px solid var(--color-focus, #2c84db); outline-offset: 1px; }
 .cx-goal-editor textarea { width: 100%; min-height: 84px; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--ao-line); border-radius: 8px; background: var(--color-bg-primary); color: var(--color-text-primary); font: inherit; resize: vertical; }
 .cx-goal-editor footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 .cx-goal-editor .cx-text-button, .cx-goal-editor .cx-primary-button { padding: 5px 12px; border: 0; border-radius: 8px; font-size: 12px; cursor: pointer; }
