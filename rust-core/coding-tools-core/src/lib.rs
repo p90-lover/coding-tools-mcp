@@ -14,7 +14,7 @@ pub use coding_tools_mcp_desktop_lib::{
 };
 
 use data::{AppData, DataStore};
-use error::{AppError, AppResult};
+use error::AppResult;
 use runtime::RuntimeSupervisor;
 
 /// Shared application state used by both the retained Tauri adapter and the
