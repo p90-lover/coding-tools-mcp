@@ -471,6 +471,9 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-step-meta { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--ao-muted); text-overflow: ellipsis; white-space: nowrap; }
 .cx-step.tone-stalled .cx-step-meta { color: var(--ao-amber); }
 .cx-step.tone-error .cx-step-meta { color: var(--ao-red); }
+/* How the card runs, after its state on the same row; the state keeps its width, the route is cut. */
+.cx-step-meta:has(+ .cx-step-route) { flex: 0 1 auto; }
+.cx-step-route { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--ao-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; opacity: .8; }
 .cx-step-body { margin: 2px 0 8px 22px; color: var(--color-text-primary); }
 .cx-step-detail { margin: 0 0 4px; color: var(--ao-muted); font-size: 12px; overflow-wrap: anywhere; }
 .cx-step-error { margin: 0; color: var(--ao-red); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }

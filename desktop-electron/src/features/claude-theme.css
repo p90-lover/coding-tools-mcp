@@ -183,6 +183,7 @@
 .ao-workflow .cx-chat .cx-step-head:hover:not(:disabled) { background: var(--cx-hover); color: var(--claude-text); }
 .ao-workflow .cx-chat .cx-step-name { color: var(--claude-text); font-weight: 500; }
 .ao-workflow .cx-chat .cx-step-meta { color: var(--claude-text-2); }
+.ao-workflow .cx-chat .cx-step-route { color: var(--claude-text-3, var(--claude-text-2)); }
 .ao-workflow .cx-chat .cx-step-body { margin: 2px 0 8px 14px; padding-left: 12px; border-left: 1px solid var(--claude-line-soft); }
 .ao-workflow .cx-chat .cx-step-detail { color: var(--claude-text-2); font-size: 12px; }
 .ao-workflow .cx-chat .cx-step-error { font-size: 13px; }

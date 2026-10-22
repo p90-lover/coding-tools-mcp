@@ -438,10 +438,12 @@ function StepRow({ step, runId, loadWork }: { step: ChatStep; runId: string; loa
           : step.error ? "failed" : step.verdict || (step.state === "finished" ? "done" : step.state)}
         {step.working && step.startedAtMs ? <> · <Elapsed since={step.startedAtMs} /></> : null}
       </span>
+      {/* How the card runs (Claude Code · CPA · Cline Pass · mimo-v2.6-pro · effort max · 400,000
+          context), on the row itself: it was only in the opened body. */}
+      {step.detail ? <span className="cx-step-route" title={step.detail}>{step.detail}</span> : null}
       {body ? <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} /> : null}
     </button>
     {open ? <div className="cx-step-body">
-      {step.detail ? <p className="cx-step-detail">{step.detail}</p> : null}
       {step.working && !compact ? <p className="cx-step-detail">{step.working.detail}</p> : null}
       {/* Its earlier rounds first, folded (oldest first), then the attempt now: a retried card's
           failed attempt showed under the new attempt's work, as if it came after it. */}
