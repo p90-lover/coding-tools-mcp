@@ -113,6 +113,26 @@ test("a chat whose launch came back without a session can be archived: it owns n
   assert.ok(world.calls.some(c=>c[1]?.change?.change?.operation==="set_visibility"),"the chat is archived");
 });
 
+test("a chat whose agent has no controller running can be archived: its run is stopped and it has no turn to stop", async()=>{
+  // Seen live 2026-10-22: Archive failed twice with "the agent controller for this session is not
+  // running (CHAT_CONTROLLER_NOT_READY)": the run was already stopped, then the agent's interrupt
+  // was refused and the refusal failed the archive.
+  for (const action of ["archive_task","delete_task"]) {
+    const interrupted=[];
+    const world=reconfigureWorld(undefined,{aoHarness:{
+      interrupt:async id=>{interrupted.push(id);throw Error("the agent controller for this session is not running (CHAT_CONTROLLER_NOT_READY)")},
+      observe:async()=>({status:"ready",turnState:"interrupted"})}});
+    await world.workflow.call(action,{workspaceId:"ws",taskId:"task"});
+    assert.deepEqual(interrupted,["owned"],"the agent's stop was still asked for");
+    assert.ok(world.calls.some(c=>c[0]==="/api/v1/ao/control"&&c[1].action==="stop"),"the run is stopped");
+    assert.ok(world.calls.some(c=>c[1]?.change?.change?.operation==="set_visibility"),`the chat is ${action==="archive_task"?"archived":"deleted"}`);
+  }
+  // Any other refusal still stops the archive: the turn may still be running.
+  const world=reconfigureWorld(undefined,{aoHarness:{interrupt:async()=>{throw Error("AO request timed out")},observe:async()=>({status:"working",turnState:"running"})}});
+  await assert.rejects(world.workflow.call("archive_task",{workspaceId:"ws",taskId:"task"}),/timed out/);
+  assert.ok(!world.calls.some(c=>c[1]?.change?.change?.operation==="set_visibility"));
+});
+
 test("model edits preserve missed, uncertain and cancelled schedule holds rather than launching",async()=>{
   for(const state of ["missed","needs_attention","cancelled","claimed"]){
     const world=reconfigureWorld();
@@ -3291,6 +3311,26 @@ test("a wake-up is dropped when the chat moved on, cancelled by the user, and re
   await assert.rejects(workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 5, reason: "  " }), /reason must say/);
 });
 
+test("the user edits a wake-up's note and minutes: it fires on the new clock with the new note", async () => {
+  const { world, workflow, advance } = wakeChat();
+  await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 30, reason: "check the build" });
+  const { id } = await wakeupOf(workflow);
+  await advance(60_000);
+  const edited = await workflow.call("chat_wakeup", { workspaceId: "ws-1", taskId: "task-1", action: "edit", id, minutes: 2, reason: " check the deploy " });
+  assert.equal(edited.wakeup.reason, "check the deploy");
+  assert.equal(edited.wakeup.dueAt, 1_000_000 + 60_000 + 2 * 60_000, "the minutes count from the edit");
+  assert.equal((await wakeupOf(workflow)).id, id, "the same wake-up, edited");
+  // A note-only edit keeps when it fires.
+  await workflow.call("chat_wakeup", { workspaceId: "ws-1", taskId: "task-1", action: "edit", id, reason: "check the deploy logs" });
+  assert.equal((await wakeupOf(workflow)).dueAt, 1_000_000 + 3 * 60_000);
+  const before = world.updates.length;
+  await advance(2 * 60_000);
+  assert.equal(world.updates.length, before + 1, "the old 30-minute timer is gone; the new one fired");
+  assert.match(world.edits.at(-1).description, /Your note: check the deploy logs/);
+  await assert.rejects(workflow.call("chat_wakeup", { workspaceId: "ws-1", taskId: "task-1", action: "edit", id, minutes: 5 }), /already fired/);
+  await assert.rejects(workflow.call("chat_wakeup", { workspaceId: "ws-1", taskId: "task-1", action: "snooze", id }), /edit or cancel/);
+});
+
 test("a goal waits for its agent's wake-up instead of starting the next round at once", async () => {
   const { world, workflow, advance } = wakeChat({ goal: true });
   const route = world.runs[0].nodes[0].route;
@@ -3320,6 +3360,10 @@ test("wake-ups are kept per chat in a file, and a due one sends, waits or drops"
     const again = createWakeupStore({ file });
     assert.equal(again.get("ws-1", "task-1").id, first.id, "it survives a restart");
     assert.deepEqual(again.all().map((item) => [item.workspaceId, item.taskId]), [["ws-1", "task-1"]]);
+    assert.equal(again.edit("ws-1", "task-1", "another-id", { reason: "x" }), null, "only the wake-up named is edited");
+    assert.throws(() => again.edit("ws-1", "task-1", first.id, { minutes: 0 }), /1 to 720/);
+    assert.equal(again.edit("ws-1", "task-1", first.id, { reason: " deploy " }).dueAt, 180_000, "a note edit keeps its time");
+    assert.equal(createWakeupStore({ file }).get("ws-1", "task-1").reason, "deploy", "the edit is saved");
     assert.equal(again.clear("ws-1", "task-1", "another-id"), false, "only the wake-up named is cleared");
     assert.equal(again.clear("ws-1", "task-1", first.id), true);
     assert.equal(createWakeupStore({ file }).get("ws-1", "task-1"), null);
@@ -3598,6 +3642,63 @@ test("the reviewer is told the agent's workspace folder, so a path inside it is 
   const unknown = await promptFor(() => { throw new Error("AO is restarting"); });
   assert.doesNotMatch(unknown.prompt, /Workspace folder:/);
   assert.deepEqual(unknown.resolved, ["yes"]);
+});
+
+test("the reviewer sees what the user asked in the chat and the worker's own description of a shell command", async () => {
+  // Seen live 2026-10-22: asked "can u kill the backend first . after the test is done , re open it .",
+  // the agent's `taskkill /PID 31332 /T /F` ("Kill uvicorn backend process tree") was denied as "not
+  // enough context to verify that PID 31332 is safe to stop": the prompt held the bare command only.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
+  async function promptFor({ projectId, board }) {
+    const request = { approval_id: "kill", source: "ao", kind: "command", tool: "PowerShell", command: "taskkill /PID 31332 /T /F",
+      reason: "Kill uvicorn backend process tree", summary: "PowerShell", decisions };
+    const mission = { id: "run", workspace_id: "ws", project_id: projectId, revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+      { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+    const prompts = [], resolved = [], listed = [];
+    const workflow = createAgentOrchestratorWorkflow({
+      findCodexExecutable: () => process.execPath,
+      resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+      cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+      fetchImpl: async (url, init) => {
+        if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
+        prompts.push(JSON.parse(init.body).messages[0].content);
+        return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"allow","reason":"the user asked for it"}' } }] }) };
+      },
+      requestHeadless: async (endpoint, body) => {
+        if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+        if (endpoint === "/api/v1/tools/call") { listed.push(structuredClone(body)); return board(); }
+        return { ok: true, run: mission };
+      },
+      aoHarness: {
+        observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: resolved.length ? [] : [request] }),
+        resolveApproval: async (session, requestId, decisionId) => { resolved.push(decisionId); return { ok: true }; },
+      },
+      confirm: async () => true,
+    });
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 200 && !resolved.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    mission.nodes[0].state = "finished";
+    return { prompt: prompts[0] ?? "", resolved, listed };
+  }
+  const asked = "Run the API tests.\n\nFollow-up (2026-10-22 09:20 UTC):\ncan u kill the backend first . after the test is done , re open it .";
+  const chat = await promptFor({ projectId: "task", board: () => ({ ok: true, operation: { state: "completed",
+    result: { ok: true, revision: 1, tasks: [], task: { id: "task", title: "API tests", description: asked } } } }) });
+  assert.ok(chat.listed.some(call => JSON.stringify(call).includes('"task_id":"task"')), "the chat's own task is read");
+  assert.ok(chat.prompt.includes(`What the user asked in this chat (their own words, latest last; this is the task):\n${asked}`));
+  assert.match(chat.prompt, /Request: taskkill \/PID 31332 \/T \/F\nThe worker describes this request as: Kill uvicorn backend process tree/);
+  assert.deepEqual(chat.resolved, ["yes"]);
+  // A long chat keeps its latest words: the task is cut from the front.
+  const long = await promptFor({ projectId: "task", board: () => ({ ok: true, operation: { state: "completed",
+    result: { ok: true, revision: 1, tasks: [], task: { id: "task", title: "API tests", description: "x".repeat(5000) + "\nkill the backend" } } } }) });
+  assert.match(long.prompt, /x+\nkill the backend\nRequest:/);
+  assert.ok(!long.prompt.includes("x".repeat(2001)));
+  // A task that cannot be read never holds the review up: the prompt just has no task line.
+  const unread = await promptFor({ projectId: "task", board: () => { throw new Error("AO is restarting"); } });
+  assert.doesNotMatch(unread.prompt, /What the user asked/);
+  assert.match(unread.prompt, /The worker describes this request as:/);
+  assert.deepEqual(unread.resolved, ["yes"]);
 });
 
 test("Approve for me asks a reviewer that failed again before involving the person, and never pops a tool call up", async () => {

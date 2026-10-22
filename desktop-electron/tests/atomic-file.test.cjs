@@ -8,7 +8,40 @@ const {
   WINDOWS_RENAME_RETRY_DELAYS_MS,
   renameAtomicFile,
   writePrivateFileAtomic,
+  writePrivateFileAtomicAsync,
 } = require("../electron/atomic-file.cjs");
+
+test("async atomic writes land in the order asked, leave no temp file, and never block", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "atomic-async-"));
+  const file = path.join(root, "nested", "state.json");
+  try {
+    const writes = Array.from({ length: 20 }, (_, index) => writePrivateFileAtomicAsync(file, `{"n":${index}}\n`));
+    assert.ok(writes.every((write) => write instanceof Promise));
+    assert.equal(fs.existsSync(file), false, "nothing is written before the caller yields");
+    await Promise.all(writes);
+    assert.equal(fs.readFileSync(file, "utf8"), '{"n":19}\n', "the last write asked for is the one on disk");
+    assert.deepEqual(fs.readdirSync(path.dirname(file)), ["state.json"], "no temp file is left");
+    // A BOM is dropped, as in the synchronous form.
+    await writePrivateFileAtomicAsync(file, "﻿{}\n");
+    assert.equal(fs.readFileSync(file, "utf8"), "{}\n");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a failed async write rejects and does not stop the next one", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "atomic-async-fail-"));
+  const blocker = path.join(root, "not-a-directory");
+  fs.writeFileSync(blocker, "x");
+  try {
+    await assert.rejects(writePrivateFileAtomicAsync(path.join(blocker, "state.json"), "{}"));
+    const file = path.join(root, "state.json");
+    await writePrivateFileAtomicAsync(file, "ok");
+    assert.equal(fs.readFileSync(file, "utf8"), "ok");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("atomic replacement retries bounded transient Windows file locks", () => {
   const waits = [];

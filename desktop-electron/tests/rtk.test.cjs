@@ -26,13 +26,33 @@ function world({ version = "rtk 1.0.1", rewrites = {}, enabled = true, files = [
   return { rtk, calls };
 }
 
-test("rtk is found in WinGet's Links folder, and only a real rtk at least 0.23.0 counts", () => {
-  assert.deepEqual(world().rtk.status(), { enabled: true, installed: true, installing: false, path: RTK, version: "1.0.1", minimum: "0.23.0", installCommand: "winget install rtk-ai.rtk" });
+test("rtk is found in WinGet's Links folder, and only a real rtk at least 0.23.0 counts", async () => {
+  assert.deepEqual(await world().rtk.status(), { enabled: true, installed: true, installing: false, path: RTK, version: "1.0.1", minimum: "0.23.0", installCommand: "winget install rtk-ai.rtk" });
   // Another crates.io project is also called rtk; an old rtk has no `rewrite`.
   for (const version of ["rtk-tui 0.4.0", "rtk 0.22.9", "something else"]) {
-    assert.equal(world({ version }).rtk.status().installed, false, version);
+    assert.equal((await world({ version }).rtk.status()).installed, false, version);
   }
-  assert.equal(world({ files: [] }).rtk.status().installed, false);
+  assert.equal((await world({ files: [] }).rtk.status()).installed, false);
+});
+
+test("the RTK page's status looks rtk up without blocking, and an agent's rewrite meanwhile keeps the cached answer", async () => {
+  // status() ran `rtk --version` through spawnSync (5 s timeout) on the main process each time.
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let lookups = 0;
+  const rtk = createRtk({ getEnabled: () => true, platform: "win32", now: () => 0, exists: (file) => file === RTK,
+    env: { PATH: "", LOCALAPPDATA: "C:\\Users\\me\\AppData\\Local" },
+    run: async (_file, args) => {
+      if (args[0] === "--version") { lookups += 1; if (lookups > 1) await gate; return { status: 0, stdout: "rtk 1.0.1\n" }; }
+      return { status: 0, stdout: "rtk git status" };
+    } });
+  assert.equal(await rtk.rewrite("git status"), `"${RTK}" git status`);
+  const pending = rtk.status();
+  assert.ok(pending instanceof Promise, "status resolves later instead of blocking");
+  assert.equal(await rtk.rewrite("git status"), `"${RTK}" git status`, "a rewrite does not wait for the page's lookup");
+  release();
+  assert.equal((await pending).installed, true);
+  assert.equal(lookups, 2);
 });
 
 test("a command runs as rtk's rewrite on exit 0 or 3, and as written otherwise", async () => {
@@ -82,6 +102,23 @@ test("on, Claude Code's hook and the agents' PATH point at the installed rtk", (
   assert.equal(rtk.binDir(), path.dirname(RTK));
 });
 
+test("AO's hook and PATH use the rtk at hand once looked up, refreshing a stale answer without blocking", async () => {
+  let clock = 0;
+  let lookups = 0;
+  const rtk = createRtk({ getEnabled: () => true, platform: "win32", now: () => clock, exists: (file) => file === RTK,
+    env: { PATH: "", LOCALAPPDATA: "C:\\Users\\me\\AppData\\Local" },
+    run: (_file, args) => { if (args[0] === "--version") lookups += 1; return { status: 0, stdout: "rtk 1.0.1\n" }; } });
+  assert.equal(rtk.binDir(), path.dirname(RTK), "the first answer is looked up");
+  assert.equal(lookups, 1);
+  clock = 10 * 60_000;
+  // Stale: answered from what is known now; the lookup runs in the background (an async run).
+  assert.equal(rtk.claudeHook(), `"${RTK}" hook claude`);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(lookups, 2, "refreshed in the background");
+  assert.equal(rtk.binDir(), path.dirname(RTK));
+  assert.equal(lookups, 2, "a fresh answer is not looked up again");
+});
+
 test("a rewritten command is judged as the command it wraps", () => {
   const { rtk } = world();
   rtk.locate();
@@ -116,9 +153,9 @@ function machine({ installed = false, enabled = true, code = 0, now = () => 0 } 
   return { rtk, winget };
 }
 
-test("rtk winget unpacked into its Packages folder is found: no Links shim, its PATH entry not seen yet", () => {
+test("rtk winget unpacked into its Packages folder is found: no Links shim, its PATH entry not seen yet", async () => {
   const { rtk } = machine({ installed: true });
-  assert.equal(rtk.status().path, PACKAGED);
+  assert.equal((await rtk.status()).path, PACKAGED);
   assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: `"${PACKAGED}" hook claude` });
   assert.equal(rtk.binDir(), path.dirname(PACKAGED), "AO's agents get its folder on PATH");
 });
@@ -127,10 +164,12 @@ test("missing rtk is installed at startup without a click, once, and every harne
   const { rtk, winget } = machine();
   const stamps = [];
   const first = rtk.autoInstall({ record: (at) => stamps.push(at) });
+  // rtk is looked up first, without blocking; winget starts once that answers "missing".
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(winget.length, 1);
   assert.deepEqual(winget[0].args.slice(0, 4), ["install", "--id", "rtk-ai.rtk", "-e"]);
   assert.ok(winget[0].args.includes("--silent") && winget[0].args.includes("--accept-package-agreements"), "no prompt to answer");
-  assert.equal(rtk.status().installing, true);
+  assert.equal((await rtk.status()).installing, true);
   // The person's click, or a second start, joins the same install.
   rtk.install();
   rtk.autoInstall();
@@ -138,7 +177,7 @@ test("missing rtk is installed at startup without a click, once, and every harne
   winget[0].finish();
   const result = await first;
   assert.equal(result.status.installed, true);
-  assert.equal(rtk.status().installing, false);
+  assert.equal((await rtk.status()).installing, false);
   assert.deepEqual(stamps, [0]);
   assert.equal(rtk.claudeHook(), `"${PACKAGED}" hook claude`);
 });
@@ -155,6 +194,7 @@ test("an automatic install is skipped when rtk is there or off, and a failed one
   await rtk.autoInstall({ lastAttemptAt: clock - DAY + 60_000 });
   assert.equal(winget.length, 0, "tried less than a day ago");
   const retried = rtk.autoInstall({ lastAttemptAt: clock - DAY - 1 });
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(winget.length, 1, "a day later it tries again");
   winget[0].finish();
   assert.equal((await retried).status.installed, false);
@@ -162,7 +202,7 @@ test("an automatic install is skipped when rtk is there or off, and a failed one
   const broken = createRtk({ platform: "win32", now: () => clock, env: { LOCALAPPDATA: LOCAL }, exists: () => false, listDir: () => [],
     spawnProcess: () => { const { EventEmitter } = require("node:events"); const child = new EventEmitter(); setImmediate(() => child.emit("error", new Error("spawn winget ENOENT"))); return child; } });
   assert.equal(await broken.autoInstall(), null);
-  assert.equal(broken.status().installing, false);
+  assert.equal((await broken.status()).installing, false);
 });
 
 test("AO's start waits for an install in progress, but not past its bound", async () => {

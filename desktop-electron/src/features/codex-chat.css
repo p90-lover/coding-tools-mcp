@@ -1106,6 +1106,11 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-goal-editor .cx-text-button { background: transparent; color: var(--ao-muted); }
 .cx-goal-editor .cx-primary-button { background: var(--color-text-primary); color: var(--color-bg-primary); }
 .cx-goal-editor .cx-primary-button:disabled { opacity: .4; cursor: default; }
+/* The wake-up's note opens its editor: drawn as the bar's plain text, not a pill. */
+.cx-goal button.cx-wakeup-note { display: block; padding: 0; overflow: hidden; color: var(--ao-muted); text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.cx-goal button.cx-wakeup-note:hover { background: transparent; color: var(--color-text-primary); }
+.cx-wakeup-minutes { display: flex; align-items: center; gap: 6px; margin-top: 8px; color: var(--ao-muted); font-size: 12px; }
+.cx-wakeup-minutes input { width: 64px; padding: 4px 6px; border: 1px solid var(--ao-line); border-radius: 6px; background: var(--color-bg-primary); color: var(--color-text-primary); font: inherit; }
 /* Delete message: the same in-chat confirmation, its Delete button in the danger colour. */
 .cx-delete-confirm footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 .cx-delete-confirm .cx-text-button, .cx-delete-confirm .cx-primary-button { padding: 5px 12px; border: 0; border-radius: 8px; font-size: 12px; cursor: pointer; }

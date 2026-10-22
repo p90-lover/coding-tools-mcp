@@ -7,6 +7,7 @@ const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const TOOL_IDS = Object.freeze(["cpa"]);
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const HEALTH_POLL_MS = 45_000;
+const KEEPALIVE_PERSIST_MS = 10 * 60_000;
 const BACKOFF_BASE_MS = 1_000;
 const BACKOFF_CAP_MS = 5 * 60_000;
 const BLIP_RESTART_THRESHOLD = 3;
@@ -170,6 +171,7 @@ function attachCpaCodexLongRun(inner, {
   const timers = new Map();
   let powerSaveId = null;
   let disposed = false;
+  let lastKeepalivePersist = -Infinity;
 
   function persist() {
     writeState(statePath, state);
@@ -283,6 +285,7 @@ function attachCpaCodexLongRun(inner, {
     const current = state.tools[toolId];
     if (kind === "healthy") {
       const recovered = current.consecutiveBlips > 0 || current.consecutiveCrashes > 0 || current.lastEvent === "crash-recover";
+      const wasClean = !recovered && current.backoffMs === 0 && !current.firstFailureAt && !current.lastError;
       current.consecutiveBlips = 0;
       current.consecutiveCrashes = 0;
       current.backoffMs = 0;
@@ -293,7 +296,13 @@ function attachCpaCodexLongRun(inner, {
         current.reconnectGeneration += 1;
         record(toolId, "reconnect", { generation: current.reconnectGeneration });
       }
-      persist();
+      // A healthy poll that changed nothing but keptAliveAt is not written every 45 s: the atomic
+      // rewrite blocked the main thread for seconds on the busy hard disk. The time on disk is
+      // refreshed at most every KEEPALIVE_PERSIST_MS.
+      if (!wasClean || now() - lastKeepalivePersist >= KEEPALIVE_PERSIST_MS) {
+        lastKeepalivePersist = now();
+        persist();
+      }
       schedule(toolId, HEALTH_POLL_MS, () => tick(toolId));
       return;
     }

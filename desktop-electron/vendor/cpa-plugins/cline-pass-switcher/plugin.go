@@ -34,7 +34,7 @@ const pluginID = "cline-pass-switcher"
 const apiPrefix = "/v0/management/" + pluginID
 const resourcePrefix = "/v0/resource/plugins/" + pluginID
 
-var pluginVersion = "0.1.0-codingtools.6"
+var pluginVersion = "0.1.0-codingtools.7"
 var hostAvailable atomic.Bool
 
 type envelope struct {
@@ -57,6 +57,17 @@ func okEnvelope(v any) ([]byte, error) {
 	return json.Marshal(envelope{OK: true, Result: b})
 }
 func errorEnvelope(code, msg string) []byte { return upstreamErrorEnvelope(code, msg, 500, false) }
+
+// upstreamStatus is the status a client sees for Cline's error. Cline answers a model it lists but
+// no longer serves with 502 {"error":"model not found"}: as a 5xx, Claude Code retried it for about
+// four minutes (seen 2026-10-22 on glm-5.2, kimi-k2.6, kimi-k2.7-code, mimo-v2.5, mimo-v2.5-pro), so a
+// chat on one looked stuck launching. It is a 404, which no client retries.
+func upstreamStatus(status int, body []byte) int {
+	if status >= 500 && bytes.Contains(bytes.ToLower(body), []byte("model not found")) {
+		return http.StatusNotFound
+	}
+	return status
+}
 func upstreamErrorEnvelope(code, msg string, status int, retry bool) []byte {
 	b, _ := json.Marshal(envelope{Error: &envelopeError{Code: code, Message: msg, HTTPStatus: status, Retryable: retry}})
 	return b
@@ -513,7 +524,8 @@ func execute(raw []byte, stream bool) ([]byte, error) {
 	if r.StatusCode < 200 || r.StatusCode >= 300 {
 		defer r.Body.Close()
 		out, _ := io.ReadAll(io.LimitReader(r.Body, 8192))
-		return upstreamErrorEnvelope("cline_upstream", string(out), r.StatusCode, r.StatusCode == 429 || r.StatusCode >= 500), nil
+		status := upstreamStatus(r.StatusCode, out)
+		return upstreamErrorEnvelope("cline_upstream", string(out), status, status == 429 || status >= 500), nil
 	}
 	// Tool calls a model wrote as text become real calls (texttools.go); nil when no tools were offered.
 	sieve := newToolSieve(body)

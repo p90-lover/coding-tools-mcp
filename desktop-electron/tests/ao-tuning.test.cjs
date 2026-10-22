@@ -103,6 +103,14 @@ test("unsupported or unverified AO overrides can be explicitly cleared to model 
     "Native Codex controls are unchanged");
 });
 
+// The split view's grid rules (pure), as the Surface imports them.
+function splitRules() {
+  const exports = {};
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/chat-split.ts"), "utf8");
+  vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText, { exports });
+  return exports;
+}
+
 test("Surface caches model capability catalogs for AO harnesses and Native Codex alike", async () => {
   const surfaceSource = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8");
   const surface = {}, calls = [], callbacks = [];
@@ -119,6 +127,7 @@ test("Surface caches model capability catalogs for AO harnesses and Native Codex
         return { result: { models: ["fixture"], capabilities: { fixture: { efforts: ["high"] } } } };
       } } }) }
       : name === "./ao-chat" ? { chatList: () => [], chatArchived: () => [] }
+      : name === "./chat-split" ? splitRules()
       : name === "../i18n" ? { copyFor: () => ({}) }
       : name === "./AgentOrchestratorRoleEditor" ? { workerRoute: () => ({}), emptyRoleSettings: () => ({}), NATIVE_HARNESS: "codex-native" } : {},
   });

@@ -2,7 +2,7 @@ import { useEffect, useState, type CSSProperties } from "react";
 import { getCodingToolsClient } from "../api/client";
 import { Caret, Icon } from "../icons";
 import { useComposerPopover } from "./AgentOrchestratorComposerControls";
-import { useSurfaceHidden } from "./page-visibility";
+import { onWindowFocus, useSurfaceHidden, windowUnfocused } from "./page-visibility";
 
 type Branch = {
   name: string; updatedAt: string | null; upstream: string | null; worktree: string | null; current: boolean; chat: boolean; default?: boolean;
@@ -85,17 +85,26 @@ export function ChatBranchBar({ workspaceId, sessionId, inline = false }: { work
   useEffect(() => {
     if (!workspaceId) { setData(null); return; }
     let live = true;
-    const read = () => void getCodingToolsClient().apps.call({
-      moduleId: "agent-orchestrator", operation: "chat_branches", arguments: { workspaceId, ...(sessionId ? { sessionId } : {}) },
-    }).then((reply) => {
-      const result = resultOf(reply as ModuleReply);
-      if (live) setData(result && Array.isArray(result.branches) ? result as ChatBranches : null);
-    }).catch(() => { if (live) setData(null); });
+    // One read at a time: on a busy disk a read took longer than the interval and the next one
+    // started on top of it, so git processes piled up.
+    let reading = false;
+    const read = () => {
+      if (reading) return;
+      reading = true;
+      void getCodingToolsClient().apps.call({
+        moduleId: "agent-orchestrator", operation: "chat_branches", arguments: { workspaceId, ...(sessionId ? { sessionId } : {}) },
+      }).then((reply) => {
+        const result = resultOf(reply as ModuleReply);
+        if (live) setData(result && Array.isArray(result.branches) ? result as ChatBranches : null);
+      }).catch(() => { if (live) setData(null); }).finally(() => { reading = false; });
+    };
     read();
-    // Each read runs about a dozen git commands in the main process. A minimized window or a hidden
-    // tab skips its refreshes, and the list is read again when the menu opens (below).
-    const timer = window.setInterval(() => { if (!surfaceHidden()) read(); }, REFRESH_MS);
-    return () => { live = false; window.clearInterval(timer); };
+    // Each read runs about a dozen git commands in the main process. A minimized window, a hidden
+    // tab or another app in front skips its refreshes; the list is read again when the window gets
+    // focus back and when the menu opens (below).
+    const timer = window.setInterval(() => { if (!surfaceHidden() && !windowUnfocused()) read(); }, REFRESH_MS);
+    const offFocus = onWindowFocus(() => { if (!surfaceHidden()) read(); });
+    return () => { live = false; window.clearInterval(timer); offFocus(); };
   }, [workspaceId, sessionId, revision, surfaceHidden]);
   // Opening the menu shows the branches as they are now, not as of the last refresh.
   useEffect(() => { if (popup.open) setRevision((value) => value + 1); }, [popup.open]);

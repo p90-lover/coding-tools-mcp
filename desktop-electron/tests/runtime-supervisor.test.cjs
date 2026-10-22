@@ -227,6 +227,68 @@ test("DEV runtime supervision ignores launcher version mismatch and starts only 
   }
 });
 
+test("a process is inspected without blocking the main thread", { skip: process.platform !== "win32" }, async () => {
+  // PowerShell through spawnSync (10 s timeout) froze the app while the bridge started or recovered.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-process-info-"));
+  try {
+    const supervisor = new RuntimeSupervisor({
+      app: { getVersion: () => "0.2.0", isPackaged: false },
+      logger: { info() {}, warn() {}, error() {} },
+      sourceRoot: root,
+      coreHome: root,
+      browserDescriptorPath: path.join(root, "runtime", "launcher-browser.json"),
+    });
+    let ticks = 0;
+    const ticker = setInterval(() => { ticks += 1; }, 5);
+    const pending = supervisor.processInfo(process.pid);
+    assert.ok(pending instanceof Promise);
+    const info = await pending;
+    clearInterval(ticker);
+    assert.ok(ticks > 0, "timers kept running while PowerShell ran");
+    assert.ok(info === null || path.basename(info.executablePath).toLowerCase() === path.basename(process.execPath).toLowerCase(), JSON.stringify(info));
+    assert.equal(await supervisor.processInfo(-1), null);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the runtime config is parsed once per change, not on every monitor read", () => {
+  // The monitors read config.json every 2-60 s; on a busy hard disk each synchronous read stalled the app.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-config-cache-"));
+  const descriptorPath = path.join(root, "runtime", "launcher-browser.json");
+  const configPath = path.join(root, "config.json");
+  const { readFileSync } = fs;
+  let reads = 0;
+  try {
+    fs.writeFileSync(configPath, `${JSON.stringify(launcherConfig(descriptorPath))}\n`);
+    const supervisor = new RuntimeSupervisor({
+      app: { getVersion: () => "0.2.0", isPackaged: false },
+      logger: { info() {}, warn() {}, error() {} },
+      sourceRoot: root,
+      coreHome: root,
+      browserDescriptorPath: descriptorPath,
+    });
+    fs.readFileSync = function (file, ...rest) { if (file === configPath) reads += 1; return readFileSync.call(this, file, ...rest); };
+    for (let i = 0; i < 5; i++) {
+      assert.equal(supervisor.readSetupConfig().port, 17841);
+      assert.equal(supervisor.readConfig().port, 17841);
+    }
+    assert.equal(reads, 1, "ten reads, one parse");
+    supervisor.readSetupConfig().port = 1;
+    assert.equal(supervisor.readSetupConfig().port, 17841, "a caller's change does not leak into the next read");
+    // Another writer (the setup command) changes it: the next read sees it.
+    fs.writeFileSync(configPath, `${JSON.stringify(launcherConfig(descriptorPath, { port: 17999, appName: "Changed app" }))}\n`);
+    fs.utimesSync(configPath, new Date(), new Date(Date.now() + 5_000));
+    assert.equal(supervisor.readConfig().port, 17999);
+    fs.rmSync(configPath);
+    assert.equal(supervisor.readSetupConfig(), null);
+    assert.equal(supervisor.readConfig(), null);
+  } finally {
+    fs.readFileSync = readFileSync;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("launcher runtime validation rejects a relative full-mode executable before spawn", () => {
   const descriptorPath = path.join(os.tmpdir(), "launcher.json");
   assert.throws(() => validateConfig(launcherConfig(descriptorPath, {

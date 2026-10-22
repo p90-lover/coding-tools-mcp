@@ -103,6 +103,13 @@ function MenuList({ items, label, onClose, autoFocus, style }: {
       }
     } else if (event.key === "Escape") {
       event.preventDefault(); event.stopPropagation(); onClose();
+    } else if (/^[1-9]$/.test(event.key) && !event.ctrlKey && !event.altKey && !event.metaKey) {
+      // Claude Code's numbered items ("Open in ▸ 1 Split view"): the digit chooses the item.
+      const index = items.findIndex((item) => item.kind !== "separator" && item.shortcut === event.key && actionable(item));
+      if (index < 0) return;
+      event.preventDefault(); event.stopPropagation();
+      list.current?.querySelectorAll<HTMLButtonElement>(":scope > div > button[role=menuitem]")
+        [items.slice(0, index).filter((item) => item.kind !== "separator").length]?.click();
     }
   };
   const placed = flip ? { ...style, left: "auto", right: "100%" } : style;

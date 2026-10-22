@@ -77,6 +77,9 @@ test("each chat row is Claude Code's: its title, a status dot, and one hover \"M
   menu().items.find((item) => item.label === "Archive").run();
   walk(rows()[1]).find((element) => element.props?.className === "cx-thread-select").props.onClick();
   assert.deepEqual(calls, [["pin", "t2"], ["lifecycle", "t2", "archive"], ["select", "t2"]]);
+  // Ctrl-click opens the chat in split view, as in Claude Code.
+  walk(rows[0]).find((element) => element.props?.className === "cx-thread-select").props.onClick({ ctrlKey: true });
+  assert.deepEqual(calls.at(-1), ["openSplit", "a", "t1"]);
 });
 
 const projectButton = (view, name) => walk(view).find((element) => element.type === "button" && element.props.className === "cx-project" && text(element).includes(name));
@@ -180,7 +183,11 @@ test("right-click menus match Codex: its order and glyphs, and every chat item d
   assert.deepEqual([menuOf().x, menuOf().y], [10, 20], "the menu opens at the pointer");
   const taskMenu = menuOf().items.filter((item) => item.kind !== "separator");
   assert.deepEqual(plain(taskMenu.map((item) => item.label)), ["Rename", "Pin", "Mark as unread", "Project", "Section", "Fork", "Schedule start…", "Share", "Copy",
-    "Open in new window", "Open in", "Archive", "Delete"]);
+    "Open in", "Archive", "Delete"]);
+  // Claude Code's "Open in": its layouts first and numbered, then the other places.
+  const openIn = taskMenu.find((item) => item.label === "Open in").items;
+  assert.deepEqual(plain(openIn.map((item) => item.kind === "separator" ? "—" : [item.label, item.shortcut ?? null])),
+    [["Split view", "1"], ["New window", "2"], "—", ["Structure", null], ["Mission Board", null]]);
   assert.deepEqual(plain(taskMenu.filter((item) => item.shortcut).map((item) => [item.label, item.shortcut])),
     [["Rename", "Alt+Ctrl+R"], ["Pin", "Alt+Ctrl+P"], ["Mark as unread", "Ctrl+Shift+U"], ["Archive", "Ctrl+Shift+A"]]);
   for (const item of taskMenu) {
@@ -190,16 +197,24 @@ test("right-click menus match Codex: its order and glyphs, and every chat item d
   taskMenu.find((item) => item.label === "Schedule start…").run();
   taskMenu.find((item) => item.label === "Delete").run();
   taskMenu.find((item) => item.label === "Share").run();
-  taskMenu.find((item) => item.label === "Open in new window").run();
-  assert.deepEqual(calls.splice(0), [["lifecycle", "t2", "schedule"], ["lifecycle", "t2", "delete"], ["share", "t2"], ["openWindow", "t2"]]);
+  openIn.find((item) => item.label === "New window").run();
+  openIn.find((item) => item.label === "Split view").run();
+  assert.deepEqual(calls.splice(0), [["lifecycle", "t2", "schedule"], ["lifecycle", "t2", "delete"], ["share", "t2"], ["openWindow", "t2"], ["openSplit", "a", "t2"]]);
   const projects = taskMenu.find((item) => item.label === "Project").items;
   assert.deepEqual(plain(projects.map((item) => [item.label, Boolean(item.run), Boolean(item.checked)])),
     [["Alpha", false, true], ["Continue in Beta", true, false]], "the chat's own project is checked; another continues the chat there");
   projects[1].run();
   taskMenu.find((item) => item.label === "Fork").items[0].run();
   taskMenu.find((item) => item.label === "Copy").items[1].run();
-  taskMenu.find((item) => item.label === "Open in").items[0].run();
+  openIn.find((item) => item.label === "Structure").run();
   assert.deepEqual(calls, [["continueIn", "t2", "b"], ["fork", "t2", "start"], ["copy", "t2", "conversation"], ["openStructure", "t2"]]);
+  calls.splice(0);
+  // A chat already open in the window or a split pane is not offered "Split view"; New window is then 1.
+  const open = mount("ChatThreadList.tsx", { ...props, openTaskIds: ["t2"] });
+  walk(open.render()).filter((element) => element.type === "li" && element.props.onContextMenu)[1].props.onContextMenu(event);
+  const openedMenu = walk(open.render()).find((element) => element.type === "ChatMenu").props.menu.items.find((item) => item.label === "Open in").items;
+  assert.deepEqual(plain(openedMenu.filter((item) => item.kind !== "separator").map((item) => [item.label, item.shortcut ?? null])),
+    [["New window", "1"], ["Structure", null], ["Mission Board", null]]);
 
   walk(list.render()).find((element) => element.props?.className === "cx-project" && text(element).includes("Alpha")).props.onContextMenu(event);
   const projectMenu = menuOf().items.filter((item) => item.kind !== "separator");

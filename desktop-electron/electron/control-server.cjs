@@ -642,38 +642,53 @@ class BrowserControlServer {
     return path.join(this.modelsCacheDir, `${key}.json`);
   }
 
-  readModelsCache(file) {
+  // The catalog copy (about 600 KB) is read and written off the main thread: each Codex catalog
+  // request read, parsed and rewrote it synchronously, stalling the app on a busy hard disk. Writes
+  // to one file run in order, and a read waits for the write in flight.
+  async readModelsCache(file) {
+    await this.modelsCacheWrites?.get(file);
     try {
-      const saved = JSON.parse(fs.readFileSync(file, "utf8"));
+      const saved = JSON.parse(await fs.promises.readFile(file, "utf8"));
       return typeof saved?.body === "string" && typeof saved?.contentType === "string" ? saved : null;
     } catch { return null; }
   }
 
   writeModelsCache(file, contentType, body) {
-    try {
-      fs.mkdirSync(this.modelsCacheDir, { recursive: true });
+    this.modelsCacheWrites ??= new Map();
+    const write = (this.modelsCacheWrites.get(file) ?? Promise.resolve()).then(async () => {
+      await fs.promises.mkdir(this.modelsCacheDir, { recursive: true });
       const temporary = `${file}.${process.pid}.tmp`;
-      fs.writeFileSync(temporary, JSON.stringify({ contentType, body, savedAt: new Date().toISOString() }), { mode: 0o600 });
-      fs.renameSync(temporary, file);
-    } catch (error) {
+      await fs.promises.writeFile(temporary, JSON.stringify({ contentType, body, savedAt: new Date().toISOString() }), { mode: 0o600 });
+      await fs.promises.rename(temporary, file);
+    }).catch((error) => {
       this.logger.warn("browser.native_models_cache_write_failed", { message: error instanceof Error ? error.message : String(error) });
-    }
+    }).finally(() => {
+      if (this.modelsCacheWrites.get(file) === write) this.modelsCacheWrites.delete(file);
+    });
+    this.modelsCacheWrites.set(file, write);
+    return write;
   }
 
   // The live catalog request races a short timer; the cache answers whichever comes first
   // only when the live answer is late or not a success. Without a cache it behaves as before.
   async forwardModels(url, headers, authorization, response) {
     const file = this.modelsCacheFile(authorization, url.search);
-    const cached = this.readModelsCache(file);
+    const saved = this.readModelsCache(file);
     const live = (async () => {
       const upstream = await this.fetchNative(url.href, { method: "GET", headers, credentials: "omit", redirect: "manual",
         signal: AbortSignal.timeout(60_000) });
       const buffer = Buffer.from(await upstream.arrayBuffer());
       const contentType = upstream.headers.get("content-type") || "application/json";
-      if (upstream.status === 200 && buffer.length <= MODELS_CACHE_MAX_BYTES) this.writeModelsCache(file, contentType, buffer.toString("utf8"));
+      if (upstream.status === 200 && buffer.length <= MODELS_CACHE_MAX_BYTES) {
+        // The same catalog as the copy is not written again.
+        const body = buffer.toString("utf8");
+        const previous = await saved;
+        if (previous?.body !== body || previous?.contentType !== contentType) void this.writeModelsCache(file, contentType, body);
+      }
       return { status: upstream.status, buffer, headers: [...upstream.headers] };
     })();
     live.catch(() => undefined);
+    const cached = await saved;
     const serveCache = (reason) => {
       this.logger.info("browser.native_models_cache_served", { reason });
       response.writeHead(200, { "content-type": cached.contentType, "x-coding-tools-models-cache": reason });
