@@ -26,6 +26,22 @@ export function useSurfaceHidden(): () => boolean {
 }
 
 /**
+ * For polls that run git (each a walk of the working tree on disk): true while you are in another
+ * app. On a busy hard disk those polls kept git reading the whole tree every few seconds with
+ * nobody looking at the result; they refresh when the window has focus again (onWindowFocus).
+ */
+export function windowUnfocused(): boolean {
+  return typeof document !== "undefined" && typeof document.hasFocus === "function" && !document.hasFocus();
+}
+
+/** Runs `refresh` when the window gets focus back. Returns the unsubscribe. */
+export function onWindowFocus(refresh: () => void): () => void {
+  if (typeof window === "undefined" || typeof window.addEventListener !== "function") return () => {};
+  window.addEventListener("focus", refresh);
+  return () => window.removeEventListener("focus", refresh);
+}
+
+/**
  * Runs `refresh` as soon as AO pushes a change (a role's message, reasoning or tool call, or a
  * mission's run state), so screens update without waiting for their next poll. Polls stay as the
  * fallback when the push is unavailable. Returns the unsubscribe.
