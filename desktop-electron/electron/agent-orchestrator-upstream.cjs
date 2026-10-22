@@ -655,16 +655,20 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     const input = detail.input && typeof detail.input === "object" ? detail.input : {};
     const base = { id: String(activity.id), sequence: Number(activity.sequence) || 0, status: String(activity.status || "").slice(0, 32) };
     const summary = String(activity.summary || "");
+    // The timeout a tool call states for itself (Claude Code's Bash/PowerShell `timeout`), so the run
+    // loop can tell a long call still within it from one whose result never came back.
+    const stated = Number(input.timeout);
+    const timeout = Number.isFinite(stated) && stated > 0 ? { timeoutMs: Math.min(stated, 24 * 3600_000) } : {};
     // A file edit shows as Claude Code shows one: "Edited <file> +12 −3", opening on the diff.
     const edit = editedFiles(activity, detail, input);
     if (edit) return { ...base, kind: "edit", label: edit.label, text: utf8Prefix(edit.files.map(file => file.path).join(", "), 400), files: edit.files };
     // A shell call (Bash, PowerShell) shows as the command it ran, like Codex.
     if (activity.activityKind === "mcp_tool" && typeof input.command === "string" && input.command.trim()) {
-      return { ...base, kind: "command", text: utf8Prefix(input.command.trim(), 400), ...toolDetails(detail, input) };
+      return { ...base, kind: "command", text: utf8Prefix(input.command.trim(), 400), ...toolDetails(detail, input), ...timeout };
     }
     if (activity.activityKind === "mcp_tool") {
       return { ...base, kind: "tool", label: toolLabel(detail, summary), text: utf8Prefix(summary || detail.toolKind || "tool", 400),
-        ...toolDetails(detail, input) };
+        ...toolDetails(detail, input), ...timeout };
     }
     // The model's reasoning summary: AO streams it into the activity's text (detail.text); its
     // summary is only the word "Reasoning".

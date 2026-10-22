@@ -2,6 +2,7 @@ import { createContext, memo, useContext, useEffect, useMemo, useRef, useState }
 import { getCodingToolsClient } from "../api/client";
 import { Caret, Icon } from "../icons";
 import { AgentOrchestratorComposerControls, type ComposerControlsProps } from "./AgentOrchestratorComposerControls";
+import { modelShortLabel } from "./AgentOrchestratorRoleEditor";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { ChatMarkdown } from "./ChatMarkdown";
@@ -105,8 +106,36 @@ const CARDS_WIDTH_KEY = "coding-tools:ao:cards-panel-width";
 /** Whether the chat's pet is shown ("off" hides it), kept on this computer. */
 const PET_KEY = "coding-tools:ao:pet";
 /** What an AO agent is started with; a follow-up with any of them changed gets a new agent (continuationCard). */
-const SESSION_ROUTE_FIELDS = ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile",
-  "approval_policy", "approvals_reviewer", "effort", "context_window"];
+type RouteFields = Record<string, unknown>;
+/** A route's model as the composer's picker names it ("MiMo V2.6 Pro"), not its id. */
+const routeModelName = (route: RouteFields) => {
+  const model = typeof route.model === "string" ? route.model : "";
+  return model ? modelShortLabel(model).name || model : "the agent";
+};
+const routeEffortName = (route: RouteFields) => {
+  const effort = typeof route.effort === "string" ? route.effort : "";
+  return `${!effort ? "Auto" : effort === "xhigh" ? "Extra high" : effort[0].toUpperCase() + effort.slice(1)} effort`;
+};
+const routeWindowName = (route: RouteFields) => typeof route.context_window === "number" && route.context_window > 0
+  ? `${Math.round(route.context_window / 1000)}K context` : "the default context";
+/**
+ * What differs between the agent's route and the picked one, in the composer's own words, and
+ * what to pick to get the agent back: "Max effort" / "Medium effort". The note showed the raw
+ * model id and asked to switch back to the very model already picked when only the effort changed.
+ */
+function routeChange(agent: RouteFields, picked: RouteFields): { now: string; back: string } | null {
+  const same = (field: string) => (agent[field] ?? null) === (picked[field] ?? null);
+  const parts: Array<[string, string]> = [];
+  if (!same("model") || !same("harness_id") || !same("provider_id") || !same("account_id")) parts.push([routeModelName(picked), routeModelName(agent)]);
+  if (!same("effort")) parts.push([routeEffortName(picked), routeEffortName(agent)]);
+  if (!same("context_window")) parts.push([routeWindowName(picked), routeWindowName(agent)]);
+  if (["permission_profile", "native_permission_profile", "approval_policy", "approvals_reviewer"].some((field) => !same(field))) {
+    parts.push(["Other permissions", "the earlier permissions"]);
+  }
+  if (!parts.length) return null;
+  const list = (items: string[]) => items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
+  return { now: list(parts.map(([now]) => now)), back: list(parts.map(([, back]) => back)) };
+}
 
 /** Thread actions the chat header, its ⋯ menu and its slash commands share with the thread list. */
 export type ChatThreadActions = {
@@ -1790,17 +1819,16 @@ export function AgentOrchestratorChat({
           const running = lead?.route?.model;
           const picked = composer?.mode === "single" ? composer.route?.model : undefined;
           if (runOpen && latest?.execution_mode === "single" && running && picked && picked !== running) {
-            return <p className="cx-route-note" role="status">This turn is running on <b>{running}</b>; your next message uses <b>{picked}</b>.</p>;
+            return <p className="cx-route-note" role="status">This turn runs on <b>{routeModelName({ model: running })}</b>; your next message uses <b>{routeModelName({ model: picked })}</b>.</p>;
           }
           // An agent keeps the model, effort, window and permissions it started with, so a follow-up
           // with any of them changed starts a new agent that gets only a summary of the chat (it
           // "forgot everything" after an effort switch from Max to High). Say so before it is sent.
           const route = composer?.mode === "single" ? composer.route : undefined;
-          const changed = !runOpen && latest?.execution_mode === "single" && lead?.route && route
-            && SESSION_ROUTE_FIELDS.some((field) => ((lead.route as Record<string, unknown>)[field] ?? null)
-              !== ((route as unknown as Record<string, unknown>)[field] ?? null));
-          return changed ? <p className="cx-route-note" role="status">Changing the model or its settings starts a new agent that gets only a summary
-            of this chat, not its memory. Switch back to <b>{running}{lead?.route?.effort ? ` · ${lead.route.effort}` : ""}</b> to keep the same agent.</p> : null;
+          const change = !runOpen && latest?.execution_mode === "single" && lead?.route && route
+            ? routeChange(lead.route as unknown as RouteFields, route as unknown as RouteFields) : null;
+          return change ? <p className="cx-route-note" role="status"><b>{change.now}</b> starts a new agent with only a summary of this chat.
+            Switch back to <b>{change.back}</b> to keep this one.</p> : null;
         })()}
         {selectedTaskId ? <ChatBranchBar workspaceId={projectId} sessionId={agentSessions[0]?.id} /> : null}
         {/* A request waiting on the person sits right above the chat box, as wide as it, as DeepSeek
