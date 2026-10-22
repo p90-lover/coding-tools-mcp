@@ -20,14 +20,53 @@ test("read-only inspection inside the workspace folder is allowed: listing, read
   assert.ok(readOnlyInspection("Get-ChildItem", FOLDER, "F:\\clash of clan macro\\scripts"));
 });
 
+test("the shell reads agents really send pass without the paid reviewer", () => {
+  // Seen live (2026-10-21): 824 of 862 shell requests went to the model reviewer (Codex's
+  // codex-auto-review, 816 requests that day against the account's limits). These shapes, taken from
+  // them, are reads inside the project.
+  for (const command of [
+    "Set-Location \"F:\\clash of clan macro\"; git status --porcelain=v1 2>&1 | Select-Object -First 80",
+    "cd \"F:\\clash of clan macro\"; Get-Content src\\detector.py | Select-String -Pattern 'def ' | Select-Object -First 20",
+    "cd \"F:\\clash of clan macro\" && git diff --stat",
+    "Get-ChildItem \"F:\\clash of clan macro\" -File | Where-Object {$_.LastWriteTime -gt (Get-Date).AddHours(-14)} | Sort-Object LastWriteTime -Descending",
+    "Set-Location \"F:\\clash of clan macro\"; try { $r = Invoke-WebRequest -Uri \"http://127.0.0.1:7373/api/health\" -TimeoutSec 8 -UseBasicParsing; $r.StatusCode; $r.Content } catch { \"7373 health fail: \" + $_.Exception.Message }",
+    "try { $r = Invoke-RestMethod -Uri \"http://127.0.0.1:7413/api/logs?limit=25\" -TimeoutSec 15; $r | ConvertTo-Json -Depth 3 } catch { \"logs err: $($_.Exception.Message)\" }",
+    "Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Select-Object LocalPort,OwningProcess",
+    "Get-Process python -ErrorAction SilentlyContinue | Select-Object Id,StartTime", "netstat -ano | findstr 7373",
+    "foreach ($f in \"src/detector.py\",\"server.py\") { Get-Item $f | Select-Object Name,Length }",
+    "Set-Location \"F:\\clash of clan macro\"\n# what changed\ngit log --oneline -5",
+    // A local holding a checked literal may be passed on; curl's read-only options are fine.
+    "$p = \"F:\\clash of clan macro\\models\"; Get-ChildItem $p", "curl.exe -s --max-time 5 http://127.0.0.1:7373/api/health",
+    "(Invoke-WebRequest -Uri \"http://127.0.0.1:7413/api/screenshot\" -TimeoutSec 15 -UseBasicParsing).StatusCode",
+  ]) assert.ok(readOnlyInspection(command, FOLDER), `inspection: ${command}`);
+});
+
 test("anything that writes, runs code, reads outside the folder or reads the environment still goes to the reviewer", () => {
   for (const command of [
     "Get-Content 'C:\\Users\\simon\\.ssh\\id_rsa'", "Get-ChildItem 'F:\\other project'", "type ..\\secrets.txt", "cat ~/notes",
     "Get-ChildItem -Path:C:\\Windows", "Get-Content $env:USERPROFILE\\x", "Get-Content $path", "echo $env:API_KEY",
     "Get-Content x > y", "Get-ChildItem | Remove-Item", "Get-ChildItem | ForEach-Object { Remove-Item $_ }",
     "Set-Content config.json '{}'", "Invoke-Expression 'dir'", "iex 'dir'", "& 'tool.exe'", ". ./script.ps1",
-    "(Get-Item x).Delete()", "Get-Content x; $a = 1", "[IO.File]::ReadAllText('x')", "Get-Content $(whoami)",
+    "(Get-Item x).Delete()", "Get-Content x; $a = Remove-Item x", "[IO.File]::ReadAllText('x')", "Get-Content $(whoami)",
     "Start-Process notepad", "python script.py", "Get-ChildItem `\n Remove-Item x", "ls /etc", "",
+    // What the widened rules must still refuse: leaving the project, writing git, other web requests,
+    // a variable expanded in quotes, a here-string, $( ) other than the pipeline item's property.
+    "cd C:\\Windows; Get-ChildItem", "Set-Location ..; Get-Content secrets.txt", "cd \"F:\\clash of clan macro\"; git checkout -- src/x.py",
+    "git reset --hard", "git push", "git -C ..\\other status", "git diff --output=..\\out.txt",
+    "Invoke-WebRequest -Uri \"https://example.com/x\"", "Invoke-RestMethod -Uri \"http://127.0.0.1:7413/api/action\" -Method Post -Body '{}'",
+    "curl http://127.0.0.1:8000 -o out.html", "curl -d x=1 http://localhost:8000", "iwr \"http://192.168.1.5/\"",
+    "Write-Output \"$env:CPA_KEY\"", "\"$home\"", "Get-Content x\n$a = Remove-Item y", "Write-Output @\"\n$(whoami)\n\"@",
+    "\"$((Get-Item x).Delete())\"", "$r = $env:API_KEY", "Get-Process | Stop-Process", "Get-CimInstance Win32_Process | Invoke-CimMethod -MethodName Terminate",
+    // Review on #479: curl's long write/upload options, a destination borrowed from another statement or
+    // written without its scheme, a path read from a file, and methods called through ForEach-Object.
+    "curl.exe http://localhost:8000 --output README.md", "curl.exe http://localhost:8000 --data payload", "curl.exe -o x http://localhost:8000",
+    "curl.exe http://localhost:8000 --upload-file x", "Invoke-WebRequest -Uri \"http://127.0.0.1:1/\" -OutFile x",
+    "Invoke-RestMethod -Uri \"http://127.0.0.1:1/\" -Method Post", "Write-Output http://localhost/; curl.exe example.com",
+    "Write-Output \"http://127.0.0.1/\"; Invoke-WebRequest example.com", "curl.exe localhost:8000", "iwr -Uri \"http://evil.example/\"",
+    "$p = Get-Content paths.txt; Get-Content $p", "$p = Get-Content paths.txt; Set-Location $p; Get-Content secrets.txt",
+    "foreach ($f in (Get-Content list.txt)) { Get-Content $f }", "$d = (Get-Item x).FullName; Get-ChildItem -Path $d",
+    "Get-Item README.md | ForEach-Object -MemberName Delete", "Get-Process notepad | ForEach-Object -MemberName Kill",
+    "Get-Item README.md | ForEach-Object Delete", "Get-Process notepad | foreach Kill", "Get-Item x | % Delete",
   ]) assert.equal(readOnlyInspection(command, FOLDER), null, `not inspection: ${JSON.stringify(command)}`);
   // No folder known, or a command run outside the project: the reviewer decides.
   assert.equal(readOnlyInspection("Get-ChildItem", null), null);

@@ -363,25 +363,39 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-empty p { margin: 0; color: var(--ao-muted); font-size: 13px; }
 .cx-turn { display: flex; flex-direction: column; gap: 10px; }
 .cx-user { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
-/* Claude Code's queued-message bar, right above the composer at its width: messages waiting for the
-   agent, right-aligned and newest last, as the person's own bubbles with the text greyed (claude.ai's
-   UserMessage state "queued"), their actions beside them; one on its way pulses (state "pending").
-   Its list is Claude's: gap xs, at most min(40vh, 22rem) tall, then it scrolls. */
+/* Claude Code's queued messages (claude.ai's composer queue rows, "pending-queue-row"), right above
+   the composer at its width: right-aligned, newest last, each the person's own bubble collapsed to
+   one line with its text greyed (UserMessage state "queued"), "Queued" under it, and its X
+   ("Discard queued message", ghost sm) shown on hover or focus 32px past the bubble's end; the
+   first has "Send now" (ghost xs). One on its way to the agent pulses (state "pending"). The list
+   is at most min(40vh, 22rem) tall, then scrolls; its right padding holds the X. */
 .cx-queued { flex: 0 0 auto; width: calc(100% - 48px); max-width: 780px; margin: 0 auto 8px; }
-.cx-queued-list { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; max-height: min(40vh, 22rem); margin: -4px 0; padding: 4px 0;
+.cx-queued-list { display: flex; flex-direction: column; align-items: flex-end; max-height: min(40vh, 22rem); margin: 0; padding: 0 36px 0 0;
   overflow-y: auto; list-style: none; }
-.cx-queued-row { display: flex; align-items: center; justify-content: flex-end; gap: 4px; width: 100%; min-width: 0; }
-.cx-queued-message { flex: 0 1 auto; min-width: 0; max-width: min(85%, calc(100% - 92px)); }
+.cx-queued-row { display: flex; flex-direction: column; align-items: flex-end; width: 100%; min-width: 0; margin: 4px 0; }
+.cx-queued-bubble { position: relative; display: flex; justify-content: flex-end; min-width: 0; max-width: 85%; }
+.cx-queued-message { flex: 0 1 auto; min-width: 0; max-width: 100%; }
+.cx-queued-message[role="button"] { cursor: pointer; border-radius: 16px; }
+.cx-queued-message[role="button"]:focus-visible { outline: 2px solid var(--color-focus, #2c84db); outline-offset: 2px; }
 .cx-queued-message .cx-bubble { max-width: none; }
+/* Collapsed to its first line, as Claude's collapsible bubble is. */
+.cx-queued-message .cx-bubble > * + * { display: none; }
+.cx-queued-message .cx-bubble > * { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .cx-queued-row[data-state="queued"] .cx-bubble { color: var(--ao-muted); }
 .cx-queued-row[data-state="pending"] .cx-bubble { animation: cx-queued-pulse 2s cubic-bezier(.4, 0, .6, 1) infinite; }
 @keyframes cx-queued-pulse { 50% { opacity: .5; } }
 @media (prefers-reduced-motion: reduce) { .cx-queued-row[data-state="pending"] .cx-bubble { animation: none; color: var(--ao-muted); } }
-.cx-queued-actions { display: flex; flex: none; gap: 2px; }
-.cx-queued-actions button { display: inline-grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 6px;
+.cx-queued-discard { position: absolute; top: 0; right: -32px; display: flex; align-items: center; height: 100%; opacity: 0; transition: opacity .15s ease; }
+.cx-queued-row:hover .cx-queued-discard, .cx-queued-row:focus-within .cx-queued-discard { opacity: 1; }
+.cx-queued-discard button { display: inline-grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px;
   background: transparent; color: var(--ao-muted); cursor: pointer; }
-.cx-queued-actions button:hover:not(:disabled) { background: var(--cx-hover); color: var(--color-text-primary); }
-.cx-queued-actions button:disabled { opacity: .4; cursor: default; }
+.cx-queued-discard button:hover { background: var(--cx-hover); color: var(--color-text-primary); }
+.cx-queued-meta { display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin-top: 4px; }
+.cx-queued-status { font-size: 11px; line-height: 16px; color: var(--ao-muted); }
+.cx-queued-send-now { height: 20px; padding: 0 6px; border: 0; border-radius: 5px; background: transparent; color: var(--ao-muted);
+  font: inherit; font-size: 12px; line-height: 20px; cursor: pointer; }
+.cx-queued-send-now:hover:not(:disabled) { background: var(--cx-hover); color: var(--color-text-primary); }
+.cx-queued-send-now:disabled { opacity: .4; cursor: default; }
 .cx-sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 /* A message steered into a working turn: the user's own bubble, in the live timeline where it was sent. */
 .cx-live-item.kind-steer { display: block; margin: 6px 0; }

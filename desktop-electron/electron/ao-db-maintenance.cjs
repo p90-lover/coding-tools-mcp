@@ -12,7 +12,8 @@ const { spawn } = require("node:child_process");
  * lock within a moment, and AO starts as before.
  *
  * The first time, a mostly empty database is rewritten once (VACUUM) and switched to incremental
- * auto-vacuum; after that a start only frees what accumulated (incremental_vacuum). VACUUM is
+ * auto-vacuum; after that a start frees what accumulated, at most incrementalMaxBytes of it
+ * (incremental_vacuum(N)), so a start never waits on a large rewrite. VACUUM is
  * synchronous and takes tens of seconds on a hard disk, so it runs in a separate process.
  */
 const DEFAULTS = Object.freeze({
@@ -23,6 +24,11 @@ const DEFAULTS = Object.freeze({
   maxUsedBytes: 1024 * 1024 * 1024,
   // Once incremental, free pages are given back when at least this much has accumulated.
   incrementalMinBytes: 64 * 1024 * 1024,
+  // ...and at most this much per start. AO waits for it, and an uncapped incremental_vacuum moved
+  // 443 MB through the write-ahead log at under 1 MB/s on a busy hard disk: AO stayed down for
+  // over ten minutes and the disk froze the app. Free pages are reused anyway; the rest of the
+  // space comes back over the next starts.
+  incrementalMaxBytes: 32 * 1024 * 1024,
   // AO starts only after this; past the limit the maintenance is stopped and AO starts without it.
   timeoutMs: 90_000,
 });
@@ -33,7 +39,7 @@ const { DatabaseSync } = require("node:sqlite");
 const fs = require("node:fs");
 const report = (result) => process.stdout.write(JSON.stringify(result) + "\\n");
 (() => {
-  const { file, minFreeBytes, minFreeRatio, maxUsedBytes, incrementalMinBytes, diskFreeBytes } = JSON.parse(process.env.AO_DB_MAINTENANCE_INPUT);
+  const { file, minFreeBytes, minFreeRatio, maxUsedBytes, incrementalMinBytes, incrementalMaxBytes, diskFreeBytes } = JSON.parse(process.env.AO_DB_MAINTENANCE_INPUT);
   let db = null;
   try {
     db = new DatabaseSync(file, { timeout: 2000 });
@@ -44,7 +50,10 @@ const report = (result) => process.stdout.write(JSON.stringify(result) + "\\n");
     const beforeBytes = fs.statSync(file).size, started = Date.now();
     let action = "none", reason = "";
     if (mode === 2) {
-      if (freeBytes >= incrementalMinBytes) { db.exec("PRAGMA incremental_vacuum"); action = "incremental"; }
+      if (freeBytes >= incrementalMinBytes) {
+        db.exec("PRAGMA incremental_vacuum(" + Math.max(1, Math.floor(incrementalMaxBytes / pageSize)) + ")");
+        action = "incremental";
+      }
     } else if (mode === 0 && freeBytes >= minFreeBytes && pages && free / pages >= minFreeRatio) {
       // The write-ahead log takes about the data's size again while the copy is written back.
       if (usedBytes > maxUsedBytes) reason = "too much data to rewrite at start";
@@ -75,7 +84,7 @@ function compactAoDatabase(dataRoot, options = {}) {
   let diskFreeBytes = null;
   try { const stats = fs.statfsSync(dataRoot); diskFreeBytes = Number(stats.bavail) * Number(stats.bsize); } catch { /* unknown */ }
   const input = JSON.stringify({ file, diskFreeBytes, minFreeBytes: settings.minFreeBytes, minFreeRatio: settings.minFreeRatio,
-    maxUsedBytes: settings.maxUsedBytes, incrementalMinBytes: settings.incrementalMinBytes });
+    maxUsedBytes: settings.maxUsedBytes, incrementalMinBytes: settings.incrementalMinBytes, incrementalMaxBytes: settings.incrementalMaxBytes });
   return new Promise((resolve) => {
     let settled = false, timer = null, timedOut = null, output = "";
     const done = (result) => { if (!settled) { settled = true; clearTimeout(timer); resolve(result); } };
