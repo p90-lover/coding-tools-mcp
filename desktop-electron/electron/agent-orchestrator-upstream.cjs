@@ -183,7 +183,8 @@ async function allocatePort() {
   return port;
 }
 
-function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, cpaQuota = null, cpaUsage = null, logger = console }) {
+function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, cpaQuota = null, cpaUsage = null, logger = console,
+  readySlowMs = 30000, readyLimitMs = 300000 }) {
   let child = null;
   let gateway = null;
   let view = null;
@@ -1677,9 +1678,21 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
             error = `AO exited (${code})${daemonLines ? `: ${daemonLines.trimEnd().slice(-600)}` : ""}`;
           }
         });
-        const deadline = Date.now() + 30000;
-        while (Date.now() < deadline) {
+        // AO answers /readyz once it listens, after opening its database. On a busy hard disk that
+        // took over 30 s, and killing it then made the next start redo the same work: AO stayed
+        // down for 12 minutes (16 starts) and the chats that outlived an update were dropped.
+        // A daemon that is still running is waited for; one that exited fails at once.
+        const startedAt = Date.now();
+        let slowLogged = false;
+        while (Date.now() - startedAt < readyLimitMs) {
           checkStartup();
+          if (currentChild.exitCode !== null || currentChild.signalCode !== null) {
+            throw new Error(error || `AO exited (${currentChild.exitCode ?? currentChild.signalCode}) before it was ready`);
+          }
+          if (!slowLogged && Date.now() - startedAt >= readySlowMs) {
+            slowLogged = true;
+            logger.warn?.("ao.start_slow", { waitedMs: Date.now() - startedAt, output: logTail.slice(-300) });
+          }
           try {
             const response = await fetch(`http://127.0.0.1:${daemonPort}/readyz`, { redirect: "error", signal: AbortSignal.timeout(1000) });
             checkStartup();
