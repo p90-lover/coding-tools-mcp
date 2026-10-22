@@ -789,3 +789,21 @@ test("a hidden agent browser is offered back from the chat header, and opens the
     assert.ok(!after.some((element) => element.props?.className === "cx-browser-chip"), "no chip while it shows");
   } finally { openPage = null; }
 });
+
+test("the chat header has a Preview button that opens the chat's browser with no page open, and closes it again", () => {
+  const { props } = base({ selectedTaskId: "t",
+    runs: [run("r1", "t", [node("w", "planner", "finished", { route: { harness_id: "ao:claude-code", model: "cpa/m" }, receipt: { thread_id: "s1" } })], { execution_mode: "single" })] });
+  const view = mount(props);
+  const preview = () => walk(view.render()).find((element) => element.props?.["aria-label"] === "Preview");
+  assert.ok(preview(), "one click away, not behind Side panel → Overview");
+  assert.equal(preview().props["aria-pressed"], false);
+  preview().props.onClick();
+  assert.ok(walk(view.render()).some((element) => element.type === "Workbench" && element.props.tab === "preview"), "it opens the Preview tab");
+  assert.equal(preview().props["aria-pressed"], true);
+  preview().props.onClick();
+  assert.ok(!walk(view.render()).some((element) => element.type === "Workbench"), "a second click closes it");
+  openPage = { sessionId: "s1", url: "http://127.0.0.1:5173/", title: "App" };
+  try {
+    assert.ok(!preview(), "while a hidden page is open the browser chip takes its place");
+  } finally { openPage = null; }
+});
