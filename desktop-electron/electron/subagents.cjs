@@ -18,7 +18,8 @@ const path = require("node:path");
 
 const EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
 const PERMISSIONS = new Set(["auto", "full"]);
-const LIMITS = Object.freeze({ maxConcurrent: [1, 10], maxPerChat: [1, 10], timeoutMinutes: [1, 240] });
+// The user, 2026-10-22: "it should allow me to use as many subagents on a chat and globally" (the cap was 10).
+const LIMITS = Object.freeze({ maxConcurrent: [1, 100], maxPerChat: [1, 100], timeoutMinutes: [1, 240] });
 const DEFAULT_SETTINGS = Object.freeze({
   enabled: true, maxConcurrent: 3, maxPerChat: 3, timeoutMinutes: 30, permission: "auto", releaseWhenDone: true, defaultRoute: null,
 });

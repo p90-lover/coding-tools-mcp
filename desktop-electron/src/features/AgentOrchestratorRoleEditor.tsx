@@ -403,8 +403,10 @@ export async function pickerModels(harness: string, loadModels: AoModelLoader, a
 }
 
 /** Harness + model pickers shared by the inspector, New mission and Add worker sheets. */
-export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled = false, hideModel = false, hidePermissionNote = false, agentsOnly = false }: {
+export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled = false, hideModel = false, hidePermissionNote = false, agentsOnly = false, compact = false }: {
   route: AoRoute; harnesses: AoHarness[]; disabled?: boolean; hideModel?: boolean; hidePermissionNote?: boolean; agentsOnly?: boolean;
+  /** Model rows by their name only (no "CPA · provider ·" or capability text) and no tuning fine print. */
+  compact?: boolean;
   loadModels: AoModelLoader;
   onChange: (route: AoRoute) => void;
 }) {
@@ -479,8 +481,9 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
         : models && !models.includes(route.model) ? <option value={route.model}>{route.model} (no longer listed)</option> : null}
       {models === null ? <option value={route.model}>{route.model || "Loading"}</option> : null}
       {shown.map(model => <option key={model} value={model}>
-        {modelLabel(model, native && !isWebModel(model))}{harness !== NATIVE_HARNESS && isWebModel(model) ? " · switches to Native Codex"
-          : capabilities?.harness === harness && capabilityText(capabilities.models[model], native && isWebModel(model)) ? ` · ${capabilityText(capabilities.models[model], native && isWebModel(model))}` : ""}
+        {compact ? modelShortLabel(model, native && !isWebModel(model)).name
+          : <>{modelLabel(model, native && !isWebModel(model))}{harness !== NATIVE_HARNESS && isWebModel(model) ? " · switches to Native Codex"
+            : capabilities?.harness === harness && capabilityText(capabilities.models[model], native && isWebModel(model)) ? ` · ${capabilityText(capabilities.models[model], native && isWebModel(model))}` : ""}</>}
       </option>)}
     </select></label> : null}
     {!hidePermissionNote ? harness === NATIVE_HARNESS ? <p className="ao-hint">Saved native permission: {nativePermission(route) || "Unknown"}. Change permissions explicitly in the chat composer menu; runtime capabilities are authoritative.</p>
@@ -513,13 +516,13 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
     {missing ? <p className="ao-hint ao-wide" role="status">{modelLabel(route.model)} is no longer in this harness's model list, so its efforts and context window are unknown and a run with them saved will not start.
       {sameModelElsewhere(route.model, models ?? []).map(other => <button key={other} type="button" className="button-secondary" disabled={disabled}
         onClick={() => onChange(withTuning(workerRoute(route.harness_id, other, nativePermission(route)), route, listed))}>Use {modelLabel(other)}</button>)}</p> : null}
-    <p className="ao-hint ao-wide">{native
+    {compact ? null : <p className="ao-hint ao-wide">{native
       ? `${!webEffort && !efforts?.length ? `${capability?.effortReason || "This model has no effort override."} ` : ""}Native harness context budget: 4,096–${nativeMax.toLocaleString("en-US")} tokens${capability?.contextLimit ? " (this model's limit)" : ""}. Blank uses the model default.`
       : [capability?.effortReason || (!efforts ? "Effort capabilities are unverified." : !efforts.length ? "This model has no effort override." : ""),
           capability?.contextReason || (!context ? "This client has no verified context override." : context.kind === "compaction"
             ? "Context sets the client compaction threshold, not a thinking budget or output limit."
             : "Context sets the client budget, not a thinking budget or a larger provider limit."),
-          capability?.contextLimit ? `Model context limit: ${tokensLabel(capability.contextLimit)} tokens.` : ""].filter(Boolean).join(" ")}</p>
+          capability?.contextLimit ? `Model context limit: ${tokensLabel(capability.contextLimit)} tokens.` : ""].filter(Boolean).join(" ")}</p>}
     </fieldset>
     {notice ? <p className="ao-hint" role="status">{notice}</p> : null}
   </>;
