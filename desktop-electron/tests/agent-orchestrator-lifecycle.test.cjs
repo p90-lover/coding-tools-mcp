@@ -211,6 +211,8 @@ function createHarness(hooks = {}) {
     require(name) { assert.ok(Object.hasOwn(dependencies, name), `Unexpected dependency: ${name}`); return dependencies[name]; },
     process: { platform: process.platform, env: { PATH: "fixture", AO_PORT: "1", AO_REMOTE: "inherited-value" } },
     Buffer, URL, URLSearchParams, AbortSignal, setTimeout, clearTimeout,
+    // A test may give the module its own clock (a daemon slow to start, without waiting for real).
+    ...(hooks.Date ? { Date: hooks.Date } : {}),
     async fetch(url, options) {
       const endpoint = new URL(url);
       assert.equal(endpoint.hostname, "127.0.0.1");
@@ -335,6 +337,25 @@ for (const stage of ["portListen", "portClose", "gatewayListen", "readyFetch", "
     assert.deepEqual(harness.warnings, [], "intentional cancellation is not a startup failure");
   });
 }
+
+test("a daemon still starting after 30 s is waited for, not killed and started again", async (context) => {
+  // Seen 2026-10-22, right after an update on an HDD machine: "AO readiness timed out" after 30 s,
+  // the daemon killed and another started from nothing, and the surviving chats not reattached.
+  let clock = Date.now();
+  const started = clock;
+  class SlowClock extends Date { static now() { return clock; } }
+  const harness = createHarness({
+    Date: SlowClock,
+    // Each readiness poll finds the daemon still starting and moves the clock 5 s, until it is
+    // 45 s old.
+    readyFetch: () => { clock += 5_000; if (clock - started < 45_000) throw new Error("connect ECONNREFUSED"); },
+  });
+  const { controller } = harness;
+  context.after(async () => { await controller.stop(); });
+  assert.equal((await controller.start()).state, "ready");
+  assert.equal(harness.children.length, 1, "one daemon, never replaced");
+  assert.deepEqual(harness.warnings, []);
+});
 
 test("concurrent stops share cleanup and a new start waits for the old gateway", async (context) => {
   const closing = deferred();
@@ -824,6 +845,33 @@ test("a chat started in the background whose agent failed to come up is resumed 
     const other = await h.controller.harness.observe("s2");
     assert.equal(other.turnState, "failed");
     assert.equal(resumed.length, 1, "a failure that is not about time is not retried");
+  } finally { await h.controller.stop(); }
+});
+
+test("observers of the same conversation page share one built timeline, each with its own array", async () => {
+  // A working chat's run loop, activity poll and approval screen observe it within the same moment.
+  let reads = 0;
+  const h = createHarness({
+    getWorkspaces: async () => [], missionCall: async () => ({ ok: true }),
+    workspaceBoard: { bind: async () => ({ projectId: "project-fixture" }) },
+    api: async (endpoint) => {
+      if (/^\/api\/v1\/sessions\/[^/]+$/.test(endpoint.pathname)) return { session: { id: "s1", mode: "chat", status: "working" } };
+      if (endpoint.pathname.endsWith("/conversation")) {
+        reads += 1;
+        return { turns: [{ id: "t1", state: "running" }], messages: [],
+          activities: [{ id: "a1", sequence: 1, turnId: "t1", activityKind: "reasoning", status: "running", detail: { text: "想".repeat(5000) } }] };
+      }
+    },
+  });
+  try {
+    await h.controller.start();
+    const first = await h.controller.harness.observe("s1");
+    const second = await h.controller.harness.observe("s1");
+    assert.equal(reads, 1, "the second observer reads the same page");
+    assert.notEqual(first.timeline, second.timeline, "a caller's array is its own");
+    assert.equal(first.timeline[0], second.timeline[0], "the items were built once");
+    // A running thought keeps its newest 4 KB: 1365 three-byte characters.
+    assert.equal(first.timeline[0].text, "想".repeat(1365));
   } finally { await h.controller.stop(); }
 });
 

@@ -940,6 +940,9 @@ function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview
       ? "Subagents: for a self-contained piece of work (exploring part of the codebase, an independent change, a review) you can "
         + "start a subagent with subagent_start and keep working; it runs in this project on its own model and ends with a report "
         + "you read with subagent_result. It cannot see this conversation, so give it the whole task. Several may run in parallel. "
+        + "subagent_inspect shows what one is doing; subagent_message steers it while it works or gives a finished one its next task "
+        + "in the same session. You may pick its model, effort and context window (subagent_models; it then runs on Claude Code), "
+        + "or give subagent_start a saved team (subagent_list) to do the task as one subagent. "
         + (subagents ? `Available: ${String(subagents).slice(0, 1500)}. ` : "subagent_list shows the ones the user set up. ")
       : "")
     // Every poll of a slow job is another round of tokens; a turn that ends costs nothing while it waits.

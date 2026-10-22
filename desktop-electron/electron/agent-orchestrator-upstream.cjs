@@ -13,7 +13,7 @@ const { createAoDependencyLinks } = require("./ao-dependency-links.cjs");
 const { createDaemonLogFilter } = require("./ao-daemon-log.cjs");
 const { compactAoDatabase } = require("./ao-db-maintenance.cjs");
 const { readContextBreakdown } = require("./ao-context-breakdown.cjs");
-const { withAgentShellCommands, CONVERSATION_LIMITS: AGENT_SHELL_CONVERSATION_LIMITS } = require("./chat-agent-shell.cjs");
+const { withAgentShellCommands, utf8Suffix, CONVERSATION_LIMITS: AGENT_SHELL_CONVERSATION_LIMITS } = require("./chat-agent-shell.cjs");
 const { windowsChildEnvironment, systemEnvironment } = require("./chat-sandbox.cjs");
 
 const API_OPERATIONS = Object.freeze({
@@ -121,6 +121,8 @@ const WORKSPACE_MODES = new Set(["worktree", "shared", "folder"]);
 // Agents without an AO chat controller run in their own terminal UI and report here.
 // How often the harness list re-runs AO's install checks, so a newly installed CLI shows up.
 const AGENT_RECHECK_MS = 60_000;
+// How long a started AO daemon that is still running may take to answer /readyz (see start).
+const AO_READY_TIMEOUT_MS = 90_000;
 
 // A plain GET lists only the agents whose install check has finished, which right after the
 // daemon starts is often just one; the list was then read once and Codex, opencode and others
@@ -545,6 +547,21 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     ];
     return items.sort((a, b) => a.sequence - b.sequence).slice(-TIMELINE_ITEMS);
   }
+  // Callers of a working chat's observe() (the run loop, the chat's activity poll and its follow-ups,
+  // the approval screen, the panel's status poll) share one tail read, but each built its timeline
+  // again: ~13 ms of main-thread work per call on a 100-item tail, several calls a second for each
+  // chat on screen. Seen 2026-10-22: the main process at 70-100% of a core with two working chats
+  // open, 7% once the window was hidden. A page is never changed once read, so its timeline is
+  // built once per turn; each caller gets its own array of the shared (read-only) items.
+  const builtTimelines = new WeakMap(); // conversation page -> Map(`${turnId}|${turnOver}` -> items)
+  function sharedTurnTimeline(conversation, turnId, turnOver) {
+    if (!conversation || typeof conversation !== "object") return turnTimeline(conversation, turnId, turnOver);
+    let built = builtTimelines.get(conversation);
+    if (!built) builtTimelines.set(conversation, built = new Map());
+    const key = `${turnId}|${turnOver}`;
+    if (!built.has(key)) built.set(key, turnTimeline(conversation, turnId, turnOver));
+    return built.get(key).slice();
+  }
   /**
    * The page of a session's conversation before `beforeSequence`. A page over the handler limit
    * (a command's long output, a screenshot) is read again smaller; one item over it on its own is
@@ -872,18 +889,6 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     while (cut > 0 && (bytes[cut] & 0xc0) === 0x80) cut -= 1;
     return bytes.toString("utf8", 0, cut);
   }
-  /** The longest suffix of `text` that is at most `maxBytes` of UTF-8: the newest part of live text. */
-  function utf8Suffix(text, maxBytes) {
-    const value = String(text);
-    if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
-    let start = Math.max(0, value.length - maxBytes);
-    while (start < value.length && Buffer.byteLength(value.slice(start), "utf8") > maxBytes) start += Math.max(1, Math.floor((value.length - start) * 0.05));
-    while (start > 0 && Buffer.byteLength(value.slice(start - 1), "utf8") <= maxBytes) start -= 1;
-    // Never start on the second half of a surrogate pair.
-    const first = value.charCodeAt(start);
-    if (start < value.length && first >= 0xdc00 && first <= 0xdfff) start += 1;
-    return value.slice(start);
-  }
 
   // Mission-owned AO calls. The run grant already covers them, so no extra dialog.
   async function internalApi(method, endpoint, body, options) {
@@ -1116,7 +1121,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         .filter(message => message.role === "assistant" && message.turnId === turn.id && typeof message.text === "string")
         .map(message => message.text).join("\n\n").trim();
       const status = session?.session?.status;
-      const timeline = turnTimeline(conversation, turn?.id, turnOver);
+      const timeline = sharedTurnTimeline(conversation, turn?.id, turnOver);
       // A chat started in the background (spawn's async) whose agent failed to come up: one that
       // failed only for time is resumed once (AO keeps the queued prompt, so it is never sent twice);
       // otherwise the turn fails with AO's reason.
@@ -1707,7 +1712,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
             error = `AO exited (${code})${daemonLines ? `: ${daemonLines.trimEnd().slice(-600)}` : ""}`;
           }
         });
-        const deadline = Date.now() + 30000;
+        // A daemon that exits fails at once (checkStartup); one still starting is waited for. 30 s
+        // was too short on this machine's HDD: on 2026-10-22, right after an update (with the
+        // database compaction running), the first start was given up as "AO readiness timed out",
+        // its daemon killed and a new one started from nothing, and the chats that outlived the
+        // update were not reattached.
+        const deadline = Date.now() + AO_READY_TIMEOUT_MS;
         while (Date.now() < deadline) {
           checkStartup();
           try {
