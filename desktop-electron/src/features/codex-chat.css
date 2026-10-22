@@ -8,38 +8,52 @@
   --cx-bubble: color-mix(in srgb, var(--color-text-primary) 6%, var(--color-bg-primary));
   --cx-radius: 12px;
   --cx-tray: color-mix(in srgb, var(--color-text-primary) 5%, var(--color-bg-primary));
+  /* Codex 26.1016's sidebar (app-shared CSS, its default light theme): ink #1a1c1f, tertiary text
+     and row hover as that ink at 49.5% and 5.3%, the sidebar on surface-under #f6f6f6. */
+  --cx-side-ink: #1a1c1f;
+  --cx-side-tertiary: rgb(26 28 31 / 49.5%);
+  --cx-side-hover: rgb(26 28 31 / 5.3%);
+  --cx-side-font: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 /* ---------- Thread list ---------- */
-/* min-width: 0 so long chat titles ellipsize instead of widening the column. */
-.ao-workflow > .cx-threads { position: relative; display: flex; flex: 0 0 248px; flex-direction: column; width: 248px; min-width: 0; min-height: 0; overflow: hidden;
-  padding: calc(env(titlebar-area-height, 34px) + 8px) 8px 8px; border-right: 1px solid var(--ao-line); background: var(--cx-sidebar); }
-.cx-new-chat { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 10px; border: 0; border-radius: 8px;
-  background: transparent; color: var(--color-text-primary); font-size: 13px; text-align: left; cursor: pointer; }
-.cx-new-chat:hover, .cx-new-chat[aria-pressed="true"] { background: var(--cx-hover); }
+/* min-width: 0 so long chat titles ellipsize instead of widening the column. Codex's sidebar is
+   275 px wide, its rows 30 px high with 10 px corners and 14 px text. */
+.ao-workflow > .cx-threads { position: relative; display: flex; flex: 0 0 275px; flex-direction: column; width: 275px; min-width: 0; min-height: 0; overflow: hidden;
+  padding: calc(env(titlebar-area-height, 34px) + 8px) 8px 8px; border-right: 1px solid var(--ao-line); background: #f6f6f6;
+  color: var(--cx-side-ink); font-family: var(--cx-side-font); }
+.cx-new-chat { display: flex; align-items: center; gap: 12px; height: 30px; padding: 0 8px; border: 0; border-radius: 10px;
+  background: transparent; color: var(--cx-side-ink); font-size: 14px; text-align: left; cursor: pointer; }
+.cx-new-chat:hover, .cx-new-chat[aria-pressed="true"] { background: var(--cx-side-hover); }
 .cx-thread-scroll { flex: 1 1 auto; min-height: 0; margin-top: 8px; overflow-x: hidden; overflow-y: auto; }
 .cx-thread-group { margin-bottom: 12px; }
-.cx-thread-group > h3 { margin: 6px 10px 4px; color: var(--ao-muted); font-size: 11px; font-weight: 500; }
+/* Codex's section title: 30 px high, 14 px medium, tertiary. */
+.cx-thread-group > h3 { display: flex; align-items: center; min-height: 30px; margin: 0; padding: 0 6px 0 8px; color: var(--cx-side-tertiary); font-size: 14px; font-weight: 500; }
 .cx-thread-group ul { margin: 0; padding: 0; list-style: none; }
-.cx-project { display: flex; align-items: center; gap: 6px; width: 100%; height: 30px; padding: 0 8px; border: 0; border-radius: 8px;
-  background: transparent; color: var(--color-text-primary); font-size: 13px; font-weight: 500; text-align: left; cursor: pointer; }
-.cx-project:hover { background: var(--cx-hover); }
+/* A project row: the 16 px folder centred in a 30 px slot from the row's 4 px start, the name 8 px
+   after it (36 px in), regular weight as Codex's label. */
+.cx-project { display: flex; align-items: center; gap: 12px; width: 100%; height: 30px; padding: 0 8px; border: 0; border-radius: 10px;
+  background: transparent; color: var(--cx-side-ink); font-size: 14px; font-weight: 400; text-align: left; cursor: pointer; }
+.cx-project:hover { background: var(--cx-side-hover); }
 /* The chevron icon points right: right when closed, down when open. */
-.cx-project svg { flex: 0 0 auto; color: var(--ao-muted); transition: transform var(--duration-micro, 140ms); }
+.cx-project svg { flex: 0 0 auto; color: var(--cx-side-ink); transition: transform var(--duration-micro, 140ms); }
 .cx-project svg.is-open { transform: rotate(90deg); }
 .cx-project-pin { margin-left: auto; font-size: 10px; opacity: .7; }
 /* A project folder's git label ("worktree", "not git"): quiet, amber when chats can't use the folder. */
 .cx-project-tag { flex: none; padding: 0 5px; border: 1px solid var(--ao-line); border-radius: 4px; color: var(--ao-muted); font-size: 10px; line-height: 15px; }
 .cx-project-tag.is-warn { border-color: color-mix(in srgb, var(--ao-amber, #c98a12) 55%, transparent); color: var(--ao-amber, #c98a12); }
 .cx-project-tag + .cx-project-pin { margin-left: 4px; }
-.cx-projects > li > ul { padding-left: 10px; }
-.cx-thread-row { position: relative; display: flex; align-items: center; border-radius: 8px; }
-.cx-thread-row:hover { background: var(--cx-hover); }
+/* A project's chats keep the same leading slot as its folder, so their titles line up with the
+   project name, 36 px in (the status dot stays at the row's end). */
+.cx-projects > li > ul { padding-left: 0; }
+.cx-projects > li > ul .cx-thread-select { padding-left: 36px; }
+.cx-thread-row { position: relative; display: flex; align-items: center; border-radius: 10px; }
+.cx-thread-row:hover { background: var(--cx-side-hover); }
 .cx-thread-select { display: flex; flex: 1 1 auto; align-items: center; gap: 8px; min-width: 0; height: 30px; padding: 0 8px; border: 0;
-  border-radius: 8px; background: transparent; color: var(--color-text-primary); font-size: 13px; text-align: left; cursor: pointer; }
-.cx-thread-select[aria-current="true"] { background: var(--cx-active); }
+  border-radius: 10px; background: transparent; color: var(--cx-side-ink); font-size: 14px; line-height: 20px; text-align: left; cursor: pointer; }
+.cx-thread-select[aria-current="true"] { background: var(--cx-side-hover); }
 .cx-thread-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cx-thread-age { flex: 0 0 auto; color: var(--ao-muted); font-size: 11px; }
+.cx-thread-age { flex: 0 0 auto; color: var(--cx-side-tertiary); font-size: 13px; line-height: 16px; font-variant-numeric: tabular-nums; }
 .cx-thread-dot { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; background: transparent; }
 .cx-thread-dot.status-running { background: var(--ao-green); animation: cx-pulse 1.4s ease-in-out infinite; }
 .cx-thread-dot.status-attention { background: var(--ao-red); }
@@ -80,14 +94,16 @@
 .cx-project-card-action { display: flex; align-items: center; gap: 6px; padding: 4px 2px; border: 0; background: transparent; color: var(--color-text-primary);
   font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
 .cx-project-card-action:hover { color: var(--ao-blue); }
-.cx-show-more { width: 100%; height: 26px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: var(--ao-muted);
-  font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
-.cx-show-more:hover { background: var(--cx-hover); color: var(--color-text-primary); }
-.cx-group-head { display: flex; align-items: center; justify-content: space-between; margin: 6px 6px 4px 10px; }
-.cx-group-head h3 { margin: 0; color: var(--ao-muted); font-size: 11px; font-weight: 500; }
-.cx-list-settings { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; border: 0;
-  border-radius: 6px; background: transparent; color: var(--ao-muted); cursor: pointer; }
-.cx-list-settings:hover, .cx-list-settings[aria-expanded="true"] { background: var(--cx-hover); color: var(--color-text-primary); }
+/* Codex's "Show more": an xs button, 24 px high, regular 14 px, tertiary until hovered. */
+.cx-show-more { width: 100%; height: 24px; padding: 0 8px 0 36px; border: 0; border-radius: 10px; background: transparent; color: var(--cx-side-tertiary);
+  font: inherit; font-size: 14px; font-weight: 400; text-align: left; cursor: pointer; }
+.cx-show-more:hover { background: var(--cx-side-hover); color: var(--cx-side-ink); }
+.cx-group-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 30px; margin: 0; padding: 0 6px 0 8px; }
+.cx-group-head h3 { margin: 0; color: var(--cx-side-tertiary); font-size: 14px; font-weight: 500; }
+/* Codex's section-header actions: 24 px uniform ghost buttons. */
+.cx-list-settings { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: 0;
+  border-radius: 6px; background: transparent; color: var(--cx-side-tertiary); cursor: pointer; }
+.cx-list-settings:hover, .cx-list-settings[aria-expanded="true"] { background: var(--cx-side-hover); color: var(--cx-side-ink); }
 .cx-thread-row[draggable="true"] { cursor: grab; }
 .cx-thread-row.is-dragging { opacity: .45; }
 /* The label that follows the pointer while a chat is dragged (ChatThreadList); drawn off screen. */

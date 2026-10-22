@@ -25,7 +25,7 @@ export function projectGitLabel(git: ThreadProjectGit | null | undefined): { tag
     case "repo": return { tag: null, line: `Git repository${on}`, warn: false };
     case "worktree": return { tag: "worktree", line: `Worktree of ${git.mainRepo ?? "another repository"}${on}`, warn: false };
     case "inside": return { tag: "subfolder", line: `A folder inside the repository ${git.root ?? ""}${on}. Agent chats need the repository's root folder.`, warn: true };
-    case "none": return { tag: "not git", line: "Not a git repository. Agent chats need a project whose folder is a repository's root.", warn: true };
+    case "none": return { tag: "not git", line: "Not a git repository. Agent chats need a repository's root folder.", warn: true };
     case "missing": return { tag: "missing", line: "This folder no longer exists.", warn: true };
     default: return null;
   }
@@ -433,7 +433,7 @@ export function ChatThreadList(props: ThreadListProps) {
       ] },
       scheduled
         ? { label: "Cancel scheduled start", icon: "schedule", run: () => actions.lifecycle(chat.taskId, "cancel_schedule") }
-        : running ? { label: "Schedule start…", icon: "schedule", reason: "Stop this mission before scheduling a start" }
+        : running ? { label: "Schedule start…", icon: "schedule", reason: "Stop this chat before scheduling a start" }
           : { label: "Schedule start…", icon: "schedule", run: () => actions.lifecycle(chat.taskId, "schedule") },
       { kind: "separator" },
       { label: "Share", icon: "share", run: () => actions.share(chat.taskId) },
@@ -447,7 +447,7 @@ export function ChatThreadList(props: ThreadListProps) {
       { label: "Open in new window", icon: "window", run: () => actions.openWindow(chat.taskId) },
       { label: "Open in", icon: "openIn", items: [
         { label: "Structure", run: () => actions.openStructure(chat.taskId) },
-        { label: "Mission Board", run: () => actions.openBoard() },
+        { label: "Mission board", run: () => actions.openBoard() },
       ] },
       { kind: "separator" },
       // Archive and delete stop the chat's own running work after a confirmation; both can be restored.
@@ -664,7 +664,7 @@ export function ChatThreadList(props: ThreadListProps) {
   return (
     <aside className="cx-threads" aria-label="Projects and chats" onDragOver={listDragOver} onDrop={listDrop}>
       <button type="button" className="cx-new-chat" aria-pressed={!selectedTaskId} onClick={actions.newChat}>
-        <Icon name="plus" width="15" height="15" />New chat
+        <ChatGlyph name="compose" size={16} />New chat
       </button>
       <nav className="cx-thread-scroll">
         {pinnedChats.length ? <section className="cx-thread-group">
@@ -696,7 +696,7 @@ export function ChatThreadList(props: ThreadListProps) {
             <h3>Projects</h3>
             <button type="button" className="cx-list-settings" aria-label="Chat list settings" title="Chat list settings" aria-expanded={Boolean(settingsAt)}
               onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); setSettingsAt(settingsAt ? null : { top: box.bottom + 4, left: box.left }); }}>
-              <Icon name="settings" width="13" height="13" />
+              <ChatGlyph name="more" size={16} />
             </button>
           </div>
           <ul className="cx-projects">
@@ -708,7 +708,8 @@ export function ChatThreadList(props: ThreadListProps) {
                 <div className="cx-project-row" onMouseEnter={(event) => hoverProject(item, event.currentTarget)} onMouseLeave={leaveProject}>
                   <button type="button" className="cx-project" aria-expanded={open}
                     onClick={() => clickProject(item.id)} onContextMenu={(event) => openMenu(event, projectMenu(item), item.name)}>
-                    <ChatGlyph name="folder" size={15} />
+                    {/* Codex's project row: a closed folder, an open one while its chats show. */}
+                    <ChatGlyph name={open ? "folderOpen" : "folder"} size={16} />
                     <span className="cx-thread-title">{item.name}</span>
                     {git?.tag ? <span className={`cx-project-tag${git.warn ? " is-warn" : ""}`} title={git.line}>{git.tag}</span> : null}
                     {props.pinnedProjects.includes(item.id) ? <span className="cx-project-pin" aria-label="Pinned project">📌</span> : null}
@@ -718,9 +719,9 @@ export function ChatThreadList(props: ThreadListProps) {
                     <button type="button" aria-label={`${item.name} actions`} title="More"
                       onClick={(event) => { const owner = event.currentTarget, box = owner.getBoundingClientRect(); setProjectCard(null);
                         setMenu((current) => current?.owner === owner ? null : { x: box.left, y: box.bottom + 4, items: projectMenu(item), label: item.name, owner }); }}>
-                      <ChatGlyph name="more" size={14} /></button>
+                      <ChatGlyph name="more" size={16} /></button>
                     <button type="button" aria-label={`New chat in ${item.name}`} title="New chat in this project" onClick={() => actions.newChatIn(item.id)}>
-                      <ChatGlyph name="edit" size={14} /></button>
+                      <ChatGlyph name="compose" size={16} /></button>
                   </span>
                 </div>
                 {open && !current ? <ul>{otherRows(item.id)}</ul> : null}
@@ -780,7 +781,7 @@ export function ChatThreadList(props: ThreadListProps) {
                 const { chats: shown, drag } = archivedDrag(group.key, group.chats);
                 return <li key={group.key}>
                   <button type="button" className="cx-project" aria-expanded={open} onClick={() => toggle(key)}>
-                    {group.project ? <ChatGlyph name="folder" size={15} /> : <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />}
+                    {group.project ? <ChatGlyph name={open ? "folderOpen" : "folder"} size={16} /> :<Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />}
                     <span className="cx-thread-title">{group.name}</span>
                     <span className="cx-archived-count">{group.chats.length}</span>
                   </button>
@@ -856,7 +857,7 @@ export function ChatThreadList(props: ThreadListProps) {
           <span>days</span>
         </label> : null}
         {props.setArchiveDays ? <p className="cx-popover-hint">0 keeps them archived. Deleted chats can still be restored.</p> : null}
-        <p className="cx-popover-hint">Drag chats to reorder them in any list (a project, Pinned, a section, Archived), or press Alt+Shift+↑/↓ on the open chat.</p>
+        <p className="cx-popover-hint">Drag chats to reorder any list, or press Alt+Shift+↑/↓ on the open chat.</p>
         {manualOrder.length ? <button type="button" className="cx-popover-reset" onClick={() => saveOrder([])}>Reset to newest first</button> : null}
       </FloatingLayer> : null}
       <ChatMenu menu={menu} onClose={() => setMenu(null)} />
