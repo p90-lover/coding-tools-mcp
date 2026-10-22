@@ -18,8 +18,12 @@ const FILE_BYTES: u64 = 32 * 1024 * 1024;
 const TOTAL_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_ENTRIES: usize = 20_000;
 const DEADLINE: Duration = Duration::from_secs(8);
-#[cfg(windows)]
+#[cfg(all(windows, not(test)))]
 const GIT_METADATA_DEADLINE: Duration = Duration::from_secs(3);
+// Hosted Windows runners running the whole suite at once took over 3 s to start Git, failing
+// unrelated tests; the overall DEADLINE still bounds a scan.
+#[cfg(all(windows, test))]
+const GIT_METADATA_DEADLINE: Duration = Duration::from_secs(7);
 #[cfg(not(windows))]
 const GIT_METADATA_DEADLINE: Duration = Duration::from_secs(1);
 static ACTIVE: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();

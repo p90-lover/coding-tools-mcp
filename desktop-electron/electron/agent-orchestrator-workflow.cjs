@@ -1252,17 +1252,23 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         // session, worktree or replayed prompt, and the agent keeps what it already read and ran.
         const continued = continuations.get(runId);
         // A session that is gone, or refuses the message, falls back to a fresh start.
-        let sent = null;
+        let sent = null, sendError = null;
         if (continued) stage("reconnecting to the chat's agent");
-        if (continued && await continuableSession(continued.session)) {
+        const usable = Boolean(continued) && await continuableSession(continued.session);
+        if (usable) {
           sessionOwners.set(continued.session, runKey(workspaceId, runId));
           if (sessionOwners.size > 500) sessionOwners.delete(sessionOwners.keys().next().value);
           stage("sending your message to the agent");
-          sent = await harnessService().send(continued.session, continued.text, reserved.request_key).catch(() => null);
+          sent = await harnessService().send(continued.session, continued.text, reserved.request_key)
+            .catch((error) => { sendError = publicText(error?.message || error, 200); return null; });
         }
-        // A follow-up that should have continued the chat's session starts a fresh one: logged, so
-        // "it forgot everything" can be traced to it.
-        if (continued && !sent?.turnId) logger?.warn?.("ao.continuation_lost", { reason: sent ? "send_refused" : "session_gone" });
+        // A follow-up that should have continued the chat's session starts a fresh one: logged with
+        // the session and why, so "it forgot everything" can be traced. "session_gone" covered both a
+        // session that could not be continued (ao.continuable_refused says why) and a failed send.
+        if (continued && !sent?.turnId) {
+          logger?.warn?.("ao.continuation_lost", { session: continued.session,
+            reason: !usable ? "not_continuable" : sendError ? "send_failed" : "send_refused", ...(sendError ? { message: sendError } : {}) });
+        }
         // A fresh start of a follow-up (another model or setting, or a session that is gone) begins
         // with what the earlier agents replied; the first card to start takes it.
         const handoff = handoffs.get(runId);
