@@ -44,6 +44,39 @@ test("a moved window is saved off the main thread, and closing saves the final p
   }
 });
 
+test("closing the window to the tray saves off the main thread; only quitting saves at once", async () => {
+  const { EventEmitter } = require("node:events");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-window-tray-"));
+  const file = path.join(root, "window-state.json");
+  let bounds = { x: 10, y: 10, width: 1000, height: 700 };
+  let quitting = false;
+  const window = Object.assign(new EventEmitter(), {
+    isDestroyed: () => false, isMaximized: () => false, isFullScreen: () => false,
+    getBounds: () => ({ ...bounds }), getNormalBounds: () => ({ ...bounds }),
+  });
+  const errors = [];
+  const { writeFileSync } = fs;
+  let syncWrites = 0;
+  try {
+    trackWindowState(window, file, (error) => errors.push(error), { quitting: () => quitting });
+    fs.writeFileSync = function (target, ...rest) { if (String(target).startsWith(file)) syncWrites += 1; return writeFileSync.call(this, target, ...rest); };
+    window.emit("close");
+    assert.equal(syncWrites, 0, "hiding to the tray never blocks the app on the disk");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")).bounds, bounds, "the position is still saved");
+    bounds = { x: 70, y: 80, width: 1200, height: 760 };
+    quitting = true;
+    window.emit("close");
+    assert.equal(syncWrites, 1, "quitting saves before the app can exit");
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")).bounds, bounds);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.deepEqual(errors, []);
+  } finally {
+    fs.writeFileSync = writeFileSync;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 const displays = [{ workArea: { x: 0, y: 0, width: 1512, height: 982 } }];
 
 test("window state preserves visible bounds and desktop modes", () => {

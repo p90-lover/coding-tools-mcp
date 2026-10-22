@@ -71,7 +71,14 @@ function captureWindowState(window) {
   };
 }
 
-function trackWindowState(window, filePath, onError) {
+/**
+ * `quitting`: whether a close is the app exiting. Without it every close counts as one (the old
+ * behaviour). A close that only hides the window to the tray saves off the main thread: the
+ * synchronous save (six file operations on the data drive, and up to 1.4 s of Atomics.wait retries
+ * when Windows holds the file) ran on every close to the tray. Seen 2026-10-22: a 4.0 s stall with
+ * the main process nearly idle, as the window was hidden.
+ */
+function trackWindowState(window, filePath, onError, { quitting = () => true } = {}) {
   let timer = null;
   // While the window is moved or resized, the position is saved off the main thread: each
   // synchronous atomic write (six file operations, and up to 1.4 s of retries when Windows holds
@@ -90,16 +97,16 @@ function trackWindowState(window, filePath, onError) {
   for (const event of ["resize", "move", "maximize", "unmaximize", "enter-full-screen", "leave-full-screen"]) {
     window.on(event, schedule);
   }
-  // Closing saves synchronously, so the position is on disk before the app can exit. The same state
-  // is queued after any save still in flight, so an older one cannot land last.
+  // Closing the app saves synchronously, so the position is on disk before it can exit. The same
+  // state is queued after any save still in flight, so an older one cannot land last.
   window.on("close", () => {
     if (timer) clearTimeout(timer);
     timer = null;
     if (window.isDestroyed()) return;
     try {
       const content = `${JSON.stringify(captureWindowState(window), null, 2)}\n`;
-      writePrivateFileAtomic(filePath, content);
-      writePrivateFileAtomicAsync(filePath, content).catch(() => {});
+      if (quitting()) writePrivateFileAtomic(filePath, content);
+      writePrivateFileAtomicAsync(filePath, content).catch((error) => onError?.(error));
     } catch (error) {
       onError?.(error);
     }

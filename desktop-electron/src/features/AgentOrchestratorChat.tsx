@@ -529,8 +529,8 @@ function WorkGroupView({ turn, idle = false, expanded = false, loadWork }: WorkG
       ? <div className="cx-work is-live"><span className="cx-shimmer">Starting…</span></div> : null;
   }
   // While it works the turn has no head of its own: its steps start at their dots, and how long it
-  // has worked and on what is said once, at the turn's foot (TurnRunning). Once done it folds under
-  // "Worked · N steps".
+  // has worked and on what is said once, at the turn's foot (TurnRunning, whose verb alone shimmers).
+  // Once done it folds under "Worked · N steps".
   return <div className={`cx-work${working ? " is-live" : ""}${working?.working?.stalled ? " is-stalled" : ""}`}>
     {working ? null : <button type="button" className="cx-work-head" aria-expanded={open} onClick={() => setChosen(!open)}>
       <span>{`Worked · ${turn.steps.length} ${turn.steps.length === 1 ? "step" : "steps"}`}</span>
@@ -1746,6 +1746,11 @@ export function AgentOrchestratorChat({
             title={`Agent's browser: ${livePage.url}\nClick to show`} onClick={() => setWorkbench("preview")}>
             <span className="cx-browser-dot" aria-hidden="true" /><Icon name="browser" width="13" height="13" />
             <span>{livePage.title || (() => { try { return new URL(livePage.url).host; } catch { return livePage.url; } })()}</span></button> : null}
+          {/* Preview, as Claude Code's header has it: the chat's browser in one click, open page or not
+              (the user found it only behind Side panel → Overview → Preview). */}
+          {selectedTaskId && !(livePage && workbench !== "preview") ? <button type="button" className="cx-icon-button" aria-pressed={workbench === "preview"}
+            title="Preview: the chat's browser" aria-label="Preview" onClick={() => setWorkbench((open) => (open === "preview" ? null : "preview"))}>
+            <Icon name="globe" width="16" height="16" /></button> : null}
           {selectedTaskId ? <button type="button" className="cx-icon-button cx-compact-toggle" aria-pressed={compactActivity}
             title={compactActivity ? "Show every step" : "Compact activity"}
             aria-label="Compact activity" onClick={toggleCompact}>

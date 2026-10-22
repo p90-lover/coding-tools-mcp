@@ -215,7 +215,7 @@
 .ao-workflow .cx-chat .cx-reasoning-body { margin: 2px 0 6px 6px; padding-left: 12px; border-left: 1px solid var(--claude-line-soft); color: var(--claude-text-2); }
 .ao-workflow .cx-chat .cx-reasoning-body .cx-md { color: var(--claude-text-2); font-size: 13px; line-height: 1.6; }
 .ao-workflow .cx-chat .cx-shimmer { background-image: linear-gradient(90deg, var(--claude-text-2) 0%, var(--claude-text) 50%, var(--claude-text-2) 100%);
-  animation-duration: 2.8s; }
+  animation-duration: 2.8s; animation-timing-function: steps(84); }
 
 /* ---------- Cards: approvals, questions, plans, errors ---------- */
 .ao-workflow .cx-chat .ao-msg-approval, .ao-workflow .cx-chat .cx-card { padding: 14px 16px; border: 1px solid var(--claude-line); border-radius: 12px;

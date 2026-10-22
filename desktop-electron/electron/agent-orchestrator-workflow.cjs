@@ -1252,17 +1252,23 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         // session, worktree or replayed prompt, and the agent keeps what it already read and ran.
         const continued = continuations.get(runId);
         // A session that is gone, or refuses the message, falls back to a fresh start.
-        let sent = null;
+        let sent = null, sendError = null;
         if (continued) stage("reconnecting to the chat's agent");
-        if (continued && await continuableSession(continued.session)) {
+        const usable = Boolean(continued) && await continuableSession(continued.session);
+        if (usable) {
           sessionOwners.set(continued.session, runKey(workspaceId, runId));
           if (sessionOwners.size > 500) sessionOwners.delete(sessionOwners.keys().next().value);
           stage("sending your message to the agent");
-          sent = await harnessService().send(continued.session, continued.text, reserved.request_key).catch(() => null);
+          sent = await harnessService().send(continued.session, continued.text, reserved.request_key)
+            .catch((error) => { sendError = publicText(error?.message || error, 200); return null; });
         }
-        // A follow-up that should have continued the chat's session starts a fresh one: logged, so
-        // "it forgot everything" can be traced to it.
-        if (continued && !sent?.turnId) logger?.warn?.("ao.continuation_lost", { reason: sent ? "send_refused" : "session_gone" });
+        // A follow-up that should have continued the chat's session starts a fresh one: logged with
+        // the session and why, so "it forgot everything" can be traced. "session_gone" covered both a
+        // session that could not be continued (ao.continuable_refused says why) and a failed send.
+        if (continued && !sent?.turnId) {
+          logger?.warn?.("ao.continuation_lost", { session: continued.session,
+            reason: !usable ? "not_continuable" : sendError ? "send_failed" : "send_refused", ...(sendError ? { message: sendError } : {}) });
+        }
         // A fresh start of a follow-up (another model or setting, or a session that is gone) begins
         // with what the earlier agents replied; the first card to start takes it.
         const handoff = handoffs.get(runId);
@@ -5135,10 +5141,60 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    */
   const subagentLaunchArgs = (workspaceId, route, name) => aoLaunchArgs(clean(workspaceId, 128),
     { id: "subagent", role: "worker", route, settings: { name } }, true);
+  /**
+   * A saved team run as a subagent (subagents.cjs): the team works on the task as a chat of its own
+   * (chat_send in team mode, started in the background as a /goal round is), and its closing cards'
+   * answers are the report. Only teams whose every role has a model are offered.
+   */
+  const subagentTeams = {
+    async list(workspaceId) {
+      const saved = await runs({ workspaceId: clean(workspaceId, 128) });
+      return (saved.teams ?? (saved.team ? [saved.team] : []))
+        .filter(team => team?.id && Number.isSafeInteger(team.revision) && !missingModelNotice(team))
+        .map(team => ({ id: String(team.id), name: publicText(team.name || team.id, 80), revision: team.revision,
+          roles: (team.nodes ?? []).map(node => ({ name: publicText(node.settings?.name || node.role || "role", 96),
+            model: String(node.route?.model ?? "").replace(/^cpa\//, "") })) }));
+    },
+    async start({ workspaceId, teamId, title, message }) {
+      const team = (await subagentTeams.list(workspaceId)).find(item => item.id === teamId);
+      if (!team) throw new Error("That saved team changed or was removed; subagent_list shows the current ones");
+      const result = await chatSend({ workspaceId, title, message, executionMode: "team", teamId: team.id, teamRevision: team.revision, deferStart: true });
+      if (result?.ok === false) throw new Error(String(result.reason || "The team could not start"));
+      return { taskId: result.taskId, runId: result.runId };
+    },
+    /** A follow-up to a settled team run: a new run of the same chat and team. */
+    async followUp({ workspaceId, taskId, teamId, message }) {
+      const team = (await subagentTeams.list(workspaceId)).find(item => item.id === teamId);
+      if (!team) throw new Error("That saved team changed or was removed; start a new subagent");
+      const result = await chatSend({ workspaceId, taskId, message, executionMode: "team", teamId: team.id, teamRevision: team.revision, deferStart: true });
+      if (result?.ok === false) throw new Error(String(result.reason || "The team could not continue"));
+      return { runId: result.runId };
+    },
+    /** Whether the run is over (nothing drives it and no card can still run), each role's state, and the answers so far. */
+    async state({ workspaceId, runId }) {
+      const id = clean(workspaceId, 128), run = clean(runId, 80);
+      const saved = await runs({ workspaceId: id, runId: run });
+      const mission = saved.runs.find(entry => entry.id === run && entry.workspace_id === id);
+      if (!mission) throw new Error("AO run unavailable");
+      const live = backgroundRuns.get(runKey(id, run));
+      const moving = Boolean(live && (live.starting || live.driving));
+      const startFailed = live?.status === "failed" && !moving;
+      return {
+        settled: !moving && (runSettled(mission) || startFailed),
+        cancelled: Boolean(mission.cancelled),
+        failed: startFailed || mission.nodes.some(node => node.state === "failed"),
+        detail: live?.detail ? publicText(live.detail, 300) : "",
+        roles: mission.nodes.filter(node => node.role !== "retry").map(node => ({ name: publicText(node.settings?.name || node.role || node.id, 96),
+          state: node.state, ...(node.receipt?.error ? { error: publicText(node.receipt.error, 300) } : {}) })),
+        answers: closingAnswers(mission),
+      };
+    },
+    stop: ({ workspaceId, runId }) => controlRun({ workspaceId, runId, action: "stop" }),
+  };
   /** Whether the command approver's safety rules block this request text whatever anyone answers. */
   const blockedRequest = (text) => hardDenied(text);
   restoreWakeups();
-  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scheduleWakeup, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs });
+  return Object.freeze({ call, restoreSchedules, dispose, goalAfterRun, scheduleWakeup, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams });
 }
 
 module.exports = { createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
