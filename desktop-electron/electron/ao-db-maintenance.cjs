@@ -2,7 +2,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const { Worker } = require("node:worker_threads");
+const { spawn } = require("node:child_process");
 
 /**
  * Gives back the space of an AO database that is mostly empty pages. AO's janitors delete old
@@ -13,7 +13,7 @@ const { Worker } = require("node:worker_threads");
  *
  * The first time, a mostly empty database is rewritten once (VACUUM) and switched to incremental
  * auto-vacuum; after that a start only frees what accumulated (incremental_vacuum). VACUUM is
- * synchronous and takes tens of seconds on a hard disk, so it runs in a worker thread.
+ * synchronous and takes tens of seconds on a hard disk, so it runs in a separate process.
  */
 const DEFAULTS = Object.freeze({
   // A full rewrite only for a file that is at least this much, and at least half, empty.
@@ -23,16 +23,17 @@ const DEFAULTS = Object.freeze({
   maxUsedBytes: 1024 * 1024 * 1024,
   // Once incremental, free pages are given back when at least this much has accumulated.
   incrementalMinBytes: 64 * 1024 * 1024,
-  // AO starts only after this; past the limit the worker is stopped and AO starts without it.
+  // AO starts only after this; past the limit the maintenance is stopped and AO starts without it.
   timeoutMs: 90_000,
 });
 
-const WORKER = `
-const { parentPort, workerData } = require("node:worker_threads");
+// Runs in its own process: its input in AO_DB_MAINTENANCE_INPUT, its result one JSON line on stdout.
+const SCRIPT = `
 const { DatabaseSync } = require("node:sqlite");
 const fs = require("node:fs");
+const report = (result) => process.stdout.write(JSON.stringify(result) + "\\n");
 (() => {
-  const { file, minFreeBytes, minFreeRatio, maxUsedBytes, incrementalMinBytes, diskFreeBytes } = workerData;
+  const { file, minFreeBytes, minFreeRatio, maxUsedBytes, incrementalMinBytes, diskFreeBytes } = JSON.parse(process.env.AO_DB_MAINTENANCE_INPUT);
   let db = null;
   try {
     db = new DatabaseSync(file, { timeout: 2000 });
@@ -58,10 +59,10 @@ const fs = require("node:fs");
     if (action !== "none") db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
     db.close();
     db = null;
-    parentPort.postMessage({ action, ...(reason ? { reason } : {}), beforeBytes, afterBytes: fs.statSync(file).size, freeBytes, usedBytes, ms: Date.now() - started });
+    report({ action, ...(reason ? { reason } : {}), beforeBytes, afterBytes: fs.statSync(file).size, freeBytes, usedBytes, ms: Date.now() - started });
   } catch (error) {
     try { db?.close(); } catch {}
-    parentPort.postMessage({ action: "failed", error: String(error?.message || error).slice(0, 300) });
+    report({ action: "failed", error: String(error?.message || error).slice(0, 300) });
   }
 })();
 `;
@@ -73,30 +74,40 @@ function compactAoDatabase(dataRoot, options = {}) {
   if (!fs.existsSync(file)) return Promise.resolve({ action: "none", reason: "no database yet" });
   let diskFreeBytes = null;
   try { const stats = fs.statfsSync(dataRoot); diskFreeBytes = Number(stats.bavail) * Number(stats.bsize); } catch { /* unknown */ }
+  const input = JSON.stringify({ file, diskFreeBytes, minFreeBytes: settings.minFreeBytes, minFreeRatio: settings.minFreeRatio,
+    maxUsedBytes: settings.maxUsedBytes, incrementalMinBytes: settings.incrementalMinBytes });
   return new Promise((resolve) => {
-    let settled = false, timer = null;
+    let settled = false, timer = null, timedOut = null, output = "";
     const done = (result) => { if (!settled) { settled = true; clearTimeout(timer); resolve(result); } };
-    let worker;
+    let child;
     try {
-      // workerSource: tests only.
-      worker = new Worker(settings.workerSource ?? WORKER, { eval: true, workerData: { file, diskFreeBytes, minFreeBytes: settings.minFreeBytes, minFreeRatio: settings.minFreeRatio,
-        maxUsedBytes: settings.maxUsedBytes, incrementalMinBytes: settings.incrementalMinBytes } });
+      // In its own process, not a worker thread: AO starts only once this is done, and a run that
+      // never finished kept AO from starting at all (seen 2026-10-22: "starting" for over 10 minutes
+      // after an update, every chat stuck in "checking"). A worker cannot be stopped inside a native
+      // SQLite call such as VACUUM, so it went on holding the write lock after giving up on it; a
+      // killed process lets go of its locks, and SQLite drops the unfinished rewrite. In Electron the
+      // app's own executable runs as plain Node. scriptSource: tests only.
+      child = spawn(process.execPath, ["-e", settings.scriptSource ?? SCRIPT], {
+        windowsHide: true, stdio: ["ignore", "pipe", "ignore"],
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", AO_DB_MAINTENANCE_INPUT: input },
+      });
     } catch (error) {
       done({ action: "failed", error: String(error?.message || error).slice(0, 300) });
       return;
     }
-    // AO starts only once this is done. A run that never finished kept AO from starting at all
-    // (seen 2026-10-22: "starting" for over 10 minutes after an update, the app idle, every chat
-    // stuck in "checking" and no steer reaching its agent). Past the limit the worker is stopped,
-    // which leaves an unfinished rewrite uncommitted, and AO starts without it.
+    child.stdout.on("data", (chunk) => { output = (output + chunk.toString()).slice(-4096); });
+    child.once("error", (error) => done({ action: "failed", error: String(error?.message || error).slice(0, 300) }));
+    child.once("exit", () => {
+      // Past the limit, AO starts only once the process is gone and its locks with it.
+      if (timedOut) { done(timedOut); return; }
+      const line = output.trim().split("\n").pop();
+      try { done(JSON.parse(line)); } catch { done({ action: "failed", error: "the maintenance process stopped" }); }
+    });
     timer = setTimeout(() => {
-      done({ action: "failed", error: `timed out after ${Math.round(settings.timeoutMs / 1000)} s; AO starts without it` });
-      void worker.terminate().catch(() => {});
+      timedOut = { action: "failed", error: `timed out after ${Math.round(settings.timeoutMs / 1000)} s; AO starts without it` };
+      child.kill();
     }, settings.timeoutMs);
     timer.unref?.();
-    worker.once("message", done);
-    worker.once("error", (error) => done({ action: "failed", error: String(error?.message || error).slice(0, 300) }));
-    worker.once("exit", () => done({ action: "failed", error: "the maintenance worker stopped" }));
   });
 }
 
