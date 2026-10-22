@@ -3310,6 +3310,26 @@ test("a wake-up is dropped when the chat moved on, cancelled by the user, and re
   await assert.rejects(workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 5, reason: "  " }), /reason must say/);
 });
 
+test("the user edits a wake-up's note and minutes: it fires on the new clock with the new note", async () => {
+  const { world, workflow, advance } = wakeChat();
+  await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 30, reason: "check the build" });
+  const { id } = await wakeupOf(workflow);
+  await advance(60_000);
+  const edited = await workflow.call("chat_wakeup", { workspaceId: "ws-1", taskId: "task-1", action: "edit", id, minutes: 2, reason: " check the deploy " });
+  assert.equal(edited.wakeup.reason, "check the deploy");
+  assert.equal(edited.wakeup.dueAt, 1_000_000 + 60_000 + 2 * 60_000, "the minutes count from the edit");
+  assert.equal((await wakeupOf(workflow)).id, id, "the same wake-up, edited");
+  // A note-only edit keeps when it fires.
+  await workflow.call("chat_wakeup", { workspaceId: "ws-1", taskId: "task-1", action: "edit", id, reason: "check the deploy logs" });
+  assert.equal((await wakeupOf(workflow)).dueAt, 1_000_000 + 3 * 60_000);
+  const before = world.updates.length;
+  await advance(2 * 60_000);
+  assert.equal(world.updates.length, before + 1, "the old 30-minute timer is gone; the new one fired");
+  assert.match(world.edits.at(-1).description, /Your note: check the deploy logs/);
+  await assert.rejects(workflow.call("chat_wakeup", { workspaceId: "ws-1", taskId: "task-1", action: "edit", id, minutes: 5 }), /already fired/);
+  await assert.rejects(workflow.call("chat_wakeup", { workspaceId: "ws-1", taskId: "task-1", action: "snooze", id }), /edit or cancel/);
+});
+
 test("a goal waits for its agent's wake-up instead of starting the next round at once", async () => {
   const { world, workflow, advance } = wakeChat({ goal: true });
   const route = world.runs[0].nodes[0].route;
@@ -3339,6 +3359,10 @@ test("wake-ups are kept per chat in a file, and a due one sends, waits or drops"
     const again = createWakeupStore({ file });
     assert.equal(again.get("ws-1", "task-1").id, first.id, "it survives a restart");
     assert.deepEqual(again.all().map((item) => [item.workspaceId, item.taskId]), [["ws-1", "task-1"]]);
+    assert.equal(again.edit("ws-1", "task-1", "another-id", { reason: "x" }), null, "only the wake-up named is edited");
+    assert.throws(() => again.edit("ws-1", "task-1", first.id, { minutes: 0 }), /1 to 720/);
+    assert.equal(again.edit("ws-1", "task-1", first.id, { reason: " deploy " }).dueAt, 180_000, "a note edit keeps its time");
+    assert.equal(createWakeupStore({ file }).get("ws-1", "task-1").reason, "deploy", "the edit is saved");
     assert.equal(again.clear("ws-1", "task-1", "another-id"), false, "only the wake-up named is cleared");
     assert.equal(again.clear("ws-1", "task-1", first.id), true);
     assert.equal(createWakeupStore({ file }).get("ws-1", "task-1"), null);

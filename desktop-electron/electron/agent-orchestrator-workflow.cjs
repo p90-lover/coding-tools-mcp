@@ -4301,10 +4301,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     armWakeup(id, run.project_id);
     return { ok: true, taskId: run.project_id, dueAt: wakeup.dueAt, minutes: wakeup.minutes };
   }
-  // chat_wakeup: the user cancels the chat's wake-up.
-  function chatWakeup({ workspaceId, taskId, action, id } = {}) {
+  // chat_wakeup: the user edits (its note, the minutes from now) or deletes the chat's wake-up.
+  function chatWakeup({ workspaceId, taskId, action, id, minutes, reason } = {}) {
     const workspace = clean(workspaceId, 128), task = clean(taskId, 128);
-    if (action !== "cancel") throw new Error("Choose cancel");
+    if (action === "edit") {
+      const wakeup = wakeups.edit(workspace, task, clean(id, 128), {
+        ...(minutes === undefined ? {} : { minutes }), ...(reason === undefined ? {} : { reason: String(reason) }) });
+      if (!wakeup) throw new Error("This wake-up already fired or was replaced; refresh the chat");
+      armWakeup(workspace, task);
+      return { ok: true, wakeup };
+    }
+    if (action !== "cancel") throw new Error("Choose edit or cancel");
     disarmWakeup(workspace, task);
     return { ok: true, cancelled: wakeups.clear(workspace, task, id ? clean(id, 128) : null) };
   }

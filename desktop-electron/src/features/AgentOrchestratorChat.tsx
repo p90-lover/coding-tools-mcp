@@ -679,8 +679,11 @@ function GoalGlyph({ name }: { name: "target" | "trash" | "play" | "pause" | "ex
   </svg>;
 }
 
-/** The agent asked to be woken later (schedule_wakeup): when, its note, and Cancel. The label ticks alone. */
-function WakeupBar({ wakeup, onCancel }: { wakeup: ChatWakeup; onCancel: () => void }) {
+/**
+ * The agent asked to be woken later (schedule_wakeup): when, its note, then Delete and Edit, drawn as
+ * the goal bar's icons. Clicking the note edits it too. The label ticks alone.
+ */
+function WakeupBar({ wakeup, onEdit, onDelete }: { wakeup: ChatWakeup; onEdit?: () => void; onDelete: () => void }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
@@ -689,8 +692,11 @@ function WakeupBar({ wakeup, onCancel }: { wakeup: ChatWakeup; onCancel: () => v
   return <div className="cx-goal cx-wakeup is-active" role="status">
     <span className="cx-wakeup-glyph" aria-hidden="true">◷</span>
     <span className="cx-goal-state" title={`Asked for ${wakeup.minutes} min at ${new Date(wakeup.scheduledAt).toLocaleTimeString()}`}>{wakeupLabel(wakeup, now)}</span>
-    <span className="cx-goal-objective" title={wakeup.reason}>{wakeup.reason}</span>
-    <button type="button" title="Cancel wake-up" aria-label="Cancel wake-up" onClick={onCancel}>Cancel</button>
+    {onEdit
+      ? <button type="button" className="cx-goal-objective cx-wakeup-note" title={`${wakeup.reason}\n\nClick to edit`} onClick={onEdit}>{wakeup.reason}</button>
+      : <span className="cx-goal-objective" title={wakeup.reason}>{wakeup.reason}</span>}
+    <button type="button" className="cx-goal-icon" title="Delete wake-up" aria-label="Delete wake-up" onClick={onDelete}><GoalGlyph name="trash" /></button>
+    {onEdit ? <button type="button" className="cx-goal-icon" title="Edit wake-up" aria-label="Edit wake-up" onClick={onEdit}><GoalGlyph name="expand" /></button> : null}
   </div>;
 }
 
@@ -1090,8 +1096,10 @@ export function AgentOrchestratorChat({
   const [card, setCard] = useState<ChatCommandCard | null>(null);
   // Edit goal: the objective being edited, or null.
   const [goalEditing, setGoalEditing] = useState<string | null>(null);
+  // Edit wake-up: its note and the minutes from now being edited, or null.
+  const [wakeupEditing, setWakeupEditing] = useState<{ reason: string; minutes: string } | null>(null);
   // Another chat's card or goal edit never shows over this one (its queue says so itself, below).
-  useEffect(() => { setCard(null); setGoalEditing(null); }, [selectedTaskId]);
+  useEffect(() => { setCard(null); setGoalEditing(null); setWakeupEditing(null); }, [selectedTaskId]);
   const say = (title: string, text: string, quote?: string) => setCard({ title, text, ...(quote ? { quote } : {}) });
 
   /**
@@ -1832,8 +1840,28 @@ export function AgentOrchestratorChat({
             <button type="button" className="cx-primary-button" disabled={!goalEditing.trim() || goalEditing.trim() === commands.goal.objective}
               onClick={() => void commands.goalEdit(goalEditing.trim()).then(() => setGoalEditing(null), (cause) => say("Edit goal", cause instanceof Error ? cause.message : String(cause)))}>Save</button></footer>
         </section> : null}
+        {wakeupEditing !== null && commands?.wakeup && commands.editWakeup ? (() => {
+          const minutes = Number(wakeupEditing.minutes);
+          const valid = wakeupEditing.reason.trim() !== "" && Number.isSafeInteger(minutes) && minutes >= 1 && minutes <= 720;
+          return <section className="cx-command-card cx-goal-editor cx-wakeup-editor" aria-label="Edit wake-up">
+            <header><strong>Edit wake-up</strong>
+              <button type="button" className="cx-icon-button" aria-label="Cancel" onClick={() => setWakeupEditing(null)}><Icon name="close" width="12" height="12" /></button></header>
+            <textarea aria-label="What to check when it wakes" rows={3} maxLength={500} value={wakeupEditing.reason} placeholder="What the agent should check when it wakes"
+              onChange={(event) => setWakeupEditing({ ...wakeupEditing, reason: event.target.value })} />
+            <label className="cx-wakeup-minutes">Wake in
+              <input type="number" min={1} max={720} step={1} inputMode="numeric" aria-label="Minutes from now" value={wakeupEditing.minutes}
+                onChange={(event) => setWakeupEditing({ ...wakeupEditing, minutes: event.target.value })} /> min</label>
+            <footer><button type="button" className="cx-text-button" onClick={() => setWakeupEditing(null)}>Cancel</button>
+              <button type="button" className="cx-primary-button" disabled={!valid}
+                onClick={() => void commands.editWakeup?.({ reason: wakeupEditing.reason.trim(), minutes })
+                  .then(() => setWakeupEditing(null), (cause) => say("Edit wake-up", cause instanceof Error ? cause.message : String(cause)))}>Save</button></footer>
+          </section>;
+        })() : null}
         {commands?.goal || commands?.planMode || commands?.wakeup ? <div className="cx-composer-modes">
-          {commands?.wakeup ? <WakeupBar wakeup={commands.wakeup} onCancel={() => void commands.cancelWakeup?.().catch((cause) => say("Cancel wake-up", cause instanceof Error ? cause.message : String(cause)))} /> : null}
+          {commands?.wakeup ? <WakeupBar wakeup={commands.wakeup}
+            onEdit={commands.editWakeup ? () => { setCard(null); setWakeupEditing({ reason: commands.wakeup!.reason,
+              minutes: String(Math.min(720, Math.max(1, Math.ceil((commands.wakeup!.dueAt - Date.now()) / 60_000)))) }); } : undefined}
+            onDelete={() => { setWakeupEditing(null); void commands.cancelWakeup?.().catch((cause) => say("Delete wake-up", cause instanceof Error ? cause.message : String(cause))); }} /> : null}
           {/* Codex's goal bar: state, objective, how long it has run, then Clear / Resume or Pause / Edit. */}
           {commands?.goal ? <div className={`cx-goal is-${commands.goal.status}`} role="status">
             <GoalGlyph name="target" />
