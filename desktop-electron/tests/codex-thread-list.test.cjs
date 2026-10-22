@@ -360,6 +360,25 @@ test("chats can be dragged into place in every list: Pinned, another open projec
   for (const key of Object.keys(stored)) delete stored[key];
 });
 
+test("a project dragged onto another project moves there: each sits in its own <li>, the shared list takes the drop", () => {
+  for (const key of Object.keys(stored)) delete stored[key];
+  const { props } = fixture();
+  const list = mount("ChatThreadList.tsx", props);
+  const projectRow = (view, name) => walk(view).find((element) => String(element.props?.className ?? "").startsWith("cx-project-row") && text(element).includes(name));
+  const projectsList = walk(list.render()).find((element) => element.props?.className === "cx-projects");
+  assert.equal(projectsList.props["data-drag-list"], "projects", "the shared project list names itself as the drag boundary");
+  // Codex review: the row's parent is its own <li>, so it must not be the boundary.
+  const listEl = { contains: (node) => node === "beta-row" };
+  const event = (lower) => ({ ...dragEvent(lower), target: "beta-row", currentTarget: { ...dragEvent(lower).currentTarget,
+    parentElement: { contains: (node) => node === "alpha-row" },
+    closest: (selector) => (selector === '[data-drag-list="projects"]' ? listEl : null) } });
+  projectRow(list.render(), "Alpha").props.onDragStart(event(false));
+  projectRow(list.render(), "Beta").props.onDragOver(event(true));
+  walk(list.render()).find((element) => element.props?.className === "cx-threads").props.onDrop(event(true));
+  assert.deepEqual(JSON.parse(stored["coding-tools:ao:project-order"]), ["b", "a"]);
+  for (const key of Object.keys(stored)) delete stored[key];
+});
+
 test("a long project shows 5 chats and Show more, like Codex; the count is a list setting", () => {
   delete stored["coding-tools:ao:chat-list-settings"];
   delete stored["coding-tools:ao:chat-order:a"];

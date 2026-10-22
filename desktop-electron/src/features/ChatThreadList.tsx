@@ -590,8 +590,11 @@ export function ChatThreadList(props: ThreadListProps) {
       draggable: true,
       "data-drop": sameList && dragging?.id !== id && dropAt?.id === id ? (dropAt.after ? "after" : "before") : undefined,
       onDragStart: (event: ReactDragEvent<HTMLElement>) => {
-        // The list element the row sits in: drops count only over it (inSourceList).
-        setDragging({ list: drag.list, id, drag, listEl: event.currentTarget.parentElement ?? null });
+        // The list element the row sits in: drops count only over it (inSourceList). A project row
+        // sits in its own <li>, so the shared project list names itself with data-drag-list; chat
+        // rows nested inside a project do not match it and keep their own list.
+        const listEl = event.currentTarget.closest?.<HTMLElement>(`[data-drag-list="${drag.list}"]`) ?? event.currentTarget.parentElement;
+        setDragging({ list: drag.list, id, drag, listEl: listEl ?? null });
         event.dataTransfer.effectAllowed = "move";
         event.dataTransfer.setData("text/plain", id);
         // The browser's own drag image is a see-through copy of the row a few pixels off it, which
@@ -731,7 +734,7 @@ export function ChatThreadList(props: ThreadListProps) {
               <Icon name="settings" width="13" height="13" />
             </button>
           </div>
-          <ul className="cx-projects">
+          <ul className="cx-projects" data-drag-list="projects">
             {projectOrder.map((item) => {
               const current = item.id === workspaceId;
               const open = current ? !collapsed.has(item.id) : openOthers.has(item.id);
