@@ -3053,6 +3053,7 @@ async function start() {
         harness: () => agentOrchestratorUpstream?.harness ?? null,
         blockedRequest: (text) => missionWorkflowRuntime?.blockedRequest?.(text) ?? true,
         recommendedAnswer: (approval) => missionWorkflowRuntime?.recommendedAnswer?.(approval) ?? { action: "decline" },
+        routeRefusal: (route) => missionWorkflowRuntime?.subagentRouteRefusal?.(route) ?? null,
         logger,
       });
       app.on("will-quit", () => subagentsService?.dispose());

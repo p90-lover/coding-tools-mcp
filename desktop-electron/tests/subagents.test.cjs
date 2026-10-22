@@ -12,7 +12,7 @@ const ROUTE = { harness_id: "ao:claude-code", model: "cpa/test-model" };
 const parse = (result) => JSON.parse(result.content[0].text);
 
 /** A subagents service over a fake AO harness whose sessions the test drives. */
-function world({ settings = {}, agents = null, now = () => 1_000_000, aoUp = () => true, setTimer = undefined } = {}) {
+function world({ settings = {}, agents = null, now = () => 1_000_000, aoUp = () => true, setTimer = undefined, routeRefusal = undefined } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-"));
   const spawned = [], resolved = [], inputs = [], interrupted = [], released = [];
   const sessions = new Map();
@@ -30,7 +30,7 @@ function world({ settings = {}, agents = null, now = () => 1_000_000, aoUp = () 
     statePath: path.join(dir, "subagents.json"),
     launchArgs: (workspaceId, route, name) => workflow.subagentLaunchArgs(workspaceId, route, name),
     harness: () => (aoUp() ? harness : null), blockedRequest: workflow.blockedRequest, recommendedAnswer: workflow.recommendedAnswer,
-    logger: { info() {}, warn() {} }, now, ...(setTimer ? { setTimer } : {}),
+    logger: { info() {}, warn() {} }, now, ...(setTimer ? { setTimer } : {}), ...(routeRefusal ? { routeRefusal } : {}),
   });
   service.save({ settings: { defaultRoute: ROUTE, ...settings }, agents: agents ?? STARTERS });
   return { service, harness, sessions, spawned, resolved, inputs, interrupted, released, dir,
@@ -78,15 +78,32 @@ test("a retained child already removed from AO does not prevent parent shutdown"
 
 test("a parent stop waits for its pending launch and ends the returned child", async () => {
   const w = world({ settings: { releaseWhenDone: false } });
-  let finishLaunch;
-  w.harness.spawn = () => new Promise(resolve => { finishLaunch = resolve; });
+  let finishLaunch, spawnCalled;
+  const spawning = new Promise(resolve => { spawnCalled = resolve; });
+  w.harness.spawn = () => new Promise(resolve => { finishLaunch = resolve; spawnCalled(); });
   try {
     const starting = w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read one" });
+    await spawning;
     const stopping = w.service.stopParent("chat-1");
     finishLaunch("late-child");
     await Promise.all([starting, stopping]);
     assert.deepEqual(w.released, ["late-child"]);
     assert.equal(w.service.runs()[0].state, "stopped");
+  } finally { w.cleanup(); }
+});
+
+test("a parent stop during the launch's route check starts nothing", async () => {
+  let answer;
+  const w = world({ routeRefusal: () => new Promise(resolve => { answer = resolve; }) });
+  try {
+    const starting = w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read one" });
+    await Promise.resolve();
+    const stopping = w.service.stopParent("chat-1");
+    answer(null);
+    const [started] = await Promise.all([starting, stopping]);
+    assert.equal(started.isError, true);
+    assert.match(started.content[0].text, /stopped its subagents before this one started/);
+    assert.deepEqual(w.spawned, []);
   } finally { w.cleanup(); }
 });
 
@@ -639,5 +656,24 @@ test("a subagent whose model keeps refusing requests stops at the third 429 and 
     assert.deepEqual(w.interrupted, [started.subagent_id], "it is stopped");
     result = parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: started.subagent_id, wait_seconds: 0 }));
     assert.match(String(result.error ?? ""), /keeps refusing requests \(API error 429, attempt 3 of 10\)/);
+  } finally { w.cleanup(); }
+});
+
+test("a subagent on a route its provider refuses fails at once with the reason, and nothing is launched", async () => {
+  // Claude Code on an Antigravity model: before, the subagent waited out minutes of "quota" 429s.
+  const asked = [];
+  const w = world({ routeRefusal: async (route) => { asked.push(route.model); return route.model === ROUTE.model ? "test-model: Antigravity refuses Claude Code's requests" : null; } });
+  try {
+    const refused = await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Map the training data" });
+    assert.equal(refused.isError, true);
+    assert.match(refused.content[0].text, /cannot run on its model: test-model: Antigravity refuses Claude Code's requests\. The user can give it another model on the Subagents page/);
+    assert.deepEqual(w.spawned, [], "no AO session is started");
+    assert.deepEqual(asked, [ROUTE.model]);
+    // A refusal check that fails lets the launch go ahead, as before.
+    const broken = world({ routeRefusal: async () => { throw new Error("CPA is down"); } });
+    try {
+      assert.equal((await broken.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read" })).isError, false);
+      assert.equal(broken.spawned.length, 1);
+    } finally { broken.cleanup(); }
   } finally { w.cleanup(); }
 });
