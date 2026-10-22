@@ -2673,6 +2673,8 @@ test("Claude Code is not offered Antigravity's models, Claude or Gemini, and say
   // A subagent saved on one of them is refused at launch with the reason; other routes are not.
   assert.match(await workflow.subagentRouteRefusal({ harness_id: "ao:claude-code", model: "cpa/gemini-3.8-flash-high" }),
     /^gemini-3\.8-flash-high: Antigravity refuses Claude Code's requests/);
+  assert.match(await workflow.subagentRouteRefusal({ harness_id: "ao:claude-code", model: "cpa/gemini-3.8-flash-high(high)" }),
+    /^gemini-3\.8-flash-high: Antigravity refuses/, "a saved effort suffix is looked up by its base model");
   assert.equal(await workflow.subagentRouteRefusal({ harness_id: "ao:claude-code", model: "cpa/claude-haiku-4-5" }), null);
   assert.equal(await workflow.subagentRouteRefusal({ harness_id: "ao:codex", model: "cpa/gemini-3.8-flash-high" }), null);
   assert.equal(await workflow.subagentRouteRefusal({ harness_id: "ao:claude-code", model: "cpa/not-listed" }), null);

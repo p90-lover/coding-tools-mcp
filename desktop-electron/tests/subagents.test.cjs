@@ -92,19 +92,21 @@ test("a parent stop waits for its pending launch and ends the returned child", a
   } finally { w.cleanup(); }
 });
 
-test("a parent stop during the launch's route check starts nothing", async () => {
-  let answer;
-  const w = world({ routeRefusal: () => new Promise(resolve => { answer = resolve; }) });
-  try {
-    const starting = w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read one" });
-    await Promise.resolve();
-    const stopping = w.service.stopParent("chat-1");
-    answer(null);
-    const [started] = await Promise.all([starting, stopping]);
-    assert.equal(started.isError, true);
-    assert.match(started.content[0].text, /stopped its subagents before this one started/);
-    assert.deepEqual(w.spawned, []);
-  } finally { w.cleanup(); }
+test("a parent stop during the launch's route check starts nothing and does not fail, whatever the check answers", async () => {
+  for (const verdict of [null, "test-model: Antigravity refuses Claude Code's requests"]) {
+    let answer;
+    const w = world({ routeRefusal: () => new Promise(resolve => { answer = resolve; }) });
+    try {
+      const starting = w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read one" });
+      await Promise.resolve();
+      const stopping = w.service.stopParent("chat-1");
+      answer(verdict);
+      const [started] = await Promise.all([starting, stopping]);
+      assert.equal(started.isError, true);
+      assert.match(started.content[0].text, /stopped its subagents before this one started/, String(verdict));
+      assert.deepEqual(w.spawned, []);
+    } finally { w.cleanup(); }
+  }
 });
 
 test("automatic release and concurrent parent stops share one pending process shutdown", async () => {

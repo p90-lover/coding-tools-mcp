@@ -4886,7 +4886,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (agent !== "claude-code" || !model) return null;
     let catalog = null;
     try { catalog = await models(); } catch { return null; }
-    const id = model.startsWith(CPA_MODEL_PREFIX) ? model.slice(CPA_MODEL_PREFIX.length) : model;
+    // CPA lists the base model; a saved route may carry an effort suffix (…-flash-high(high)).
+    const id = (model.startsWith(CPA_MODEL_PREFIX) ? model.slice(CPA_MODEL_PREFIX.length) : model)
+      .replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
     return antigravityRefuses(agent, catalog?.capabilities?.[id]) ? `${id}: ${ANTIGRAVITY_REFUSES_CLAUDE_CODE}` : null;
   }
   /** Whether the command approver's safety rules block this request text whatever anyone answers. */

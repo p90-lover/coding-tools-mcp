@@ -409,10 +409,11 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     // reason, instead of minutes of "quota exhausted" retries. Asked once the launch holds its slot
     // and a parent stop can wait for it; a check that cannot answer lets the launch go ahead.
     const refusal = await Promise.resolve().then(() => routeRefusal(route)).catch(() => null);
-    if (refusal) throw new Error(`"${agent.name}" cannot run on its model: ${refusal}. The user can give it another model on the Subagents page.`);
+    // A stop during the check wins over its answer: nothing started, so the stop did not fail.
     if ((stopGenerations.get(parent) ?? 0) !== generation) {
       throw Object.assign(new Error("The chat stopped its subagents before this one started"), { cancelledByStop: true });
     }
+    if (refusal) throw new Error(`"${agent.name}" cannot run on its model: ${refusal}. The user can give it another model on the Subagents page.`);
     const permissions = settings.permission === "full"
       ? { permission_profile: ":danger-full-access", approval_policy: "never", approvals_reviewer: "user" }
       : { permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
