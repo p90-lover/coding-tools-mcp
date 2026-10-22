@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { agentShellCommands, withAgentShellCommands, utf8Suffix, MAX_OUTPUT_BYTES } = require("../electron/chat-agent-shell.cjs");
+const { agentShellCommands, withAgentShellCommands, utf8Prefix, utf8Suffix, MAX_OUTPUT_BYTES } = require("../electron/chat-agent-shell.cjs");
 
 const BIG = `${"x".repeat(40_000)}\nlast line`;
 
@@ -75,6 +75,29 @@ test("utf8Suffix keeps the newest bytes and never splits a character", () => {
   assert.equal(tail, "éé😀end");
   // Cutting inside the emoji drops it whole rather than leaving half a surrogate pair.
   assert.equal(utf8Suffix("a😀end", 5), "end");
+});
+
+test("utf8Prefix and utf8Suffix keep the longest whole-character part that fits, as Buffer counts bytes", () => {
+  // The slow cuts they replaced, as the reference: grow one character at a time while it fits.
+  const bytes = (text) => Buffer.byteLength(text, "utf8");
+  const pairAt = (text, index) => /[\ud800-\udbff]/.test(text[index] ?? "") && /[\udc00-\udfff]/.test(text[index + 1] ?? "");
+  const prefix = (text, max) => { let end = 0; while (end < text.length) { const next = end + (pairAt(text, end) ? 2 : 1); if (bytes(text.slice(0, next)) > max) break; end = next; } return text.slice(0, end); };
+  const suffix = (text, max) => { let start = text.length; while (start > 0) { const next = start - (start > 1 && pairAt(text, start - 2) ? 2 : 1); if (bytes(text.slice(next)) > max) break; start = next; } return text.slice(start); };
+  const pieces = ["a", "é", "想", "😀", "\ud800", "\udc00", " ", "Ж"];
+  let seed = 7;
+  const random = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+  for (let round = 0; round < 300; round += 1) {
+    const text = Array.from({ length: Math.floor(random() * 40) }, () => pieces[Math.floor(random() * pieces.length)]).join("");
+    const max = Math.floor(random() * 50);
+    assert.equal(utf8Prefix(text, max), prefix(text, max), `prefix of ${JSON.stringify(text)} in ${max}`);
+    assert.equal(utf8Suffix(text, max), suffix(text, max), `suffix of ${JSON.stringify(text)} in ${max}`);
+  }
+  // A long Chinese text is cut by reading only the part kept.
+  const long = "想".repeat(2_000_000);
+  const started = process.hrtime.bigint();
+  assert.equal(utf8Suffix(long, 4096), "想".repeat(1365));
+  assert.equal(utf8Prefix(long, 4096), "想".repeat(1365));
+  assert.ok(Number(process.hrtime.bigint() - started) / 1e6 < 200, "linear in the bytes kept");
 });
 
 test("app commands are marked source app and merged with the agent's own commands", async () => {

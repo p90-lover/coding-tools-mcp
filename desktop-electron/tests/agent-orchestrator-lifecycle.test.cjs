@@ -848,6 +848,33 @@ test("a chat started in the background whose agent failed to come up is resumed 
   } finally { await h.controller.stop(); }
 });
 
+test("observers of the same conversation page share one built timeline, each with its own array", async () => {
+  // A working chat's run loop, activity poll and approval screen observe it within the same moment.
+  let reads = 0;
+  const h = createHarness({
+    getWorkspaces: async () => [], missionCall: async () => ({ ok: true }),
+    workspaceBoard: { bind: async () => ({ projectId: "project-fixture" }) },
+    api: async (endpoint) => {
+      if (/^\/api\/v1\/sessions\/[^/]+$/.test(endpoint.pathname)) return { session: { id: "s1", mode: "chat", status: "working" } };
+      if (endpoint.pathname.endsWith("/conversation")) {
+        reads += 1;
+        return { turns: [{ id: "t1", state: "running" }], messages: [],
+          activities: [{ id: "a1", sequence: 1, turnId: "t1", activityKind: "reasoning", status: "running", detail: { text: "想".repeat(5000) } }] };
+      }
+    },
+  });
+  try {
+    await h.controller.start();
+    const first = await h.controller.harness.observe("s1");
+    const second = await h.controller.harness.observe("s1");
+    assert.equal(reads, 1, "the second observer reads the same page");
+    assert.notEqual(first.timeline, second.timeline, "a caller's array is its own");
+    assert.equal(first.timeline[0], second.timeline[0], "the items were built once");
+    // A running thought keeps its newest 4 KB: 1365 three-byte characters.
+    assert.equal(first.timeline[0].text, "想".repeat(1365));
+  } finally { await h.controller.stop(); }
+});
+
 test("a failed background start read by two observers at once is resumed once and fails neither", async () => {
   // The run loop and the chat's activity poll both observe a working card, about once a second each.
   let resumes = 0, resumed = false, release;
