@@ -148,8 +148,18 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
   }
 
   const enabled = () => getEnabled() !== false;
-  /** rtk, when it is installed and turned on. */
-  const active = () => (enabled() ? locate() : null);
+  /**
+   * rtk, when it is installed and turned on. Once rtk has been looked up, the answer at hand is
+   * used and a stale one is refreshed in the background: the blocking lookup (`rtk --version`, 5 s
+   * timeout per place) ran whenever AO's start read the hook after the 1-minute cache expired.
+   * Only the very first answer, before any lookup, is waited for.
+   */
+  const active = () => {
+    if (!enabled()) return null;
+    if (checkedAt === -Infinity) return locate();
+    if (now() - checkedAt >= FIND_TTL_MS) void locateAsync().catch(() => {});
+    return found;
+  };
 
   /**
    * The command rtk would run instead of `command`, or null to run it as written (resolves). rtk's

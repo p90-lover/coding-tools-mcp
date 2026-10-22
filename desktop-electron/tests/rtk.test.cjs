@@ -102,6 +102,23 @@ test("on, Claude Code's hook and the agents' PATH point at the installed rtk", (
   assert.equal(rtk.binDir(), path.dirname(RTK));
 });
 
+test("AO's hook and PATH use the rtk at hand once looked up, refreshing a stale answer without blocking", async () => {
+  let clock = 0;
+  let lookups = 0;
+  const rtk = createRtk({ getEnabled: () => true, platform: "win32", now: () => clock, exists: (file) => file === RTK,
+    env: { PATH: "", LOCALAPPDATA: "C:\\Users\\me\\AppData\\Local" },
+    run: (_file, args) => { if (args[0] === "--version") lookups += 1; return { status: 0, stdout: "rtk 1.0.1\n" }; } });
+  assert.equal(rtk.binDir(), path.dirname(RTK), "the first answer is looked up");
+  assert.equal(lookups, 1);
+  clock = 10 * 60_000;
+  // Stale: answered from what is known now; the lookup runs in the background (an async run).
+  assert.equal(rtk.claudeHook(), `"${RTK}" hook claude`);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(lookups, 2, "refreshed in the background");
+  assert.equal(rtk.binDir(), path.dirname(RTK));
+  assert.equal(lookups, 2, "a fresh answer is not looked up again");
+});
+
 test("a rewritten command is judged as the command it wraps", () => {
   const { rtk } = world();
   rtk.locate();
