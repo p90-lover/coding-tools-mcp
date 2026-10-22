@@ -374,7 +374,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   /** The AO spawn arguments for a card, without its prompt; throws when the route cannot be honored. */
   function aoLaunchArgs(workspaceId, node, plain, contextDefault = null, effortDefault = null) {
     const contextWindow = node.route.context_window ?? contextDefault;
-    const effort = node.route.effort ?? effortDefault;
+    // "auto" is the model's own effort: nothing is sent, neither a CPA suffix nor a native effort.
+    // Tried 2026-10-22 through CPA: every Cline Pass model refused "(auto)" with a 400 ("Supported
+    // reasoning levels are …") while the bare model answered, as every model did.
+    let effort = node.route.effort === "auto" ? null : node.route.effort ?? effortDefault;
     const agent = externalAgent(node);
     const profile = node.route.native_permission_profile ?? node.route.permission_profile;
     if ((node.route.approval_policy !== undefined || node.route.native_permission_profile !== undefined) && (!PERMISSION_AGENTS.has(agent)
@@ -396,11 +399,30 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // CPA's "(high)" suffix is one it never does ("not recognized as a known model"), so the model
     // could only print its tool calls as text. agy picks its own thinking level.
     const verbatim = Boolean(viaCpa) && (agent === "agy" || verbatimModel(viaCpa));
-    let wireModel = verbatim ? viaCpa.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "") : viaCpa;
-    if (viaCpa && effort && !verbatim) {
-      if (!tuningEfforts.has(effort)) throw new Error("Choose a supported CPA reasoning level");
+    const baseModel = viaCpa?.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
+    // A model saved with a level in its name ("…(high)", an older chat) is that effort unless one is picked.
+    const savedLevel = viaCpa?.match(/\((none|minimal|low|medium|high|xhigh|max|ultra)\)$/i)?.[1]?.toLowerCase();
+    if (!effort && savedLevel && node.route.effort !== "auto") effort = savedLevel;
+    if (effort && !tuningEfforts.has(effort)) throw new Error("Choose a supported CPA reasoning level");
+    // A level the model does not take runs at its nearest one instead of failing every request: one
+    // kept from another model ("medium" moved to DeepSeek V4.1 Flash, which takes none/low/high/max;
+    // "none" to MiMo or GLM) was refused with a 400, and the chat's launch looked stuck.
+    const takes = viaCpa && CLINE_EFFORTS.get(baseModel);
+    if (effort && takes && !takes.includes(effort)) {
+      const fitted = nearestEffort(effort, takes);
+      logger?.info?.("ao.effort_fitted", { model: baseModel.slice(0, 120), effort, fitted: fitted || "auto" });
+      effort = fitted;
+    }
+    // Claude Code and Codex send the effort in the request body (Claude Code's output_config.effort,
+    // Codex's reasoning.effort), which CPA hands to the provider's own field. A "(level)" model suffix
+    // was refused outright by every Cline Pass model for "(auto)" and for any level outside its list,
+    // while the same levels in the body went through (tried 2026-10-22 on MiMo V2.6 Pro, DeepSeek V4.1
+    // Flash, GLM 5.3 Flash and Gemini 3.8 Flash). opencode has no body transport in AO and keeps it.
+    const bodyEffort = Boolean(viaCpa) && !verbatim && BODY_EFFORT_AGENTS.has(agent);
+    let wireModel = viaCpa ? (verbatim || bodyEffort ? baseModel : viaCpa) : viaCpa;
+    if (viaCpa && effort && !verbatim && !bodyEffort) {
       // The suffix is session-local; the saved mission model and account remain unchanged.
-      wireModel = viaCpa.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "") + "(" + effort + ")";
+      wireModel = baseModel + "(" + effort + ")";
     }
     const agentModel = wireModel && agent === "opencode" ? `openai/${wireModel}` : wireModel ?? node.route.model;
     return { workspaceId, agent, model: agentModel, name: node.settings?.name || "AO worker",
@@ -415,8 +437,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // A card left blank gets its model's full known limit (defaultContextWindow).
       ...(contextWindow != null ? { contextWindow } : {}),
       ...(plain ? { plain: true } : {}),
-      // Native effort validation stays skipped for foreign models; CPA reads the suffix.
-      ...(!viaCpa && node.route.effort ? { effort: node.route.effort } : {}) };
+      // A native model takes its own effort; a CPA model's goes in the body where the harness can send it.
+      ...(!viaCpa && node.route.effort && node.route.effort !== "auto" ? { effort: node.route.effort }
+        : bodyEffort && effort ? { effort } : {}) };
   }
 
   // Pre-warming: a chat's first launch (its worktree, the agent process and its handshake) took
@@ -799,6 +822,22 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
    * "claude-opus-4-6-thinking(low)" answered with a thinking block, and without one they did not.
    */
   const CLAUDE_SUFFIX_EFFORTS = ["low", "medium", "high", "max"];
+  // Harnesses whose AO driver sends a CPA model's effort in the request body (see aoLaunchArgs).
+  const BODY_EFFORT_AGENTS = new Set(["claude-code", "codex"]);
+  const EFFORT_LADDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+  /** The level of `levels` nearest `effort`, the higher on a tie; "" when there is none (the model's own). */
+  const nearestEffort = (effort, levels) => {
+    const want = EFFORT_LADDER.indexOf(effort);
+    if (want < 0) return "";
+    let best = "", bestDistance = Infinity;
+    for (const level of levels) {
+      const at = EFFORT_LADDER.indexOf(level);
+      if (at < 0) continue;
+      const distance = Math.abs(at - want);
+      if (distance < bestDistance || (distance === bestDistance && at > want)) { best = level; bestDistance = distance; }
+    }
+    return best;
+  };
   const CLINE_EFFORTS = { get: id => CLINE_EFFORT_MODELS.find(([pattern]) => pattern.test(String(id)))?.[1], has: id => Boolean(CLINE_EFFORTS.get(id)) };
   // Ids the last catalog read named a plugin as provider of, for launches that have only the id.
   let pluginModels = new Set();
@@ -3869,7 +3908,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // "Approve for me" answers a request within 20 s (its reviewer up to 25 s): a steer waits that long.
   const STEER_ANSWER_WAIT_MS = 30_000;
   const STEER_ANSWER_POLL_MS = 750;
-  async function chatSteer({ workspaceId, taskId, message } = {}) {
+  /** `restart`: the person pressed Restart on a stuck turn, so it is restarted whatever its quiet time. */
+  async function chatSteer({ workspaceId, taskId, message, restart = false } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
     const text = clean(message, 8192, false);
     if (!text.trim()) throw new Error("Type a message to steer the agent");
@@ -3920,11 +3960,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // A tool call silent as long as the chat calls a turn stuck (STEER_TOOL_STALL_MS, the chat's
     // "may be stuck") is stuck with it: the user, looking at "may be stuck", asked that a steer then
     // retrigger the model rather than wait on a call that may never return.
-    if (idle > (toolRunning ? STEER_TOOL_STALL_MS : STEER_STALL_MS)) {
-      await stopExternalTurn(card.receipt.thread_id);
-      logger?.info?.("ao.steer_restarted_stalled_turn", { idleSeconds: Math.round(idle / 1000), toolRunning });
+    if (restart === true || idle > (toolRunning ? STEER_TOOL_STALL_MS : STEER_STALL_MS)) {
+      // A tool call that never returns cannot be interrupted either: the agent's host is shut down then
+      // (escalate), and AO resumes the same session for the message's turn.
+      await stopExternalTurn(card.receipt.thread_id, { owner: runKey(id, run.id), escalate: true });
+      logger?.info?.("ao.steer_restarted_stalled_turn", { idleSeconds: Math.round(idle / 1000), toolRunning, asked: restart === true });
       return { ok: true, steered: false, waiting: true, restarted: true,
-        reason: `The agent had shown nothing for ${Math.round(idle / 60_000)} minutes${toolRunning ? " (a tool call never returned)" : ""}, so its turn was stopped; your message is sent as the next turn` };
+        reason: restart === true ? "Its turn was stopped; your message is sent as the next turn"
+          : `The agent had shown nothing for ${Math.round(idle / 60_000)} minutes${toolRunning ? " (a tool call never returned)" : ""}, so its turn was stopped; your message is sent as the next turn` };
     }
     // A chat's session is created in the background (spawn's async): its card runs, with the session,
     // while the agent is still starting, and AO has no controller to steer yet. The message waits
@@ -4568,6 +4611,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
   const STOP_SETTLE_MS = 15_000;
   const STOP_SETTLE_POLL_MS = 250;
+  /** How long a Stop that ends the agent waits for its interrupt before shutting the agent down. */
+  const STOP_RELEASE_SETTLE_MS = 3_000;
   /** Interrupt acknowledges a signal; only an exited or settled, non-working turn releases ownership. */
   async function stopExternalTurn(session, ownership = null) {
     for (;;) {
@@ -4582,28 +4627,57 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const owns = () => !ownership || !sessionOwners.has(session) || sessionOwners.get(session) === ownership.owner;
       if (!owns()) return;
       let alreadyExited = false;
+      // Why the interrupt did not stop the turn, when the agent's shutdown had to: said again if that fails too.
+      let escalated = "";
+      // The agent's host is shut down: always for a Stop that ends the agent (releaseAgent), and for
+      // `escalate` (a stuck turn's restart) only when its interrupt did not land.
+      let shutDown = ownership?.releaseAgent === true;
       if (ownership?.turnId || ownership?.releaseAgent) {
         const current = await service.observe(session);
         if ((ownership?.turnId && current?.turnId && current.turnId !== ownership.turnId) || !owns()) return;
         alreadyExited = current?.exited === true;
       }
       if (!ownership?.completed && !alreadyExited) {
-        await service.interrupt(session);
+        // A Stop that also ends the agent (releaseAgent) does not depend on the interrupt: the agent's
+        // host is shut down next, and that shutdown is confirmed (exitAgent). Seen live (2026-10-22):
+        // Stop on an agent still launching, its model retrying 429s, waited the whole settle window
+        // and failed "stop needs attention", and the agent ran on; an agent whose controller had not
+        // started refused the interrupt (CHAT_CONTROLLER_NOT_READY), and Stop failed outright.
+        // A stuck turn's restart escalates the same way (seen live 2026-10-22: a tool call that never
+        // returned held a chat "may be stuck" for 3h 39m; its interrupt never settled, so every "keep
+        // going" failed "stop needs attention" and came back to the composer). AO keeps the session,
+        // so the next turn resumes it with everything the agent already knows.
+        const release = ownership?.releaseAgent === true;
+        const escalate = release || ownership?.escalate === true;
+        let signalled = true;
+        try { await service.interrupt(session); }
+        catch (error) {
+          if (!escalate) throw error;
+          signalled = false;
+          escalated = String(error?.message || error).slice(0, 200);
+          logger?.info?.("ao.stop_escalated", { reason: "interrupt_refused", error: escalated });
+        }
         let stopped = false;
         // Up to 15 s for the interrupt to settle (it was 2 s). Seen live: a stalled chat's interrupt
         // landed later than that, so the restart failed ("stop needs attention"), its next steers
         // and send were refused, and the chat sat for 8 more minutes until another steer found the
-        // turn over.
-        const tries = Math.ceil(STOP_SETTLE_MS / STOP_SETTLE_POLL_MS);
+        // turn over. A Stop that ends the agent waits only STOP_RELEASE_SETTLE_MS before shutting it down.
+        const settleMs = release ? STOP_RELEASE_SETTLE_MS : STOP_SETTLE_MS;
+        const tries = signalled ? Math.ceil(settleMs / STOP_SETTLE_POLL_MS) : 0;
         for (let attempt = 0; attempt < tries; attempt++) {
           const observation = await service.observe(session);
           if (observation?.exited === true || (["completed", "failed", "interrupted", "cancelled"].includes(observation?.turnState)
             && !["working", "running", "starting"].includes(observation?.status))) { stopped = true; break; }
           if (attempt < tries - 1) await new Promise(resolve => setTimer(resolve, STOP_SETTLE_POLL_MS));
         }
-        if (!stopped) throw new Error("Owned turn is still working; stop needs attention, no replacement was started");
+        if (!stopped && !escalate) throw new Error("Owned turn is still working; stop needs attention, no replacement was started");
+        if (!stopped) shutDown = true;
+        if (!stopped && signalled) {
+          escalated = "Owned turn is still working";
+          logger?.info?.("ao.stop_escalated", { reason: "interrupt_unsettled", waitedMs: settleMs, release });
+        }
       }
-      if (ownership?.releaseAgent && owns()) {
+      if (shutDown && owns()) {
         const outcomes = await Promise.allSettled([
           Promise.resolve().then(() => service.exitAgent(session)).then(outcome => {
             if (outcome?.ok !== true) throw new Error(`Agent ${session} shutdown is unconfirmed`);
@@ -4611,7 +4685,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           Promise.resolve().then(() => subagents?.stopParent(session)),
         ]);
         const failures = outcomes.filter(outcome => outcome.status === "rejected").map(outcome => String(outcome.reason?.message || outcome.reason));
-        if (failures.length) throw new Error(failures.join("; "));
+        if (failures.length) throw new Error([escalated, ...failures].filter(Boolean).join("; "));
       }
     });
     job.releasesAgent = ownership?.releaseAgent === true;
@@ -4895,9 +4969,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function archivedChats({ workspaceIds } = {}) {
     if (!Array.isArray(workspaceIds) || workspaceIds.length > 100) throw new Error("Choose the projects to list");
     const chats=[];
-    for (const id of [...new Set(workspaceIds.map(value=>clean(value,128)))]) {
+    const ids=[...new Set(workspaceIds.map(value=>clean(value,128)))];
+    const read=new Map(); // workspace -> { saved, deleted: task ids }
+    for (const id of ids) {
       let saved;
       try { saved=await runs({workspaceId:id}); } catch { continue; }
+      const deleted=new Set();
+      read.set(id,{ saved, deleted });
       // A chat is a task with runs; a board task that never ran is not one.
       const chatTasks=new Set(saved.runs.map(run=>run.project_id));
       for (const life of saved.task_lifecycle ?? []) {
@@ -4913,11 +4991,47 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             logger?.warn?.("ao.archived_chat_delete_failed",{message:publicText(error?.message||error,200)});
           }
         }
+        if (visibility === "deleted") deleted.add(life.task_id);
         chats.push({ workspaceId:id, taskId:life.task_id, title:String(life.title||""), visibility,
           ...(visibility === "archived" ? { archivedAt:archive.since(id,life.task_id) } : {}) });
       }
     }
+    // Every project's chats must be known: a session is ended only when no chat still uses it.
+    if (read.size === ids.length) void endOldSessions(read).catch(error =>
+      logger?.warn?.("ao.old_sessions_failed",{message:publicText(error?.message||error,200)}));
     return { ok:true, days:archive.days(), chats };
+  }
+  /**
+   * Old AO sessions leave AO's board on the archive's clock (archive.days(); 0 keeps them). The
+   * archive moved old chats away, but AO kept every session they and their workers, subagents
+   * and reviewers ever had: 191 on the board, 35 unused for over a week, on 2026-10-22. A session
+   * is ended (AO's kill, which Restore undoes) when it has not been used for that many days and no
+   * chat in the list or in Archived still has it, so continuing a chat keeps its agent's context.
+   * At most once an hour; a session an active run owns is never touched.
+   */
+  const OLD_SESSION_SWEEP_MS = 60 * 60_000;
+  let oldSessionSweepAt = 0;
+  async function endOldSessions(read) {
+    const days = archive.days(), service = aoHarness;
+    if (!days || typeof service?.staleSessions !== "function" || now() - oldSessionSweepAt < OLD_SESSION_SWEEP_MS) return 0;
+    oldSessionSweepAt = now();
+    const kept = new Set();
+    for (const { saved, deleted } of read.values()) {
+      for (const run of saved.runs ?? []) {
+        if (deleted.has(run.project_id)) continue;
+        for (const node of run.nodes ?? []) {
+          for (const receipt of [node.receipt, ...(node.history ?? [])]) if (receipt?.thread_id) kept.add(String(receipt.thread_id));
+        }
+      }
+    }
+    let ended = 0;
+    for (const session of await service.staleSessions([...read.keys()], days * 24 * 60 * 60_000)) {
+      if (kept.has(session) || sessionOwners.has(session)) continue;
+      try { await service.kill(session); ended += 1; }
+      catch (error) { logger?.warn?.("ao.old_session_end_failed", { message: publicText(error?.message || error, 200) }); }
+    }
+    if (ended) logger?.info?.("ao.old_sessions_ended", { count: ended, days });
+    return ended;
   }
   function dispose() {
     schedulerDisposed = true;

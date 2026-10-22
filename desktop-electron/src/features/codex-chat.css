@@ -403,6 +403,11 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
   font: inherit; font-size: 12px; line-height: 20px; cursor: pointer; }
 .cx-queued-send-now:hover:not(:disabled) { background: var(--cx-hover); color: var(--color-text-primary); }
 .cx-queued-send-now:disabled { opacity: .4; cursor: default; }
+/* A stuck turn's Restart, inline in its "may be stuck" line: the one thing to press there. */
+.cx-turn-restart { height: 20px; padding: 0 8px; border: 1px solid var(--cx-border, rgb(0 0 0 / .14)); border-radius: 5px; background: transparent;
+  color: var(--color-text-primary); font: inherit; font-size: 12px; line-height: 18px; cursor: pointer; vertical-align: baseline; }
+.cx-turn-restart:hover:not(:disabled) { background: var(--cx-hover); }
+.cx-turn-restart:disabled { opacity: .5; cursor: default; }
 .cx-sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 /* A message steered into a working turn: the user's own bubble, in the live timeline where it was sent. */
 .cx-live-item.kind-steer { display: block; margin: 6px 0; }

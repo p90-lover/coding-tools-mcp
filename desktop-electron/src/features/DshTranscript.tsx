@@ -10,7 +10,7 @@
  */
 import { useContext, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, ToolImages } from "./ChatToolParts";
+import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart, ToolImages } from "./ChatToolParts";
 import {
   dshActivity, dshDuration, dshItemDetail, dshLiveTitle, dshProcessTitle, dshQuietNote, dshRetryNote, dshSegments, dshThinkSummary, dshToolTitle,
   steerReader, steerReceipts, tidyTimeline, withoutReplied, type ChatLiveItem, type ChatStep, type ChatTurn, type DshActivity, type SteerReceipt,
@@ -265,6 +265,7 @@ function DshRunning({ since, divider, heardAt, retry = "" }: { since?: number; d
   // does not look frozen, and say plainly when it has been quiet as long as a stuck one. A turn whose
   // agent is waiting out a model error says that instead (dshRetryNote).
   const quietNote = retry || dshQuietNote(heardAt, now);
+  const { onRestart, restarting } = useContext(TurnRestart);
   return <div className="dsh-running" role="status" aria-live="polite">
     {divider ? <span className="dsh-running-divider" aria-hidden="true" /> : null}
     <span className="dsh-running-content">
@@ -273,6 +274,9 @@ function DshRunning({ since, divider, heardAt, retry = "" }: { since?: number; d
         <svg className="dsh-whale-still" width="100%" height="100%" viewBox="0 0 16 16" fill="none"><path d={WHALE} stroke="currentColor" strokeWidth={1} /></svg>
       </span>
       <span className="dsh-shimmer is-deep">{since ? `Deep diving for ${dshDuration(now - since)}${quietNote} ···` : `Deep diving${quietNote}`}</span>
+      {/* A stuck turn has something to press here too (see TurnRunning). */}
+      {quietNote.includes("may be stuck") && onRestart ? <button type="button" className="cx-turn-restart" onClick={onRestart} disabled={restarting}
+        title="Stop this turn and have the same agent continue where it left off">{restarting ? "Restarting…" : "Restart"}</button> : null}
     </span>
   </div>;
 }

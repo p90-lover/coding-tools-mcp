@@ -60,6 +60,12 @@ export function ToolImages({ paths }: { paths: string[] }) {
 export const SentMessageView = createContext<(text: string) => ReactNode>(
   (text) => <div className="cx-bubble"><p>{chatMessageReadable(text)}</p></div>);
 
+/**
+ * A stuck turn's Restart (AgentOrchestratorChat's restartTurn), for a running footer drawn inside a
+ * memoized transcript (DshTurnWork) that a prop would not reach.
+ */
+export const TurnRestart = createContext<{ onRestart?: () => void; restarting: boolean }>({ restarting: false });
+
 /** Who reads the person's steers in this card ("Read by Claude"), from steerReader. */
 export const SteerReader = createContext("Claude");
 

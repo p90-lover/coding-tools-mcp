@@ -13,7 +13,7 @@ import { ChatContextMeter } from "./ChatContextMeter";
 import { ChatPet } from "./ChatPet";
 import { ChatTurnStats } from "./ChatTurnStats";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
-import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, Attachments, ImageLightbox, SentImage, ToolImages } from "./ChatToolParts";
+import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart, Attachments, ImageLightbox, SentImage, ToolImages } from "./ChatToolParts";
 import { PartErrorBoundary } from "../PartErrorBoundary";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
@@ -156,6 +156,10 @@ export type ChatThreadActions = {
   pinned: boolean;
 };
 
+/** What a stuck turn's Restart sends the same agent as its next turn. */
+export const RESTART_MESSAGE = "Your previous turn stopped responding and was restarted. Continue the same task from where you left off; "
+  + "do not start over or repeat work that is already done. If a command or tool call never returned, do not run it the same way again.";
+
 /**
  * How long since `since`, counting up once a second by itself while `live`: only this label
  * re-renders on a tick, never the transcript around it. Stopped, it holds at `until`.
@@ -176,6 +180,8 @@ function Elapsed({ since, live = true, until, format = chatDuration }: { since: 
  * for" label sat at the turn's top, hundreds of steps up, so a stuck turn could not be told apart.
  */
 function TurnRunning({ turn }: { turn: ChatTurn }) {
+  // Through context: the transcript around it is memoized and would keep a stale callback.
+  const { onRestart, restarting } = useContext(TurnRestart);
   const step = turn.steps.find((item) => item.working) ?? (turn.final?.working ? turn.final : undefined);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -188,7 +194,12 @@ function TurnRunning({ turn }: { turn: ChatTurn }) {
   return <p className={`cx-note cx-turn-running${step.working.stalled ? " is-stalled" : ""}`} role="status" aria-live="polite">
     <span className="cx-shimmer">Working</span>{turn.startedAtMs ? <> for <Elapsed since={turn.startedAtMs} /></> : null}
     {` · ${step.name}${step.working.activity ? ` — ${step.working.activity}` : ""}${note}`}
-    {note.includes("may be stuck") ? " · send a message to restart it" : ""}
+    {/* A stuck turn has a button of its own: the person looking at "may be stuck" had nothing to
+        press, and a tool call that never returned held a chat for hours (Restart: chat_steer's restart). */}
+    {note.includes("may be stuck") ? onRestart
+      ? <> · <button type="button" className="cx-turn-restart" onClick={onRestart} disabled={restarting}
+        title="Stop this turn and have the same agent continue where it left off">{restarting ? "Restarting…" : "Restart"}</button></>
+      : " · send a message to restart it" : ""}
   </p>;
 }
 
@@ -687,7 +698,8 @@ export function AgentOrchestratorChat({
   send: (input: { taskId?: string; title?: string; message: string; goal?: string }) => Promise<void>;
   /** Hands a message to the running agent at once (Codex's steer); false when its turn already ended. */
   /** true: steered; "wait": the agent waits on a request, so the message is queued; false: send it normally. */
-  steer?: (input: { taskId: string; message: string }) => Promise<boolean | "wait" | "restart" | "interrupt" | "starting">;
+  /** `restart`: stop the turn and send the message as its next turn, whatever its quiet time (Restart). */
+  steer?: (input: { taskId: string; message: string; restart?: boolean }) => Promise<boolean | "wait" | "restart" | "interrupt" | "starting">;
   openStructure: (runId: string) => void;
   approvals: ChatApproval[];
   approve: (approval: ChatApproval, reply: ApprovalReply) => void;
@@ -1056,7 +1068,8 @@ export function AgentOrchestratorChat({
    * Sends a message the way the composer does: into this chat, or as a new chat. A queued message
    * sent in the background (fromComposer false) leaves whatever the user is typing alone.
    */
-  const deliver = async (message: string, goal?: string, fromComposer = true) => {
+  /** `restart`: the stuck turn's Restart: stop it and send `message` as its next turn (chat_steer's restart). */
+  const deliver = async (message: string, goal?: string, fromComposer = true, restart = false) => {
     const owner = composing.current;
     const here = () => alive.current && composing.current.taskId === owner.taskId;
     // Only what was sent is cleared: a draft, file or annotation added while it was sending stays.
@@ -1065,7 +1078,7 @@ export function AgentOrchestratorChat({
     // A steer shows at once, as in Claude Code: the composer clears and the message waits in the
     // queued-message bar, pulsing, while it reaches the agent, which can take seconds (it waits out
     // an approval being answered). Until then the box held the text and the Stop button stayed.
-    const steerNow = !goal && steering && Boolean(steer && selectedTaskId);
+    const steerNow = !goal && (steering || restart) && Boolean(steer && selectedTaskId);
     // A steer sent again from the queue keeps the bubble it already has, not a second one.
     const pendingId = steerNow ? pendingSteers.find((entry) => entry.taskId === selectedTaskId && entry.text === message)?.id
       ?? `steer-${Date.now()}-${Math.random().toString(36).slice(2)}` : "";
@@ -1078,7 +1091,7 @@ export function AgentOrchestratorChat({
     const dropPending = () => { if (pendingId) setPendingSteers((list) => list.filter((entry) => entry.id !== pendingId)); };
     try {
       // A steer the turn outran (it ended first) is sent as an ordinary follow-up instead; a goal is never steered.
-      const steered = steerNow ? await steer!({ taskId: selectedTaskId, message }) : false;
+      const steered = steerNow ? await steer!({ taskId: selectedTaskId, message, ...(restart ? { restart: true } : {}) }) : false;
       // The agent is busy with a request of its own (or still starting): the steer waits in the queue
       // and goes in once it can. It stays shown as steering; a "Queued" card here read as if the
       // message had not been sent at all ("it pop up as queued for no reason").
@@ -1166,6 +1179,12 @@ export function AgentOrchestratorChat({
       return false;
     } finally { setSending(false); }
   };
+  // Restart on a stuck turn's foot: the same agent continues where it left off, told why.
+  const [restarting, setRestarting] = useState(false);
+  const restartTurn = steer && selectedTaskId ? () => {
+    setRestarting(true);
+    void deliver(RESTART_MESSAGE, undefined, false, true).finally(() => setRestarting(false));
+  } : undefined;
 
   const submit = async () => {
     // A whole draft that is a command runs it, even while the chat is working (/status, /goal pause);
@@ -1610,6 +1629,7 @@ export function AgentOrchestratorChat({
   }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn]);
 
   return (<Attachments.Provider value={attachmentAccess}><SentMessageView.Provider value={sentMessageView}><CompactActivity.Provider value={compactActivity}>
+    <TurnRestart.Provider value={{ onRestart: restartTurn, restarting }}>
     <div className={`cx-chat${showStructure && structure ? " has-structure" : ""}`}>
       <section className="cx-thread" aria-label={chat?.title || CHAT_DEFAULT_TITLE}>
         <header className="cx-thread-head">
@@ -1934,5 +1954,5 @@ export function AgentOrchestratorChat({
       {workbench && selectedTaskId ? <ChatWorkbench sessions={agentSessions} workspaceId={projectId} tab={workbench} onTab={setWorkbench} onClose={() => setWorkbench(null)} /> : null}
       <ChatMenu menu={menu} onClose={() => setMenu(null)} />
     </div>
-  </CompactActivity.Provider></SentMessageView.Provider></Attachments.Provider>);
+  </TurnRestart.Provider></CompactActivity.Provider></SentMessageView.Provider></Attachments.Provider>);
 }

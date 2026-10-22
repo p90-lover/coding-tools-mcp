@@ -1044,7 +1044,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         ...(approvalMode ? { approvalMode } : {}),
         ...(brief ? { prompt: mode === "chat" ? brief : `${brief}\n\n${TUI_RESULT_INSTRUCTION}` } : {}),
         ...(model && model !== "default" ? { model: String(model).slice(0, 256) } : {}),
-        ...(effort && !gateway ? { effort: String(effort).slice(0, 32) } : {}),
+        // Through CPA too: the agent sends it in the request body (the workflow's aoLaunchArgs).
+        ...(effort ? { effort: String(effort).slice(0, 32) } : {}),
         ...(contextWindow != null ? { contextWindow } : {}),
         // A single-model chat is a plain assistant: AO adds none of its worker/orchestrator prompt.
         ...(plain ? { plainPrompt: true } : {}),
@@ -1280,6 +1281,23 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         return Number.isFinite(used) && now - used >= idleMs ? String(session.id) : null;
       }));
       return idle.filter(Boolean);
+    },
+    /**
+     * Sessions of these workspaces' AO projects that nobody has used for at least `idleMs`: live
+     * (not terminated), not working, not pinned, with no message to them since, or since they were
+     * made. AO's board keeps every exited session, so old workers, subagents and replaced chats
+     * piled up there (35 over a week old on 2026-10-22). The activity time is no measure of use:
+     * it restarts with the daemon.
+     */
+    async staleSessions(workspaceIds, idleMs, now = Date.now()) {
+      const projects = new Set((await Promise.all(workspaceIds.map(id => projectFor(id).catch(() => null)))).filter(Boolean));
+      if (!projects.size) return [];
+      const list = await internalApi("GET", "/api/v1/sessions");
+      const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
+      const lastUse = session => Math.max(...[session.lastUserMessageAt, session.createdAt].map(stamp => Date.parse(stamp ?? "")).filter(Number.isFinite));
+      return sessions.filter(session => session && projects.has(session.projectId) && !session.isTerminated && session.isPinned !== true
+        && !["working", "spawning", "starting"].includes(session.status) && Number.isFinite(lastUse(session)) && now - lastUse(session) >= idleMs)
+        .map(session => String(session.id));
     },
     /** Sends a follow-up as a new turn of the same session; AO de-duplicates by client message id. */
     async send(id, text, clientMessageId) {
@@ -1570,6 +1588,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // space back (ao-db-maintenance.cjs). It runs in a worker, and anything it cannot do is skipped.
         if (!databaseCompacted) {
           databaseCompacted = true;
+          // Logged before it runs: a run that hung once left no trace while AO waited on it.
+          logger.info?.("ao.database_compaction_started", {});
           const compacted = await compactAoDatabase(dataRoot);
           if (compacted.action !== "none") logger.info?.("ao.database_compacted", compacted);
           checkStartup();

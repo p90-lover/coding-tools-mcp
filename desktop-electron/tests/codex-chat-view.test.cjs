@@ -24,6 +24,9 @@ const run = (id, taskId, nodes, extra = {}) => ({ id, project_id: taskId, cancel
 
 // The page the agent's browser has open, as useWorkbenchAutoOpen reports it (null: none).
 let openPage = null;
+// A stuck turn's Restart: its Provider stays in the tree (so a test can read the value the chat
+// gives it), and its value is what TurnRunning reads.
+const turnRestart = { Provider: "TurnRestartProvider", value: { restarting: false } };
 function mount(props) {
   const states = []; let cursor = 0;
   const react = {
@@ -50,7 +53,7 @@ function mount(props) {
             // The parts the chat shares with the DeepSeek view; its Providers wrap the chat.
             : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), Attachments: react.createContext({}),
               SentImage: "SentImage", ToolImages: "ToolImages", ImageLightbox: "ImageLightbox",
-              SteerReader: react.createContext("Claude"), SteerReceiptMark: "SteerReceiptMark" } : {},
+              SteerReader: react.createContext("Claude"), SteerReceiptMark: "SteerReceiptMark", TurnRestart: turnRestart } : {},
   { window: { setTimeout: () => 0, setInterval: () => 0, clearInterval() {}, confirm: () => true }, document: { querySelector: () => null }, navigator: {} });
   return { render: (next = {}) => { cursor = 0; return module.AgentOrchestratorChat({ ...props, ...next }); } };
 }
@@ -286,6 +289,49 @@ test("while the agent works, a typed message steers it at once; Esc on an empty 
   await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
   assert.deepEqual(JSON.parse(JSON.stringify(steered)), [{ taskId: "t", message: "use pnpm" }]);
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0, "a delivered steer is not also sent as a follow-up");
+});
+
+test("a turn that may be stuck has a Restart button; it stops the turn and has the same agent continue", async () => {
+  // Seen live 2026-10-22: "may be stuck 3h 39m" on a tool call that never returned, with nothing to press.
+  const now = Date.now();
+  const steered = [];
+  const { props, calls } = base({ selectedTaskId: "t", working: true,
+    runs: [run("r1", "t", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/m" }, receipt: { started_at_ms: now - 4 * 3_600_000 } })], { execution_mode: "single" })],
+    activity: { "r1:w": { activity: "running Find detection log files", last_event_at_ms: now - 11 * 60_000, turn_started: true } },
+    steer: async (input) => { steered.push(input); return true; } });
+  const view = mount(props);
+  const provided = walk(view.render()).find((element) => element.type === "TurnRestartProvider").props.value;
+  assert.equal(typeof provided.onRestart, "function", "a steerable chat offers Restart");
+  try {
+    turnRestart.value = { onRestart: provided.onRestart, restarting: false };
+    const running = walk(view.render()).find((element) => String(element.props?.className).includes("cx-turn-running"));
+    assert.match(text(running), /may be stuck/);
+    const button = walk(running).find((element) => element.props?.className === "cx-turn-restart");
+    assert.ok(button && !button.props.disabled, "the stuck footer has its own Restart");
+    assert.equal(text(button), "Restart");
+    button.props.onClick();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(steered.length, 1);
+    assert.equal(steered[0].restart, true, "the turn is restarted whatever its quiet time");
+    assert.match(steered[0].message, /^Your previous turn stopped responding and was restarted\. Continue the same task/);
+    assert.equal(calls.filter(([kind]) => kind === "stop").length, 0, "the run is not stopped: the same agent continues");
+    turnRestart.value = { onRestart: provided.onRestart, restarting: true };
+    const pressed = walk(walk(view.render()).find((element) => String(element.props?.className).includes("cx-turn-running")))
+      .find((element) => element.props?.className === "cx-turn-restart");
+    assert.equal(pressed.props.disabled, true);
+    assert.equal(text(pressed), "Restarting…");
+  } finally { turnRestart.value = { restarting: false }; }
+});
+
+test("a chat that cannot be steered keeps the old hint on a stuck turn instead of a Restart", () => {
+  const now = Date.now();
+  const { props } = base({ selectedTaskId: "t", working: true,
+    runs: [run("r1", "t", [node("w", "planner", "running", { receipt: { started_at_ms: now - 3_600_000 } })], { execution_mode: "single" })],
+    activity: { "r1:w": { activity: "running a command", last_event_at_ms: now - 11 * 60_000, turn_started: true } } });
+  const view = mount(props).render();
+  assert.equal(walk(view).find((element) => element.type === "TurnRestartProvider").props.value.onRestart, undefined);
+  const running = walk(view).find((element) => String(element.props?.className).includes("cx-turn-running"));
+  assert.match(text(running), /may be stuck · send a message to restart it$/);
 });
 
 test("while the agent works, /review and /init steer it; a new goal waits for the turn; /rewind goes back to a message", async () => {

@@ -134,7 +134,7 @@ function yamlString(value) {
 // Every Go plugin is built with Go 1.26.10/1.27.3 or later: before them, crypto/x509 trusted chains
 // through distrusted intermediates (CVE-2026-111943, the leaked emSign CA keys).
 const COMMANDCODE_PLUGINS = [
-  { id: "cline-pass-switcher", file: "cline-pass-switcher-v0.1.0-codingtools.5.dll", sha256: "3a635fee93736fba27a1a444915ff08128031c798ffaef0bc582b994c15a5769" },
+  { id: "cline-pass-switcher", file: "cline-pass-switcher-v0.1.0-codingtools.6.dll", sha256: "1e165f43044d6bed967d027d86febb9261ae413e3bd3b3e194b7ac25ae1d0f56" },
   { id: "commandcode-go", file: "commandcode-go-v1.0.0-codingtools.3.dll", sha256: "7b50bd0f2879101c06732e98b6fc1a30ae8afa29a5fd8f6016473f0eb74ff343" },
   { id: "auth-commandcode", file: "auth-commandcode-v0.1.0-codingtools.2.dll", sha256: "0d24aa57f4415db4163ece11fa95ab785e7f061bee657894cef1e14b9dc9bf31" },
   // CPA Helper (usage, costs, Codex keeper), rebuilt from walkingddd/CPA-Helper as a native plugin.
