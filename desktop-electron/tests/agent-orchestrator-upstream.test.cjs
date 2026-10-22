@@ -70,7 +70,9 @@ function observeHarness(context) {
   const shared = helpers.replace(/const TAIL_FRESH_MS = \d+;/, `const TAIL_FRESH_MS = ${Number(context.tailFreshMs ?? 0)};`);
   return vm.runInNewContext(states + timelineBounds(source) + shared + identity + "({" + method + "})", {
     Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"),
-    agentTools: null, setTimeout, exitedReleased: new Set(), observeTui: async () => { throw new Error("not a TUI fixture"); }, ...context,
+    agentTools: null, setTimeout, exitedReleased: new Set(), observeTui: async () => { throw new Error("not a TUI fixture"); },
+    // Imported by the module (not part of the helpers sliced above).
+    utf8Suffix: require("../electron/chat-agent-shell.cjs").utf8Suffix, ...context,
   });
 }
 

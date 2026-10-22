@@ -1029,7 +1029,7 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
     logger.warn("launcher.window_state_write_failed", {
       message: error instanceof Error ? error.message : String(error),
     });
-  });
+  }, { quitting: () => quitting });
   logger.info("launcher.window_created", { platform: process.platform, cdpPort });
   return window;
 }
