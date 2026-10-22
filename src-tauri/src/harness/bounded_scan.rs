@@ -18,8 +18,11 @@ const FILE_BYTES: u64 = 32 * 1024 * 1024;
 const TOTAL_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_ENTRIES: usize = 20_000;
 const DEADLINE: Duration = Duration::from_secs(8);
+// A cold git start on Windows (antivirus scanning git.exe, a busy CI runner, a slow disk) took over
+// 3 s: the GitHub Windows runner failed the baseline scan tests on "Git metadata deadline reached"
+// twice in a row (2026-10-22). The scan's own DEADLINE still bounds the whole scan.
 #[cfg(windows)]
-const GIT_METADATA_DEADLINE: Duration = Duration::from_secs(3);
+const GIT_METADATA_DEADLINE: Duration = Duration::from_secs(6);
 #[cfg(not(windows))]
 const GIT_METADATA_DEADLINE: Duration = Duration::from_secs(1);
 static ACTIVE: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
