@@ -4017,10 +4017,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // "Approve for me" answers a request within 20 s (its reviewer up to 25 s): a steer waits that long.
   const STEER_ANSWER_WAIT_MS = 30_000;
   const STEER_ANSWER_POLL_MS = 750;
+  // The board (src-tauri board_sync) keeps a task's description to 8,192 UTF-8 bytes and refuses a
+  // carriage return or any control but newline and tab. Counted here in characters, a chat whose
+  // text held "↳ Steer" notes (3 bytes each), "·" or non-Latin words passed every check, was never
+  // compacted, and every follow-up after was refused ("Text is empty, oversized or contains
+  // unsupported controls", 51 times in four seconds on 2026-10-22).
+  const BOARD_TEXT_BYTES = 8192;
+  const boardText = text => text.replace(/\r\n?/g, "\n").replace(/[\x7F-\x9F]/g, "");
   /** `restart`: the person pressed Restart on a stuck turn, so it is restarted whatever its quiet time. */
   async function chatSteer({ workspaceId, taskId, message, restart = false } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
-    const text = clean(message, 8192, false);
+    const text = boardText(clean(message, 8192, false));
     if (!text.trim()) throw new Error("Type a message to steer the agent");
     const saved = await runs({ workspaceId: id });
     const run = saved.runs.filter(entry => entry.project_id === task && !entry.cancelled).at(-1);
@@ -4093,7 +4100,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const note = async () => {
       const detail = await board({ workspaceId: id, taskId: task });
       const description = `${detail.task?.description || ""}\n\n↳ Steer (${stamp} UTC): ${text}`.trim();
-      if (detail.task && description.length <= 8192) {
+      if (detail.task && utf8Bytes(description) <= BOARD_TEXT_BYTES) {
         await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
       }
     };
@@ -4109,10 +4116,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const id = clean(workspaceId, 128);
     // /goal <condition>: the first round sends the condition itself; the chat keeps going from there.
     const objective = goal === undefined ? null : cleanObjective(goal);
-    const asked = clean(message, 8192, false);
+    const asked = boardText(clean(message, 8192, false));
     const text = objective ? goalMessage(objective, 1) : asked;
     const naming = objective ?? asked;
     if (!text.trim()) throw new Error("Type a message to start the chat");
+    // Compacting the chat cannot make room for one message over the board's byte limit by itself.
+    if (utf8Bytes(text) > BOARD_TEXT_BYTES) {
+      throw new Error(`This message is ${utf8Bytes(text).toLocaleString("en-US")} bytes; a chat message can be at most ${BOARD_TEXT_BYTES.toLocaleString("en-US")}. Shorten it or send it in parts.`);
+    }
     const selectedExecutable = codexExecutable(executable);
     const saved = await runs({ workspaceId: id });
     if (executionMode !== undefined && !["single", "team"].includes(executionMode)) throw new Error("Choose single or team execution");
@@ -4176,7 +4187,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
       const extended = () => `${detail.task.description || ""}\n\nFollow-up (${stamp} UTC):\n${text}`.trim();
       let description = extended();
-      if (description.length > 8192) {
+      if (utf8Bytes(description) > BOARD_TEXT_BYTES) {
         // A long chat compacts itself, as Codex does, instead of stopping at the size limit: the
         // earlier conversation becomes a handoff summary (what /compact does) and the chat goes on.
         const compacted = await compactChat({ workspaceId: id, taskId: task })
@@ -4184,7 +4195,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         detail = await board({ workspaceId: id, taskId: task });
         if (!detail.task) throw new Error("This chat's task no longer exists");
         description = extended();
-        if (!compacted.compacted || description.length > 8192) throw new Error("This chat is full; start a new chat to continue");
+        if (!compacted.compacted || utf8Bytes(description) > BOARD_TEXT_BYTES) throw new Error("This chat is full; start a new chat to continue");
       }
       await write(id, { expected_revision: detail.revision,
         change: { operation: "edit", id: task, title: detail.task.title, description } });
@@ -4649,8 +4660,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     if (!summary) throw new Error("The model returned no summary; the chat is unchanged");
     const stamp = new Date(now()).toISOString().replace("T", " ").slice(0, 16);
-    const description = clean(`Summary of the earlier conversation (compacted ${stamp} UTC):\n${summary}`, 6000, false);
-    if (description.length >= before.length) return { ok: true, compacted: false, before: before.length, after: before.length };
+    const description = boardText(clean(`Summary of the earlier conversation (compacted ${stamp} UTC):\n${summary}`, 6000, false));
+    if (utf8Bytes(description) >= utf8Bytes(before)) return { ok: true, compacted: false, before: before.length, after: before.length };
     const fresh = await board({ workspaceId: id, taskId: task });
     if (!fresh.task || String(fresh.task.description || "") !== before) throw new Error("The chat changed while compacting; try again");
     await write(id, { expected_revision: fresh.revision, change: { operation: "edit", id: task, title: fresh.task.title, description } });

@@ -11,6 +11,8 @@ const path = require("node:path");
 // finishes in the background and refreshes it.
 const MODELS_CACHE_WAIT_MS = 3_500;
 const MODELS_CACHE_MAX_BYTES = 4 * 1024 * 1024;
+// A catalog cached for a sign-in not used this long is gone with it (tokens rotate).
+const MODELS_CACHE_KEEP_MS = 7 * 24 * 60 * 60_000;
 const { releaseRetainedConversation } = require("./retained-turn-release.cjs");
 
 const MAX_BODY_BYTES = 16 * 1024;
@@ -653,10 +655,24 @@ class BrowserControlServer {
     } catch { return null; }
   }
 
+  // Files for older sign-ins (one ~600 KB copy per rotated token, 18 here on 2026-10-22) and stray
+  // temporaries are dropped once per run, before the first write.
   writeModelsCache(file, contentType, body) {
     this.modelsCacheWrites ??= new Map();
     const write = (this.modelsCacheWrites.get(file) ?? Promise.resolve()).then(async () => {
       await fs.promises.mkdir(this.modelsCacheDir, { recursive: true });
+      if (!this.modelsCachePruned) {
+        this.modelsCachePruned = true;
+        const now = Date.now();
+        for (const name of await fs.promises.readdir(this.modelsCacheDir)) {
+          const other = path.join(this.modelsCacheDir, name);
+          if (other === file) continue;
+          try {
+            const age = now - (await fs.promises.stat(other)).mtimeMs;
+            if (name.endsWith(".tmp") ? age > 60 * 60_000 : age > MODELS_CACHE_KEEP_MS) await fs.promises.rm(other, { force: true });
+          } catch {}
+        }
+      }
       const temporary = `${file}.${process.pid}.tmp`;
       await fs.promises.writeFile(temporary, JSON.stringify({ contentType, body, savedAt: new Date().toISOString() }), { mode: 0o600 });
       await fs.promises.rename(temporary, file);
