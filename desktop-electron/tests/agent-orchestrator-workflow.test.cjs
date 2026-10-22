@@ -2027,10 +2027,11 @@ test("activity reports each working card's runtime and current step without adva
     receipt: { status: "submitted", thread_id: "sess-3" } };
   const done = { id: "p", role: "planner", state: "finished", route: native.route, receipt: { status: "completed" } };
   const testing = { ...agent, id: "w4", receipt: { status: "submitted", thread_id: "sess-4" } };
+  const asking = { ...agent, id: "w5", receipt: { status: "submitted", thread_id: "sess-5" } };
   const workflow = createAgentOrchestratorWorkflow({
     requestHeadless: async (endpoint, body) => {
       calls.push(endpoint);
-      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [done, native, stuck, agent, testing] }] };
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [done, native, stuck, agent, testing, asking] }] };
       if (endpoint === "/api/v1/ao/harness/status") {
         return { ok: true, status: { connected: true, live_output: body.node_id === "w1" ? "native partial Bearer SECRET_TOKEN npm run task-runner sk-abcdefghijklmnopqrst1234" : "", threads: body.node_id === "w1"
           ? [{ id: "thread-1", turn_id: "turn-1", activity: "running a command", activity_at_ms: 5_000, last_event_at_ms: 6_000 }]
@@ -2040,13 +2041,16 @@ test("activity reports each working card's runtime and current step without adva
     },
     aoHarness: { observe: async (session) => session === "sess-4"
       ? { turnState: "running", turnId: "t-4", timeline: [{ id: "a1", kind: "command", status: "pending", text: "python -m pytest tests -q", timeoutMs: 300_000 }] }
+      // AO marks the session needs_input while a permission request waits: the card names the command.
+      : session === "sess-5" ? { turnState: "running", turnId: "t-5", needsInput: true, approvals: [{ approval_id: "r1", kind: "command", command: "npm run build", tool: "Bash" }] }
       : { turnState: "running", turnId: "t-3" } },
     confirm: async () => true,
   });
   await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
   await new Promise(resolve => setImmediate(resolve));
   const result = await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
-  assert.deepEqual(Object.keys(result.nodes).sort(), ["w1", "w2", "w3", "w4"], "only working cards");
+  assert.deepEqual(Object.keys(result.nodes).sort(), ["w1", "w2", "w3", "w4", "w5"], "only working cards");
+  assert.equal(result.nodes.w5.activity, "waiting for approval: npm run build");
   assert.equal(result.nodes.w1.activity, "running a command");
   // "sk-" inside a word (task-runner) is not a key; a whole sk- token is.
   assert.equal(result.nodes.w1.output, "native partial [redacted] npm run task-runner [redacted]");

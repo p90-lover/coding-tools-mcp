@@ -1704,10 +1704,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
    * was last heard is added by the chat itself.
    */
   function describeTurn(observed) {
-    if (observed.needsInput) return "waiting for your answer";
     if (observed.exited) return "exited";
-    const asking = Array.isArray(observed.approvals) ? observed.approvals[0] : null;
-    if (asking) return `waiting for approval: ${publicText(asking.command || asking.tool || asking.title || "a request", 90)}`;
+    // The waiting request first: AO marks a session needs_input while a permission request waits
+    // too, and the card then said only "waiting for your answer" without naming the command.
+    const requests = Array.isArray(observed.approvals) ? observed.approvals.filter(Boolean) : [];
+    const permission = requests.find(request => request.kind !== "question");
+    if (permission?.kind === "plan") return "waiting for you to review its plan";
+    if (permission) return `waiting for approval: ${publicText(permission.command || permission.path || permission.tool || "a request", 90)}`;
+    const question = requests.find(request => request.kind === "question");
+    if (question) return `waiting for your answer: ${publicText(question.summary || question.message || "a question", 90)}`;
+    if (observed.needsInput) return "waiting for your answer";
     if (observed.turnState && TERMINAL_TURNS.has(observed.turnState)) return publicText(observed.turnState, 40);
     const live = (Array.isArray(observed.timeline) ? observed.timeline : []).filter(item => ["running", "pending"].includes(item?.status));
     const tool = live.find(item => !["message", "system", "reasoning", "thinking", "approval"].includes(item.kind));
