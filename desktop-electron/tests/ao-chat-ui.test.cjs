@@ -508,6 +508,19 @@ test("the pet is Claude Code's Clawd: the CLI's glyphs, poses and frame-by-frame
   assert.match(html, /<svg class="cx-clawd-glyphs" viewBox="0 0 18 12" width="72" height="48"/);
 });
 
+test("a walking pet reads no layout per frame and is redrawn at most 60 times a second", () => {
+  // Seen 2026-10-23 on a 165 Hz screen: each walk step set the pet's spot and then read the box's
+  // rect, a forced layout every frame (1,917 layouts and 3,933 style recalcs in 20 s).
+  const source = fs.readFileSync(path.join(__dirname, "../src/features/ChatPet.tsx"), "utf8");
+  const walk = source.slice(source.indexOf("const walkTo ="), source.indexOf("const nextSpot ="));
+  const step = walk.slice(walk.indexOf("const frame = (now: number)"));
+  assert.match(walk, /const box = composer\.current\?\.getBoundingClientRect\(\);[\s\S]*const frame = \(now: number\)/, "the box is read once, before the walk");
+  assert.doesNotMatch(step, /getBoundingClientRect|obstacles\(\)/, "no layout read inside a step");
+  assert.match(step, /blocked\(atNow\.current, rects, box\)/);
+  assert.match(step, /if \(arrived \|\| now - shown >= 1000 \/ WALK_FPS\) \{ shown = now; setAt\(atNow\.current\); \}/);
+  assert.match(source, /const WALK_FPS = 60;/);
+});
+
 test("a reviewer keeps every earlier cycle, oldest first and folded, not only the last review", () => {
   const reviewer = { id: "rev", role: "reviewer", state: "pending", x: 0, history: [
     { answer: "Worker 1's listing is truncated.", verdict: "CHANGES_REQUIRED" },
