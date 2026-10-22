@@ -2274,10 +2274,10 @@ export function chatGptPromptFilePayloads(
 }
 
 /**
- * The prompt as ChatGPT's composer can hold it. The editor has no carriage return: each `\r` of a
- * CRLF becomes its own line break, so the composer reads back `\n\n` where `\r\n` was sent, the
- * same length but different text. Codex's goal-continuation block arrives with CRLF line endings
- * on Windows, which failed every goal round's prompt check. Send one `\n` per line break instead.
+ * The prompt as ChatGPT's composer can hold it. The editor has no carriage return: it reads `\r\n`
+ * back as ` \n` (checked on the live ProseMirror composer, 2026-10-22), the same length but
+ * different text. Codex's goal-continuation block arrives with CRLF line endings on Windows, which
+ * failed every goal round's prompt check. Send one `\n` per line break instead.
  */
 export function chatGptComposerPromptText(prompt: string): string {
   return prompt.replace(/\r\n?/g, "\n");

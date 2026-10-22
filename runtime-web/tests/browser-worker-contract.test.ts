@@ -1121,8 +1121,8 @@ test("large Markdown-rich context uses one plain-text editing command before exa
 
 // Seen live (2026-10-22): a goal round's plain prompt failed with "did not preserve the complete
 // prompt (expectedChars=13575, actualChars=13575, commonPrefixChars=7067)". Codex's goal block uses
-// CRLF; ChatGPT's composer turns each \r into its own line break, so the readback kept the length
-// but not the text, at the block's first \r.
+// CRLF; ChatGPT's composer reads each \r back as a space, so the readback kept the length but not
+// the text, from the block's first \r.
 test("a CRLF prompt is sent with one line break per CRLF, so the composer reads back what was sent", async () => {
   const goal = "<codex_internal_context source=\"goal\">\nContinue working toward the active thread goal.\r\n\r\nBudget:\r\n- Tokens used: 8268043\r\n\n</codex_internal_context>";
   const prompt = `${"summary ".repeat(870)}\n\n${goal}\n\nkeep going`;
@@ -1132,8 +1132,8 @@ test("a CRLF prompt is sent with one line break per CRLF, so the composer reads 
     focus: async () => {},
     evaluate: async (_fn: unknown, value: string) => { inserted += value; return true; },
   };
-  // What ChatGPT's editor holds after an insert: no carriage returns, each one a line break.
-  const readback = (): string => inserted.replace(/\r/g, "\n");
+  // What ChatGPT's editor reads back after an insert (seen live): each carriage return as a space.
+  const readback = (): string => inserted.replace(/\r/g, " ");
   const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
     activeComposer: async () => composer,
     attachedPromptText: async () => readback(),
@@ -1146,8 +1146,11 @@ test("a CRLF prompt is sent with one line break per CRLF, so the composer reads 
   }).promptTextEquivalent;
 
   // The old transport: same length, different text from the first \r on.
-  expect(prompt.replace(/\r/g, "\n").length).toBe(prompt.length);
-  expect(promptTextEquivalent.call(worker, prompt, prompt.replace(/\r/g, "\n"))).toBeFalse();
+  expect(readback().length).toBe(0);
+  inserted = prompt;
+  expect(readback().length).toBe(prompt.length);
+  expect(promptTextEquivalent.call(worker, prompt, readback())).toBeFalse();
+  inserted = "";
 
   await attachPrompt.call(worker, {}, prompt, false);
   expect(inserted).toBe(chatGptComposerPromptText(prompt));
