@@ -49,7 +49,7 @@ function writeRuntime(appRoot, version) {
   for (const file of files) digest.update(file.path + "\0" + file.size + "\0" + file.sha256 + "\0");
   fs.writeFileSync(path.join(runtime, "manifest.json"), JSON.stringify({
     schemaVersion: 2, appVersion: version, platform: "win32", arch: "x64",
-    bunVersion: "1.4.0", playwright: "1.62.0", launcher: "bin/codex-chatgpt-web.cmd",
+    bunVersion: "1.4.3", playwright: "1.62.0", launcher: "bin/codex-chatgpt-web.cmd",
     entrypoint: "app/cli.js", bundleId: digest.digest("hex"), files,
   }));
 }

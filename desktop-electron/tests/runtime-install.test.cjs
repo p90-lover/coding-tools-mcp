@@ -57,7 +57,7 @@ function writeRuntimeManifest(source, version = "0.2.0") {
     schemaVersion: 2,
     appVersion: version,
     bundleId: bundleIdFor(files),
-    bunVersion: "1.4.0",
+    bunVersion: "1.4.3",
     platform: process.platform,
     arch: process.arch,
     launcher: `bin/${process.platform === "win32" ? "codex-chatgpt-web.cmd" : "codex-chatgpt-web"}`,
