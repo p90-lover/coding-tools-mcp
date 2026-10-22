@@ -5387,9 +5387,15 @@ test("team Stop and graph replacement require observed settlement after an inter
       ? workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" })
       : workflow.call("update_run", { workspaceId: "ws", change: { operation: "graph", run_id: "run", expected_revision: 3, change: { operation: "set_parents", node_id: "one", parents: [] } } }); };
     try {
-      await assert.rejects(invoke(), /still working|settlement.*unconfirmed/i, "ACK alone is insufficient");
-      // 60 settlement checks: 15 s at 250 ms (it was 8, 2 s, which gave up on interrupts that land later).
-      assert.equal(reads, action === "stop" ? 61 : 60, "one optional exited-host preflight plus bounded settlement checks");
+      if (action === "stop") {
+        // Stop ends the agent: after 3 s (12 checks) unsettled, its host's confirmed shutdown is the proof.
+        assert.equal((await invoke()).ok, true, "a confirmed agent shutdown stops what the interrupt did not");
+        assert.equal(reads, 13, "one exited-host preflight plus 3 s of settlement checks");
+      } else {
+        await assert.rejects(invoke(), /still working|settlement.*unconfirmed/i, "ACK alone is insufficient");
+        // 60 settlement checks: 15 s at 250 ms (it was 8, 2 s, which gave up on interrupts that land later).
+        assert.equal(reads, 60, "bounded settlement checks");
+      }
       assert.equal(updates, 0, "a live attempt cannot be replaced");
       assert.deepEqual(interrupted, ["s1"]);
       remainingBusy = 2; reads = 0;
@@ -5466,19 +5472,27 @@ test("Stop attempts every owned agent and reports an unconfirmed interrupt", asy
   const mission = { id: "run", workspace_id: "ws", nodes: ["s1", "s2"].map(id => ({
     id, state: "running", route, receipt: { thread_id: id },
   })) };
-  const interrupted = [];
-  const workflow = createAgentOrchestratorWorkflow({
-    requestHeadless: async endpoint => {
-      if (endpoint.endsWith("/control")) throw new Error("native control unavailable");
-      if (endpoint.endsWith("/read")) return { ok: true, runs: [structuredClone(mission)] };
-      throw new Error("unexpected " + endpoint);
-    },
-    aoHarness: { exitAgent: async () => ({ ok: true }), interrupt: async id => { interrupted.push(id); if (id === "s1") throw new Error("fixture stop unavailable"); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
-  });
-  try {
-    await assert.rejects(workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" }), /fixture stop unavailable/);
-    assert.deepEqual(interrupted, ["s1", "s2"]);
-  } finally { workflow.dispose(); }
+  // A refused interrupt is no longer the end: the agent's confirmed shutdown stops it. Only when
+  // that shutdown fails too is the Stop unconfirmed, and it says both.
+  for (const exitFails of [false, true]) {
+    const interrupted = [], exited = [];
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless: async endpoint => {
+        if (endpoint.endsWith("/control")) throw new Error("native control unavailable");
+        if (endpoint.endsWith("/read")) return { ok: true, runs: [structuredClone(mission)] };
+        throw new Error("unexpected " + endpoint);
+      },
+      aoHarness: { exitAgent: async id => { exited.push(id); if (exitFails && id === "s1") throw new Error("host shutdown failed"); return { ok: true }; },
+        interrupt: async id => { interrupted.push(id); if (id === "s1") throw new Error("fixture stop unavailable"); }, observe: async () => ({ turnState: "interrupted", status: "ready" }) },
+    });
+    try {
+      const stop = workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" });
+      if (exitFails) await assert.rejects(stop, /fixture stop unavailable; host shutdown failed/);
+      else assert.equal((await stop).ok, true, "the refused agent was shut down instead");
+      assert.deepEqual(interrupted, ["s1", "s2"]);
+      assert.deepEqual(exited.sort(), ["s1", "s2"], "every owned agent is shut down");
+    } finally { workflow.dispose(); }
+  }
 });
 
 test("a working external card is not rewired when its interrupt fails", async () => {
@@ -6031,6 +6045,34 @@ test("Stop retries failed descendant shutdown after the parent's host has alread
     assert.equal(childAttempts, 2, "the failed child is retried even though its parent is already gone");
     assert.equal(interrupts, 1, "an observed exited parent needs no nonexistent-controller interrupt");
   } finally { workflow.dispose(); }
+});
+
+test("Stop shuts down an agent whose interrupt never settles or is refused, instead of failing", async () => {
+  // Seen live (2026-10-22): Stop on an agent still launching (its model retrying 429s) waited the
+  // whole settle window, failed "Owned turn is still working; stop needs attention", and the agent
+  // ran on. One whose controller had not started refused the interrupt and Stop failed outright.
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  for (const refuse of [false, true]) {
+    const mission = { id: "run", workspace_id: "ws", nodes: [
+      { id: "one", state: "cancelled", route, receipt: { thread_id: "launching", request_key: "k", status: "held" } },
+    ] };
+    let exited = false, reads = 0, interrupted = false;
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless: async endpoint => ({ ok: true, ...(endpoint.endsWith("/read") ? { runs: [mission] } : { run: mission }) }),
+      setTimer: (callback) => { callback(); return 0; },
+      aoHarness: {
+        observe: async () => { if (interrupted) reads++; return { exited, turnState: exited ? "interrupted" : "running", status: exited ? "exited" : "working" }; },
+        interrupt: async () => { if (refuse) throw new Error("CHAT_CONTROLLER_NOT_READY"); interrupted = true; },
+        exitAgent: async () => { exited = true; return { ok: true }; },
+      },
+    });
+    try {
+      const result = await workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "stop" });
+      assert.equal(result.ok, true, refuse ? "a refused interrupt" : "an interrupt that never settles");
+      assert.equal(exited, true, "the agent's host is shut down");
+      assert.ok(reads <= 12, `it waits at most 3 s for the interrupt before shutting down (${reads} reads)`);
+    } finally { workflow.dispose(); }
+  }
 });
 
 test("Stop disables the local driver before a queued receipt snapshot can return", async () => {

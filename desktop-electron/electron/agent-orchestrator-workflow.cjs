@@ -4427,6 +4427,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
   const STOP_SETTLE_MS = 15_000;
   const STOP_SETTLE_POLL_MS = 250;
+  /** How long a Stop that ends the agent waits for its interrupt before shutting the agent down. */
+  const STOP_RELEASE_SETTLE_MS = 3_000;
   /** Interrupt acknowledges a signal; only an exited or settled, non-working turn releases ownership. */
   async function stopExternalTurn(session, ownership = null) {
     for (;;) {
@@ -4441,26 +4443,45 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const owns = () => !ownership || !sessionOwners.has(session) || sessionOwners.get(session) === ownership.owner;
       if (!owns()) return;
       let alreadyExited = false;
+      // Why the interrupt did not stop the turn, when the agent's shutdown had to: said again if that fails too.
+      let escalated = "";
       if (ownership?.turnId || ownership?.releaseAgent) {
         const current = await service.observe(session);
         if ((ownership?.turnId && current?.turnId && current.turnId !== ownership.turnId) || !owns()) return;
         alreadyExited = current?.exited === true;
       }
       if (!ownership?.completed && !alreadyExited) {
-        await service.interrupt(session);
+        // A Stop that also ends the agent (releaseAgent) does not depend on the interrupt: the agent's
+        // host is shut down next, and that shutdown is confirmed (exitAgent). Seen live (2026-10-22):
+        // Stop on an agent still launching, its model retrying 429s, waited the whole settle window
+        // and failed "stop needs attention", and the agent ran on; an agent whose controller had not
+        // started refused the interrupt (CHAT_CONTROLLER_NOT_READY), and Stop failed outright.
+        const release = ownership?.releaseAgent === true;
+        let signalled = true;
+        try { await service.interrupt(session); }
+        catch (error) {
+          if (!release) throw error;
+          signalled = false;
+          escalated = String(error?.message || error).slice(0, 200);
+          logger?.info?.("ao.stop_escalated", { reason: "interrupt_refused", error: escalated });
+        }
         let stopped = false;
         // Up to 15 s for the interrupt to settle (it was 2 s). Seen live: a stalled chat's interrupt
         // landed later than that, so the restart failed ("stop needs attention"), its next steers
         // and send were refused, and the chat sat for 8 more minutes until another steer found the
-        // turn over.
-        const tries = Math.ceil(STOP_SETTLE_MS / STOP_SETTLE_POLL_MS);
+        // turn over. A Stop that ends the agent waits only STOP_RELEASE_SETTLE_MS before shutting it down.
+        const tries = signalled ? Math.ceil((release ? STOP_RELEASE_SETTLE_MS : STOP_SETTLE_MS) / STOP_SETTLE_POLL_MS) : 0;
         for (let attempt = 0; attempt < tries; attempt++) {
           const observation = await service.observe(session);
           if (observation?.exited === true || (["completed", "failed", "interrupted", "cancelled"].includes(observation?.turnState)
             && !["working", "running", "starting"].includes(observation?.status))) { stopped = true; break; }
           if (attempt < tries - 1) await new Promise(resolve => setTimer(resolve, STOP_SETTLE_POLL_MS));
         }
-        if (!stopped) throw new Error("Owned turn is still working; stop needs attention, no replacement was started");
+        if (!stopped && !release) throw new Error("Owned turn is still working; stop needs attention, no replacement was started");
+        if (!stopped && signalled) {
+          escalated = "Owned turn is still working";
+          logger?.info?.("ao.stop_escalated", { reason: "interrupt_unsettled", waitedMs: STOP_RELEASE_SETTLE_MS });
+        }
       }
       if (ownership?.releaseAgent && owns()) {
         const outcomes = await Promise.allSettled([
@@ -4470,7 +4491,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           Promise.resolve().then(() => subagents?.stopParent(session)),
         ]);
         const failures = outcomes.filter(outcome => outcome.status === "rejected").map(outcome => String(outcome.reason?.message || outcome.reason));
-        if (failures.length) throw new Error(failures.join("; "));
+        if (failures.length) throw new Error([escalated, ...failures].filter(Boolean).join("; "));
       }
     });
     job.releasesAgent = ownership?.releaseAgent === true;
