@@ -4390,6 +4390,51 @@ test("a follow-up that would overflow a long chat compacts it first instead of r
   assert.ok(final.length < 8192);
 });
 
+test("a chat over the board's byte limit in fewer characters compacts too, and a CRLF message is sent with plain newlines", async () => {
+  // 6,040 characters but over 10,000 UTF-8 bytes: "↳" is three. The board counts bytes, so this
+  // follow-up was refused ("oversized") on every send and the chat never compacted.
+  const task = { id: "task-1", title: "Long job", description: `${"x".repeat(4000)}${"↳".repeat(2000)}`, state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false, nodes: [{ state: "finished" }] }] });
+  const written = [];
+  // The board's own check (board_sync.rs text()): bytes, and no control but newline and tab.
+  const requestHeadless = async (endpoint, body) => {
+    const description = body?.arguments?.change?.description;
+    if (endpoint === "/api/v1/tools/call" && typeof description === "string") {
+      written.push(description);
+      if (Buffer.byteLength(description, "utf8") > 8192 || /\r/.test(description)) throw new Error("Text is empty, oversized or contains unsupported controls");
+    }
+    return world.requestHeadless(endpoint, body);
+  };
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless, findCodexExecutable: () => "C:/c.exe",
+    resolveHarness: async () => { throw new Error("stop before the background loop"); },
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async (url) => String(url).endsWith("/models")
+      ? { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) }
+      : { ok: true, json: async () => ({ choices: [{ message: { content: "Did the first half." } }] }) },
+  });
+  await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "keep\r\ngoing" });
+  assert.match(world.tasks[0].description, /^Summary of the earlier conversation \(compacted [^)]+ UTC\):\nDid the first half\.\n\nFollow-up \([^)]+ UTC\):\nkeep\ngoing$/);
+  assert.ok(written.length, "the board was written");
+  await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "字".repeat(3000) }),
+    /9,000 bytes; a chat message can be at most 8,192/, "one message over the limit by itself says so, not that the chat is full");
+});
+
+test("a steer into a stalled turn whose agent has no controller waits for it instead of failing", async () => {
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", execution_mode: "single", cancelled: false, nodes: [
+    { id: "card", role: "worker", state: "running", route, receipt: { thread_id: "session-1" } }] }] });
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless,
+    aoHarness: {
+      observe: async () => ({ lastActivityAt: Date.now() - 60 * 60_000, timeline: [] }),
+      interrupt: async () => { throw new Error("the agent controller for this session is not running (CHAT_CONTROLLER_NOT_READY)"); },
+      steer: async () => { throw new Error("not reached"); },
+    } });
+  const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
+  assert.equal(result.steered, false);
+  assert.equal(result.starting, true, "the chat queues the message and steers it in later");
+});
+
 test("a card stopped while its agent launched also stops that agent once its session arrives", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
   const mission = { id: "run", workspace_id: "ws", revision: 1, execution_mode: "single", cancelled: false, grant: { executable_sha256: "a".repeat(64) },
