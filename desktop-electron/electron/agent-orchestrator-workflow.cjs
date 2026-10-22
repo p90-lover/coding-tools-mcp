@@ -638,14 +638,36 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   const IDLE_EARLY_SWEEPS_MS = [60_000, 3 * 60_000];
   let idleTimer = null;
   let idleStopped = false;
+  // A chat AO still calls "working" with nothing from its agent this long has lost its turn to an
+  // app or daemon restart (see quietWorkingChatSessions); a stuck turn of a live run shows "may be
+  // stuck" long before this, and such a run's sessions are never released here.
+  const STALE_WORKING_MS = 2 * 60 * 60_000;
+  /** Sessions of the runs this app drives now, or null when one of them could not be read. */
+  async function drivenSessions() {
+    const driven = new Set();
+    for (const [key, live] of backgroundRuns) {
+      if (!(live?.starting || live?.driving || live?.status === "running")) continue;
+      const [workspaceId, runId] = JSON.parse(key);
+      const saved = await runs({ workspaceId, runId }).catch(() => null);
+      const mission = saved?.runs?.find(run => run.id === runId);
+      if (!mission) return null;
+      for (const node of mission.nodes ?? []) if (node.receipt?.thread_id) driven.add(String(node.receipt.thread_id));
+    }
+    return driven;
+  }
   async function releaseIdle() {
     const ours = new Set([...warm.values()].map(entry => entry.session).filter(Boolean));
     const idle = await harnessService().idleChatSessions?.(IDLE_RELEASE_MS, now()).catch(() => []) ?? [];
+    const quiet = await harnessService().quietWorkingChatSessions?.(STALE_WORKING_MS, now()).catch(() => []) ?? [];
+    // Only when every driven run could be read: a session one of them still uses is never stopped.
+    const driven = quiet.length ? await drivenSessions() : new Set();
+    const stale = driven ? quiet.filter(id => !driven.has(id)) : [];
     const released = [];
-    for (const id of idle) {
-      if (ours.has(id)) continue;
+    for (const id of [...idle, ...stale]) {
+      if (ours.has(id) || released.includes(id)) continue;
       if (await harnessService().exitAgent?.(id).then(() => true, () => false)) released.push(id);
     }
+    if (stale.length) logger?.info?.("ao.stale_working_released", { count: released.filter(id => stale.includes(id)).length, quiet: quiet.length });
     return released;
   }
   function scheduleIdleRelease(delay, early = [...IDLE_EARLY_SWEEPS_MS]) {
@@ -3098,6 +3120,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
 
   const POOL_EXHAUSTED = /auth_unavailable|invalid[_ -]?auth|account[^\n]*(?:exhaust|unavail)|pool[^\n]*exhaust|sign[- ]?in|reauth|HTTP (?:401|403)/i;
+  // CPA answers "unknown provider for model X" when nothing serves X at all: a model it retired
+  // (gpt-5.5, 2026-10-22), not one cooling down (that one is still routed, and gets a 429). Kept from
+  // memory for 30 days, it stayed in the menu and each try spent a full launch (65 s) to fail again;
+  // a retry cannot fix it. The model is forgotten, so the menu drops it until CPA lists it again.
+  const MODEL_RETIRED = /unknown provider for model ([^\s"'\\,;]+)/i;
+  function forgetRetiredModel(error) {
+    const id = MODEL_RETIRED.exec(error)?.[1]?.replace(/\([^()]*\)$/, "");
+    if (!id || !knownModels[id]) return null;
+    delete knownModels[id];
+    saveKnownModels();
+    cpaCatalogCache = null;
+    return id;
+  }
   function blockedByFailure(mission, node, depth = 0) {
     return depth < mission.nodes.length && (node.parents || []).some(id => {
       const parent = mission.nodes.find(entry => entry.id === id);
@@ -3121,6 +3156,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!node) return null;
     const error = String(node.receipt?.error || "");
     if (POOL_EXHAUSTED.test(error)) return { detail: "This failure needs you. Check the account pool or sign in again, since retrying won't fix it." };
+    if (MODEL_RETIRED.test(error)) return { detail: "CPA no longer serves this model. Choose another model and send again." };
     const attempt = (node.history?.length ?? 0) + 1;
     if (attempt > AUTO_RETRY_LIMIT) return { detail: `Retried ${AUTO_RETRY_LIMIT} times. Check the saved answer, then retry.` };
     const key = `${mission.id}:${node.id}:${attempt}`;
@@ -3143,7 +3179,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!chatPreferences.get().autoRetry || !mission || mission.cancelled || mission.paused || mission.execution_mode !== "single") return false;
     if (mission.nodes.some(node => ["running", "reserved"].includes(node.state))) return false;
     const node = mission.nodes.find(entry => entry.state === "held" && entry.role !== "retry") ?? mission.nodes.find(entry => entry.state === "held");
-    return Boolean(node) && !POOL_EXHAUSTED.test(String(node.receipt?.error || "")) && (node.history?.length ?? 0) + 1 <= AUTO_RETRY_LIMIT;
+    const error = String(node?.receipt?.error || "");
+    return Boolean(node) && !POOL_EXHAUSTED.test(error) && !MODEL_RETIRED.test(error) && (node.history?.length ?? 0) + 1 <= AUTO_RETRY_LIMIT;
   }
   // A step that failed because the way out was down for a moment: the local proxy every CPA model
   // and the ChatGPT browser go through (seen live: ProxyBridge restarted, and for three minutes CPA
@@ -3183,6 +3220,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function recoverHeld(workspaceId, mission, state = {}) {
     const held = mission.nodes.filter(node => node.state === "held");
     if (!held.length || mission.cancelled) return null;
+    for (const node of held) {
+      const retired = forgetRetiredModel(String(node.receipt?.error || ""));
+      if (retired) logger?.info?.("cpa.model_retired", { model: retired });
+    }
     // A sign-in or account-pool failure (some arrive as a 5xx) is the person's, never a lost connection.
     const outage = chatPreferences.get().autoRetry
       ? held.find(node => node.role !== "retry" && NETWORK_OUTAGE.test(String(node.receipt?.error || ""))

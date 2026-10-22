@@ -4867,6 +4867,47 @@ test("idle agents are released on a timer, never a pre-warmed one, and the timer
   assert.ok(timers.at(-1).cleared, "dispose stops it");
 });
 
+test("the idle sweep stops agents stranded as working, never one a run being driven still uses", async () => {
+  // Seen 2026-10-22: two chat hosts ran on for 8 hours and a day, their sessions "working" for good.
+  const timers = [], released = [], quietAsked = [];
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
+  const mission = { id: "run", workspace_id: "ws", revision: 1, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) },
+    nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "driven", request_key: "k" } }] };
+  let readFails = false;
+  const workflow = createAgentOrchestratorWorkflow({ releaseIdleAgents: true,
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    requestHeadless: async endpoint => {
+      if (endpoint.endsWith("/read")) { if (readFails) throw new Error("AO is restarting"); return { ok: true, runs: [mission], worker_capacity: { run: 1 } }; }
+      return { ok: true, run: mission };
+    },
+    setTimer: (run, delay) => { const timer = { run, delay }; timers.push(timer); return timer; },
+    clearTimer: () => {},
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: [] }),
+      idleChatSessions: async () => ["idle-1"],
+      quietWorkingChatSessions: async quietMs => { quietAsked.push(quietMs); return ["stranded", "driven", "idle-1"]; },
+      exitAgent: async id => { released.push(id); return { ok: true }; },
+    },
+    confirm: async () => true,
+  });
+  await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  const sweep = async () => {
+    const timer = timers.filter(entry => [20_000, 60_000, 3 * 60_000, 10 * 60_000].includes(entry.delay) && !entry.ran)[0];
+    timer.ran = true; timer.run();
+    for (let tries = 0; tries < 100 && timers.filter(entry => !entry.ran && [60_000, 3 * 60_000, 10 * 60_000].includes(entry.delay)).length === 0; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  };
+  await sweep();
+  assert.deepEqual(quietAsked, [2 * 60 * 60_000], "quiet for two hours");
+  assert.deepEqual(released, ["idle-1", "stranded"], "the stranded agent is stopped once; the driven run's agent is kept");
+  // A driven run that cannot be read could be using any of them: none is stopped that sweep.
+  released.length = 0; readFails = true;
+  await sweep();
+  assert.deepEqual(released, ["idle-1"]);
+  workflow.dispose();
+  mission.nodes[0].state = "finished";
+});
+
 test("an open chat pre-warms only when its next message cannot continue its agent, and at most two wait", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
   const other = { ...route, model: "cpa/other-model" };
@@ -5985,6 +6026,60 @@ test("\"Retry automatically\" retries a failed step by itself once its pause is 
     clock += 11_000;
     for (let tries = 0; tries < 200 && !controls.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
     assert.deepEqual(controls, ["retry"], "the failed step was retried by itself");
+  } finally {
+    mission.nodes[0].state = "finished";
+    for (let tries = 0; tries < 100 && (await status()).status === "running"; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  }
+});
+test("a model CPA has no provider for is not retried and leaves the picker, though remembered", async () => {
+  // gpt-5.5 (2026-10-22): CPA stopped listing it, the menu kept it from memory, and each send spent
+  // a 65 s launch on "unknown provider for model gpt-5.5"; Retry automatically spent three more.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-5.5" };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", cancelled: false,
+    grant: { executable_sha256: "a".repeat(64), expires_at_ms: Date.now() + 3_600_000 },
+    nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, history: [], receipt: { thread_id: "session-1", request_key: "k" } }] };
+  let catalog = { data: [{ id: "gpt-5.6-sol" }, { id: "gpt-5.5" }] };
+  const controls = [];
+  let clock = 1_000_000;
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async url => String(url).includes("/v1/models") ? { ok: true, json: async () => catalog } : { ok: false, status: 404, json: async () => ({}) },
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+      if (endpoint === "/api/v1/ao/control") controls.push(body.action);
+      return { ok: true, run: mission };
+    },
+    aoHarness: { catalog: async () => [], models: async () => [], spawn: async () => "session",
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: [] }) },
+    confirm: async () => true,
+  });
+  const models = () => workflow.call("models", { harness: "ao:claude-code" });
+  assert.ok((await models()).models.includes("cpa/gpt-5.5"));
+  catalog = { data: [{ id: "gpt-5.6-sol" }] };
+  clock += 2 * 60_000;
+  assert.match((await models()).held["cpa/gpt-5.5"], /not listing it right now/, "remembered while CPA may only be cooling it down");
+  await workflow.call("chat_auto_retry", { enabled: true });
+  await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  const status = () => workflow.call("run_status", { workspaceId: "ws", runId: "run" });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    mission.nodes[0] = { ...mission.nodes[0], state: "held",
+      receipt: { ...mission.nodes[0].receipt, error: "API Error: 400 unknown provider for model gpt-5.5" } };
+    let detail = "";
+    for (let tries = 0; tries < 100 && !/no longer serves/.test(detail); tries++) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+      detail = String((await status()).detail ?? "");
+    }
+    assert.match(detail, /CPA no longer serves this model\. Choose another model/);
+    clock += 60_000;
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.deepEqual(controls, [], "nothing is retried");
+    const after = await models();
+    assert.ok(!after.models.includes("cpa/gpt-5.5") && !after.held?.["cpa/gpt-5.5"], "the retired model leaves the menu");
+    assert.ok(after.models.includes("cpa/gpt-5.6-sol"));
   } finally {
     mission.nodes[0].state = "finished";
     for (let tries = 0; tries < 100 && (await status()).status === "running"; tries++) await new Promise(resolve => setTimeout(resolve, 10));
