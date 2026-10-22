@@ -223,6 +223,36 @@ test("reads CPA Helper with the management key over a range, splits accounts by 
   assert.equal((await usage.read({ range: "bogus" })).range, "30d");
 });
 
+test("the per-account splits go to CPA three at a time, not all at once, and every account still gets its own", async () => {
+  // Seen 2026-10-22: one refresh sent ~16 range aggregations to the CPA that serves the chats, and all
+  // of them timed out in the same second.
+  const keys = Array.from({ length: 10 }, (_, index) => `idx-${index}`);
+  let inFlight = 0, most = 0;
+  const usage = createCpaUsage({
+    getConnection: () => ({ baseUrl: "http://127.0.0.1:8317", managementKey: KEY }), now: () => NOW, logger: { warn() {} },
+    fetchImpl: async (url) => {
+      const parsed = new URL(url);
+      const auth = parsed.searchParams.get("auth");
+      const body = parsed.pathname.endsWith("/rankings") && parsed.searchParams.get("group") === "auth" ? { items: keys.map((key) => agg(key)) }
+        : auth ? { items: [agg(`model-of-${auth}`, { cost_usd: 1, unpriced: 0 })] }
+        : parsed.pathname.endsWith("/auth-files") ? { files: keys.map((key) => ({ name: `${key}.json`, auth_index: key, provider: "codex" })) }
+        : { items: [] };
+      if (auth) {
+        inFlight += 1; most = Math.max(most, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        inFlight -= 1;
+      }
+      return { ok: true, status: 200, json: async () => body };
+    },
+  });
+  const result = await usage.read({ range: "7d" });
+  assert.equal(most, 3, "at most three split reads at a time");
+  for (const key of keys) {
+    const account = result.accounts.find((row) => row.id === key);
+    assert.deepEqual(account.models.map((model) => model.model ?? model.id ?? model.name), [`model-of-${key}`], `${key} keeps its own split`);
+  }
+});
+
 test("without CPA, without CPA Helper or with a refused key it says why, and the key goes only to loopback", async () => {
   assert.deepEqual(await fixture({ connection: null }).usage.read(), { ok: true, available: false, reason: "CPA is not running" });
   assert.match((await fixture().usage.read()).reason, /CPA Helper is not installed/);
