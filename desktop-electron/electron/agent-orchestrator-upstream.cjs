@@ -1917,7 +1917,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       const pathArgument = (value) => (typeof value === "string" && value.length <= 1024 && !value.includes("\0") ? value : ".");
       switch (operation) {
         case "chat_terminal_start": return agentTools.terminalStart({ sessionId: args.sessionId, workspaceId: args.workspaceId });
-        case "chat_changes": return agentTools.changes({ sessionId: args.sessionId, workspaceId: args.workspaceId });
+        case "chat_changes": return agentTools.changes({ sessionId: args.sessionId, workspaceId: args.workspaceId, summary: args.summary === true });
         case "chat_files": return agentTools.files({ sessionId: args.sessionId, workspaceId: args.workspaceId, path: pathArgument(args.path) });
         case "chat_file": {
           if (typeof args.path !== "string" || !args.path || args.path.length > 1024) throw new Error("Choose a file");
