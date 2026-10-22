@@ -3055,6 +3055,10 @@ async function start() {
         harness: () => agentOrchestratorUpstream?.harness ?? null,
         blockedRequest: (text) => missionWorkflowRuntime?.blockedRequest?.(text) ?? true,
         recommendedAnswer: (approval) => missionWorkflowRuntime?.recommendedAnswer?.(approval) ?? { action: "decline" },
+        // A model the chat agent picks runs on Claude Code and is checked against its catalog; a
+        // saved team can run as one subagent.
+        models: (workspaceId) => missionWorkflowRuntime?.call("models", { harness: "ao:claude-code", workspaceId }) ?? null,
+        teams: () => missionWorkflowRuntime?.subagentTeams ?? null,
         logger,
       });
       app.on("will-quit", () => subagentsService?.dispose());
