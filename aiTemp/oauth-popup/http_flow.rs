@@ -343,7 +343,16 @@ async fn run_flow(root: PathBuf) {
             .unwrap();
         assert_eq!(fresh["issuer"], "https://new-popup.example");
         assert!(!worker.is_finished());
-        let log = std::fs::read_to_string(root.join("transport-logs/mcp-requests.log")).unwrap();
+        // Traces go through a background writer: wait for it to catch up before reading.
+        let log_path = root.join("transport-logs/mcp-requests.log");
+        let waited = std::time::Instant::now();
+        while (!log_path.exists()
+            || crate::mcp::request_log::status()["pending"].as_u64() != Some(0))
+            && waited.elapsed() < Duration::from_secs(15)
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let log = std::fs::read_to_string(&log_path).unwrap();
         assert!(
             !log.contains(access)
                 && !log.contains(&returned["code"])
