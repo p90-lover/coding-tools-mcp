@@ -6,7 +6,7 @@ import { modelShortLabel } from "./AgentOrchestratorRoleEditor";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { ChatWorkbench, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
+import { ChatWorkbench, useChatSubagents, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
 import { ChatBranchBar } from "./ChatBranchBar";
 import { AnnotationTray, SelectionAnnotator, SentAnnotations, type DraftAnnotation } from "./ChatAnnotations";
 import { ChatContextMeter } from "./ChatContextMeter";
@@ -22,6 +22,7 @@ import {
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
   activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshQuietNote, dshRetryNote, steerReader, steerReceipts, type ChatWakeup,
+  subagentActive, subagentsSummary,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -919,6 +920,13 @@ export function AgentOrchestratorChat({
   const agentSessions = useMemo(() => chatAgentSessions(chatRuns), [chatRuns]);
   const agentSessionIds = useMemo(() => agentSessions.map((session) => session.id), [agentSessions]);
   const livePage = useWorkbenchAutoOpen(selectedTaskId ? agentSessionIds : [], workbench !== null, (tab) => setWorkbench(tab), projectId);
+  // A subagent starting opens the panel on its Subagents tab, as Codex's panel shows a thread's
+  // subagents; a Preview, Terminal or diff the person has open stays (the line above the chat box says it).
+  const subagents = useChatSubagents(selectedTaskId ? agentSessionIds : [],
+    () => setWorkbench((open) => (open === null || open === "overview" || open === "new" ? "subagents" : open)));
+  const subagentLine = useMemo(() => (subagents.some(subagentActive) ? subagentsSummary(subagents) : null), [subagents]);
+  const renderSubagentWork = useMemo(() => (items: ChatLiveItem[], live: boolean, reply?: string) =>
+    <LiveTimeline items={items} live={live} finished={!live} reply={reply} />, []);
   useEffect(() => { setWorkbench(null); }, [selectedTaskId]);
   // Following new output jumps, even under a theme's smooth scrolling: an animated follow lags the
   // stream and flashes the ↓ button. Only that button scrolls smoothly.
@@ -1676,7 +1684,7 @@ export function AgentOrchestratorChat({
             <Icon name="orchestrator" width="16" height="16" /></button> : null}
           {/* The side panel opens on its Overview, as Claude Code's side column: context, changes,
               tasks and usage, each a click from its tab (the browser chip still opens Preview). */}
-          {selectedTaskId ? <button type="button" className="cx-icon-button" aria-pressed={workbench !== null} title="Side panel: overview, preview, terminal, changes and files"
+          {selectedTaskId ? <button type="button" className="cx-icon-button" aria-pressed={workbench !== null} title="Side panel: overview, preview, terminal, changes, files and subagents"
             aria-label="Show side panel" onClick={() => setWorkbench((open) => (open ? null : "overview"))}>
             <Icon name="browser" width="16" height="16" /></button> : null}
           {onOpenMissionBoard ? <button type="button" className="cx-icon-button" title="Mission Board" aria-label="Open Mission Board" onClick={onOpenMissionBoard}>
@@ -1878,6 +1886,12 @@ export function AgentOrchestratorChat({
         })()}
         {/* Steered and queued messages sit above the project's branch bar, on top of everything below
             the transcript: under it, they read as part of the chat box's own controls. */}
+        {/* Codex's "… started working" line for a thread's subagents: who works now, a click from their work. */}
+        {selectedTaskId && subagentLine ? <button type="button" className="cx-subagent-strip" role="status" title="Show the subagents and what they are doing"
+          onClick={() => setWorkbench("subagents")}>
+          <span className="cx-subagent-dots" aria-hidden="true">{subagents.filter(subagentActive).slice(0, 3).map((run) => <i key={run.subagent_id} />)}</span>
+          <span className="cx-shimmer">{subagentLine}</span>
+        </button> : null}
         <QueuedMessageBar items={queuedBar} />
         {selectedTaskId ? <ChatBranchBar workspaceId={projectId} sessionId={agentSessions[0]?.id} /> : null}
         {/* A request waiting on the person sits right above the chat box, as wide as it, as DeepSeek
@@ -1992,7 +2006,8 @@ export function AgentOrchestratorChat({
           <Icon name="close" width="14" height="14" /></button></header>
         <div className="cx-structure-body">{structure}</div>
       </aside> : null}
-      {workbench && selectedTaskId ? <ChatWorkbench sessions={agentSessions} workspaceId={projectId} tab={workbench} onTab={setWorkbench} onClose={() => setWorkbench(null)} /> : null}
+      {workbench && selectedTaskId ? <ChatWorkbench sessions={agentSessions} workspaceId={projectId} tab={workbench} onTab={setWorkbench} onClose={() => setWorkbench(null)}
+        subagents={subagents} renderWork={renderSubagentWork} /> : null}
       <ChatMenu menu={menu} onClose={() => setMenu(null)} />
     </div>
   </TurnRestart.Provider></CompactActivity.Provider></SentMessageView.Provider></Attachments.Provider>);

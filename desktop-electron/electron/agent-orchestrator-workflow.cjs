@@ -1769,6 +1769,24 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     return { ok: true, timeline: fitTimeline(publicTimeline(await harnessService().timeline(session, turnId), READ_TOOL_BYTES)) };
   }
 
+  /**
+   * subagent_transcript: a subagent's work (thinking, tool calls, messages), for the chat's side
+   * panel, as Codex opens a subagent's thread beside its parent's. The chat showed only the parent's
+   * "subagent_start" call, so what a subagent did could not be seen until its report came back.
+   * A running turn is read live (short tool output); a finished one whole, like a finished card.
+   */
+  async function subagentTranscript({ subagentId } = {}) {
+    if (!subagents) throw new Error("Subagents are unavailable");
+    const id = clean(subagentId, 128);
+    const run = subagents.runs().find(item => item.subagent_id === id);
+    if (!run) return { ok: false, error: "No such subagent (the app restarted since it ran, or it was cleared)" };
+    const service = harnessService();
+    const observed = await service.observe(id).catch(() => null);
+    const over = !observed || observed.exited === true || TERMINAL_TURNS.has(observed.turnState);
+    const items = over && observed?.turnId ? await service.timeline(id, observed.turnId).catch(() => observed.timeline) : observed?.timeline;
+    return { ok: true, run, timeline: fitTimeline(publicTimeline(items ?? [], over ? READ_TOOL_BYTES : LIVE_TOOL_BYTES)) };
+  }
+
   const activityFrames = new Map();
   const activityAttempt = (workspace, run, node) => JSON.stringify([
     workspace, run, node.id, node.receipt?.request_key || node.request_key || null,
@@ -5214,6 +5232,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         return { ok: true, ...subagents.save({ settings: args.settings, agents: args.agents }) };
       }
       case "subagents_runs": return { ok: true, runs: subagents ? subagents.runs() : [] };
+      case "subagent_transcript": return subagentTranscript(args);
       case "subagents_stop": {
         if (!subagents) throw new Error("Subagents are unavailable");
         return { ok: true, run: await subagents.stop(clean(args.subagentId, 128)) };

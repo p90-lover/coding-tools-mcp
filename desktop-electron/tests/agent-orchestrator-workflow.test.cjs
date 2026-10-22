@@ -254,6 +254,28 @@ test("explicit stop revokes a pending schedule and its timer rather than leaving
   workflow.dispose();
 });
 
+test("a chat reads a subagent's work: live while it works, whole once it ends", async () => {
+  // Seen live: the chat showed only its agent's subagent_start call; what the subagent did could not be read.
+  let observed = { turnId: "t1", turnState: "running", timeline: [{ id: "c1", kind: "command", status: "running", text: "rg gate", output: "x".repeat(5000) }] };
+  const pastReads = [];
+  const runs = [{ subagent_id: "sub-1", agent: "explorer", name: "Explorer", state: "running", task: "Find it", elapsed_seconds: 3, parent: "ao-1" }];
+  const workflow = createAgentOrchestratorWorkflow({
+    subagents: { runs: () => runs },
+    aoHarness: { observe: async () => observed,
+      timeline: async (id, turnId) => { pastReads.push([id, turnId]); return [{ id: "m1", kind: "message", status: "completed", text: "Report" }]; } },
+  });
+  const working = await workflow.call("subagent_transcript", { subagentId: "sub-1" });
+  assert.equal(working.run.parent, "ao-1");
+  assert.equal(working.timeline[0].text, "rg gate");
+  assert.ok(working.timeline[0].output.length <= 2001, "a live read keeps tool output short");
+  assert.deepEqual(pastReads, []);
+  observed = { turnId: "t1", turnState: "completed", timeline: [] };
+  const done = await workflow.call("subagent_transcript", { subagentId: "sub-1" });
+  assert.deepEqual(pastReads, [["sub-1", "t1"]], "a finished turn is read back whole");
+  assert.equal(done.timeline[0].text, "Report");
+  assert.equal((await workflow.call("subagent_transcript", { subagentId: "sub-9" })).ok, false, "an unknown subagent is not read");
+});
+
 test("team settings use their local UI operation and cannot be changed through mission graph tools", async () => {
   const requests = [];
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async (endpoint, body, options) => {

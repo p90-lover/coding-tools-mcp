@@ -56,6 +56,50 @@ export function chatAgentSessions(runs: { nodes: ChatNode[] }[]): ChatAgentSessi
   });
 }
 
+/** A subagent one of the chat's agents started (subagents.cjs, `subagents_runs`). */
+export type ChatSubagent = {
+  subagent_id: string; agent: string; name: string; state: string; task: string; elapsed_seconds: number;
+  parent?: string; started_at?: number; report?: string; error?: string; stopping?: boolean;
+};
+const SUBAGENT_ACTIVE = new Set(["starting", "running"]);
+export const subagentActive = (run: Pick<ChatSubagent, "state">) => SUBAGENT_ACTIVE.has(run.state);
+
+/** The subagents the chat's own agents (`sessionIds`) started, running ones first, then newest first. */
+export function chatSubagents(runs: readonly ChatSubagent[], sessionIds: readonly string[]): ChatSubagent[] {
+  const own = new Set(sessionIds);
+  return runs.filter((run) => run.parent && own.has(run.parent))
+    .sort((a, b) => Number(subagentActive(b)) - Number(subagentActive(a)) || (b.started_at ?? 0) - (a.started_at ?? 0));
+}
+
+/**
+ * A subagent's title, as Codex names one by its job rather than its kind: the task's first line,
+ * shortened, after the subagent's name ("Explorer · Find the autoplay gate").
+ */
+export function subagentTitle(run: Pick<ChatSubagent, "name" | "task">): string {
+  const line = run.task.split("\n").map((part) => part.trim()).find(Boolean) ?? "";
+  const short = line.length > 48 ? `${line.slice(0, 47).trimEnd()}…` : line;
+  return short ? `${run.name} · ${short}` : run.name;
+}
+
+/**
+ * The chat's line for its subagents, as Codex's "Loot goal autoplay, Pet execution and Guide backend
+ * started working": who is working now, or when none is, how the last ones ended. Null with none.
+ */
+export function subagentsSummary(runs: readonly ChatSubagent[]): string | null {
+  if (!runs.length) return null;
+  const working = runs.filter(subagentActive);
+  const names = (list: readonly ChatSubagent[]) => {
+    const shown = list.slice(0, 3).map((run) => run.name);
+    const rest = list.length - shown.length;
+    if (rest > 0) return `${shown.join(", ")} and ${rest} more`;
+    return shown.length > 1 ? `${shown.slice(0, -1).join(", ")} and ${shown.at(-1)}` : shown[0];
+  };
+  if (working.length) return `${working.length === 1 ? "1 subagent" : `${working.length} subagents`} working: ${names(working)}`;
+  const done = runs.filter((run) => run.state === "completed").length;
+  const other = runs.length - done;
+  return `${runs.length === 1 ? "1 subagent" : `${runs.length} subagents`} finished${other ? ` (${other} did not complete)` : ""}`;
+}
+
 /** What a working card is doing now (the workflow's "activity" operation). */
 export type ChatActivity = {
   activity?: string;

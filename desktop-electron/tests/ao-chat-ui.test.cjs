@@ -40,7 +40,7 @@ const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "../icons": { 
   "./AgentOrchestratorComposerControls": { AgentOrchestratorComposerControls: () => null },
   "./AgentOrchestratorApproval": { AgentOrchestratorApproval: () => null },
   // The side panel opens on demand; the chat only needs its auto-open hook to exist here.
-  "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => {} },
+  "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => {}, useChatSubagents: () => [] },
   "./ChatThreadList": load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu }) });
 
 test("a DeepSeek turn renders as DeepSeek Harness's: flat rows and Deep diving while it runs, Completed once it ends", () => {
@@ -361,6 +361,31 @@ test("the side panel opens on an Overview of the chat: environment, context, cha
   for (const heading of ["Environment", "Context", "Changes", "Background tasks", "Usage"]) assert.match(html, new RegExp(`<h4>${heading}`), heading);
   assert.match(html, /glm-5\.3-flash/, "the model by its own name");
   assert.match(html, /Today<\/button>/, "usage can switch between today, 7 and 30 days");
+});
+
+test("a chat shows the subagents its own agents started, as Codex's panel does: who works, on what, a click from their work", () => {
+  // Seen live: an agent's subagent_start showed only as the call; nothing said a subagent was working.
+  const run = (id, parent, state, extra = {}) => ({ subagent_id: id, agent: "explorer", name: "Explorer", state, task: `Find the autoplay gate ${id}`,
+    elapsed_seconds: 75, parent, started_at: Number(id.slice(1)), ...extra });
+  const all = [run("s1", "ao-1", "completed", { report: "Found it" }), run("s2", "ao-other", "running"), run("s3", "ao-1", "running"),
+    run("s4", "ao-2", "starting", { name: "Reviewer" })];
+  const own = chat.chatSubagents(all, ["ao-1", "ao-2"]);
+  assert.deepEqual(own.map((item) => item.subagent_id), ["s4", "s3", "s1"], "another chat's are left out; working ones first, newest first");
+  assert.equal(chat.subagentTitle(own[1]), "Explorer · Find the autoplay gate s3", "named by its job");
+  assert.equal(chat.subagentTitle({ name: "Explorer", task: "x".repeat(80) }).length, "Explorer · ".length + 48, "a long task is shortened");
+  assert.equal(chat.subagentsSummary(own), "2 subagents working: Reviewer and Explorer");
+  assert.equal(chat.subagentsSummary([own[2]]), "1 subagent finished");
+  assert.equal(chat.subagentsSummary([]), null);
+
+  const workbench = load("ChatWorkbench.tsx", { "../api/client": client, "../icons": { Icon: () => null }, "./ao-chat": chat,
+    "./ChatMarkdown": markdown, "./cpa-usage": load("cpa-usage.ts", { "../api/client": client }) });
+  const props = { sessions: [{ id: "ao-1", label: "Claude Code" }], onTab: () => {}, onClose: () => {}, workspaceId: "ws", subagents: own };
+  const overview = renderToStaticMarkup(React.createElement(workbench.ChatWorkbench, { ...props, tab: "overview" }));
+  assert.match(overview, /<h4>Subagents<small>2 working<\/small>/, "the Overview lists them");
+  const tab = renderToStaticMarkup(React.createElement(workbench.ChatWorkbench, { ...props, tab: "subagents" }));
+  assert.match(tab, />Subagents<\/button>/, "a Subagents tab");
+  assert.match(tab, /class="is-starting".*Reviewer · Find the autoplay gate s4.*Starting · 1m/, "each with its state and how long it has run");
+  assert.match(tab, /class="is-completed".*Done · 1m/);
 });
 
 test("the Terminal pane opens for a server or the project's app launcher, never for a one-off tool call", () => {

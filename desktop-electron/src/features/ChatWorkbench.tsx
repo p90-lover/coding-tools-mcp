@@ -1,9 +1,10 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { PointerEvent as ReactPointerEvent, ReactElement } from "react";
+import type { PointerEvent as ReactPointerEvent, ReactElement, ReactNode } from "react";
 import { getCodingToolsClient } from "../api/client";
 import type { JsonObject } from "../api/contracts";
 import { Caret, Icon } from "../icons";
-import { contextFraction, tokensShort, type ChatAgentSession } from "./ao-chat";
+import { chatSubagents, contextFraction, subagentActive, subagentTitle, tokensShort, type ChatAgentSession, type ChatLiveItem, type ChatSubagent } from "./ao-chat";
+import { ChatMarkdown } from "./ChatMarkdown";
 import { costLabel, costSourceLabel, readCpaUsage, type CpaUsage, type CpaUsageRange } from "./cpa-usage";
 import { onWindowFocus, windowUnfocused } from "./page-visibility";
 
@@ -13,7 +14,7 @@ import { onWindowFocus, windowUnfocused } from "./page-visibility";
 // plus a new-tab page with those tools and the pages this chat opened. Everything acts for the
 // user: navigating, stopping a command or typing into it needs no approval, since the user does it.
 
-export type WorkbenchTab = "overview" | "preview" | "terminal" | "changes" | "files" | "new";
+export type WorkbenchTab = "overview" | "preview" | "terminal" | "changes" | "files" | "subagents" | "new";
 type PanelTab = { id: string; kind: WorkbenchTab };
 
 type PreviewState = { url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; errors: number };
@@ -41,7 +42,7 @@ export function isServerProcess(command: Pick<Command, "cmd" | "status" | "backg
   return command.status === "background" || command.background === true || SERVER_COMMAND.test(String(command.cmd ?? ""));
 }
 
-const TAB_TITLES: Record<WorkbenchTab, string> = { overview: "Overview", preview: "Preview", terminal: "Terminal", changes: "Changes", files: "Files", new: "New tab" };
+const TAB_TITLES: Record<WorkbenchTab, string> = { overview: "Overview", preview: "Preview", terminal: "Terminal", changes: "Changes", files: "Files", subagents: "Subagents", new: "New tab" };
 const PANEL_WIDTH_KEY = "coding-tools:ao:workbench-width";
 let tabSequence = 0;
 const newTab = (kind: WorkbenchTab): PanelTab => ({ id: `tab-${++tabSequence}`, kind });
@@ -163,6 +164,61 @@ export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen
 /** A page a chat agent's browser has open (its preview keeps running while the panel is hidden). */
 export type LivePage = { sessionId: string; url: string; title: string };
 
+const SUBAGENTS_POLL_MS = 3000;
+/**
+ * The subagents this chat's agents (`sessionIds`) started, read every few seconds while the chat is
+ * shown (the app keeps them in memory: subagents_runs). `onStarted` runs when one starts while the
+ * chat is open, so the side panel shows it as Codex's does; ones already there when the chat opened
+ * do not open it. The chat showed only its agent's "subagent_start" call: nothing said a subagent
+ * was working, and its work could not be read.
+ */
+export function useChatSubagents(sessionIds: string[], onStarted: () => void): ChatSubagent[] {
+  const [runs, setRuns] = useState<ChatSubagent[]>([]);
+  const seen = useRef<Set<string> | null>(null);
+  const onStartedNow = useRef(onStarted);
+  onStartedNow.current = onStarted;
+  const key = sessionIds.join(",");
+  useEffect(() => {
+    setRuns([]);
+    seen.current = null;
+    if (!sessionIds.length) return undefined;
+    let live = true;
+    const tick = async () => {
+      if (document.visibilityState !== "visible") return;
+      try {
+        const result = await paneCall("subagents_runs");
+        if (!live) return;
+        const own = chatSubagents(Array.isArray(result.runs) ? result.runs as ChatSubagent[] : [], sessionIds);
+        setRuns((current) => (JSON.stringify(current) === JSON.stringify(own) ? current : own));
+        const first = seen.current === null;
+        const fresh = own.filter((run) => !seen.current?.has(run.subagent_id));
+        seen.current = new Set([...(seen.current ?? []), ...own.map((run) => run.subagent_id)]);
+        if (!first && fresh.some(subagentActive)) onStartedNow.current();
+      } catch { /* the next tick tries again */ }
+    };
+    void tick();
+    const timer = window.setInterval(() => void tick(), SUBAGENTS_POLL_MS);
+    const offFocus = onWindowFocus(() => void tick());
+    return () => { live = false; window.clearInterval(timer); offFocus(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+  return runs;
+}
+
+const SUBAGENT_STATE: Record<string, string> = {
+  starting: "Starting", running: "Working", completed: "Done", failed: "Failed", stopped: "Stopped", timed_out: "Timed out",
+};
+/** 42 -> "42s", 300 -> "5m", 5400 -> "1h 30m". */
+function seconds(total: number) {
+  const value = Math.max(0, Math.round(total));
+  if (value < 60) return `${value}s`;
+  if (value < 3600) return `${Math.floor(value / 60)}m`;
+  return `${Math.floor(value / 3600)}h${value % 3600 >= 60 ? ` ${Math.floor((value % 3600) / 60)}m` : ""}`;
+}
+const subagentState = (run: ChatSubagent) => `${run.stopping ? "Stopping" : SUBAGENT_STATE[run.state] ?? run.state} · ${seconds(run.elapsed_seconds)}`;
+/** Draws a subagent's turn as the chat draws its own agents' (AgentOrchestratorChat's LiveTimeline). */
+export type RenderWork = (items: ChatLiveItem[], live: boolean, reply?: string) => ReactNode;
+
 const PREVIEW_POLL_MS = 1500;
 const COMMANDS_POLL_MS = 2000;
 const OUTPUT_POLL_MS = 1000;
@@ -186,7 +242,7 @@ function since(startedAt: number, now: number) {
   return seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
 }
 
-export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId }: {
+export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId, subagents = [], renderWork }: {
   sessions: ChatAgentSession[];
   /** The chat's workspace: reaches an agent's worktree even when the app holds no lease for it. */
   workspaceId?: string;
@@ -194,8 +250,13 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId }: {
   tab: WorkbenchTab;
   onTab: (tab: WorkbenchTab) => void;
   onClose: () => void;
+  /** The subagents the chat's agents started (useChatSubagents), for the Subagents tab and the Overview. */
+  subagents?: ChatSubagent[];
+  renderWork?: RenderWork;
 }) {
   const [sessionId, setSessionId] = useState(sessions[0]?.id ?? "");
+  // The subagent whose work the Subagents tab shows; none shows the list.
+  const [subagentId, setSubagentId] = useState<string | null>(null);
   useEffect(() => {
     if (!sessions.some((session) => session.id === sessionId)) setSessionId(sessions[0]?.id ?? "");
   }, [sessions, sessionId]);
@@ -286,9 +347,12 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId }: {
       <button type="button" className="cx-icon-button" aria-label="Hide side panel" title="Hide the panel: the agent's browser and commands keep running" onClick={onClose}>
         <Icon name="close" width="14" height="14" /></button>
     </header>
-    {!sessionId
+    {/* The chat's subagents belong to all its agents, so this tab does not follow the agent picker. */}
+    {current?.kind === "subagents" ? <SubagentsPane subagents={subagents} selected={subagentId} onSelect={setSubagentId} renderWork={renderWork} />
+      : !sessionId
       ? <p className="cx-workbench-empty">No agent has started in this chat yet. The pages it opens, its changes, files and commands show here.</p>
-      : current?.kind === "overview" ? <OverviewPane key={sessionId} session={sessions.find((item) => item.id === sessionId)} sessionId={sessionId} workspaceId={workspaceId} onTool={show} />
+      : current?.kind === "overview" ? <OverviewPane key={sessionId} session={sessions.find((item) => item.id === sessionId)} sessionId={sessionId} workspaceId={workspaceId} onTool={show}
+        subagents={subagents} onSubagent={(id) => { setSubagentId(id); show("subagents"); }} />
       : current?.kind === "preview" ? <PreviewPane key={sessionId} sessionId={sessionId} />
         : current?.kind === "terminal" ? <TerminalPane key={sessionId} sessionId={sessionId} workspaceId={workspaceId} />
           : current?.kind === "changes" ? <ChangesPane key={sessionId} sessionId={sessionId} workspaceId={workspaceId} />
@@ -307,8 +371,9 @@ function NewTabPage({ sessionId, onTool }: { sessionId: string; onTool: (kind: W
   return <div className="cx-newtab">
     <p className="cx-newtab-label">Tools</p>
     <div className="cx-newtab-tools">
-      {(["overview", "preview", "changes", "terminal", "files"] as const).map((kind) => <button key={kind} type="button" onClick={() => onTool(kind)}>
-        <span>{TAB_TITLES[kind]}</span><small>{kind === "overview" ? "Context, changes, tasks and usage" : kind === "preview" ? "The agent's browser" : kind === "changes" ? "Its worktree's diff" : kind === "terminal" ? "Commands and a shell" : "Browse its worktree"}</small>
+      {(["overview", "preview", "changes", "terminal", "files", "subagents"] as const).map((kind) => <button key={kind} type="button" onClick={() => onTool(kind)}>
+        <span>{TAB_TITLES[kind]}</span><small>{kind === "overview" ? "Context, changes, tasks and usage" : kind === "preview" ? "The agent's browser" : kind === "changes" ? "Its worktree's diff"
+          : kind === "terminal" ? "Commands and a shell" : kind === "subagents" ? "The helpers it started, and their work" : "Browse its worktree"}</small>
       </button>)}
     </div>
     <p className="cx-newtab-label">Recents</p>
@@ -327,8 +392,9 @@ const OVERVIEW_POLL_MS = 5_000;
  * opens the tab with the detail. Usage is CPA's per-account report (cpa_usage); keys the app holds
  * for other providers report no usage, which the block says rather than guessing.
  */
-function OverviewPane({ session, sessionId, workspaceId, onTool }: {
+function OverviewPane({ session, sessionId, workspaceId, onTool, subagents = [], onSubagent }: {
   session?: ChatAgentSession; sessionId: string; workspaceId?: string; onTool: (kind: WorkbenchTab) => void;
+  subagents?: ChatSubagent[]; onSubagent?: (id: string) => void;
 }) {
   const [context, setContext] = useState<{ used: number | null; window: number | null; controller: string | null } | null>(null);
   const [changes, setChanges] = useState<{ root: string; branch: string; count: number } | null>(null);
@@ -405,6 +471,14 @@ function OverviewPane({ session, sessionId, workspaceId, onTool }: {
         <button type="button" title={task.cmd} onClick={() => onTool("terminal")}><i aria-hidden="true" /><span>{task.cmd}</span></button>
       </li>)}</ul> : <p className="cx-overview-note">Nothing running.</p>}
     </section>
+    {/* Codex's side column lists a thread's subagents, each a click from its work. */}
+    {subagents.length ? <section className="cx-overview-block">
+      <h4>Subagents<small>{(() => { const working = subagents.filter(subagentActive).length; return working ? `${working} working` : `${subagents.length} finished`; })()}</small></h4>
+      <ul className="cx-overview-tasks">{subagents.slice(0, 6).map((run) => <li key={run.subagent_id}>
+        <button type="button" className={subagentActive(run) ? undefined : "is-idle"} title={`${subagentState(run)}\n${run.task}`} onClick={() => onSubagent?.(run.subagent_id)}>
+          <i aria-hidden="true" /><span>{subagentTitle(run)}</span></button>
+      </li>)}</ul>
+    </section> : null}
     <section className="cx-overview-block">
       <h4>Usage
         <span className="cx-overview-range" role="group" aria-label="Usage period">
@@ -424,6 +498,70 @@ function OverviewPane({ session, sessionId, workspaceId, onTool }: {
           <p className="cx-overview-note">Costs are estimated at API list prices; subscription accounts are not billed per token. Keys used outside CPA report no usage.</p>
         </>}
     </section>
+  </div>;
+}
+
+/** The chat's subagents, as Codex's panel lists a thread's: each one's job and state, a click from its work. */
+function SubagentsPane({ subagents, selected, onSelect, renderWork }: {
+  subagents: ChatSubagent[]; selected: string | null; onSelect: (id: string | null) => void; renderWork?: RenderWork;
+}) {
+  const run = selected ? subagents.find((item) => item.subagent_id === selected) : undefined;
+  if (run) return <SubagentWork key={run.subagent_id} run={run} onBack={() => onSelect(null)} renderWork={renderWork} />;
+  if (!subagents.length) return <p className="cx-workbench-empty">No subagents yet. When this chat's agent starts one, it shows here with what it is doing.</p>;
+  return <ul className="cx-subagent-list">{subagents.map((item) => <li key={item.subagent_id}>
+    <button type="button" className={`is-${item.state}`} title={item.task} onClick={() => onSelect(item.subagent_id)}>
+      <i aria-hidden="true" />
+      <span><b>{subagentTitle(item)}</b><small>{subagentState(item)}</small></span>
+    </button>
+  </li>)}</ul>;
+}
+
+const SUBAGENT_WORK_POLL_MS = 2000;
+
+/**
+ * One subagent's work: its thinking, tool calls and messages (subagent_transcript), read every two
+ * seconds while it works and once whole when it ends, then its report. It can be stopped from here.
+ */
+function SubagentWork({ run, onBack, renderWork }: { run: ChatSubagent; onBack: () => void; renderWork?: RenderWork }) {
+  const [items, setItems] = useState<ChatLiveItem[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [stopping, setStopping] = useState(false);
+  const active = subagentActive(run);
+  useEffect(() => {
+    let live = true;
+    const read = () => {
+      if (document.visibilityState !== "visible") return;
+      void paneCall("subagent_transcript", { subagentId: run.subagent_id }).then((result) => {
+        if (!live) return;
+        setItems(Array.isArray(result.timeline) ? result.timeline as ChatLiveItem[] : []);
+        setError(null);
+      }).catch((cause) => { if (live) setError(cause instanceof Error ? cause.message : String(cause)); });
+    };
+    read();
+    if (!active) return () => { live = false; };
+    const timer = window.setInterval(read, SUBAGENT_WORK_POLL_MS);
+    return () => { live = false; window.clearInterval(timer); };
+  }, [run.subagent_id, active]);
+  const stop = () => {
+    setStopping(true);
+    void paneCall("subagents_stop", { subagentId: run.subagent_id })
+      .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause))).finally(() => setStopping(false));
+  };
+  return <div className="cx-subagent">
+    <header className="cx-subagent-head">
+      <button type="button" className="cx-icon-button" aria-label="All subagents" title="All subagents" onClick={onBack}>‹</button>
+      <span className={`cx-subagent-title is-${run.state}`}><i aria-hidden="true" /><b title={run.task}>{subagentTitle(run)}</b><small>{subagentState(run)}</small></span>
+      {active ? <button type="button" className="cx-subagent-stop" disabled={stopping || run.stopping} onClick={stop}>{stopping || run.stopping ? "Stopping…" : "Stop"}</button> : null}
+    </header>
+    <div className="cx-subagent-body">
+      <details className="cx-subagent-task"><summary>Task</summary><p>{run.task}</p></details>
+      {error ? <p className="cx-workbench-error" role="alert">{error}</p> : null}
+      {items === null ? <p className="cx-workbench-empty">Reading its work…</p>
+        : items.length && renderWork ? renderWork(items, active, run.report)
+          : <p className="cx-workbench-empty">{active ? "It has not done anything yet." : "Its work could not be read back."}</p>}
+      {run.error ? <p className="cx-workbench-error">{run.error}</p> : null}
+      {run.report ? <section className="cx-subagent-report"><h4>Report</h4><ChatMarkdown text={run.report} /></section> : null}
+    </div>
   </div>;
 }
 

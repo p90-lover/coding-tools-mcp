@@ -516,7 +516,9 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     call,
     config: () => read(),
     save,
-    runs: () => [...runs.values()].sort((a, b) => b.startedAt - a.startedAt).map((run) => ({ ...view(run), workspace_id: run.workspaceId })),
+    // `parent` (the chat agent's AO session) lets a chat show the subagents its own agents started.
+    runs: () => [...runs.values()].sort((a, b) => b.startedAt - a.startedAt).map((run) => ({ ...view(run), workspace_id: run.workspaceId,
+      parent: run.parent, started_at: run.startedAt })),
     stop: (id) => stop(id).then(view),
     stopParent,
     dispose() { if (poller) clearTimer(poller); poller = null; },
