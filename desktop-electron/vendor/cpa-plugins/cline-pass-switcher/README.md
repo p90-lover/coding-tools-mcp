@@ -8,6 +8,8 @@ Runtime adaptations cover ephemeral-port readiness/client URLs, CPA marker boots
 
 Plugin YAML: `runtime-executable` (absolute Bun/Node path), `data-dir` (absolute private data directory), `proxy-url` (selected outbound HTTP proxy). Coding Tools configures these automatically and creates a credential-free `auth/cline-pass-switcher.json` bridge marker.
 
+A request's reasoning effort (the body's `reasoning_effort`, or a `model(level)` suffix, which wins) runs at the model's nearest level it takes, a tie going up (`takenEffort`); "auto", an empty one or an unknown word sends none. A level a model lacked used to be refused with a 400, which Claude Code retried until the chat's launch looked stuck.
+
 A model that writes a tool call as text (Qwen XML `<tool_call><function=NAME><parameter=K>V</parameter></function></tool_call>`, or JSON inside `<tool_call>`), as MiMo V2.6 Pro does, gets it turned into a real `tool_calls` entry for a tool the request offered, streamed or whole (`texttools.go`); anything else stays text.
 
 Build with the repository's portable Go/Zig toolchain (`CGO_ENABLED=1`, `CC="zig cc -target x86_64-windows-gnu"`), using `go build -buildmode=c-shared -trimpath -ldflags "-s -w"`. The ABI glue is adapted from the existing MIT CommandCode plugin. Tests cover native lifecycle/routes/models/inference and SSE framing; Node tests cover the pinned binary and scoped panel credential exchange.

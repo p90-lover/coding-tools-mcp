@@ -370,7 +370,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   /** The AO spawn arguments for a card, without its prompt; throws when the route cannot be honored. */
   function aoLaunchArgs(workspaceId, node, plain, contextDefault = null, effortDefault = null) {
     const contextWindow = node.route.context_window ?? contextDefault;
-    const effort = node.route.effort ?? effortDefault;
+    // "auto" is the model's own effort: nothing is sent, neither a CPA suffix nor a native effort.
+    // Tried 2026-10-22 through CPA: every Cline Pass model refused "(auto)" with a 400 ("Supported
+    // reasoning levels are …") while the bare model answered, as every model did.
+    let effort = node.route.effort === "auto" ? null : node.route.effort ?? effortDefault;
     const agent = externalAgent(node);
     const profile = node.route.native_permission_profile ?? node.route.permission_profile;
     if ((node.route.approval_policy !== undefined || node.route.native_permission_profile !== undefined) && (!PERMISSION_AGENTS.has(agent)
@@ -392,11 +395,30 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // CPA's "(high)" suffix is one it never does ("not recognized as a known model"), so the model
     // could only print its tool calls as text. agy picks its own thinking level.
     const verbatim = Boolean(viaCpa) && (agent === "agy" || verbatimModel(viaCpa));
-    let wireModel = verbatim ? viaCpa.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "") : viaCpa;
-    if (viaCpa && effort && !verbatim) {
-      if (!tuningEfforts.has(effort)) throw new Error("Choose a supported CPA reasoning level");
+    const baseModel = viaCpa?.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
+    // A model saved with a level in its name ("…(high)", an older chat) is that effort unless one is picked.
+    const savedLevel = viaCpa?.match(/\((none|minimal|low|medium|high|xhigh|max|ultra)\)$/i)?.[1]?.toLowerCase();
+    if (!effort && savedLevel && node.route.effort !== "auto") effort = savedLevel;
+    if (effort && !tuningEfforts.has(effort)) throw new Error("Choose a supported CPA reasoning level");
+    // A level the model does not take runs at its nearest one instead of failing every request: one
+    // kept from another model ("medium" moved to DeepSeek V4.1 Flash, which takes none/low/high/max;
+    // "none" to MiMo or GLM) was refused with a 400, and the chat's launch looked stuck.
+    const takes = viaCpa && CLINE_EFFORTS.get(baseModel);
+    if (effort && takes && !takes.includes(effort)) {
+      const fitted = nearestEffort(effort, takes);
+      logger?.info?.("ao.effort_fitted", { model: baseModel.slice(0, 120), effort, fitted: fitted || "auto" });
+      effort = fitted;
+    }
+    // Claude Code and Codex send the effort in the request body (Claude Code's output_config.effort,
+    // Codex's reasoning.effort), which CPA hands to the provider's own field. A "(level)" model suffix
+    // was refused outright by every Cline Pass model for "(auto)" and for any level outside its list,
+    // while the same levels in the body went through (tried 2026-10-22 on MiMo V2.6 Pro, DeepSeek V4.1
+    // Flash, GLM 5.3 Flash and Gemini 3.8 Flash). opencode has no body transport in AO and keeps it.
+    const bodyEffort = Boolean(viaCpa) && !verbatim && BODY_EFFORT_AGENTS.has(agent);
+    let wireModel = viaCpa ? (verbatim || bodyEffort ? baseModel : viaCpa) : viaCpa;
+    if (viaCpa && effort && !verbatim && !bodyEffort) {
       // The suffix is session-local; the saved mission model and account remain unchanged.
-      wireModel = viaCpa.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "") + "(" + effort + ")";
+      wireModel = baseModel + "(" + effort + ")";
     }
     const agentModel = wireModel && agent === "opencode" ? `openai/${wireModel}` : wireModel ?? node.route.model;
     return { workspaceId, agent, model: agentModel, name: node.settings?.name || "AO worker",
@@ -411,8 +433,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // A card left blank gets its model's full known limit (defaultContextWindow).
       ...(contextWindow != null ? { contextWindow } : {}),
       ...(plain ? { plain: true } : {}),
-      // Native effort validation stays skipped for foreign models; CPA reads the suffix.
-      ...(!viaCpa && node.route.effort ? { effort: node.route.effort } : {}) };
+      // A native model takes its own effort; a CPA model's goes in the body where the harness can send it.
+      ...(!viaCpa && node.route.effort && node.route.effort !== "auto" ? { effort: node.route.effort }
+        : bodyEffort && effort ? { effort } : {}) };
   }
 
   // Pre-warming: a chat's first launch (its worktree, the agent process and its handshake) took
@@ -795,6 +818,22 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
    * "claude-opus-4-6-thinking(low)" answered with a thinking block, and without one they did not.
    */
   const CLAUDE_SUFFIX_EFFORTS = ["low", "medium", "high", "max"];
+  // Harnesses whose AO driver sends a CPA model's effort in the request body (see aoLaunchArgs).
+  const BODY_EFFORT_AGENTS = new Set(["claude-code", "codex"]);
+  const EFFORT_LADDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+  /** The level of `levels` nearest `effort`, the higher on a tie; "" when there is none (the model's own). */
+  const nearestEffort = (effort, levels) => {
+    const want = EFFORT_LADDER.indexOf(effort);
+    if (want < 0) return "";
+    let best = "", bestDistance = Infinity;
+    for (const level of levels) {
+      const at = EFFORT_LADDER.indexOf(level);
+      if (at < 0) continue;
+      const distance = Math.abs(at - want);
+      if (distance < bestDistance || (distance === bestDistance && at > want)) { best = level; bestDistance = distance; }
+    }
+    return best;
+  };
   const CLINE_EFFORTS = { get: id => CLINE_EFFORT_MODELS.find(([pattern]) => pattern.test(String(id)))?.[1], has: id => Boolean(CLINE_EFFORTS.get(id)) };
   // Ids the last catalog read named a plugin as provider of, for launches that have only the id.
   let pluginModels = new Set();

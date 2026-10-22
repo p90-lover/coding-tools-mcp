@@ -34,7 +34,7 @@ const pluginID = "cline-pass-switcher"
 const apiPrefix = "/v0/management/" + pluginID
 const resourcePrefix = "/v0/resource/plugins/" + pluginID
 
-var pluginVersion = "0.1.0-codingtools.5"
+var pluginVersion = "0.1.0-codingtools.6"
 var hostAvailable atomic.Bool
 
 type envelope struct {
@@ -378,6 +378,43 @@ var deepseekV41Flash = regexp.MustCompile(`^cline-pass/deepseek-v4\.1-flash(-\d{
 // level could be picked for those models at all.
 var openRouterEfforts = []string{"minimal", "low", "medium", "high", "xhigh", "max"}
 
+// effortRank orders every level a request may carry, lowest first.
+var effortRank = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+
+// takenEffort maps a requested level onto one the model takes, so no request fails over its effort:
+// "" or "auto" is the model's own (nothing sent); a level the model lacks becomes its nearest one,
+// the higher on a tie; an unknown word is dropped. Seen 2026-10-22: "medium" on DeepSeek V4.1 Flash,
+// "none" on MiMo or GLM, "(auto)" on any model, and a Claude Code thinking budget that CPA turned
+// into a level DeepSeek lacks were all refused with a 400, and a chat's launch looked stuck.
+func takenEffort(effort string, levels []string) string {
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	if effort == "" || effort == "auto" || len(levels) == 0 {
+		return ""
+	}
+	if slices.Contains(levels, effort) {
+		return effort
+	}
+	want := slices.Index(effortRank, effort)
+	if want < 0 {
+		return ""
+	}
+	best, bestDistance := "", len(effortRank)+1
+	for _, level := range levels {
+		at := slices.Index(effortRank, level)
+		if at < 0 {
+			continue
+		}
+		distance := at - want
+		if distance < 0 {
+			distance = -distance
+		}
+		if distance < bestDistance || distance == bestDistance && at > want {
+			best, bestDistance = level, distance
+		}
+	}
+	return best
+}
+
 func modelEfforts(model string) []string {
 	if deepseekV41Flash.MatchString(model) {
 		return []string{"none", "low", "high", "max"}
@@ -452,17 +489,14 @@ func execute(raw []byte, stream bool) ([]byte, error) {
 	}
 	effort, _ := body["reasoning_effort"].(string)
 	if open := strings.LastIndex(model, "("); open > 0 && strings.HasSuffix(model, ")") {
+		// An explicit suffix wins over CPA's generic conversion (max used to become xhigh).
 		effort, model = model[open+1:len(model)-1], model[:open]
-		if len(modelEfforts(model)) == 0 {
-			return upstreamErrorEnvelope("unsupported_effort", "Cline has no advertised reasoning levels for this model", 400, false), nil
-		}
 	}
-	if levels := modelEfforts(model); len(levels) > 0 && effort != "" {
-		if !slices.Contains(levels, effort) {
-			return upstreamErrorEnvelope("unsupported_effort", "Supported reasoning levels are "+strings.Join(levels, ", "), 400, false), nil
-		}
-		// The explicit suffix wins over CPA's generic conversion (max used to become xhigh).
-		body["reasoning_effort"] = effort
+	// Whatever the request asked for, only a level the model takes goes upstream (takenEffort).
+	if taken := takenEffort(effort, modelEfforts(model)); taken != "" {
+		body["reasoning_effort"] = taken
+	} else {
+		delete(body, "reasoning_effort")
 	}
 	if model != "" {
 		body["model"] = model
