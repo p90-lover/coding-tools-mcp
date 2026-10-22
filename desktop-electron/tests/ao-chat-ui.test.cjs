@@ -462,6 +462,28 @@ test("edits on the Subagents page survive leaving the page and coming back befor
   assert.match(source, /setDraft\(current => keptDraft\(current, previous, config\)\)/, "the page's reload goes through it");
 });
 
+test("the Subagents page saves each change by itself, and keeps edits made while a save was on its way", () => {
+  // Reported 2026-10-22: a change made without pressing Save was not saved.
+  const page = load("SubagentsSurface.tsx", { "./AgentOrchestratorSurface": {}, "./AgentOrchestratorRoleEditor": roles });
+  const sent = { settings: { enabled: true, maxConcurrent: 50, maxPerChat: 3, timeoutMinutes: 30, permission: "auto", releaseWhenDone: true, defaultRoute: null },
+    agents: [{ id: "explorer", name: "Explorer", enabled: true, description: "", instructions: "", route: null }] };
+  const kept = { ...sent, settings: { ...sent.settings, maxConcurrent: 50 } };
+  const after = page.draftAfterSave(structuredClone(sent), sent, kept);
+  assert.deepEqual(after, kept, "nothing edited meanwhile: the draft is what was saved");
+  assert.notEqual(after, kept, "as its own copy");
+  const typedOn = { ...sent, agents: [{ ...sent.agents[0], name: "Explorer 2" }] };
+  assert.equal(page.draftAfterSave(typedOn, sent, kept), typedOn, "an edit made while saving is kept for the next save");
+  assert.ok(page.AUTOSAVE_MS > 0 && page.AUTOSAVE_MS <= 1500, "a moment after the last edit");
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/SubagentsSurface.tsx"), "utf8");
+  assert.match(source, /window\.setTimeout\(\(\) => void save\(sent\), AUTOSAVE_MS\)/, "a change schedules its own save");
+  assert.match(source, /failedDraft\.current === JSON\.stringify\(draft\)/, "a draft that failed to save is not resent in a loop");
+  assert.doesNotMatch(source, />\{busy \? "Saving…" : "Save"\}</, "no Save button to forget");
+  // The banner and the save bar line up with the page's column.
+  const css = fs.readFileSync(path.resolve(__dirname, "../src/features/subagents.css"), "utf8");
+  assert.doesNotMatch(css, /\.sa-notice, \.sa-warning \{ margin: /, "a shorthand margin reset the column's auto side margins");
+  assert.match(css, /\.sa-savebar \{[^}]*padding: 12px max\(32px, calc\(\(100% - 820px\) \/ 2\)\)/);
+});
+
 test("an answer citing an annotation (Codex's :codex-annotation directive) shows its number as a badge, never the raw directive", () => {
   const html = renderToStaticMarkup(React.createElement(markdown.ChatMarkdown, { text: 'Both gates matter :codex-annotation{index="1"} and the installer waits :codex-annotation{index="2"}.' }));
   assert.match(html, /<span class="cx-annotation-ref" title="Your annotation 1">1<\/span>/);

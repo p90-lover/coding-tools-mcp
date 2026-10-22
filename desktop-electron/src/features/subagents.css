@@ -47,7 +47,9 @@
 .sa-pill { display: inline-flex; align-items: center; height: 22px; padding: 0 9px; border: 1px solid var(--sa-line-soft); border-radius: 999px; background: var(--sa-panel); color: var(--sa-text-2); font-size: 12px; }
 .sa-pill.is-on { border-color: rgb(63 125 46 / 25%); background: rgb(63 125 46 / 8%); color: var(--sa-green); }
 .sa-pill.is-running { border-color: rgb(47 111 219 / 25%); background: rgb(47 111 219 / 8%); color: var(--sa-blue); }
-.sa-notice, .sa-warning { margin: 16px 0 0; padding: 10px 12px; border-radius: 10px; font-size: 12.5px; line-height: 1.45; }
+/* margin-top only: a shorthand margin here reset the column's auto side margins (.subagents-scroll > *),
+   and the banner sat on the page's left edge instead of in the column. */
+.sa-notice, .sa-warning { margin-top: 16px; padding: 10px 12px; border-radius: 10px; font-size: 12.5px; line-height: 1.45; }
 .sa-notice { border: 1px solid rgb(63 125 46 / 20%); background: rgb(63 125 46 / 7%); color: var(--sa-green); }
 .sa-warning { border: 1px solid rgb(168 107 18 / 22%); background: rgb(168 107 18 / 8%); color: var(--sa-amber); }
 
@@ -149,9 +151,11 @@
 @keyframes sa-pulse { 50% { opacity: .35; } }
 
 /* ---------- Save bar ---------- */
-.sa-savebar { position: absolute; right: 0; bottom: 0; left: 0; display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 12px 32px; border-top: 1px solid var(--sa-line-soft); background: rgb(250 249 245 / 92%); backdrop-filter: blur(8px); color: var(--sa-text-3); font-size: 12.5px; }
+/* Its content lines up with the page's 820 px column (.subagents-scroll), not the window's edges. */
+.sa-savebar { position: absolute; right: 0; bottom: 0; left: 0; display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 12px max(32px, calc((100% - 820px) / 2)); border-top: 1px solid var(--sa-line-soft); background: rgb(250 249 245 / 92%); backdrop-filter: blur(8px); color: var(--sa-text-3); font-size: 12.5px; }
 .sa-savebar > span { margin-right: auto; }
-.sa-savebar.is-dirty > span { color: var(--sa-amber); font-weight: 500; }
+.sa-savebar.is-dirty > span { color: var(--sa-text-2); }
+.sa-savebar.is-error > span { color: var(--sa-amber); font-weight: 500; }
 
 @media (max-width: 680px) {
   .subagents-scroll { padding: 24px 16px 96px; }
