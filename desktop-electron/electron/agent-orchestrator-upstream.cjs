@@ -453,7 +453,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     const tiny = [3, 1].filter(size => size < smallest);
     // includePending: a request still waiting on an answer is always in the page, however much
     // came after it; one that fell out of the newest items never showed and sat until it timed out.
-    const pending = async (size, options) => internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${size}&includePending=1`, undefined, options);
+    // trimLargeFields: AO cuts any detail string over 64 KB to its first 2 KB and last 16 KB, all
+    // the chat (2 KB of a tool's output) and Terminal pane (16 KB of a command's) show. Screenshot
+    // data made one poll of a chat 3.5 MB; ten recent chats' pages went from 8.8 MB to 2.9 MB.
+    // Edit sources and prose are never cut. An AO without it ignores the parameter.
+    const pending = async (size, options) => internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=${size}&includePending=1&trimLargeFields=1`, undefined, options);
     for (const size of limits) {
       try { return await pending(size); } catch (error) { if (!tooLarge(error)) throw error; }
     }
