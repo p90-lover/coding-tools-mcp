@@ -86,11 +86,11 @@ test("adoption refuses a live foreign owner, a version mismatch, or a non-persis
     const helper = supervisorFor(root).supervisor;
     helper.proxyHealthPayload = async () => health;
     helper.processInfo = () => ({ parentPid: 2 ** 22 - 5, executablePath: "Coding Tools.exe", commandLine });
-    assert.equal(helper.launcherOwnerRunning(daemon.pid), false, commandLine);
+    assert.equal(await helper.launcherOwnerRunning(daemon.pid), false, commandLine);
   }
   const unknown = supervisorFor(root).supervisor;
   unknown.processInfo = () => null;
-  assert.equal(unknown.launcherOwnerRunning(daemon.pid), true, "an uninspectable live PID stays an owner");
+  assert.equal(await unknown.launcherOwnerRunning(daemon.pid), true, "an uninspectable live PID stays an owner");
 
   writeOwnership(root, { ownerPid: 2 ** 22 - 3, daemonPid: daemon.pid });
   const oldBridge = supervisorFor(root).supervisor;

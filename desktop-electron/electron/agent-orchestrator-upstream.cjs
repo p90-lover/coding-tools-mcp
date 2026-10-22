@@ -244,12 +244,18 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   async function defaultToFolderMode(project) {
     if (folderModeChecked.has(project.id)) return;
     const endpoint = `/api/v1/projects/${encodeURIComponent(project.id)}`;
+    const settled = current => !current || (current.kind && current.kind !== "single_repo") || Boolean(current.config?.workspaceMode);
+    // Only a write waits its turn. Seen live: the first launch in a project after the app started
+    // waited 19 s behind its dependency-link sync just to read a mode that was already "folder".
+    if (settled(project) && project.config || settled((await internalApi("GET", endpoint))?.project)) {
+      folderModeChecked.add(project.id);
+      return;
+    }
     // On the dependency-link sync's queue: both rewrite the whole config.
     await dependencyLinks.exclusive(project.id, async () => {
       const current = (await internalApi("GET", endpoint))?.project;
-      if (!current || (current.kind && current.kind !== "single_repo")) return;
+      if (settled(current)) return;
       const config = current.config && typeof current.config === "object" ? current.config : {};
-      if (config.workspaceMode) return;
       await internalApi("PUT", `${endpoint}/config`, { config: { ...config, workspaceMode: "folder" } });
     });
     folderModeChecked.add(project.id);
@@ -319,10 +325,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       },
     }) : null;
 
-  async function requestApi(method, endpoint, body, { maxBytes } = {}) {
+  async function requestApi(method, endpoint, body, { maxBytes, timeoutMs } = {}) {
     if (state !== "ready") throw new Error("Start the source-integrated AO runtime first");
     if (body?.length > 65536) throw new Error("AO API request exceeds 64 KiB");
-    const response = await fetch(`http://127.0.0.1:${daemonPort}${endpoint}`, { method, headers: { "content-type": "application/json" }, body, redirect: "error", signal: AbortSignal.timeout(method === "GET" ? 30000 : 180000) });
+    const waitMs = Number.isSafeInteger(timeoutMs) && timeoutMs > 0 ? timeoutMs : method === "GET" ? 30000 : 180000;
+    const response = await fetch(`http://127.0.0.1:${daemonPort}${endpoint}`, { method, headers: { "content-type": "application/json" }, body, redirect: "error", signal: AbortSignal.timeout(waitMs) });
     const text = await response.text();
     // A conversation read is trimmed below before anything uses it, so it may arrive larger; every
     // other AO call keeps the 900 KB limit.
@@ -355,7 +362,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
    */
   async function chatHostGone(id) {
     let address;
-    try { address = JSON.parse(fs.readFileSync(path.join(dataRoot, "chat-hosts", sessionId(id), "host.json"), "utf8")).address; }
+    try { address = JSON.parse(await fs.promises.readFile(path.join(dataRoot, "chat-hosts", sessionId(id), "host.json"), "utf8")).address; }
     catch { return false; }
     const match = /^127\.0\.0\.1:(\d{1,5})$/.exec(String(address));
     if (!match) return false;
@@ -918,14 +925,17 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (!workspaceBoard) throw new Error("Coding Tools mission service is unavailable");
     const at = Date.now();
     const kept = projectBindings.get(workspaceId);
-    if (kept && at - kept.at < PROJECT_BINDING_TTL_MS) return kept.promise;
-    const entry = { at, promise: workspaceBoard.bind(workspaceId).then(binding => {
+    if (kept && at - kept.at < PROJECT_BINDING_TTL_MS) return kept.projectId ?? kept.promise;
+    // A workspace bound before keeps its project while the binding (git, the dependency-link sync,
+    // up to 3 s) is refreshed behind the launch: every send more than a minute after the last one
+    // waited for it. A failed refresh or start forgets the binding, so the next one binds afresh.
+    const entry = { at, projectId: kept?.projectId ?? null, promise: workspaceBoard.bind(workspaceId).then(binding => {
       if (!binding.projectId) throw new Error("AO harness workers need this workspace to be a git repository registered in AO");
       return binding.projectId;
     }) };
-    entry.promise.catch(() => forgetProject(workspaceId, entry));
+    entry.promise.then(projectId => { entry.projectId = projectId; }, () => forgetProject(workspaceId, entry));
     projectBindings.set(workspaceId, entry);
-    return entry.promise;
+    return entry.projectId ?? entry.promise;
   }
   // One send bound its workspace up to four times (model checks, the default window, the launch):
   // each listed AO's projects, ran git and synced dependency links for up to 3 s. A binding is kept
@@ -1253,6 +1263,24 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return idle.filter(Boolean);
     },
     /**
+     * Chat sessions AO still calls "working" whose agent has done nothing for `quietMs`. A turn that
+     * dies with an app or daemon restart leaves its session "working" for good, and its chat host
+     * waits for a controller that never comes: neither the idle sweep (idle and exited only) nor AO's
+     * reaper (exited only) stopped it. Seen 2026-10-22: two hosts and their agents, quiet 8 hours and
+     * a day, while their chats had moved on to new sessions. A working agent reports activity with
+     * every tool call; AO's activity time restarts with the host, which only makes it look newer.
+     */
+    async quietWorkingChatSessions(quietMs, now = Date.now()) {
+      const list = await internalApi("GET", "/api/v1/sessions");
+      const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
+      return sessions.filter(session => session?.mode === "chat" && !session.isTerminated && session.status === "working")
+        .filter(session => {
+          const at = Date.parse(session.activity?.lastActivityAt ?? "");
+          return Number.isFinite(at) && now - at >= quietMs;
+        })
+        .map(session => String(session.id));
+    },
+    /**
      * Sessions of these workspaces' AO projects that nobody has used for at least `idleMs`: live
      * (not terminated), not working, not pinned, with no message to them since, or since they were
      * made. AO's board keeps every exited session, so old workers, subagents and replaced chats
@@ -1270,10 +1298,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         .map(session => String(session.id));
     },
     /** Sends a follow-up as a new turn of the same session; AO de-duplicates by client message id. */
-    async send(id, text, clientMessageId) {
+    async send(id, text, clientMessageId, { timeoutMs } = {}) {
       forgetTail(id);
       const data = await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/conversation/messages`,
-        { text: utf8Prefix(String(text), 64 * 1024), ...(clientMessageId ? { clientMessageId: String(clientMessageId).slice(0, 200) } : {}) });
+        { text: utf8Prefix(String(text), 64 * 1024), ...(clientMessageId ? { clientMessageId: String(clientMessageId).slice(0, 200) } : {}) },
+        timeoutMs ? { timeoutMs } : undefined);
       if (typeof data?.turnId !== "string" || !data.turnId) throw new Error("AO did not start a turn for the follow-up");
       return { turnId: data.turnId, state: data.state };
     },
@@ -1532,6 +1561,30 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     throw new Error("This desktop operation is unavailable; manage runtime lifecycle from the Coding Tools host bar");
   }
 
+  // { file, size, mtimeMs, digest } of the daemon last hashed. It is kept in dataRoot too, so a
+  // launch of the same install does not read the 41 MB file again; an update or a swapped daemon
+  // changes its size or time and is hashed anew.
+  let verifiedDaemon = null;
+  const verifiedDaemonFile = path.join(dataRoot, "daemon-verified.json");
+  async function daemonDigest(file) {
+    const stat = await fs.promises.stat(file);
+    if (!verifiedDaemon) {
+      try { verifiedDaemon = JSON.parse(await fs.promises.readFile(verifiedDaemonFile, "utf8")); } catch { /* none yet */ }
+    }
+    if (verifiedDaemon && verifiedDaemon.file === file && verifiedDaemon.size === stat.size && verifiedDaemon.mtimeMs === stat.mtimeMs
+      && typeof verifiedDaemon.digest === "string") {
+      return verifiedDaemon.digest;
+    }
+    const digest = await new Promise((resolve, reject) => {
+      const hash = crypto.createHash("sha256");
+      fs.createReadStream(file).on("error", reject).on("data", (chunk) => hash.update(chunk)).on("end", () => resolve(hash.digest("hex")));
+    });
+    verifiedDaemon = { file, size: stat.size, mtimeMs: stat.mtimeMs, digest };
+    fs.promises.mkdir(dataRoot, { recursive: true, mode: 0o700 })
+      .then(() => fs.promises.writeFile(verifiedDaemonFile, JSON.stringify(verifiedDaemon)))
+      .catch(() => { /* hashed again next launch */ });
+    return digest;
+  }
   async function start() {
     if (stopping) await stopping;
     if (state === "ready") return snapshot();
@@ -1551,7 +1604,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         const manifest = JSON.parse(fs.readFileSync(path.join(resourceRoot, "manifest.json"), "utf8"));
         if (manifest.localOnly !== true || manifest.standaloneInstall !== false) throw new Error("AO local-only source bundle is required");
         const executable = path.join(resourceRoot, process.platform === "win32" ? "ao-daemon.exe" : "ao-daemon");
-        const digest = crypto.createHash("sha256").update(fs.readFileSync(executable)).digest("hex");
+        // Read in chunks off the main thread: the 41 MB daemon read in one readFileSync on a busy
+        // hard disk froze the whole app for 17-28 s while AO started. A file unchanged since it was
+        // verified is not read again.
+        const digest = await daemonDigest(executable);
+        checkStartup();
         if (digest !== manifest.daemonSha256) throw new Error("AO daemon does not match its build manifest");
         fs.mkdirSync(dataRoot, { recursive: true, mode: 0o700 });
         // Once per app session, before AO opens it: a database that is mostly empty pages gives the
@@ -1917,7 +1974,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       const pathArgument = (value) => (typeof value === "string" && value.length <= 1024 && !value.includes("\0") ? value : ".");
       switch (operation) {
         case "chat_terminal_start": return agentTools.terminalStart({ sessionId: args.sessionId, workspaceId: args.workspaceId });
-        case "chat_changes": return agentTools.changes({ sessionId: args.sessionId, workspaceId: args.workspaceId });
+        case "chat_changes": return agentTools.changes({ sessionId: args.sessionId, workspaceId: args.workspaceId, summary: args.summary === true });
         case "chat_files": return agentTools.files({ sessionId: args.sessionId, workspaceId: args.workspaceId, path: pathArgument(args.path) });
         case "chat_file": {
           if (typeof args.path !== "string" || !args.path || args.path.length > 1024) throw new Error("Choose a file");

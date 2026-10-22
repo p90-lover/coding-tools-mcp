@@ -31,22 +31,24 @@ function clineModelsRevision(config, meta = null) {
   return crypto.createHash("sha256").update(JSON.stringify({ ids, catalog: exposed })).digest("hex").slice(0, 16);
 }
 
-const readJson = (file) => {
-  try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return null; }
+// Read off the main thread: this runs every 15 s, and the synchronous reads (the metadata holds
+// a growing request history) stalled the whole app for seconds on the busy hard disk.
+const readJson = async (file) => {
+  try { return JSON.parse(await fs.promises.readFile(file, "utf8")); } catch { return null; }
 };
 
 /**
- * Brings the marker's revision up to the switcher's model list. Returns true when it rewrote
+ * Brings the marker's revision up to the switcher's model list. Resolves to true when it rewrote
  * the marker. Leaves alone a marker that is missing or is not the switcher's bridge marker.
  */
-function syncClineMarker(stateRoot) {
+async function syncClineMarker(stateRoot) {
   const data = path.join(stateRoot, "cline-pass-switcher-data");
-  const config = readJson(path.join(data, "config.json"));
+  const config = await readJson(path.join(data, "config.json"));
   // The metadata also holds request history; read it only when the catalog is served.
-  const revision = clineModelsRevision(config, config?.exposeCatalog === true ? readJson(path.join(data, "metadata.json")) : null);
+  const revision = clineModelsRevision(config, config?.exposeCatalog === true ? await readJson(path.join(data, "metadata.json")) : null);
   if (!revision) return false;
   const markerFile = path.join(stateRoot, "auth", "cline-pass-switcher.json");
-  const marker = readJson(markerFile);
+  const marker = await readJson(markerFile);
   if (!marker || marker.type !== "cline" || marker.switcher !== true) return false;
   if (marker.modelsRevision === revision) return false;
   writePrivateFileAtomic(markerFile, `${JSON.stringify({ ...marker, modelsRevision: revision })}\n`);
@@ -71,14 +73,14 @@ async function refreshClineModels({ baseUrl, managementKey, fetchImpl = fetch })
 }
 
 function watchCpaPluginModels({ stateRoot, logger = console, intervalMs = INTERVAL_MS, refresh = null }) {
-  const check = () => {
-    try {
-      if (syncClineMarker(stateRoot)) logger.info?.("cpa.plugin_models_changed", { plugin: "cline-pass-switcher" });
-    } catch (error) {
-      logger.warn?.("cpa.plugin_models_sync_failed", { message: String(error?.message ?? error).slice(0, 200) });
-    }
-  };
-  check();
+  // A check still reading on a slow disk is not joined by another one.
+  let running = null;
+  const check = () => running ??= syncClineMarker(stateRoot).then((changed) => {
+    if (changed) logger.info?.("cpa.plugin_models_changed", { plugin: "cline-pass-switcher" });
+  }, (error) => {
+    logger.warn?.("cpa.plugin_models_sync_failed", { message: String(error?.message ?? error).slice(0, 200) });
+  }).finally(() => { running = null; });
+  const ready = check();
   const timer = setInterval(check, intervalMs);
   timer.unref?.();
   // refresh: { baseUrl, managementKey } of the managed loopback CPA, to keep Cline Pass's list current.
@@ -92,7 +94,7 @@ function watchCpaPluginModels({ stateRoot, logger = console, intervalMs = INTERV
     first.unref?.(); every.unref?.();
     timers.push(() => clearTimeout(first), () => clearInterval(every));
   }
-  return { check, stop: () => { clearInterval(timer); for (const clear of timers) clear(); } };
+  return { check, ready, stop: () => { clearInterval(timer); for (const clear of timers) clear(); } };
 }
 
 module.exports = { clineModelsRevision, syncClineMarker, watchCpaPluginModels, refreshClineModels };

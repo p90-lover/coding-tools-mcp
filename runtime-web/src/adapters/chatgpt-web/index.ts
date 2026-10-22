@@ -336,6 +336,19 @@ function validateBatchTools(parsed: CodexParsedRequest, requests: BrokerToolRequ
 /** Keep the Responses bridge alive during every awaited phase of a browser turn. */
 export const CHATGPT_WEB_ADAPTER_HEARTBEAT_MS = 10_000;
 
+/**
+ * What Codex shows when a compaction's browser turn fails. The cause used to reach only the
+ * daemon's stderr, so the chat said "did not complete the context handoff" whether ChatGPT refused
+ * an attachment or its tab never loaded, and the daemon keeps no log file to look it up in.
+ */
+export function chatGptHandoffFailureMessage(error: Error): string {
+  const source = error instanceof AggregateError && error.errors[0] instanceof Error ? error.errors[0] : error;
+  const cause = source.message.replace(/\s+/g, " ").replace(/[.\s]+$/, "").trim();
+  return cause
+    ? `ChatGPT did not complete the context handoff: ${cause.length > 300 ? `${cause.slice(0, 299)}…` : cause}. Retry the task.`
+    : "ChatGPT did not complete the context handoff. Retry the task.";
+}
+
 export function createChatGptWebAdapter(
   provider: CodexProviderConfig,
   dependencies: {
@@ -1089,7 +1102,7 @@ export function createChatGptWebAdapter(
               console.error("[chatgpt-web] structured context handoff failed:", handoffError);
               emit({
                 type: "error",
-                message: "ChatGPT did not complete the context handoff. Retry the task.",
+                message: chatGptHandoffFailureMessage(handoffError),
                 status: 409,
                 errorType: "invalid_request_error",
                 code: "compaction_handoff_failed",
