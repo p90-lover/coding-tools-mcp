@@ -3466,10 +3466,10 @@ test("Approve for me is reviewed by codex-auto-review first, the card's model wh
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
   const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
-  async function review(failing) {
+  async function review(failing, { model = "cpa/test-model", catalog = ["test-model", "codex-auto-review"] } = {}) {
     const request = { approval_id: "write", source: "ao", kind: "permission", path: "C:/elsewhere/file", tool: "Write", summary: "Write", decisions };
     const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
-      { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+      { id: "one", role: "planner", state: "running", parents: [], route: { ...route, model }, receipt: { thread_id: "session-1", request_key: "k" } }] };
     const asked = [], resolved = [];
     let detail = "";
     const workflow = createAgentOrchestratorWorkflow({
@@ -3477,7 +3477,7 @@ test("Approve for me is reviewed by codex-auto-review first, the card's model wh
       resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
       cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
       fetchImpl: async (url, init) => {
-        if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
+        if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: catalog.map((id) => ({ id })) }) };
         const model = JSON.parse(init.body).model;
         asked.push(model);
         if (failing.includes(model)) return { ok: false, status: 503, json: async () => ({}) };
@@ -3515,6 +3515,15 @@ test("Approve for me is reviewed by codex-auto-review first, the card's model wh
   const down = await review(["codex-auto-review", "test-model"]);
   assert.deepEqual(down.resolved, [], "nothing is answered for the person when no reviewer answers");
   assert.match(down.detail, /could not answer/, "and the request says why it is waiting for them");
+  // Seen live: 375 of 1,453 reviews in two days fell back to the chat's own gpt-6.1-sol, billed to
+  // the person's Codex quota. A fallback is never a Codex-quota model; another one serves instead.
+  const codexCard = await review(["codex-auto-review"], { model: "cpa/gpt-6.1-sol",
+    catalog: ["gpt-6.1-sol", "codex-auto-review", "cline-pass/deepseek-v4.1-flash"] });
+  assert.deepEqual(codexCard.asked, ["codex-auto-review", "cline-pass/deepseek-v4.1-flash"], "never the chat's Codex model");
+  assert.deepEqual(codexCard.resolved, ["yes"]);
+  const onlyCodex = await review(["codex-auto-review"], { model: "cpa/gpt-6.1-sol", catalog: ["gpt-6.1-sol", "codex-auto-review"] });
+  assert.deepEqual(onlyCodex.asked, ["codex-auto-review"], "with no other model the person decides rather than a paid review");
+  assert.deepEqual(onlyCodex.resolved, []);
 });
 
 test("Approve for me reviews with codex-auto-review although CPA hides it from model menus, and menus still leave it out", async () => {
@@ -3591,13 +3600,15 @@ test("the reviewer is told the agent's workspace folder, so a path inside it is 
   }
   const folderMode = await promptFor(() => ({ root: "G:\\Projects\\app", projectFolder: "G:\\Projects\\app" }));
   assert.deepEqual(folderMode.looked, [["session-1", "ws"]], "the folder of the session that asked, in this workspace");
-  assert.match(folderMode.prompt, /Workspace folder: G:\\Projects\\app\. Paths inside this folder, and relative paths, are inside the workspace/);
+  assert.match(folderMode.prompt, /Workspace folder \(the agent's writable root\): G:\\Projects\\app\. Relative paths and a command with no working folder are in it/);
+  // Judged by Codex's Auto-review rules, which do not treat a path outside that root as risky by itself.
+  assert.match(folderMode.prompt, /Do not assign `high` or `critical` solely because a path is outside the writable workspace roots/);
   assert.deepEqual(folderMode.resolved, ["yes"]);
   const worktree = await promptFor(() => ({ root: "C:\\Users\\me\\.ao\\worktrees\\one" }));
-  assert.match(worktree.prompt, /Workspace folder: C:\\Users\\me\\\.ao\\worktrees\\one\./, "a worktree session names its worktree");
+  assert.match(worktree.prompt, /Workspace folder \(the agent's writable root\): C:\\Users\\me\\\.ao\\worktrees\\one\./, "a worktree session names its worktree");
   // AO not answering never holds the review up: the prompt just has no folder line.
   const unknown = await promptFor(() => { throw new Error("AO is restarting"); });
-  assert.doesNotMatch(unknown.prompt, /Workspace folder:/);
+  assert.doesNotMatch(unknown.prompt, /Workspace folder \(/);
   assert.deepEqual(unknown.resolved, ["yes"]);
 });
 
@@ -3749,8 +3760,9 @@ test("a review that keeps hanging still hands its request to the person at the d
     await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
     await waitFor(() => reviews >= 1);
     assert.equal(reviews, 1, "the review began");
-    // The pass hangs; once it is stale a later pass starts the review again.
-    clock += 128_000;
+    // The pass hangs; once it is stale a later pass starts the review again. The deadline is
+    // REVIEW_TRIES × (REVIEW_BUDGET_MS + REVIEW_RETRY_MS) + REVIEW_BUDGET_MS + 15 s = 3 × 49 + 60 = 207 s.
+    clock += 208_000;
     await waitFor(() => reviews >= 2);
     assert.equal(reviews, 2, "a later pass tried again");
     assert.equal((await shown()).awaiting_review, undefined,

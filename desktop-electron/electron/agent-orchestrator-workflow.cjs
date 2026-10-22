@@ -8,6 +8,7 @@ const { wakePrompt, wakeupAction, createWakeupStore } = require("./chat-wakeups.
 const { chatDescriptionWithout, createChatEditStore } = require("./chat-edits.cjs");
 const { createChatArchiveStore } = require("./chat-archive.cjs");
 const { normalizedAuthFile } = require("./cpa-oauth-adapter.cjs");
+const { guardianInstructions } = require("./codex-guardian-policy.cjs");
 
 function clean(value, limit, required = true) {
   if (typeof value !== "string") throw new Error("Expected text");
@@ -2443,15 +2444,26 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const own = route.provider_id === "cliproxyapi-antigravity" ? route.model
       : typeof route.model === "string" && route.model.startsWith(CPA_MODEL_PREFIX) ? route.model.slice(CPA_MODEL_PREFIX.length) : null;
     const card = approver.role === "approver";
-    const order = card ? [own, AUTO_REVIEW_MODEL, catalog[0]] : [AUTO_REVIEW_MODEL, own, catalog[0]];
+    // A fallback never spends the person's Codex quota: 375 of 1,453 reviews in two days (seen live)
+    // fell back to the chat's own gpt-6.1-sol when codex-auto-review timed out. Only a team's Command
+    // approver card keeps a Codex model it was explicitly given.
+    const fallback = catalog.find(model => model !== AUTO_REVIEW_MODEL && !codexQuotaModel(model));
+    const order = card ? [own, AUTO_REVIEW_MODEL, fallback] : [AUTO_REVIEW_MODEL, own, fallback];
     // The review model is one CPA hides from menus (see readCpaCatalog), so it counts when listed hidden.
-    return [...new Set(order.filter(model => model && (catalog.includes(model) || (model === AUTO_REVIEW_MODEL && hidden.includes(model)))))];
+    return [...new Set(order.filter(model => model && (catalog.includes(model) || (model === AUTO_REVIEW_MODEL && hidden.includes(model)))
+      && !(codexQuotaModel(model) && !(card && model === own))))];
+  }
+  /** A model CPA serves from the person's ChatGPT (Codex) account, billed to their Codex quota. */
+  function codexQuotaModel(model) {
+    return model !== AUTO_REVIEW_MODEL && /^(?:gpt-|codex-|o\d)/i.test(String(model));
   }
 
   // A reviewer model that just failed (Codex's auto-review with every Codex sign-in expired took
   // half a minute per request to fail) is passed over for a while, and one request's review never
   // takes longer than REVIEW_BUDGET_MS across all the models it tries: past that the person decides.
-  const REVIEW_BUDGET_MS = 25_000;
+  // Codex's reviewer thinks before it answers (GPT-5.4 Thinking, low): at 25 s it timed out often
+  // enough that reviews fell back to a paid model.
+  const REVIEW_BUDGET_MS = 45_000;
   const REVIEWER_DOWN_MS = 10 * 60_000;
   const reviewerDown = new Map(); // model -> until
   // A review no model answered is tried again on the next passes, REVIEW_RETRY_MS apart, before the
@@ -2489,27 +2501,33 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const deadline = now() + REVIEW_BUDGET_MS;
     const folder = await requestFolder(approval, mission);
     const scripts = reviewScriptExcerpts(approval, folder);
+    // What the person asked this chat to do: Codex's reviewer judges user authorization from the
+    // user's own messages, and without them every action read as "unknown" authorization.
+    const task = await board({ workspaceId: mission.workspace_id, taskId: mission.project_id }).then((detail) => detail.task).catch(() => null);
+    const userRequest = typeof task?.description === "string" ? task.description.trim().slice(-3000) : "";
+    // Codex's Auto-review rules (codex-guardian-policy.cjs), with what Coding Tools adds where Codex
+    // adds its own: this reviewer cannot run read-only checks, and the person's own approver rules.
+    const instructions = guardianInstructions([
+      "## Coding Tools",
+      "- You review one planned action of a coding agent that Coding Tools runs for the user. You cannot call tools or run commands here: judge from the request and the context given, and where something that would flip the decision cannot be verified, say so in the rationale and lean conservative.",
+      "- The agent may not be sandboxed; review the action itself.",
+      String(approver.settings?.instructions || "").trim()
+        ? `- The user's own rules for this reviewer (trusted, like a developer message): ${String(approver.settings.instructions).trim().slice(0, 1500)}` : "",
+    ].filter(Boolean).join("\n"));
     const prompt = [
-      "You are the command approver for an orchestrated coding mission. A worker asks to run a tool request.",
-      `Workspace: ${mission.workspace_id}. Approver rules: ${String(approver.settings?.instructions || "none").slice(0, 1500)}`,
-      folder ? `Workspace folder: ${folder}. Paths inside this folder, and relative paths, are inside the workspace; a command with no working folder runs there.` : "",
+      userRequest ? `# The user's request for this chat (trusted user content)\n${userRequest}` : "",
+      "# Planned action",
+      `Workspace: ${mission.workspace_id}.`,
+      folder ? `Workspace folder (the agent's writable root): ${folder}. Relative paths and a command with no working folder are in it.` : "",
       `Request: ${describeRequest(approval)}`,
       approval.permissions ? `Permissions: ${JSON.stringify(approval.permissions).slice(0, 800)}` : "",
       ...scripts.map((script) => `Local script ${script.file} (from the request's working folder${script.truncated ? ", first 4 KB" : ""}):\n${script.text}`),
-      ...(decide ? [
-        'Answer with JSON only: {"action":"allow"|"deny","reason":"<one sentence for the user>"}.',
-        "Nobody else will look at this request: choose allow or deny. allow: safe and needed for the task. "
-          + "deny: destructive, outside the workspace, secret-touching, unrelated, or anything you are not sure is safe.",
-      ] : [
-        'Answer with JSON only: {"action":"allow"|"deny"|"ask","reason":"<one sentence for the user>"}.',
-        "allow: clearly safe and needed for the task. deny: destructive, outside the workspace, secret-touching or unrelated. ask: anything unclear.",
-      ]),
-      // Seen live: a project's own config.json read got "ask" ("may expose credentials").
-      "Reading, listing or searching files inside the workspace folder (the project's own config and data files included) is routine: allow it. "
-        + "Secret-touching means credential stores (.env files, private keys, token or password files), not any file that might hold a setting.",
-      scripts.length ? "Judge a command that runs a local script by the script's contents shown above." : "",
+      "# Answer",
+      'Answer with JSON only: {"risk_level":"low"|"medium"|"high"|"critical","user_authorization":"high"|"medium"|"low"|"unknown","outcome":"allow"|"deny","rationale":"<one sentence for the user>"}.',
+      // Asked again after an "ask" (an older reviewer's answer, or a card's own model): this time it decides.
+      decide ? "Nobody else will look at this request: the outcome must be allow or deny." : "",
     ].filter(Boolean).join("\n");
-    const verdictKey = createHash("sha256").update(prompt).digest("hex");
+    const verdictKey = createHash("sha256").update(instructions).update(prompt).digest("hex");
     const known = reviewVerdicts.get(verdictKey);
     if (known && now() - known.at < REVIEW_CACHE_MS) {
       logger?.info?.("ao.approval_reviewed", { cached: true, action: known.action, tool: String(approval.tool ?? approval.kind ?? "").slice(0, 80),
@@ -2524,13 +2542,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
           method: "POST",
           headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ model, temperature: 0, max_tokens: 200, messages: [{ role: "user", content: prompt }] }),
+          // Codex's policy first, then this request (Codex puts the policy in the session's developer message).
+          body: JSON.stringify({ model, temperature: 0, max_tokens: 400,
+            messages: [{ role: "user", content: `${instructions}\n\n${prompt}` }] }),
           signal: AbortSignal.timeout(left),
         });
         if (!response.ok) throw new Error(`Command approver ${model} returned HTTP ${response.status}`);
         const text = String((await response.json())?.choices?.[0]?.message?.content ?? "");
-        const decision = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
-        if (!["allow", "deny", "ask"].includes(decision?.action)) throw new Error(`Command approver ${model} gave no decision`);
+        const answer = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
+        // Codex's outcome; an answer in this reviewer's older shape ({action, reason}) is read too.
+        const decision = { action: answer?.outcome ?? answer?.action, reason: answer?.rationale ?? answer?.reason };
+        if (!["allow", "deny", "ask"].includes(decision.action)) throw new Error(`Command approver ${model} gave no decision`);
         reviewerDown.delete(model);
         const reason = String(decision.reason || "").slice(0, 300);
         // The reason otherwise lived only in the run's latest note, so a wrong deny could not be traced.
