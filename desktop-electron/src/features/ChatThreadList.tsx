@@ -3,6 +3,7 @@ import type { DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent } from 
 import { Icon } from "../icons";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import { chatRelativeTime, scheduledStartLabel, type ChatStatus, type ChatSummary } from "./ao-chat";
+import { SPLIT_DRAG_TYPE } from "./chat-split";
 
 const STATUS_LABEL: Record<ChatStatus, string> = {
   queued: "Starting", scheduled: "Scheduled", running: "Running", paused: "Paused", attention: "Needs you", stopped: "Stopped", done: "Done",
@@ -56,6 +57,8 @@ export type ThreadActions = {
   share: (taskId: string) => void;
   /** A read-only live copy of the chat in its own window. */
   openWindow: (taskId: string) => void;
+  /** Opens the chat in a split view pane beside the open one (Claude Code's "Open in ▸ Split view"). */
+  openSplit?: (workspaceId: string, taskId: string) => void;
   /** Opens a chat of another project the list shows open: switches to that project, then the chat. */
   selectIn?: (workspaceId: string, taskId: string) => void;
 };
@@ -86,6 +89,8 @@ export type ThreadListProps = {
   toggleProjectPin: (workspaceId: string) => void;
   /** Chats whose rename or lifecycle action is in flight. */
   busyTaskIds: string[];
+  /** Chats open in the window or one of its split view panes: "Split view" is not offered for them. */
+  openTaskIds?: string[];
   /** A new chat being created, shown at once at the top of its project. */
   pendingTitle?: string;
   actions: ThreadActions;
@@ -145,13 +150,15 @@ export function orderChats<T extends { taskId: string; status: ChatStatus }>(cha
 }
 
 /**
- * The Projects list's order, as in Codex: pinned projects first, then the project you used most
- * recently, then the list's own order for projects not used yet.
+ * The Projects list's order: pinned projects first, then the order you dragged projects into, then
+ * the list's own order for projects you have not placed. A project no longer moves by itself: it
+ * jumped to the top whenever one of its chats got a message (the user: "it shouldnt be change if
+ * not me moving it").
  */
-export function orderProjects<T extends { id: string }>(items: T[], pinned: string[], usedAt: Record<string, number>): T[] {
+export function orderProjects<T extends { id: string }>(items: T[], pinned: string[], manual: string[]): T[] {
   const index = new Map(items.map((item, at) => [item.id, at]));
-  return [...items].sort((a, b) => Number(pinned.includes(b.id)) - Number(pinned.includes(a.id))
-    || (usedAt[b.id] ?? 0) - (usedAt[a.id] ?? 0) || (index.get(a.id) ?? 0) - (index.get(b.id) ?? 0));
+  const placed = (id: string) => { const at = manual.indexOf(id); return at < 0 ? manual.length + (index.get(id) ?? 0) : at; };
+  return [...items].sort((a, b) => Number(pinned.includes(b.id)) - Number(pinned.includes(a.id)) || placed(a.id) - placed(b.id));
 }
 
 /**
@@ -164,7 +171,7 @@ export function releaseUsedChats(manual: string[], seenRuns: Record<string, stri
   return { order: used.length ? manual.filter((id) => !used.includes(id)) : manual, used };
 }
 
-const PROJECT_USED_KEY = "coding-tools:ao:project-used";
+const PROJECT_ORDER_KEY = "coding-tools:ao:project-order";
 const OPEN_PROJECTS_KEY = "coding-tools:ao:open-projects";
 function readStored<T>(key: string, fallback: T, valid: (value: unknown) => value is T): T {
   try { const value = JSON.parse(localStorage.getItem(key) || "null"); return valid(value) ? value : fallback; } catch { return fallback; }
@@ -370,27 +377,22 @@ export function ChatThreadList(props: ThreadListProps) {
     }
     return () => { live = false; };
   }, [loadProjectChats, openOtherIds, now]);
-  // A chat that got a new run was just used: it rises to the top of its project, and its project to
-  // the top of Projects (below pinned ones), as in Codex.
-  const [projectUsedAt, setProjectUsedAt] = useState<Record<string, number>>(() => readStored(PROJECT_USED_KEY, {}, isTimes));
+  // A chat that got a new run was just used: it rises to the top of its project, as in Codex. Its
+  // project stays where it is; projects move only when you drag them (projectManual).
+  const [projectManual, setProjectManual] = useState<string[]>(() => readStored(PROJECT_ORDER_KEY, [], isIds));
+  const saveProjectOrder = (next: string[]) => {
+    setProjectManual(next);
+    try { localStorage.setItem(PROJECT_ORDER_KEY, JSON.stringify(next)); } catch { /* per-session only */ }
+  };
   const seenRuns = useRef<{ workspaceId: string; runs: Record<string, string> }>({ workspaceId, runs: {} });
   useEffect(() => {
     if (seenRuns.current.workspaceId !== workspaceId) seenRuns.current = { workspaceId, runs: {} };
     // A switch empties the list before the new project's chats arrive; that load is not a use.
     if (!chats.length) { seenRuns.current.runs = {}; return; }
     const known = seenRuns.current.runs;
-    const hadChats = Object.keys(known).length > 0;
-    const { order, used } = releaseUsedChats(manualOrder, known, chats);
-    const created = hadChats && chats.some((chat) => known[chat.taskId] === undefined);
+    const { order } = releaseUsedChats(manualOrder, known, chats);
     for (const chat of chats) known[chat.taskId] = chat.latestRunId;
     if (order !== manualOrder) saveOrder(order);
-    if (used.length || created) {
-      setProjectUsedAt((current) => {
-        const next = { ...current, [workspaceId]: Date.now() };
-        try { localStorage.setItem(PROJECT_USED_KEY, JSON.stringify(next)); } catch { /* per-session only */ }
-        return next;
-      });
-    }
   }, [chats, workspaceId]);
   const startRename = (chat: ChatSummary) => setRenaming({ taskId: chat.taskId, title: chat.title });
   const commitRename = async () => {
@@ -444,8 +446,12 @@ export function ChatThreadList(props: ThreadListProps) {
         { label: "Chat ID", run: () => actions.copy(chat.taskId, "id") },
       ] },
       { kind: "separator" },
-      { label: "Open in new window", icon: "window", run: () => actions.openWindow(chat.taskId) },
+      // Claude Code's "Open in": its layouts first, numbered (1, 2), then the other places.
       { label: "Open in", icon: "openIn", items: [
+        ...(actions.openSplit && !props.openTaskIds?.includes(chat.taskId)
+          ? [{ label: "Split view", shortcut: "1", run: () => actions.openSplit!(workspaceId, chat.taskId) }] : []),
+        { label: "New window", shortcut: actions.openSplit && !props.openTaskIds?.includes(chat.taskId) ? "2" : "1", run: () => actions.openWindow(chat.taskId) },
+        { kind: "separator" },
         { label: "Structure", run: () => actions.openStructure(chat.taskId) },
         { label: "Mission Board", run: () => actions.openBoard() },
       ] },
@@ -549,7 +555,7 @@ export function ChatThreadList(props: ThreadListProps) {
     }
     endDrag();
   };
-  const dragRow = (id: string, drag: DragList | undefined) => {
+  const dragRow = (id: string, drag: DragList | undefined, project = workspaceId) => {
     if (!drag) return { onDragEnd: endDrag };
     const sameList = dragging?.list === drag.list;
     const lower = (event: ReactDragEvent<HTMLElement>) => {
@@ -560,10 +566,14 @@ export function ChatThreadList(props: ThreadListProps) {
       draggable: true,
       "data-drop": sameList && dragging?.id !== id && dropAt?.id === id ? (dropAt.after ? "after" : "before") : undefined,
       onDragStart: (event: ReactDragEvent<HTMLElement>) => {
+        // A chat row sits inside its project's row, which drags too: the drag is the chat's only.
+        event.stopPropagation();
         // The list element the row sits in: drops count only over it (inSourceList).
         setDragging({ list: drag.list, id, drag, listEl: event.currentTarget.parentElement ?? null });
         event.dataTransfer.effectAllowed = "move";
         event.dataTransfer.setData("text/plain", id);
+        // Dropped on the chat area it opens in split view (ChatSplit), as Claude Code's sidebar drag does.
+        if (actions.openSplit) event.dataTransfer.setData(SPLIT_DRAG_TYPE, JSON.stringify({ workspaceId: project, taskId: id }));
         // The browser's own drag image is a see-through copy of the row a few pixels off it, which
         // read as the chat crossed out and hid the drop line; a small label beside the pointer instead.
         if (typeof document !== "undefined" && typeof event.dataTransfer.setDragImage === "function") {
@@ -608,7 +618,9 @@ export function ChatThreadList(props: ThreadListProps) {
         hoverTimer.current = window.setTimeout(() => setHover({ chat, top: box.top, left: box.right + 8 }), 600);
       }}
       onMouseLeave={() => { window.clearTimeout(hoverTimer.current); setHover(null); }}>
-      <button type="button" className="cx-thread-select" aria-current={chat.taskId === selectedTaskId} onClick={() => actions.select(chat.taskId)}>
+      <button type="button" className="cx-thread-select" aria-current={chat.taskId === selectedTaskId}
+        // Ctrl-click opens it in split view, as in Claude Code.
+        onClick={(event) => event?.ctrlKey && actions.openSplit ? actions.openSplit(workspaceId, chat.taskId) : actions.select(chat.taskId)}>
         <span className="cx-thread-title">{chat.title}</span>
         {chat.schedule?.state === "scheduled" ? <span className="cx-thread-age" aria-label="Scheduled">◷</span> : null}
         <span className={`cx-thread-dot status-${chat.status}`} aria-label={STATUS_LABEL[chat.status]} />
@@ -642,10 +654,11 @@ export function ChatThreadList(props: ThreadListProps) {
     const drag: DragList = { list: `project:${projectId}`, order: ordered.map((chat) => chat.taskId), save: (next) => saveListOrder(orderKey(projectId), next) };
     const all = expanded.has(projectId);
     return <>
-      {(all ? ordered : ordered.slice(0, settings.visible)).map((chat) => <li key={chat.taskId} {...dragRow(chat.taskId, drag)}
+      {(all ? ordered : ordered.slice(0, settings.visible)).map((chat) => <li key={chat.taskId} {...dragRow(chat.taskId, drag, projectId)}
         className={`cx-thread-row${unread.includes(chat.taskId) ? " is-unread" : ""}${isDragged(chat.taskId, drag) ? " is-dragging" : ""}`}>
-        <button type="button" className="cx-thread-select" aria-current={false}
-          onClick={() => (actions.selectIn ? actions.selectIn(projectId, chat.taskId) : props.onWorkspace(projectId))}>
+        <button type="button" className="cx-thread-select" aria-current={chat.taskId === selectedTaskId}
+          onClick={(event) => event?.ctrlKey && actions.openSplit ? actions.openSplit(projectId, chat.taskId)
+            : actions.selectIn ? actions.selectIn(projectId, chat.taskId) : props.onWorkspace(projectId)}>
           <span className="cx-thread-title">{chat.title}</span>
           {chat.schedule?.state === "scheduled" ? <span className="cx-thread-age" aria-label="Scheduled">◷</span> : null}
           <span className={`cx-thread-dot status-${chat.status}`} aria-label={STATUS_LABEL[chat.status]} />
@@ -660,7 +673,9 @@ export function ChatThreadList(props: ThreadListProps) {
     value={naming?.name ?? ""} onChange={(event) => setNaming((current) => current && { ...current, name: event.target.value })}
     onKeyDown={(event) => { if (event.key === "Enter") commitNaming(); if (event.key === "Escape") setNaming(null); }}
     onBlur={commitNaming} />;
-  const projectOrder = orderProjects(workspaces, props.pinnedProjects, projectUsedAt);
+  const projectOrder = orderProjects(workspaces, props.pinnedProjects, projectManual);
+  // Projects are dragged into place like chats, and only within Projects; that order is kept.
+  const projectsDrag: DragList = { list: "projects", order: projectOrder.map((item) => item.id), save: saveProjectOrder };
   return (
     <aside className="cx-threads" aria-label="Projects and chats" onDragOver={listDragOver} onDrop={listDrop}>
       <button type="button" className="cx-new-chat" aria-pressed={!selectedTaskId} onClick={actions.newChat}>
@@ -704,7 +719,7 @@ export function ChatThreadList(props: ThreadListProps) {
               const current = item.id === workspaceId;
               const open = current ? !collapsed.has(item.id) : openOthers.has(item.id);
               const git = projectGitLabel(item.path ? gits[item.path] : null);
-              return <li key={item.id}>
+              return <li key={item.id} {...dragRow(item.id, projectsDrag)} className={`cx-project-item${isDragged(item.id, projectsDrag) ? " is-dragging" : ""}`}>
                 <div className="cx-project-row" onMouseEnter={(event) => hoverProject(item, event.currentTarget)} onMouseLeave={leaveProject}>
                   <button type="button" className="cx-project" aria-expanded={open}
                     onClick={() => clickProject(item.id)} onContextMenu={(event) => openMenu(event, projectMenu(item), item.name)}>

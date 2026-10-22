@@ -23,6 +23,13 @@ const TIMEOUT_MS = 8_000;
 const MAX_ACCOUNTS = 40;
 /** Accounts whose usage is split by model (one more CPA Helper read each). */
 const MAX_SPLIT_ACCOUNTS = 24;
+/**
+ * Those split reads in flight at once. All of them together (up to 24 range aggregations over CPA
+ * Helper's records, beside the overall ones) hit the CPA that serves the chats' model requests in
+ * one burst, every refresh of every chat's context meter; on 2026-10-22 sixteen of them timed out
+ * in the same second.
+ */
+const SPLIT_CONCURRENCY = 3;
 const MAX_MODELS = 12;
 const DAY_MS = 24 * 60 * 60_000;
 const RANGES = Object.freeze({ "24h": DAY_MS, "7d": 7 * DAY_MS, "30d": 30 * DAY_MS, all: null });
@@ -280,6 +287,20 @@ function aggregateUsage({ authRows = [], modelsByAuth = new Map(), modelRows = [
   return { accounts, totals, models };
 }
 
+/** `fn` over `items`, at most `limit` at a time; the results keep the items' order. */
+async function mapLimited(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await fn(items[index]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
 function createCpaUsage({ getConnection, quota = null, fetchImpl = fetch, now = Date.now, logger = console } = {}) {
   const cache = new Map(); // range -> { at, value }
   const pending = new Map(); // range -> Promise
@@ -336,10 +357,10 @@ function createCpaUsage({ getConnection, quota = null, fetchImpl = fetch, now = 
       optional(target, `/cpa-helper/rankings?${query({ group: "model" })}`),
       optional(target, "/auth-files"),
       quota?.read ? quota.read().catch(() => null) : null,
-      Promise.all(authRows.slice(0, MAX_SPLIT_ACCOUNTS).filter((row) => row?.key).map(async (row) => {
+      mapLimited(authRows.slice(0, MAX_SPLIT_ACCOUNTS).filter((row) => row?.key), SPLIT_CONCURRENCY, async (row) => {
         const listing = await optional(target, `/cpa-helper/rankings?${query({ group: "model", auth: String(row.key) })}`);
         return [String(row.key), Array.isArray(listing?.items) ? listing.items : null];
-      })),
+      }),
     ]);
     const authFiles = Array.isArray(fileListing?.files) ? fileListing.files : null;
     // The switcher's pool only matters when CPA has its bridge account (or the list is unreadable).

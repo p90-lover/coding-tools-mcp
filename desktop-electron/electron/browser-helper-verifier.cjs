@@ -1,7 +1,7 @@
 const { spawn } = require("node:child_process");
 const { randomBytes } = require("node:crypto");
 const { createInterface } = require("node:readline");
-const { processRunning, terminateOwnedProcessTree } = require("./process-tree.cjs");
+const { processRunning, terminateOwnedProcessTreeAsync } = require("./process-tree.cjs");
 
 const BROWSER_HELPER_OPERATION_TIMEOUT_MS = 90_000;
 
@@ -40,7 +40,7 @@ async function stopChild(child) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   await writeMessage(child, { type: "shutdown" }).catch(() => {});
   if (await waitForExit(child, 5_000)) return;
-  if (process.platform === "win32") terminateOwnedProcessTree(child);
+  if (process.platform === "win32") await terminateOwnedProcessTreeAsync(child);
   else if (!child.kill("SIGTERM") && child.exitCode === null && child.signalCode === null) {
     throw new Error("Browser helper verification process refused termination");
   }

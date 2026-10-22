@@ -12,28 +12,32 @@ const ROUTE = { harness_id: "ao:claude-code", model: "cpa/test-model" };
 const parse = (result) => JSON.parse(result.content[0].text);
 
 /** A subagents service over a fake AO harness whose sessions the test drives. */
-function world({ settings = {}, agents = null, now = () => 1_000_000, aoUp = () => true, setTimer = undefined, routeRefusal = undefined } = {}) {
+function world({ settings = {}, agents = null, now = () => 1_000_000, aoUp = () => true, setTimer = undefined, models = null, teams = null, routeRefusal = undefined } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-"));
-  const spawned = [], resolved = [], inputs = [], interrupted = [], released = [];
+  const spawned = [], resolved = [], inputs = [], interrupted = [], released = [], steered = [], sent = [], observedTurns = [];
   const sessions = new Map();
   let next = 0;
   const harness = {
     spawn: async (input) => { spawned.push(input); const id = `sub-${++next}`; sessions.set(id, { turnState: "queued", approvals: [] }); return id; },
-    observe: async (id) => ({ turnId: "t1", ...sessions.get(id) }),
+    observe: async (id, turn) => { observedTurns.push([id, turn]); return { turnId: "t1", ...sessions.get(id) }; },
     resolveApproval: async (id, approvalId, decision) => { resolved.push([id, approvalId, decision]); },
     resolveInput: async (id, approvalId, action, content) => { inputs.push([id, approvalId, action, content]); },
     interrupt: async (id) => { interrupted.push(id); sessions.set(id, { turnState: "interrupted", status: "ready", approvals: [] }); },
     exitAgent: async (id) => { released.push(id); return { ok: true }; },
+    steer: async (id, text) => { steered.push([id, text]); return { steered: true }; },
+    continuable: async () => true,
+    send: async (id, text) => { sent.push([id, text]); sessions.set(id, { turnState: "queued", approvals: [] }); return { turnId: `t${sent.length + 1}`, state: "queued" }; },
   };
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }) });
   const service = createSubagents({
     statePath: path.join(dir, "subagents.json"),
     launchArgs: (workspaceId, route, name) => workflow.subagentLaunchArgs(workspaceId, route, name),
     harness: () => (aoUp() ? harness : null), blockedRequest: workflow.blockedRequest, recommendedAnswer: workflow.recommendedAnswer,
+    ...(models ? { models } : {}), ...(teams ? { teams: () => teams } : {}),
     logger: { info() {}, warn() {} }, now, ...(setTimer ? { setTimer } : {}), ...(routeRefusal ? { routeRefusal } : {}),
   });
   service.save({ settings: { defaultRoute: ROUTE, ...settings }, agents: agents ?? STARTERS });
-  return { service, harness, sessions, spawned, resolved, inputs, interrupted, released, dir,
+  return { service, harness, sessions, spawned, resolved, inputs, interrupted, released, steered, sent, observedTurns, dir,
     cleanup: () => { service.dispose(); fs.rmSync(dir, { recursive: true, force: true }); } };
 }
 
@@ -190,7 +194,9 @@ test("a subagent preserves the model's none effort when saved and launched", asy
     assert.equal(saved.settings.defaultRoute.effort, "none");
     const started = await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read the source" });
     assert.equal(started.isError, false);
-    assert.equal(w.spawned[0].gateway.model, "cline-pass/deepseek-v4.1-flash(none)");
+    // Claude Code sends the effort in the request body (#498), not as a "(none)" model suffix.
+    assert.equal(w.spawned[0].gateway.model, "cline-pass/deepseek-v4.1-flash");
+    assert.equal(w.spawned[0].effort, "none");
     assert.equal(w.service.config().settings.defaultRoute.effort, "none");
   } finally { w.cleanup(); }
 });
@@ -678,4 +684,226 @@ test("a subagent on a route its provider refuses fails at once with the reason, 
       assert.equal(broken.spawned.length, 1);
     } finally { broken.cleanup(); }
   } finally { w.cleanup(); }
+});
+
+// Claude Code's catalog as the workflow's models({ harness: "ao:claude-code" }) returns it.
+const CATALOG = {
+  ok: true, harness: "ao:claude-code", models: ["cpa/glm-5", "cpa/fixed-model"],
+  capabilities: {
+    "cpa/glm-5": { efforts: ["low", "high"], contextLimit: 200000, contextWindow: { min: 4096, max: 200000, kind: "context" } },
+    "cpa/fixed-model": { efforts: [], effortReason: "CPA did not advertise reasoning levels for this model.", contextReason: "No setter." },
+  },
+  unavailable: { "cpa/retired": "nobody is signed in to its provider" },
+};
+
+test("a chat agent picks a subagent's model, effort and window, and it always runs on Claude Code", async () => {
+  const w = world({ settings: { defaultRoute: { harness_id: "ao:codex", model: "gpt-6" } }, models: async () => CATALOG });
+  try {
+    const listed = parse(await w.service.call("chat-1", "ws-1", "subagent_models", {}));
+    assert.match(listed.harness, /Claude Code/);
+    assert.deepEqual(listed.models[0], { id: "glm-5", efforts: ["low", "high"], context_window: { min: 4096, max: 200000 }, context_limit: 200000 });
+    const started = parse(await w.service.call("chat-1", "ws-1", "subagent_start",
+      { agent: "explorer", task: "Map the code", model: "glm-5", effort: "high", context_window: 120000 }));
+    assert.equal(started.model, "glm-5");
+    assert.equal(w.spawned[0].agent, "claude-code", "the saved Codex route is not used once a model is picked");
+    assert.deepEqual(w.spawned[0].gateway, { provider: "cpa", model: "glm-5" });
+    assert.equal(w.spawned[0].effort, "high");
+    assert.equal(w.spawned[0].contextWindow, 120000);
+    assert.match(w.spawned[0].prompt, /read-only explorer/, "the saved subagent's instructions still apply");
+    const refuse = async (args, pattern) => {
+      const result = await w.service.call("chat-2", "ws-1", "subagent_start", { agent: "explorer", task: "x", ...args });
+      assert.equal(result.isError, true);
+      assert.match(result.content[0].text, pattern);
+    };
+    await refuse({ model: "retired" }, /not offered to Claude Code \(nobody is signed in/);
+    await refuse({ model: "glm-5", effort: "max" }, /offers the efforts low, high/);
+    await refuse({ model: "fixed-model", effort: "low" }, /takes no reasoning effort/);
+    await refuse({ model: "glm-5", context_window: 500000 }, /from 4096 to 200000/);
+    await refuse({ model: "fixed-model", context_window: 100000 }, /takes no context window/);
+    await refuse({ effort: "low" }, /Name the model/);
+    await refuse({ team: "squad", model: "glm-5" }, /own roles and models/);
+    // With no saved subagent: the task alone, on the picked model.
+    const custom = parse(await w.service.call("chat-3", "ws-1", "subagent_start", { task: "Count the tests", model: "cpa/glm-5" }));
+    assert.equal(custom.agent, "custom");
+    assert.doesNotMatch(w.spawned[1].prompt, /read-only explorer/);
+    assert.equal(w.spawned.length, 2);
+  } finally { w.cleanup(); }
+});
+
+test("an effort or window alone keeps a saved Claude Code route's model; an unreadable catalog leaves the launch to check", async () => {
+  const w = world({ settings: { defaultRoute: { harness_id: "ao:claude-code", model: "cpa/glm-5", effort: "low" } }, models: async () => { throw new Error("CPA down"); } });
+  try {
+    await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "x", context_window: 64000 });
+    assert.deepEqual(w.spawned[0].gateway, { provider: "cpa", model: "glm-5" });
+    assert.equal(w.spawned[0].effort, "low", "the saved effort is kept");
+    assert.equal(w.spawned[0].contextWindow, 64000);
+    assert.equal((await w.service.call("chat-1", "ws-1", "subagent_models", {})).isError, true);
+  } finally { w.cleanup(); }
+});
+
+test("a chat agent steers a working subagent and gives a finished one its next task in the same session", async () => {
+  const w = world();
+  try {
+    const { subagent_id: id } = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "implementer", task: "Add a test" }));
+    const early = await w.service.call("chat-1", "ws-1", "subagent_message", { subagent_id: id, message: "Also lint" });
+    assert.match(early.content[0].text, /not begun its turn/);
+    w.sessions.set(id, { turnState: "running", status: "working", approvals: [] });
+    const steered = parse(await w.service.call("chat-1", "ws-1", "subagent_message", { subagent_id: id, message: "Use node:test" }));
+    assert.equal(steered.delivered, "steered");
+    assert.deepEqual(w.steered, [[id, "Use node:test"]]);
+
+    w.sessions.set(id, { turnState: "completed", status: "ready", answer: "Added tests/a.test.cjs", approvals: [] });
+    assert.equal(parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 })).state, "completed");
+    assert.deepEqual(w.released, [id]);
+    const next = parse(await w.service.call("chat-1", "ws-1", "subagent_message", { subagent_id: id, message: "Now run it on CI" }));
+    assert.equal(next.delivered, "new_turn");
+    assert.equal(next.previous_report, "Added tests/a.test.cjs");
+    assert.equal(next.state, "starting");
+    assert.equal(next.turns, 2);
+    assert.deepEqual(w.sent, [[id, "Now run it on CI"]]);
+    // Its next report is read from the new turn, never the finished one.
+    await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 });
+    assert.deepEqual(w.observedTurns.at(-1), [id, "t2"]);
+    w.sessions.set(id, { turnState: "completed", status: "ready", answer: "CI green", approvals: [] });
+    const done = parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 }));
+    assert.equal(done.report, "CI green");
+    assert.deepEqual(w.released, [id, id], "released again once the follow-up is done");
+
+    w.harness.continuable = async () => false;
+    const gone = await w.service.call("chat-1", "ws-1", "subagent_message", { subagent_id: id, message: "More" });
+    assert.match(gone.content[0].text, /can no longer continue/);
+    assert.equal((await w.service.call("chat-2", "ws-1", "subagent_message", { subagent_id: id, message: "x" })).isError, true, "another chat cannot message it");
+  } finally { w.cleanup(); }
+});
+
+test("a message counts toward the limits, and a steer that arrives as the turn ends collects its report first", async () => {
+  const w = world({ settings: { maxConcurrent: 1 } });
+  try {
+    const { subagent_id: first } = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "one" }));
+    w.sessions.set(first, { turnState: "running", status: "working", approvals: [] });
+    await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: first, wait_seconds: 0 });
+    w.harness.steer = async () => { w.sessions.set(first, { turnState: "completed", status: "ready", answer: "Found it", approvals: [] }); return { steered: false }; };
+    const late = parse(await w.service.call("chat-1", "ws-1", "subagent_message", { subagent_id: first, message: "and the tests" }));
+    assert.equal(late.delivered, "new_turn");
+    assert.equal(late.previous_report, "Found it");
+    const blocked = await w.service.call("chat-2", "ws-1", "subagent_start", { agent: "explorer", task: "two" });
+    assert.match(blocked.content[0].text, /already running/, "the resumed subagent holds its place again");
+  } finally { w.cleanup(); }
+});
+
+test("subagent_inspect shows a subagent's latest steps, idle time, running tool and waiting requests", async () => {
+  let clock = 1_000_000;
+  const w = world({ now: () => clock });
+  try {
+    const { subagent_id: id } = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "x" }));
+    w.sessions.set(id, { turnState: "running", status: "working", lastActivityAt: clock - 30_000, toolSince: clock - 12_000, liveOutput: "Looking at src/",
+      approvals: [{ approval_id: "a", kind: "command", tool: "Bash", command: "git push origin main", decisions: [] }],
+      timeline: [
+        { kind: "reasoning", status: "completed", text: "Plan:\n  read the router" },
+        { kind: "edit", status: "completed", label: "Edited router.ts +2 -1", text: "src/router.ts", files: [{ path: "src/router.ts" }] },
+        { kind: "command", status: "running", text: "npm test" },
+      ] });
+    const seen = parse(await w.service.call("chat-1", "ws-1", "subagent_inspect", { subagent_id: id, items: 2 }));
+    assert.equal(seen.turn_state, "running");
+    assert.equal(seen.last_activity_seconds_ago, 30);
+    assert.equal(seen.tool_running_seconds, 12);
+    assert.deepEqual(seen.pending_requests, [{ kind: "command", tool: "Bash", command: "git push origin main" }]);
+    assert.equal(seen.live_output, "Looking at src/");
+    assert.deepEqual(seen.timeline, [
+      { kind: "edit", status: "completed", label: "Edited router.ts +2 -1", text: "src/router.ts", files: ["src/router.ts"] },
+      { kind: "command", status: "running", text: "npm test" },
+    ]);
+  } finally { w.cleanup(); }
+});
+
+/** A fake of the workflow's subagentTeams over runs the test settles. */
+function teamOwner() {
+  const missions = new Map(), started = [], stopped = [], followUps = [];
+  let next = 0;
+  return { missions, started, stopped, followUps,
+    list: async () => [{ id: "t1", name: "Squad", revision: 2, roles: [{ name: "Lead", model: "glm-5" }, { name: "Builder", model: "glm-5" }] }],
+    start: async (input) => { started.push(input); const runId = `run-${++next}`; missions.set(runId, { settled: false, roles: [], answers: [] }); return { taskId: "task-1", runId }; },
+    followUp: async (input) => { followUps.push(input); const runId = `run-${++next}`; missions.set(runId, { settled: false, roles: [], answers: [] }); return { runId }; },
+    state: async ({ runId }) => missions.get(runId),
+    stop: async ({ runId }) => { stopped.push(runId); missions.set(runId, { ...missions.get(runId), settled: true, cancelled: true }); return { ok: true }; },
+  };
+}
+
+test("a saved team runs as one subagent: listed, started as its own chat, reported, followed up and stopped", async () => {
+  const owner = teamOwner();
+  const w = world({ teams: owner });
+  try {
+    const listed = parse(await w.service.call("chat-1", "ws-1", "subagent_list", {}));
+    assert.deepEqual(listed.teams, [{ id: "t1", name: "Squad", roles: [{ name: "Lead", model: "glm-5" }, { name: "Builder", model: "glm-5" }] }]);
+    const started = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { team: "squad", task: "Ship the login page" }));
+    assert.equal(started.team, "t1");
+    assert.equal(started.name, "Squad");
+    assert.equal(owner.started[0].teamId, "t1");
+    assert.equal(owner.started[0].title, "Subagent team · Squad");
+    assert.match(owner.started[0].message, /working as a subagent[\s\S]*Task:\nShip the login page$/);
+    assert.equal(w.spawned.length, 0, "the team's own run starts its agents");
+
+    const running = await w.service.call("chat-1", "ws-1", "subagent_message", { subagent_id: started.subagent_id, message: "x" });
+    assert.match(running.content[0].text, /only once it has finished/);
+    owner.missions.set("run-1", { settled: false, roles: [{ name: "Lead", state: "finished" }, { name: "Builder", state: "running" }], answers: ["Plan done"], detail: "" });
+    const seen = parse(await w.service.call("chat-1", "ws-1", "subagent_inspect", { subagent_id: started.subagent_id }));
+    assert.equal(seen.state, "running");
+    assert.deepEqual(seen.roles.map(role => role.state), ["finished", "running"]);
+    assert.deepEqual(seen.answers_so_far, ["Plan done"]);
+
+    owner.missions.set("run-1", { settled: true, cancelled: false, failed: false, roles: [], answers: ["Login page shipped", "Tests pass"] });
+    const done = parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: started.subagent_id, wait_seconds: 0 }));
+    assert.equal(done.state, "completed");
+    assert.equal(done.report, "Login page shipped\n\n---\n\nTests pass");
+
+    const again = parse(await w.service.call("chat-1", "ws-1", "subagent_message", { subagent_id: started.subagent_id, message: "Add a logout button" }));
+    assert.equal(again.delivered, "new_turn");
+    assert.equal(again.previous_report, "Login page shipped\n\n---\n\nTests pass");
+    assert.deepEqual(owner.followUps, [{ workspaceId: "ws-1", taskId: "task-1", teamId: "t1", message: "Add a logout button" }]);
+    owner.missions.set("run-2", { settled: false, roles: [], answers: [] });
+    const halted = parse(await w.service.call("chat-1", "ws-1", "subagent_stop", { subagent_id: started.subagent_id }));
+    assert.deepEqual(owner.stopped, ["run-2"], "the follow-up's own run is stopped");
+    assert.equal(halted.state, "stopped");
+    assert.match((await w.service.call("chat-1", "ws-1", "subagent_start", { team: "nobody", task: "x" })).content[0].text, /No saved team/);
+  } finally { w.cleanup(); }
+});
+
+test("a parent stop also stops its team subagents, and a failed team reports why", async () => {
+  const owner = teamOwner();
+  const w = world({ teams: owner });
+  try {
+    const one = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { team: "t1", task: "a" }));
+    await w.service.stopParent("chat-1");
+    assert.deepEqual(owner.stopped, ["run-1"]);
+    assert.equal(w.service.runs().find(run => run.subagent_id === one.subagent_id).state, "stopped");
+    const two = parse(await w.service.call("chat-2", "ws-1", "subagent_start", { team: "t1", task: "b" }));
+    owner.missions.set("run-2", { settled: true, failed: true, detail: "Review contains failed or blocked work", roles: [], answers: ["Half done"] });
+    const failed = parse(await w.service.call("chat-2", "ws-1", "subagent_result", { subagent_id: two.subagent_id, wait_seconds: 0 }));
+    assert.equal(failed.state, "failed");
+    assert.match(failed.error, /failed or blocked work/);
+    assert.equal(failed.report, "Half done");
+  } finally { w.cleanup(); }
+});
+
+test("the workflow offers saved teams with a model for every role and reads a team run's closing answers", async () => {
+  const reads = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async (endpoint, body) => {
+    reads.push([endpoint, body]);
+    if (endpoint !== "/api/v1/ao/read") return { ok: true };
+    return { ok: true, teams: [
+      { id: "t1", name: "Squad", revision: 4, nodes: [{ role: "planner", settings: { name: "Lead" }, route: { model: "cpa/glm-5" } }] },
+      { id: "t2", name: "Unset", revision: 1, nodes: [{ role: "worker", route: { model: "default" } }] },
+    ], runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [
+      { id: "p", role: "planner", state: "finished", parents: [], receipt: { answer: "Plan" } },
+      { id: "w", role: "worker", state: "finished", parents: ["p"], settings: { name: "Builder" }, receipt: { answer: "Built it" } },
+    ] }] };
+  } });
+  const teams = await workflow.subagentTeams.list("ws-1");
+  assert.deepEqual(teams, [{ id: "t1", name: "Squad", revision: 4, roles: [{ name: "Lead", model: "glm-5" }] }], "a team with an unset model is not offered");
+  const state = await workflow.subagentTeams.state({ workspaceId: "ws-1", runId: "run-1" });
+  assert.equal(state.settled, true);
+  assert.equal(state.failed, false);
+  assert.deepEqual(state.answers, ["Built it"]);
+  assert.deepEqual(state.roles.map(role => [role.name, role.state]), [["planner", "finished"], ["Builder", "finished"]]);
+  workflow.dispose();
 });

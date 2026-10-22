@@ -109,7 +109,7 @@
   "cline": {
     "id": "cline-pass-switcher",
     "provider": "cline",
-    "version": "0.1.0-codingtools.5",
+    "version": "0.1.0-codingtools.7",
     "source": {
       "repository": "https://github.com/munmunjaklin458-afk/cline-pass-switcher",
       "commit": "02538a3137a08948a94f26f17dd4aeff8c029ed1",
@@ -125,7 +125,9 @@
       "DeepSeek V4.1 Flash's dated builds (deepseek-v4.1-flash-1017) take the same none/low/high/max efforts",
       "Streams are SSE-framed for cross-format requests (Claude /v1/messages, Responses) and raw for OpenAI Chat, by CPA's request_path; multiline JSON chunks are compacted (from #352)",
       "Every other Cline Pass model takes OpenRouter's minimal/low/medium/high/xhigh/max efforts (suffix to body); none and ultra stay refused",
-      "A tool call a model writes as text (Qwen XML <tool_call><function=…><parameter=…>, or JSON in <tool_call>) to a tool the request offered becomes a real tool_calls entry, streamed or whole, so Claude Code runs it"
+      "A tool call a model writes as text (Qwen XML <tool_call><function=…><parameter=…>, or JSON in <tool_call>) to a tool the request offered becomes a real tool_calls entry, streamed or whole, so Claude Code runs it",
+      "A request's reasoning effort (body reasoning_effort, or a model(level) suffix, which wins) runs at the model's nearest level, a tie going up; auto or an unknown word sends none. A level the model lacked was a 400, retried by Claude Code until the launch looked stuck",
+      "A model Cline lists but no longer serves (its 502 \"model not found\") is a non-retryable 404: Claude Code retried the 502 for about four minutes before the chat failed"
     ],
     "build": {
       "go": "1.27.3",
@@ -134,9 +136,9 @@
     },
     "platforms": {
       "win32/x64": {
-        "path": "windows/amd64/cline-pass-switcher-v0.1.0-codingtools.5.dll",
-        "sha256": "3a635fee93736fba27a1a444915ff08128031c798ffaef0bc582b994c15a5769",
-        "size": 7865856
+        "path": "windows/amd64/cline-pass-switcher-v0.1.0-codingtools.7.dll",
+        "sha256": "55ae02ccdad336f0e1418fd15f42cb4273e30ad9416dc566f4ddb2fb10d8bc9e",
+        "size": 7868928
       }
     }
   }

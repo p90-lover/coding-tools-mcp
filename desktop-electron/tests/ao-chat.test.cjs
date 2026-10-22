@@ -357,7 +357,7 @@ test("a new chat's prompt is Codex's \"Do anything\" in either mode; follow-up a
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
     exports: component, require: name => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : name === "./ao-chat" ? chat
       : name === "./ChatWorkbench" ? { useWorkbenchAutoOpen() {} }
-      : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null) } : {},
+      : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), TurnRestart: react.createContext({ restarting: false }) } : {},
   });
   const walk = item => !item || typeof item !== "object" ? [] : Array.isArray(item) ? item.flatMap(walk) : [item, ...walk(item.props?.children)];
   const base = { runs: [], tasks: [], selectedTaskId: "", busy: false, loadDescription: async () => "", send: async () => {}, openStructure() {}, approvals: [], approve() {}, describeRoute: () => "", retryStart() {} };
@@ -485,14 +485,53 @@ function surfaceComposer(seed = {}) {
     "./AgentOrchestratorCanvas": { AgentOrchestratorCanvas: "Canvas" },
     "./AgentOrchestratorOriginalSurface": { AgentOrchestratorOriginalSurface: "OriginalBoard" },
     "./ao-chat": chat,
+    "./chat-split": feature("chat-split.ts"),
     "./page-visibility": { useSurfaceHidden: () => () => false, pageHidden: () => false, onAoPush: () => () => {} },
   };
-  const surface = loadSurface(react, { localStorage: { getItem: () => "w", setItem() {} }, structuredClone }, imports);
+  const surface = loadSurface(react,{ localStorage: { getItem: () => "w", setItem() {} }, structuredClone, crypto: globalThis.crypto }, imports);
   const walk = item => !item || typeof item !== "object" ? [] : Array.isArray(item) ? item.flatMap(walk) : [item, ...walk(item.props?.children)];
   const render = () => { cursor = 0; refCursor = 0; return surface.AgentOrchestratorSurface({ language: "en", setError() {} }); };
   const currentChat = () => walk(render()).find(item => item.type === "Chat");
   return { state, calls, render, walk, currentChat };
 }
+
+test("split view: Split view and New chat add panes, the sidebar fills the focused pane, and closing the window's chat promotes the next", () => {
+  const fixture = surfaceComposer({ chatTaskId: "t1" });
+  const list = () => fixture.walk(fixture.render()).find(item => item.props?.actions?.openSplit);
+  const panes = () => plain(fixture.state.splitPanes.map(item => [item.taskId, item.col, item.row]));
+  assert.equal(fixture.currentChat().props.onClosePane, undefined, "one chat alone has no Close split view");
+
+  list().props.actions.openSplit("w", "t2");
+  assert.deepEqual(panes(), [["t2", 1, 0]], "Open in ▸ Split view: a column to the right");
+  assert.equal(fixture.state.focusedPane, fixture.state.splitPanes[0].id, "and it is focused");
+  list().props.actions.openSplit("w", "t1");
+  assert.equal(fixture.state.focusedPane, "main", "a chat already open is focused, never opened twice");
+  assert.deepEqual(plain(list().props.openTaskIds), ["t1", "t2"], "the sidebar offers no Split view for them");
+
+  // The user's rule: New chat in a split window opens one more pane instead of replacing a chat.
+  list().props.actions.newChat();
+  assert.deepEqual(panes(), [["t2", 1, 0], ["", 0, 1]], "two columns full: below the window's chat");
+  assert.equal(fixture.state.chatTaskId, "t1", "the window's own chat stays");
+  const draft = fixture.state.splitPanes[1];
+  assert.equal(fixture.state.focusedPane, draft.id);
+
+  // A sidebar click goes to the focused pane.
+  list().props.actions.select("t3");
+  assert.deepEqual(panes(), [["t2", 1, 0], ["t3", 0, 1]]);
+  assert.equal(list().props.selectedTaskId, "t3", "the sidebar marks the focused pane's chat");
+
+  const host = fixture.walk(fixture.render()).find(item => Array.isArray(item.props?.panes));
+  assert.deepEqual(plain(host.props.panes.map(item => [item.content.props.pane.workspaceId, item.content.props.pane.taskId])), [["w", "t2"], ["w", "t3"]],
+    "each pane is a Surface of its own, told which chat to show");
+  assert.equal(typeof fixture.currentChat().props.onClosePane, "function", "while split the window's chat has Close split view too");
+
+  // Closing the window's chat: the first pane with a chat, by column then row, takes its place.
+  fixture.currentChat().props.onClosePane();
+  assert.equal(fixture.state.chatTaskId, "t3");
+  assert.deepEqual(panes(), [["t2", 1, 0]]);
+  host.props.panes[0].content.props.pane.onClose();
+  assert.deepEqual(panes(), [], "closing the last pane leaves one chat");
+});
 
 test("Surface defaults to red Single and sends only one explicit route without saving a reusable team", async () => {
   const fixture = surfaceComposer();
@@ -1203,6 +1242,28 @@ test("a tool title with a path reads by its file name in the folded line, never 
     "Search for every place the context meter…");
   const read = (id, path) => ({ id, kind: "tool", status: "completed", text: `Read ${path}` });
   assert.equal(chat.activitySummary([read("a", "C:/x/skills/a.md"), read("b", "C:/y/b.md")]), "Read a.md, Read b.md");
+});
+
+test("a steer reads as Claude Code's receipt: unread until the model's next request, read after", () => {
+  const at = (kind, id = kind) => ({ id, kind, status: "completed", text: kind === "steer" ? "use the other API" : "" });
+  const receipt = (items, finished = false) => chat.steerReceipts(items, finished).find((item) => item.kind === "steer").receipt;
+  // Mid-reply: the response in flight was written without it, its tool call too; what follows that call has it.
+  assert.equal(receipt([at("message"), at("steer")]), "unread", "just delivered");
+  assert.equal(receipt([at("message"), at("steer"), at("tool")]), "unread", "a call the response in flight made");
+  assert.equal(receipt([at("message"), at("steer"), at("tool"), at("reasoning")]), "read", "the next request had it");
+  // Waiting on a tool call: its result and the steer go back together, so the next output read it.
+  assert.equal(receipt([at("command"), at("steer")]), "unread");
+  assert.equal(receipt([at("command"), at("approval"), at("steer"), at("message")]), "read", "an approval row is no model output");
+  // A finished turn read every steer in it.
+  assert.equal(receipt([at("message"), at("steer")], true), "read");
+  // Items that did not change come back as they were (a poll rebuilds the list every second).
+  const items = [at("message"), at("steer"), at("tool"), at("message", "m2")];
+  const marked = chat.steerReceipts(items, false);
+  assert.equal(chat.steerReceipts(marked, false), marked, "already marked: the same list");
+  assert.equal(marked[0], items[0]);
+  assert.equal(chat.steerReader("Claude Code · deepseek-v4.1-flash · high"), "Claude");
+  assert.equal(chat.steerReader("Codex · gpt-5.5"), "Codex");
+  assert.equal(chat.steerReader(undefined), "Claude");
 });
 
 test("an answered request is no row of its own: its answer shows on the call it let run", () => {

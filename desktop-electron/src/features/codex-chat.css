@@ -99,6 +99,13 @@
   background: var(--ao-blue); pointer-events: none; }
 .cx-thread-row[data-drop="before"]::before { top: -1px; }
 .cx-thread-row[data-drop="after"]::before { bottom: -1px; }
+/* A project dragged into place: the same line, above or below the project under the pointer. */
+.cx-project-item { position: relative; }
+.cx-project-item.is-dragging { opacity: .45; }
+.cx-project-item[data-drop]::before { content: ""; position: absolute; left: 6px; right: 6px; z-index: 1; height: 2px; border-radius: 1px;
+  background: var(--ao-blue); pointer-events: none; }
+.cx-project-item[data-drop="before"]::before { top: -1px; }
+.cx-project-item[data-drop="after"]::before { bottom: -1px; }
 .cx-popover { position: fixed; z-index: 70; display: grid; gap: 10px; width: 260px; padding: 12px; border: 1px solid var(--ao-line); border-radius: 10px;
   background: var(--color-bg-primary); box-shadow: 0 12px 36px rgb(0 0 0 / 18%); color: var(--color-text-primary); font-size: 13px; }
 .cx-popover strong { font-size: 13px; }
@@ -396,6 +403,11 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
   font: inherit; font-size: 12px; line-height: 20px; cursor: pointer; }
 .cx-queued-send-now:hover:not(:disabled) { background: var(--cx-hover); color: var(--color-text-primary); }
 .cx-queued-send-now:disabled { opacity: .4; cursor: default; }
+/* A stuck turn's Restart, inline in its "may be stuck" line: the one thing to press there. */
+.cx-turn-restart { height: 20px; padding: 0 8px; border: 1px solid var(--cx-border, rgb(0 0 0 / .14)); border-radius: 5px; background: transparent;
+  color: var(--color-text-primary); font: inherit; font-size: 12px; line-height: 18px; cursor: pointer; vertical-align: baseline; }
+.cx-turn-restart:hover:not(:disabled) { background: var(--cx-hover); }
+.cx-turn-restart:disabled { opacity: .5; cursor: default; }
 .cx-sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 /* A message steered into a working turn: the user's own bubble, in the live timeline where it was sent. */
 .cx-live-item.kind-steer { display: block; margin: 6px 0; }
@@ -425,6 +437,17 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-user:hover .cx-msg-actions, .cx-answer:hover .cx-msg-actions, .cx-msg-actions:focus-within { opacity: 1; }
 .cx-msg-actions button { display: inline-grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--ao-muted); font-size: 13px; cursor: pointer; }
 .cx-msg-actions button:hover:not(:disabled) { background: var(--cx-hover); color: var(--color-text-primary); }
+/* A sent message's footer: the read receipt first and always shown, then the hover actions (Claude Code's row). */
+.cx-msg-foot { display: flex; align-items: center; justify-content: flex-end; gap: 2px; min-height: 26px; }
+.cx-receipt { position: relative; display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 6px; color: var(--ao-muted); outline: none; }
+.cx-receipt[data-receipt="unread"] svg { opacity: .5; }
+.cx-receipt[data-receipt="unread"]:is(:hover, :focus-visible) svg { opacity: 1; }
+.cx-receipt:focus-visible { box-shadow: 0 0 0 2px var(--cx-focus, rgb(59 130 246 / .5)); }
+/* Its tooltip shows at once, as Claude Code's (delay 0). */
+.cx-receipt[data-tip]::after { content: attr(data-tip); position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+  padding: 4px 8px; border-radius: 6px; background: #1f1f1f; color: #fff; font-size: 12px; font-weight: 500; line-height: 16px; white-space: nowrap;
+  pointer-events: none; opacity: 0; z-index: 5; }
+.cx-receipt[data-tip]:is(:hover, :focus-visible)::after { opacity: 1; }
 
 /* Work: the cards' turns collapsed under one line, live while a card works. */
 .cx-work { color: var(--ao-muted); font-size: 13px; }
@@ -1021,6 +1044,11 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-goal-editor .cx-text-button { background: transparent; color: var(--ao-muted); }
 .cx-goal-editor .cx-primary-button { background: var(--color-text-primary); color: var(--color-bg-primary); }
 .cx-goal-editor .cx-primary-button:disabled { opacity: .4; cursor: default; }
+/* The wake-up's note opens its editor: drawn as the bar's plain text, not a pill. */
+.cx-goal button.cx-wakeup-note { display: block; padding: 0; overflow: hidden; color: var(--ao-muted); text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.cx-goal button.cx-wakeup-note:hover { background: transparent; color: var(--color-text-primary); }
+.cx-wakeup-minutes { display: flex; align-items: center; gap: 6px; margin-top: 8px; color: var(--ao-muted); font-size: 12px; }
+.cx-wakeup-minutes input { width: 64px; padding: 4px 6px; border: 1px solid var(--ao-line); border-radius: 6px; background: var(--color-bg-primary); color: var(--color-text-primary); font: inherit; }
 /* Delete message: the same in-chat confirmation, its Delete button in the danger colour. */
 .cx-delete-confirm footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 .cx-delete-confirm .cx-text-button, .cx-delete-confirm .cx-primary-button { padding: 5px 12px; border: 0; border-radius: 8px; font-size: 12px; cursor: pointer; }

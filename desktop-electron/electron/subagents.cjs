@@ -48,16 +48,44 @@ const STARTERS = Object.freeze([
     instructions: "You review code for correctness: bugs, edge cases, error handling, security and missing tests. Do not edit files. Report findings ordered by severity, each with file, line and a concrete suggestion." },
 ]);
 
+// A subagent whose model, effort or window the chat agent picks itself always runs on Claude Code.
+const PICKED_HARNESS = "ao:claude-code";
+// A team's task becomes its chat's first message, which the board keeps to 8 KB.
+const MAX_TEAM_TASK = 7_000;
+const MAX_MODELS_LISTED = 200;
+const MAX_INSPECT_ITEMS = 60;
+
 const SUBAGENT_TOOL_DEFS = Object.freeze([
   { name: "subagent_list", title: "List subagents",
-    description: "The subagents the user set up for you (Runtime > Subagents): each one's id, what it is for and its model, plus how many may run at once. Start one with subagent_start.",
+    description: "The subagents the user set up for you (Runtime > Subagents): each one's id, what it is for and its model, the saved teams you can run as a subagent, plus how many may run at once. Start one with subagent_start.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false } },
+  { name: "subagent_models", title: "List subagent models",
+    description: "The models a subagent can run on when you pick one (subagent_start's model), each with its reasoning efforts and the context windows it accepts. Picked models always run on Claude Code.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false } },
   { name: "subagent_start", title: "Start a subagent",
-    description: "Start a subagent on a self-contained task. It works on its own in this project (it cannot see this conversation, so give it everything it needs: goal, files, constraints, what to report) and ends with a report you read with subagent_result. Several can run in parallel; keep working while they do.",
-    inputSchema: { type: "object", additionalProperties: false, required: ["agent", "task"], properties: {
-      agent: { type: "string", description: "The subagent's id (from subagent_list)" },
+    description: "Start a subagent (or a saved team) on a self-contained task. It works on its own in this project (it cannot see this conversation, so give it everything it needs: goal, files, constraints, what to report) and ends with a report you read with subagent_result. Several can run in parallel; keep working while they do. "
+      + "Optionally pick its model, effort and context window (from subagent_models); it then runs on Claude Code. Give `team` instead of `agent` to have a saved team (subagent_list) do the task as one subagent.",
+    inputSchema: { type: "object", additionalProperties: false, required: ["task"], properties: {
+      agent: { type: "string", description: "The subagent's id (from subagent_list). May be left out when you pick a model: it then has no role instructions beyond the task" },
+      team: { type: "string", description: "A saved team's id or name (from subagent_list), instead of agent; the team runs with its own models" },
       task: { type: "string", description: "The complete task for the subagent" },
+      model: { type: "string", description: "Run it on this model (an id from subagent_models), on Claude Code" },
+      effort: { type: "string", enum: [...EFFORTS], description: "Its reasoning effort (one the model offers, from subagent_models); runs it on Claude Code" },
+      context_window: { type: "integer", minimum: 4096, description: "Its context window in tokens (within the model's range, from subagent_models); runs it on Claude Code" },
       wait_seconds: { type: "integer", minimum: 0, maximum: MAX_WAIT_SECONDS, description: "Wait up to this long for its report (default 0: return at once)" },
+    } } },
+  { name: "subagent_message", title: "Message a subagent",
+    description: "Send a subagent you started a message. While it works, the message steers its current turn; once it has finished (or was stopped), it continues the same session with the message as a new turn, keeping everything it did, and its next report replaces the last one (returned here as previous_report). A team takes a message only once it has finished.",
+    inputSchema: { type: "object", additionalProperties: false, required: ["subagent_id", "message"], properties: {
+      subagent_id: { type: "string" },
+      message: { type: "string", description: "What to tell it: a correction, more detail, or the next task" },
+      wait_seconds: { type: "integer", minimum: 0, maximum: MAX_WAIT_SECONDS, description: "Wait up to this long for its report (default 0)" },
+    } } },
+  { name: "subagent_inspect", title: "Inspect a subagent",
+    description: "What a subagent is doing now: its turn state, its latest steps (messages, reasoning, commands, edits, tool calls), how long since it last did anything, a tool call still running, requests waiting on an answer, and its live output. For a team: each role's state and the answers so far.",
+    inputSchema: { type: "object", additionalProperties: false, required: ["subagent_id"], properties: {
+      subagent_id: { type: "string" },
+      items: { type: "integer", minimum: 1, maximum: MAX_INSPECT_ITEMS, description: "How many of its latest steps to show (default 20)" },
     } } },
   { name: "subagent_result", title: "Get a subagent's result",
     description: "A subagent's state and, once it has finished, its report. Waits up to wait_seconds (default 30) for it to finish.",
@@ -133,10 +161,12 @@ function cleanConfig(input) {
  * The service. `launchArgs(workspaceId, route, name)` gives AO's spawn arguments for a route (the
  * workflow's, so a subagent's model is honoured as a chat card's is); `harness()` is AO's harness
  * service (spawn, observe, resolveApproval, resolveInput, interrupt, exitAgent); `blockedRequest`
- * and `recommendedAnswer` are the workflow's (agent-orchestrator-workflow.cjs).
+ * and `recommendedAnswer` are the workflow's (agent-orchestrator-workflow.cjs). `models(workspaceId)`
+ * is the workflow's model catalog for Claude Code (a picked model is checked against it), and
+ * `teams()` the workflow's subagentTeams (list, start, followUp, state, stop).
  */
 function createSubagents({ statePath = null, launchArgs, harness, blockedRequest = () => true, recommendedAnswer = () => ({ action: "decline" }),
-  routeRefusal = async () => null, logger = console, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
+  routeRefusal = async () => null, models = null, teams = () => null, logger = console, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
   let config = null;
   const runs = new Map(); // AO session id -> run
   const launching = []; // the parent chat of each start AO has not answered yet
@@ -179,8 +209,9 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
   }
 
   const view = (run) => ({
-    subagent_id: run.id, agent: run.agentId, name: run.agentName, state: run.state, task: run.task.slice(0, 200),
-    elapsed_seconds: Math.round(((run.endedAt ?? now()) - run.startedAt) / 1000),
+    subagent_id: run.id, ...(run.kind === "team" ? { team: run.agentId } : { agent: run.agentId }), name: run.agentName,
+    ...(run.model ? { model: run.model } : {}), state: run.state, task: run.task.slice(0, 200),
+    elapsed_seconds: Math.round(((run.endedAt ?? now()) - run.startedAt) / 1000), ...(run.turns > 1 ? { turns: run.turns } : {}),
     ...(run.report ? { report: run.report } : {}), ...(run.error ? { error: run.error } : {}), ...(run.stopping ? { stopping: true } : {}),
   });
   const active = () => [...runs.values()].filter((run) => ACTIVE.has(run.state));
@@ -202,6 +233,8 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
   }
 
   function release(run) {
+    // A team's agents belong to its run, which settles (or is stopped) as a whole.
+    if (run.kind === "team") run.released = true;
     if (run.released === true) return Promise.resolve({ ok: true });
     if (!run.releasePromise) {
       const retained = !ACTIVE.has(run.state);
@@ -287,10 +320,39 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     return `API error 429, attempt ${attempt[1]} of ${attempt[2]}`;
   }
 
+  /** A team run's progress: settled with its closing answers as the report, or still going. */
+  async function checkTeam(run) {
+    let seen;
+    try { seen = await teams()?.state({ workspaceId: run.workspaceId, runId: run.runId }); }
+    catch (error) {
+      if (!ACTIVE.has(run.state) || run.stopping) return;
+      run.misses = (run.misses ?? 0) + 1;
+      if (run.misses >= 5) {
+        run.stopState = "failed";
+        run.error = `The team's run cannot be read: ${String(error?.message ?? error).slice(0, 300)}; awaiting confirmed settlement`;
+        await stop(run.id).catch(() => undefined);
+      }
+      return;
+    }
+    if (!seen || !ACTIVE.has(run.state)) return;
+    run.misses = 0;
+    if (run.stopping) {
+      if (seen.settled) await stop(run.id).catch(() => undefined);
+      return;
+    }
+    if (run.state === "starting") run.state = "running";
+    if (!seen.settled) return;
+    const report = (Array.isArray(seen.answers) ? seen.answers : []).join("\n\n---\n\n").slice(0, MAX_REPORT);
+    if (seen.cancelled) finish(run, "stopped", report ? { report } : {});
+    else if (seen.failed) finish(run, "failed", { error: String(seen.detail || "A role in the team failed").slice(0, 1000), ...(report ? { report } : {}) });
+    else finish(run, "completed", { report: report || "(The team finished without a written report.)" });
+  }
+
   async function check(run) {
     if (!ACTIVE.has(run.state)) return;
     const service = harness();
-    if (!run.stopping && now() - run.startedAt > read().settings.timeoutMinutes * 60_000) {
+    // A follow-up turn gets the whole time limit again.
+    if (!run.stopping && now() - (run.turnStartedAt ?? run.startedAt) > read().settings.timeoutMinutes * 60_000) {
       run.stopState = "timed_out";
       run.error = `Stopped after ${read().settings.timeoutMinutes} minutes (the Subagents page's time limit); awaiting confirmed settlement`;
       await stop(run.id).catch(() => undefined);
@@ -300,9 +362,11 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
       await stop(run.id).catch(() => undefined);
       return;
     }
+    if (run.kind === "team") return checkTeam(run);
     if (!service) return;
     let observed;
-    try { observed = await service.observe(run.id); }
+    // Pinned to the turn it is on: after a message, the previous turn's report is not this one's.
+    try { observed = await service.observe(run.id, run.turnId); }
     catch (error) {
       if (!ACTIVE.has(run.state) || run.stopping) return;
       run.misses = (run.misses ?? 0) + 1;
@@ -373,27 +437,93 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     }
   }
 
-  /** Starts a subagent for the chat session `parent` (an AO session id) in `workspaceId`. */
-  async function start(parent, workspaceId, { agent: wanted, task } = {}) {
-    const generation = stopGenerations.get(parent) ?? 0;
-    const { settings } = read();
-    if (!settings.enabled) throw new Error("Subagents are turned off on the Subagents page");
-    const key = text(wanted, 60).toLowerCase();
-    const agent = enabledAgents().find((item) => item.id === key || item.name.toLowerCase() === key);
-    if (!agent) throw new Error(`No enabled subagent "${wanted}"; subagent_list shows the ones you can start`);
-    const route = routeOf(agent);
-    if (!route) throw new Error(`"${agent.name}" has no model: the user sets one on the Subagents page (its own, or the default model)`);
-    const brief = text(task, MAX_TASK);
-    if (!brief) throw new Error("Give the subagent a task");
-    // Starts still waiting on AO count too: a chat agent calls tools in parallel, and each start
-    // checked the limits before any of them was running, so all of them went ahead.
+  /**
+   * Throws when another subagent for `parent` would pass a limit. Starts and messages still waiting
+   * on AO count too: a chat agent calls tools in parallel, and each start checked the limits before
+   * any of them was running, so all of them went ahead.
+   */
+  function checkRoom(parent, settings) {
     const holders = [...active().map((run) => run.parent), ...launching];
     if (holders.length >= settings.maxConcurrent) throw new Error(`${settings.maxConcurrent} subagents are already running (the limit); wait for one with subagent_result`);
     if (holders.filter((holder) => holder === parent).length >= settings.maxPerChat) {
       throw new Error(`This chat already runs ${settings.maxPerChat} subagents (the limit per chat); wait for one with subagent_result`);
     }
+  }
+
+  /** Claude Code's model catalog as the model pickers read it, or null when it cannot be read. */
+  const catalogFor = (workspaceId) => Promise.resolve().then(() => models?.(workspaceId) ?? null).catch(() => null);
+
+  /**
+   * The route a subagent runs on: its saved one, or, when the chat agent picked a model, effort or
+   * context window, Claude Code with those (the harness is never the chat agent's to pick). A pick
+   * the catalog does not offer is refused here, naming what is; an unreadable catalog leaves the
+   * launch's own check as the backstop.
+   */
+  async function pickedRoute(workspaceId, saved, { model, effort, context_window: contextWindow }) {
+    // Only effort or window: keep a saved Claude Code route's model (and its provider).
+    const inherit = (model === undefined || model === null) && saved?.harness_id === PICKED_HARNESS;
+    let id = inherit ? saved.model : text(model, 256);
+    if (!id) throw new Error("Name the model to run it on (subagent_models lists them); a picked effort or window runs on Claude Code");
+    const catalog = await catalogFor(workspaceId);
+    const offered = Array.isArray(catalog?.models) ? catalog.models : null;
+    if (offered && !offered.includes(id) && offered.includes(`cpa/${id}`)) id = `cpa/${id}`;
+    if (offered && offered.length && !catalog.stale && !offered.includes(id)) {
+      const why = catalog.unavailable?.[id] ?? catalog.unavailable?.[`cpa/${id}`];
+      throw new Error(`${id.replace(/^cpa\//, "")} is not offered to Claude Code${why ? ` (${String(why).slice(0, 200)})` : ""}; subagent_models lists the ones that are`);
+    }
+    const capabilities = catalog?.capabilities?.[id];
+    const chosenEffort = effort ?? (inherit ? saved.effort : undefined);
+    const chosenWindow = contextWindow ?? (inherit ? saved.context_window : undefined);
+    if (effort !== undefined && effort !== null && capabilities) {
+      const efforts = Array.isArray(capabilities.efforts) ? capabilities.efforts : [];
+      if (!efforts.length) throw new Error(`${id.replace(/^cpa\//, "")} takes no reasoning effort: ${String(capabilities.effortReason || "none is offered").slice(0, 200)}`);
+      if (!efforts.includes(effort)) throw new Error(`${id.replace(/^cpa\//, "")} offers the efforts ${efforts.join(", ")}`);
+    }
+    if (contextWindow !== undefined && contextWindow !== null && capabilities) {
+      const range = capabilities.contextWindow;
+      if (!range) throw new Error(`${id.replace(/^cpa\//, "")} takes no context window: ${String(capabilities.contextReason || "none is offered").slice(0, 200)}`);
+      if (!Number.isSafeInteger(contextWindow) || contextWindow < range.min || contextWindow > range.max) {
+        throw new Error(`${id.replace(/^cpa\//, "")} takes a context window from ${range.min} to ${range.max} tokens`);
+      }
+    }
+    return cleanRoute({ harness_id: PICKED_HARNESS, model: id, ...(inherit && saved.provider_id ? { provider_id: saved.provider_id } : {}),
+      ...(chosenEffort !== undefined && chosenEffort !== null ? { effort: chosenEffort } : {}),
+      ...(chosenWindow !== undefined && chosenWindow !== null ? { context_window: chosenWindow } : {}) });
+  }
+
+  /** Starts a subagent for the chat session `parent` (an AO session id) in `workspaceId`. */
+  async function start(parent, workspaceId, { agent: wanted, team: wantedTeam, task, ...picks } = {}) {
+    const generation = stopGenerations.get(parent) ?? 0;
+    const { settings } = read();
+    if (!settings.enabled) throw new Error("Subagents are turned off on the Subagents page");
+    const brief = text(task, MAX_TASK);
+    if (!brief) throw new Error("Give the subagent a task");
+    if (wantedTeam !== undefined && wantedTeam !== null) {
+      if (wanted !== undefined || Object.values(picks).some((value) => value !== undefined && value !== null)) {
+        throw new Error("A team runs with its own roles and models; give team without agent, model, effort or context_window");
+      }
+      return startTeam(parent, workspaceId, wantedTeam, brief, settings, generation);
+    }
+    let agent;
+    if (wanted === undefined || wanted === null || wanted === "") {
+      if (picks.model === undefined || picks.model === null) throw new Error("Name a subagent (subagent_list), a team, or a model to run it on");
+      agent = { id: "custom", name: "Custom", instructions: "", route: null };
+    } else {
+      const key = text(wanted, 60).toLowerCase();
+      agent = enabledAgents().find((item) => item.id === key || item.name.toLowerCase() === key);
+      if (!agent) throw new Error(`No enabled subagent "${wanted}"; subagent_list shows the ones you can start`);
+    }
+    if (!routeOf(agent) && (picks.model === undefined || picks.model === null)) {
+      throw new Error(`"${agent.name}" has no model: the user sets one on the Subagents page (its own, or the default model), or pick one (subagent_models)`);
+    }
+    checkRoom(parent, settings);
+    // The place is taken and the launch registered before anything is awaited, so a parallel
+    // start sees it and a parent stop waits for it, while a picked model is checked.
     launching.push(parent);
-    const pending = launch(parent, workspaceId, agent, route, brief, settings, generation);
+    const picked = Object.values(picks).some((value) => value !== undefined && value !== null);
+    const pending = picked
+      ? pickedRoute(workspaceId, routeOf(agent), picks).then((route) => launch(parent, workspaceId, agent, route, brief, settings, generation))
+      : launch(parent, workspaceId, agent, routeOf(agent), brief, settings, generation);
     if (!pendingLaunches.has(parent)) pendingLaunches.set(parent, new Set());
     pendingLaunches.get(parent).add(pending);
     try { return await pending; }
@@ -420,25 +550,57 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     // AO honours an explicit permission mode only on Claude Code and Codex; opencode keeps its own.
     const explicit = ["ao:claude-code", "ao:codex"].includes(route.harness_id);
     const args = launchArgs(workspaceId, { ...route, ...(explicit ? permissions : {}) }, `Subagent · ${agent.name}`);
-    const prompt = [
-      agent.instructions,
-      "You are a subagent: the main chat agent gave you the task below. Nobody can answer questions while you work, so when something is ambiguous make a reasonable choice and say so in your report.",
-      "End with a concise report for the main agent: what you found or changed (files), commands you ran and their results, and anything left undone.",
-      `Task:\n${brief}`,
-    ].filter(Boolean).join("\n\n");
+    const prompt = [agent.instructions, SUBAGENT_NOTE, REPORT_NOTE, `Task:\n${brief}`].filter(Boolean).join("\n\n");
     const service = harness();
     if (!service) throw new Error("Agent Orchestrator is not running");
     const id = await service.spawn({ ...args, prompt, plain: true, subagent: true });
-    const run = { id, parent, workspaceId, agentId: agent.id, agentName: agent.name, task: brief, startedAt: now(), endedAt: null,
-      state: "starting", report: "", error: "" };
+    const run = { id, parent, workspaceId, agentId: agent.id, agentName: agent.name, model: route.model.replace(/^cpa\//, ""), task: brief,
+      startedAt: now(), endedAt: null, state: "starting", report: "", error: "", turns: 1 };
     remember(run);
-    if ((stopGenerations.get(parent) ?? 0) !== generation) {
-      const outcomes = await Promise.allSettled([stop(id, parent), stopParent(id)]);
-      const failed = outcomes.find(outcome => outcome.status === "rejected");
-      if (failed) throw failed.reason;
-    }
+    await stopIfParentStopped(run, parent, generation);
     logger?.info?.("subagents.started", { agent: agent.id, harness: route.harness_id });
     return run;
+  }
+
+  /** A start whose chat was stopped while AO created it is stopped at once (stopParent). */
+  async function stopIfParentStopped(run, parent, generation) {
+    if ((stopGenerations.get(parent) ?? 0) === generation) return;
+    const outcomes = await Promise.allSettled([stop(run.id, parent), stopParent(run.id)]);
+    const failed = outcomes.find(outcome => outcome.status === "rejected");
+    if (failed) throw failed.reason;
+  }
+
+  const SUBAGENT_NOTE = "You are a subagent: the main chat agent gave you the task below. Nobody can answer questions while you work, so when something is ambiguous make a reasonable choice and say so in your report.";
+  const REPORT_NOTE = "End with a concise report for the main agent: what you found or changed (files), commands you ran and their results, and anything left undone.";
+
+  /** Starts a saved team on the task as one subagent: its run is a chat of its own (subagentTeams). */
+  async function startTeam(parent, workspaceId, wanted, brief, settings, generation) {
+    const service = teams();
+    if (!service) throw new Error("Agent Orchestrator is not running");
+    if (brief.length > MAX_TEAM_TASK) throw new Error(`A team's task can be at most ${MAX_TEAM_TASK} characters (it becomes its chat's first message)`);
+    const key = text(wanted, 80).toLowerCase();
+    const team = (await service.list(workspaceId)).find((item) => item.id.toLowerCase() === key || item.name.toLowerCase() === key);
+    if (!team) throw new Error(`No saved team "${wanted}" with a model for every role; subagent_list shows the teams`);
+    checkRoom(parent, settings);
+    launching.push(parent);
+    const pending = (async () => {
+      const message = [SUBAGENT_NOTE.replace("You are a subagent", "Your team is working as a subagent"), REPORT_NOTE, `Task:\n${brief}`].join("\n\n");
+      const started = await service.start({ workspaceId, teamId: team.id, title: `Subagent team · ${team.name}`.slice(0, 120), message });
+      const run = { id: `team-${started.runId}`, kind: "team", runId: started.runId, taskId: started.taskId, parent, workspaceId,
+        agentId: team.id, agentName: team.name, task: brief, startedAt: now(), endedAt: null, state: "starting", report: "", error: "", turns: 1 };
+      remember(run);
+      await stopIfParentStopped(run, parent, generation);
+      logger?.info?.("subagents.team_started", { roles: team.roles.length });
+      return run;
+    })();
+    if (!pendingLaunches.has(parent)) pendingLaunches.set(parent, new Set());
+    pendingLaunches.get(parent).add(pending);
+    try { return await pending; }
+    finally {
+      launching.splice(launching.indexOf(parent), 1);
+      pendingLaunches.get(parent).delete(pending);
+      if (!pendingLaunches.get(parent).size) pendingLaunches.delete(parent);
+    }
   }
 
   async function stop(id, parent = null, includeRetained = false) {
@@ -451,7 +613,18 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     run.stopping = true;
     run.stopPromise = Promise.resolve().then(async () => {
       const service = harness();
-      if (active) {
+      if (active && run.kind === "team") {
+        // The workflow's mission Stop: no more work starts and its owned agents are interrupted.
+        const owner = teams();
+        if (!owner) throw new Error("Agent Orchestrator is not running; the team's stop was not confirmed");
+        if (!run.stopAcknowledged) {
+          await owner.stop({ workspaceId: run.workspaceId, runId: run.runId });
+          run.stopAcknowledged = true;
+        }
+        const seen = await owner.state({ workspaceId: run.workspaceId, runId: run.runId });
+        if (!seen?.settled) throw new Error("Stop requested; the team is finishing turns it already sent");
+        if (!run.report && Array.isArray(seen.answers) && seen.answers.length) run.report = seen.answers.join("\n\n---\n\n").slice(0, MAX_REPORT);
+      } else if (active) {
         if (typeof service?.interrupt !== "function") throw new Error("Agent Orchestrator is not running; the subagent's stop was not confirmed");
         if (!run.stopAcknowledged) {
           await service.interrupt(run.id);
@@ -483,6 +656,118 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     if (failures.length) throw new Error(failures.join("; "));
   }
 
+  const ownRun = (parent, id) => {
+    const run = runs.get(String(id ?? ""));
+    if (!run || run.parent !== parent) throw new Error("No such subagent in this chat; subagent_status lists the ones you started.");
+    return run;
+  };
+
+  /**
+   * A message from the chat agent: it steers the subagent's running turn, or, once the subagent
+   * has finished, continues the same session (its released agent resumed) as a new turn. A team
+   * takes one only once its run has settled, as a new run of the same chat.
+   */
+  async function message(parent, id, words) {
+    const run = ownRun(parent, id);
+    const body = text(words, MAX_TASK);
+    if (!body) throw new Error("Write the message for the subagent");
+    if (run.stopping) throw new Error("This subagent is stopping; message it once subagent_result shows it stopped");
+    if (run.resuming) throw new Error("This subagent is already taking a message; wait for it");
+    const messageId = () => `subagent:${run.id}:${(run.messages = (run.messages ?? 0) + 1)}`;
+    // Read first: one that finished since the last poll takes a new turn, not a steer.
+    if (ACTIVE.has(run.state)) await check(run).catch(() => undefined);
+    if (run.stopping) throw new Error("This subagent is stopping; message it once subagent_result shows it stopped");
+    if (ACTIVE.has(run.state)) {
+      if (run.kind === "team") throw new Error("A team takes a message only once it has finished; read its progress with subagent_inspect, or stop it");
+      if (run.state === "starting") throw new Error("This subagent has not begun its turn yet; message it once subagent_inspect shows it running");
+      const service = harness();
+      if (!service) throw new Error("Agent Orchestrator is not running");
+      const steered = await service.steer(run.id, body, messageId());
+      if (steered?.steered) return { delivered: "steered", ...view(run) };
+      // The turn ended as the message arrived: its report is collected before the next turn.
+      await check(run).catch(() => undefined);
+      if (ACTIVE.has(run.state)) throw new Error("The subagent's turn is ending; collect its report with subagent_result, then message it again");
+    }
+    const { settings } = read();
+    if (!settings.enabled) throw new Error("Subagents are turned off on the Subagents page");
+    checkRoom(parent, settings);
+    launching.push(parent);
+    run.resuming = true;
+    try {
+      const previous = run.report;
+      let turn = {};
+      if (run.kind === "team") {
+        const owner = teams();
+        if (!owner) throw new Error("Agent Orchestrator is not running");
+        const next = await owner.followUp({ workspaceId: run.workspaceId, taskId: run.taskId, teamId: run.agentId, message: body });
+        turn = { runId: next.runId };
+      } else {
+        // A released agent is resumed first; finish() may still be releasing it.
+        if (run.releasePromise) await run.releasePromise.catch(() => undefined);
+        const service = harness();
+        if (!service) throw new Error("Agent Orchestrator is not running");
+        if (!await service.continuable(run.id)) throw new Error("This subagent's session can no longer continue (removed, or its agent could not resume); start a new one with subagent_start");
+        const sent = await service.send(run.id, body, messageId());
+        turn = { turnId: sent.turnId };
+      }
+      Object.assign(run, turn, { state: "starting", released: false, turnStartedAt: now(), endedAt: null, report: "", error: "", stopState: undefined,
+        stopAcknowledged: false, misses: 0, turns: (run.turns ?? 1) + 1 });
+      schedule();
+      logger?.info?.("subagents.continued", { agent: run.agentId, turns: run.turns });
+      return { delivered: "new_turn", ...view(run), ...(previous ? { previous_report: previous } : {}) };
+    } finally {
+      run.resuming = false;
+      launching.splice(launching.indexOf(parent), 1);
+    }
+  }
+
+  const snippet = (value, max) => String(value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
+  /** What a subagent is doing now, read from AO (or, for a team, from its run). */
+  async function inspect(parent, id, items) {
+    const run = ownRun(parent, id);
+    if (ACTIVE.has(run.state)) await check(run).catch(() => undefined);
+    if (run.kind === "team") {
+      const seen = await teams()?.state({ workspaceId: run.workspaceId, runId: run.runId });
+      if (!seen) throw new Error("Agent Orchestrator is not running");
+      return { ...view(run), roles: seen.roles, ...(seen.detail ? { detail: seen.detail } : {}),
+        ...(ACTIVE.has(run.state) && seen.answers?.length ? { answers_so_far: seen.answers.map((answer) => snippet(answer, 2000)) } : {}) };
+    }
+    const service = harness();
+    if (!service) throw new Error("Agent Orchestrator is not running");
+    const seen = await service.observe(run.id, run.turnId);
+    const count = Number.isSafeInteger(items) ? Math.min(MAX_INSPECT_ITEMS, Math.max(1, items)) : 20;
+    const timeline = (Array.isArray(seen?.timeline) ? seen.timeline : []).slice(-count).map((item) => ({
+      kind: item.kind, status: item.status, ...(item.label ? { label: snippet(item.label, 120) } : {}), text: snippet(item.text, 600),
+      ...(Array.isArray(item.files) && item.files.length ? { files: item.files.slice(0, 20).map((file) => String(file?.path ?? "")) } : {}),
+    }));
+    const ago = (stamp) => Math.max(0, Math.round((now() - stamp) / 1000));
+    return {
+      ...view(run), session_status: seen?.status ?? null, turn_state: seen?.turnState ?? null,
+      ...(Number.isFinite(seen?.lastActivityAt) ? { last_activity_seconds_ago: ago(seen.lastActivityAt) } : {}),
+      ...(Number.isFinite(seen?.toolSince) ? { tool_running_seconds: ago(seen.toolSince) } : {}),
+      needs_input: seen?.needsInput === true,
+      // Answered for it on the next poll (see answer()); shown so a stall waiting on one is visible.
+      pending_requests: (Array.isArray(seen?.approvals) ? seen.approvals : []).map((approval) => ({ kind: approval.kind,
+        ...(approval.tool ? { tool: snippet(approval.tool, 80) } : {}), ...(approval.command ? { command: snippet(approval.command, 300) } : {}) })),
+      ...(ACTIVE.has(run.state) && seen?.liveOutput ? { live_output: String(seen.liveOutput).slice(-2000) } : {}),
+      timeline,
+    };
+  }
+
+  /** The models a chat agent may pick for a subagent: Claude Code's catalog, with efforts and windows. */
+  async function modelList(workspaceId) {
+    const catalog = await catalogFor(workspaceId);
+    if (!Array.isArray(catalog?.models)) throw new Error("Claude Code's model list cannot be read right now; try again shortly");
+    const list = catalog.models.slice(0, MAX_MODELS_LISTED).map((id) => {
+      const capabilities = catalog.capabilities?.[id] ?? {};
+      return { id: id.replace(/^cpa\//, ""), ...(Array.isArray(capabilities.efforts) && capabilities.efforts.length ? { efforts: capabilities.efforts } : {}),
+        ...(capabilities.contextWindow ? { context_window: { min: capabilities.contextWindow.min, max: capabilities.contextWindow.max } } : {}),
+        ...(capabilities.contextLimit ? { context_limit: capabilities.contextLimit } : {}) };
+    });
+    return { harness: "Claude Code (picked models always run on it)", models: list,
+      ...(catalog.models.length > MAX_MODELS_LISTED ? { more: catalog.models.length - MAX_MODELS_LISTED } : {}), ...(catalog.stale ? { stale: true } : {}) };
+  }
+
   /** One subagent tool call from the chat session `parent` (an AO session id) in `workspaceId`. */
   async function call(parent, workspaceId, name, args = {}) {
     if (!parent) return failure("This chat's session is not ready yet; try again in a moment.");
@@ -490,16 +775,32 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
       switch (name) {
         case "subagent_list": {
           const { settings } = read();
+          // An unreadable team list (AO not up yet) leaves the subagents listed.
+          const saved = await Promise.resolve().then(() => teams()?.list(workspaceId) ?? []).catch(() => []);
           return textResult({ enabled: settings.enabled, max_running: settings.maxConcurrent, max_per_chat: settings.maxPerChat,
             time_limit_minutes: settings.timeoutMinutes,
             subagents: enabledAgents().map((agent) => ({ id: agent.id, name: agent.name, description: agent.description,
-              model: routeOf(agent)?.model ?? null, ready: Boolean(routeOf(agent)) })) });
+              model: routeOf(agent)?.model ?? null, ready: Boolean(routeOf(agent)) })),
+            teams: saved.map((team) => ({ id: team.id, name: team.name, roles: team.roles })),
+            pick_a_model: "subagent_start takes model, effort and context_window (subagent_models lists them); a picked model runs on Claude Code" });
         }
+        case "subagent_models": return textResult(await modelList(workspaceId));
         case "subagent_start": {
-          const run = await start(parent, workspaceId, { agent: args.agent, task: args.task });
+          const run = await start(parent, workspaceId, { agent: args.agent, team: args.team, task: args.task,
+            model: args.model, effort: args.effort, context_window: args.context_window });
           if (Number.isSafeInteger(args.wait_seconds) && args.wait_seconds > 0) await waitFor(run, args.wait_seconds);
           return textResult(view(run));
         }
+        case "subagent_message": {
+          const sent = await message(parent, args.subagent_id, args.message);
+          const run = runs.get(sent.subagent_id);
+          if (run && Number.isSafeInteger(args.wait_seconds) && args.wait_seconds > 0) {
+            await waitFor(run, args.wait_seconds);
+            return textResult({ ...sent, ...view(run) });
+          }
+          return textResult(sent);
+        }
+        case "subagent_inspect": return textResult(await inspect(parent, args.subagent_id, args.items));
         case "subagent_result": {
           const run = runs.get(String(args.subagent_id ?? ""));
           if (!run || run.parent !== parent) return failure("No such subagent in this chat; subagent_status lists the ones you started.");

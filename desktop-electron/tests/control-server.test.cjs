@@ -760,6 +760,85 @@ test("the Codex model catalog is served from the last good copy when the live re
   }
 });
 
+test("the catalog copy is read off the main thread and an unchanged catalog is not written again", async () => {
+  // Each catalog request read, parsed and rewrote ~600 KB synchronously, stalling the app on a busy disk.
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const os = require("node:os");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ct-models-quiet-"));
+  let models = ["a"];
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    getBrowserHost: () => null,
+    getPreferences: () => ({}),
+    modelsCacheDir: dir,
+    modelsCacheWaitMs: 2_000,
+    fetchNative: async () => new Response(JSON.stringify({ models }), { headers: { "content-type": "application/json" } }),
+  }).start();
+  const { endpoint, token } = server.descriptor();
+  const ask = () => fetch(`${endpoint}/v1/network/native-fetch`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "x-native-url": "https://chatgpt.com/backend-api/codex/models?client_version=1",
+      "x-native-authorization": "Bearer account-a", "x-native-method": "GET" },
+  });
+  const { readFileSync } = fs;
+  const { writeFile } = fs.promises;
+  const syncReads = [];
+  let writes = 0;
+  fs.readFileSync = function (file, ...rest) { if (String(file).startsWith(dir)) syncReads.push(file); return readFileSync.call(this, file, ...rest); };
+  fs.promises.writeFile = function (file, ...rest) { if (String(file).startsWith(dir)) writes += 1; return writeFile.call(this, file, ...rest); };
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 100));
+  try {
+    for (let i = 0; i < 3; i++) { assert.deepEqual(await (await ask()).json(), { models: ["a"] }); await settle(); }
+    assert.equal(writes, 1, "the same catalog is saved once");
+    models = ["a", "b"];
+    await (await ask()).arrayBuffer();
+    await settle();
+    assert.equal(writes, 2, "a changed catalog is saved");
+    assert.deepEqual(syncReads, [], "no synchronous read of the copy");
+  } finally {
+    fs.readFileSync = readFileSync;
+    fs.promises.writeFile = writeFile;
+    await server.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("catalog copies for sign-ins unused for a week and stray temporaries are pruned", async () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const os = require("node:os");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ct-models-prune-"));
+  const old = path.join(dir, "old-sign-in.json"), stray = path.join(dir, "x.json.1.tmp"), recent = path.join(dir, "recent.json");
+  for (const file of [old, stray, recent]) fs.writeFileSync(file, "{}");
+  const weekAgo = new Date(Date.now() - 8 * 24 * 60 * 60_000);
+  fs.utimesSync(old, weekAgo, weekAgo);
+  fs.utimesSync(stray, weekAgo, weekAgo);
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    getBrowserHost: () => null,
+    getPreferences: () => ({}),
+    modelsCacheDir: dir,
+    modelsCacheWaitMs: 2_000,
+    fetchNative: async () => new Response(JSON.stringify({ models: ["a"] }), { headers: { "content-type": "application/json" } }),
+  }).start();
+  const { endpoint, token } = server.descriptor();
+  try {
+    await (await fetch(`${endpoint}/v1/network/native-fetch`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "x-native-url": "https://chatgpt.com/backend-api/codex/models?client_version=1",
+        "x-native-authorization": "Bearer account-a", "x-native-method": "GET" },
+    })).arrayBuffer();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.ok(!fs.existsSync(old) && !fs.existsSync(stray), "a sign-in's copy unused for a week and a stray temporary are removed");
+    assert.ok(fs.existsSync(recent), "a recent copy for another sign-in stays");
+    assert.equal(fs.readdirSync(dir).filter((name) => name !== "recent.json" && name.endsWith(".json")).length, 1, "the new copy is saved");
+  } finally {
+    await server.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a native fetch aborted before its response arrives fails instead of hanging", async () => {
   const { EventEmitter } = require("node:events");
   const { fetchNativeWithProxyAuth } = require("../electron/control-server.cjs");

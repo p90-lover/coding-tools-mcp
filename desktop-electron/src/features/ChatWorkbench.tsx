@@ -5,6 +5,7 @@ import type { JsonObject } from "../api/contracts";
 import { Caret, Icon } from "../icons";
 import { contextFraction, tokensShort, type ChatAgentSession } from "./ao-chat";
 import { costLabel, costSourceLabel, readCpaUsage, type CpaUsage, type CpaUsageRange } from "./cpa-usage";
+import { onWindowFocus, windowUnfocused } from "./page-visibility";
 
 // The chat's side panel, as Codex shows one beside a thread: tabs for the page the chat's agent
 // opened in its own browser (a native view drawn over the pane's slot), the changes in its
@@ -337,22 +338,32 @@ function OverviewPane({ session, sessionId, workspaceId, onTool }: {
   useEffect(() => {
     let live = true;
     const scope: JsonObject = workspaceId ? { workspaceId } : {};
+    // The changed-file count runs git status over the whole worktree (untracked files too): one at a
+    // time, not while you are in another app (refreshed when you come back), and without the diff,
+    // which this block never shows (`summary`). Every 5 s it kept a busy hard disk walking the tree.
+    let counting = false;
+    const countChanges = () => {
+      if (counting || windowUnfocused()) return;
+      counting = true;
+      void paneCall("chat_changes", { sessionId, ...scope, summary: true }).then((result) => {
+        if (live) setChanges({ root: String(result.root ?? ""), branch: String(result.branch ?? ""), count: Array.isArray(result.entries) ? result.entries.length : 0 });
+      }).catch(() => undefined).finally(() => { counting = false; });
+    };
     const read = () => {
       if (document.visibilityState !== "visible") return;
       void paneCall("chat_context", { sessionIds: [sessionId] }).then((result) => {
         const found = (result.sessions as Record<string, { controller?: string | null; usage?: { contextUsed: number | null; contextWindow: number | null } | null }> | undefined)?.[sessionId];
         if (live) setContext({ used: found?.usage?.contextUsed ?? null, window: found?.usage?.contextWindow ?? session?.contextWindow ?? null, controller: found?.controller ?? null });
       }).catch(() => undefined);
-      void paneCall("chat_changes", { sessionId, ...scope }).then((result) => {
-        if (live) setChanges({ root: String(result.root ?? ""), branch: String(result.branch ?? ""), count: Array.isArray(result.entries) ? result.entries.length : 0 });
-      }).catch(() => undefined);
+      countChanges();
       void paneCall("chat_processes", { sessionIds: [sessionId], ...scope }).then((result) => {
         if (live) setTasks((((result.sessions as { commands: Command[] }[] | undefined)?.[0]?.commands) ?? []).filter(isLive));
       }).catch(() => undefined);
     };
     read();
     const timer = window.setInterval(read, OVERVIEW_POLL_MS);
-    return () => { live = false; window.clearInterval(timer); };
+    const offFocus = onWindowFocus(read);
+    return () => { live = false; window.clearInterval(timer); offFocus(); };
   }, [sessionId, workspaceId, session?.contextWindow]);
   // Usage changes slowly and the main process caches it for 20 s: once per range, then each minute.
   useEffect(() => {

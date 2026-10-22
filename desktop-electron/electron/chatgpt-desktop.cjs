@@ -187,18 +187,35 @@ function createChatGptDesktopHost({
 
   function watchAccounts() {
     stopWatchingAccounts();
-    const current = { directory: currentCpaAuthDir(), watcher: null, timer: null, debounce: null, signature: accountSignature() };
+    // The baseline is read once, synchronously, when watching starts (startup, a moved folder);
+    // the repeated checks below run off the main thread and never overlap.
+    const current = { directory: currentCpaAuthDir(), watcher: null, timer: null, debounce: null, signature: accountSignature(), reading: false, again: false };
+    const compare = async () => {
+      if (current.reading) { current.again = true; return; }
+      current.reading = true;
+      try {
+        do {
+          current.again = false;
+          const next = await accountSignatureAsync();
+          if (accountWatch !== current) return;
+          if (next === current.signature) continue;
+          current.signature = next;
+          emit();
+          scheduleAutoStart();
+        } while (current.again && accountWatch === current);
+      } catch (error) {
+        logger?.warn?.("chatgpt_desktop.account_check_failed", { message: error?.message });
+      } finally {
+        current.reading = false;
+      }
+    };
     const check = () => {
       clearTimeout(current.debounce);
       current.debounce = setTimeout(() => {
         if (accountWatch !== current) return;
         // CPA's auth-dir setting can move; follow it.
         if (currentCpaAuthDir() !== current.directory) { watchAccounts(); emit(); return; }
-        const next = accountSignature();
-        if (next === current.signature) return;
-        current.signature = next;
-        emit();
-        scheduleAutoStart();
+        void compare();
       }, SYNC_DEBOUNCE_MS);
     };
     if (current.directory) {
@@ -248,6 +265,23 @@ function createChatGptDesktopHost({
     return packageInfo;
   }
 
+  // CPA identifies a Codex account by its `type`, not its file name: accounts added through some
+  // flows are saved as "<email>.json" with no "codex-" prefix. The type check decides.
+  function cpaAccountOf(file, name, raw) {
+    if (!raw || String(raw.type || "").toLowerCase() !== "codex" || typeof raw.refresh_token !== "string") return null;
+    const email = typeof raw.email === "string" ? raw.email : jwtEmail(raw.id_token);
+    return {
+      slotId: cpaSlotId(raw.account_id, email),
+      source: "cpa",
+      file,
+      email: email || null,
+      plan: planFromFileName(name, email),
+      disabled: raw.disabled === true,
+    };
+  }
+
+  const byEmail = (a, b) => String(a.email).localeCompare(String(b.email));
+
   function cpaAccounts() {
     let directory;
     try { directory = resolveCpaAuthDir(); } catch { return []; }
@@ -255,24 +289,55 @@ function createChatGptDesktopHost({
     try { names = fs.readdirSync(directory); } catch { return []; }
     const accounts = [];
     for (const name of names) {
-      // CPA identifies a Codex account by its `type`, not its file name: accounts added through
-      // some flows are saved as "<email>.json" with no "codex-" prefix. The type check below decides.
       if (!/\.json$/i.test(name)) continue;
       const file = path.join(directory, name);
       let raw;
       try { raw = readJson(file); } catch { continue; }
-      if (!raw || String(raw.type || "").toLowerCase() !== "codex" || typeof raw.refresh_token !== "string") continue;
-      const email = typeof raw.email === "string" ? raw.email : jwtEmail(raw.id_token);
-      accounts.push({
-        slotId: cpaSlotId(raw.account_id, email),
-        source: "cpa",
-        file,
-        email: email || null,
-        plan: planFromFileName(name, email),
-        disabled: raw.disabled === true,
-      });
+      const account = cpaAccountOf(file, name, raw);
+      if (account) accounts.push(account);
     }
-    return accounts.sort((a, b) => String(a.email).localeCompare(String(b.email)));
+    return accounts.sort(byEmail);
+  }
+
+  // The same list for the timers (account poll every 15 s, token sync every 60 s), read off the
+  // main thread: the synchronous read of every CPA auth file (21 here) stalled the whole app for
+  // seconds on a busy hard disk. A file whose size and time are unchanged is not read again.
+  const parsedAuthFiles = new Map(); // file -> { size, mtimeMs, account }
+  async function cpaAccountsAsync() {
+    let directory;
+    try { directory = resolveCpaAuthDir(); } catch { return []; }
+    let names;
+    try { names = await fs.promises.readdir(directory); } catch { return []; }
+    const files = names.filter((name) => /\.json$/i.test(name)).map((name) => [name, path.join(directory, name)]);
+    const accounts = await Promise.all(files.map(async ([name, file]) => {
+      let stat;
+      try { stat = await fs.promises.stat(file); } catch { return null; }
+      const known = parsedAuthFiles.get(file);
+      if (known && known.size === stat.size && known.mtimeMs === stat.mtimeMs) return known.account;
+      let raw = null;
+      try { raw = JSON.parse(await fs.promises.readFile(file, "utf8")); } catch { /* being written: not an account yet */ }
+      const account = cpaAccountOf(file, name, raw);
+      parsedAuthFiles.set(file, { size: stat.size, mtimeMs: stat.mtimeMs, account });
+      return account;
+    }));
+    const present = new Set(files.map(([, file]) => file));
+    for (const file of parsedAuthFiles.keys()) if (!present.has(file)) parsedAuthFiles.delete(file);
+    return accounts.filter(Boolean).sort(byEmail);
+  }
+
+  const fileExists = (file) => fs.promises.access(file).then(() => true, () => false);
+
+  /** accountSignature(), read off the main thread. */
+  async function accountSignatureAsync() {
+    const fromCpa = await Promise.all((await cpaAccountsAsync()).map(async (account) =>
+      [account.slotId, account.email, account.plan, account.disabled, await fileExists(slotPaths(dataRoot, account.slotId).auth)]));
+    const local = await Promise.all(state.local.map(async (entry) => {
+      const auth = slotPaths(dataRoot, entry.id).auth;
+      let email = null;
+      try { email = jwtEmail(JSON.parse(await fs.promises.readFile(auth, "utf8"))?.tokens?.id_token); } catch {}
+      return [entry.id, email, null, false, await fileExists(auth)];
+    }));
+    return JSON.stringify([...fromCpa, ...local]);
   }
 
   function slotSignedIn(slotId) {
@@ -357,13 +422,31 @@ function createChatGptDesktopHost({
     const account = cpaAccounts().find((entry) => entry.slotId === slotId);
     if (!account) return;
     const paths = slotPaths(dataRoot, slotId);
-    const current = { watchers: [], timer: null, debounce: null };
+    const current = { watchers: [], timer: null, debounce: null, reading: false, synced: null };
+    // Both files' size and time after the last sync: a sweep that finds them unchanged reads
+    // nothing (the sync reads and may rewrite both, synchronously).
+    const stampOf = async (file) => {
+      try { const stat = await fs.promises.stat(file); return `${stat.size}:${stat.mtimeMs}`; } catch { return "missing"; }
+    };
     const schedule = () => {
       clearTimeout(current.debounce);
-      current.debounce = setTimeout(() => {
-        // CPA may have renamed or rewritten the file; resolve it again each time.
-        const latest = cpaAccounts().find((entry) => entry.slotId === slotId);
-        if (latest) syncNow(latest, paths);
+      current.debounce = setTimeout(async () => {
+        if (syncs.get(slotId) !== current) return;
+        if (current.reading) { schedule(); return; }
+        current.reading = true;
+        try {
+          // CPA may have renamed or rewritten the file; resolve it again each time.
+          const latest = (await cpaAccountsAsync()).find((entry) => entry.slotId === slotId);
+          if (!latest || syncs.get(slotId) !== current) return;
+          const before = `${latest.file}|${await stampOf(latest.file)}|${await stampOf(paths.auth)}`;
+          if (before === current.synced) return;
+          syncNow(latest, paths);
+          current.synced = `${latest.file}|${await stampOf(latest.file)}|${await stampOf(paths.auth)}`;
+        } catch (error) {
+          logger?.warn?.("chatgpt_desktop.token_sync_failed", { slotId, message: error?.message });
+        } finally {
+          current.reading = false;
+        }
       }, SYNC_DEBOUNCE_MS);
     };
     for (const [directory, fileName] of [[paths.codexHome, "auth.json"], [path.dirname(account.file), null]]) {

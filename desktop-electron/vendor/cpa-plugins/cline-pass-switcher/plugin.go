@@ -34,7 +34,7 @@ const pluginID = "cline-pass-switcher"
 const apiPrefix = "/v0/management/" + pluginID
 const resourcePrefix = "/v0/resource/plugins/" + pluginID
 
-var pluginVersion = "0.1.0-codingtools.5"
+var pluginVersion = "0.1.0-codingtools.7"
 var hostAvailable atomic.Bool
 
 type envelope struct {
@@ -57,6 +57,17 @@ func okEnvelope(v any) ([]byte, error) {
 	return json.Marshal(envelope{OK: true, Result: b})
 }
 func errorEnvelope(code, msg string) []byte { return upstreamErrorEnvelope(code, msg, 500, false) }
+
+// upstreamStatus is the status a client sees for Cline's error. Cline answers a model it lists but
+// no longer serves with 502 {"error":"model not found"}: as a 5xx, Claude Code retried it for about
+// four minutes (seen 2026-10-22 on glm-5.2, kimi-k2.6, kimi-k2.7-code, mimo-v2.5, mimo-v2.5-pro), so a
+// chat on one looked stuck launching. It is a 404, which no client retries.
+func upstreamStatus(status int, body []byte) int {
+	if status >= 500 && bytes.Contains(bytes.ToLower(body), []byte("model not found")) {
+		return http.StatusNotFound
+	}
+	return status
+}
 func upstreamErrorEnvelope(code, msg string, status int, retry bool) []byte {
 	b, _ := json.Marshal(envelope{Error: &envelopeError{Code: code, Message: msg, HTTPStatus: status, Retryable: retry}})
 	return b
@@ -378,6 +389,43 @@ var deepseekV41Flash = regexp.MustCompile(`^cline-pass/deepseek-v4\.1-flash(-\d{
 // level could be picked for those models at all.
 var openRouterEfforts = []string{"minimal", "low", "medium", "high", "xhigh", "max"}
 
+// effortRank orders every level a request may carry, lowest first.
+var effortRank = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+
+// takenEffort maps a requested level onto one the model takes, so no request fails over its effort:
+// "" or "auto" is the model's own (nothing sent); a level the model lacks becomes its nearest one,
+// the higher on a tie; an unknown word is dropped. Seen 2026-10-22: "medium" on DeepSeek V4.1 Flash,
+// "none" on MiMo or GLM, "(auto)" on any model, and a Claude Code thinking budget that CPA turned
+// into a level DeepSeek lacks were all refused with a 400, and a chat's launch looked stuck.
+func takenEffort(effort string, levels []string) string {
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	if effort == "" || effort == "auto" || len(levels) == 0 {
+		return ""
+	}
+	if slices.Contains(levels, effort) {
+		return effort
+	}
+	want := slices.Index(effortRank, effort)
+	if want < 0 {
+		return ""
+	}
+	best, bestDistance := "", len(effortRank)+1
+	for _, level := range levels {
+		at := slices.Index(effortRank, level)
+		if at < 0 {
+			continue
+		}
+		distance := at - want
+		if distance < 0 {
+			distance = -distance
+		}
+		if distance < bestDistance || distance == bestDistance && at > want {
+			best, bestDistance = level, distance
+		}
+	}
+	return best
+}
+
 func modelEfforts(model string) []string {
 	if deepseekV41Flash.MatchString(model) {
 		return []string{"none", "low", "high", "max"}
@@ -452,17 +500,14 @@ func execute(raw []byte, stream bool) ([]byte, error) {
 	}
 	effort, _ := body["reasoning_effort"].(string)
 	if open := strings.LastIndex(model, "("); open > 0 && strings.HasSuffix(model, ")") {
+		// An explicit suffix wins over CPA's generic conversion (max used to become xhigh).
 		effort, model = model[open+1:len(model)-1], model[:open]
-		if len(modelEfforts(model)) == 0 {
-			return upstreamErrorEnvelope("unsupported_effort", "Cline has no advertised reasoning levels for this model", 400, false), nil
-		}
 	}
-	if levels := modelEfforts(model); len(levels) > 0 && effort != "" {
-		if !slices.Contains(levels, effort) {
-			return upstreamErrorEnvelope("unsupported_effort", "Supported reasoning levels are "+strings.Join(levels, ", "), 400, false), nil
-		}
-		// The explicit suffix wins over CPA's generic conversion (max used to become xhigh).
-		body["reasoning_effort"] = effort
+	// Whatever the request asked for, only a level the model takes goes upstream (takenEffort).
+	if taken := takenEffort(effort, modelEfforts(model)); taken != "" {
+		body["reasoning_effort"] = taken
+	} else {
+		delete(body, "reasoning_effort")
 	}
 	if model != "" {
 		body["model"] = model
@@ -479,7 +524,8 @@ func execute(raw []byte, stream bool) ([]byte, error) {
 	if r.StatusCode < 200 || r.StatusCode >= 300 {
 		defer r.Body.Close()
 		out, _ := io.ReadAll(io.LimitReader(r.Body, 8192))
-		return upstreamErrorEnvelope("cline_upstream", string(out), r.StatusCode, r.StatusCode == 429 || r.StatusCode >= 500), nil
+		status := upstreamStatus(r.StatusCode, out)
+		return upstreamErrorEnvelope("cline_upstream", string(out), status, status == 429 || status >= 500), nil
 	}
 	// Tool calls a model wrote as text become real calls (texttools.go); nil when no tools were offered.
 	sieve := newToolSieve(body)

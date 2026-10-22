@@ -33,6 +33,8 @@ function createHarness(hooks = {}) {
   const warnings = [];
   const opened = [];
   const binary = Buffer.from("fake source-built Go daemon");
+  const files = hooks.files ?? new Map();
+  const daemonReads = [];
   const resourceRoot = path.resolve("ao-lifecycle-fixture/resources");
   const dataRoot = path.resolve("ao-lifecycle-fixture/data");
   const manifest = { localOnly: true, standaloneInstall: false, daemonSha256: crypto.createHash("sha256").update(binary).digest("hex"), ...hooks.manifest };
@@ -121,6 +123,24 @@ function createHarness(hooks = {}) {
         return binary;
       },
       mkdirSync(directory) { assert.equal(directory, dataRoot); },
+      // The daemon is hashed from a stream; daemon-verified.json lives in `files` (shared when a
+      // test passes its own, like a data folder kept across launches).
+      createReadStream(filename) {
+        assert.equal(filename, path.join(resourceRoot, process.platform === "win32" ? "ao-daemon.exe" : "ao-daemon"));
+        daemonReads.push(filename);
+        const stream = new EventEmitter();
+        setImmediate(() => { stream.emit("data", hooks.binary ?? binary); stream.emit("end"); });
+        return stream;
+      },
+      promises: {
+        async stat() { return { size: (hooks.binary ?? binary).length, mtimeMs: hooks.mtimeMs ?? 1 }; },
+        async readFile(filename) {
+          if (!files.has(filename)) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+          return files.get(filename);
+        },
+        async mkdir(directory) { assert.equal(directory, dataRoot); },
+        async writeFile(filename, content) { files.set(filename, String(content)); },
+      },
     },
     "node:net": {
       createServer() {
@@ -191,6 +211,8 @@ function createHarness(hooks = {}) {
     require(name) { assert.ok(Object.hasOwn(dependencies, name), `Unexpected dependency: ${name}`); return dependencies[name]; },
     process: { platform: process.platform, env: { PATH: "fixture", AO_PORT: "1", AO_REMOTE: "inherited-value" } },
     Buffer, URL, URLSearchParams, AbortSignal, setTimeout, clearTimeout,
+    // A test may give the module its own clock (a daemon slow to start, without waiting for real).
+    ...(hooks.Date ? { Date: hooks.Date } : {}),
     async fetch(url, options) {
       const endpoint = new URL(url);
       assert.equal(endpoint.hostname, "127.0.0.1");
@@ -226,7 +248,7 @@ function createHarness(hooks = {}) {
     agentTools: hooks.agentTools,
     logger: { warn: (...entry) => warnings.push(entry) },
   });
-  return { controller, children, gateways, reservations, views, requests, events, warnings, parent, opened };
+  return { controller, children, gateways, reservations, views, requests, events, warnings, parent, opened, daemonReads, files };
 }
 
 test("Runtime opens the original AO board and keeps the selected project", async () => {
@@ -315,6 +337,25 @@ for (const stage of ["portListen", "portClose", "gatewayListen", "readyFetch", "
     assert.deepEqual(harness.warnings, [], "intentional cancellation is not a startup failure");
   });
 }
+
+test("a daemon still starting after 30 s is waited for, not killed and started again", async (context) => {
+  // Seen 2026-10-22, right after an update on an HDD machine: "AO readiness timed out" after 30 s,
+  // the daemon killed and another started from nothing, and the surviving chats not reattached.
+  let clock = Date.now();
+  const started = clock;
+  class SlowClock extends Date { static now() { return clock; } }
+  const harness = createHarness({
+    Date: SlowClock,
+    // Each readiness poll finds the daemon still starting and moves the clock 5 s, until it is
+    // 45 s old.
+    readyFetch: () => { clock += 5_000; if (clock - started < 45_000) throw new Error("connect ECONNREFUSED"); },
+  });
+  const { controller } = harness;
+  context.after(async () => { await controller.stop(); });
+  assert.equal((await controller.start()).state, "ready");
+  assert.equal(harness.children.length, 1, "one daemon, never replaced");
+  assert.deepEqual(harness.warnings, []);
+});
 
 test("concurrent stops share cleanup and a new start waits for the old gateway", async (context) => {
   const closing = deferred();
@@ -460,6 +501,26 @@ test("daemon exit during a readiness response cannot publish ready and startup f
   assert.equal(harness.gateways[0].closed, true);
   exitDuringReadiness = false;
   assert.equal((await controller.start()).state, "ready");
+});
+
+test("the daemon is hashed once per install: a later launch trusts the stamp, a changed file is hashed again", async (context) => {
+  // Hashing the 41 MB daemon on every launch froze the app for 17-28 s on a busy hard disk.
+  const files = new Map();
+  const first = createHarness({ files });
+  context.after(() => first.controller.stop());
+  await first.controller.start();
+  assert.equal(first.daemonReads.length, 1);
+  await first.controller.stop();
+  const relaunch = createHarness({ files });
+  context.after(() => relaunch.controller.stop());
+  assert.equal((await relaunch.controller.start()).state, "ready");
+  assert.equal(relaunch.daemonReads.length, 0, "the same daemon is not read again");
+  await relaunch.controller.stop();
+  // A swapped daemon has another time: it is hashed and refused.
+  const swapped = createHarness({ files, mtimeMs: 2, binary: Buffer.from("another daemon") });
+  await assert.rejects(swapped.controller.start(), /does not match its build manifest/);
+  assert.equal(swapped.daemonReads.length, 1);
+  assert.equal(swapped.children.length, 0);
 });
 
 test("lifecycle changes preserve manifest validation, daemon environment, and stop confirmation", async (context) => {
@@ -784,6 +845,33 @@ test("a chat started in the background whose agent failed to come up is resumed 
     const other = await h.controller.harness.observe("s2");
     assert.equal(other.turnState, "failed");
     assert.equal(resumed.length, 1, "a failure that is not about time is not retried");
+  } finally { await h.controller.stop(); }
+});
+
+test("observers of the same conversation page share one built timeline, each with its own array", async () => {
+  // A working chat's run loop, activity poll and approval screen observe it within the same moment.
+  let reads = 0;
+  const h = createHarness({
+    getWorkspaces: async () => [], missionCall: async () => ({ ok: true }),
+    workspaceBoard: { bind: async () => ({ projectId: "project-fixture" }) },
+    api: async (endpoint) => {
+      if (/^\/api\/v1\/sessions\/[^/]+$/.test(endpoint.pathname)) return { session: { id: "s1", mode: "chat", status: "working" } };
+      if (endpoint.pathname.endsWith("/conversation")) {
+        reads += 1;
+        return { turns: [{ id: "t1", state: "running" }], messages: [],
+          activities: [{ id: "a1", sequence: 1, turnId: "t1", activityKind: "reasoning", status: "running", detail: { text: "想".repeat(5000) } }] };
+      }
+    },
+  });
+  try {
+    await h.controller.start();
+    const first = await h.controller.harness.observe("s1");
+    const second = await h.controller.harness.observe("s1");
+    assert.equal(reads, 1, "the second observer reads the same page");
+    assert.notEqual(first.timeline, second.timeline, "a caller's array is its own");
+    assert.equal(first.timeline[0], second.timeline[0], "the items were built once");
+    // A running thought keeps its newest 4 KB: 1365 three-byte characters.
+    assert.equal(first.timeline[0].text, "想".repeat(1365));
   } finally { await h.controller.stop(); }
 });
 

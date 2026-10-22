@@ -920,6 +920,9 @@ function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview
       ? "Subagents: for a self-contained piece of work (exploring part of the codebase, an independent change, a review) you can "
         + "start a subagent with subagent_start and keep working; it runs in this project on its own model and ends with a report "
         + "you read with subagent_result. It cannot see this conversation, so give it the whole task. Several may run in parallel. "
+        + "subagent_inspect shows what one is doing; subagent_message steers it while it works or gives a finished one its next task "
+        + "in the same session. You may pick its model, effort and context window (subagent_models; it then runs on Claude Code), "
+        + "or give subagent_start a saved team (subagent_list) to do the task as one subagent. "
         + (subagents ? `Available: ${String(subagents).slice(0, 1500)}. ` : "subagent_list shows the ones the user set up. ")
       : "")
     // Every poll of a slow job is another round of tokens; a turn that ends costs nothing while it waits.
@@ -2226,13 +2229,14 @@ function createChatAgentTools({
     },
     /**
      * The session worktree's changes for the side panel's Changes tab: git's status (with new files)
-     * and the diff of tracked files, as headless reads them in that worktree.
+     * and the diff of tracked files, as headless reads them in that worktree. With `summary` only the
+     * files: the chat's Overview polls it for a count and never shows the diff.
      */
-    async changes({ sessionId, workspaceId } = {}) {
+    async changes({ sessionId, workspaceId, summary = false } = {}) {
       const entry = paneEntry(sessionId, workspaceId);
       if (!entry) throw new Error("That chat agent's session has ended");
       const status = await invokeAsUser(entry, "git_status", { include_untracked: true, max_entries: 500 });
-      const diff = await invokeAsUser(entry, "git_diff", { context_lines: 3, max_bytes: 512 * 1024 });
+      const diff = summary ? null : await invokeAsUser(entry, "git_diff", { context_lines: 3, max_bytes: 512 * 1024 });
       return {
         ok: true, root: entry.root?.path ?? null, branch: typeof status?.branch === "string" ? status.branch : "",
         entries: Array.isArray(status?.entries) ? status.entries.slice(0, 500) : [],

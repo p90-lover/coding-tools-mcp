@@ -44,6 +44,19 @@ test("persisted mesh excludes credentials", () => {
   assert.throws(() => persistLoopbackMesh(filePath, { ...parsed, leak: "proxyApiKey" }), /secrets/i);
 });
 
+test("an unchanged mesh is not rewritten, a changed or deleted one is", () => {
+  const filePath = path.join(temporaryDirectory(), "loopback-mesh.json");
+  persistLoopbackMesh(filePath, buildLoopbackMesh());
+  fs.writeFileSync(filePath, "marker");
+  persistLoopbackMesh(filePath, buildLoopbackMesh());
+  assert.equal(fs.readFileSync(filePath, "utf8"), "marker", "same content: no write");
+  persistLoopbackMesh(filePath, buildLoopbackMesh([{ id: "cpa", endpoint: "http://127.0.0.1:9000" }]));
+  assert.match(fs.readFileSync(filePath, "utf8"), /9000/);
+  fs.rmSync(filePath);
+  persistLoopbackMesh(filePath, buildLoopbackMesh([{ id: "cpa", endpoint: "http://127.0.0.1:9000" }]));
+  assert.ok(fs.existsSync(filePath), "a deleted mesh is written again");
+});
+
 test("external and managed controllers advertise the same CPA mesh", () => {
   const directory = temporaryDirectory();
   const options = {

@@ -70,7 +70,9 @@ function observeHarness(context) {
   const shared = helpers.replace(/const TAIL_FRESH_MS = \d+;/, `const TAIL_FRESH_MS = ${Number(context.tailFreshMs ?? 0)};`);
   return vm.runInNewContext(states + timelineBounds(source) + shared + identity + "({" + method + "})", {
     Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"),
-    agentTools: null, setTimeout, exitedReleased: new Set(), observeTui: async () => { throw new Error("not a TUI fixture"); }, ...context,
+    agentTools: null, setTimeout, exitedReleased: new Set(), observeTui: async () => { throw new Error("not a TUI fixture"); },
+    // Imported by the module (not part of the helpers sliced above).
+    utf8Suffix: require("../electron/chat-agent-shell.cjs").utf8Suffix, ...context,
   });
 }
 
@@ -198,6 +200,69 @@ test("a session's project folder is named for its tools only for the chat's own 
   assert.equal(await folderModeRoot(session, folder, "w1"), null, "a project that chose worktrees");
   project = { ...project, config: {} };
   assert.equal(await folderModeRoot(session, folder, "w1"), null, "a project that never chose");
+});
+
+test("the folder default waits behind the project's dependency-link sync only when it has to write", async () => {
+  // Seen live: the first launch in a project after the app started waited 19 s behind its link
+  // sync just to read a mode that was already "folder".
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("  const folderModeChecked = new Set();");
+  const fn = source.slice(start, source.indexOf("  /** The project folder a folder-mode session works in", start));
+  const calls = [];
+  const stored = { p2: { id: "p2", kind: "single_repo", config: { workspaceMode: "worktree" } }, p3: { id: "p3", kind: "single_repo", config: { other: 1 } } };
+  const defaultToFolderMode = vm.runInNewContext(`${fn}; defaultToFolderMode`, {
+    internalApi: async (method, endpoint, body) => {
+      calls.push(`${method} ${endpoint}`);
+      return method === "GET" ? { project: stored[endpoint.split("/").pop()] } : { ok: true, body };
+    },
+    dependencyLinks: { exclusive: async (_id, work) => { calls.push("queued"); return work(); } },
+  });
+  await defaultToFolderMode({ id: "p1", kind: "single_repo", config: { workspaceMode: "folder" } });
+  assert.deepEqual(calls, [], "a mode the project list already shows needs no read and no queue");
+  await defaultToFolderMode({ id: "p2", kind: "single_repo" });
+  assert.deepEqual(calls, ["GET /api/v1/projects/p2"], "a chosen mode is read once, outside the queue");
+  calls.length = 0;
+  await defaultToFolderMode({ id: "p3", kind: "single_repo" });
+  assert.deepEqual(calls, ["GET /api/v1/projects/p3", "queued", "GET /api/v1/projects/p3", "PUT /api/v1/projects/p3/config"],
+    "only a project that never chose is written, on the sync's queue");
+  calls.length = 0;
+  await defaultToFolderMode({ id: "p3", kind: "single_repo" });
+  assert.deepEqual(calls, [], "checked once per project");
+});
+
+test("a workspace's known AO project is used at once while its binding is refreshed behind the launch", async () => {
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("  async function projectFor");
+  const fn = source.slice(start, source.indexOf("  async function chatTools", start));
+  let clock = 1_000_000, binds = 0;
+  const pending = [];
+  const { projectFor, forgetProject } = vm.runInNewContext(`${fn}; ({ projectFor, forgetProject })`, {
+    Map, Error, Date: { now: () => clock },
+    workspaceBoard: { bind: () => { binds += 1; return new Promise((resolve, reject) => pending.push({ resolve, reject })); } },
+  });
+  const first = projectFor("w1");
+  pending.shift().resolve({ projectId: "p1" });
+  assert.equal(await first, "p1", "the first launch waits for its binding");
+  assert.equal(await projectFor("w1"), "p1");
+  assert.equal(binds, 1, "kept for a minute");
+  clock += 61_000;
+  assert.equal(await projectFor("w1"), "p1", "a stale binding answers at once");
+  assert.equal(binds, 2, "and is refreshed");
+  assert.equal(await projectFor("w1"), "p1", "a launch during the refresh does not wait for it either");
+  assert.equal(binds, 2);
+  pending.shift().reject(new Error("AO project registration failed"));
+  await new Promise((resolve) => setImmediate(resolve));
+  const afresh = projectFor("w1");
+  assert.equal(binds, 3, "a failed refresh is forgotten; the next launch binds afresh");
+  pending.shift().resolve({ projectId: "p9" });
+  assert.equal(await afresh, "p9");
+  forgetProject("w1");
+  const again = projectFor("w1");
+  pending.shift().resolve({ projectId: "p9" });
+  assert.equal(await again, "p9");
+  assert.equal(binds, 4, "a forgotten binding (a failed start) is waited for again");
 });
 
 test("a session AO runs in the chat workspace's own folder is named a project folder, whatever its project lookup says", async () => {
@@ -749,6 +814,40 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
   assert.ok(calls.some(([method, endpoint]) => method === "POST" && endpoint === "/api/v1/sessions/old/resume-agent"));
   status = "exited"; resumeOk = false;
   await assert.rejects(upstream.continuable("old"), error => error.code === "AO_SESSION_RESTORE_UNCONFIRMED", "an uncertain resume cannot replace the retained conversation");
+});
+
+test("stale sessions are this project's live, unpinned, idle ones with no message (or creation) within the limit", async () => {
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("    async continuable(id)");
+  const end = source.indexOf("    /** Sends a follow-up as a new turn", start);
+  const methods = source.slice(start, end).trim().replace(/,$/, "");
+  const helpers = source.slice(source.indexOf("  async function chatHostGone"), source.indexOf("  // Mission-owned AO calls."));
+  const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
+  const states = source.match(/const TERMINAL_TURN_STATES = .*;/)[0];
+  const now = Date.parse("2026-10-22T10:00:00Z");
+  const daysAgo = days => new Date(now - days * 86_400_000).toISOString();
+  const sessions = [
+    { id: "old-worker", projectId: "proj", status: "exited", createdAt: daysAgo(12) },
+    { id: "old-chat-written-to", projectId: "proj", status: "idle", createdAt: daysAgo(20), lastUserMessageAt: daysAgo(2) },
+    { id: "new-worker", projectId: "proj", status: "exited", createdAt: daysAgo(3) },
+    { id: "old-working", projectId: "proj", status: "working", createdAt: daysAgo(12) },
+    { id: "old-pinned", projectId: "proj", status: "exited", createdAt: daysAgo(12), isPinned: true },
+    { id: "old-terminated", projectId: "proj", status: "terminated", createdAt: daysAgo(12), isTerminated: true },
+    { id: "other-project", projectId: "elsewhere", status: "exited", createdAt: daysAgo(12) },
+    { id: "no-times", projectId: "proj", status: "exited" },
+  ];
+  const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
+    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), Date, Math, Number, Promise, Set, agentTools: null,
+    exitedReleased: new Set(),
+    projectFor: async workspaceId => { if (workspaceId === "ws") return "proj"; throw new Error("not a git repository"); },
+    internalApi: async (method, endpoint) => {
+      assert.deepEqual([method, endpoint], ["GET", "/api/v1/sessions"]);
+      return { sessions };
+    },
+  });
+  assert.deepEqual([...await upstream.staleSessions(["ws", "not-bound"], 7 * 86_400_000, now)], ["old-worker"]);
+  assert.deepEqual([...await upstream.staleSessions(["not-bound"], 7 * 86_400_000, now)], [], "no bound project, nothing listed");
 });
 
 test("a resumed chat gets the app's tools again, and an AO that refuses them still resumes it", async () => {
@@ -1465,4 +1564,28 @@ test("an exited chat whose agent may live on is exited again once, so AO stops i
   assert.equal((await upstream.exitAgent("leftover")).ok, true, "AO's AGENT_EXITED counts as released (it stopped any leftover host)");
   assert.deepEqual(exits, ["leftover"]);
   assert.deepEqual([...await upstream.idleChatSessions(30 * 60_000, now)], [], "and it is not asked again this run");
+});
+
+test("chats AO still calls working with no agent activity for long are listed, so their stranded hosts can be stopped", async () => {
+  // Seen 2026-10-22: two chat hosts and their agents ran on, quiet 8 hours and a day, their sessions
+  // "working" for good after their turns died with a restart; nothing looked at working sessions.
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("    async quietWorkingChatSessions(");
+  const end = source.indexOf("    /**", start);
+  const method = source.slice(start, end).trim().replace(/,$/, "");
+  const now = Date.parse("2026-10-22T10:30:00Z");
+  const ago = minutes => new Date(now - minutes * 60_000).toISOString();
+  const sessions = [
+    { id: "stranded", mode: "chat", status: "working", activity: { state: "active", lastActivityAt: ago(24 * 60) } },
+    { id: "busy", mode: "chat", status: "working", activity: { state: "active", lastActivityAt: ago(5) } },
+    { id: "idle", mode: "chat", status: "idle", activity: { state: "idle", lastActivityAt: ago(24 * 60) } },
+    { id: "ended", mode: "chat", status: "working", isTerminated: true, activity: { lastActivityAt: ago(24 * 60) } },
+    { id: "worker", mode: "worker", status: "working", activity: { lastActivityAt: ago(24 * 60) } },
+    { id: "unknown", mode: "chat", status: "working", activity: {} },
+  ];
+  const upstream = vm.runInNewContext("({" + method + "})", { Date, Number, Array, String,
+    internalApi: async (method, endpoint) => { assert.equal(endpoint, "/api/v1/sessions"); return { sessions }; } });
+  assert.deepEqual([...await upstream.quietWorkingChatSessions(2 * 60 * 60_000, now)], ["stranded"],
+    "only a live chat quiet past the limit: not a busy one, an idle or ended one, a non-chat, or one with no activity time");
 });

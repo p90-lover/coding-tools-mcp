@@ -446,8 +446,54 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
   return validateRuntimeBundle(destination, expectedIdentity, verify);
 }
 
+const STALE_RUNTIME_TEMP_MS = 60 * 60_000;
+
+/**
+ * Removes other versions' runtime copies from the core home: every update copied a whole runtime
+ * (~6,000 files, 165 MB) into versions\ and none was ever removed (ten were found, 2026-10-22).
+ * This version's copy and the newest other one (a rollback) stay, and so does any copy still in
+ * use: each is renamed first, which Windows refuses for a folder a process runs from. The rename is
+ * all the caller waits for; the delete runs on fs.promises so a slow disk never holds startup.
+ * Leftover .tmp-/.previous-/.retired- folders older than an hour go too.
+ */
+async function pruneOldRuntimes({ app, coreHome, now = Date.now(), keepOthers = 1 }) {
+  if (!app.isPackaged || !coreHome) return [];
+  const versionsRoot = path.join(coreHome, "versions");
+  const current = `${app.getVersion()}-${process.platform}-${process.arch}`;
+  let entries;
+  try { entries = fs.readdirSync(versionsRoot, { withFileTypes: true }); } catch { return []; }
+  const others = [];
+  const doomed = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const name = entry.name;
+    if (name === current || name.startsWith(`${current}-`) || name.startsWith(`${current}.`)) continue;
+    let mtimeMs;
+    try { mtimeMs = fs.statSync(path.join(versionsRoot, name)).mtimeMs; } catch { continue; }
+    if (/\.(tmp|previous|retired)-/.test(name)) {
+      if (now - mtimeMs > STALE_RUNTIME_TEMP_MS) doomed.push(name);
+    } else if (/-(win32|darwin|linux)-[a-z0-9]+$/.test(name)) {
+      others.push({ name, mtimeMs });
+    }
+  }
+  others.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  doomed.push(...others.slice(keepOthers).map((other) => other.name));
+  const removed = [];
+  const deletes = [];
+  for (const name of doomed) {
+    const retired = path.join(versionsRoot, `${name}.retired-${process.pid}-${now}`);
+    const from = /\.retired-/.test(name) ? null : path.join(versionsRoot, name);
+    try { if (from) fs.renameSync(from, retired); } catch { continue; }
+    removed.push(name);
+    deletes.push(fs.promises.rm(from ? retired : path.join(versionsRoot, name), { recursive: true, force: true }).catch(() => undefined));
+  }
+  await Promise.all(deletes);
+  return removed;
+}
+
 module.exports = {
   ensurePackagedRuntime,
+  pruneOldRuntimes,
   installedPackagedRuntime,
   validateRuntimeBundle,
   waitForPackagedRuntimeSource,
