@@ -538,6 +538,13 @@ type QueuedBarItem = {
   onRemove?: () => void; onEdit?: () => void; onSendNow?: () => void; sendNowBlocked?: string;
 };
 
+/** Whether a click inside a queued bubble came from a control of its own (an attachment's button, link or image). */
+function queuedNestedControl(target: EventTarget | null, bubble: EventTarget | null): boolean {
+  const element = target as { closest?: (selector: string) => unknown } | null;
+  const control = typeof element?.closest === "function" ? element.closest("button, a, input, img, [role='button'], [role='link']") : null;
+  return Boolean(control) && control !== bubble;
+}
+
 /** The X of Claude Code's "Discard queued message" (its cds "X" icon, 16 px). */
 function QueuedDiscardGlyph() {
   return <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -566,7 +573,12 @@ function QueuedMessageBar({ items }: { items: QueuedBarItem[] }) {
         <div className="cx-queued-bubble">
           {item.state === "queued" && item.onEdit
             ? <div className="cx-user cx-queued-message" role="button" tabIndex={0} aria-label="Edit in composer" title="Edit in composer"
-              onClick={item.onEdit} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); item.onEdit?.(); } }}>
+              // A click on the message's own attachment (an image preview, a file) is for that control:
+              // bubbled up, it dequeued the message and unmounted the preview it had just opened.
+              onClick={(event) => { if (!queuedNestedControl(event.target, event.currentTarget)) item.onEdit?.(); }}
+              onKeyDown={(event) => {
+                if ((event.key === "Enter" || event.key === " ") && event.target === event.currentTarget) { event.preventDefault(); item.onEdit?.(); }
+              }}>
               <SentMessage text={item.text} /></div>
             : <div className="cx-user cx-queued-message"><SentMessage text={item.text} /></div>}
           {item.state === "queued" ? <span className="cx-queued-discard">

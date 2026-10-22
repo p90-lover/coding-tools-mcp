@@ -365,9 +365,17 @@ test("a queued message waits as Claude Code's queue row: greyed, Queued, Discard
   // The agent can't be steered and the turn still runs: Send now waits, and says why.
   assert.equal(action("Send now").props.disabled, true);
   assert.equal(action("Send now").props["data-tip"], "Sent when the current turn finishes");
+  // A click on a control inside the bubble (an attachment's preview or file button) is that control's:
+  // the message stays queued.
+  const bubble = { closest: () => bubble };
+  const attachmentButton = { closest: () => attachmentButton };
+  action("Edit in composer").props.onClick({ target: attachmentButton, currentTarget: bubble });
+  assert.equal(rows().length, 1, "opening an attachment does not dequeue the message");
+  action("Edit in composer").props.onKeyDown({ key: "Enter", target: attachmentButton, currentTarget: bubble, preventDefault() {} });
+  assert.equal(rows().length, 1, "nor does Enter on that control");
   // Edit in composer takes it out of the queue and back into the box, ahead of anything typed.
   textarea().props.onChange({ target: { value: "typed meanwhile" } });
-  action("Edit in composer").props.onClick();
+  action("Edit in composer").props.onClick({ target: bubble, currentTarget: bubble });
   assert.equal(rows().length, 0, "it leaves the queue");
   assert.equal(textarea().props.value, "first note\n\ntyped meanwhile");
   // Discard drops it; nothing is sent. Only the first queued message has Send now.
@@ -396,7 +404,7 @@ test("Edit in composer gives a queued message's annotations back as the composer
   // A new selection made meanwhile stays, after the queued message's own.
   annotator().props.onAdd("another line");
   const row = all().find((element) => element.type === "li" && element.props.className === "cx-queued-row");
-  walk(row).find((element) => element.props?.["aria-label"] === "Edit in composer").props.onClick();
+  walk(row).find((element) => element.props?.["aria-label"] === "Edit in composer").props.onClick({ target: null, currentTarget: null });
   assert.equal(all().find((element) => element.type === "textarea").props.value, "first note", "only the text goes in the box");
   assert.deepEqual(JSON.parse(JSON.stringify(tray().props.annotations.map((item) => [item.text, item.comment]))),
     [["the parser drops tabs", "fix this too"], ["another line", ""]], "its annotations come back as chips, ahead of the new one");
