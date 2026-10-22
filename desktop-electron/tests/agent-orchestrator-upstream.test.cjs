@@ -71,7 +71,9 @@ function observeHarness(context) {
   return vm.runInNewContext(states + timelineBounds(source) + shared + identity + "({" + method + "})", {
     Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"),
     agentTools: null, setTimeout, exitedReleased: new Set(), observeTui: async () => { throw new Error("not a TUI fixture"); },
-    logger: { info() {}, warn() {} }, ...context,
+    logger: { info() {}, warn() {} },
+    // Imported by the module (not part of the helpers sliced above).
+    utf8Suffix: require("../electron/chat-agent-shell.cjs").utf8Suffix, ...context,
   });
 }
 
