@@ -538,40 +538,48 @@ type QueuedBarItem = {
   onRemove?: () => void; onEdit?: () => void; onSendNow?: () => void; sendNowBlocked?: string;
 };
 
-/** The queued-message actions' glyphs: Remove from queue (X), Edit in composer (pencil), Send now (arrow up). */
-function QueuedGlyph({ name }: { name: "remove" | "edit" | "send" }) {
-  return <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-    {name === "remove" ? <path d="M18 6 6 18M6 6l12 12" />
-      : name === "edit" ? <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
-      : <path d="M12 19V5M5 12l7-7 7 7" />}
+/** The X of Claude Code's "Discard queued message" (its cds "X" icon, 16 px). */
+function QueuedDiscardGlyph() {
+  return <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M18 6 6 18M6 6l12 12" />
   </svg>;
 }
 
 /**
- * Claude Code's queued-message bar (claude.ai's QueuedMessageBar): a message sent while the agent
- * works waits right above the composer, newest last, as the person's own bubble with its text
- * greyed, until the agent takes it; from then on the chat shows it as any sent message. A waiting
- * one has Remove from queue, Edit in composer and Send now beside it; one on its way pulses.
- * Screen readers hear Claude Code's own status line. It replaced the "Queued" notice cards and the
- * "Steering…" bubble at the end of the chat.
+ * Claude Code's queued messages (claude.ai's composer queue rows, data-testid "pending-queue-row"):
+ * a message sent while the agent works waits right above the composer, newest last, as the
+ * person's own bubble collapsed to one line with its text greyed, and "Queued" under it. Its X
+ * ("Discard queued message") shows on hover or focus just past the bubble's end; the first one also
+ * has "Send now". One on its way to the agent pulses and has no actions. Screen readers hear Claude
+ * Code's own status line. Not in Claude Code: clicking a queued bubble puts it back in the composer
+ * to edit (the earlier bar's "Edit in composer").
  */
 function QueuedMessageBar({ items }: { items: QueuedBarItem[] }) {
   if (!items.length) return null;
   const waiting = items.filter((item) => item.state === "queued").length;
+  const head = items.findIndex((item) => item.state === "queued");
   return <div className="cx-queued">
-    <ol className="cx-queued-list" aria-label="Queued messages">
-      {items.map((item) => <li key={item.key} className="cx-queued-row" data-state={item.state}>
-        {item.state === "queued" ? <div className="cx-queued-actions" role="toolbar" aria-label="Queued message actions">
-          <button type="button" aria-label="Remove from queue" data-tip="Remove from queue" onClick={item.onRemove}><QueuedGlyph name="remove" /></button>
-          <button type="button" aria-label="Edit in composer" data-tip="Edit in composer" onClick={item.onEdit}><QueuedGlyph name="edit" /></button>
-          <button type="button" aria-label="Send now" data-tip={item.sendNowBlocked ?? "Send now"} disabled={Boolean(item.sendNowBlocked)}
-            onClick={item.onSendNow}><QueuedGlyph name="send" /></button>
-        </div> : null}
-        <div className="cx-user cx-queued-message"><SentMessage text={item.text} /></div>
-      </li>)}
-    </ol>
     <span className="cx-sr-only" role="status">{waiting === 0 ? "" : waiting === 1 ? "1 message queued. Will send after the current response."
       : `${waiting} messages queued. Will send after the current response.`}</span>
+    <ol className="cx-queued-list" aria-label="Queued messages">
+      {items.map((item, index) => <li key={item.key} className="cx-queued-row" data-state={item.state}>
+        <div className="cx-queued-bubble">
+          {item.state === "queued" && item.onEdit
+            ? <div className="cx-user cx-queued-message" role="button" tabIndex={0} aria-label="Edit in composer" title="Edit in composer"
+              onClick={item.onEdit} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); item.onEdit?.(); } }}>
+              <SentMessage text={item.text} /></div>
+            : <div className="cx-user cx-queued-message"><SentMessage text={item.text} /></div>}
+          {item.state === "queued" ? <span className="cx-queued-discard">
+            <button type="button" aria-label="Discard queued message" data-tip="Discard queued message" onClick={item.onRemove}><QueuedDiscardGlyph /></button>
+          </span> : null}
+        </div>
+        {item.state === "queued" ? <div className="cx-queued-meta">
+          {index === head && item.onSendNow ? <button type="button" className="cx-queued-send-now" aria-label="Send now"
+            data-tip={item.sendNowBlocked ?? "Send now"} disabled={Boolean(item.sendNowBlocked)} onClick={item.onSendNow}>Send now</button> : null}
+          <span className="cx-queued-status">Queued</span>
+        </div> : null}
+      </li>)}
+    </ol>
   </div>;
 }
 
@@ -982,8 +990,12 @@ export function AgentOrchestratorChat({
   // A steer goes straight to the agent and a queued message waits here: neither takes the surface's
   // one-action lock (busy), which an approval or a refresh holds often while a chat runs. Waiting on
   // it kept the Stop button in place of Steer while the user typed.
-  const canSend = (!busy || steering || queueing) && !sending && !(deciding && !selectedTaskId)
-    && Boolean(draft.trim() || attachments.length || annotations.length) && (accepts || steering || queueing);
+  // A message typed while the previous one is still being sent waits in the queue, as Claude Code
+  // queues one typed during a response. Enter did nothing at all then, so a quick second message
+  // looked dropped.
+  const queueWhileSending = sending && Boolean(selectedTaskId) && !steering;
+  const canSend = (!busy || steering || queueing || queueWhileSending) && (!sending || queueWhileSending) && !(deciding && !selectedTaskId)
+    && Boolean(draft.trim() || attachments.length || annotations.length) && (accepts || steering || queueing || queueWhileSending);
   const slash = chatSlashMatches(draft, { chat: Boolean(selectedTaskId), run: Boolean(latest), open: runOpen });
 
   // What a command shows above the composer (its result, or why it couldn't run).
@@ -1124,7 +1136,7 @@ export function AgentOrchestratorChat({
       say("Too long", `This message is ${text.length.toLocaleString()} characters with its annotations; the limit is ${CHAT_MESSAGE_LIMIT.toLocaleString()}. Remove an annotation or select less.`);
       return;
     }
-    if (queueing) {
+    if (queueing || queueWhileSending) {
       // Several messages typed during one turn go together, in order.
       setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what: "Message", message: text }));
       setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote("");
@@ -1146,7 +1158,9 @@ export function AgentOrchestratorChat({
   // One queued item per free spell: right after a send the chat may still read as free for a moment,
   // and the next item must wait for the turn that send started.
   const sentWhileFree = useRef(false);
-  useEffect(() => { sentWhileFree.current = false; }, [accepts, selectedTaskId]);
+  // Also on a new run: a send refused as "still running" while the chat read free held the queue
+  // until `accepts` changed, and when it never did, the message sat queued for no reason.
+  useEffect(() => { sentWhileFree.current = false; }, [accepts, selectedTaskId, latest?.id]);
   // A send runs only from the focused app window. A turn that ended while the user was in another
   // app had its queued message refused and dropped back into the composer; it now waits for focus.
   const [windowFocused, setWindowFocused] = useState(() => typeof document === "undefined" || typeof document.hasFocus !== "function" || document.hasFocus());
