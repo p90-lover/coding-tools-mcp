@@ -3103,6 +3103,15 @@ async function start() {
         blockedCommand: (text) => missionWorkflowRuntime?.blockedRequest?.(text) ?? true,
         // The subagents a chat agent may start (Runtime > Subagents).
         subagents: subagentsService,
+        // app_processes: the app's own processes and what they started, with CPU, memory and uptime.
+        // Its own: under the install, profile or runtime folders, the app's services by name, and
+        // Electron's processes (whose types it names: main, window, GPU).
+        appProcesses: (options) => backendBundles.requireModule(backend, "app-processes.cjs").listAppProcesses({
+          ...options,
+          roots: [path.dirname(process.execPath), app.getPath("userData"), launcherUserData, installedRuntimeRoot].filter(Boolean),
+          own: [process.pid],
+          electron: app.getAppMetrics().map((metric) => ({ pid: metric.pid, type: metric.type })),
+        }),
         // schedule_wakeup: the chat is sent a follow-up after the minutes its agent chose.
         wakeups: {
           schedule: (request) => {

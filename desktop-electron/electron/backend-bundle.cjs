@@ -35,6 +35,7 @@ const BACKEND_MODULES = Object.freeze([
   "chat-edits.cjs",
   "chat-archive.cjs",
   "chat-agent-tools.cjs",
+  "app-processes.cjs",
   "chat-agent-shell.cjs",
   "chat-preview.cjs",
   "chat-sandbox.cjs",

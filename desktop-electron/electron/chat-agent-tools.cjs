@@ -84,7 +84,7 @@ const AGENT_TOOLS = new Set([
   "git_status", "git_diff", "git_log", "git_show", "git_blame",
   "view_image", "image_info", "compare_images",
   "update_plan", "get_plan", "get_current_time", "tool_search", "server_info",
-  "show_in_chat", "schedule_wakeup",
+  "show_in_chat", "schedule_wakeup", "app_processes",
 ]);
 // The app's own agent tool (not headless's): brings a pane of the chat forward for the user. Seen
 // live: an agent asked to "open the browser and keep checking" started it, but nothing showed in
@@ -118,6 +118,26 @@ const WAKE_TOOL_DEFS = Object.freeze([{
       reason: { type: "string", maxLength: 500, description: "What to check when you wake, e.g. \"see whether CI run 123 passed\"" },
     },
   },
+}]);
+// The app's own monitor (app-processes.cjs): Coding Tools' processes and what they started, with
+// CPU, memory and uptime. Read-only, and private: no command line (it can carry a token) is read.
+const APP_PROCESSES_DEFS = Object.freeze([{
+  name: "app_processes", title: "Monitor Coding Tools' processes",
+  description: "List Coding Tools' own processes with how much CPU each used over a short sample, its memory, threads, handles "
+    + "and uptime: the app's windows, its runtime bridge (bun), CPA, the AO daemon, the headless service, and everything they "
+    + "started (chat agents such as claude.exe or codex.exe, and the commands those run). Notes point out services running "
+    + "more than once and processes using over half the CPU. Use it when the app or a chat is slow or seems stuck, when "
+    + "the user asks what is running or what uses CPU or memory, or to check that a process you started ended. Read-only: "
+    + "it shows no command lines and stops nothing.",
+  inputSchema: {
+    type: "object", additionalProperties: false,
+    properties: {
+      sample_ms: { type: "integer", minimum: 250, maximum: 5000, default: 1000, description: "How long to measure CPU over" },
+      sort: { type: "string", enum: ["cpu", "memory", "name"], default: "cpu" },
+      limit: { type: "integer", minimum: 1, maximum: 200, default: 40, description: "How many processes to list" },
+    },
+  },
+  annotations: { readOnlyHint: true },
 }]);
 // Opt-in: commands start in the worktree but are not confined to it.
 const TERMINAL_TOOLS = new Set([
@@ -984,6 +1004,8 @@ function createChatAgentTools({
   subagents = null,
   // schedule_wakeup's scheduler ({ schedule({ workspaceId, session, minutes, reason }) }); without it the tool is not offered.
   wakeups = null,
+  // app_processes's reader (({ sampleMs, sort, limit }) => listAppProcesses result); without it the tool is not offered.
+  appProcesses = null,
   // Whether the command approver's safety rules block a request's text (never answered for the user).
   blockedCommand = () => false,
   // Runs the terminal's commands in Codex's Windows sandbox (chat-sandbox.cjs) when it is installed.
@@ -1222,10 +1244,10 @@ function createChatAgentTools({
     const catalog = await requestHeadless(`/api/v1/tools/catalog?workspace_id=${encodeURIComponent(entry.workspaceId)}`, null, { method: "GET" });
     // The preview's tools are the app's own, not headless's.
     const own = [...(allowed(entry, "preview") ? PREVIEW_TOOL_DEFS : []), ...(allowed(entry, "subagents") ? SUBAGENT_TOOL_DEFS : []), ...SHOW_TOOL_DEFS,
-      ...(canWake(entry) ? WAKE_TOOL_DEFS : []), ...CAPTURE_PROCESS_DEFS];
+      ...(canWake(entry) ? WAKE_TOOL_DEFS : []), ...CAPTURE_PROCESS_DEFS, ...(appProcesses ? APP_PROCESSES_DEFS : [])];
     return [...(Array.isArray(catalog?.tools) ? catalog.tools : [])
       .filter((tool) => !PREVIEW_TOOLS.has(tool?.name) && !SUBAGENT_TOOLS.has(tool?.name) && tool?.name !== "show_in_chat"
-        && tool?.name !== "schedule_wakeup" && tool?.name !== "capture_process"), ...own]
+        && tool?.name !== "schedule_wakeup" && tool?.name !== "capture_process" && tool?.name !== "app_processes"), ...own]
       .filter((tool) => typeof tool?.name === "string" && !UNLISTED_TOOLS.has(tool.name) && !duplicateOfHarness(entry, tool.name)
         && groupOf(tool.name) && allowed(entry, groupOf(tool.name)))
       // outputSchema is left out: clients would validate structuredContent against it, and the
@@ -1502,6 +1524,17 @@ function createChatAgentTools({
       + `(about ${at}) with your note. End your turn now: do not wait, sleep or poll in the meantime.` }] };
   }
 
+  /** app_processes: the app's processes with their CPU, memory and uptime (app-processes.cjs). */
+  async function listProcesses(given) {
+    if (!appProcesses) return failedCall("Unknown tool: app_processes");
+    try {
+      const listed = await appProcesses({ sampleMs: given.sample_ms, sort: given.sort, limit: given.limit });
+      return { content: [{ type: "text", text: JSON.stringify(listed, null, 1) }] };
+    } catch (error) {
+      return failedCall(`The app's processes could not be read: ${errorMessage(error)}`);
+    }
+  }
+
   async function callTool(entry, params) {
     const name = params?.name;
     if (typeof name !== "string" || !name || name.length > 128) return failedCall("A tool name is required");
@@ -1514,6 +1547,7 @@ function createChatAgentTools({
     const given = params.arguments && typeof params.arguments === "object" && !Array.isArray(params.arguments) ? params.arguments : {};
     if (name === "show_in_chat") return showInChat(entry, given);
     if (name === "schedule_wakeup") return scheduleWakeup(entry, given);
+    if (name === "app_processes") return listProcesses(given);
     // Subagents are the app's own (subagents.cjs): no worktree is needed to start or read one.
     if (group === "subagents") {
       const found = await Promise.resolve().then(() => sessionWorkspace?.(entry.aoSession, entry.workspaceId)).catch(() => null);

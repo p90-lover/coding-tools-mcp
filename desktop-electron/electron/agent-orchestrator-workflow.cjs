@@ -2631,6 +2631,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // The chat's own follow-up timer: it sends this chat a note later, and runs nothing.
     if (short === "schedule_wakeup") return "A reminder the chat sends itself later; it runs nothing";
     if (short === "show_in_chat") return "Brings a pane of this chat forward; it shows only what already runs";
+    if (short === "app_processes") return "Lists the app's own processes with their CPU and memory; read-only, no command lines";
     if (!AGENT_TOOLS.has(short) && !TERMINAL_READS.has(short)) return null;
     return APP_EDITS.has(short)
       ? "An edit through the app's tools, confined to the agent's worktree (like Claude's own edits)"
