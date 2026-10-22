@@ -3,7 +3,7 @@
 const { createHash, randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
-const { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, roundAnswers, cleanObjective, createGoalStore, ROUND_LIMITS } = require("./chat-goals.cjs");
+const { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAnswers, roundAnswers, cleanObjective, createGoalStore, ROUND_LIMITS } = require("./chat-goals.cjs");
 const { wakePrompt, wakeupAction, createWakeupStore } = require("./chat-wakeups.cjs");
 const { chatDescriptionWithout, createChatEditStore } = require("./chat-edits.cjs");
 const { createChatArchiveStore } = require("./chat-archive.cjs");
