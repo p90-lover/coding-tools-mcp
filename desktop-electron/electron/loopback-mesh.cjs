@@ -146,10 +146,17 @@ function persistLoopbackMesh(filePath, mesh) {
   if (/\buser_[A-Za-z0-9]/u.test(serialized) || serialized.includes("proxyApiKey")) {
     throw new Error("Loopback mesh must not contain secrets");
   }
+  // Every CPA keep-alive (20 s) publishes the mesh. An unchanged mesh that is still on disk is not
+  // rewritten: each atomic write (six file operations) blocked the main thread for seconds on the
+  // busy hard disk.
+  if (lastWritten.get(filePath) === serialized && fs.existsSync(filePath)) return filePath;
   fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
   writePrivateFileAtomic(filePath, serialized);
+  lastWritten.set(filePath, serialized);
   return filePath;
 }
+
+const lastWritten = new Map();
 
 module.exports = {
   DEFAULT_IN_APP_LOOPBACKS,

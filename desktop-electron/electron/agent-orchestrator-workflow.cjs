@@ -638,14 +638,36 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   const IDLE_EARLY_SWEEPS_MS = [60_000, 3 * 60_000];
   let idleTimer = null;
   let idleStopped = false;
+  // A chat AO still calls "working" with nothing from its agent this long has lost its turn to an
+  // app or daemon restart (see quietWorkingChatSessions); a stuck turn of a live run shows "may be
+  // stuck" long before this, and such a run's sessions are never released here.
+  const STALE_WORKING_MS = 2 * 60 * 60_000;
+  /** Sessions of the runs this app drives now, or null when one of them could not be read. */
+  async function drivenSessions() {
+    const driven = new Set();
+    for (const [key, live] of backgroundRuns) {
+      if (!(live?.starting || live?.driving || live?.status === "running")) continue;
+      const [workspaceId, runId] = JSON.parse(key);
+      const saved = await runs({ workspaceId, runId }).catch(() => null);
+      const mission = saved?.runs?.find(run => run.id === runId);
+      if (!mission) return null;
+      for (const node of mission.nodes ?? []) if (node.receipt?.thread_id) driven.add(String(node.receipt.thread_id));
+    }
+    return driven;
+  }
   async function releaseIdle() {
     const ours = new Set([...warm.values()].map(entry => entry.session).filter(Boolean));
     const idle = await harnessService().idleChatSessions?.(IDLE_RELEASE_MS, now()).catch(() => []) ?? [];
+    const quiet = await harnessService().quietWorkingChatSessions?.(STALE_WORKING_MS, now()).catch(() => []) ?? [];
+    // Only when every driven run could be read: a session one of them still uses is never stopped.
+    const driven = quiet.length ? await drivenSessions() : new Set();
+    const stale = driven ? quiet.filter(id => !driven.has(id)) : [];
     const released = [];
-    for (const id of idle) {
-      if (ours.has(id)) continue;
+    for (const id of [...idle, ...stale]) {
+      if (ours.has(id) || released.includes(id)) continue;
       if (await harnessService().exitAgent?.(id).then(() => true, () => false)) released.push(id);
     }
+    if (stale.length) logger?.info?.("ao.stale_working_released", { count: released.filter(id => stale.includes(id)).length, quiet: quiet.length });
     return released;
   }
   function scheduleIdleRelease(delay, early = [...IDLE_EARLY_SWEEPS_MS]) {
@@ -2717,6 +2739,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       .catch(() => null);
     return typeof where?.projectFolder === "string" ? where.projectFolder : typeof where?.root === "string" ? where.root : null;
   }
+  const REVIEW_TASK_LIMIT = 2000;
+  /**
+   * What the user asked in the chat a request serves, latest last, or "": the chat's task holds its
+   * first message, then each follow-up and steer. Without it the reviewer judged "needed for the
+   * task" blind. Seen live 2026-10-22: asked to "kill the backend first, after the test reopen it",
+   * the agent's `taskkill /PID 31332 /T /F` was denied as "not enough context to verify that PID
+   * 31332 is safe to stop", then so were Stop-Process and the chat terminal's own kill.
+   */
+  async function requestTask(mission) {
+    if (!mission.project_id) return "";
+    const detail = await board({ workspaceId: mission.workspace_id, taskId: mission.project_id }).catch(() => null);
+    return publicText(detail?.task?.description ?? "", REVIEW_TASK_LIMIT, true).trim();
+  }
   /** `decide`: the reviewer already said "ask"; this time it must choose allow or deny. */
   async function askApprover({ approver, mission, approval, decide = false }) {
     const { baseUrl, key } = connection();
@@ -2727,13 +2762,20 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const candidates = [...all.filter(model => !(reviewerDown.get(model) > now())), ...all.filter(model => reviewerDown.get(model) > now())];
     if (!candidates.length) throw new Error("CPA has no model for the command approver");
     const deadline = now() + REVIEW_BUDGET_MS;
-    const folder = await requestFolder(approval, mission);
+    const [folder, task] = await Promise.all([requestFolder(approval, mission), requestTask(mission)]);
     const scripts = reviewScriptExcerpts(approval, folder);
+    const request = describeRequest(approval);
+    // A shell command is reviewed as its bare command line, which leaves out the agent's own
+    // description of it ("Kill uvicorn backend process tree").
+    const purpose = typeof approval.reason === "string" && approval.reason.trim() && !request.includes(approval.reason)
+      ? publicText(approval.reason.trim(), 300) : "";
     const prompt = [
       "You are the command approver for an orchestrated coding mission. A worker asks to run a tool request.",
       `Workspace: ${mission.workspace_id}. Approver rules: ${String(approver.settings?.instructions || "none").slice(0, 1500)}`,
       folder ? `Workspace folder: ${folder}. Paths inside this folder, and relative paths, are inside the workspace; a command with no working folder runs there.` : "",
-      `Request: ${describeRequest(approval)}`,
+      task ? `What the user asked in this chat (their own words, latest last; this is the task):\n${task}` : "",
+      `Request: ${request}`,
+      purpose ? `The worker describes this request as: ${purpose}` : "",
       approval.permissions ? `Permissions: ${JSON.stringify(approval.permissions).slice(0, 800)}` : "",
       ...scripts.map((script) => `Local script ${script.file} (from the request's working folder${script.truncated ? ", first 4 KB" : ""}):\n${script.text}`),
       ...(decide ? [
@@ -3078,6 +3120,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
 
   const POOL_EXHAUSTED = /auth_unavailable|invalid[_ -]?auth|account[^\n]*(?:exhaust|unavail)|pool[^\n]*exhaust|sign[- ]?in|reauth|HTTP (?:401|403)/i;
+  // CPA answers "unknown provider for model X" when nothing serves X at all: a model it retired
+  // (gpt-5.5, 2026-10-22), not one cooling down (that one is still routed, and gets a 429). Kept from
+  // memory for 30 days, it stayed in the menu and each try spent a full launch (65 s) to fail again;
+  // a retry cannot fix it. The model is forgotten, so the menu drops it until CPA lists it again.
+  const MODEL_RETIRED = /unknown provider for model ([^\s"'\\,;]+)/i;
+  function forgetRetiredModel(error) {
+    const id = MODEL_RETIRED.exec(error)?.[1]?.replace(/\([^()]*\)$/, "");
+    if (!id || !knownModels[id]) return null;
+    delete knownModels[id];
+    saveKnownModels();
+    cpaCatalogCache = null;
+    return id;
+  }
   function blockedByFailure(mission, node, depth = 0) {
     return depth < mission.nodes.length && (node.parents || []).some(id => {
       const parent = mission.nodes.find(entry => entry.id === id);
@@ -3101,6 +3156,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!node) return null;
     const error = String(node.receipt?.error || "");
     if (POOL_EXHAUSTED.test(error)) return { detail: "This failure needs you (the account pool or a sign-in); automatic retry does not help it" };
+    if (MODEL_RETIRED.test(error)) return { detail: "CPA no longer serves this model; choose another model and send again" };
     const attempt = (node.history?.length ?? 0) + 1;
     if (attempt > AUTO_RETRY_LIMIT) return { detail: `Retried automatically ${AUTO_RETRY_LIMIT} times; inspect the saved answer and retry explicitly` };
     const key = `${mission.id}:${node.id}:${attempt}`;
@@ -3123,7 +3179,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!chatPreferences.get().autoRetry || !mission || mission.cancelled || mission.paused || mission.execution_mode !== "single") return false;
     if (mission.nodes.some(node => ["running", "reserved"].includes(node.state))) return false;
     const node = mission.nodes.find(entry => entry.state === "held" && entry.role !== "retry") ?? mission.nodes.find(entry => entry.state === "held");
-    return Boolean(node) && !POOL_EXHAUSTED.test(String(node.receipt?.error || "")) && (node.history?.length ?? 0) + 1 <= AUTO_RETRY_LIMIT;
+    const error = String(node?.receipt?.error || "");
+    return Boolean(node) && !POOL_EXHAUSTED.test(error) && !MODEL_RETIRED.test(error) && (node.history?.length ?? 0) + 1 <= AUTO_RETRY_LIMIT;
   }
   // A step that failed because the way out was down for a moment: the local proxy every CPA model
   // and the ChatGPT browser go through (seen live: ProxyBridge restarted, and for three minutes CPA
@@ -3163,6 +3220,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function recoverHeld(workspaceId, mission, state = {}) {
     const held = mission.nodes.filter(node => node.state === "held");
     if (!held.length || mission.cancelled) return null;
+    for (const node of held) {
+      const retired = forgetRetiredModel(String(node.receipt?.error || ""));
+      if (retired) logger?.info?.("cpa.model_retired", { model: retired });
+    }
     // A sign-in or account-pool failure (some arrive as a 5xx) is the person's, never a lost connection.
     const outage = chatPreferences.get().autoRetry
       ? held.find(node => node.role !== "retry" && NETWORK_OUTAGE.test(String(node.receipt?.error || ""))
@@ -4281,10 +4342,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     armWakeup(id, run.project_id);
     return { ok: true, taskId: run.project_id, dueAt: wakeup.dueAt, minutes: wakeup.minutes };
   }
-  // chat_wakeup: the user cancels the chat's wake-up.
-  function chatWakeup({ workspaceId, taskId, action, id } = {}) {
+  // chat_wakeup: the user edits (its note, the minutes from now) or deletes the chat's wake-up.
+  function chatWakeup({ workspaceId, taskId, action, id, minutes, reason } = {}) {
     const workspace = clean(workspaceId, 128), task = clean(taskId, 128);
-    if (action !== "cancel") throw new Error("Choose cancel");
+    if (action === "edit") {
+      const wakeup = wakeups.edit(workspace, task, clean(id, 128), {
+        ...(minutes === undefined ? {} : { minutes }), ...(reason === undefined ? {} : { reason: String(reason) }) });
+      if (!wakeup) throw new Error("This wake-up already fired or was replaced; refresh the chat");
+      armWakeup(workspace, task);
+      return { ok: true, wakeup };
+    }
+    if (action !== "cancel") throw new Error("Choose edit or cancel");
     disarmWakeup(workspace, task);
     return { ok: true, cancelled: wakeups.clear(workspace, task, id ? clean(id, 128) : null) };
   }
@@ -4585,7 +4653,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         || result.run.nodes.some(node => ["running", "reserved"].includes(node.state))) {
       throw new Error("Owned native stop was not acknowledged; no replacement was started");
     }
-    for (const node of external) if (node.receipt?.thread_id) await stopExternalTurn(node.receipt.thread_id);
+    for (const node of external) {
+      if (!node.receipt?.thread_id) continue;
+      // An agent whose controller is not running has no turn to stop, and its run was stopped just
+      // above. Seen live 2026-10-22: that refusal (CHAT_CONTROLLER_NOT_READY) failed Archive twice.
+      await stopExternalTurn(node.receipt.thread_id).catch((error) => {
+        if (!/\bCHAT_CONTROLLER_NOT_READY\b/.test(String(error?.message))) throw error;
+        logger?.info?.("ao.stop_owned_no_controller", { run: mission.id });
+      });
+    }
     return result.run;
   }
   async function resolveStoppedIntents(workspaceId,taskId,saved) {

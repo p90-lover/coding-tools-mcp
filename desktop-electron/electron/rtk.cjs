@@ -123,10 +123,11 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
     })
     : async (...args) => run(...args);
 
-  // locate() for the command path: the cached answer, refreshed without blocking when it is stale.
+  // locate() for the command path: the cached answer, refreshed without blocking when it is stale
+  // (or always, with `force`; a refresh already running is joined).
   let refreshing = null;
-  function locateAsync() {
-    if (now() - checkedAt < FIND_TTL_MS) return Promise.resolve(found);
+  function locateAsync(force = false) {
+    if (!force && now() - checkedAt < FIND_TTL_MS) return Promise.resolve(found);
     refreshing ??= (async () => {
       let next = null;
       for (const file of candidates()) {
@@ -147,8 +148,18 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
   }
 
   const enabled = () => getEnabled() !== false;
-  /** rtk, when it is installed and turned on. */
-  const active = () => (enabled() ? locate() : null);
+  /**
+   * rtk, when it is installed and turned on. Once rtk has been looked up, the answer at hand is
+   * used and a stale one is refreshed in the background: the blocking lookup (`rtk --version`, 5 s
+   * timeout per place) ran whenever AO's start read the hook after the 1-minute cache expired.
+   * Only the very first answer, before any lookup, is waited for.
+   */
+  const active = () => {
+    if (!enabled()) return null;
+    if (checkedAt === -Infinity) return locate();
+    if (now() - checkedAt >= FIND_TTL_MS) void locateAsync().catch(() => {});
+    return found;
+  };
 
   /**
    * The command rtk would run instead of `command`, or null to run it as written (resolves). rtk's
@@ -212,8 +223,12 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
     return { available: true, text: String(text?.stdout ?? "").slice(0, 20_000), data };
   }
 
-  function status() {
-    const tool = locate(true);
+  /**
+   * The RTK page's status (resolves). rtk is looked up afresh, without blocking: `rtk --version`
+   * through spawnSync (5 s timeout per candidate) froze the app each time the page asked.
+   */
+  async function status() {
+    const tool = await locateAsync(true);
     return { enabled: enabled(), installed: Boolean(tool), installing: Boolean(installing), path: tool?.path ?? null, version: tool?.version ?? null,
       minimum: MIN_VERSION.join("."), installCommand: platform === "win32" ? "winget install rtk-ai.rtk" : "brew install rtk" };
   }
@@ -233,7 +248,7 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
         installing = null;
         checkedAt = -Infinity;
         logger?.info?.("rtk.install_finished", { code });
-        resolve({ code, output: output.trim().slice(-2_000), status: status() });
+        status().then((current) => resolve({ code, output: output.trim().slice(-2_000), status: current }), reject);
       });
     });
     return installing;
@@ -244,10 +259,22 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
    * it with nothing for the person to do. An attempt that failed (offline, no winget) is not
    * repeated for a day; `record` keeps when it ran. Resolves with the install's result, or null.
    */
-  function autoInstall({ lastAttemptAt = null, record = () => {} } = {}) {
+  // The startup check in progress: AO's start (ready) waits for it as for an install.
+  let checking = null;
+  function autoInstall(options = {}) {
     if (platform !== "win32" || !enabled()) return Promise.resolve(null);
     if (installing) return installing.catch(() => null);
-    if (locate(true)) return Promise.resolve(null);
+    if (checking) return checking;
+    // rtk is looked up without blocking: `rtk --version` through spawnSync (5 s timeout per place
+    // looked) held up every start. The answer also fills the cache AO's environment reads.
+    checking = locateAsync(true).then((tool) => (tool ? null : startAutoInstall(options)), () => startAutoInstall(options))
+      .finally(() => { checking = null; });
+    return checking;
+  }
+
+  function startAutoInstall({ lastAttemptAt = null, record = () => {} }) {
+    if (!enabled()) return Promise.resolve(null);
+    if (installing) return installing.catch(() => null);
     // Never tried is null (Number(null) would be 0, "just now" at the epoch); a clock moved back retries.
     const last = typeof lastAttemptAt === "number" ? lastAttemptAt : NaN;
     if (Number.isFinite(last) && now() - last >= 0 && now() - last < AUTO_INSTALL_RETRY_MS) return Promise.resolve(null);
@@ -264,11 +291,13 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
    * which hands its PATH and Claude's hook to every agent) is started with rtk.
    */
   function ready(timeoutMs) {
-    if (!installing) return Promise.resolve();
+    const pending = checking ?? installing;
+    if (!pending) return Promise.resolve();
     return new Promise((resolve) => {
       const timer = setTimeout(resolve, timeoutMs);
       timer.unref?.();
-      installing.then(() => {}, () => {}).then(() => { clearTimeout(timer); resolve(); });
+      // The startup check resolves with the install it started, if any.
+      pending.then(() => {}, () => {}).then(() => { clearTimeout(timer); resolve(); });
     });
   }
 

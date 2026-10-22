@@ -214,6 +214,53 @@ test("an account added in CPA reaches the picker without a restart", async () =>
   }
 });
 
+test("account checks read CPA's files off the main thread, and an unchanged file only once", async () => {
+  // Every 15 s the check read all 21 auth files synchronously, freezing the app on a busy disk.
+  const { createChatGptDesktopHost } = require("../electron/chatgpt-desktop.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-desktop-reads-"));
+  const authDir = path.join(root, "auth");
+  fs.mkdirSync(authDir);
+  const write = (name, body) => fs.writeFileSync(path.join(authDir, name), JSON.stringify(body));
+  write("a@x.com.json", { type: "codex", email: "a@x.com", account_id: "1", refresh_token: "r" });
+  const seen = [];
+  const host = createChatGptDesktopHost({
+    dataRoot: path.join(root, "data"),
+    resolveCpaAuthDir: () => authDir,
+    helper: { call: async () => null, dispose() {} },
+    platform: "linux",
+    onChange: (status) => seen.push(status.accounts.map((a) => a.email)),
+  });
+  const syncReads = [];
+  const asyncReads = [];
+  const { readFileSync } = fs;
+  const { readFile } = fs.promises;
+  try {
+    await host.initialize();
+    fs.readFileSync = function (file, ...rest) { if (String(file).startsWith(authDir)) syncReads.push(file); return readFileSync.call(this, file, ...rest); };
+    fs.promises.readFile = function (file, ...rest) { if (String(file).startsWith(authDir)) asyncReads.push(path.basename(String(file))); return readFile.call(this, file, ...rest); };
+    // Unrelated files changing wake the check several times; the account's file stays as it was.
+    for (let round = 0; round < 3; round++) {
+      write(`other-${round}.json`, { type: "gemini" });
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+    }
+    assert.deepEqual(syncReads, [], "no synchronous read of CPA's files");
+    assert.ok(asyncReads.filter((name) => name === "a@x.com.json").length <= 1, `read again: ${asyncReads}`);
+    // A real change is still noticed.
+    write("b@x.com.json", { type: "codex", email: "b@x.com", account_id: "2", refresh_token: "r" });
+    const before = seen.length;
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && !seen.slice(before).some((emails) => emails.includes("b@x.com"))) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.ok(seen.slice(before).some((emails) => emails.includes("b@x.com")));
+  } finally {
+    fs.readFileSync = readFileSync;
+    fs.promises.readFile = readFile;
+    await host.shutdown();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // A fake of the win32 helper: launched processes get a window, keyed by the slot's APPDATA.
 function fakeDesktopWorld(root) {
   const location = path.join(root, "pkg");

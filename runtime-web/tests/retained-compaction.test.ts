@@ -23,6 +23,7 @@ import {
   retainedConversationResumeRequest,
 } from "../src/adapters/chatgpt-web/conversation-key";
 import {
+  chatGptHandoffFailureMessage,
   chatGptWebExecutionNamespace,
   createChatGptWebAdapter,
 } from "../src/adapters/chatgpt-web/index";
@@ -1501,6 +1502,23 @@ test("structured compact rebuilds canonical context when its retained browser di
   }
 });
 
+// Seen live (2026-10-20): four compactions of one goal thread failed with only "did not complete the
+// context handoff". The causes, in the daemon's stderr alone, were a refused image attachment and a
+// tab that had not finished loading.
+test("a failed context handoff tells Codex why", () => {
+  expect(chatGptHandoffFailureMessage(new Error("ChatGPT did not accept all prompt attachments")))
+    .toBe("ChatGPT did not complete the context handoff: ChatGPT did not accept all prompt attachments. Retry the task.");
+  expect(chatGptHandoffFailureMessage(new Error("ChatGPT browser stage timed out: browser_page.\n")))
+    .toBe("ChatGPT did not complete the context handoff: ChatGPT browser stage timed out: browser_page. Retry the task.");
+  // A retirement failure on top keeps the handoff's own cause, which comes first.
+  expect(chatGptHandoffFailureMessage(new AggregateError(
+    [new Error("ChatGPT web login is expired or the new chat surface is unavailable"), new Error("retire failed")],
+    "Structured compaction failed and its retained conversation could not be retired",
+  ))).toContain(": ChatGPT web login is expired or the new chat surface is unavailable. Retry");
+  expect(chatGptHandoffFailureMessage(new Error(""))).toBe("ChatGPT did not complete the context handoff. Retry the task.");
+  expect(chatGptHandoffFailureMessage(new Error("x".repeat(1_000))).length).toBeLessThan(400);
+});
+
 test("a disappeared retained source cannot leave its fresh compaction rebuild past the shared deadline", async () => {
   const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-stale-retained-deadline-"));
   const provider: CodexProviderConfig = {
@@ -1556,8 +1574,10 @@ test("a disappeared retained source cannot leave its fresh compaction rebuild pa
       type: "error",
       code: "compaction_handoff_failed",
       retryable: false,
-      message: "ChatGPT did not complete the context handoff. Retry the task.",
     });
+    // The chat names why the handoff failed instead of only that it did.
+    expect((events.at(-1) as { message: string }).message)
+      .toMatch(/^ChatGPT did not complete the context handoff: \S.*\. Retry the task\.$/);
   } finally {
     releaseBrowser?.();
     await cancelStructuredCompactionTrace(fallbackTrace, new Error("test cleanup"));

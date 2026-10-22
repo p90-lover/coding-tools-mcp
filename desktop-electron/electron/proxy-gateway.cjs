@@ -7,7 +7,7 @@ const path = require("node:path");
 const { execFile, spawn } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { DEFAULT_BYPASS } = require("./provider-network.cjs");
-const { processRunning, terminateOwnedProcessTree } = require("./process-tree.cjs");
+const { processRunning, terminateOwnedProcessTreeAsync } = require("./process-tree.cjs");
 const relay = require("./proxy-gateway-relay.cjs");
 
 // App side of the built-in proxy gateway (the relay itself is proxy-gateway-relay.cjs).
@@ -568,7 +568,7 @@ function createProxyGatewayController({
     } catch {}
     if (!(await waitForExit(target.pid, 3_000))) {
       try {
-        if (target.child) terminateOwnedProcessTree(target.child);
+        if (target.child) await terminateOwnedProcessTreeAsync(target.child);
         else process.kill(target.pid);
       } catch {}
       await waitForExit(target.pid, 2_000);
@@ -642,7 +642,7 @@ function createProxyGatewayController({
       }
     } catch (error) {
       try {
-        if (child.exitCode === null && child.signalCode === null) terminateOwnedProcessTree(child);
+        if (child.exitCode === null && child.signalCode === null) await terminateOwnedProcessTreeAsync(child);
       } catch {}
       // Even a helper that would not die must never keep the app's process alive.
       child.stdout.destroy();

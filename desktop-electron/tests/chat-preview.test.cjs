@@ -662,6 +662,12 @@ test("the side panel reads the agent's worktree: its changes, folders and files,
   assert.equal(changes.branch, "ao/reg-machine-31");
   assert.match(changes.diff, /\+b/);
   assert.equal(changes.entries[0].path, "api/new.py");
+  // The Overview's count (every 5 s) runs git status only: no diff of the whole worktree.
+  const diffs = env.headless.filter((body) => body.tool === "git_diff").length;
+  const summary = await env.tools.changes({ sessionId: "ao-1", summary: true });
+  assert.equal(summary.entries.length, 1);
+  assert.equal(summary.diff, "");
+  assert.equal(env.headless.filter((body) => body.tool === "git_diff").length, diffs, "no git_diff for a summary");
   assert.equal((await env.tools.files({ sessionId: "ao-1", path: "." })).entries[0].type, "directory");
   assert.equal((await env.tools.file({ sessionId: "ao-1", path: "api/x.py" })).content, "content of api/x.py");
   await assert.rejects(env.tools.file({ sessionId: "ao-1", path: "../../outside.txt" }), /outside this chat's worktree/, "only inside the worktree");

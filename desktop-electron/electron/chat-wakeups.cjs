@@ -97,6 +97,19 @@ function createWakeupStore({ file = null, now = Date.now } = {}) {
       persist();
       return wakeup;
     },
+    /**
+     * The user's change to the chat's wake-up `id`: its note and/or the minutes from now, checked as
+     * the agent's own are. A new time restarts the clock. Null when that wake-up is gone or replaced.
+     */
+    edit(workspaceId, taskId, id, { minutes, reason } = {}) {
+      const wakeup = wakeups[key(workspaceId, taskId)];
+      if (!wakeup || wakeup.id !== id) return null;
+      const checked = cleanWakeup({ minutes: minutes ?? wakeup.minutes, reason: reason ?? wakeup.reason });
+      const at = now();
+      Object.assign(wakeup, checked, minutes === undefined ? {} : { scheduledAt: at, dueAt: at + checked.minutes * 60_000, due: false });
+      persist();
+      return wakeup;
+    },
     /** Removes the chat's wake-up (only `id` when given, so a newer one is never cleared by mistake). */
     clear(workspaceId, taskId, id = null) {
       const wakeup = wakeups[key(workspaceId, taskId)];
