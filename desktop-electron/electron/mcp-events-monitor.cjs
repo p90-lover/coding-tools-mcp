@@ -215,7 +215,7 @@ function createMcpEventMonitor({
     openIncident("bridge:proxy_fetch", EVENTS.bridgeDown, null, {
       reason_code: netError,
       reason: `A ChatGPT request through the configured proxy failed (${netError}).`,
-      next_step: "Start the local proxy app or choose a working proxy in Coding Tools > Network Proxy; ChatGPT requests fail until the proxy route works.",
+      next_step: "Start the local proxy app or choose a working proxy in Coding Tools > Proxy; ChatGPT requests fail until the proxy route works.",
       recovery_tools: ["server_info"],
       component: "proxy_route",
       target: target?.label ?? "unknown",
@@ -370,7 +370,7 @@ function createMcpEventMonitor({
         "Restart the Codex bridge from Coding Tools (Runtime > Restart). Web chat turns cannot run until it is back.");
       const proxy = proxyTarget(proxyUrl());
       await checkComponent("proxy", proxy?.label ?? null, () => probeTcp(proxy), "The network proxy",
-        "Start the local proxy app or choose a working proxy in Coding Tools > Network Proxy; ChatGPT requests fail until the proxy route works.");
+        "Start the local proxy app or choose a working proxy in Coding Tools > Proxy; ChatGPT requests fail until the proxy route works.");
       await syncProxy();
       await flush();
     } finally {
