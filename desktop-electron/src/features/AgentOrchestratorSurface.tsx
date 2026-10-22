@@ -7,6 +7,11 @@ import { AgentOrchestratorOriginalSurface } from "./AgentOrchestratorOriginalSur
 import { AgentOrchestratorCanvas, type CanvasNode } from "./AgentOrchestratorCanvas";
 import { AgentOrchestratorChat } from "./AgentOrchestratorChat";
 import { ChatThreadList, type ArchivedChat, type ThreadWorkspace } from "./ChatThreadList";
+import { ChatSplit } from "./ChatSplit";
+import {
+  SPLIT_ROW, SPLIT_STORE, belowPlace, defaultPlace, focusOrder, normalizeSplit, paneOrder, readSplit, spatialNeighbour, splitColumns,
+  type PanePos, type SplitDropTarget, type SplitPane, type SplitSaved,
+} from "./chat-split";
 import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "./ProjectEditDialog";
 import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
@@ -473,9 +478,23 @@ const STALE_OBSERVE = /AO receipt changed/;
 /** A chat card's model as the composer's chip names it ("DeepSeek V4.1 Flash", "WebGPT High"). */
 const chatModelName = (model: string) => modelShortLabel(model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, ""), model.startsWith("cpa/")).name;
 
-export function AgentOrchestratorSurface({ language, setError }: {
+/**
+ * A split pane: one more chat beside the window's own, run by a Surface of its own (so its run,
+ * approvals, composer and sends are its own). The window's Surface chooses the chat it shows and
+ * hears which chat it opened (`onChat`); a new chat asked for inside it opens another pane.
+ */
+export type SplitPaneLink = {
+  workspaceId: string;
+  taskId: string;
+  onChat: (workspaceId: string, taskId: string) => void;
+  onNewChat: (workspaceId: string) => void;
+  onClose: () => void;
+};
+
+export function AgentOrchestratorSurface({ language, setError, pane }: {
   language: Language;
   setError: (error: string | null) => void;
+  pane?: SplitPaneLink;
 }) {
   const copy = words[language];
   const surfaceHidden = useSurfaceHidden();
@@ -484,7 +503,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
   // The project whose board and runs were last read in full: until it is the open one, the chat
   // list is still loading, not empty.
   const [loadedWorkspace, setLoadedWorkspace] = useState("");
-  const [workspaceId, setWorkspaceId] = useState(() => { try { return localStorage.getItem("coding-tools:ao:workspace") || ""; } catch { return ""; } });
+  // A split pane opens its own project, and never changes the one the window opens next time.
+  const [workspaceId, setWorkspaceId] = useState(() => { if (pane) return pane.workspaceId; try { return localStorage.getItem("coding-tools:ao:workspace") || ""; } catch { return ""; } });
+  // The chat a split pane is to show once its project has loaded (null: not a pane).
+  const paneWanted = useRef(pane ? { workspaceId: pane.workspaceId, taskId: pane.taskId } : null);
   // One project tree switches between the conversation and the selected graph above its workspace board.
   const [view, setView] = useState<"chat" | "overview" | "board">("chat");
   // null until the workspace's runs load; "" means a new, unsent chat.
@@ -1031,6 +1053,15 @@ export function AgentOrchestratorSurface({ language, setError }: {
     // still loaded; picking its "latest chat" re-selected the old project's task under the new
     // project, so a send went to a task the new workspace refuses. Wait for this project's board.
     if (chatTaskId !== null || !board || boardWorkspace.current !== workspaceId) return;
+    // A split pane opens the chat it was given (a new one for ""), never the project's latest.
+    const wanted = paneWanted.current;
+    if (wanted) {
+      if (wanted.workspaceId !== workspaceId || loadedWorkspace !== workspaceId) return;
+      const found = wanted.taskId ? chatList(missions, board.tasks, taskLifecycle).find((entry) => entry.taskId === wanted.taskId) : undefined;
+      setChatTaskId(found?.taskId ?? "");
+      if (found) setSelectedRunId(found.latestRunId);
+      return;
+    }
     // "Continue in project" switched here to open a new, pre-filled chat, not the latest one.
     if (chatSeed?.workspaceId === workspaceId) { setChatTaskId(""); setView("chat"); return; }
     // A chat clicked in this project's rows opens itself (pendingSelect), not the latest one.
@@ -1709,6 +1740,153 @@ export function AgentOrchestratorSurface({ language, setError }: {
     return next;
   });
   const startNewChat = () => { setPendingChat(null); setChatTaskId(""); setDraftTeam(null); setInspectedId(""); setView("chat"); setSheet(""); setMissionTeamId(team?.id ?? ""); };
+  // Split view (Claude Code's): more chats beside the window's own, each in a pane of its own
+  // (SplitPaneLink). "main" is the window's own chat; a sidebar click goes to the focused pane.
+  const [splitPanes, setSplitPanes] = useState<SplitPane[]>([]);
+  const [focusedPane, setFocusedPane] = useState("main");
+  const focusedSplit = splitPanes.find((item) => item.id === focusedPane);
+  const [splitMaxCols, setSplitMaxCols] = useState(2);
+  const [splitWeightsSaved, setSplitWeightsSaved] = useState<number[] | undefined>(undefined);
+  const [splitRow, setSplitRow] = useState(SPLIT_ROW.DEFAULT);
+  /** The pane already showing a chat, so a chat is never open twice (both would send its queue). */
+  const paneShowing = (id: string, taskId: string) => !taskId ? undefined : workspaceId === id && chatTaskId === taskId ? "main"
+    : splitPanes.find((item) => item.workspaceId === id && item.taskId === taskId)?.id;
+  /** The window's own chat becomes this one (a promoted pane, a chat dropped to the left of it). */
+  const showInMain = (id: string, taskId: string) => {
+    if (id === workspaceId) { if (taskId) selectChat(taskId); else startNewChat(); return; }
+    if (taskId) selectChatIn(id, taskId);
+    else { setChatSeed({ key: crypto.randomUUID(), workspaceId: id, title: "", text: "" }); chooseWorkspace(id); }
+  };
+  /**
+   * Opens a chat ("" a new one) in a pane: where it was asked to go, else Claude Code's next place
+   * (a new column while one fits, then a free bottom row, else in place of the last chat).
+   */
+  const openInSplit = (id: string, taskId: string, at?: SplitDropTarget | PanePos | null) => {
+    const open = paneShowing(id, taskId);
+    setView("chat"); setSheet("");
+    if (open) { setFocusedPane(open); return; }
+    if (at && "kind" in at && at.kind === "left") {
+      // In front of the window's own chat: that chat moves into a pane of its own, every column one right.
+      const moved = { id: crypto.randomUUID(), workspaceId, taskId: chatTaskId ?? "", col: 1, row: 0 as const };
+      setSplitPanes((current) => normalizeSplit([moved, ...current.map((item) => ({ ...item, col: item.col + 1 }))]));
+      setFocusedPane("main");
+      showInMain(id, taskId);
+      return;
+    }
+    const place: PanePos | { replace: string } = !at ? defaultPlace(splitPanes, splitMaxCols)
+      : "kind" in at ? at.kind === "column" ? { col: splitColumns(splitPanes), row: 0 } : { col: at.col, row: at.row } : at;
+    const holder = "replace" in place ? splitPanes.find((item) => item.id === place.replace)
+      : splitPanes.find((item) => item.col === place.col && item.row === place.row);
+    if ("col" in place && place.col === 0 && place.row === 0) { setFocusedPane("main"); showInMain(id, taskId); return; }
+    if (holder) {
+      setSplitPanes((current) => current.map((item) => item.id === holder.id ? { ...item, workspaceId: id, taskId } : item));
+      setFocusedPane(holder.id);
+      return;
+    }
+    const added = { id: crypto.randomUUID(), workspaceId: id, taskId, ...(place as PanePos) };
+    setSplitPanes((current) => normalizeSplit([...current, added]));
+    setFocusedPane(added.id);
+  };
+  /** Close split view: a pane goes; the window's own chat closed hands its place to the first pane with a chat. */
+  const closeSplitPane = (id: string) => {
+    if (!splitPanes.length) return;
+    if (id === "main") {
+      const ordered = [...splitPanes].sort(paneOrder);
+      const first = ordered.find((item) => item.taskId);
+      setFocusedPane("main");
+      if (!first) { startNewChat(); return; }
+      setSplitPanes((current) => normalizeSplit(current.filter((item) => item.id !== first.id)));
+      showInMain(first.workspaceId, first.taskId);
+      return;
+    }
+    const order = focusOrder(splitPanes);
+    setSplitPanes((current) => normalizeSplit(current.filter((item) => item.id !== id)));
+    if (focusedPane === id) setFocusedPane(order[Math.max(0, order.indexOf(id) - 1)] ?? "main");
+  };
+  // The split view is kept between runs (its chats, column widths and row split), as Claude Code keeps it.
+  const splitRestored = useRef(false);
+  useEffect(() => {
+    if (pane || splitRestored.current || !workspaceReady) return;
+    splitRestored.current = true;
+    let saved: SplitSaved = { panes: [] };
+    try { saved = readSplit(localStorage.getItem(SPLIT_STORE)); } catch { /* Nothing kept. */ }
+    if (saved.panes.length) setSplitPanes(normalizeSplit(saved.panes.map((item) => ({ ...item, id: crypto.randomUUID() }))));
+    if (saved.weights) setSplitWeightsSaved(saved.weights);
+    if (saved.rowSplit) setSplitRow(saved.rowSplit);
+  }, [workspaceReady]);
+  useEffect(() => {
+    if (pane || !splitRestored.current) return;
+    const kept: SplitSaved = { panes: splitPanes.filter((item) => item.taskId).map(({ workspaceId: id, taskId, col, row }) => ({ workspaceId: id, taskId, col, row })),
+      weights: splitWeightsSaved, rowSplit: splitRow };
+    try { localStorage.setItem(SPLIT_STORE, JSON.stringify(kept)); } catch { /* Kept for this session only. */ }
+  }, [splitPanes, splitWeightsSaved, splitRow]);
+  // Claude Code's split view keys (Windows): Ctrl+Alt+\ a new chat on the right, Ctrl+Alt+- one below,
+  // Ctrl+] / Ctrl+[ the next or previous pane, Ctrl+Alt+Arrow the pane that way, Ctrl+Alt+W close it.
+  useEffect(() => {
+    if (pane) return;
+    const onKey = (event: KeyboardEvent) => {
+      // AltGr arrives as Ctrl+Alt: on many layouts it types \ or - and must not open a pane.
+      if (view !== "chat" || event.getModifierState?.("AltGraph")) return;
+      const key = event.key;
+      if (event.ctrlKey && event.altKey && !event.shiftKey && (key === "\\" || event.code === "Backslash")) {
+        event.preventDefault();
+        openInSplit(workspaceId, "", splitColumns(splitPanes) < splitMaxCols ? { kind: "column" } : null);
+      } else if (event.ctrlKey && event.altKey && !event.shiftKey && (key === "-" || event.code === "Minus")) {
+        event.preventDefault();
+        const from = focusedSplit ?? { col: 0, row: 0 as const };
+        openInSplit(workspaceId, "", belowPlace(splitPanes, from, splitMaxCols) as PanePos);
+      } else if (event.ctrlKey && event.altKey && !event.shiftKey && (key.toLowerCase() === "w" || event.code === "KeyW")) {
+        if (!splitPanes.length) return;
+        event.preventDefault();
+        closeSplitPane(focusedPane);
+      } else if (event.ctrlKey && !event.altKey && !event.shiftKey && (key === "]" || key === "[")) {
+        if (!splitPanes.length) return;
+        event.preventDefault();
+        const order = focusOrder(splitPanes);
+        const at = Math.max(0, order.indexOf(focusedPane));
+        focusComposer.current = true;
+        setFocusedPane(order[(at + (key === "]" ? 1 : -1) + order.length) % order.length]);
+      } else if (event.ctrlKey && event.altKey && !event.shiftKey && /^Arrow(Left|Right|Up|Down)$/.test(key)) {
+        const next = spatialNeighbour(splitPanes, focusedPane, key.slice(5).toLowerCase() as "left" | "right" | "up" | "down");
+        if (!next) return;
+        event.preventDefault();
+        focusComposer.current = true;
+        setFocusedPane(next);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+  // A pane focused from the keyboard or just opened takes the keyboard: its composer, as Claude
+  // Code's does. A click into a pane leaves focus where the click put it.
+  const focusComposer = useRef(false);
+  useEffect(() => {
+    if (pane || !splitPanes.length || !focusComposer.current) return;
+    focusComposer.current = false;
+    const frame = window.requestAnimationFrame(() => {
+      const box = stageRef.current?.querySelector<HTMLElement>(`.cx-split > .cx-pane[data-focused]`);
+      if (box && !box.contains(document.activeElement)) box.querySelector<HTMLTextAreaElement>(".cx-composer textarea")?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [focusedPane]);
+  /** A chat chosen in the sidebar: its pane if it is open, else the focused pane shows it. */
+  const showChat = (id: string, taskId: string) => {
+    const open = paneShowing(id, taskId);
+    if (open) { setFocusedPane(open); if (open === "main") selectChat(taskId); else setView("chat"); return; }
+    if (focusedSplit) {
+      setView("chat"); setSheet("");
+      setSplitPanes((current) => current.map((item) => item.id === focusedSplit.id ? { ...item, workspaceId: id, taskId } : item));
+      return;
+    }
+    if (id === workspaceId) selectChat(taskId); else selectChatIn(id, taskId);
+  };
+  /** New chat: in a split window it opens a pane of its own; otherwise it replaces the open chat. */
+  const openNewChat = (id = workspaceId) => {
+    if (pane) { pane.onNewChat(id); return; }
+    if (splitPanes.length) { openInSplit(id, ""); return; }
+    if (id === workspaceId) startNewChat();
+    else { setChatSeed({ key: crypto.randomUUID(), workspaceId: id, title: "", text: "" }); chooseWorkspace(id); }
+  };
   const renameChat = (taskId: string, title: string) => chatRun(taskId, async () => {
     await moduleCall("task_rename", { workspaceId, taskId, title });
     await loadBoard(workspaceId);
@@ -1867,6 +2045,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const switchToWorkspace = (id: string) => {
     setWorkspaceId(id);
     setChatTaskId(null);
+    if (pane) return;
     try { localStorage.setItem("coding-tools:ao:workspace", id); } catch { /* Selection still works for this session. */ }
   };
   const chooseWorkspace = (id: string) => {
@@ -1916,6 +2095,20 @@ export function AgentOrchestratorSurface({ language, setError }: {
     pendingSelect.current = null;
     selectChat(pending.taskId);
   }, [missions, board, taskLifecycle, workspaceId, loadedWorkspace]);
+  // A split pane shows the chat the window chose for it (a sidebar click while it was focused).
+  useEffect(() => {
+    if (!pane) return;
+    paneWanted.current = { workspaceId: pane.workspaceId, taskId: pane.taskId };
+    if (pane.workspaceId !== workspaceId) { switchToWorkspace(pane.workspaceId); return; }
+    if (chatTaskId === null || chatTaskId === pane.taskId) return;
+    if (pane.taskId) selectChat(pane.taskId); else startNewChat();
+  }, [pane?.workspaceId, pane?.taskId]);
+  // ...and tells it which chat it opened itself (a new chat's first send, a project picked in it).
+  useEffect(() => {
+    if (!pane || chatTaskId === null || loadedWorkspace !== workspaceId) return;
+    paneWanted.current = { workspaceId, taskId: chatTaskId };
+    if (pane.workspaceId !== workspaceId || pane.taskId !== chatTaskId) pane.onChat(workspaceId, chatTaskId);
+  }, [chatTaskId, workspaceId, loadedWorkspace]);
   // Another project's chats for its open row in the list, without switching to it.
   const loadProjectChats = useCallback(async (id: string) => {
     const [projectBoard, projectRuns] = await Promise.all([moduleCall("board", { workspaceId: id }), moduleCall("runs", { workspaceId: id })]);
@@ -1925,9 +2118,12 @@ export function AgentOrchestratorSurface({ language, setError }: {
   // A chat that finishes or needs you while another is open is marked unread, as in Codex.
   const lastChatStatus = useRef<Record<string, string>>({});
   useEffect(() => {
+    // The window's Surface keeps the unread marks; a chat shown in any pane is being read.
+    if (pane) return;
     for (const entry of chatList(missions, allTasks, taskLifecycle)) {
       const before = lastChatStatus.current[entry.taskId];
-      if (before && before !== entry.status && ["done", "attention", "stopped"].includes(entry.status) && entry.taskId !== chatTaskId) markUnread(entry.taskId, true);
+      if (before && before !== entry.status && ["done", "attention", "stopped"].includes(entry.status) && entry.taskId !== chatTaskId
+        && !splitPanes.some((item) => item.taskId === entry.taskId)) markUnread(entry.taskId, true);
       lastChatStatus.current[entry.taskId] = entry.status;
     }
   }, [missions]);
@@ -2109,15 +2305,15 @@ export function AgentOrchestratorSurface({ language, setError }: {
   }, [shownMissions, taskLifecycle]);
   // The chat's actions call the current handlers through this ref, so the objects it holds keep
   // their identity across renders (they are only called after a render has committed).
-  const chatHandlers = useRef({ startNewChat, renameChat, missionAction, forkChat, rewindChat, deleteChatMessage, copyChat, togglePin, restartChatRun, stopChatRun });
+  const chatHandlers = useRef({ openNewChat, renameChat, missionAction, forkChat, rewindChat, deleteChatMessage, copyChat, togglePin, restartChatRun, stopChatRun });
   useLayoutEffect(() => {
-    chatHandlers.current = { startNewChat, renameChat, missionAction, forkChat, rewindChat, deleteChatMessage, copyChat, togglePin, restartChatRun, stopChatRun };
+    chatHandlers.current = { openNewChat, renameChat, missionAction, forkChat, rewindChat, deleteChatMessage, copyChat, togglePin, restartChatRun, stopChatRun };
   });
   const chatPinned = Boolean(chatTaskId && chatPins.includes(chatTaskId));
   const chatThread = useMemo(() => {
     if (!chatTaskId) return undefined;
     return {
-      newChat: () => chatHandlers.current.startNewChat(),
+      newChat: () => chatHandlers.current.openNewChat(),
       rename: (title: string) => chatHandlers.current.renameChat(chatTaskId, title),
       archive: () => chatHandlers.current.missionAction(chatTaskId, "archive"),
       fork: (turnIndex?: number | "first") => chatHandlers.current.forkChat(chatTaskId, turnIndex),
@@ -2132,28 +2328,30 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const stopChat = useCallback((runId: string) => chatHandlers.current.stopChatRun(runId), []);
 
   return (
-    <section className="ao-workflow" aria-label={copy.title} lang={language}>
-      <ChatThreadList workspaces={workspaces.map((item) => ({ id: item.id, name: item.name, path: item.path }))} workspaceId={workspaceId} onWorkspace={chooseWorkspace}
-        chats={threadChats} archived={threadArchived} selectedTaskId={chatTaskId ?? ""} now={listNow}
+    <section className={pane ? "ao-workflow cx-pane-surface" : "ao-workflow"} aria-label={copy.title} lang={language}>
+      {pane ? null : <ChatThreadList workspaces={workspaces.map((item) => ({ id: item.id, name: item.name, path: item.path }))} workspaceId={workspaceId} onWorkspace={chooseWorkspace}
+        chats={threadChats} archived={threadArchived} selectedTaskId={focusedSplit ? focusedSplit.taskId : chatTaskId ?? ""} now={listNow}
         archivedAll={archivedAll ?? undefined} restoreArchived={restoreArchived} setArchiveDays={setArchiveDays}
         pinned={chatPins} togglePin={togglePin} unread={chatUnread} setUnread={markUnread}
         pinnedProjects={projectPins} toggleProjectPin={toggleProjectPin}
-        busyTaskIds={chatBusy} pendingTitle={pendingChat && !pendingChat.taskId ? pendingChat.title : undefined}
-        actions={{ select: (taskId) => selectChat(taskId, "chat"), newChat: startNewChat, rename: renameChat,
+        busyTaskIds={chatBusy} openTaskIds={[chatTaskId ?? "", ...splitPanes.map((item) => item.taskId)].filter(Boolean)} pendingTitle={pendingChat && !pendingChat.taskId ? pendingChat.title : undefined}
+        actions={{ select: (taskId) => showChat(workspaceId, taskId), newChat: () => openNewChat(), rename: renameChat,
           lifecycle: missionAction, archiveAll: archiveAllChats,
           fork: (taskId, from) => forkChat(taskId, from === "first" ? "first" : undefined), copy: copyChat,
           openStructure: (taskId) => selectChat(taskId, "overview"), openBoard: () => { setSheet(""); setView("board"); }, openFolder,
           continueIn: continueInProject, share: shareChat, openWindow: openChatWindow,
+          openSplit: (id, taskId) => openInSplit(id || workspaceId, taskId),
           // Another project's new chat goes through the same seed as "Continue in", with an empty draft.
-          newChatIn: (id) => { if (id === workspaceId) startNewChat(); else { setChatSeed({ key: crypto.randomUUID(), workspaceId: id, title: "", text: "" }); chooseWorkspace(id); } },
+          newChatIn: (id) => openNewChat(id),
           editProject: (id) => setProjectEdit({ id, step: "edit" }),
           removeProject: (id) => setProjectEdit({ id, step: "remove" }),
-          selectIn: selectChatIn }}
+          selectIn: (id, taskId) => showChat(id, taskId) }}
         loadProjectChats={loadProjectChats} chatsLoading={loadedWorkspace !== workspaceId}
         projectRemote={(folder) => window.codexWebLauncher?.projectRemote?.(folder) ?? Promise.resolve(null)}
-        projectGit={readProjectGit} />
+        projectGit={readProjectGit} />}
       <div className="ao-main">
-      <div className="ao-dragstrip" aria-hidden="true" />
+      {/* A pane sits inside the window's own chat area: only that one holds the window's drag strip. */}
+      {pane ? null : <div className="ao-dragstrip" aria-hidden="true" />}
       {view !== "chat" ? <header className="ao-workspace-head">
         <div className="ao-workspace-title">
           <strong>{workspaces.find(workspace => workspace.id === workspaceId)?.name || copy.title}</strong>
@@ -2294,7 +2492,15 @@ export function AgentOrchestratorSurface({ language, setError }: {
         {view === "chat" ? (
           !workspaceId && workspaceReady
             ? <div className="ao-empty-state"><p>{copy.noWorkspace}</p><button className="button-primary" type="button" onClick={() => setSheet("settings")}>{copy.settings}</button></div>
-            : <AgentOrchestratorChat
+            : <ChatSplit focused={focusedPane} onFocus={setFocusedPane}
+                weights={splitWeightsSaved} onWeights={setSplitWeightsSaved} rowSplit={splitRow} onRowSplit={setSplitRow}
+                maxColumns={splitMaxCols} onMaxColumns={setSplitMaxCols}
+                onDropChat={pane ? undefined : (chat, target) => openInSplit(chat.workspaceId || workspaceId, chat.taskId, target)}
+                panes={pane ? [] : splitPanes.map((item) => ({ ...item, content: <AgentOrchestratorSurface language={language} setError={setError}
+                  pane={{ workspaceId: item.workspaceId, taskId: item.taskId, onNewChat: (id) => openInSplit(id, ""), onClose: () => closeSplitPane(item.id),
+                    onChat: (id, taskId) => setSplitPanes((current) => current.map((entry) => entry.id === item.id ? { ...entry, workspaceId: id, taskId } : entry)) }} /> }))}>
+              <AgentOrchestratorChat
+                onClosePane={pane ? pane.onClose : splitPanes.length ? () => closeSplitPane("main") : undefined}
                 runs={chatRuns}
                 tasks={allTasks} selectedTaskId={chatTaskId ?? ""} deciding={chatTaskId === null} onComposing={prewarmOnTyping}
                 projectName={workspaces.find((item) => item.id === workspaceId)?.name} projectBranch={projectBranch}
@@ -2351,6 +2557,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
                 retryStart={retryChatStart}
                 describeNode={describeChatNode} activity={chatActivity} modelName={chatModelName}
                 describeRoute={(nodeId, runId) => { const node = missions.find((mission) => mission.id === runId)?.nodes.find((entry) => entry.id === nodeId); return node ? describeNode(node as unknown as CanvasNode) : ""; }} />
+              </ChatSplit>
         ) : null}
 
         {view === "board" ? <section className="ao-board-view" aria-label="Mission Board">

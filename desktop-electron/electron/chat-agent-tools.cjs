@@ -2226,13 +2226,14 @@ function createChatAgentTools({
     },
     /**
      * The session worktree's changes for the side panel's Changes tab: git's status (with new files)
-     * and the diff of tracked files, as headless reads them in that worktree.
+     * and the diff of tracked files, as headless reads them in that worktree. With `summary` only the
+     * files: the chat's Overview polls it for a count and never shows the diff.
      */
-    async changes({ sessionId, workspaceId } = {}) {
+    async changes({ sessionId, workspaceId, summary = false } = {}) {
       const entry = paneEntry(sessionId, workspaceId);
       if (!entry) throw new Error("That chat agent's session has ended");
       const status = await invokeAsUser(entry, "git_status", { include_untracked: true, max_entries: 500 });
-      const diff = await invokeAsUser(entry, "git_diff", { context_lines: 3, max_bytes: 512 * 1024 });
+      const diff = summary ? null : await invokeAsUser(entry, "git_diff", { context_lines: 3, max_bytes: 512 * 1024 });
       return {
         ok: true, root: entry.root?.path ?? null, branch: typeof status?.branch === "string" ? status.branch : "",
         entries: Array.isArray(status?.entries) ? status.entries.slice(0, 500) : [],

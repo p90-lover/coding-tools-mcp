@@ -137,6 +137,31 @@ func TestDeepSeekEffortCatalogAndTransport(t *testing.T) {
 	}
 }
 
+func TestAModelClineNoLongerServesIsANotFoundNoClientRetries(t *testing.T) {
+	for _, c := range []struct {
+		status int
+		body   string
+		want   int
+	}{
+		{502, `{"error":"model not found","success":false}`, 404},
+		{500, `{"error":"Model Not Found"}`, 404},
+		{502, `{"error":"upstream timeout"}`, 502},
+		{429, `{"error":"model not found"}`, 429},
+		{400, `{"error":"bad request"}`, 400},
+	} {
+		if got := upstreamStatus(c.status, []byte(c.body)); got != c.want {
+			t.Fatalf("upstreamStatus(%d, %s) = %d, want %d", c.status, c.body, got, c.want)
+		}
+	}
+	var env envelope
+	if err := json.Unmarshal(upstreamErrorEnvelope("cline_upstream", "model not found", upstreamStatus(502, []byte("model not found")), false), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error == nil || env.Error.HTTPStatus != 404 || env.Error.Retryable {
+		t.Fatalf("envelope = %+v, want a non-retryable 404", env.Error)
+	}
+}
+
 func TestTakenEffortFitsEveryLevelToTheModel(t *testing.T) {
 	deepseek := []string{"none", "low", "high", "max"}
 	for _, c := range []struct{ in, want string }{

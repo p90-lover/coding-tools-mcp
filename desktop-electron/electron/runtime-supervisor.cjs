@@ -3,13 +3,13 @@ const fs = require("node:fs");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
-const { spawn, spawnSync } = require("node:child_process");
+const { execFile, spawn } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { redactText } = require("./logging.cjs");
 const {
   DETACH_OWNED_CHILD,
   processRunning,
-  terminateOwnedProcessTree,
+  terminateOwnedProcessTreeAsync,
 } = require("./process-tree.cjs");
 const { runtimeInvocation, runtimeReleaseVersion } = require("./runtime-command.cjs");
 
@@ -365,23 +365,28 @@ function validateConfig(config, descriptorPath, platform = process.platform, lau
   return config;
 }
 
-// Executable, command line and parent of a process, or null when unknown. Windows only: elsewhere
-// an unrecognised bridge stays an external owner, as before.
+// Executable, command line and parent of a process, or null when unknown (resolves). Windows only:
+// elsewhere an unrecognised bridge stays an external owner, as before. PowerShell runs as a child
+// process the main thread does not wait on: through spawnSync (10 s timeout) its start on a busy
+// machine froze the app while the bridge was started or recovered.
 function windowsProcessInfo(pid) {
-  if (process.platform !== "win32" || !Number.isInteger(pid) || pid < 1) return null;
+  if (process.platform !== "win32" || !Number.isInteger(pid) || pid < 1) return Promise.resolve(null);
   const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT || "C:\\Windows";
   const powershell = path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
   const script = `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; `
     + "if ($p) { [pscustomobject]@{ executablePath = $p.ExecutablePath; commandLine = $p.CommandLine; parentPid = [int]$p.ParentProcessId } | ConvertTo-Json -Compress }";
-  const result = spawnSync(powershell, ["-NoProfile", "-NonInteractive", "-Command", script],
-    { encoding: "utf8", windowsHide: true, timeout: 10_000 });
-  if (result.error || result.status !== 0 || !result.stdout.trim()) return null;
-  try {
-    const info = JSON.parse(result.stdout.trim());
-    return { executablePath: String(info.executablePath || ""), commandLine: String(info.commandLine || ""), parentPid: Number(info.parentPid) };
-  } catch {
-    return null;
-  }
+  return new Promise((resolve) => {
+    execFile(powershell, ["-NoProfile", "-NonInteractive", "-Command", script],
+      { encoding: "utf8", windowsHide: true, timeout: 10_000 }, (error, stdout) => {
+        if (error || !String(stdout).trim()) { resolve(null); return; }
+        try {
+          const info = JSON.parse(String(stdout).trim());
+          resolve({ executablePath: String(info.executablePath || ""), commandLine: String(info.commandLine || ""), parentPid: Number(info.parentPid) });
+        } catch {
+          resolve(null);
+        }
+      });
+  });
 }
 
 function samePath(left, right) {
@@ -430,6 +435,7 @@ class RuntimeSupervisor {
       ? getRuntimeEnvironment
       : () => ({});
     this.configPath = path.join(coreHome, "config.json");
+    this.configCache = null; // { size, mtimeMs, value }: see readConfigJson
     this.statePath = path.join(coreHome, "runtime", "launcher-supervisor.json");
     this.daemon = null;
     this.tunnel = null;
@@ -456,10 +462,28 @@ class RuntimeSupervisor {
     this.daemonLogPath = path.join(coreHome, "runtime", "daemon.log");
   }
 
+  /**
+   * config.json as parsed JSON (a fresh copy each call), or undefined when it does not exist.
+   * Monitors read it every 2-60 s, each through readSetupConfig and readConfig; on a busy hard disk
+   * those four synchronous calls stalled the whole app. It is parsed again only when its size or
+   * time changes, whoever wrote it.
+   */
+  readConfigJson() {
+    let stat;
+    try { stat = fs.statSync(this.configPath); } catch { this.configCache = null; return undefined; }
+    const cached = this.configCache;
+    if (!cached || cached.size !== stat.size || cached.mtimeMs !== stat.mtimeMs) {
+      this.configCache = null;
+      this.configCache = { size: stat.size, mtimeMs: stat.mtimeMs, value: readJson(this.configPath) };
+    }
+    return structuredClone(this.configCache.value);
+  }
+
   readConfig() {
-    if (!fs.existsSync(this.configPath)) return null;
+    const config = this.readConfigJson();
+    if (config === undefined) return null;
     return validateConfig(
-      readJson(this.configPath),
+      config,
       this.browserDescriptorPath,
       this.platform,
       this.launcherProfile,
@@ -467,8 +491,8 @@ class RuntimeSupervisor {
   }
 
   readSetupConfig() {
-    if (!fs.existsSync(this.configPath)) return null;
-    const config = readJson(this.configPath);
+    const config = this.readConfigJson();
+    if (config === undefined) return null;
     if (!config || typeof config !== "object" || Array.isArray(config)) {
       throw new Error("Runtime configuration is not an object");
     }
@@ -669,7 +693,7 @@ class RuntimeSupervisor {
     try { state = this.readState(); } catch { return false; }
     if (!state || runtimeOwnershipPredatesCurrentBoot(state)) return false;
     if (!Number.isInteger(state.daemonPid) || !processRunning(state.daemonPid)) return false;
-    if (state.ownerPid !== process.pid && this.launcherOwnerRunning(state.ownerPid)) return false;
+    if (state.ownerPid !== process.pid && await this.launcherOwnerRunning(state.ownerPid)) return false;
     const health = await this.proxyHealthPayload(config);
     if (health?.service !== "codex-chatgpt-web"
       || health?.mode !== config.mode
@@ -1865,35 +1889,36 @@ class RuntimeSupervisor {
       const timeout = setTimeout(() => {
         if (settled) return;
         timeoutError = new Error(`${label} timed out after ${timeoutMs}ms`);
-        try {
-          terminateOwnedProcessTree(child);
-        } catch (error) {
+        // taskkill runs without blocking the main thread; a failure rejects as before.
+        terminateOwnedProcessTreeAsync(child).then(() => {
+          if (settled) return;
+          terminationTimeout = setTimeout(() => {
+            if (settled) return;
+            terminateOwnedProcessTreeAsync(child, "SIGKILL").then(() => {
+              if (settled) return;
+              forceTimeout = setTimeout(() => {
+                if (settled) return;
+                settled = true;
+                clearTimers();
+                reject(new Error(`${timeoutError.message}; the control process did not exit after forced termination`));
+              }, 2_000);
+            }, (error) => {
+              if (settled) return;
+              settled = true;
+              clearTimers();
+              reject(new Error(
+                `${timeoutError.message}; forced control process tree termination failed: ${errorMessage(error)}`,
+              ));
+            });
+          }, 5_000);
+        }, (error) => {
+          if (settled) return;
           settled = true;
           clearTimers();
           reject(new Error(
             `${timeoutError.message}; control process tree termination failed: ${errorMessage(error)}`,
           ));
-          return;
-        }
-        terminationTimeout = setTimeout(() => {
-          if (settled) return;
-          try {
-            terminateOwnedProcessTree(child, "SIGKILL");
-          } catch (error) {
-            settled = true;
-            clearTimers();
-            reject(new Error(
-              `${timeoutError.message}; forced control process tree termination failed: ${errorMessage(error)}`,
-            ));
-            return;
-          }
-          forceTimeout = setTimeout(() => {
-            if (settled) return;
-            settled = true;
-            clearTimers();
-            reject(new Error(`${timeoutError.message}; the control process did not exit after forced termination`));
-          }, 2_000);
-        }, 5_000);
+        });
       }, timeoutMs);
       child.stdout.on("data", (chunk) => capture(stdout, chunk, "stdout"));
       child.stderr.on("data", (chunk) => capture(stderr, chunk, "stderr"));
@@ -1901,9 +1926,7 @@ class RuntimeSupervisor {
         if (settled) return;
         settled = true;
         clearTimers();
-        try {
-          terminateOwnedProcessTree(child);
-        } catch {}
+        terminateOwnedProcessTreeAsync(child).catch(() => {});
         reject(new Error(`${label} ${stream} pipe failed: ${errorMessage(error)}`));
       };
       child.stdout.once("error", onOutputError("stdout"));
@@ -1921,14 +1944,11 @@ class RuntimeSupervisor {
         settled = true;
         clearTimers();
         if (timeoutError) {
-          try {
-            terminateOwnedProcessTree(child, "SIGKILL");
-            reject(timeoutError);
-          } catch (error) {
+          terminateOwnedProcessTreeAsync(child, "SIGKILL").then(() => reject(timeoutError), (error) => {
             reject(new Error(
               `${timeoutError.message}; final control process-group cleanup failed: ${errorMessage(error)}`,
             ));
-          }
+          });
           return;
         }
         const exitCode = code ?? 1;
@@ -1953,9 +1973,9 @@ class RuntimeSupervisor {
    * Chromium child (--type=) or a script run (the bridge's browser helper) is never a launcher.
    * A process that cannot be inspected keeps the cautious answer.
    */
-  launcherOwnerRunning(pid) {
+  async launcherOwnerRunning(pid) {
     if (!Number.isInteger(pid) || pid < 1 || pid === process.pid || !processRunning(pid)) return false;
-    const info = this.processInfo(pid);
+    const info = await this.processInfo(pid);
     if (!info) return true;
     if (info.parentPid === process.pid) return false;
     const command = String(info.commandLine || "");
@@ -1964,7 +1984,7 @@ class RuntimeSupervisor {
 
   // True only for this install's own runtime (its bun.exe serving its app/cli.js) whose launcher
   // is gone. A live parent, another executable or another entrypoint is never ours to stop.
-  isOwnOrphanedBridge(pid) {
+  async isOwnOrphanedBridge(pid) {
     if (!Number.isInteger(pid) || pid < 1 || pid === process.pid) return false;
     let expected;
     try {
@@ -1972,7 +1992,7 @@ class RuntimeSupervisor {
     } catch {
       return false;
     }
-    const info = this.processInfo(pid);
+    const info = await this.processInfo(pid);
     if (!info?.executablePath || !info.commandLine) return false;
     if (Number.isInteger(info.parentPid) && info.parentPid > 0 && processRunning(info.parentPid)) return false;
     if (!samePath(info.executablePath, expected.executable)) return false;
@@ -2007,7 +2027,7 @@ class RuntimeSupervisor {
       // A launcher stopped without its shutdown (an install, a crash) leaves its bridge running
       // under a marker a later launch overwrote. Recover it only when it is provably this
       // install's own bridge whose launcher is gone; anything else stays an external owner.
-      if (!this.isOwnOrphanedBridge(health.pid)) {
+      if (!(await this.isOwnOrphanedBridge(health.pid))) {
         throw new Error("The process on the Responses port does not match the stale launcher marker");
       }
       this.logger.warn("runtime.orphaned_bridge_detected", { pid: health.pid, markerPid: state.daemonPid ?? null });
@@ -2044,7 +2064,7 @@ class RuntimeSupervisor {
       this.clearState();
       return true;
     }
-    if (state.ownerPid !== process.pid && this.launcherOwnerRunning(state.ownerPid)) {
+    if (state.ownerPid !== process.pid && await this.launcherOwnerRunning(state.ownerPid)) {
       throw new Error(`Another launcher process still owns the runtime (pid ${state.ownerPid})`);
     }
 
@@ -2205,7 +2225,7 @@ class RuntimeSupervisor {
     }
     this.expectedExits.add(child);
     try {
-      terminateOwnedProcessTree(child);
+      await terminateOwnedProcessTreeAsync(child);
     } catch (error) {
       this.expectedExits.delete(child);
       if (!processRunning(child.pid)) {
@@ -2218,7 +2238,7 @@ class RuntimeSupervisor {
       await this.waitForChildExit(name, child, timeoutMs);
     } catch (gracefulError) {
       try {
-        terminateOwnedProcessTree(child, "SIGKILL");
+        await terminateOwnedProcessTreeAsync(child, "SIGKILL");
         await this.waitForChildExit(name, child, 2_000);
       } catch (forceError) {
         throw new Error(appendFailure(
@@ -2229,7 +2249,7 @@ class RuntimeSupervisor {
       }
       this.logger.warn(`runtime.${name}_forced_stop`, { message: errorMessage(gracefulError) });
     }
-    terminateOwnedProcessTree(child, "SIGKILL");
+    await terminateOwnedProcessTreeAsync(child, "SIGKILL");
     this[name] = null;
   }
 

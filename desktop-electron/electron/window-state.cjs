@@ -1,5 +1,5 @@
 const fs = require("node:fs");
-const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { writePrivateFileAtomic, writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 
 const DEFAULT_WINDOW_STATE = Object.freeze({
   bounds: { width: 1120, height: 720 },
@@ -73,25 +73,36 @@ function captureWindowState(window) {
 
 function trackWindowState(window, filePath, onError) {
   let timer = null;
-  const capture = () => {
+  // While the window is moved or resized, the position is saved off the main thread: each
+  // synchronous atomic write (six file operations, and up to 1.4 s of retries when Windows holds
+  // the file) stalled the app on a busy disk, every 400 ms of a drag.
+  const captureAsync = () => {
     timer = null;
     if (window.isDestroyed()) return;
-    try {
-      writeWindowState(filePath, captureWindowState(window));
-    } catch (error) {
-      onError?.(error);
-    }
+    let state;
+    try { state = captureWindowState(window); } catch (error) { onError?.(error); return; }
+    writePrivateFileAtomicAsync(filePath, `${JSON.stringify(state, null, 2)}\n`).catch((error) => onError?.(error));
   };
   const schedule = () => {
     if (timer) clearTimeout(timer);
-    timer = setTimeout(capture, 400);
+    timer = setTimeout(captureAsync, 400);
   };
   for (const event of ["resize", "move", "maximize", "unmaximize", "enter-full-screen", "leave-full-screen"]) {
     window.on(event, schedule);
   }
+  // Closing saves synchronously, so the position is on disk before the app can exit. The same state
+  // is queued after any save still in flight, so an older one cannot land last.
   window.on("close", () => {
     if (timer) clearTimeout(timer);
-    capture();
+    timer = null;
+    if (window.isDestroyed()) return;
+    try {
+      const content = `${JSON.stringify(captureWindowState(window), null, 2)}\n`;
+      writePrivateFileAtomic(filePath, content);
+      writePrivateFileAtomicAsync(filePath, content).catch(() => {});
+    } catch (error) {
+      onError?.(error);
+    }
   });
 }
 
