@@ -78,7 +78,7 @@ test("each chat row is Claude Code's: its title, a status dot, and one hover \"M
   walk(rows()[1]).find((element) => element.props?.className === "cx-thread-select").props.onClick();
   assert.deepEqual(calls, [["pin", "t2"], ["lifecycle", "t2", "archive"], ["select", "t2"]]);
   // Ctrl-click opens the chat in split view, as in Claude Code.
-  walk(rows[0]).find((element) => element.props?.className === "cx-thread-select").props.onClick({ ctrlKey: true });
+  walk(rows()[0]).find((element) => element.props?.className === "cx-thread-select").props.onClick({ ctrlKey: true });
   assert.deepEqual(calls.at(-1), ["openSplit", "a", "t1"]);
 });
 

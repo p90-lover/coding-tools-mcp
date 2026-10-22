@@ -453,7 +453,7 @@ export function ChatThreadList(props: ThreadListProps) {
         { label: "New window", shortcut: actions.openSplit && !props.openTaskIds?.includes(chat.taskId) ? "2" : "1", run: () => actions.openWindow(chat.taskId) },
         { kind: "separator" },
         { label: "Structure", run: () => actions.openStructure(chat.taskId) },
-        { label: "Mission board", run: () => actions.openBoard() },
+        { label: "Mission Board", run: () => actions.openBoard() },
       ] },
       { kind: "separator" },
       // Archive and delete stop the chat's own running work after a confirmation; both can be restored.

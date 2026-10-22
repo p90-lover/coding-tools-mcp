@@ -2334,7 +2334,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
         <div className="ao-workspace-title">
           <strong>{workspaces.find(workspace => workspace.id === workspaceId)?.name || copy.title}</strong>
           <label className="ao-hint"><input type="checkbox" checked={showInactive} onChange={event=>setShowInactive(event.target.checked)} /> Show archived and deleted</label>
-          <span>{view === "board" ? "Mission board" : view === "overview" ? copy.overview : copy.canvas}{selectedRun && (view === "overview" || chatTaskId) ? ` · ${taskName(selectedRun.project_id)}` : ""}</span>
+          <span>{view === "board" ? "Mission Board" : view === "overview" ? copy.overview : copy.canvas}{selectedRun && (view === "overview" || chatTaskId) ? ` · ${taskName(selectedRun.project_id)}` : ""}</span>
         </div>
         <span className="ao-head-spacer" />
         {selectedRun && (view === "overview" || chatTaskId) ? <span className={`ao-pill status-${statusText}`} role="status" title={advanceNotice || statusText}>
@@ -2538,7 +2538,7 @@ export function AgentOrchestratorSurface({ language, setError, pane }: {
               </ChatSplit>
         ) : null}
 
-        {view === "board" ? <section className="ao-board-view" aria-label="Mission board">
+        {view === "board" ? <section className="ao-board-view" aria-label="Mission Board">
           <header><strong>Mission board</strong><button type="button" className="button-secondary" onClick={() => setView("chat")}>Back to chat</button>
             <button type="button" className="button-secondary" onClick={() => setView("overview")}>Team graph</button></header>
           {workspaceReady && workspaceId && !sheet && !projectEdit
