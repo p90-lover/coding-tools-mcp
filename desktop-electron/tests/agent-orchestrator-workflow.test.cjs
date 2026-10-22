@@ -3619,6 +3619,63 @@ test("the reviewer is told the agent's workspace folder, so a path inside it is 
   assert.deepEqual(unknown.resolved, ["yes"]);
 });
 
+test("the reviewer sees what the user asked in the chat and the worker's own description of a shell command", async () => {
+  // Seen live 2026-10-22: asked "can u kill the backend first . after the test is done , re open it .",
+  // the agent's `taskkill /PID 31332 /T /F` ("Kill uvicorn backend process tree") was denied as "not
+  // enough context to verify that PID 31332 is safe to stop": the prompt held the bare command only.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
+  async function promptFor({ projectId, board }) {
+    const request = { approval_id: "kill", source: "ao", kind: "command", tool: "PowerShell", command: "taskkill /PID 31332 /T /F",
+      reason: "Kill uvicorn backend process tree", summary: "PowerShell", decisions };
+    const mission = { id: "run", workspace_id: "ws", project_id: projectId, revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+      { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+    const prompts = [], resolved = [], listed = [];
+    const workflow = createAgentOrchestratorWorkflow({
+      findCodexExecutable: () => process.execPath,
+      resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+      cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+      fetchImpl: async (url, init) => {
+        if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
+        prompts.push(JSON.parse(init.body).messages[0].content);
+        return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"allow","reason":"the user asked for it"}' } }] }) };
+      },
+      requestHeadless: async (endpoint, body) => {
+        if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+        if (endpoint === "/api/v1/tools/call") { listed.push(structuredClone(body)); return board(); }
+        return { ok: true, run: mission };
+      },
+      aoHarness: {
+        observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: resolved.length ? [] : [request] }),
+        resolveApproval: async (session, requestId, decisionId) => { resolved.push(decisionId); return { ok: true }; },
+      },
+      confirm: async () => true,
+    });
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 200 && !resolved.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    mission.nodes[0].state = "finished";
+    return { prompt: prompts[0] ?? "", resolved, listed };
+  }
+  const asked = "Run the API tests.\n\nFollow-up (2026-10-22 09:20 UTC):\ncan u kill the backend first . after the test is done , re open it .";
+  const chat = await promptFor({ projectId: "task", board: () => ({ ok: true, operation: { state: "completed",
+    result: { ok: true, revision: 1, tasks: [], task: { id: "task", title: "API tests", description: asked } } } }) });
+  assert.ok(chat.listed.some(call => JSON.stringify(call).includes('"task_id":"task"')), "the chat's own task is read");
+  assert.ok(chat.prompt.includes(`What the user asked in this chat (their own words, latest last; this is the task):\n${asked}`));
+  assert.match(chat.prompt, /Request: taskkill \/PID 31332 \/T \/F\nThe worker describes this request as: Kill uvicorn backend process tree/);
+  assert.deepEqual(chat.resolved, ["yes"]);
+  // A long chat keeps its latest words: the task is cut from the front.
+  const long = await promptFor({ projectId: "task", board: () => ({ ok: true, operation: { state: "completed",
+    result: { ok: true, revision: 1, tasks: [], task: { id: "task", title: "API tests", description: "x".repeat(5000) + "\nkill the backend" } } } }) });
+  assert.match(long.prompt, /x+\nkill the backend\nRequest:/);
+  assert.ok(!long.prompt.includes("x".repeat(2001)));
+  // A task that cannot be read never holds the review up: the prompt just has no task line.
+  const unread = await promptFor({ projectId: "task", board: () => { throw new Error("AO is restarting"); } });
+  assert.doesNotMatch(unread.prompt, /What the user asked/);
+  assert.match(unread.prompt, /The worker describes this request as:/);
+  assert.deepEqual(unread.resolved, ["yes"]);
+});
+
 test("Approve for me asks a reviewer that failed again before involving the person, and never pops a tool call up", async () => {
   // Seen live: one 502 from the card's model ("Command approver ... returned HTTP 502; check it
   // yourself") popped a routine command up with a desktop notice; codex-auto-review had been
