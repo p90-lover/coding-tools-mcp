@@ -5927,6 +5927,60 @@ test("\"Retry automatically\" retries a failed step by itself once its pause is 
     for (let tries = 0; tries < 100 && (await status()).status === "running"; tries++) await new Promise(resolve => setTimeout(resolve, 10));
   }
 });
+test("a model CPA has no provider for is not retried and leaves the picker, though remembered", async () => {
+  // gpt-5.5 (2026-10-22): CPA stopped listing it, the menu kept it from memory, and each send spent
+  // a 65 s launch on "unknown provider for model gpt-5.5"; Retry automatically spent three more.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-5.5" };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", cancelled: false,
+    grant: { executable_sha256: "a".repeat(64), expires_at_ms: Date.now() + 3_600_000 },
+    nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, history: [], receipt: { thread_id: "session-1", request_key: "k" } }] };
+  let catalog = { data: [{ id: "gpt-5.6-sol" }, { id: "gpt-5.5" }] };
+  const controls = [];
+  let clock = 1_000_000;
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async url => String(url).includes("/v1/models") ? { ok: true, json: async () => catalog } : { ok: false, status: 404, json: async () => ({}) },
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+      if (endpoint === "/api/v1/ao/control") controls.push(body.action);
+      return { ok: true, run: mission };
+    },
+    aoHarness: { catalog: async () => [], models: async () => [], spawn: async () => "session",
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: [] }) },
+    confirm: async () => true,
+  });
+  const models = () => workflow.call("models", { harness: "ao:claude-code" });
+  assert.ok((await models()).models.includes("cpa/gpt-5.5"));
+  catalog = { data: [{ id: "gpt-5.6-sol" }] };
+  clock += 2 * 60_000;
+  assert.match((await models()).held["cpa/gpt-5.5"], /not listing it right now/, "remembered while CPA may only be cooling it down");
+  await workflow.call("chat_auto_retry", { enabled: true });
+  await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  const status = () => workflow.call("run_status", { workspaceId: "ws", runId: "run" });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    mission.nodes[0] = { ...mission.nodes[0], state: "held",
+      receipt: { ...mission.nodes[0].receipt, error: "API Error: 400 unknown provider for model gpt-5.5" } };
+    let detail = "";
+    for (let tries = 0; tries < 100 && !/no longer serves/.test(detail); tries++) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+      detail = String((await status()).detail ?? "");
+    }
+    assert.match(detail, /CPA no longer serves this model; choose another model/);
+    clock += 60_000;
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.deepEqual(controls, [], "nothing is retried");
+    const after = await models();
+    assert.ok(!after.models.includes("cpa/gpt-5.5") && !after.held?.["cpa/gpt-5.5"], "the retired model leaves the menu");
+    assert.ok(after.models.includes("cpa/gpt-5.6-sol"));
+  } finally {
+    mission.nodes[0].state = "finished";
+    for (let tries = 0; tries < 100 && (await status()).status === "running"; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  }
+});
 test("\"Retry automatically\" also restarts a chat whose run ended on an error, within the attempt limit", async () => {
   // A launch that timed out threw out of the run before the failed step was looked at, so nothing
   // was left to retry it.
