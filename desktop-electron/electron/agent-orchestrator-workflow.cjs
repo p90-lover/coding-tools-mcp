@@ -3860,7 +3860,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // "Approve for me" answers a request within 20 s (its reviewer up to 25 s): a steer waits that long.
   const STEER_ANSWER_WAIT_MS = 30_000;
   const STEER_ANSWER_POLL_MS = 750;
-  async function chatSteer({ workspaceId, taskId, message } = {}) {
+  /** `restart`: the person pressed Restart on a stuck turn, so it is restarted whatever its quiet time. */
+  async function chatSteer({ workspaceId, taskId, message, restart = false } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
     const text = clean(message, 8192, false);
     if (!text.trim()) throw new Error("Type a message to steer the agent");
@@ -3911,11 +3912,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // A tool call silent as long as the chat calls a turn stuck (STEER_TOOL_STALL_MS, the chat's
     // "may be stuck") is stuck with it: the user, looking at "may be stuck", asked that a steer then
     // retrigger the model rather than wait on a call that may never return.
-    if (idle > (toolRunning ? STEER_TOOL_STALL_MS : STEER_STALL_MS)) {
-      await stopExternalTurn(card.receipt.thread_id);
-      logger?.info?.("ao.steer_restarted_stalled_turn", { idleSeconds: Math.round(idle / 1000), toolRunning });
+    if (restart === true || idle > (toolRunning ? STEER_TOOL_STALL_MS : STEER_STALL_MS)) {
+      // A tool call that never returns cannot be interrupted either: the agent's host is shut down then
+      // (escalate), and AO resumes the same session for the message's turn.
+      await stopExternalTurn(card.receipt.thread_id, { owner: runKey(id, run.id), escalate: true });
+      logger?.info?.("ao.steer_restarted_stalled_turn", { idleSeconds: Math.round(idle / 1000), toolRunning, asked: restart === true });
       return { ok: true, steered: false, waiting: true, restarted: true,
-        reason: `The agent had shown nothing for ${Math.round(idle / 60_000)} minutes${toolRunning ? " (a tool call never returned)" : ""}, so its turn was stopped; your message is sent as the next turn` };
+        reason: restart === true ? "Its turn was stopped; your message is sent as the next turn"
+          : `The agent had shown nothing for ${Math.round(idle / 60_000)} minutes${toolRunning ? " (a tool call never returned)" : ""}, so its turn was stopped; your message is sent as the next turn` };
     }
     // A chat's session is created in the background (spawn's async): its card runs, with the session,
     // while the agent is still starting, and AO has no controller to steer yet. The message waits
@@ -4484,6 +4488,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       let alreadyExited = false;
       // Why the interrupt did not stop the turn, when the agent's shutdown had to: said again if that fails too.
       let escalated = "";
+      // The agent's host is shut down: always for a Stop that ends the agent (releaseAgent), and for
+      // `escalate` (a stuck turn's restart) only when its interrupt did not land.
+      let shutDown = ownership?.releaseAgent === true;
       if (ownership?.turnId || ownership?.releaseAgent) {
         const current = await service.observe(session);
         if ((ownership?.turnId && current?.turnId && current.turnId !== ownership.turnId) || !owns()) return;
@@ -4495,11 +4502,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // Stop on an agent still launching, its model retrying 429s, waited the whole settle window
         // and failed "stop needs attention", and the agent ran on; an agent whose controller had not
         // started refused the interrupt (CHAT_CONTROLLER_NOT_READY), and Stop failed outright.
+        // A stuck turn's restart escalates the same way (seen live 2026-10-22: a tool call that never
+        // returned held a chat "may be stuck" for 3h 39m; its interrupt never settled, so every "keep
+        // going" failed "stop needs attention" and came back to the composer). AO keeps the session,
+        // so the next turn resumes it with everything the agent already knows.
         const release = ownership?.releaseAgent === true;
+        const escalate = release || ownership?.escalate === true;
         let signalled = true;
         try { await service.interrupt(session); }
         catch (error) {
-          if (!release) throw error;
+          if (!escalate) throw error;
           signalled = false;
           escalated = String(error?.message || error).slice(0, 200);
           logger?.info?.("ao.stop_escalated", { reason: "interrupt_refused", error: escalated });
@@ -4509,20 +4521,22 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // landed later than that, so the restart failed ("stop needs attention"), its next steers
         // and send were refused, and the chat sat for 8 more minutes until another steer found the
         // turn over. A Stop that ends the agent waits only STOP_RELEASE_SETTLE_MS before shutting it down.
-        const tries = signalled ? Math.ceil((release ? STOP_RELEASE_SETTLE_MS : STOP_SETTLE_MS) / STOP_SETTLE_POLL_MS) : 0;
+        const settleMs = release ? STOP_RELEASE_SETTLE_MS : STOP_SETTLE_MS;
+        const tries = signalled ? Math.ceil(settleMs / STOP_SETTLE_POLL_MS) : 0;
         for (let attempt = 0; attempt < tries; attempt++) {
           const observation = await service.observe(session);
           if (observation?.exited === true || (["completed", "failed", "interrupted", "cancelled"].includes(observation?.turnState)
             && !["working", "running", "starting"].includes(observation?.status))) { stopped = true; break; }
           if (attempt < tries - 1) await new Promise(resolve => setTimer(resolve, STOP_SETTLE_POLL_MS));
         }
-        if (!stopped && !release) throw new Error("Owned turn is still working; stop needs attention, no replacement was started");
+        if (!stopped && !escalate) throw new Error("Owned turn is still working; stop needs attention, no replacement was started");
+        if (!stopped) shutDown = true;
         if (!stopped && signalled) {
           escalated = "Owned turn is still working";
-          logger?.info?.("ao.stop_escalated", { reason: "interrupt_unsettled", waitedMs: STOP_RELEASE_SETTLE_MS });
+          logger?.info?.("ao.stop_escalated", { reason: "interrupt_unsettled", waitedMs: settleMs, release });
         }
       }
-      if (ownership?.releaseAgent && owns()) {
+      if (shutDown && owns()) {
         const outcomes = await Promise.allSettled([
           Promise.resolve().then(() => service.exitAgent(session)).then(outcome => {
             if (outcome?.ok !== true) throw new Error(`Agent ${session} shutdown is unconfirmed`);

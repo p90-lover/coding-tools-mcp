@@ -6238,6 +6238,58 @@ test("a hung turn whose interrupt lands after a few seconds is still restarted, 
   assert.deepEqual(interrupted, ["sess-1"]);
 });
 
+// Seen live 2026-10-22: a tool call that never returned held a chat "may be stuck" for 3h 39m. Its
+// interrupt never settled, so every "keep going" failed "stop needs attention" and came back.
+function stuckToolWorld({ settles = false, refuses = false, now = 1_000_000 + 30 * 60_000 } = {}) {
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  const interrupted = [], exited = [], steered = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => now,
+    setTimer: (callback) => { callback(); return 0; },
+    aoHarness: {
+      observe: async () => {
+        const ended = exited.length || (settles && interrupted.length);
+        return { turnId: "t1", turnState: ended ? "interrupted" : "running", status: ended ? "ready" : "working", exited: exited.length > 0,
+          lastActivityAt: 1_000_000, timeline: [{ kind: "tool_call", status: "running", title: "Find detection log files" }], approvals: [] };
+      },
+      steer: async (id, text) => { steered.push([id, text]); return { steered: true }; },
+      interrupt: async id => { interrupted.push(id); if (refuses) throw new Error("CHAT_CONTROLLER_NOT_READY"); },
+      exitAgent: async id => { exited.push(id); return { ok: true }; },
+    } });
+  return { workflow, interrupted, exited, steered };
+}
+
+test("a stuck tool call whose interrupt never settles is restarted by shutting its agent down, not left as 'stop needs attention'", async () => {
+  const world = stuckToolWorld();
+  const result = await world.workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
+  assert.equal(result.restarted, true, "the message goes as the next turn");
+  assert.deepEqual(world.interrupted, ["sess-1"], "the interrupt is tried first");
+  assert.deepEqual(world.exited, ["sess-1"], "then the agent's host is shut down; AO keeps the session to resume");
+  assert.deepEqual(world.steered, [], "nothing is steered into the hung turn");
+});
+
+test("a stuck turn whose interrupt is refused is still restarted", async () => {
+  const world = stuckToolWorld({ refuses: true });
+  const result = await world.workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
+  assert.equal(result.restarted, true);
+  assert.deepEqual(world.exited, ["sess-1"]);
+});
+
+test("Restart stops a turn that is not yet past its stall limit, and an interrupt that lands needs no shutdown", async () => {
+  // Restart is the person's call: the chat said "may be stuck", which the backend's longer tool limit has not reached.
+  const world = stuckToolWorld({ settles: true, now: 1_000_000 + 60_000 });
+  const plain = await world.workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "and lint" });
+  assert.equal(plain.steered, true, "a message without restart is steered in as before");
+  assert.deepEqual(world.interrupted, []);
+  const result = await world.workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "continue", restart: true });
+  assert.equal(result.restarted, true);
+  assert.match(result.reason, /your message is sent as the next turn/);
+  assert.deepEqual(world.interrupted, ["sess-1"]);
+  assert.deepEqual(world.exited, [], "the interrupt settled, so the agent keeps running");
+});
+
 test("a steer is never sent to an agent whose state could not be read", async () => {
   // Seen live: a turn waiting on an approval could not be read (its conversation was too large for
   // the old client), was taken for "not asking", and the steer wedged the chat in AO.
