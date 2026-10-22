@@ -18,7 +18,8 @@ test("every tool of the chat's own groups is covered by Approve for me as it is 
   const { AGENT_TOOLS, TERMINAL_TOOLS, DESKTOP_TOOLS } = require("../electron/chat-agent-tools.cjs");
   const { PREVIEW_TOOLS } = require("../electron/chat-preview.cjs");
   const { SUBAGENT_TOOLS } = require("../electron/subagents.cjs");
-  for (const name of [...AGENT_TOOLS, ...PREVIEW_TOOLS, ...SUBAGENT_TOOLS]) assert.ok(routineAppTool(`mcp__coding-tools__${name}`), name);
+  const { CHAT_HISTORY_TOOLS } = require("../electron/chat-history.cjs");
+  for (const name of [...AGENT_TOOLS, ...PREVIEW_TOOLS, ...SUBAGENT_TOOLS, ...CHAT_HISTORY_TOOLS]) assert.ok(routineAppTool(`mcp__coding-tools__${name}`), name);
   for (const name of [...TERMINAL_TOOLS, ...DESKTOP_TOOLS].filter((tool) => !["check_exec_environment", "read_output"].includes(tool))) {
     assert.equal(routineAppTool(`mcp__coding-tools__${name}`), null, `${name} is reviewed, not routine`);
   }
