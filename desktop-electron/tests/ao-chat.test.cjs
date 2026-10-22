@@ -1217,6 +1217,28 @@ test("a tool title with a path reads by its file name in the folded line, never 
   assert.equal(chat.activitySummary([read("a", "C:/x/skills/a.md"), read("b", "C:/y/b.md")]), "Read a.md, Read b.md");
 });
 
+test("a steer reads as Claude Code's receipt: unread until the model's next request, read after", () => {
+  const at = (kind, id = kind) => ({ id, kind, status: "completed", text: kind === "steer" ? "use the other API" : "" });
+  const receipt = (items, finished = false) => chat.steerReceipts(items, finished).find((item) => item.kind === "steer").receipt;
+  // Mid-reply: the response in flight was written without it, its tool call too; what follows that call has it.
+  assert.equal(receipt([at("message"), at("steer")]), "unread", "just delivered");
+  assert.equal(receipt([at("message"), at("steer"), at("tool")]), "unread", "a call the response in flight made");
+  assert.equal(receipt([at("message"), at("steer"), at("tool"), at("reasoning")]), "read", "the next request had it");
+  // Waiting on a tool call: its result and the steer go back together, so the next output read it.
+  assert.equal(receipt([at("command"), at("steer")]), "unread");
+  assert.equal(receipt([at("command"), at("approval"), at("steer"), at("message")]), "read", "an approval row is no model output");
+  // A finished turn read every steer in it.
+  assert.equal(receipt([at("message"), at("steer")], true), "read");
+  // Items that did not change come back as they were (a poll rebuilds the list every second).
+  const items = [at("message"), at("steer"), at("tool"), at("message", "m2")];
+  const marked = chat.steerReceipts(items, false);
+  assert.equal(chat.steerReceipts(marked, false), marked, "already marked: the same list");
+  assert.equal(marked[0], items[0]);
+  assert.equal(chat.steerReader("Claude Code · deepseek-v4.1-flash · high"), "Claude");
+  assert.equal(chat.steerReader("Codex · gpt-5.5"), "Codex");
+  assert.equal(chat.steerReader(undefined), "Claude");
+});
+
 test("an answered request is no row of its own: its answer shows on the call it let run", () => {
   const tidy = chat.tidyTimeline([
     { id: "1", kind: "command", status: "completed", text: "python diag.py" },

@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { chatMessageReadable, numberedDiff, type ChatSentAttachment, type ChatStepRound } from "./ao-chat";
+import { chatMessageReadable, numberedDiff, type ChatStepRound, type SteerReceipt, type ChatSentAttachment } from "./ao-chat";
 
 // Parts of a chat turn both transcripts draw: the Claude Code one (AgentOrchestratorChat) and the
 // DeepSeek Harness one (DshTranscript), so a fix to one is a fix to both.
@@ -59,6 +59,25 @@ export function ToolImages({ paths }: { paths: string[] }) {
  */
 export const SentMessageView = createContext<(text: string) => ReactNode>(
   (text) => <div className="cx-bubble"><p>{chatMessageReadable(text)}</p></div>);
+
+/** Who reads the person's steers in this card ("Read by Claude"), from steerReader. */
+export const SteerReader = createContext("Claude");
+
+/**
+ * Claude Code's read receipt under a message sent mid-turn (claude.ai's epitaxy user rows): a check
+ * at half strength, "Unread", while the agent holds it, and a double check, "Read by Claude", once its
+ * model has read it. Its tooltip shows at once (delay 0), and the mark stays shown, not only on hover.
+ */
+export function SteerReceiptMark({ receipt }: { receipt?: SteerReceipt }) {
+  const reader = useContext(SteerReader);
+  if (!receipt) return null;
+  const words = receipt === "read" ? `Read by ${reader}` : "Unread";
+  return <span className="cx-receipt" data-receipt={receipt} role="img" aria-label={words} data-tip={words} tabIndex={0}>
+    <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      {receipt === "read" ? <><path d="M18 6 7 17l-5-5" /><path d="m22 10-7.5 7.5L13 16" /></> : <path d="M20 6 9 17l-5-5" />}
+    </svg>
+  </span>;
+}
 
 /**
  * A card's earlier rounds (a reviewer's past cycles, a retried card's past attempts), oldest first,

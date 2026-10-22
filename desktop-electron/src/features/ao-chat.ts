@@ -88,7 +88,57 @@ export type ChatLiveItem = {
   approval?: string;
   /** On a request or question the person answered: what was asked and what they chose. */
   answered?: { question: string; answer: string };
+  /** On a steer: whether the agent's model has read it yet (steerReceipts). */
+  receipt?: SteerReceipt;
 };
+
+/**
+ * Claude Code's receipt on a message the person sent mid-turn: "unread" once the agent has it (a
+ * faded check, "Unread"), "read" once its model has taken it (a double check, "Read by Claude").
+ */
+export type SteerReceipt = "unread" | "read";
+const TOOL_KINDS = new Set(["tool", "command", "edit"]);
+const MODEL_OUTPUT_KINDS = new Set(["message", "reasoning", ...TOOL_KINDS]);
+
+/**
+ * Marks each steer in a turn read or unread. AO and the harness inject a steer into the running
+ * turn, and the model reads it with its next request: once the model's response in flight is done.
+ * That boundary is a tool call (its result goes back with the steer), or the model already waiting
+ * on one when the steer came; output after it was written with the steer in hand. A turn that
+ * finished read every steer in it: Claude Code and Codex send one still waiting before they end.
+ */
+export function steerReceipts(items: ChatLiveItem[], finished: boolean): ChatLiveItem[] {
+  let changed = false;
+  const marked = items.map((item, index) => {
+    if (item.kind !== "steer") return item;
+    const receipt: SteerReceipt = finished || steerRead(items, index) ? "read" : "unread";
+    if (item.receipt === receipt) return item;
+    changed = true;
+    return { ...item, receipt };
+  });
+  return changed ? marked : items;
+}
+
+function steerRead(items: ChatLiveItem[], at: number): boolean {
+  // What the model last did before the steer: waiting on a tool call means its next request has it.
+  let boundary = false;
+  for (let index = at - 1; index >= 0; index -= 1) {
+    if (!MODEL_OUTPUT_KINDS.has(items[index].kind)) continue;
+    boundary = TOOL_KINDS.has(items[index].kind);
+    break;
+  }
+  for (const item of items.slice(at + 1)) {
+    if (boundary && MODEL_OUTPUT_KINDS.has(item.kind)) return true;
+    if (TOOL_KINDS.has(item.kind)) boundary = true;
+  }
+  return false;
+}
+
+/** Who reads a steer, by the card's harness ("Claude Code · model · …"): Claude Code's own words name Claude. */
+export function steerReader(detail: string | undefined): string {
+  const harness = (detail ?? "").split(" · ")[0]?.trim();
+  return !harness || /^claude code$/i.test(harness) ? "Claude" : harness;
+}
 /**
  * A turn's activity as it reads. A request "Approve for me" (or the user) allowed is no row of its
  * own (every tool call left a second "Approval <tool>" row under it): its answer goes on the tool

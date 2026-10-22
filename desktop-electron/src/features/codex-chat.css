@@ -432,6 +432,17 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-user:hover .cx-msg-actions, .cx-answer:hover .cx-msg-actions, .cx-msg-actions:focus-within { opacity: 1; }
 .cx-msg-actions button { display: inline-grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--ao-muted); font-size: 13px; cursor: pointer; }
 .cx-msg-actions button:hover:not(:disabled) { background: var(--cx-hover); color: var(--color-text-primary); }
+/* A sent message's footer: the read receipt first and always shown, then the hover actions (Claude Code's row). */
+.cx-msg-foot { display: flex; align-items: center; justify-content: flex-end; gap: 2px; min-height: 26px; }
+.cx-receipt { position: relative; display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 6px; color: var(--ao-muted); outline: none; }
+.cx-receipt[data-receipt="unread"] svg { opacity: .5; }
+.cx-receipt[data-receipt="unread"]:is(:hover, :focus-visible) svg { opacity: 1; }
+.cx-receipt:focus-visible { box-shadow: 0 0 0 2px var(--cx-focus, rgb(59 130 246 / .5)); }
+/* Its tooltip shows at once, as Claude Code's (delay 0). */
+.cx-receipt[data-tip]::after { content: attr(data-tip); position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+  padding: 4px 8px; border-radius: 6px; background: #1f1f1f; color: #fff; font-size: 12px; font-weight: 500; line-height: 16px; white-space: nowrap;
+  pointer-events: none; opacity: 0; z-index: 5; }
+.cx-receipt[data-tip]:is(:hover, :focus-visible)::after { opacity: 1; }
 
 /* Work: the cards' turns collapsed under one line, live while a card works. */
 .cx-work { color: var(--ao-muted); font-size: 13px; }
