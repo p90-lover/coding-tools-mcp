@@ -112,6 +112,26 @@ test("a chat whose launch came back without a session can be archived: it owns n
   assert.ok(world.calls.some(c=>c[1]?.change?.change?.operation==="set_visibility"),"the chat is archived");
 });
 
+test("a chat whose agent has no controller running can be archived: its run is stopped and it has no turn to stop", async()=>{
+  // Seen live 2026-10-22: Archive failed twice with "the agent controller for this session is not
+  // running (CHAT_CONTROLLER_NOT_READY)": the run was already stopped, then the agent's interrupt
+  // was refused and the refusal failed the archive.
+  for (const action of ["archive_task","delete_task"]) {
+    const interrupted=[];
+    const world=reconfigureWorld(undefined,{aoHarness:{
+      interrupt:async id=>{interrupted.push(id);throw Error("the agent controller for this session is not running (CHAT_CONTROLLER_NOT_READY)")},
+      observe:async()=>({status:"ready",turnState:"interrupted"})}});
+    await world.workflow.call(action,{workspaceId:"ws",taskId:"task"});
+    assert.deepEqual(interrupted,["owned"],"the agent's stop was still asked for");
+    assert.ok(world.calls.some(c=>c[0]==="/api/v1/ao/control"&&c[1].action==="stop"),"the run is stopped");
+    assert.ok(world.calls.some(c=>c[1]?.change?.change?.operation==="set_visibility"),`the chat is ${action==="archive_task"?"archived":"deleted"}`);
+  }
+  // Any other refusal still stops the archive: the turn may still be running.
+  const world=reconfigureWorld(undefined,{aoHarness:{interrupt:async()=>{throw Error("AO request timed out")},observe:async()=>({status:"working",turnState:"running"})}});
+  await assert.rejects(world.workflow.call("archive_task",{workspaceId:"ws",taskId:"task"}),/timed out/);
+  assert.ok(!world.calls.some(c=>c[1]?.change?.change?.operation==="set_visibility"));
+});
+
 test("model edits preserve missed, uncertain and cancelled schedule holds rather than launching",async()=>{
   for(const state of ["missed","needs_attention","cancelled","claimed"]){
     const world=reconfigureWorld();

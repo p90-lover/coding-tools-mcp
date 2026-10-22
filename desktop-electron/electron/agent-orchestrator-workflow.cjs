@@ -4585,7 +4585,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         || result.run.nodes.some(node => ["running", "reserved"].includes(node.state))) {
       throw new Error("Owned native stop was not acknowledged; no replacement was started");
     }
-    for (const node of external) if (node.receipt?.thread_id) await stopExternalTurn(node.receipt.thread_id);
+    for (const node of external) {
+      if (!node.receipt?.thread_id) continue;
+      // An agent whose controller is not running has no turn to stop, and its run was stopped just
+      // above. Seen live 2026-10-22: that refusal (CHAT_CONTROLLER_NOT_READY) failed Archive twice.
+      await stopExternalTurn(node.receipt.thread_id).catch((error) => {
+        if (!/\bCHAT_CONTROLLER_NOT_READY\b/.test(String(error?.message))) throw error;
+        logger?.info?.("ao.stop_owned_no_controller", { run: mission.id });
+      });
+    }
     return result.run;
   }
   async function resolveStoppedIntents(workspaceId,taskId,saved) {
