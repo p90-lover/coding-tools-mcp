@@ -6200,3 +6200,48 @@ test("a steer is never sent to an agent whose state could not be read", async ()
   assert.deepEqual(steered, [], "nothing is steered blind");
   assert.deepEqual(interrupted, [], "nor is the turn stopped");
 });
+
+// Seen 2026-10-21: a turn "running" for hours after its model stream stopped (or after the agent had
+// already left it), and a pytest with a 5-minute timeout "checking" for an hour after its result
+// never came back. Nothing failed, so "Retry automatically" never ran; the chat sat until stopped.
+test("with Retry automatically on, a turn silent past its limit is stopped so its step is retried", async () => {
+  let clock = 2_000_000_000_000;
+  const interrupts = [];
+  let observed;
+  const node = { id: "w", role: "worker", task_id: "t", parents: [], state: "running",
+    route: { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/m", permission_profile: ":ao-default" },
+    receipt: { request_key: "k", status: "submitted", thread_id: "sess-1" } };
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    requestHeadless: async (endpoint) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run", workspace_id: "ws", revision: 1, cancelled: false, execution_mode: "single", nodes: [node] }] };
+      throw new Error(`Unexpected AO endpoint ${endpoint}`);
+    },
+    aoHarness: {
+      observe: async () => observed,
+      interrupt: async (session) => { interrupts.push(session); observed = { ...observed, turnState: "interrupted", status: "idle" }; },
+    },
+    confirm: async () => true,
+  });
+  const silent = (minutes, timeline = []) => ({ turnId: "turn-1", turnState: "running", status: "working",
+    lastActivityAt: clock - minutes * 60_000, timeline, approvals: [] });
+  const look = () => workflow.call("observe", { workspaceId: "ws", runId: "run", nodeId: "w" });
+
+  observed = silent(60);
+  await look();
+  assert.deepEqual(interrupts, [], "off by default: nothing is stopped behind the person's back");
+  await workflow.call("chat_auto_retry", { enabled: true });
+
+  observed = silent(8, [{ kind: "command", status: "pending", timeoutMs: 300_000 }]);
+  await look();
+  assert.deepEqual(interrupts, [], "a command still within its own 5-minute timeout and the margin is left to run");
+
+  observed = silent(11);
+  await look();
+  assert.deepEqual(interrupts, ["sess-1"], "silent 11 minutes with no tool running: the hung turn is stopped");
+
+  clock += 11 * 60_000;
+  observed = silent(40, [{ kind: "command", status: "pending", timeoutMs: 300_000 }]);
+  await look();
+  assert.deepEqual(interrupts, ["sess-1", "sess-1"], "a command long past its stated timeout is stopped too");
+});

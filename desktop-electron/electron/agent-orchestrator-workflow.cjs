@@ -1271,6 +1271,41 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   }
 
   const TERMINAL_TURNS = new Set(["completed", "failed", "interrupted", "cancelled", "recovered"]);
+  // A turn that shows nothing for this long, with no tool call running, has hung: a model stream
+  // that stopped mid-reply, or AO still holding a turn the agent already left (seen 2026-10-21: a
+  // turn "running" for 7 hours while its agent sat waiting for input, so "keep going" never got
+  // in). With a tool call running it waits for that call's own timeout (Claude Code's tools state
+  // one, up to 10 minutes) and a margin, or TOOL_STALL_MS when none is stated: a pytest with a
+  // 5-minute timeout sat "checking" for an hour after its result never came back.
+  const TURN_STALL_MS = 10 * 60_000;
+  const TOOL_STALL_MS = 30 * 60_000;
+  const TOOL_STALL_MARGIN_MS = 5 * 60_000;
+  const stalledStops = new Map(); // session -> when its stalled turn was stopped
+  /**
+   * With "Retry automatically" on, stops a hung turn so the step is retried; nothing else ever
+   * ended it (no failure, so no retry), and the chat said "checking" or "launching" for hours.
+   */
+  async function stopStalledTurn(session, observed) {
+    if (!chatPreferences.get().autoRetry || !Number.isFinite(observed?.lastActivityAt)) return false;
+    const idle = now() - observed.lastActivityAt;
+    // "pending" too: a tool call approved but never reported as started stays pending (the pytest).
+    const tools = Array.isArray(observed.timeline) ? observed.timeline.filter(item => ["running", "pending"].includes(item?.status)
+      && !["message", "system", "reasoning", "thinking", "approval"].includes(item.kind)) : [];
+    const stated = tools.map(item => Number(item.timeoutMs))
+      .filter(value => Number.isFinite(value) && value > 0);
+    const limit = !tools.length ? TURN_STALL_MS
+      : stated.length === tools.length ? Math.max(...stated) + TOOL_STALL_MARGIN_MS : TOOL_STALL_MS;
+    if (idle <= limit || now() - (stalledStops.get(session) ?? 0) < TURN_STALL_MS) return false;
+    stalledStops.set(session, now());
+    if (stalledStops.size > 200) stalledStops.delete(stalledStops.keys().next().value);
+    // An interrupt that does not settle in time is tried again after TURN_STALL_MS; it never fails
+    // the observation it was found in.
+    try { await stopExternalTurn(session); }
+    catch (error) { logger?.warn?.("ao.stalled_turn_stop_failed", { message: publicText(error?.message || error, 200) }); return false; }
+    logger?.info?.("ao.stalled_turn_stopped", { idleSeconds: Math.round(idle / 1000), toolRunning: tools.length > 0 });
+    return true;
+  }
+
   async function observeExternal(workspaceId, runId, node, mission = null) {
     const session = node.receipt?.thread_id;
     if (node.state === "reserved" && !dispatching.has(nodeKey(workspaceId, runId, node.id))) {
@@ -1286,6 +1321,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (!terminal) {
       // The agent's parked tool requests, answerable from the chat or by the reviewer.
       const pending = aoPending(node, session, observed);
+      if (!pending.length && !observed.needsInput) await stopStalledTurn(session, observed);
       pendingFrames.set(nodeKey(workspaceId, runId, node.id), { at: Date.now(), pending, mission, node });
       if (pendingFrames.size > 500) pendingFrames.delete(pendingFrames.keys().next().value);
       return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: observed.needsInput && !pending.length, session_id: session };

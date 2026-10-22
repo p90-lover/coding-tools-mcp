@@ -44,6 +44,8 @@ function mount(props) {
     : name === "./ao-chat" ? chat : name === "./codex-prompts" ? prompts : name === "../icons" ? { Icon: "Icon" } : name === "./ChatMarkdown" ? { ChatMarkdown: "Markdown" }
       : name === "./ChatMenu" ? { ChatMenu: "ChatMenu", ChatGlyph: "Glyph", FloatingLayer: "FloatingLayer" } : name === "./AgentOrchestratorComposerControls" ? { AgentOrchestratorComposerControls: "Controls" }
         : name === "./AgentOrchestratorApproval" ? { AgentOrchestratorApproval: "Approval" }
+          // The picker's short name: the model id without its "cpa/<provider>/" prefix.
+          : name === "./AgentOrchestratorRoleEditor" ? { modelShortLabel: (model) => ({ group: "", name: model.replace(/^cpa\/(?:[^/]+\/)?/, "") }) }
           : name === "./ChatWorkbench" ? { ChatWorkbench: "Workbench", useWorkbenchAutoOpen: () => openPage }
             : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null) } : {},
   { window: { setTimeout: () => 0, setInterval: () => 0, clearInterval() {}, confirm: () => true }, document: { querySelector: () => null }, navigator: {} });
@@ -629,7 +631,7 @@ test("while a single-model turn runs on one model and the picker shows another, 
   const view = mount(props).render();
   const note = walk(view).find((element) => element.props?.className === "cx-route-note");
   assert.ok(note, "the switch is never silent");
-  assert.match(text(note), /running on cpa\/gpt-6-luna; your next message uses cpa\/deepseek-v4/);
+  assert.match(text(note), /This turn runs on gpt-6-luna; your next message uses deepseek-v4\./, "the models' names, not their ids");
   const same = mount(base({ selectedTaskId: "t", working: true,
     runs: [run("r1", "t", [node("w", "planner", "running", { route })], { execution_mode: "single" })],
     composer: { mode: "single", route, onModeChange() {}, onRouteChange() {} } }).props).render();
@@ -644,8 +646,13 @@ test("a finished single-model chat says a changed model or effort starts a new a
     composer: { mode: "single", route: { ...route, model: "cpa/cline-pass/deepseek-v4.1-flash-1017(high)" }, onModeChange() {}, onRouteChange() {} } }).props).render();
   const note = walk(changed).find((element) => element.props?.className === "cx-route-note");
   assert.ok(note, "the new agent is never a surprise");
-  assert.match(text(note), /starts a new agent that gets only a summary/);
-  assert.match(text(note), /deepseek-v4\.1-flash-1017\(max\)/, "it names what to switch back to");
+  assert.match(text(note), /^deepseek-v4\.1-flash-1017\(high\) starts a new agent with only a summary of this chat\./, "it names what changed");
+  assert.match(text(note), /Switch back to deepseek-v4\.1-flash-1017\(max\) to keep this one\./, "and what to switch back to");
+  // Only the effort changed: the note names the effort, not the model that stayed the same.
+  const effort = mount(base({ selectedTaskId: "t", runs: [run("r1", "t", [node("w", "planner", "finished", { route: { ...route, effort: "medium" }, receipt: { answer: "Done" } })], { execution_mode: "single" })],
+    composer: { mode: "single", route: { ...route, effort: "max" }, onModeChange() {}, onRouteChange() {} } }).props).render();
+  assert.match(text(walk(effort).find((element) => element.props?.className === "cx-route-note")),
+    /^Max effort starts a new agent with only a summary of this chat\.\s*Switch back to Medium effort to keep this one\.$/);
   const same = mount(base({ selectedTaskId: "t", runs: finished(),
     composer: { mode: "single", route: { ...route }, onModeChange() {}, onRouteChange() {} } }).props).render();
   assert.equal(walk(same).some((element) => element.props?.className === "cx-route-note"), false, "the same route continues the same agent");
