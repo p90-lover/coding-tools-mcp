@@ -1767,13 +1767,19 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
    * only "running" or "checking", so a turn that hung could not be told from one at work. When it
    * was last heard is added by the chat itself.
    */
-  function describeTurn(observed) {
+  function describeTurn(observed, card = null) {
     if (observed.exited) return "exited";
     // The waiting request first: AO marks a session needs_input while a permission request waits
     // too, and the card then said only "waiting for your answer" without naming the command.
     const requests = Array.isArray(observed.approvals) ? observed.approvals.filter(Boolean) : [];
     const permission = requests.find(request => request.kind !== "question");
     if (permission?.kind === "plan") return "waiting for you to review its plan";
+    // "Approve for me": a request the reviewer answers is not the person's. The card said "waiting
+    // for approval" for the two minutes a slow review took, with no request shown to answer (seen
+    // live: a PowerShell check, allowed by the reviewer after 114 s), so it looked stuck on them.
+    if (permission && card?.mission && card?.node && !approvalNeedsPerson(card.mission, card.node, permission)) {
+      return `the reviewer is checking: ${publicText(permission.command || permission.path || permission.tool || "a request", 90)}`;
+    }
     if (permission) return `waiting for approval: ${publicText(permission.command || permission.path || permission.tool || "a request", 90)}`;
     const question = requests.find(request => request.kind === "question");
     if (question) return `waiting for your answer: ${publicText(question.summary || question.message || "a question", 90)}`;
@@ -1832,7 +1838,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
                 const observed = await harnessService().observe(session);
                 const currentTurn = !node.receipt?.turn_id || observed.turnId === node.receipt.turn_id;
                 frame = { ...base, turn_started: Boolean(observed.turnId),
-                  activity: currentTurn ? describeTurn(observed) : observed.needsInput ? "waiting for input" : observed.exited ? "exited" : publicText(observed.turnState || "working", 40),
+                  activity: currentTurn ? describeTurn(observed, { mission, node }) : observed.needsInput ? "waiting for input" : observed.exited ? "exited" : publicText(observed.turnState || "working", 40),
                   step: publicText(observed.activity || observed.turnState || "working", 120),
                   output: currentTurn ? publicText(observed.liveOutput ?? observed.answer) : "",
                   // The role's reasoning, tool calls and messages, as Codex shows them while it works.

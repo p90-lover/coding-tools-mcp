@@ -932,7 +932,10 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
     // A request nobody has answered yet holds the card: it said "working" or its last tool meanwhile.
     const newest = timeline.at(-1);
     const asking = newest?.kind === "approval" && /pending|waiting/i.test(newest.status);
-    step.working = { ...working, ...(asking ? { activity: "waiting for approval" } : live?.activity ? { activity: textOf(live.activity) } : {}),
+    // A request "Approve for me" is reviewing says so ("the reviewer is checking: …"): it is not the
+    // person's to answer, and "waiting for approval" with no request shown read as stuck on them.
+    const reviewing = /^the reviewer is checking/i.test(textOf(live?.activity));
+    step.working = { ...working, ...(asking && !reviewing ? { activity: "waiting for approval" } : live?.activity ? { activity: textOf(live.activity) } : {}),
       ...(timeline.length ? { timeline } : {}) };
     // A retried card's new attempt starts empty; until it writes, its earlier reply stays readable.
     const earlier = copiesEarlier ? latestHistoryAnswer(node) : undefined;

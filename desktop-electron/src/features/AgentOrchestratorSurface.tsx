@@ -82,9 +82,12 @@ function ToolButton({ icon, label, onClick, disabled, primary, pressed }: { icon
   return <button type="button" className={`ao-tool${primary ? " is-primary" : ""}`} aria-label={label} title={label} aria-pressed={pressed} disabled={disabled} onClick={onClick}><Glyph name={icon} /></button>;
 }
 
-// How long a request the "Approve for me" reviewer has not answered stays hidden. One review takes
-// at most ~50 s (25 s, then 25 s more to decide); past that, nothing is screening it.
-const REVIEW_GRACE_MS = 120_000;
+// How long a request the "Approve for me" reviewer has not answered stays hidden. One review pass
+// takes at most REVIEW_BUDGET_MS (45 s); past a minute the reviewer is struggling (retrying a model
+// that fails, or nothing screens it), and the person can answer it themselves. At two minutes the
+// chat sat on "waiting for approval" with nothing to answer (seen live: a PowerShell check the
+// reviewer allowed after 114 s). The card still says the reviewer is on it.
+const REVIEW_GRACE_MS = 60_000;
 /**
  * A chat message refused only for the moment: the chat started working again under it (its
  * automatic retry), or the app window was not in front. The chat keeps it at the front of its queue
