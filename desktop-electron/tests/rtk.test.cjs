@@ -147,6 +147,8 @@ test("missing rtk is installed at startup without a click, once, and every harne
   const { rtk, winget } = machine();
   const stamps = [];
   const first = rtk.autoInstall({ record: (at) => stamps.push(at) });
+  // rtk is looked up first, without blocking; winget starts once that answers "missing".
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(winget.length, 1);
   assert.deepEqual(winget[0].args.slice(0, 4), ["install", "--id", "rtk-ai.rtk", "-e"]);
   assert.ok(winget[0].args.includes("--silent") && winget[0].args.includes("--accept-package-agreements"), "no prompt to answer");
@@ -175,6 +177,7 @@ test("an automatic install is skipped when rtk is there or off, and a failed one
   await rtk.autoInstall({ lastAttemptAt: clock - DAY + 60_000 });
   assert.equal(winget.length, 0, "tried less than a day ago");
   const retried = rtk.autoInstall({ lastAttemptAt: clock - DAY - 1 });
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(winget.length, 1, "a day later it tries again");
   winget[0].finish();
   assert.equal((await retried).status.installed, false);
