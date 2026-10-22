@@ -1179,8 +1179,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         };
         const invalid = session => !session || session.mode === "tui" || session.isTerminated
           || ["terminated", "killed", "errored"].includes(session.status) || session.provisionState === "failed";
+        // Why a chat's follow-up could not continue its agent (and started a fresh one, without what
+        // it knew): only "ao.continuation_lost" was logged, which named neither the session nor why.
+        const refuse = (why, session, extra = {}) => {
+          logger?.info?.("ao.continuable_refused", { session: key, why, ...(session ? { status: session.status ?? null,
+            provisionState: session.provisionState ?? null, terminated: session.isTerminated === true } : {}), ...extra });
+          return false;
+        };
         let session = await read();
-        if (invalid(session)) return false;
+        if (invalid(session)) return refuse(session ? "invalid" : "not_found", session);
         if (session.id !== key) throw uncertain();
         if (session.status === "exited") {
           // Startup may already own restoration. A conflict is not readiness: wait for this
@@ -1197,13 +1204,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
             }
             if (resumed?.ok !== true) throw uncertain();
           } catch (error) {
-            if (["SESSION_NOT_RESTORABLE", "SESSION_TERMINATED", "SESSION_NOT_FOUND"].includes(error.code)) return false;
+            if (["SESSION_NOT_RESTORABLE", "SESSION_TERMINATED", "SESSION_NOT_FOUND"].includes(error.code)) {
+              return refuse("restore_refused", session, { code: error.code, message: String(error?.message ?? "").slice(0, 200) });
+            }
             if (error.status !== 409 || error.code !== "AGENT_RESUME_IN_PROGRESS") throw uncertain(error);
           }
           const deadline = Date.now() + 30000;
           for (let attempt = 0; attempt < 150 && Date.now() < deadline; attempt++) {
             session = await read();
-            if (invalid(session)) return false;
+            if (invalid(session)) return refuse(session ? "invalid_after_restore" : "not_found_after_restore", session);
             if (session.id !== key) throw uncertain();
             // Status is a display value: an idle live agent may show its pull request state.
             const activity = session.activity?.state;
@@ -1216,7 +1225,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           }
           throw uncertain();
         }
-        return !(await chatHostGone(key));
+        return (await chatHostGone(key)) ? refuse("host_gone", session) : true;
       })().finally(() => continuing.delete(key)));
       return continuing.get(key);
     },

@@ -4141,6 +4141,50 @@ test("retrying a chat whose grant is spent gets a fresh grant and continues the 
   assert.match(sent[0]?.[1] ?? "", /interrupted before it finished.*Continue the same task/s);
 });
 
+test("a follow-up that cannot continue its agent says which session and why before it starts fresh", async () => {
+  // Seen 2026-10-22: "ao.continuation_lost {reason: session_gone}", then a 52 s fresh start; the
+  // reason covered both a session that could not be continued and a send that failed.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  async function lost(aoHarness) {
+    const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+    const previous = { id: "r1", project_id: "task-1", execution_mode: "single", cancelled: false,
+      nodes: [{ id: "one", role: "planner", state: "finished", parents: [], route, receipt: { thread_id: "sess-1" } }] };
+    const world = chatWorld({ tasks: [task], runs: [previous] });
+    const created = new Map(), spawned = [], warnings = [];
+    const request = async (endpoint, body, options) => {
+      if (endpoint === "/api/v1/ao/read" && body.run_id) {
+        const run = created.get(body.run_id) ?? { id: body.run_id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1,
+          grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+        created.set(body.run_id, run);
+        return { ok: true, runs: [run], worker_capacity: { [body.run_id]: 1 } };
+      }
+      const latest = [...created.values()].at(-1);
+      if (endpoint === "/api/v1/ao/grant") return { ok: true, run: latest, grant: { executable_sha256: "a".repeat(64) } };
+      if (endpoint === "/api/v1/ao/external/reserve") { latest.nodes[0].state = "reserved"; return { ok: true, request_key: "key-1", prompt: "first ask\n\nFollow-up: now run the tests" }; }
+      if (endpoint === "/api/v1/ao/external/submitted") { latest.nodes[0].state = "running"; latest.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run: latest }; }
+      if (endpoint === "/api/v1/ao/external/terminal") { latest.nodes[0].state = "finished"; return { ok: true, run: latest }; }
+      return world.requestHeadless(endpoint, body, options);
+    };
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless: request, findCodexExecutable: () => process.execPath,
+      resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+      logger: { info() {}, warn: (event, fields) => warnings.push([event, fields]) },
+      aoHarness: { ...aoHarness,
+        spawn: async input => { spawned.push(input); return "new-session"; },
+        observe: async (id, expected) => ({ status: "idle", turnId: expected, turnState: "completed", answer: "done" }) },
+    });
+    await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "now run the tests", executionMode: "single", singleRoute: route });
+    for (let tries = 0; tries < 200 && !spawned.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(spawned.length, 1, "a fresh agent starts");
+    return JSON.parse(JSON.stringify(warnings.filter(([event]) => event === "ao.continuation_lost")));
+  }
+  assert.deepEqual(await lost({ continuable: async () => false }),
+    [["ao.continuation_lost", { session: "sess-1", reason: "not_continuable" }]]);
+  assert.deepEqual(await lost({ continuable: async () => true, send: async () => { throw new Error("AO: CHAT_CONTROLLER_NOT_READY"); } }),
+    [["ao.continuation_lost", { session: "sess-1", reason: "send_failed", message: "AO: CHAT_CONTROLLER_NOT_READY" }]]);
+});
+
 test("a single-model follow-up continues the chat's live AO session with just the new message", () => followUpContinues("finished"));
 test("a follow-up after a held turn (a hung turn the user's message stopped) continues its session too", () => followUpContinues("held"));
 
