@@ -324,7 +324,7 @@ test("every message names how its card runs; a working card shows runtime, step 
   const live = { "r1:w": { activity: "running a command", last_event_at_ms: now - 30_000, turn_started: true } };
   const transcript = plain(chat.chatTranscript(runs, "go", { describe, activity: live, now }));
   assert.equal(transcript[1].detail, "chatgpt-web/high · planner", "finished answers carry their card's description");
-  assert.equal(transcript[2].detail, "cpa/gpt-6-luna · Auditor · running 2h 58m · running a command (last heard 30s ago)");
+  assert.equal(transcript[2].detail, "cpa/gpt-6-luna · Auditor · running 2h 58m · running a command · last heard 30s ago");
   assert.equal(transcript[2].stalled, false);
   assert.equal(transcript[2].text, "Worker is working…");
 });
@@ -366,7 +366,7 @@ test("a new chat's prompt is Codex's \"Do anything\" in either mode; follow-up a
   assert.equal(placeholder({ composer: { mode: "team" } }), "Do anything");
   assert.equal(placeholder({ composer: { mode: "single" }, selectedTaskId: "task" }), "Send a follow-up…");
   assert.equal(placeholder({ composer: { mode: "single" }, selectedTaskId: "task", working: true,
-    runs: [run("active", "task", [node("worker", "worker", "running")])] }), "Running — a message now is sent when it finishes");
+    runs: [run("active", "task", [node("worker", "worker", "running")])] }), "Running. New messages send when it finishes");
 });
 
 test("mission drafts retain actual role routes and instructions rather than another task's newer global template",()=>{
@@ -764,7 +764,7 @@ test("an install command's approval says what it does to the project's own packa
   assert.equal(chat.dependencyInstallNote("python -m pip install -r requirements.txt", links).tone, "warn");
   assert.equal(chat.dependencyInstallNote("uv sync", links).tone, "warn");
   assert.equal(chat.dependencyInstallNote("npm ci --prefix frontend", links).tone, "info", "a farmed node_modules installs privately");
-  assert.match(chat.dependencyInstallNote("pnpm add zod", links).text, /privately/);
+  assert.match(chat.dependencyInstallNote("pnpm add zod", links).text, /only in this worktree/);
   assert.equal(chat.dependencyInstallNote("npm ci", { shared: ["node_modules"], farmed: [] }).tone, "warn", "a user's own node_modules link is shared");
   assert.equal(chat.dependencyInstallNote("pip install requests", { shared: [], farmed: ["node_modules"] }), null, "no shared venv, nothing to say");
   assert.equal(chat.dependencyInstallNote("npm run dev", links), null, "not an install");
@@ -1447,9 +1447,9 @@ test("a turn whose agent is waiting out a model error says so, instead of \"may 
     { id: "a", kind: "command", status: "completed", text: "ls" },
     { id: "r", kind: "system", status, text } ] } });
   assert.equal(chat.dshRetryNote([retrying("Retrying Claude, attempt 8 of 10. API error 429. Trying again in 38.6s.")]),
-    " · the model is rate-limited (429), retrying (8 of 10)");
+    " · rate limited (429), retrying 8 of 10");
   assert.equal(chat.dshRetryNote([retrying("Retrying Claude, attempt 2 of 10. API error 503. Trying again in 2s.")]),
-    " · the model's service is failing (503), retrying (2 of 10)");
+    " · model service error (503), retrying 2 of 10");
   assert.equal(chat.dshRetryNote([retrying("Retrying Claude, attempt 2 of 10.", "completed")]), "", "a retry that is over says nothing");
   assert.equal(chat.dshRetryNote([{ key: "s", working: { timeline: [{ id: "a", kind: "command", status: "running", text: "npm test" }] } }]), "",
     "a card busy with a tool is not retrying");

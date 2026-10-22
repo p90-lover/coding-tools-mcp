@@ -385,14 +385,14 @@ const isNodeModules = (dir: string) => /(?:^|\/)node_modules$/i.test(dir);
 export function dependencyInstallNote(command: string | undefined, links: DependencyLinks | null): DependencyNote | null {
   if (!command || !links) return null;
   if (PYTHON_INSTALL.test(command) && links.shared.some(isVenv)) {
-    return { tone: "warn", text: "This worktree shares the project's Python environment: installing here changes the project's packages too." };
+    return { tone: "warn", text: "This worktree shares the project's Python environment. Installing here changes the project's packages too." };
   }
   if (NODE_INSTALL.test(command)) {
     if (links.shared.some(isNodeModules)) {
-      return { tone: "warn", text: "This worktree shares the project's node_modules: installing here changes the project's packages too." };
+      return { tone: "warn", text: "This worktree shares the project's node_modules. Installing here changes the project's packages too." };
     }
     if (links.farmed.some(isNodeModules)) {
-      return { tone: "info", text: "Node packages install privately in this worktree; the project's own stay as they are." };
+      return { tone: "info", text: "Node packages install only in this worktree. The project's packages don't change." };
     }
   }
   return null;
@@ -439,7 +439,7 @@ export function chatWorkingDetail(node: ChatNode, live: ChatActivity | undefined
   const heard = live?.last_event_at_ms || live?.activity_at_ms || null;
   const parts = [describe?.(node, run) ?? ""];
   if (started) parts.push(`running ${chatDuration(now - started)}`);
-  if (live?.activity) parts.push(heard ? `${live.activity} (last heard ${chatDuration(now - heard)} ago)` : live.activity);
+  if (live?.activity) parts.push(heard ? `${live.activity} · last heard ${chatDuration(now - heard)} ago` : live.activity);
   const quietSince = heard ?? started;
   const stalled = Boolean(quietSince && now - quietSince >= STALL_MS && (heard || live?.turn_started === false));
   return { detail: parts.filter(Boolean).join(" · "), stalled, ...(heard ? { heardAtMs: heard } : {}) };
@@ -668,7 +668,7 @@ export function chatTranscript(runs: ChatRun[], description: string | undefined,
   runs.forEach((run) => {
     const user = run.replaces_run_id ? undefined : said[messageIndex++];
     if (run.replaces_run_id) messages.push({ kind: "status", key: `${run.id}:reconfigured`,
-      text: "Configuration changed; continuing from quoted visible work.", state: "finished" });
+      text: "Settings changed. Continuing from the work so far.", state: "finished" });
     if (user) messages.push({ kind: "user", key: `${run.id}:user`, text: user.text, stamp: user.stamp });
     for (const node of chatNodeOrder(run.nodes)) {
       const name = chatNodeName(node);
@@ -690,14 +690,14 @@ export function chatTranscript(runs: ChatRun[], description: string | undefined,
         const working = chatWorkingDetail(node, options.activity?.[key], now, options.describe, run);
         messages.push({
           kind: "status", key, state: node.state, detail: working.detail, stalled: working.stalled,
-          text: working.stalled ? `${name} may be stuck: nothing heard for a while. Stop or restart the mission if it does not recover.` : `${name} is working…`,
+          text: working.stalled ? `${name} may be stuck. Stop or restart the mission if nothing changes.` : `${name} is working…`,
         });
       } else if (node.state === "held") {
         messages.push({ kind: "status", key, text: `${name} needs your attention`, state: node.state });
       }
     }
     if (run.solo) {
-      messages.push({ kind: "status", key: `${run.id}:solo`, text: "Simple mission: the orchestrator answered alone; no workers ran.", state: "finished" });
+      messages.push({ kind: "status", key: `${run.id}:solo`, text: "The orchestrator answered alone. No workers ran.", state: "finished" });
     }
     if (run.cancelled) messages.push({ kind: "status", key: `${run.id}:stopped`, text: "Stopped", state: "cancelled" });
   });
@@ -1091,8 +1091,8 @@ export function dshRetryNote(steps: ChatStep[]): string {
     if (!last || last.kind !== "system" || last.status !== "running" || !/^Retrying\b/i.test(last.text)) continue;
     const attempt = last.text.match(/attempt (\d+) of (\d+)/i);
     const status = last.text.match(/API error (\d{3})/i)?.[1];
-    const why = status === "429" ? "the model is rate-limited (429)" : status ? `the model's service is failing (${status})` : "the model request failed";
-    return ` · ${why}, retrying${attempt ? ` (${attempt[1]} of ${attempt[2]})` : ""}`;
+    const why = status === "429" ? "rate limited (429)" : status ? `model service error (${status})` : "model request failed";
+    return ` · ${why}, retrying${attempt ? ` ${attempt[1]} of ${attempt[2]}` : ""}`;
   }
   return "";
 }

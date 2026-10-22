@@ -33,7 +33,7 @@ test("Linux auto-update fails closed without the stable installer wrapper", () =
       stagingRoot: "/tmp/stage",
       tempRoot: "/tmp/update",
       logPath: "/tmp/update.log",
-    }), /requires the stable install-launcher\.sh wrapper/);
+    }), /needs the install-launcher\.sh wrapper/);
   } finally {
     if (previousAppImage === undefined) delete process.env.CODEX_WEB_GPT_APPIMAGE;
     else process.env.CODEX_WEB_GPT_APPIMAGE = previousAppImage;

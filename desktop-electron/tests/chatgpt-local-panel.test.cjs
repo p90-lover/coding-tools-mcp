@@ -159,7 +159,7 @@ test("with ChatGPT not open the preview stops, offers Check again, and Send stay
   await flush();
   let tree = view.render();
   assert.equal(timers.length, before, "no further capture is scheduled");
-  assert.match(text(tree), /not open/);
+  assert.match(text(tree), /isn't open/);
   find(tree, (el) => el.type === "textarea").props.onChange({ target: { value: "hello" } });
   tree = view.render();
   assert.equal(find(tree, (el) => el.type === "button" && el.props.type === "submit").props.disabled, true);

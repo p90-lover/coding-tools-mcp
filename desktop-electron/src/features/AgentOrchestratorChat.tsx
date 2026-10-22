@@ -47,7 +47,7 @@ function AutoRetryToggle({ disabled, onRetryNow }: { disabled: boolean; onRetryN
     return () => { live = false; };
   }, []);
   // A switch, not a checkbox: the box and its words wrapped onto two lines beside the button.
-  return <label className="cx-auto-retry" title="A failed step runs again by itself, up to three times with a growing pause; account or sign-in failures still wait for you">
+  return <label className="cx-auto-retry" title="Retries a failed step up to 3 times. Sign-in errors still wait for you">
     <input type="checkbox" role="switch" checked={on === true} disabled={disabled || on === null} onChange={(event) => {
       const next = event.target.checked;
       setOn(next);
@@ -531,7 +531,7 @@ function SentMessage({ text }: { text: string }) {
       {parts.attachments.map((item, index) => item.image && item.path
         ? <SentImage key={`${item.path}:${index}`} item={item} onOpen={setOpen} />
         : <button key={`${item.name}:${index}`} type="button" className="cx-sent-file" disabled={!item.path || !reveal}
-          title={item.path ? `${item.path}\nClick to show it in its folder` : `${item.name} (sent inline)`} onClick={() => item.path && reveal?.(item.path)}>
+          title={item.path ? `${item.path}\nClick to show in folder` : `${item.name} · sent inline`} onClick={() => item.path && reveal?.(item.path)}>
           <span className="cx-sent-file-icon" aria-hidden="true">{/\.pdf$/i.test(item.name) ? "PDF" : "TXT"}</span>
           <span className="cx-sent-file-name">{item.name}</span>
         </button>)}
@@ -1090,8 +1090,8 @@ export function AgentOrchestratorChat({
         // The queued-message bar shows a waiting steer, as Claude Code does; only a stopped turn is told.
         if (here() && !waits) {
           say(steered === "restart" ? "Restarting" : "Interrupting", steered === "restart"
-            ? "The agent had stopped responding, so its turn was stopped; your message is sent as the next turn."
-            : "A command was still running, so it was stopped; the same agent gets your message next, with everything it already knows.",
+            ? "The agent stopped responding, so its turn was stopped. Your message goes in as the next turn."
+            : "A command was still running, so it was stopped. The same agent gets your message next.",
             chatMessageReadable(message));
         }
         return true;
@@ -1172,7 +1172,7 @@ export function AgentOrchestratorChat({
     const text = chatMessageWithAnnotations(commands?.planMode ? planMessage(body) : body, annotations);
     // The chat sends at most 8,192 characters; long selections could pass that and the send failed.
     if (text.length > CHAT_MESSAGE_LIMIT) {
-      say("Too long", `This message is ${text.length.toLocaleString()} characters with its annotations; the limit is ${CHAT_MESSAGE_LIMIT.toLocaleString()}. Remove an annotation or select less.`);
+      say("Too long", `This message is ${text.length.toLocaleString()} characters with annotations. The limit is ${CHAT_MESSAGE_LIMIT.toLocaleString()}. Remove an annotation or select less.`);
       return;
     }
     if (queueing || queueWhileSending) {
@@ -1231,7 +1231,7 @@ export function AgentOrchestratorChat({
       // Nothing is lost: a plain message goes back into the composer to send again, after anything
       // already typed there.
       if (next.what === "Message") setDraft((typed) => (typed.trim() ? `${typed}\n\n${next.message}` : next.message));
-      say(next.what, next.what === "Message" ? "The queued message couldn't be sent; it's back in the composer." : "The queued message couldn't be sent; run the command again.");
+      say(next.what, next.what === "Message" ? "Couldn't send the queued message. It's back in the composer." : "Couldn't send the queued message. Run the command again.");
     });
   }, [queueVersion, selectedTaskId, accepts, busy, sending, windowFocused]);
   // In steer mode a queued message (the agent was waiting on a request, or still starting) is
@@ -1276,10 +1276,10 @@ export function AgentOrchestratorChat({
    * can be steered (never a goal), and otherwise queues it for when the current turn finishes.
    */
   const dispatch = async (what: string, message: string, goal?: string): Promise<"sent" | "queued" | false> => {
-    if (busy || sending) { say(what, "Another action is still running; try again in a moment."); return false; }
+    if (busy || sending) { say(what, "Another action is running. Try again in a moment."); return false; }
     if (accepts || (steering && !goal)) return await deliver(message, goal) ? "sent" : false;
     setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what, message, ...(goal ? { goal } : {}) }));
-    say(what, `Queued: it's sent when the current turn finishes.${latest && runOpen && stop ? " Send /stop to end the turn now." : ""}`);
+    say(what, `Queued. It's sent when this turn finishes.${latest && runOpen && stop ? " Send /stop to end the turn now." : ""}`);
     return "queued";
   };
   // The queued-message bar: this chat's queued messages (a command or a goal waits out of sight, as
@@ -1332,7 +1332,7 @@ export function AgentOrchestratorChat({
   // A message is deleted with the runs its turn showed, so exactly that reply leaves the chat.
   const deletion = (turn: ChatTurn | undefined) => turn?.user && turn.runId && turn.messageIndex !== undefined
     ? { index: turn.messageIndex, runIds: chatRunsOfMessage(chatRuns, turn.runId) } : null;
-  const notYet = "This message hasn't run yet; it can be deleted once its turn has run";
+  const notYet = "This message hasn't run yet. Delete it after its turn runs";
   const confirmDelete = async () => {
     const target = deleting === null ? null : deletion(turns[deleting]), task = selectedTaskId;
     if (!target || !thread?.deleteMessage || deleteBlocked) return;
@@ -1357,7 +1357,7 @@ export function AgentOrchestratorChat({
           if (!arg) {
             setCard(goal ? { title: GOAL_SUMMARY[goal.status], rows: [["Goal", goal.objective], ["Round", goalRounds(goal)],
               ["Running for", goalElapsed(goal.startedAt)], ...(goal.note ? [["Note", goal.note] as [string, string]] : [])] }
-              : { title: "Goal", text: "No goal is currently set.\nUsage: /goal <objective> | pause | resume | edit | clear\nExample: /goal make every test in this project pass" });
+              : { title: "Goal", text: "No goal set.\nUsage: /goal <objective> | pause | resume | edit | clear\nExample: /goal make every test in this project pass" });
             break;
           }
           if (["pause", "resume", "clear"].includes(action)) {
@@ -1365,18 +1365,18 @@ export function AgentOrchestratorChat({
               setQueue(selectedTaskId, queued.filter((item) => !item.goal)); say("Goal", "The queued goal was dropped."); break;
             }
             if (!commands) break;
-            if (!goal) { say("Goal", "No goal is currently set."); break; }
+            if (!goal) { say("Goal", "No goal set."); break; }
             await commands.goalAction(action as "pause" | "resume" | "clear");
-            say("Goal", action === "clear" ? "Goal cleared." : action === "pause" ? "Goal paused; the current round finishes, then it waits." : "Goal resumed.");
+            say("Goal", action === "clear" ? "Goal cleared." : action === "pause" ? "Goal paused. The current round finishes first." : "Goal resumed.");
             break;
           }
           if (action === "edit") {
             setDraft("");
-            if (!goal) say("Goal", "No goal is currently set."); else { setCard(null); setGoalEditing(goal.objective); }
+            if (!goal) say("Goal", "No goal set."); else { setCard(null); setGoalEditing(goal.objective); }
             break;
           }
           if (goal && ["active", "paused"].includes(goal.status)
-            && !window.confirm("Replace current goal?\n\nThis keeps the chat but replaces the saved goal with this one.")) { setDraft(`/goal ${arg}`); break; }
+            && !window.confirm("Replace the current goal?\n\nThe chat stays. Only its goal changes.")) { setDraft(`/goal ${arg}`); break; }
           // While a turn is working the goal is queued; it starts once the turn finishes.
           const outcome = await dispatch("Goal", arg, arg);
           if (!outcome) setDraft(`/goal ${arg}`);
@@ -1385,11 +1385,11 @@ export function AgentOrchestratorChat({
         }
         case "plan":
           commands?.setPlanMode(!commands.planMode);
-          say("Plan mode", commands?.planMode ? "Plan mode is off." : "Plan mode is on: messages ask for a plan and no changes, until you turn it off with /plan.");
+          say("Plan mode", commands?.planMode ? "Plan mode is off." : "Plan mode is on. Messages ask for a plan, not changes. Send /plan to turn it off.");
           break;
         case "compact":
           if (!commands || !selectedTaskId) break;
-          if (!accepts) { say("Compact", "Compact is disabled while a chat is in progress."); break; }
+          if (!accepts) { say("Compact", "Can't compact while the chat is running."); break; }
           say("Compact", "Compacting this chat's context…");
           say("Compact", await commands.compact());
           break;
@@ -1401,16 +1401,16 @@ export function AgentOrchestratorChat({
           break;
         case "rewind": {
           if (!thread?.rewind) break;
-          if (!rewindPoints.length) { say("Rewind", "There is no message to go back to yet."); break; }
+          if (!rewindPoints.length) { say("Rewind", "No message to go back to yet."); break; }
           const pick = Number(arg);
           if (arg) {
             const point = Number.isInteger(pick) ? rewindPoints[pick - 1] : undefined;
             if (point) thread.rewind(point.messageIndex);
-            else say("Rewind", `Choose a message from 1 to ${rewindPoints.length}, e.g. /rewind ${rewindPoints.length}.`);
+            else say("Rewind", `Choose a message from 1 to ${rewindPoints.length}, like /rewind ${rewindPoints.length}.`);
             break;
           }
           setCard({ title: "Rewind",
-            text: "Go back to a message: a new chat opens with the conversation up to it and that message ready to edit. This chat and the files on disk stay as they are.",
+            text: "Pick a message to go back to. A new chat opens with it ready to edit. This chat and your files don't change.",
             items: rewindPoints.map((point, index) => ({ label: `${index + 1}. ${point.text.replace(/\s+/g, " ").slice(0, 90)}`,
               run: () => { setCard(null); thread.rewind?.(point.messageIndex); } })).reverse() });
           break;
@@ -1423,10 +1423,10 @@ export function AgentOrchestratorChat({
             const point = Number.isInteger(pick) ? rewindPoints[pick - 1] : undefined;
             if (point && !deletion(turns[point.turnIndex])) say("Delete message", `${notYet}.`);
             else if (point) { setCard(null); setDeleting(point.turnIndex); }
-            else say("Delete message", `Choose a message from 1 to ${rewindPoints.length}, e.g. /delete ${rewindPoints.length}.`);
+            else say("Delete message", `Choose a message from 1 to ${rewindPoints.length}, like /delete ${rewindPoints.length}.`);
             break;
           }
-          setCard({ title: "Delete message", text: "Choose the message to delete; you are asked to confirm.",
+          setCard({ title: "Delete message", text: "Choose a message to delete. You confirm before it goes.",
             items: rewindPoints.map((point, index) => ({ label: `${index + 1}. ${point.text.replace(/\s+/g, " ").slice(0, 90)}`,
               run: () => deletion(turns[point.turnIndex]) ? setDeleting(point.turnIndex) : say("Delete message", `${notYet}.`) })).reverse() });
           break;
@@ -1488,8 +1488,8 @@ export function AgentOrchestratorChat({
         }
       }
       if (path) { added.push({ name: file.name || fileName(path), path, image, ...(preview ? { preview } : {}) }); continue; }
-      if (image) { freePreview(preview); notes.push(`${file.name}: images need their file path, which isn't available here`); continue; }
-      if (file.size > INLINE_ATTACHMENT_BYTES) { notes.push(`${file.name}: too large to attach inline (over 200 KB)`); continue; }
+      if (image) { freePreview(preview); notes.push(`${file.name}: can't attach an image without its file path`); continue; }
+      if (file.size > INLINE_ATTACHMENT_BYTES) { notes.push(`${file.name}: over 200 KB, too large to attach inline`); continue; }
       added.push({ name: file.name, text: await file.text() });
     }
     if (added.length) setAttachments((current) => [...current, ...added].slice(0, 8));
@@ -1523,7 +1523,7 @@ export function AgentOrchestratorChat({
     { label: "Mission Board", ...(onOpenMissionBoard ? { run: onOpenMissionBoard } : { reason: "No board is available" }) },
     { label: "Orchestrator settings", ...(onSettings ? { run: onSettings } : { reason: "Settings are unavailable" }) },
     ...(thread && chat ? [{ kind: "separator" }, chat.status === "running"
-      ? { label: "Archive", reason: "Stop the running mission before archiving this chat" }
+      ? { label: "Archive", reason: "Stop the mission to archive this chat" }
       : { label: "Archive", shortcut: "Ctrl+Shift+A", run: thread.archive }] as ChatMenuItem[] : []),
   ];
 
@@ -1595,7 +1595,7 @@ export function AgentOrchestratorChat({
               {!turn.final && turn.status === "done" && !turn.steps.some((step) => step.text || step.error)
                 ? <p className="cx-note">Finished without an answer.</p> : null}
               {turn.status === "stopped" && !dsh ? <p className="cx-note">Stopped</p> : null}
-              {turn.solo ? <p className="cx-note">Answered by the orchestrator alone; no workers ran.</p> : null}
+              {turn.solo ? <p className="cx-note">The orchestrator answered alone. No workers ran.</p> : null}
             </article></PartErrorBoundary>;
   }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn]);
 
@@ -1618,19 +1618,19 @@ export function AgentOrchestratorChat({
           {headerExtra}
           {/* The agent's browser keeps running when its tab or the panel is closed: this brings it back. */}
           {selectedTaskId && livePage && workbench !== "preview" ? <button type="button" className="cx-browser-chip"
-            title={`The agent's browser is still open: ${livePage.url}\nShow it`} onClick={() => setWorkbench("preview")}>
+            title={`Agent's browser: ${livePage.url}\nClick to show`} onClick={() => setWorkbench("preview")}>
             <span className="cx-browser-dot" aria-hidden="true" /><Icon name="browser" width="13" height="13" />
             <span>{livePage.title || (() => { try { return new URL(livePage.url).host; } catch { return livePage.url; } })()}</span></button> : null}
           {selectedTaskId ? <button type="button" className="cx-icon-button cx-compact-toggle" aria-pressed={compactActivity}
-            title={compactActivity ? "Compact activity: tool calls and thinking fold into one line (click to show every step)" : "Every step shown (click to compact)"}
+            title={compactActivity ? "Show every step" : "Compact activity"}
             aria-label="Compact activity" onClick={toggleCompact}>
             <Icon name={compactActivity ? "expand" : "minus"} width="16" height="16" /></button> : null}
-          {structure || latest ? <button type="button" className="cx-icon-button" aria-pressed={showStructure} title="Show cards (Structure)" aria-label="Show cards"
+          {structure || latest ? <button type="button" className="cx-icon-button" aria-pressed={showStructure} title="Show cards" aria-label="Show cards"
             disabled={!latest} onClick={() => structure ? setShowStructure((value) => !value) : latest && openStructure(latest.id)}>
             <Icon name="orchestrator" width="16" height="16" /></button> : null}
           {/* The side panel opens on its Overview, as Claude Code's side column: context, changes,
               tasks and usage, each a click from its tab (the browser chip still opens Preview). */}
-          {selectedTaskId ? <button type="button" className="cx-icon-button" aria-pressed={workbench !== null} title="Side panel: overview, preview, terminal, changes and files"
+          {selectedTaskId ? <button type="button" className="cx-icon-button" aria-pressed={workbench !== null} title="Show side panel"
             aria-label="Show side panel" onClick={() => setWorkbench((open) => (open ? null : "overview"))}>
             <Icon name="browser" width="16" height="16" /></button> : null}
           {onOpenMissionBoard ? <button type="button" className="cx-icon-button" title="Mission Board" aria-label="Open Mission Board" onClick={onOpenMissionBoard}>
@@ -1659,7 +1659,7 @@ export function AgentOrchestratorChat({
                 onClick={() => { setDetails(null); if (structure) setShowStructure(true); else openStructure(latest.id); }}>
                 <span className="cx-details-dots" aria-hidden="true">{agents.dots.slice(0, 8).map((state, index) =>
                   <span key={index} className={`cx-details-dot is-${state}`} />)}</span><span>{agents.text}</span></button>
-                : <p className="cx-details-empty">No agents yet; they start with the first message.</p>}
+                : <p className="cx-details-empty">No agents yet. They start with your first message.</p>}
               <p className="cx-details-label">Setup</p>
               {lead ? <>
                 <p className="cx-details-line">{describeNode?.(lead) || lead.route?.model || "Model not set"}</p>
@@ -1687,8 +1687,8 @@ export function AgentOrchestratorChat({
             {threadTurns}
             {(notice || notStarted) && latest && chat?.status === "queued" && !working ? (
               <div className="cx-card tone-error">
-                <strong>{notice ? "The run could not start" : "This run hasn't started"}</strong>
-                <p>{notice || "Its start stopped before any card ran. Start it again to run the team."}</p>
+                <strong>{notice ? "Couldn't start the run" : "This run hasn't started"}</strong>
+                <p>{notice || "It stopped before any agent ran. Start it again."}</p>
                 <div className="cx-card-actions"><button className="button-primary" type="button" disabled={busy} onClick={() => retryStart(latest.id)}>{notice ? "Retry" : "Start"}</button></div>
               </div>
             ) : null}
@@ -1706,7 +1706,7 @@ export function AgentOrchestratorChat({
           <button type="button" className="cx-chip" aria-haspopup="menu"
             onClick={(event) => toggleMenu(event.currentTarget, (box) => ({ x: box.left, y: box.top - 96, label: "Work in", items: [
               { label: "This computer", icon: "monitor", checked: true, run: () => undefined },
-              { label: "Cloud", icon: "share", reason: "No cloud runner is set up; chats run on this computer" },
+              { label: "Cloud", icon: "share", reason: "No cloud runner set up. Chats run on this computer" },
             ] }))}>
             <ChatGlyph name="monitor" size={13} />This computer<Caret className="cx-chip-caret" /></button>
           {/* The project's branch sits with where the chat runs, as in Claude Code's start bar. */}
@@ -1715,8 +1715,8 @@ export function AgentOrchestratorChat({
           <button type="button" className="cx-chip-icon" aria-label="Configure local environment" title="Configure local environment" aria-haspopup="menu"
             onClick={(event) => toggleMenu(event.currentTarget, (box) => ({ x: box.right - 260, y: box.top - 116, label: "Configure local environment", items: [
               // Codex's environment popover. Orchestrator settings live in the header's ⋯ menu, not here.
-              { label: "New worktree", icon: "fork", toggle: false, reason: "Chats run in the project folder itself; separate worktrees aren't available yet" },
-              { label: "Branch", icon: "repo", detail: branch || "current", reason: "Chats use whatever branch the project folder has checked out" },
+              { label: "New worktree", icon: "fork", toggle: false, reason: "Worktrees aren't available yet. Chats run in the project folder" },
+              { label: "Branch", icon: "repo", detail: branch || "current", reason: "Chats use the project folder's current branch" },
               { label: "Environment", icon: "settings", detail: "No environment", reason: "Saved environments aren't available yet" },
             ] }))}>
             <ChatGlyph name="settings" size={14} /></button>
@@ -1738,7 +1738,7 @@ export function AgentOrchestratorChat({
           <hr />
           <button type="button" className="cx-picker-action" disabled={!onAddProject} onClick={() => { setProjectPicker(null); onAddProject?.(); }}>
             <ChatGlyph name="plus" size={13} />New project</button>
-          <button type="button" className="cx-picker-action" disabled title="Chats run in a project's folder, so a project is required">
+          <button type="button" className="cx-picker-action" disabled title="Chats need a project">
             <span aria-hidden="true">✕</span>Don't work in a project</button>
         </FloatingLayer> : null}
         {card ? <section className="cx-command-card" role="status" aria-label={card.title}>
@@ -1753,7 +1753,7 @@ export function AgentOrchestratorChat({
         {deleting !== null ? <section className="cx-command-card cx-delete-confirm" role="alertdialog" aria-label="Delete message">
           <header><strong>Delete message</strong>
             <button type="button" className="cx-icon-button" aria-label="Cancel" onClick={() => setDeleting(null)}><Icon name="close" width="12" height="12" /></button></header>
-          <p>Delete this message? It and its reply are removed from this chat. The agent's files are not changed.</p>
+          <p>Delete this message and its reply? Files on disk don't change.</p>
           {deleteBlocked ? <p className="cx-delete-reason">{deleteBlocked}.</p> : null}
           <footer><button type="button" className="cx-text-button" onClick={() => setDeleting(null)}>Cancel</button>
             <button type="button" className="cx-primary-button" disabled={Boolean(deleteBlocked) || deletingBusy} onClick={() => void confirmDelete()}>Delete</button></footer>
@@ -1795,7 +1795,7 @@ export function AgentOrchestratorChat({
           const running = lead?.route?.model;
           const picked = composer?.mode === "single" ? composer.route?.model : undefined;
           if (runOpen && latest?.execution_mode === "single" && running && picked && picked !== running) {
-            return <p className="cx-route-note" role="status">This turn is running on <b>{running}</b>; your next message uses <b>{picked}</b>.</p>;
+            return <p className="cx-route-note" role="status">This turn runs on <b>{running}</b>. Your next message uses <b>{picked}</b>.</p>;
           }
           // An agent keeps the model, effort, window and permissions it started with, so a follow-up
           // with any of them changed starts a new agent that gets only a summary of the chat (it
@@ -1804,8 +1804,8 @@ export function AgentOrchestratorChat({
           const changed = !runOpen && latest?.execution_mode === "single" && lead?.route && route
             && SESSION_ROUTE_FIELDS.some((field) => ((lead.route as Record<string, unknown>)[field] ?? null)
               !== ((route as unknown as Record<string, unknown>)[field] ?? null));
-          return changed ? <p className="cx-route-note" role="status">Changing the model or its settings starts a new agent that gets only a summary
-            of this chat, not its memory. Switch back to <b>{running}{lead?.route?.effort ? ` · ${lead.route.effort}` : ""}</b> to keep the same agent.</p> : null;
+          return changed ? <p className="cx-route-note" role="status">New settings start a new agent with only a summary of this chat.
+            Switch back to <b>{running}{lead?.route?.effort ? ` · ${lead.route.effort}` : ""}</b> to keep this agent.</p> : null;
         })()}
         {/* Queued and steering messages wait above the branch picker, which belongs to the chat box (as
             Codex's): under it, a steer sat between "main" and the box. */}
@@ -1839,7 +1839,7 @@ export function AgentOrchestratorChat({
                 <span>/{command.name}{command.args ? <em> {command.args}</em> : null}</span><small>{command.hint}</small></button>
             </li>)}
           </ul> : null}
-          {typing && !slash.length ? <p className="cx-slash-usage" role="status">/{typing.name} {typing.args} — {typing.hint}. Press Enter to run it.</p> : null}
+          {typing && !slash.length ? <p className="cx-slash-usage" role="status">/{typing.name} {typing.args} — {typing.hint}. Press Enter to run.</p> : null}
           {carried?.length && !selectedTaskId ? <div className="cx-attachments">
             <span className="cx-attachment" title={carried.join("\n\n").slice(0, 600)}>
               ↶ Includes {carried.length} earlier message{carried.length === 1 ? "" : "s"} as context
@@ -1853,7 +1853,7 @@ export function AgentOrchestratorChat({
                 is on hover, and a click shows it in its folder. */}
             {attachments.map((item, index) => <span key={`${item.name}:${index}`} className={`cx-attachment${item.preview ? " is-image" : ""}`}>
               <button type="button" className="cx-attachment-open" disabled={!item.path || !revealFile}
-                title={item.path ? `${item.path}${revealFile ? "\nClick to show it in its folder" : ""}` : `${item.name} (sent inline)`}
+                title={item.path ? `${item.path}${revealFile ? "\nClick to show in folder" : ""}` : `${item.name} · sent inline`}
                 onClick={() => { if (item.path) revealFile?.(item.path); }}>
                 {item.preview ? <img src={item.preview} alt={item.name} /> : <span aria-hidden="true">{item.image ? "🖼" : "📄"}</span>}
                 <span className="cx-attachment-name">{item.name}</span>
@@ -1866,8 +1866,8 @@ export function AgentOrchestratorChat({
             {attachNote ? <span className="cx-attach-note" role="status">{attachNote}</span> : null}
           </div> : null}
           <textarea ref={input} aria-label="Message" maxLength={8192} rows={1} value={draft}
-            placeholder={steering ? "" : awaitingAnswer && queueing ? "Answer the request above first — a message now is sent after it"
-              : queueing ? "Running — a message now is sent when it finishes" : !accepts ? "Running — you can send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : "Do anything"}
+            placeholder={steering ? "" : awaitingAnswer && queueing ? "Answer the request above. New messages send after it"
+              : queueing ? "Running. New messages send when it finishes" : !accepts ? "Running. Send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : "Do anything"}
             onChange={(event) => { setDraft(event.target.value); setSlashIndex(0); }}
             onPaste={(event) => { if (event.clipboardData.files.length) { event.preventDefault(); void addFiles(event.clipboardData.files); } }}
             onKeyDown={(event) => {
@@ -1902,7 +1902,7 @@ export function AgentOrchestratorChat({
             {latest && runOpen && stop && !accepts && !((steering || queueing) && canSend)
               ? <button className="cx-send is-stop" type="button" aria-label="Stop (Esc)" title="Stop (Esc)" onClick={() => stop(latest.id)}><span aria-hidden="true" /></button>
               : <button className="cx-send" type="submit" aria-label={sending ? "Starting…" : steering ? "Steer the agent" : queueing ? "Queue message" : "Send message"}
-                title={steering ? "Steer — sent to the working agent now (Enter)" : queueing ? "Queue — sent when the current turn finishes (Enter)" : "Send (Enter)"} disabled={!canSend}>
+                title={steering ? "Steer now (Enter)" : queueing ? "Queue for after this turn (Enter)" : "Send (Enter)"} disabled={!canSend}>
                   <Icon name="forward" width="18" height="18" /></button>}
           </div>
         </form>

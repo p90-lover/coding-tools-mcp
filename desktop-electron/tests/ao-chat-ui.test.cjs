@@ -151,9 +151,9 @@ test("normal asynchronous startup detail is not shown as a failed launch", () =>
     tasks: [{ id: "task", title: "Task" }], selectedTaskId: "task", busy: false, approvals: [],
     loadDescription: async () => "", send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {} };
   const starting = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, { ...props, working: true, notice: "Awaiting local approval" }));
-  assert.equal(starting.includes("The run could not start"), false);
+  assert.equal(starting.includes("start the run"), false);
   const failed = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, { ...props, working: false, notice: "Codex CLI unavailable" }));
-  assert.ok(failed.includes("The run could not start"));
+  assert.ok(failed.includes("start the run"));
 });
 
 test("terminal failed work never becomes a successful chat just because review finished", () => {
@@ -191,7 +191,7 @@ test("mission inspectors keep Retry structural changes in saved team templates",
     loadModels: async () => [], busy: false, change() {}, apply() {}, discard() {}, taskName: () => "Task" };
   const mission = renderToStaticMarkup(React.createElement(roles.AgentOrchestratorRoleEditor, props));
   assert.match(mission.match(/<option[^>]*value="retry"[^>]*>/)[0], /disabled/);
-  assert.ok(mission.includes("Configure Retry roles in Runtime"));
+  assert.ok(mission.includes("Set up Retry roles on the Orchestrator Team page"));
   const template = renderToStaticMarkup(React.createElement(roles.AgentOrchestratorRoleEditor, { ...props, template: true }));
   assert.doesNotMatch(template.match(/<option[^>]*value="retry"[^>]*>/)[0], /disabled/);
   const retry = { ...node, role: "retry" };
@@ -239,7 +239,7 @@ test("an open chat's composer carries the context meter; a new chat's does not",
     tasks: [{ id: "task", title: "Task" }], selectedTaskId: "task", busy: false, approvals: [],
     loadDescription: async () => "", send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {} };
   const open = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, props));
-  assert.match(open, /class="cx-icon-button cx-context-meter is-unknown"[^>]*aria-label="The agent has not reported its context yet"/);
+  assert.match(open, /class="cx-icon-button cx-context-meter is-unknown"[^>]*aria-label="Context not reported yet"/);
   const fresh = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, { ...props, runs: [], selectedTaskId: "" }));
   assert.equal(fresh.includes("cx-context-meter"), false);
 });

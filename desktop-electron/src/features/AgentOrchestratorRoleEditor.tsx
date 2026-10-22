@@ -486,17 +486,17 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
             : capabilities?.harness === harness && capabilityText(capabilities.models[model], native && isWebModel(model)) ? ` · ${capabilityText(capabilities.models[model], native && isWebModel(model))}` : ""}</>}
       </option>)}
     </select></label> : null}
-    {!hidePermissionNote ? harness === NATIVE_HARNESS ? <p className="ao-hint">Saved native permission: {nativePermission(route) || "Unknown"}. Change permissions explicitly in the chat composer menu; runtime capabilities are authoritative.</p>
-      : <p className="ao-hint">WebGPT runs only on Native Codex: choosing a WebGPT model switches to it, and any other model runs here. Native permissions are retained but unavailable on this adapter.</p> : null}
+    {!hidePermissionNote ? harness === NATIVE_HARNESS ? <p className="ao-hint">Native permission: {nativePermission(route) || "Unknown"}. Change it in the chat composer's permissions menu.</p>
+      : <p className="ao-hint">WebGPT runs only on Native Codex. Choosing a WebGPT model switches to it, and other models run here. Native permissions don't apply on this agent.</p> : null}
     <fieldset className="ao-route-tuning"><legend>Model tuning</legend>
-    <label title={webEffort ? "Reasoning effort for this card" : capability?.effortReason || (efforts ? efforts.length ? "Reasoning efforts advertised for this model" : "This model does not support an effort override" : "Model capabilities have not been verified")}>Reasoning effort
+    <label title={webEffort ? "Reasoning effort for this card" : capability?.effortReason || (efforts ? efforts.length ? "Efforts this model supports" : "This model has no effort setting" : "Model capabilities unknown")}>Reasoning effort
       <select value={route.effort ?? ""} disabled={disabled || !efforts?.length} aria-invalid={!webEffort && Boolean(route.effort) && Boolean(efforts) && !efforts?.includes(route.effort!)}
         onChange={event => { const next = { ...route }; if (event.target.value) next.effort = event.target.value; else delete next.effort; onChange(next); }}>
         <option value="">{webEffort ? "Model default" : efforts ? efforts.length ? "Model default" : "Not supported" : missing ? "Choose a listed model" : "Capabilities unverified"}</option>
         {!webEffort && route.effort && !efforts?.includes(route.effort) ? <option value={route.effort} disabled>{route.effort} (saved, unverified or unsupported)</option> : null}
         {(efforts ?? []).map(effort => <option key={effort} value={effort}>{effort}</option>)}
       </select></label>
-    <label title={native ? `Context window in tokens (4,096 to ${nativeMax.toLocaleString("en-US")})` : capability?.contextReason || (context ? context.kind === "compaction" ? "Client compaction threshold in tokens, not the model context limit" : "Client context budget in tokens, not a larger provider limit" : "No verified client context override")}>Context window
+    <label title={native ? `Context window in tokens (4,096 to ${nativeMax.toLocaleString("en-US")})` : capability?.contextReason || (context ? context.kind === "compaction" ? "Client compaction threshold in tokens, not the model context limit" : "Client context budget in tokens, not a larger provider limit" : "This agent can't set a context window")}>Context window
       {/* Typed freely: 272000, 272,000, 272k or 1m; the list offers sizes the model takes. */}
       <input type="text" inputMode="numeric" list={presets.length ? presetsId : undefined} disabled={disabled || !context}
         placeholder={!context ? "No verified override" : native ? "Model default"
@@ -510,16 +510,16 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
       {presets.length ? <datalist id={presetsId}>{presets.map(tokens => <option key={tokens} value={contextText(tokens)} />)}</datalist> : null}</label>
     {/* A CPA model on Native Codex can hold an effort it does not take, behind a disabled select. */}
     {(!native || !webEffort && route.effort !== undefined) && (route.effort !== undefined || route.context_window !== undefined) ? <button type="button" className="button-secondary ao-wide"
-      disabled={disabled} title="Clear requested effort and client context budget" onClick={() => {
+      disabled={disabled} title="Clear effort and context window" onClick={() => {
         const next = { ...route }; delete next.effort; delete next.context_window; onChange(next);
       }}>Model defaults</button> : null}
-    {missing ? <p className="ao-hint ao-wide" role="status">{modelLabel(route.model)} is no longer in this harness's model list, so its efforts and context window are unknown and a run with them saved will not start.
+    {missing ? <p className="ao-hint ao-wide" role="status">{modelLabel(route.model)} is no longer listed for this agent. A task with its effort or context window set won't start.
       {sameModelElsewhere(route.model, models ?? []).map(other => <button key={other} type="button" className="button-secondary" disabled={disabled}
         onClick={() => onChange(withTuning(workerRoute(route.harness_id, other, nativePermission(route)), route, listed))}>Use {modelLabel(other)}</button>)}</p> : null}
     {compact ? null : <p className="ao-hint ao-wide">{native
-      ? `${!webEffort && !efforts?.length ? `${capability?.effortReason || "This model has no effort override."} ` : ""}Native harness context budget: 4,096–${nativeMax.toLocaleString("en-US")} tokens${capability?.contextLimit ? " (this model's limit)" : ""}. Blank uses the model default.`
-      : [capability?.effortReason || (!efforts ? "Effort capabilities are unverified." : !efforts.length ? "This model has no effort override." : ""),
-          capability?.contextReason || (!context ? "This client has no verified context override." : context.kind === "compaction"
+      ? `${!webEffort && !efforts?.length ? `${capability?.effortReason || "This model has no effort setting."} ` : ""}Context window: 4,096–${nativeMax.toLocaleString("en-US")} tokens${capability?.contextLimit ? ", this model's limit" : ""}. Blank uses the model default.`
+      : [capability?.effortReason || (!efforts ? "Effort support is unknown." : !efforts.length ? "This model has no effort setting." : ""),
+          capability?.contextReason || (!context ? "This agent can't set a context window." : context.kind === "compaction"
             ? "Context sets the client compaction threshold, not a thinking budget or output limit."
             : "Context sets the client budget, not a thinking budget or a larger provider limit."),
           capability?.contextLimit ? `Model context limit: ${tokensLabel(capability.contextLimit)} tokens.` : ""].filter(Boolean).join(" ")}</p>}
@@ -575,7 +575,7 @@ export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, l
     else changeKind(value as AoNode["role"]);
   };
   return <div className="ao-role-inspector" aria-label="Role inspector">
-    {working ? <p className="ao-hint ao-role-live" role="status">{progress || "Working; waiting for the first activity update"}</p> : null}
+    {working ? <p className="ao-hint ao-role-live" role="status">{progress || "Working. Waiting for the first update…"}</p> : null}
     {!template ? <div className="ao-inspector-tabs" role="tablist" aria-label="Role details">
       {(["settings", "output", "history"] as const).map(name => <button key={name} type="button" role="tab" aria-selected={tab === name} onClick={() => setTab(name)}>{name}</button>)}
     </div> : null}
@@ -583,7 +583,7 @@ export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, l
       onChangeCapture={event => { const target = event.target as HTMLElement; immediateChange = target.tagName === "SELECT" || target.getAttribute("type") === "checkbox"; }}>
       <div className="ao-field-row">
         <label>Name<input maxLength={96} value={settings.name} onChange={event => updateSettings({ name: event.target.value })} /></label>
-        <label>Role<select value={typingRole ? "custom:" : roleValue} disabled={!template && role.role === "retry"} title={!template ? "Configure Retry roles in Runtime > Orchestrator Team before starting a chat" : undefined} onChange={event => pickRole(event.target.value)}>
+        <label>Role<select value={typingRole ? "custom:" : roleValue} disabled={!template && role.role === "retry"} title={!template ? "Set up Retry roles on the Orchestrator Team page before starting a chat" : undefined} onChange={event => pickRole(event.target.value)}>
           <option value="planner">Orchestrator</option><option value="approver">Command approver</option><option value="worker">Worker</option>
           <option value="sub_reviewer">Sub-reviewer</option><option value="reviewer">Main reviewer</option><option value="retry" disabled={(!template && role.role !== "retry") || (role.role !== "retry" && draft.nodes.some(item => item.role === "retry"))}>Retry</option>
           {role.role === "review_split" ? <option value="review_split">Main reviewer · split</option> : null}
@@ -602,7 +602,7 @@ export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, l
       </select></label>
       <label>Instructions<textarea aria-label="Instructions" rows={4} maxLength={4096} value={settings.instructions} onChange={event => updateSettings({ instructions: event.target.value })} /></label>
       {!followsStarter(role.role) || !settings.instructions
-        ? <button type="button" className="ao-role-defaults" title="Replace this card's Instructions and Expected output with the starter text for its role and focus"
+        ? <button type="button" className="ao-role-defaults" title="Reset instructions and expected output to the role's defaults"
           onClick={() => updateSettings(roleDefaults(role.role))}>Use role defaults</button> : null}
       <details className="ao-more">
         <summary>More</summary>
@@ -611,7 +611,7 @@ export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, l
       </details>
       {template ? <div className="ao-inspector-actions" title="The team saves itself for new chats. Existing chats keep their team.">
         <span role="status">Changes save automatically</span>
-      </div> : <div className="ao-inspector-actions" title="Changes apply automatically to this mission after its owned attempts stop.">
+      </div> : <div className="ao-inspector-actions" title="Changes apply to this mission once its current work stops">
         <span role="status">{status || "Changes apply automatically"}</span>
         <button className="button-secondary" type="button" onClick={discard}>Reset to saved</button>
       </div>}
@@ -621,7 +621,7 @@ export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, l
       {job.receipt?.error ? <p role="alert">{job.receipt.error}</p> : null}
       {job.receipt?.verdict ? <p className="ao-chip-line"><span className="ao-chip">{job.receipt.verdict}</span></p> : null}
       {live?.error && live.error !== job.receipt?.error ? <p role="alert">{live.error}</p> : null}
-      <pre aria-label="Role output">{job.receipt?.answer || live?.output || (working ? "Waiting for output from the running role…" : "No output yet.")}</pre>
+      <pre aria-label="Role output">{job.receipt?.answer || live?.output || (working ? "Waiting for output…" : "No output yet.")}</pre>
     </div> : null}
     {!template && tab === "history" ? <div>{jobs.map(item => <section key={item.id} className="ao-attempt-history">
       <strong>{taskName(item.task_id)}</strong>

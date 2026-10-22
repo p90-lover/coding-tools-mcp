@@ -260,7 +260,7 @@ function installProviderNetwork({
 
   handle("launcher:proxy-profile-save", async (active, _event, input) => {
     if (input?.id === GATEWAY_PROFILE_ID) {
-      throw new Error("The built-in gateway profile is managed in Proxy Gateway and cannot be edited here");
+      throw new Error("The built-in gateway profile is managed in Proxy Gateway. Edit it there.");
     }
     const current = active.store.snapshot();
     const refreshGlobal = current.routing.globalEnabled
@@ -273,7 +273,7 @@ function installProviderNetwork({
   }, "network");
   handle("launcher:proxy-profile-archive", async (active, _event, profileId) => {
     if (profileId === GATEWAY_PROFILE_ID) {
-      throw new Error("The built-in gateway profile is managed in Proxy Gateway; turn off \"Use for this app\" there instead");
+      throw new Error("The built-in gateway profile is managed in Proxy Gateway. Turn off \"Use for this app\" there.");
     }
     const snapshot = await publishMutation(
       active,
@@ -306,7 +306,7 @@ function installProviderNetwork({
   // the gateway, its upstream or its key (and the test, which makes outbound requests) is a
   // "network" change from the visible, focused window.
   function activeGateway() {
-    if (!gateway) throw new Error("Proxy Gateway is unavailable; check the launcher log");
+    if (!gateway) throw new Error("Proxy Gateway is unavailable. Check the launcher log.");
     return gateway;
   }
 

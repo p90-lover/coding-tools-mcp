@@ -62,18 +62,18 @@ export function ChatTurnStats({ model, models = [], from, rounds, running }: {
   }
   const parts: { key: string; text: string; title: string }[] = [
     { key: "rounds", text: `${rounds} ${rounds === 1 ? "round" : "rounds"}${has ? ` · ${stats.steps} ${stats.steps === 1 ? "step" : "steps"}` : ""}`,
-      title: has ? `Messages in this chat · model requests in the latest turn and any failed or stopped attempts before it${stats.failed ? ` (${stats.failed} failed)` : ""}` : "Messages in this chat" },
+      title: has ? `Messages in this chat · model requests this turn, retries included${stats.failed ? ` · ${stats.failed} failed` : ""}` : "Messages in this chat" },
   ];
   if (has) {
-    parts.push({ key: "llm", text: `LLM ${seconds(stats.latencyMs ?? 0)}`, title: "Time spent waiting on the model in the latest turn, failed or stopped attempts before it included" });
+    parts.push({ key: "llm", text: `LLM ${seconds(stats.latencyMs ?? 0)}`, title: "Time waiting on the model this turn" });
     if (stats.ttftMs || stats.tokensPerSecond) {
       parts.push({ key: "speed", text: [stats.ttftMs ? `first token ${seconds(stats.ttftMs)}` : "", stats.tokensPerSecond ? `${stats.tokensPerSecond} tok/s` : ""].filter(Boolean).join(" · "),
-        title: "Average time to the first token, and output speed once it streams" });
+        title: "Average time to first token · output speed" });
     }
     if (stats.cacheHit !== null && stats.cacheHit !== undefined) {
-      parts.push({ key: "cache", text: `cache ${Math.round(stats.cacheHit * 100)}%`, title: "Share of input tokens served from the provider's prompt cache" });
+      parts.push({ key: "cache", text: `cache ${Math.round(stats.cacheHit * 100)}%`, title: "Input tokens served from the prompt cache" });
     }
-    parts.push({ key: "tokens", text: `in ${tokensShort(stats.inputTokens)} · out ${tokensShort(stats.outputTokens)}`, title: "Tokens in the latest turn's model requests, failed or stopped attempts before it included" });
+    parts.push({ key: "tokens", text: `in ${tokensShort(stats.inputTokens)} · out ${tokensShort(stats.outputTokens)}`, title: "Tokens used this turn, retries included" });
   }
   return <p className={`cx-turn-stats${running ? " is-running" : ""}`} aria-label="Latest turn">
     {parts.map((part) => <span key={part.key} title={part.title}>{part.text}</span>)}

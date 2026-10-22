@@ -95,7 +95,7 @@ test("CPA config follows the selected authenticated global profile", () => {
     fs.writeFileSync(path.join(platformDir, "commandcode-go-v0.9.0.dll"), "old plugin");
     fs.writeFileSync(path.join(platformDir, "auth-commandcode-v0.0.1.dll"), "old plugin");
     const installed = installBundledCommandCodePlugin(path.join(root, "cpa"));
-    assert.deepEqual(installed.map((file) => fs.statSync(file).size), [7_817_216, 7_660_032, 14_896_640, 810_496, 24_915_456]);
+    assert.deepEqual(installed.map((file) => fs.statSync(file).size), [7_865_856, 7_707_648, 14_896_640, 810_496, 24_915_456]);
     assert.equal(fs.existsSync(path.join(platformDir, "commandcode-go-v0.9.0.dll")), false);
     assert.equal(fs.existsSync(path.join(platformDir, "auth-commandcode-v0.0.1.dll")), false);
     assert.equal(fs.readdirSync(path.join(root, "cpa", "Trash", "plugins")).length, 2);
@@ -129,5 +129,5 @@ test("CPA config follows the selected authenticated global profile", () => {
   broken.routing = { ...broken.routing, globalEnabled: true, globalProfileId: "owned" };
   delete broken.secrets.proxies.owned;
   fs.writeFileSync(savedFile, `${JSON.stringify(broken)}\n`);
-  assert.throws(() => resolveCpaProxyRoute(path.join(root, "integrations"), safeStorage), /authentication is unavailable/);
+  assert.throws(() => resolveCpaProxyRoute(path.join(root, "integrations"), safeStorage), /saved sign-in, so CPA didn't start/);
 });

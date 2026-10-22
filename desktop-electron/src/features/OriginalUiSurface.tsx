@@ -41,12 +41,12 @@ function emptyCopy(language: Language, toolId: OriginalUiId, ready: boolean): { 
     body: ready
       ? localize(
         language,
-        `Original ${name} chrome is hosted inside Coding Tools. Handlers run in-process (codingTools.apps); no standalone window and no extra listen port.`,
+        `${name} runs inside Coding Tools, with no separate window or port.`,
         `原始 ${name} 畫面由 Coding Tools 內嵌。處理常式在行程內執行（codingTools.apps）；不開啟獨立視窗，也不新增監聽連接埠。`,
       )
       : localize(
         language,
-        "Start the bundled runtime, then Coding Tools embeds this module’s visual.",
+        `Start the bundled runtime to show ${name} here.`,
         "啟動內建執行環境後，Coding Tools 會內嵌此模組畫面。",
       ),
   };
@@ -117,7 +117,7 @@ export function OriginalUiSurface({ toolId, initialSection, language, setError }
     setLocalError("");
     setNotice(localize(
       language,
-      "Visual is hosted inside Coding Tools. Handlers are in-process; the standalone app window is not launched.",
+      "Running inside Coding Tools. No separate window opens.",
       "畫面由 Coding Tools 內嵌。處理常式在行程內執行，不會開啟獨立應用程式視窗。",
     ));
     return result;
@@ -202,7 +202,7 @@ export function OriginalUiSurface({ toolId, initialSection, language, setError }
     return (
       <section className="original-ui-surface" data-tool={toolId} data-original-chrome="true" data-transport="in-process">
         <div className="original-ui-frame-empty">
-          <strong>{localize(language, "Loading Coding Tools module…", "正在載入 Coding Tools 模組…")}</strong>
+          <strong>{localize(language, "Loading module…", "正在載入 Coding Tools 模組…")}</strong>
         </div>
       </section>
     );
@@ -229,7 +229,7 @@ export function OriginalUiSurface({ toolId, initialSection, language, setError }
             await openSection();
           })} type="button">
             {busy === "start" || busy === "open" ? "…" : ready
-              ? localize(language, "Reload visual", "重新載入畫面")
+              ? localize(language, "Reload view", "重新載入畫面")
               : localize(language, "Start module", "啟動模組")}
           </button>
           {toolId === "cpa" ? (
@@ -238,7 +238,7 @@ export function OriginalUiSurface({ toolId, initialSection, language, setError }
               const copied = await api.copyCpaManagementKey();
               setNotice(localize(
                 language,
-                `CPA management key copied (${copied.length} chars). Paste it into the embedded login form.`,
+                `Management key copied, ${copied.length} characters. Paste it into the sign-in form below.`,
                 `已複製 CPA 管理金鑰（${copied.length} 字）。請貼到內嵌登入表單。`,
               ));
             })} type="button">
@@ -265,7 +265,7 @@ export function OriginalUiSurface({ toolId, initialSection, language, setError }
         <p className="original-ui-note" data-dependency="postgres">
           {localize(
             language,
-            "Anneal APIs need Postgres. Handlers return { unavailable: true, dependency: \"postgres\" }; Coding Tools remains usable.",
+            "Anneal needs Postgres. The rest of Coding Tools still works.",
             "Anneal API 需要 Postgres。處理常式會回傳 { unavailable: true, dependency: \"postgres\" }；Coding Tools 本身仍可使用。",
           )}
         </p>

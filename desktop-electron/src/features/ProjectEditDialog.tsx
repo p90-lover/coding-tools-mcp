@@ -18,7 +18,7 @@ export type WorkspaceModeState = { available: boolean; mode?: WorkspaceMode; rea
 
 export const WORKSPACE_MODE_OPTIONS: readonly { value: WorkspaceMode; label: string; hint: string }[] = [
   { value: "folder", label: "The project folder itself (default)",
-    hint: "Chats edit this folder directly, on the branch chosen above the chat box, with your uncommitted work. No branch or copy is made; chats running at the same time can change the same files." },
+    hint: "Chats edit this folder directly, with your uncommitted work, on the branch chosen above the chat box. No branch or copy is made. Chats running at the same time can change the same files." },
   { value: "worktree", label: "A new worktree for each chat",
     hint: "Each chat works on its own new branch in its own copy, so chats never touch each other's files or yours." },
   { value: "shared", label: "One shared worktree",
@@ -156,7 +156,7 @@ export function ProjectEditDialog({ project, initialStep = "edit", chooseFolder,
         {step === "remove" ? <>
           <div className="cx-modal-body">
             <p className="cx-modal-text"><strong>{project.name}</strong> will be removed from Coding Tools.</p>
-            <p className="cx-modal-hint">Its folders and files stay on disk and are not deleted, and its chats are kept. Add the folder again with New project to bring it back.</p>
+            <p className="cx-modal-hint">Its folders and files stay on disk and are not deleted. Its chats are kept. Add the folder again with New project to bring it back.</p>
             {error ? <p className="cx-modal-error" role="alert">{error}</p> : null}
           </div>
           <footer className="cx-modal-foot">
@@ -211,7 +211,7 @@ export function ProjectEditDialog({ project, initialStep = "edit", chooseFolder,
           </div>
           <footer className="cx-modal-foot">
             <button type="button" className="cx-modal-button is-danger-soft" onClick={() => { setError(""); setStep("remove"); }}
-              disabled={!onRemove || Boolean(busy)} title="Remove this project from Coding Tools; no files are deleted">Remove local project</button>
+              disabled={!onRemove || Boolean(busy)} title="Remove from Coding Tools. No files are deleted.">Remove local project</button>
             <span className="cx-modal-spacer" />
             <button type="button" className="cx-modal-button" onClick={cancel} disabled={busy === "save"}>Cancel</button>
             <button type="button" className="cx-modal-button is-primary" onClick={() => void save()} disabled={!canSave}>

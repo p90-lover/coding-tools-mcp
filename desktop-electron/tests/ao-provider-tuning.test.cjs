@@ -153,7 +153,7 @@ test("Cline DeepSeek V4.1 Flash lists native efforts and forwards them unchanged
       assert.deepEqual(input.gateway, { provider: "cpa", model: id + "(" + effort + ")" });
       assert.equal(input.effort, undefined);
     }
-    await assert.rejects(dispatched(agent, "cpa/" + id, { effort: "xhigh" }, catalog), /reasoning.*not.*support/i);
+    await assert.rejects(dispatched(agent, "cpa/" + id, { effort: "xhigh" }, catalog), /doesn't support the chosen reasoning effort/i);
     assert.equal((await dispatched(agent, "cpa/" + id, {}, catalog)).gateway.model, id + "(high)",
       "None/Low/High/Max has no Auto: a blank card starts on High, not on no effort CPA cannot serve");
   }
@@ -267,7 +267,7 @@ test("a launch that fails before returning a session saves the launcher's reason
 });
 
 test("persisted CPA tuning is checked against the current model capabilities before dispatch", async () => {
-  await assert.rejects(dispatched("codex", "cpa/gpt-5.5", { effort: "xhigh" }), /reasoning.*not.*support|unsupported.*effort/i);
+  await assert.rejects(dispatched("codex", "cpa/gpt-5.5", { effort: "xhigh" }), /doesn't support the chosen reasoning effort/i);
   await assert.rejects(dispatched("codex", "cpa/gpt-5.5", { context_window: 1048576 }), /context.*262144|context.*limit/i);
 });
 

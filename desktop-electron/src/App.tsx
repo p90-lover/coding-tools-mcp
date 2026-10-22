@@ -169,7 +169,7 @@ export function App() {
 
   if (!apiReady || !api) {
     return apiTimedOut
-      ? <FatalMessage message="Launcher IPC is unavailable." />
+      ? <FatalMessage message="Can't reach the launcher. Restart the app." />
       : <LaunchLoading />;
   }
   if (!snapshot) return <LaunchLoading />;
@@ -990,7 +990,7 @@ function LauncherShell({
 
 
             {["paseo", "anneal", "codex-router", "commandcode-proxy"].includes(surface) ? (
-              <ContentSurface title="Module retired"><p>This standalone module is retired and unavailable.</p></ContentSurface>
+              <ContentSurface title="Module retired"><p>This module is retired.</p></ContentSurface>
             ) : null}
             {keepAlive("network", () => (
               <NetworkProxySurface language={language} setError={setError} />
@@ -1101,7 +1101,7 @@ function RefreshMenu({ setError, onOpenChange }: {
         className={`icon-button${busy ? " is-busy" : ""}`}
         disabled={Boolean(busy)}
         onClick={() => setOpen((value) => !value)}
-        title="Refresh the UI or a single part"
+        title="Refresh the UI or one part"
         type="button"
       >
         <Icon name="reload" />
@@ -2217,7 +2217,7 @@ function SettingsSurface({
         {!devProfile ? <SettingRow
           body={updateNotice || (language === "zh-TW"
             ? "自動檢查更新，在應用程式內安裝，不需安裝程式：只下載有變更的檔案。你離開 10 分鐘且沒有工作在執行時，更新會自動安裝並重新啟動；也可隨時按側邊欄的「更新至」。MCP、Codex Bridge 及 CPA 持續執行。"
-            : "Automatically check for updates and install them inside the app, with no installer: only the changed files download. An update installs by itself and restarts the app once you have been away for 10 minutes and nothing is running, or any time from Update to in the sidebar. MCP, Codex Bridge and CPA keep running.")}
+            : "Checks for updates and downloads only the changed files, no installer needed. The app updates and restarts after you've been away 10 minutes with nothing running, or when you click Update to in the sidebar. MCP, Codex Bridge and CPA keep running.")}
           label={language === "zh-TW" ? "應用程式更新" : "App updates"}
         >
           <div className="inline-actions">
@@ -2431,7 +2431,7 @@ function RtkSurface({ active, enabled, setError, updateState }: {
       const result = await api!.rtkInstall();
       setStatus(result.status);
       setNote(result.status.installed ? `rtk ${result.status.version} is installed.`
-        : `winget finished (exit ${result.code ?? "?"}) without a usable rtk. ${result.output.split(/\r?\n/).slice(-2).join(" ")}`);
+        : `winget exited with code ${result.code ?? "?"}, but rtk isn't usable. ${result.output.split(/\r?\n/).slice(-2).join(" ")}`);
       if (result.status.installed) setGain(await api!.rtkGain());
     } catch (cause) {
       setNote("");
@@ -2442,17 +2442,17 @@ function RtkSurface({ active, enabled, setError, updateState }: {
   };
   const found = status?.installed ? `rtk ${status.version} · ${status.path}` : autoInstalling ? "Installing…" : status ? "Not installed" : "Checking…";
   return (
-    <ContentSurface narrow title="RTK" subtitle="Compacts the output of the shell commands chat agents run, so the model reads a fraction of it: git, ls, cat, grep, tests and 100+ more (github.com/rtk-ai/rtk).">
+    <ContentSurface narrow title="RTK" subtitle="Shortens the output of agents' shell commands, so the model reads less: git, ls, cat, grep, tests and 100+ more. From github.com/rtk-ai/rtk.">
       <SectionHeading label="Agents" />
       <div className="settings-list">
         <SettingRow body={status?.installed
-          ? "On: every command a chat agent runs through Coding Tools' terminal goes through rtk first, whatever its harness, and Claude Code's own Bash tool gets rtk's hook in its session (new Claude Code sessions after the app restarts). Your own agent settings are never changed."
-          : "The app installs rtk by itself when it starts (winget). Until it is in, agents' commands run as written."}
+          ? "Every command a chat agent runs in Coding Tools' terminal goes through rtk first. Claude Code's own Bash tool gets rtk's hook in new sessions after the app restarts. Your agent settings don't change."
+          : "The app installs rtk with winget when it starts. Until then, commands run as written."}
           label="Use RTK for agents' commands">
           <Switch checked={enabled} disabled={!status?.installed}
             onChange={(checked) => void api!.setPreference("rtkEnabled", checked).then(updateState).catch((cause) => setError(messageOf(cause)))} />
         </SettingRow>
-        <SettingRow body={status?.installed ? `Version ${status.version} or later of ${status.minimum ?? "0.23.0"} is needed; this one works.` : note || `Install it from its own release with ${status?.installCommand ?? "winget install rtk-ai.rtk"}.`}
+        <SettingRow body={status?.installed ? `Needs ${status.minimum ?? "0.23.0"} or later. This version works.` : note || `Install it with ${status?.installCommand ?? "winget install rtk-ai.rtk"}.`}
           flushAfter label={found}>
           <div className="inline-actions">
             {!status?.installed ? <PrimaryButton disabled={busy || !status} onClick={() => void install()}>{busy ? "Installing…" : "Install rtk"}</PrimaryButton> : null}
@@ -2462,13 +2462,13 @@ function RtkSurface({ active, enabled, setError, updateState }: {
       </div>
       <SectionHeading label="Covered" />
       <div className="settings-list">
-        <SettingRow body="exec_command from any harness (Claude Code, Codex, OpenCode, Antigravity…) is rewritten before it is reviewed, so an approval is for the command that runs. Approve for me judges it as the command rtk wraps." label="Coding Tools terminal tool"><span className="rtk-chip">{enabled && status?.installed ? "on" : "off"}</span></SettingRow>
-        <SettingRow body="rtk's PreToolUse hook (rtk hook claude) in each Claude Code session's own settings, so its built-in Bash tool's commands are compacted too." label="Claude Code Bash tool"><span className="rtk-chip">{enabled && status?.installed ? "on" : "off"}</span></SettingRow>
-        <SettingRow body="Their own shells are not hooked yet; their commands through Coding Tools' terminal are." flushAfter label="Codex, OpenCode and other harnesses' built-in shells"><span className="rtk-chip">terminal only</span></SettingRow>
+        <SettingRow body="exec_command from Claude Code, Codex, OpenCode, Antigravity and others is rewritten before review, so you approve the command that runs. Approve for me judges the command rtk wraps." label="Coding Tools terminal tool"><span className="rtk-chip">{enabled && status?.installed ? "on" : "off"}</span></SettingRow>
+        <SettingRow body="Adds rtk's PreToolUse hook, rtk hook claude, to each Claude Code session's settings, so its Bash tool output is compacted too." label="Claude Code Bash tool"><span className="rtk-chip">{enabled && status?.installed ? "on" : "off"}</span></SettingRow>
+        <SettingRow body="Their own shells aren't hooked yet. Their commands through Coding Tools' terminal are." flushAfter label="Built-in shells of Codex, OpenCode and others"><span className="rtk-chip">terminal only</span></SettingRow>
       </div>
       <SectionHeading label="Savings" />
       {gain?.available && gain.text ? <pre className="rtk-gain">{gain.text}</pre>
-        : <p className="surface-empty-note">{status?.installed ? "No savings recorded yet: rtk reports them once agents have run commands through it." : "rtk reports its savings here once it is installed."}</p>}
+        : <p className="surface-empty-note">{status?.installed ? "No savings yet. rtk reports them after agents run commands through it." : "rtk shows its savings here once it's installed."}</p>}
     </ContentSurface>
   );
 }

@@ -1147,7 +1147,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       // started a fresh session beside the agent coming back. Callers share the first check.
       const key = sessionId(id);
       if (!continuing.has(key)) continuing.set(key, (async () => {
-        const uncertain = cause => Object.assign(new Error("The existing agent's restoration could not be confirmed; retry this chat without starting a replacement"),
+        const uncertain = cause => Object.assign(new Error("Couldn't confirm the agent was restored. Retry this chat. No new agent was started."),
           { code: "AO_SESSION_RESTORE_UNCONFIRMED", cause });
         const read = async () => {
           try {
@@ -1397,9 +1397,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (answer) return { status, turnId: `tui-${id}`, turnState: "completed", answer, needsInput: false, exited: ended };
     if (silent) {
       return { status, turnId: `tui-${id}`, turnState: "failed", answer: "", exited: true,
-        error: `The terminal agent stopped reporting and has been idle since ${new Date(lostSince).toISOString()} without ${TUI_RESULT_FILE}; send a follow-up to continue in a new session` };
+        error: `The terminal agent stopped reporting. It has been idle since ${new Date(lostSince).toISOString()} with no ${TUI_RESULT_FILE}, so send a follow-up to continue in a new session.` };
     }
-    if (ended) return { status, turnId: `tui-${id}`, turnState: "failed", error: `AO session ended without ${TUI_RESULT_FILE}`, answer: "", exited: true };
+    if (ended) return { status, turnId: `tui-${id}`, turnState: "failed", error: `The agent's session ended with no ${TUI_RESULT_FILE}`, answer: "", exited: true };
     // Idle without a report: the agent is waiting for the user in its terminal.
     return { status, needsInput: true, exited: false, answer: "" };
   }
@@ -1605,7 +1605,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           await new Promise((resolve) => setTimeout(resolve, 200));
           checkStartup();
         }
-        throw new Error(`AO readiness timed out. ${logTail.slice(-1500)}`);
+        // "timed out" keeps TRANSIENT_CHAT_START treating it as a start to retry, not a failure.
+        throw new Error(`Agent Orchestrator timed out getting ready. ${logTail.slice(-1500)}`);
       } catch (cause) {
         // Do not call stop here: stop waits for this startup to settle.
         await cleanup();
@@ -1716,7 +1717,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (operation === "upstream_status") return snapshot();
     if (operation === "upstream_start") return start();
     if (operation === "upstream_stop") {
-      if (!await confirm({ message: "Stop Agent Orchestrator?", detail: "Active upstream sessions may be interrupted. Coding Tools missions remain saved." })) return { ok: true, cancelled: true };
+      if (!await confirm({ message: "Stop Agent Orchestrator?", detail: "Running agent sessions may stop. Your chats stay saved." })) return { ok: true, cancelled: true };
       return stop();
     }
     if (operation === "upstream_bind_workspace") {
@@ -1771,7 +1772,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       if (!workspaceBoard) throw new Error("Coding Tools mission service is unavailable");
       if (state !== "ready") return { ok: true, available: false, reason: "Agent Orchestrator is not running" };
       const { projectId } = await workspaceBoard.project(args.workspaceId);
-      if (!projectId) return { ok: true, available: false, reason: "This project's first chat sets it up; choose after that" };
+      if (!projectId) return { ok: true, available: false, reason: "This project's first chat sets this up. Choose after that." };
       if (args.mode !== undefined && !WORKSPACE_MODES.has(args.mode)) throw new Error("Choose worktree, shared or folder");
       const endpoint = `/api/v1/projects/${encodeURIComponent(projectId)}`;
       const read = async () => {
@@ -1794,7 +1795,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           // is always written, "worktree" too, so the folder default never overrides a choice.
           await internalApi("PUT", `${endpoint}/config`, { config: { ...config, workspaceMode: args.mode } });
           const saved = (await read()).config.workspaceMode;
-          if (saved !== args.mode) throw new Error("This Agent Orchestrator does not support choosing where chats work yet; update the app");
+          if (saved !== args.mode) throw new Error("This Agent Orchestrator can't choose where chats work yet. Update the app.");
         }
         return { ok: true, available: true, mode: args.mode };
       });

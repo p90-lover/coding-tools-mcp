@@ -2637,7 +2637,7 @@ test("an agent's own models take CPA's real window for the same model, and a no-
   assert.equal(listed.capabilities["gpt-6-sol"].contextLimit, undefined, "a model CPA does not serve stays unknown");
   const result = await workflow.call("advance", { workspaceId: "ws", runId: "run", executable: "C:/codex.exe" }).catch(error => ({ error }));
   const message = String(failure ?? result?.error?.message ?? JSON.stringify(result));
-  assert.match(message, /no longer in this harness's model list/, message);
+  assert.match(message, /no longer in this agent's model list/, message);
 });
 
 test("Claude Code is not offered Antigravity's Claude models, and says why; other agents and providers keep them", async () => {
@@ -3209,7 +3209,7 @@ test("a team's goal round continues on the chat's team; an achieved, failed or s
   assert.equal(world.updates.length, paused, "a paused goal starts no round");
   assert.equal((await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "clear" })).cleared, true);
   assert.equal(await goalOf(workflow), undefined);
-  await assert.rejects(workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" }), /No goal is currently set/);
+  await assert.rejects(workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" }), /No goal set/);
 });
 
 // ---- schedule_wakeup ----
@@ -3503,7 +3503,7 @@ test("Approve for me is reviewed by codex-auto-review first, the card's model wh
   assert.deepEqual(signedOut.resolved, ["yes"]);
   const down = await review(["codex-auto-review", "test-model"]);
   assert.deepEqual(down.resolved, [], "nothing is answered for the person when no reviewer answers");
-  assert.match(down.detail, /could not answer/, "and the request says why it is waiting for them");
+  assert.match(down.detail, /couldn't answer/, "and the request says why it is waiting for them");
 });
 
 test("Approve for me reviews with codex-auto-review although CPA hides it from model menus, and menus still leave it out", async () => {

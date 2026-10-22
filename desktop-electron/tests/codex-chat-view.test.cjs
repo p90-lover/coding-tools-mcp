@@ -223,9 +223,9 @@ test("Codex slash commands run from the composer in a Single chat or a team, wit
   type(teamChat, "/goal pause"); await enter(teamChat);
   assert.deepEqual(actions.at(-1), ["goal", "pause"]);
   type(teamChat, "/compact"); await enter(teamChat);
-  assert.match(text(cardOf(teamChat)), /Compact is disabled while a chat is in progress/);
+  assert.match(text(cardOf(teamChat)), /Can't compact while the chat is running/);
   type(teamChat, "/review"); await enter(teamChat);
-  assert.match(text(cardOf(teamChat)), /Queued: it's sent when the current turn finishes/, "a command that sends queues behind the working turn");
+  assert.match(text(cardOf(teamChat)), /Queued\. It's sent when this turn finishes/, "a command that sends queues behind the working turn");
   assert.equal(busy.calls.filter((call) => call[0] === "send").length, 0, "nothing is sent while the turn works");
   const pill = walk(teamChat.render({ commands: commands() })).find((element) => String(element.props?.className).startsWith("cx-goal "));
   assert.match(text(pill), /^Pursuing goalship the release5m \d+s$/, "Codex's goal bar: state, objective, running time");
@@ -302,7 +302,7 @@ test("while the agent works, /review and /init steer it; a new goal waits for th
   assert.match(steered.at(-1).message, /^Generate a file named AGENTS\.md/);
   type("/goal finish the migration"); await enter();
   assert.equal(steered.length, 2, "a goal is never steered");
-  assert.match(text(card()), /Queued: it's sent when the current turn finishes/);
+  assert.match(text(card()), /Queued\. It's sent when this turn finishes/);
   type("/goal clear"); await enter();
   assert.match(text(card()), /The queued goal was dropped/);
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0);
@@ -326,7 +326,7 @@ test("a working chat on a non-AO model is not offered steering; a message typed 
     steer: async () => { throw new Error("not steerable"); } });
   const view = mount(props);
   const textarea = () => walk(view.render()).find((element) => element.type === "textarea");
-  assert.equal(textarea().props.placeholder, "Running — a message now is sent when it finishes");
+  assert.equal(textarea().props.placeholder, "Running. New messages send when it finishes");
   textarea().props.onChange({ target: { value: "also check the logs" } });
   const button = walk(view.render()).find((element) => element.props?.["aria-label"] === "Queue message");
   assert.ok(button && !button.props.disabled, "Send queues instead of being replaced by Stop");
@@ -529,7 +529,7 @@ test("Delete on a message asks in the chat first, then removes it with its reply
   // The button only asks; Cancel leaves the chat as it is.
   buttons()[1].props.onClick();
   assert.equal(confirm().props["aria-label"], "Delete message");
-  assert.match(text(confirm()), /Delete this message\? It and its reply are removed from this chat\. The agent's files are not changed\./);
+  assert.match(text(confirm()), /Delete this message and its reply\? Files on disk don't change\./);
   assert.deepEqual(deleted, []);
   walk(confirm()).find((element) => element.type === "button" && text(element) === "Cancel").props.onClick();
   assert.equal(confirm(), undefined);
@@ -645,7 +645,7 @@ test("while a single-model turn runs on one model and the picker shows another, 
   const view = mount(props).render();
   const note = walk(view).find((element) => element.props?.className === "cx-route-note");
   assert.ok(note, "the switch is never silent");
-  assert.match(text(note), /running on cpa\/gpt-6-luna; your next message uses cpa\/deepseek-v4/);
+  assert.match(text(note), /runs on cpa\/gpt-6-luna\. Your next message uses cpa\/deepseek-v4/);
   const same = mount(base({ selectedTaskId: "t", working: true,
     runs: [run("r1", "t", [node("w", "planner", "running", { route })], { execution_mode: "single" })],
     composer: { mode: "single", route, onModeChange() {}, onRouteChange() {} } }).props).render();
@@ -660,7 +660,7 @@ test("a finished single-model chat says a changed model or effort starts a new a
     composer: { mode: "single", route: { ...route, model: "cpa/cline-pass/deepseek-v4.1-flash-1017(high)" }, onModeChange() {}, onRouteChange() {} } }).props).render();
   const note = walk(changed).find((element) => element.props?.className === "cx-route-note");
   assert.ok(note, "the new agent is never a surprise");
-  assert.match(text(note), /starts a new agent that gets only a summary/);
+  assert.match(text(note), /start a new agent with only a summary/);
   assert.match(text(note), /deepseek-v4\.1-flash-1017\(max\)/, "it names what to switch back to");
   const same = mount(base({ selectedTaskId: "t", runs: finished(),
     composer: { mode: "single", route: { ...route }, onModeChange() {}, onRouteChange() {} } }).props).render();

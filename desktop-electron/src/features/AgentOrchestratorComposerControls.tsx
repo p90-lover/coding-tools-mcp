@@ -237,7 +237,7 @@ export function AgentOrchestratorComposerControls({
     <div className="ao-mode-switch" role="group" aria-label="Who answers">
       {(["single", "team"] as const).map(option => <button key={option} type="button" aria-pressed={mode === option}
         className={mode === option ? "is-active" : undefined} disabled={busy}
-        title={option === "single" ? "One model answers by itself" : "A saved team (orchestrator, workers, reviewer) works on it"}
+        title={option === "single" ? "One model answers by itself" : "A saved team works on it"}
         onClick={() => { if (mode !== option) onModeChange(option); }}>{option === "single" ? "Single" : "Team"}</button>)}
     </div>
     {mode === "single" ? <>
@@ -281,12 +281,12 @@ export function AgentOrchestratorComposerControls({
                 </Option>;
               })}
             </div>)}
-            {models !== null && !matching.length ? <p role="status">{error || "No matching models available from this runtime."}</p> : null}
+            {models !== null && !matching.length ? <p role="status">{error || "No matching models."}</p> : null}
           </div>
         </>}
       </ChipMenu>
       {tier ? <ChipMenu heading="Reasoning effort" popupClass="ao-tuning-popup" ariaLabel={`Reasoning effort: ${tier.label}`} disabled={busy}
-        title="A WebGPT model is one ChatGPT effort: picking an effort here picks that WebGPT model"
+        title="Each effort is its own WebGPT model"
         label={<span>{tier.label}</span>}>
         {(close) => <div role="radiogroup" aria-label="Efforts">
           {WEB_TIERS.map(item => <Option key={item.model} picked={item.model === route.model} disabled={busy}
@@ -309,7 +309,7 @@ export function AgentOrchestratorComposerControls({
             : capability?.effortReason || "This model takes no effort setting."}</p> : null}
           {!efforts?.length && route.effort ? <Option picked={false} disabled={busy} onPick={() => { setEffort(null); close(); }}>
             Auto<small>the model's own</small></Option> : null}
-          {effortUnsupported && efforts?.length ? <p className="ao-popup-muted" role="status">{effortWord(route.effort)} is saved but this model does not take it; pick one above.</p> : null}
+          {effortUnsupported && efforts?.length ? <p className="ao-popup-muted" role="status">This model doesn't take {effortWord(route.effort)}. Pick another above.</p> : null}
         </div>}
       </ChipMenu>}
       <ChipMenu heading="Context window" popupClass="ao-tuning-popup" ariaLabel={`Context window: ${windowLabel}`} disabled={busy || !context}
@@ -329,7 +329,7 @@ export function AgentOrchestratorComposerControls({
               aria-invalid={Boolean(contextDraft.trim()) && !inRange(parseTokens(contextDraft) ?? Number.NaN)} onChange={event => setContextDraft(event.target.value)} />
             <button type="submit" className="ao-popover-apply" disabled={busy || !inRange(parseTokens(contextDraft) ?? Number.NaN)}>Set</button>
           </form>
-          {context ? <p className="ao-popup-muted">{contextText(context.min)}–{context.max ? contextText(context.max) : "no limit"}. Applies from the next run.</p> : null}
+          {context ? <p className="ao-popup-muted">{contextText(context.min)}–{context.max ? contextText(context.max) : "no limit"}. Applies from the next turn.</p> : null}
         </div>}
       </ChipMenu>
     </> : <ChipMenu heading="Orchestrator / Team" popupClass="ao-team-popup" ariaLabel="Choose saved team" disabled={busy}

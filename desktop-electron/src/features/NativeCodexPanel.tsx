@@ -108,7 +108,7 @@ export function NativeCodexPanel({ copy, language, setError }: NativeCodexPanelP
       });
       if (result.cancelled === true) setNotice(copy.workspaceAuthCancelled);
       else if (result.connected === true) { setStatus(result); setNotice(copy.nativeCodexConnected); }
-      else throw new Error("Native Codex did not confirm a connected session");
+      else throw new Error("Native Codex didn't connect. Try again.");
     } catch (cause) {
       setError(errorText(cause));
     } finally {
@@ -161,7 +161,7 @@ export function NativeCodexPanel({ copy, language, setError }: NativeCodexPanelP
               <dl className="wsx-facts">
                 <dt>{language === "zh-TW" ? "Codex 自動審批" : "Codex Auto-review"}</dt>
                 <dd>{status.approval_policy === "on-request" && status.approvals_reviewer === "auto_review"
-                  ? (language === "zh-TW" ? "原生運作中" : "Active in native runtime")
+                  ? (language === "zh-TW" ? "原生運作中" : "Active")
                   : (language === "zh-TW" ? "未啟用" : "Not enabled")}</dd>
               </dl>
             ) : null}
@@ -200,7 +200,7 @@ export function NativeCodexPanel({ copy, language, setError }: NativeCodexPanelP
                 </select>
                 <p className="wsx-field-hint">{language === "zh-TW"
                   ? "只適用於工作區模式及已授權模型；原生 Codex 必須確認審批設定。自動審批不會繞過沙箱或管理政策，部分操作仍可能需要人工批准。"
-                  : "For workspace mode with model use enabled. Native Codex must acknowledge this setting. Auto-review does not bypass sandbox or managed policy; some requests may still need your approval."}</p>
+                  : "Needs workspace mode with model use on. Auto-review keeps the sandbox and managed policy, so some requests may still need your approval."}</p>
               </Field>
               <Field label={copy.nativeCodexRequestLimit} hint={copy.ncRequestHint}>
                 <input disabled={locked} max={20} min={0} type="number" value={requestLimit} onChange={(event) => setRequestLimit(event.target.value)} />
