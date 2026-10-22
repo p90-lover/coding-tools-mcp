@@ -452,6 +452,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // How long a warm start may run before a launch stops waiting for it (takeWarm): one alone on a
   // busy machine was ready in 20 s.
   const WARM_START_BUDGET_MS = 45_000;
+  // How long a ready warm agent may take to accept the first message before a new one is started
+  // instead. A healthy one takes it in about 1.6 s. Seen live: one ready for five minutes never
+  // started the turn, and the send waited out AO's 180 s request timeout before the fresh start.
+  const WARM_SEND_TIMEOUT_MS = 10_000;
   // Opening chats warms agents too; keep only the newest few so browsing does not pile them up.
   const WARM_MAX = 2;
   const warm = new Map(); // key -> { promise, session?, timer }
@@ -1259,10 +1263,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           stage("sending your message to the agent");
           sessionOwners.set(warmed, runKey(workspaceId, runId));
           if (sessionOwners.size > 500) sessionOwners.delete(sessionOwners.keys().next().value);
-          first = await harnessService().send(warmed, prompt, reserved.request_key).catch(() => null);
+          const sendStarted = now();
+          first = await harnessService().send(warmed, prompt, reserved.request_key, { timeoutMs: WARM_SEND_TIMEOUT_MS }).catch(() => null);
+          if (!first?.turnId) warmLog("send_failed", { model: node.route.model, waitedMs: now() - sendStarted });
         }
         if (warmed && !first?.turnId) {
-          warmLog("send_failed", { model: node.route.model });
           void harnessService().kill?.(warmed).catch(() => undefined);
         }
         if (sent?.turnId || first?.turnId) {

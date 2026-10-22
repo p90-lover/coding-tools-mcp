@@ -4577,6 +4577,54 @@ test("a new chat's first message runs in the session pre-warmed for its model, a
   assert.equal(spawned.length, 2, "nothing is spawned after dispose");
 });
 
+test("a warm agent that does not take the first message within seconds is ended and a fresh one gets it", async () => {
+  // Seen live: a warm agent ready for five minutes never started the turn; the send waited out AO's
+  // 180 s request timeout, then a fresh start took over a minute more, so the chat sat "launching".
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  const world = chatWorld();
+  const created = new Map();
+  const spawned = [], sendOptions = [], killed = [];
+  const request = async (endpoint, body, options) => {
+    if (endpoint === "/api/v1/ao/read" && body.run_id) {
+      const run = created.get(body.run_id) ?? { id: body.run_id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1,
+        grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+      created.set(body.run_id, run);
+      return { ok: true, runs: [run], worker_capacity: { [body.run_id]: 1 } };
+    }
+    const latest = [...created.values()].at(-1);
+    if (endpoint === "/api/v1/ao/grant") return { ok: true, run: latest, grant: { executable_sha256: "a".repeat(64) } };
+    if (endpoint === "/api/v1/ao/external/reserve") { latest.nodes[0].state = "reserved"; return { ok: true, request_key: "key-1", prompt: "fix the login" }; }
+    if (endpoint === "/api/v1/ao/external/submitted") { latest.nodes[0].state = "running"; latest.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run: latest }; }
+    if (endpoint === "/api/v1/ao/external/terminal") { latest.nodes[0].state = "finished"; return { ok: true, run: latest }; }
+    return world.requestHeadless(endpoint, body, options);
+  };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: request, findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    setTimer: (callback, delay) => delay === 90_000 ? { unref() {} } : setTimeout(callback, delay),
+    clearTimer: timer => clearTimeout(timer),
+    aoHarness: {
+      spawn: async input => { spawned.push(input); return `agent-${spawned.length}`; },
+      continuable: async () => true,
+      // The warm agent's send runs into its time limit (AO's request is aborted).
+      send: async (id, text, key, options) => { sendOptions.push(options); throw new Error("The operation was aborted due to timeout"); },
+      observe: async (id, expected) => ({ status: "idle", turnId: expected, turnState: "completed", answer: "fixed" }),
+      warmSessions: async () => [],
+      kill: async id => { killed.push(id); return { ok: true }; },
+    },
+  });
+  try {
+    assert.equal((await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: route })).warmed, true);
+    await workflow.call("chat_send", { workspaceId: "ws-1", message: "fix the login", executionMode: "single", singleRoute: route });
+    for (let tries = 0; tries < 200 && spawned.length < 2; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(sendOptions, [{ timeoutMs: 10_000 }], "the warm agent gets seconds, not AO's 180 s request timeout");
+    assert.deepEqual(killed, ["agent-1"], "the stuck warm agent is ended");
+    assert.equal(spawned.length, 2);
+    assert.equal(spawned[1].prompt, "fix the login", "a fresh agent starts with the message");
+  } finally { workflow.dispose(); }
+});
+
 test("a pre-warmed session is used only by a launch that attaches the same app tools", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
