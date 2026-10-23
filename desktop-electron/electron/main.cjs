@@ -991,7 +991,9 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
         message: error instanceof Error ? error.message : String(error),
       }));
     };
-    if (rendererCrashes.length >= 3) {
+    // A page that twice in a row never finished loading is no page fault: Chromium itself is stuck
+    // (seen after a Windows restart with no network service), and only a fresh process loads again.
+    if (rendererCrashes.length >= 3 || reason === "stalled-again") {
       // A restart the app refuses (a browser operation still running) leaves the window reloaded instead.
       void requestQuit({ keepBridge: true, relaunch: true }).catch(() => undefined).finally(() => setTimeout(reload, 500));
       return;
