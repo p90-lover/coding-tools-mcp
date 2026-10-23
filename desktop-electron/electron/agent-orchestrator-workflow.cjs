@@ -4229,7 +4229,24 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     : previous?.execution_mode === "single" && previous.nodes?.[0]?.route
       ? { executionMode: "single", singleRoute: Object.fromEntries(Object.entries(previous.nodes[0].route).filter(([name, value]) => SINGLE_ROUTE_FIELDS.includes(name) && value !== undefined && value !== null)) }
       : {});
+  // Chats whose next goal round is being started. A resume and a settling round (or two resumes)
+  // both passed the "chat is working" check before either round existed, so the chat got the same
+  // round message twice and ran two turns at once on one agent: one failed "restoration could not
+  // be confirmed" and stalled the goal. One start at a time; the other caller leaves it to the first.
+  const goalStarts = new Set();
   async function continueGoal(id, task, goal, previous) {
+    const key = JSON.stringify([id, task]);
+    if (goalStarts.has(key)) return;
+    goalStarts.add(key);
+    try {
+      // Read again inside the guard: a round another caller started meanwhile is the next round.
+      const saved = await runs({ workspaceId: id });
+      const latest = saved.runs.filter(run => run.project_id === task).at(-1);
+      if (chatWorking(id, task, saved.runs) || (previous && latest && latest.id !== previous.id)) return;
+      await startGoalRound(id, task, goals.get(id, task) ?? goal, previous);
+    } finally { goalStarts.delete(key); }
+  }
+  async function startGoalRound(id, task, goal, previous) {
     const round = goal.round + 1;
     // A model picked while the goal ran (chat_goal "route") takes over from the next round on.
     const selection = followUpSelection(previous, goal.route);
@@ -4286,6 +4303,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (!goal || goal.status !== "active" || goal.evaluatedRunId === runId) return;
       const latest = saved.runs.filter(run => run.project_id === task).at(-1);
       if (latest?.id !== runId) return;
+      // A round held only because the app restarted under it, or one "Retry automatically" runs
+      // again, is not the person's turn: its step runs again and the goal is judged when the round
+      // settles. It was marked stalled ("needs you") after every app restart, where Codex's /goal
+      // carries on. Not recorded as evaluated, so the round's real outcome still counts.
+      if (status === "held" && (mission.nodes.some(node => node.state === "held" && restartInterrupted(node)) || autoRetryAllowed(mission))) return;
       goals.update(workspaceId, task, { evaluatedRunId: runId });
       if (attention === "stopped") { goals.update(workspaceId, task, { status: "paused", note: "Stopped; /goal resume picks it up again" }); return; }
       if (status === "failed") { goals.update(workspaceId, task, { status: "stalled", note: "The last round failed; retry it, then /goal resume" }); return; }
