@@ -3987,9 +3987,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const BOARD_TEXT_BYTES = 8192;
   const boardText = text => text.replace(/\r\n?/g, "\n").replace(/[\x7F-\x9F]/g, "");
   /** `restart`: the person pressed Restart on a stuck turn, so it is restarted whatever its quiet time. */
-  async function chatSteer({ workspaceId, taskId, message, restart = false } = {}) {
+  async function chatSteer({ workspaceId, taskId, message, restart = false, goal } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
-    const text = boardText(clean(message, 8192, false));
+    // /goal sent mid-turn steers its condition in, as Claude Code does; that turn is the goal's first round.
+    const objective = goal === undefined ? null : cleanObjective(goal);
+    const text = objective ? goalMessage(objective, 1) : boardText(clean(message, 8192, false));
     if (!text.trim()) throw new Error("Type a message to steer the agent");
     const saved = await runs({ workspaceId: id });
     const run = saved.runs.filter(entry => entry.project_id === task && !entry.cancelled).at(-1);
@@ -4065,6 +4067,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       return { ok: true, steered: false, waiting: true, starting: true, reason: "The agent is still starting. Your message is sent after its turn." };
     }
     if (!result.steered) return { ok: true, steered: false, reason: "The agent's turn already ended" };
+    // The goal is judged when the steered run settles (goalAfterRun), like a goal sent as a new turn.
+    if (objective) { goals.set(id, task, objective); goals.update(id, task, { round: 1, lastRunId: run.id }); }
     const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
     const note = async () => {
       const detail = await board({ workspaceId: id, taskId: task });
@@ -4229,7 +4233,24 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     : previous?.execution_mode === "single" && previous.nodes?.[0]?.route
       ? { executionMode: "single", singleRoute: Object.fromEntries(Object.entries(previous.nodes[0].route).filter(([name, value]) => SINGLE_ROUTE_FIELDS.includes(name) && value !== undefined && value !== null)) }
       : {});
+  // Chats whose next goal round is being started. A resume and a settling round (or two resumes)
+  // both passed the "chat is working" check before either round existed, so the chat got the same
+  // round message twice and ran two turns at once on one agent: one failed "restoration could not
+  // be confirmed" and stalled the goal. One start at a time; the other caller leaves it to the first.
+  const goalStarts = new Set();
   async function continueGoal(id, task, goal, previous) {
+    const key = JSON.stringify([id, task]);
+    if (goalStarts.has(key)) return;
+    goalStarts.add(key);
+    try {
+      // Read again inside the guard: a round another caller started meanwhile is the next round.
+      const saved = await runs({ workspaceId: id });
+      const latest = saved.runs.filter(run => run.project_id === task).at(-1);
+      if (chatWorking(id, task, saved.runs) || (previous && latest && latest.id !== previous.id)) return;
+      await startGoalRound(id, task, goals.get(id, task) ?? goal, previous);
+    } finally { goalStarts.delete(key); }
+  }
+  async function startGoalRound(id, task, goal, previous) {
     const round = goal.round + 1;
     // A model picked while the goal ran (chat_goal "route") takes over from the next round on.
     const selection = followUpSelection(previous, goal.route);
@@ -4286,6 +4307,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (!goal || goal.status !== "active" || goal.evaluatedRunId === runId) return;
       const latest = saved.runs.filter(run => run.project_id === task).at(-1);
       if (latest?.id !== runId) return;
+      // A round held only because the app restarted under it, or one "Retry automatically" runs
+      // again, is not the person's turn: its step runs again and the goal is judged when the round
+      // settles. It was marked stalled ("needs you") after every app restart, where Codex's /goal
+      // carries on. Not recorded as evaluated, so the round's real outcome still counts.
+      if (status === "held" && (mission.nodes.some(node => node.state === "held" && restartInterrupted(node)) || autoRetryAllowed(mission))) return;
       goals.update(workspaceId, task, { evaluatedRunId: runId });
       if (attention === "stopped") { goals.update(workspaceId, task, { status: "paused", note: "Stopped; /goal resume picks it up again" }); return; }
       if (status === "failed") { goals.update(workspaceId, task, { status: "stalled", note: "The last round failed; retry it, then /goal resume" }); return; }
@@ -4326,10 +4352,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // Resuming a goal that ran out of rounds (one saved with a limit) allows it as many more again.
     const rounds = goal.status === "limited" && goal.rounds > 0 ? goal.round + goal.rounds : goal.rounds;
     goals.update(id, task, { status: "active", rounds, note: "" });
-    const saved = await runs({ workspaceId: id });
-    if (chatWorking(id, task, saved.runs)) return { ok: true, goal: goals.get(id, task) };
-    const latest = saved.runs.filter(run => run.project_id === task).at(-1);
-    await continueGoal(id, task, goals.get(id, task), latest);
+    // The next round starts in the background: setting it up (board writes, a compaction when the
+    // chat is full, the run's creation) took up to a minute, and the goal bar's Resume sat frozen
+    // that long. A round that can't start marks the goal stalled (startGoalRound).
+    void (async () => {
+      const saved = await runs({ workspaceId: id });
+      if (chatWorking(id, task, saved.runs)) return;
+      const latest = saved.runs.filter(run => run.project_id === task).at(-1);
+      await continueGoal(id, task, goals.get(id, task), latest);
+    })().catch((error) => { logger?.warn?.("ao.goal_resume_failed", { message: publicText(error?.message || error, 200) }); });
     return { ok: true, goal: goals.get(id, task) };
   }
 

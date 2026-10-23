@@ -3147,6 +3147,8 @@ async function goalChat({ evaluator = (prompt) => /ALL DONE/.test(prompt)
   return { world, workflow, checks };
 }
 const goalOf = async (workflow) => (await workflow.call("runs", { workspaceId: "ws-1" })).goals["task-1"];
+// A resumed goal starts its round in the background: wait for it (or, with no condition, a while).
+const goalSettle = async (done = () => false) => { for (let tick = 0; tick < 200 && !done(); tick += 1) await new Promise((resolve) => setImmediate(resolve)); };
 
 test("after a round without the goal achieved, the chat runs the next round with the same Single model", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default", effort: "max" };
@@ -3171,6 +3173,41 @@ test("after a round without the goal achieved, the chat runs the next round with
   // The same settled run is not evaluated twice.
   await workflow.goalAfterRun("ws-1", "r1", "finished", null);
   assert.equal(world.updates.length, updatesBefore + 1);
+});
+
+test("an app restart under a goal's round does not stall the goal; the round's real outcome is judged", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
+  const { world, workflow, checks } = await goalChat();
+  const round = { id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "held", route, history: [],
+      receipt: { thread_id: "sess-1", error: "The agent's process ended before it finished (the app restarted)" } }] };
+  world.runs.push(round);
+  await workflow.goalAfterRun("ws-1", "r1", "held", null);
+  let goal = await goalOf(workflow);
+  assert.equal(goal.status, "active", "not \"needs you\": the restart, not the person, stopped it");
+  assert.notEqual(goal.evaluatedRunId, "r1", "left for the round's real outcome");
+  // The step ran again and the round finished: now the goal is judged as usual.
+  round.nodes[0] = { ...round.nodes[0], state: "finished", receipt: { thread_id: "sess-1", answer: "More to do." } };
+  const before = world.updates.length;
+  await workflow.goalAfterRun("ws-1", "r1", "finished", null);
+  assert.equal(checks.length, 1, "the evaluator judged the finished round");
+  assert.equal(world.updates.length, before + 1, "and the next round started");
+  // Two resumes at once (a click and /goal resume, or a resume as a round settles) start one round:
+  // both sent the same round message, and two turns ran on one agent.
+  await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" });
+  world.runs.at(-1).nodes[0].state = "finished";
+  const sentBefore = world.updates.length;
+  await Promise.all([workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" }),
+    workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" })]);
+  await goalSettle();
+  assert.equal(world.updates.length, sentBefore + 1, "one round, one message");
+  // A round held on the person (no restart) still waits for them.
+  world.runs.push({ id: "r2", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "held", route, history: [], receipt: { thread_id: "sess-1", error: "needs approval" } }] });
+  await workflow.goalAfterRun("ws-1", "r2", "held", null);
+  goal = await goalOf(workflow);
+  assert.equal(goal.status, "stalled");
+  assert.match(goal.note, /needs you/);
 });
 
 test("a team's goal round continues on the chat's team; an achieved, failed or stopped goal stops, and there is no round limit", async () => {
@@ -3230,7 +3267,12 @@ test("a team's goal round continues on the chat's team; an achieved, failed or s
   assert.equal(goal.status, "paused");
   const resumed = await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" });
   assert.equal(resumed.goal.status, "active");
-  assert.equal(resumed.goal.round, 12, "resume starts the next round right away");
+  // The click returns at once; the round it starts follows in the background, not after a frozen wait.
+  assert.equal(resumed.goal.round, 11, "resume answers before the round is set up");
+  let after = resumed.goal;
+  for (let tick = 0; tick < 50 && after.round !== 12; tick += 1) { await goalSettle(); after = await goalOf(workflow); }
+  await goalSettle(() => /Stop hook feedback/.test(world.edits.at(-1)?.description ?? ""));
+  assert.equal(after.round, 12, "and the next round starts right after");
   assert.match(world.edits.at(-1).description, /Stop hook feedback:\n\[build green on CI\]: Two tests still fail\./, "with the last feedback");
   await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" });
   world.runs.push(teamRun("t5", "more"));
@@ -4357,6 +4399,26 @@ test("steering hands the message to the running AO agent and notes it in the cha
   assert.equal((await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "late" })).steered, false,
     "a turn that already ended is reported, so the chat sends it as a follow-up");
   assert.equal(world.edits.length, 1, "nothing is noted for an undelivered steer");
+});
+
+test("a /goal sent mid-turn steers its condition in and becomes the goal of the run it steered", async () => {
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  const steered = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless,
+    aoHarness: { steer: async (id, text) => { steered.push([id, text]); return { steered: true }; } } });
+  const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "make CI green", goal: "make CI green" });
+  assert.equal(result.steered, true);
+  assert.deepEqual(steered, [["sess-1", "make CI green"]], "its first round is the condition itself");
+  const goal = (await workflow.call("runs", { workspaceId: "ws-1" })).goals["task-1"];
+  assert.deepEqual([goal.objective, goal.status, goal.round, goal.lastRunId], ["make CI green", "active", 1, "r1"]);
+  // A steer that does not land sets no goal: the chat sends it as a new turn, which sets it then.
+  const missed = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless,
+    aoHarness: { steer: async () => ({ steered: false }) } });
+  assert.equal((await missed.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "x", goal: "x" })).steered, false);
+  assert.equal((await missed.call("runs", { workspaceId: "ws-1" })).goals["task-1"], undefined);
 });
 
 test("a message typed while the chat's agent is still starting waits for its turn instead of failing", async () => {
