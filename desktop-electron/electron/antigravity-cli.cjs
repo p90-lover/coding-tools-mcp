@@ -205,7 +205,7 @@ function createAntigravityCli({
     if (installed()) return status();
     if (!await confirm({
       message: `Install ${manifest.name} ${manifest.version}?`,
-      detail: `Source: ${asset.url}\nFile: ${asset.fileName} (${(asset.size / 1048576).toFixed(1)} MB)\nSHA-256: ${asset.sha256}\n\nIt is installed for Coding Tools only and exposed to Agent Orchestrator as "${manifest.command}". Sign-in happens in the CLI itself.`,
+      detail: `Source: ${asset.url}\nFile: ${asset.fileName} (${(asset.size / 1048576).toFixed(1)} MB)\nSHA-256: ${asset.sha256}\n\nIt's installed for Coding Tools only, and agents run it as "${manifest.command}". You sign in from the CLI.`,
     })) return { ok: false, cancelled: true };
     installing = (async () => {
       const staging = path.join(root, `.staging-${manifest.version}-${now()}`);

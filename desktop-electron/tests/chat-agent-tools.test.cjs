@@ -1,4 +1,5 @@
 "use strict";
+require("./support/temp-dirs.cjs"); // removes the temp folders this file makes when it ends
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -618,6 +619,7 @@ test("the terminal is its own group, off by default, and turning it on reaches o
     assert.ok((await listed(opted.url, opted.auth)).includes("exec_command"));
     const optedInit = await post(opted.url, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, opted.auth);
     assert.match(optedInit.body.result.instructions, /NOT confined/, "the agent is told plainly that commands are not confined");
+    assert.doesNotMatch(optedInit.body.result.instructions, /hidden desktop/, "outside the sandbox a program's windows do show");
     assert.match(optedInit.body.result.instructions, /anything the user's account can/);
     assert.match(optedInit.body.result.instructions, /confirms each command/);
     terminal = false;
@@ -1039,6 +1041,9 @@ test("Claude Code on Approve for me: the reviewed command runs in Codex's sandbo
     assert.match(description, /foreground/);
     assert.match(description, /preview_open/);
     assert.doesNotMatch(init.body.result.instructions, /NOT confined|No confirmation/);
+    // Codex's sandbox runs on a hidden desktop of its own: the agent is told its windows never show.
+    assert.match(description, /hidden desktop: its windows never reach the user's screen/);
+    assert.match(init.body.result.instructions, /give the user the exact command to open it themselves/);
 
     const ran = await callTool(url, auth, "exec_command", { cmd: 'npm run dev -- --host "127.0.0.1"', workdir: "src" });
     assert.equal(ran.isError, false);
@@ -1058,6 +1063,7 @@ test("Claude Code on Approve for me: the reviewed command runs in Codex's sandbo
     assert.equal((await callTool(url, auth, "read_output", { output_ref: "command:sbx-1:stdout" })).structuredContent.content, "hello");
     const environment = await callTool(url, auth, "check_exec_environment", {});
     assert.deepEqual(environment.structuredContent.writable_roots, [path.resolve(tree.root), "C:/cache/npm"]);
+    assert.equal(environment.structuredContent.gui_windows, "hidden");
     assert.equal(confirmations.length, 0, "no dialog for any of it");
     assert.equal(calls.length, before, "nothing went to the unsandboxed terminal");
 

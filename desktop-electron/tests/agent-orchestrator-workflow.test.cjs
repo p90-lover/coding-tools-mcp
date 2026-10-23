@@ -1,4 +1,5 @@
 "use strict";
+require("./support/temp-dirs.cjs"); // removes the temp folders this file makes when it ends
 
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
@@ -2706,7 +2707,7 @@ test("an agent's own models take CPA's real window for the same model, and a no-
   assert.equal(listed.capabilities["gpt-6-sol"].contextLimit, undefined, "a model CPA does not serve stays unknown");
   const result = await workflow.call("advance", { workspaceId: "ws", runId: "run", executable: "C:/codex.exe" }).catch(error => ({ error }));
   const message = String(failure ?? result?.error?.message ?? JSON.stringify(result));
-  assert.match(message, /no longer in this harness's model list/, message);
+  assert.match(message, /no longer in this agent's model list/, message);
 });
 
 test("Claude Code is not offered Antigravity's Claude models, and says why; other agents and providers keep them", async () => {
@@ -3285,7 +3286,7 @@ test("a team's goal round continues on the chat's team; an achieved, failed or s
   assert.equal(world.updates.length, paused, "a paused goal starts no round");
   assert.equal((await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "clear" })).cleared, true);
   assert.equal(await goalOf(workflow), undefined);
-  await assert.rejects(workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" }), /No goal is currently set/);
+  await assert.rejects(workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" }), /No goal set/);
 });
 
 test("resuming a goal first judges the round nobody judged: one that ran while paused, or was stopped part-way", async () => {
@@ -3812,7 +3813,7 @@ test("Approve for me is reviewed by codex-auto-review first, the card's model wh
   assert.deepEqual(signedOut.resolved, ["yes"]);
   const down = await review(["codex-auto-review", "test-model"]);
   assert.deepEqual(down.resolved, [], "nothing is answered for the person when no reviewer answers");
-  assert.match(down.detail, /could not answer/, "and the request says why it is waiting for them");
+  assert.match(down.detail, /couldn't answer/, "and the request says why it is waiting for them");
   // Seen live: 375 of 1,453 reviews in two days fell back to the chat's own gpt-6.1-sol, billed to
   // the person's Codex quota. A fallback is never a Codex-quota model; another one serves instead.
   const codexCard = await review(["codex-auto-review"], { model: "cpa/gpt-6.1-sol",
@@ -4502,8 +4503,9 @@ test("a message sent to a hung turn stops it and goes as the next turn instead o
   const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
     nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
   const steered = [], interrupted = [];
-  let lastActivityAt = 1_000_000, timeline = [];
-  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 4 * 60_000,
+  let lastActivityAt = 1_000_000;
+  const timeline = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 11 * 60_000,
     aoHarness: {
       observe: async () => ({ turnId: "t1", turnState: interrupted.length ? "interrupted" : "running", status: interrupted.length ? "ready" : "working", lastActivityAt, timeline, approvals: [] }),
       steer: async (id, text) => { steered.push([id, text]); return { steered: true }; },
@@ -4514,13 +4516,74 @@ test("a message sent to a hung turn stops it and goes as the next turn instead o
   assert.equal(hung.restarted, true, "the chat queues it for the next turn");
   assert.deepEqual(interrupted, ["sess-1"], "the hung turn is stopped");
   assert.equal(steered.length, 0, "nothing is steered into a turn that cannot read it");
-  timeline = [{ kind: "tool", status: "running" }];
-  const building = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "and then lint" });
-  assert.equal(building.steered, true, "a tool call still running (a long build) is not a hang yet");
-  timeline = [];
   lastActivityAt = 1_000_000 + 3 * 60_000;
   assert.equal((await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "ok" })).steered, true, "a working agent is steered");
   assert.equal(interrupted.length, 1);
+});
+
+test("a steer into a slow model's quiet turn is steered in, never stops it: only a turn the chat calls stuck is restarted", async () => {
+  // Seen live: MiMo V2.6 Pro on a 400k context showed nothing for over three minutes while it
+  // thought; "keep going" stopped its turn ("Stopped by the user") and the message then waited
+  // seconds for the stop to settle. Claude Code never stops a turn because something was typed.
+  const route = { harness_id: "ao:claude-code", model: "cline-pass/mimo-v2.6-pro" };
+  const task = { id: "task-1", title: "Play Ero", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  const steered = [], interrupted = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 9 * 60_000,
+    aoHarness: {
+      observe: async () => ({ turnId: "t1", turnState: "running", status: "working", lastActivityAt: 1_000_000, timeline: [], approvals: [] }),
+      steer: async (id, text) => { steered.push([id, text]); return { steered: true }; },
+      interrupt: async id => { interrupted.push(id); },
+    } });
+  const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
+  assert.equal(result.steered, true, "nine quiet minutes is still a working turn");
+  assert.deepEqual(interrupted, [], "the turn is never stopped by a message");
+  assert.deepEqual(steered, [["sess-1", "keep going"]]);
+});
+
+test("a steer into a chat whose agent process stopped goes as its next turn at once, with nothing to interrupt", async () => {
+  // Seen live: "keep going" on a MiMo chat whose agent had died after 429s showed "the agent
+  // controller for this session is not running" and the message never went.
+  const route = { harness_id: "ao:claude-code", model: "cline-pass/mimo-v2.6-pro" };
+  const task = { id: "task-1", title: "Play Ero", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  const interrupted = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000,
+    aoHarness: {
+      observe: async () => ({ turnId: "t1", turnState: "interrupted", status: "working", agentGone: true, lastActivityAt: 1_000_000, timeline: [], approvals: [] }),
+      steer: async () => { throw new Error("the agent controller for this session is not running (CHAT_CONTROLLER_NOT_READY)"); },
+      interrupt: async id => { interrupted.push(id); },
+    } });
+  const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
+  assert.equal(result.steered, false);
+  assert.equal(result.restarted, true, "the chat sends it as the next turn");
+  assert.deepEqual(interrupted, [], "a gone agent is not interrupted");
+});
+
+test("Stop on a chat whose agent process stopped finishes at once instead of waiting for its turn row to settle", async () => {
+  const route = { harness_id: "ao:claude-code", model: "cline-pass/mimo-v2.6-pro" };
+  const task = { id: "task-1", title: "Play Ero", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  let interrupted = false, readsAfter = 0;
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 11 * 60_000,
+    setTimer: (callback) => { callback(); return 0; },
+    aoHarness: {
+      // A hung turn: the stop's interrupt ends the agent's process, but AO leaves the turn row
+      // "running"; only the snapshot's controller says nothing is left.
+      observe: async () => {
+        if (interrupted) readsAfter++;
+        return { turnId: "t1", turnState: "running", status: "working", agentGone: interrupted || undefined, lastActivityAt: 1_000_000, timeline: [], approvals: [] };
+      },
+      steer: async () => ({ steered: true }),
+      interrupt: async () => { interrupted = true; },
+    } });
+  // The stall restart stops the turn through the same stopExternalTurn as Stop.
+  const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
+  assert.equal(result.restarted, true, "the stop is confirmed, not 'stop needs attention'");
+  assert.equal(readsAfter, 1, "settled on the first read after the interrupt, not after 15 s of reads");
 });
 
 test("a turn whose reasoning stream stopped mid-thought is restarted by a message, not waited on as a running tool", async () => {
@@ -4553,14 +4616,14 @@ test("a turn that has only been retrying its model request for minutes is restar
   // The retry notice is a running "system" row in the timeline (observe's lastActivityAt leaves it out).
   const timeline = [{ kind: "message", status: "completed", text: "Looking at it" },
     { kind: "system", status: "running", text: "Retrying Claude, attempt 7 of 10. API error 503. Trying again in 30s." }];
-  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 4 * 60_000,
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 11 * 60_000,
     aoHarness: {
       observe: async () => ({ turnId: "t1", turnState: interrupted.length ? "interrupted" : "running", status: interrupted.length ? "ready" : "working", lastActivityAt: 1_000_000, timeline, approvals: [] }),
       steer: async (id, text) => { steered.push([id, text]); return { steered: true }; },
       interrupt: async id => { interrupted.push(id); },
     } });
   const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "try again" });
-  assert.equal(result.restarted, true, "four minutes of retries only is a hang");
+  assert.equal(result.restarted, true, "eleven minutes of retries only is a hang");
   assert.deepEqual(interrupted, ["sess-1"]);
   assert.equal(steered.length, 0);
 });
@@ -6010,7 +6073,7 @@ test("a stalled steer does not report a restart while its acknowledged cancellat
   const world = chatWorld({ tasks: [{ id: "task", title: "Fixture", description: "read", state: "in_progress", clauses: [] }],
     runs: [{ id: "run", project_id: "task", cancelled: false, nodes: [
       { id: "one", role: "planner", state: "running", route, receipt: { thread_id: "s1" } }] }] });
-  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 4 * 60_000,
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 11 * 60_000,
     setTimer: (callback, ms) => ms === 250 ? setImmediate(callback) : setTimeout(callback, ms),
     aoHarness: { observe: async () => ({ turnState: "running", status: "working", lastActivityAt: 1_000_000, approvals: [] }),
       interrupt: async () => {} } });
@@ -6119,7 +6182,7 @@ test("a stalled steer never reports a restart when interruption failed", async (
   const world = chatWorld({ tasks: [{ id: "task", title: "Fixture", description: "read", state: "in_progress", clauses: [] }],
     runs: [{ id: "run", project_id: "task", cancelled: false, nodes: [
       { id: "one", role: "planner", state: "running", route, receipt: { thread_id: "s1" } }] }] });
-  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 4 * 60_000,
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 11 * 60_000,
     aoHarness: { observe: async () => ({ turnState: "running", lastActivityAt: 1_000_000, approvals: [] }),
       interrupt: async () => { throw new Error("fixture stop unavailable"); } } });
   try {
@@ -6419,7 +6482,7 @@ test("a model CPA has no provider for is not retried and leaves the picker, thou
       await new Promise(resolve => setTimeout(resolve, 20));
       detail = String((await status()).detail ?? "");
     }
-    assert.match(detail, /CPA no longer serves this model; choose another model/);
+    assert.match(detail, /CPA no longer serves this model\. Choose another model/);
     clock += 60_000;
     await new Promise(resolve => setTimeout(resolve, 300));
     assert.deepEqual(controls, [], "nothing is retried");
@@ -6875,7 +6938,7 @@ test("a hung turn whose interrupt lands after a few seconds is still restarted, 
     nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
   const interrupted = [];
   let readsAfterInterrupt = 0;
-  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 4 * 60_000,
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => 1_000_000 + 11 * 60_000,
     setTimer: (callback) => { callback(); return 0; },
     aoHarness: {
       // The interrupt takes 20 more reads (5 s at 250 ms) to settle.
@@ -6938,7 +7001,7 @@ test("Restart stops a turn that is not yet past its stall limit, and an interrup
   assert.deepEqual(world.interrupted, []);
   const result = await world.workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "continue", restart: true });
   assert.equal(result.restarted, true);
-  assert.match(result.reason, /your message is sent as the next turn/);
+  assert.match(result.reason, /message is sent as the next turn/i);
   assert.deepEqual(world.interrupted, ["sess-1"]);
   assert.deepEqual(world.exited, [], "the interrupt settled, so the agent keeps running");
 });

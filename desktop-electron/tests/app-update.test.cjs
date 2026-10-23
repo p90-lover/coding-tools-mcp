@@ -1,3 +1,4 @@
+require("./support/temp-dirs.cjs"); // removes the temp folders this file makes when it ends
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");

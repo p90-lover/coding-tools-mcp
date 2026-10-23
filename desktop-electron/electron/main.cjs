@@ -775,8 +775,8 @@ const NATIVE_COPY = Object.freeze({
     remove: "Remove",
     removeTitle: "Remove Codex Web GPT",
     removeMessage: "Remove the ChatGPT Web models from Codex and restore the previous model route?",
-    removeDetail: "The launcher's ChatGPT login profile will be preserved. Codex must be restarted once.",
-    catalogFailure: "Codex reached the launcher, but loading its model catalog failed (HTTP {status}; {reason}). Check Activity for details and export a safe log if it persists.",
+    removeDetail: "Your ChatGPT sign-in in the launcher stays. Restart Codex once.",
+    catalogFailure: "Codex reached the launcher, but its model catalog didn't load: HTTP {status}, {reason}. Check Activity, and export a safe log if it keeps failing.",
   }),
   "zh-CN": Object.freeze({
     openLauncher: "打开 Codex Web GPT",
@@ -982,7 +982,9 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
         message: error instanceof Error ? error.message : String(error),
       }));
     };
-    if (rendererCrashes.length >= 3) {
+    // A page that twice in a row never finished loading is no page fault: Chromium itself is stuck
+    // (seen after a Windows restart with no network service), and only a fresh process loads again.
+    if (rendererCrashes.length >= 3 || reason === "stalled-again") {
       // A restart the app refuses (a browser operation still running) leaves the window reloaded instead.
       void requestQuit({ keepBridge: true, relaunch: true }).catch(() => undefined).finally(() => setTimeout(reload, 500));
       return;
@@ -1290,7 +1292,7 @@ function registerIpc({ logger, stateStore }) {
       type: "warning",
       title: "Coding Tools",
       message: "Save workspace authentication settings?",
-      detail: `${name}\n${location}\n${input.service}: ${input.authType}\nA running listener must be restarted to apply this change.`,
+      detail: `${name}\n${location}\n${input.service}: ${input.authType}\nRestart a running listener to apply this change.`,
       buttons: ["Cancel", "Save settings"],
       defaultId: 0,
       cancelId: 0,
@@ -1353,7 +1355,7 @@ function registerIpc({ logger, stateStore }) {
         type: "warning",
         title: "Coding Tools",
         message: `${action} the ${input.service} listener?`,
-        detail: `${name}\n${location}\nThis changes the local listener only; the tunnel configuration stays as saved.`,
+        detail: `${name}\n${location}\nOnly the local listener changes. The tunnel settings stay as saved.`,
         buttons: ["Cancel", "Continue"],
         defaultId: 0,
         cancelId: 0,
@@ -1381,7 +1383,7 @@ function registerIpc({ logger, stateStore }) {
       type: "warning",
       title: "Coding Tools",
       message: "Copy this workspace credential?",
-      detail: `${name}\n${location}\n${input.key}\nIf it is missing, Coding Tools will generate it locally.`,
+      detail: `${name}\n${location}\n${input.key}\nIf it's missing, Coding Tools creates one locally.`,
       buttons: ["Cancel", "Copy credential"],
       defaultId: 0,
       cancelId: 0,
@@ -2601,15 +2603,15 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
         buttons: ["Cancel", "Quit anyway"],
         defaultId: 0,
         cancelId: 0,
-        title: "Codex route could not be restored",
-        message: "Coding Tools could not restore the previous Codex model route.",
-        detail: `${message}\n\nQuitting anyway may leave Codex pointed at an unavailable local bridge.`,
+        title: "Couldn't restore the Codex route",
+        message: "Coding Tools couldn't restore Codex's previous model route.",
+        detail: `${message}\n\nIf you quit now, Codex may point at a local bridge that isn't running.`,
       });
       if (decision.response !== 1) throw error;
       publishOperation({
         name: "launcher-quit",
         status: "warning",
-        message: `Quitting after route restoration failed: ${message}`,
+        message: `Quitting without restoring the Codex route: ${message}`,
       });
     }
     managedBootstrapController?.dispose();
@@ -2617,7 +2619,7 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     externalServicesController?.dispose({ keepPersistent: keepBridge });
     upstreamToolController?.dispose();
     const detached = keepBridge ? await runtimeSupervisor?.detach(relaunch ? "launcher-restart" : "launcher-quit").catch((error) => {
-      publishOperation({ name: "launcher-quit", status: "warning", message: `Codex bridge could not be kept running: ${error instanceof Error ? error.message : String(error)}` });
+      publishOperation({ name: "launcher-quit", status: "warning", message: `Couldn't keep the Codex bridge running: ${error instanceof Error ? error.message : String(error)}` });
       return null;
     }) : null;
     if (detached?.status !== "detached") await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
@@ -3286,10 +3288,10 @@ async function start() {
       // reuse it under their own slug (the bridge picks the effort from the slug, not this entry).
       webModelCatalog: async ({ executable, model = "chatgpt-web/high" }) => {
         const result = await runtimeHost.run("ao-web-model-catalog", ["catalog", "ao-web", "--codex", executable], {
-          embedded: true, timeoutMs: 20_000, message: "Checking the AO WebGPT model",
-          successMessage: "AO WebGPT model checked",
+          embedded: true, timeoutMs: 20_000, message: "Checking the WebGPT model…",
+          successMessage: "WebGPT model checked",
         });
-        if (typeof aoWebCatalogForModel !== "function") throw new Error("Update the Coding Tools backend to run AO WebGPT tiers");
+        if (typeof aoWebCatalogForModel !== "function") throw new Error("Update the Coding Tools backend to use WebGPT models");
         return aoWebCatalogForModel(JSON.parse(result.stdout), model);
       },
       resolveHarness: (selection) => resolveAoNativeConnection({ ...selection, userData: app.getPath("userData") }),
@@ -3357,7 +3359,7 @@ async function start() {
       antigravityAuthBrowser?.closeAll();
       backendBundles.useBuiltin();
       startBackendFrom(backendBundles.current());
-      publishOperation({ name: "backend-update", status: "failed", message: `Backend ${backend.id} failed to start; using the installed backend` });
+      publishOperation({ name: "backend-update", status: "failed", message: `Backend ${backend.id} didn't start. Using the installed backend.` });
     }
   };
   const stopBackend = async (reason) => {
@@ -3388,7 +3390,7 @@ async function start() {
   backendBundles.watchIncoming(async (manifest) => {
     publishOperation({ name: "backend-update", status: "running", message: `Installing backend ${manifest.id}` });
     await backendControl.restart("backend-update");
-    publishOperation({ name: "backend-update", status: "completed", message: `Backend ${manifest.id} is live; the app, Codex bridge, MCP and CPA kept running` });
+    publishOperation({ name: "backend-update", status: "completed", message: `Backend ${manifest.id} is live. The app, Codex bridge, MCP and CPA kept running.` });
   });
   nativeTheme.themeSource = "system";
   mainWindow = createWindow({

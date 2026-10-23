@@ -156,7 +156,7 @@ function AoQuestion({ approval, busy, approve }: { approval: AoApproval; busy: b
         value={other[field.key] ?? ""} onChange={(event) => setOther((current) => ({ ...current, [field.key]: event.target.value }))} /> : null}
     </div>
     <div className="cdx-foot">
-      <button type="button" className="cdx-button is-ghost" disabled={busy} title="Tell the agent you won't answer; it goes on without one" onClick={dismiss}>
+      <button type="button" className="cdx-button is-ghost" disabled={busy} title="Skip answering. The agent goes on without it." onClick={dismiss}>
         Dismiss <Kbd>ESC</Kbd></button>
       {/* Codex: "Skip" while nothing is entered, then "Next" or, on the last question, "Submit". */}
       {!entered && !field?.required
@@ -292,7 +292,7 @@ export function AgentOrchestratorApproval({ approval, busy, approve, actor = "th
     return <div className="ao-msg ao-msg-approval ao-msg-plan">
       <span className="ao-msg-meta">Plan ready · {approval.tool || "ExitPlanMode"}{when ? ` · asked ${when}` : ""}</span>
       <div className="ao-plan"><ChatMarkdown text={approval.plan} /></div>
-      <p className="ao-hint">The agent waits for your answer (up to 30 minutes). A message you type now is sent after this request, so it can't cancel it.</p>
+      <p className="ao-hint">The agent waits up to 30 minutes for your answer. Messages you send now arrive after it.</p>
       <fieldset disabled={busy}><div className="ao-msg-actions">
         {(approval.decisions ?? []).map((decision) => <button key={decision.id} type="button"
           className={decision.kind.startsWith("reject") ? "button-secondary" : "button-primary"}
@@ -310,19 +310,19 @@ export function AgentOrchestratorApproval({ approval, busy, approve, actor = "th
     {approval.dependencyNote ? <p className={`ao-hint ao-dependency-note is-${approval.dependencyNote.tone}`}
       role={approval.dependencyNote.tone === "warn" ? "alert" : "note"}>{approval.dependencyNote.text}</p> : null}
     {approval.recommendation ? <p className="ao-hint">Command approver suggests {approval.recommendation.action}: {approval.recommendation.reason}</p> : null}
-    {typed ? <details><summary>Exact native request</summary><pre>{JSON.stringify(request, null, 2)}</pre></details> : null}
-    {typed && !scoped ? <p role="alert">Missing live thread/turn scope. Refresh the request or reconnect this role through its normal consent flow; no response can be sent.</p> : null}
-    {!supported ? <p role="alert">This runtime request is unsupported. Update the native bridge or stop the affected role; no automatic grant was sent.</p> : null}
+    {typed ? <details><summary>Raw request</summary><pre>{JSON.stringify(request, null, 2)}</pre></details> : null}
+    {typed && !scoped ? <p role="alert">Can't answer: this request has no live turn. Refresh it or reconnect this agent.</p> : null}
+    {!supported ? <p role="alert">This request type isn't supported. Update the bridge or stop this agent. Nothing was approved.</p> : null}
     <fieldset disabled={busy || (typed && !scoped) || !supported}>
       {!typed ? <div className="ao-msg-actions"><button type="button" className="button-primary" onClick={() => approve(approval, true)}>Allow once</button><button type="button" className="button-secondary" onClick={() => approve(approval, false)}>Deny</button></div> : null}
       {typed && (kind === "command" || kind === "file_change") ? <div className="ao-msg-actions">{decisions.map((decision, index) =>
         <button key={index} type="button" className="button-secondary" onClick={() => approve(approval, { decision })}>{typeof decision === "string" ? decision : JSON.stringify(decision)}</button>)}</div> : null}
       {typed && kind === "permissions" ? <>
-        <p>Select only requested permissions. None are selected by default.</p>
+        <p>Pick the permissions to allow. None are picked yet.</p>
         {permissionChoices.map(item => <label key={item.key}><input type="checkbox" checked={Boolean(granted[item.key])} onChange={event => setGranted(current => ({ ...current, [item.key]: event.target.checked }))} />{item.domain}{item.group ? " / " + item.group : ""}: {JSON.stringify(item.entry)}</label>)}
-        <label>Grant scope<select value={scope} onChange={event => setScope(event.target.value)}><option value="turn">This turn</option><option value="session">This session</option></select></label>
-        <button type="button" className="button-primary" onClick={replyPermissions}>Send selected subset</button>
-        <button type="button" className="button-secondary" onClick={() => approve(approval, { permissions: {}, scope: "turn" })}>Deny requested permissions</button>
+        <label>Allow for<select value={scope} onChange={event => setScope(event.target.value)}><option value="turn">This turn</option><option value="session">This session</option></select></label>
+        <button type="button" className="button-primary" onClick={replyPermissions}>Allow selected</button>
+        <button type="button" className="button-secondary" onClick={() => approve(approval, { permissions: {}, scope: "turn" })}>Deny all</button>
       </> : null}
       {typed && kind === "questions" ? <>
         {questions.map(question => <label key={String(question.id)}>{String(question.header || question.id)} · {String(question.question || "")}
@@ -333,11 +333,11 @@ export function AgentOrchestratorApproval({ approval, busy, approve, actor = "th
         <button type="button" className="button-secondary" onClick={() => approve(approval, { answers: {} })}>Cancel questions</button>
       </> : null}
       {typed && (kind === "mcp_form" || kind === "mcp_url") ? <>
-        <p>MCP/app consent applies only to this native request, not workspace MCP rights.</p>
+        <p>This consent applies to this request only, not to the project's MCP access.</p>
         {kind === "mcp_form" ? <><pre aria-label="Requested form schema">{JSON.stringify(request.requestedSchema ?? request.schema ?? {}, null, 2)}</pre>
           <label>Form values (JSON)<textarea aria-label="MCP form values" rows={5} value={content} onChange={event => setContent(event.target.value)} /></label>
           <button type="button" className="button-primary" onClick={sendForm}>Submit form</button></> : <>
-          {typeof request.url === "string" && /^https?:\/\//i.test(request.url) ? <a href={request.url} target="_blank" rel="noreferrer">Open requested authorization URL</a> : <p>Authorization URL unavailable or unsupported.</p>}
+          {typeof request.url === "string" && /^https?:\/\//i.test(request.url) ? <a href={request.url} target="_blank" rel="noreferrer">Open authorization page</a> : <p>No valid authorization link.</p>}
           <button type="button" className="button-primary" onClick={() => approve(approval, { action: "accept" })}>Authorization completed</button>
         </>}
         <button type="button" className="button-secondary" onClick={() => approve(approval, { action: "decline" })}>Decline</button>

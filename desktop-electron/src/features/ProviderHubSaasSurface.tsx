@@ -105,49 +105,49 @@ const PROVIDER_PRESENTATION: Readonly<Record<string, ProviderPresentation>> = {
   "codex-oauth": {
     english: "Codex OAuth",
     traditionalChinese: "Codex OAuth",
-    descriptionEnglish: "Sign in with one or more Codex accounts and route tasks without exposing OAuth tokens to the renderer.",
+    descriptionEnglish: "Sign in with one or more Codex accounts. OAuth tokens never reach the page.",
     descriptionTraditionalChinese: "登入一個或多個 Codex 帳戶，並在不向 renderer 暴露 OAuth token 的情況下路由任務。",
     aliases: ["openai codex", "codex login", "oauth"],
   },
   "claude-oauth": {
     english: "Claude OAuth",
     traditionalChinese: "Claude OAuth",
-    descriptionEnglish: "Manage multiple Claude sign-ins for approved Paseo and Anneal workloads.",
+    descriptionEnglish: "Manage several Claude sign-ins for Paseo and Anneal tasks.",
     descriptionTraditionalChinese: "管理多個 Claude 登入帳戶，供已批准的 Paseo 與 Anneal 工作使用。",
     aliases: ["anthropic claude", "claude login", "oauth"],
   },
   "gemini-oauth": {
     english: "Gemini OAuth (CPA)",
     traditionalChinese: "Gemini OAuth（CPA）",
-    descriptionEnglish: "Import a Gemini CLI account already authenticated by CPA without inventing an unsupported OAuth endpoint.",
+    descriptionEnglish: "Import a Gemini CLI account already signed in through CPA.",
     descriptionTraditionalChinese: "匯入已由 CPA 驗證的 Gemini CLI 帳戶，不會虛構未支援的 OAuth 端點。",
     aliases: ["gemini oauth", "gemini cli", "cpa gemini"],
   },
   "chatgpt-web": {
     english: "ChatGPT Web",
     traditionalChinese: "ChatGPT Web",
-    descriptionEnglish: "Use the authenticated browser session as a managed provider account.",
+    descriptionEnglish: "Use your signed-in browser session as a provider account.",
     descriptionTraditionalChinese: "將已驗證的瀏覽器 Session 作為受管理供應商帳戶使用。",
     aliases: ["chatgpt browser", "web gpt", "browser session"],
   },
   "openai-api": {
     english: "OpenAI API",
     traditionalChinese: "OpenAI API",
-    descriptionEnglish: "Store OpenAI API credentials through the encrypted Electron main-process boundary.",
+    descriptionEnglish: "Store OpenAI API keys, encrypted.",
     descriptionTraditionalChinese: "透過加密 Electron 主程序邊界儲存 OpenAI API 憑證。",
     aliases: ["openai key", "responses api", "api key"],
   },
   "anthropic-api": {
     english: "Anthropic API",
     traditionalChinese: "Anthropic API",
-    descriptionEnglish: "Connect Anthropic API accounts with per-account model and routing policies.",
+    descriptionEnglish: "Connect Anthropic API accounts, each with its own models and routing.",
     descriptionTraditionalChinese: "連接 Anthropic API 帳戶，並設定每個帳戶的模型與路由政策。",
     aliases: ["claude api", "anthropic key", "api key"],
   },
   "gemini-api": {
     english: "Gemini API",
     traditionalChinese: "Gemini API",
-    descriptionEnglish: "Connect Gemini API credentials and model catalogues.",
+    descriptionEnglish: "Connect Gemini API keys and models.",
     descriptionTraditionalChinese: "連接 Gemini API 憑證與模型清單。",
     aliases: ["google gemini", "gemini key", "api key"],
   },
@@ -168,14 +168,14 @@ const PROVIDER_PRESENTATION: Readonly<Record<string, ProviderPresentation>> = {
   "aistudio-to-api": {
     english: "AIStudioToAPI",
     traditionalChinese: "AIStudioToAPI",
-    descriptionEnglish: "Expose AI Studio through an OpenAI-compatible local API bridge.",
+    descriptionEnglish: "Use AI Studio through a local OpenAI-compatible API.",
     descriptionTraditionalChinese: "透過 OpenAI-compatible 本機 API bridge 使用 AI Studio。",
     aliases: ["ai studio to api", "aistudio api bridge"],
   },
   "cliproxyapi-antigravity": {
     english: "Gemini Antigravity Reverse Proxy",
     traditionalChinese: "Gemini Antigravity 反向代理",
-    descriptionEnglish: "Manage CLIProxyAPI / Antigravity accounts as an explicit Gemini reverse-proxy provider.",
+    descriptionEnglish: "Manage CLIProxyAPI / Antigravity accounts as a Gemini reverse proxy.",
     descriptionTraditionalChinese: "將 CLIProxyAPI／Antigravity 帳戶作為明確的 Gemini 反向代理供應商管理。",
     aliases: ["cliproxyapi", "antigravity", "gemini antigravity", "cli proxy api"],
   },
@@ -196,14 +196,14 @@ const PROVIDER_PRESENTATION: Readonly<Record<string, ProviderPresentation>> = {
   openrouter: {
     english: "OpenRouter",
     traditionalChinese: "OpenRouter",
-    descriptionEnglish: "Route approved models through an OpenRouter API account.",
+    descriptionEnglish: "Use models through an OpenRouter API account.",
     descriptionTraditionalChinese: "透過 OpenRouter API 帳戶路由已批准模型。",
     aliases: ["open router", "api key"],
   },
   ollama: {
     english: "Ollama",
     traditionalChinese: "Ollama",
-    descriptionEnglish: "Use a local Ollama endpoint with account-level model routing.",
+    descriptionEnglish: "Use a local Ollama endpoint with per-account models.",
     descriptionTraditionalChinese: "使用本機 Ollama endpoint，並套用帳戶級模型路由。",
     aliases: ["local llm", "ollama local"],
   },
@@ -498,7 +498,7 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
 
   const accountValidation = useMemo(() => {
     if (!draft.providerId) return text(language, "Choose a provider.", "請選擇供應商。");
-    if (!draft.label.trim()) return text(language, "Account label is required.", "必須填寫帳戶名稱。");
+    if (!draft.label.trim()) return text(language, "Enter an account label.", "必須填寫帳戶名稱。");
     if (draft.endpoint.trim()) {
       try {
         const endpoint = new URL(draft.endpoint.trim());
@@ -507,22 +507,22 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
         if (endpoint.protocol !== "https:" && !(endpoint.protocol === "http:" && loopback)) {
           return text(
             language,
-            "Provider endpoint requires HTTPS; HTTP is only allowed on loopback.",
+            "Use HTTPS for the endpoint. HTTP works only on loopback.",
             "供應商端點必須使用 HTTPS；HTTP 只允許本機 Loopback。",
           );
         }
       } catch {
-        return text(language, "Provider endpoint is invalid.", "供應商端點無效。");
+        return text(language, "Enter a valid endpoint URL.", "供應商端點無效。");
       }
     }
     return "";
   }, [draft.endpoint, draft.label, draft.providerId, language]);
 
   const routingRequirements = useMemo(() => {
-    if (!selectedAccount) return text(language, "Save an account before configuring task routing.", "請先儲存帳戶，再設定任務路由。");
-    if (!workspaceId) return text(language, "Choose a workspace to configure routing.", "請選擇工作區以設定路由。");
+    if (!selectedAccount) return text(language, "Save an account to set up routing.", "請先儲存帳戶，再設定任務路由。");
+    if (!workspaceId) return text(language, "Choose a workspace to set up routing.", "請選擇工作區以設定路由。");
     if (!selectedAccount.enabled || selectedAccount.status !== "connected") {
-      return text(language, "The account must be enabled and connected before routing.", "帳戶必須已啟用並已連線，先可以設定路由。");
+      return text(language, "Turn on and connect the account first.", "帳戶必須已啟用並已連線，先可以設定路由。");
     }
     if (!(selectedModel.trim() || selectedAccount.models[0])) {
       return text(language, "Choose or enter a task model.", "請選擇或輸入任務模型。");
@@ -530,7 +530,7 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
     if (workload === "anneal" && (!projectId.trim() || !repoId.trim() || !assigneeId.trim())) {
       return text(
         language,
-        "Anneal routing requires project, repository and assigned-agent IDs.",
+        "Anneal needs project, repository and agent IDs.",
         "Anneal 路由需要專案、儲存庫及獲指派代理 ID。",
       );
     }
@@ -589,7 +589,7 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
 
   const refreshProviderHub = useCallback(async () => {
     const api = window.codexWebLauncher;
-    if (!api) throw new Error(text(language, "Provider Hub is unavailable in this window.", "此視窗無法使用供應商樞紐。"));
+    if (!api) throw new Error(text(language, "Providers aren't available in this window.", "此視窗無法使用供應商樞紐。"));
     const next = await api.providerSnapshot();
     adoptSnapshot(next);
     return next;
@@ -612,7 +612,7 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
   useEffect(() => {
     const launcher = window.codexWebLauncher;
     if (!launcher) {
-      setError(text(language, "Provider Hub is unavailable in this window.", "此視窗無法使用供應商樞紐。"));
+      setError(text(language, "Providers aren't available in this window.", "此視窗無法使用供應商樞紐。"));
       return;
     }
     let active = true;
@@ -715,7 +715,7 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
 
   const persistAccount = async (): Promise<ProviderAccountRecord> => {
     const api = window.codexWebLauncher;
-    if (!api) throw new Error(text(language, "Provider Hub is unavailable in this window.", "此視窗無法使用供應商樞紐。"));
+    if (!api) throw new Error(text(language, "Providers aren't available in this window.", "此視窗無法使用供應商樞紐。"));
     if (accountValidation) throw new Error(accountValidation);
     const models = parseModels(draft.modelsText);
     const provider = providerDefinition(draft.providerId);
@@ -751,7 +751,7 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
     const saved = newestMatchingAccount(next, input);
     if (!saved) throw new Error(text(
       language,
-      "Provider Hub saved the account but did not return it.",
+      "The account was saved but didn't load. Refresh accounts to see it.",
       "供應商樞紐已儲存帳戶，但未能傳回帳戶資料。",
     ));
     adoptSnapshot(next, saved.id);
@@ -769,7 +769,7 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
     setError(null);
     try {
       const saved = await persistAccount();
-      setNotice(text(language, `${saved.label} was saved securely.`, `${saved.label} 已安全儲存。`));
+      setNotice(text(language, `${saved.label} saved.`, `${saved.label} 已安全儲存。`));
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -792,9 +792,9 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
         language,
         result.snapshot
           ? (result.mode === "import"
-              ? "The CPA account was imported and its model catalogue was refreshed."
-              : "The provider session is connected and its model catalogue was refreshed.")
-          : "The login page opened. Complete the provider sign-in to continue.",
+              ? "CPA account imported. Models updated."
+              : "Connected. Models updated.")
+          : "Sign-in page opened. Finish signing in to continue.",
         result.snapshot
           ? (result.mode === "import"
               ? "CPA 帳戶已匯入，模型清單亦已更新。"
@@ -818,8 +818,8 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
       adoptSnapshot(next, selectedAccount.id);
       const probed = next.accounts.find((account) => account.id === selectedAccount.id);
       setNotice(probed?.status === "connected"
-        ? text(language, "Connection succeeded and models were refreshed.", "連線成功，模型清單已更新。")
-        : text(language, "Provider session is not connected yet.", "供應商工作階段尚未連線。"));
+        ? text(language, "Connected. Models updated.", "連線成功，模型清單已更新。")
+        : text(language, "Not connected yet.", "供應商工作階段尚未連線。"));
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -872,7 +872,7 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
       setSelectedModel("");
       setSecret("");
       setEditorOpen(false);
-      setNotice(text(language, "Account archived; retained data was not deleted.", "帳戶已封存；保留資料並未刪除。"));
+      setNotice(text(language, "Account archived. Its data is kept.", "帳戶已封存；保留資料並未刪除。"));
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -883,18 +883,18 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
   const connectProvider = async () => {
     const launcher = window.codexWebLauncher;
     const api = window.codingTools;
-    if (!launcher || !api) throw new Error(text(language, "The execution bridge is unavailable.", "執行橋接目前無法使用。"));
+    if (!launcher || !api) throw new Error(text(language, "Task routing isn't available in this window.", "執行橋接目前無法使用。"));
     if (!selectedAccount) throw new Error(text(language, "Save and select an account first.", "請先儲存並選擇帳戶。"));
     if (!workspaceId) throw new Error(text(language, "Select a workspace first.", "請先選擇工作區。"));
     if (!selectedAccount.enabled || selectedAccount.status !== "connected") {
-      throw new Error(text(language, "The selected account must be enabled and connected.", "所選帳戶必須已啟用並已連線。"));
+      throw new Error(text(language, "Turn on and connect the account first.", "所選帳戶必須已啟用並已連線。"));
     }
     const model = selectedModel.trim() || selectedAccount.models[0] || "";
     if (!model) throw new Error(text(language, "Select or enter a task model.", "請選擇或輸入任務模型。"));
     if (workload === "anneal" && (!projectId.trim() || !repoId.trim() || !assigneeId.trim())) {
       throw new Error(text(
         language,
-        "Anneal requires project, repository and assigned agent IDs.",
+        "Anneal needs project, repository and agent IDs.",
         "Anneal 需要專案、儲存庫與獲指派代理 ID。",
       ));
     }
@@ -963,7 +963,7 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
           <h1>{text(language, "Provider Hub", "供應商樞紐")}</h1>
           <p>{text(
             language,
-            "Search every provider, manage multiple accounts, then route one approved account into Paseo or Anneal.",
+            "Find a provider, add accounts, then route one to Paseo or Anneal.",
             "搜尋所有供應商、管理多個帳戶，再將一個已批准帳戶路由至 Paseo 或 Anneal。",
           )}</p>
         </div>
@@ -1010,7 +1010,7 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
           <div className="provider-directory-heading">
             <div>
               <strong>{text(language, "Provider directory", "供應商目錄")}</strong>
-              <span>{text(language, "All integrations remain visible even before an account is added.", "即使未新增帳戶，所有整合仍然可見。")}</span>
+              <span>{text(language, "Every provider shows here, even without an account.", "即使未新增帳戶，所有整合仍然可見。")}</span>
             </div>
           </div>
 
@@ -1104,7 +1104,7 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
             <div className="provider-section-heading">
               <div>
                 <h3>{text(language, "Accounts and routing", "帳戶與路由")}</h3>
-                <p>{text(language, "Select an account to edit credentials, health and task routing.", "選擇帳戶以編輯憑證、健康狀態與任務路由。")}</p>
+                <p>{text(language, "Select an account to edit its credentials and routing.", "選擇帳戶以編輯憑證、健康狀態與任務路由。")}</p>
               </div>
             </div>
 
@@ -1141,7 +1141,7 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
                     <strong>{text(language, "No account added yet", "尚未新增帳戶")}</strong>
                     <span>{text(
                       language,
-                      "This provider is integrated and ready. Add the first account to configure login or credentials.",
+                      "Add an account to sign in or enter credentials.",
                       "此供應商已完成整合並可供使用。新增第一個帳戶以設定登入或憑證。",
                     )}</span>
                   </div>
@@ -1258,7 +1258,7 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
                   </datalist>
                 </label>
                 <label className="provider-full-row">
-                  <span>{text(language, "Account model catalogue (comma or line separated)", "帳戶模型清單（逗號或逐行分隔）")}</span>
+                  <span>{text(language, "Account models, one per line or comma-separated", "帳戶模型清單（逗號或逐行分隔）")}</span>
                   <textarea
                     rows={3}
                     value={draft.modelsText}
@@ -1275,13 +1275,13 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
                 </label>
                 <label className="provider-full-row">
                   <span>{selectedLoginAdapter?.kind === "cpa_oauth" || selectedLoginAdapter?.kind === "cpa_auth_file"
-                    ? text(language, "CPA / CLIProxyAPI management key (encrypted)", "CPA／CLIProxyAPI 管理金鑰（已加密）")
-                    : text(language, "Credential (encrypted by Electron main process)", "憑證（由 Electron 主程序加密）")}</span>
+                    ? text(language, "CPA / CLIProxyAPI management key, stored encrypted", "CPA／CLIProxyAPI 管理金鑰（已加密）")
+                    : text(language, "Credential, stored encrypted", "憑證（由 Electron 主程序加密）")}</span>
                   <input
                     autoComplete="off"
                     placeholder={selectedAccount?.hasCredential
-                      ? text(language, "Stored — leave blank to keep it", "已儲存——留空即可保留")
-                      : text(language, "Enter API key, token or local-proxy credential", "輸入 API Key、Token 或本機代理憑證")}
+                      ? text(language, "Saved. Leave blank to keep it", "已儲存——留空即可保留")
+                      : text(language, "API key, token or proxy credential", "輸入 API Key、Token 或本機代理憑證")}
                     type="password"
                     value={secret}
                     onChange={(event) => setSecret(event.target.value)}
@@ -1342,10 +1342,10 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
                             : selectedLoginAdapter?.kind === "cpa_oauth"
                               ? (selectedAccount?.status === "connected" || selectedAccount?.status === "expired"
                                   ? text(language, "Refresh session", "更新工作階段")
-                                  : text(language, "Login with CPA", "使用 CPA 登入"))
+                                  : text(language, "Sign in with CPA", "使用 CPA 登入"))
                               : selectedAccount?.status === "connected" || selectedAccount?.status === "expired"
                                 ? text(language, "Refresh browser session", "更新瀏覽器工作階段")
-                                : text(language, "Login account", "登入帳戶")}
+                                : text(language, "Sign in", "登入帳戶")}
                     </button>
                   ) : null}
                   <button className="provider-primary-button" disabled={busy !== null || Boolean(accountValidation)} onClick={() => void saveAccount()} type="button">
@@ -1359,7 +1359,7 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
                   <summary>
                     <span>
                       <strong>{text(language, "Paseo / Anneal task routing", "Paseo／Anneal 任務路由")}</strong>
-                      <small>{text(language, "Advanced execution settings", "進階執行設定")}</small>
+                      <small>{text(language, "Advanced settings", "進階執行設定")}</small>
                     </span>
                     <Caret />
                   </summary>
@@ -1387,7 +1387,7 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
                         onChange={(event) => setControlCredential(event.target.value)}
                         placeholder={text(
                           language,
-                          "Optional local orchestrator token — never the provider API/OAuth secret",
+                          "Optional local orchestrator token. Never a provider API key or OAuth secret",
                           "選填本機協調器 Token——絕不可使用供應商 API／OAuth 憑證",
                         )}
                         type="password"
@@ -1395,7 +1395,7 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
                       />
                       <small>{text(
                         language,
-                        "Used only to authenticate the Paseo or Anneal control plane for this connection.",
+                        "Used only to sign in to Paseo or Anneal for this connection.",
                         "只用於今次連線的 Paseo 或 Anneal 控制平面驗證。",
                       )}</small>
                     </label>
@@ -1409,7 +1409,7 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
                         onChange={(event) => setAllowProviderFallback(event.target.checked)}
                         type="checkbox"
                       />
-                      <span>{text(language, "Allow healthy-account fallback", "允許健康帳戶後備路由")}</span>
+                      <span>{text(language, "Fall back to another healthy account", "允許健康帳戶後備路由")}</span>
                     </label>
                     {workload === "anneal" ? (
                       <>
@@ -1440,8 +1440,8 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
           <section className="provider-binding-section">
             <div className="provider-section-heading">
               <div>
-                <h3>{text(language, "Approved task bindings", "已批准任務綁定")}</h3>
-                <p>{text(language, "Current Paseo and Anneal bindings for the selected workspace.", "所選工作區目前的 Paseo 與 Anneal 綁定。")}</p>
+                <h3>{text(language, "Task routes", "已批准任務綁定")}</h3>
+                <p>{text(language, "Paseo and Anneal routes for this workspace.", "所選工作區目前的 Paseo 與 Anneal 綁定。")}</p>
               </div>
             </div>
             <div className="provider-binding-list">
@@ -1459,7 +1459,7 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
               ))}
               {bindings.length === 0 ? (
                 <div className="provider-binding-empty">
-                  {text(language, "No approved binding in this workspace yet.", "此工作區目前未有已批准綁定。")}
+                  {text(language, "No task routes in this workspace yet.", "此工作區目前未有已批准綁定。")}
                 </div>
               ) : null}
             </div>

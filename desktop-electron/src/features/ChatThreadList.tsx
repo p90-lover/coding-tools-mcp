@@ -26,7 +26,7 @@ export function projectGitLabel(git: ThreadProjectGit | null | undefined): { tag
     case "repo": return { tag: null, line: `Git repository${on}`, warn: false };
     case "worktree": return { tag: "worktree", line: `Worktree of ${git.mainRepo ?? "another repository"}${on}`, warn: false };
     case "inside": return { tag: "subfolder", line: `A folder inside the repository ${git.root ?? ""}${on}. Agent chats need the repository's root folder.`, warn: true };
-    case "none": return { tag: "not git", line: "Not a git repository. Agent chats need a project whose folder is a repository's root.", warn: true };
+    case "none": return { tag: "not git", line: "Not a git repository. Agent chats need a repository's root folder.", warn: true };
     case "missing": return { tag: "missing", line: "This folder no longer exists.", warn: true };
     default: return null;
   }
@@ -467,7 +467,7 @@ export function ChatThreadList(props: ThreadListProps) {
       ] },
       scheduled
         ? { label: "Cancel scheduled start", icon: "schedule", run: () => actions.lifecycle(chat.taskId, "cancel_schedule") }
-        : running ? { label: "Schedule start…", icon: "schedule", reason: "Stop this mission before scheduling a start" }
+        : running ? { label: "Schedule start…", icon: "schedule", reason: "Stop this chat before scheduling a start" }
           : { label: "Schedule start…", icon: "schedule", run: () => actions.lifecycle(chat.taskId, "schedule") },
       { kind: "separator" },
       { label: "Share", icon: "share", run: () => actions.share(chat.taskId) },
@@ -631,7 +631,6 @@ export function ChatThreadList(props: ThreadListProps) {
   const isDragged = (id: string, drag: DragList | undefined) => Boolean(drag && dragging?.list === drag.list && dragging.id === id);
 
   const row = (chat: ChatSummary, drag?: DragList) => {
-    const isPinned = pinned.includes(chat.taskId);
     const isUnread = unread.includes(chat.taskId) && chat.taskId !== selectedTaskId;
     if (renaming?.taskId === chat.taskId) {
       return <li key={chat.taskId} className="cx-thread-row is-renaming">
@@ -653,16 +652,17 @@ export function ChatThreadList(props: ThreadListProps) {
       <button type="button" className="cx-thread-select" aria-current={chat.taskId === selectedTaskId}
         // Ctrl-click opens it in split view, as in Claude Code.
         onClick={(event) => event?.ctrlKey && actions.openSplit ? actions.openSplit(workspaceId, chat.taskId) : actions.select(chat.taskId)}>
-        <span className="cx-thread-title">{chat.title}</span>
+        <span className="cx-thread-title">{chat.title || "Untitled"}</span>
         {chat.schedule?.state === "scheduled" ? <span className="cx-thread-age" aria-label="Scheduled">◷</span> : null}
         <span className={`cx-thread-dot status-${chat.status}`} aria-label={STATUS_LABEL[chat.status]} />
       </button>
-      <span className="cx-thread-hover">
-        <button type="button" aria-label={isPinned ? "Unpin chat" : "Pin chat"} title={isPinned ? "Unpin chat" : "Pin chat"} aria-pressed={isPinned}
-          onClick={() => props.togglePin(chat.taskId)}>📌</button>
-        <button type="button" aria-label="Archive chat" title="Archive chat"
-          disabled={chatBusy(chat.taskId)} onClick={() => actions.lifecycle(chat.taskId, "archive")}>🗄</button>
-      </span>
+      {/* Claude Code's session row: on hover its status dot gives way to one "More options" button,
+          which holds Pin, Archive and the rest (the row's own menu). */}
+      <button type="button" className="cx-thread-more" aria-label={`More options for ${chat.title || "Untitled"}`} title="More options" aria-haspopup="menu"
+        onClick={(event) => { const owner = event.currentTarget, box = owner.getBoundingClientRect();
+          setMenu((current) => current?.owner === owner ? null : { x: box.left, y: box.bottom + 4, items: chatMenu(chat), label: chat.title, owner }); }}>
+        <ChatGlyph name="more" size={16} />
+      </button>
     </li>;
   };
 
@@ -710,8 +710,9 @@ export function ChatThreadList(props: ThreadListProps) {
   const projectsDrag: DragList = { list: "projects", order: projectOrder.map((item) => item.id), save: saveProjectOrder };
   return (
     <aside className="cx-threads" aria-label="Projects and chats" onDragOver={listDragOver} onDrop={listDrop}>
-      <button type="button" className="cx-new-chat" aria-pressed={!selectedTaskId} onClick={actions.newChat}>
-        <Icon name="plus" width="15" height="15" />New chat
+      {/* Claude Code's top row: a round "+" before its label (df-new-circle). */}
+      <button type="button" className="cx-new-chat" aria-pressed={!selectedTaskId} onClick={actions.newChat} title="New chat (Ctrl+N)">
+        <span className="cx-new-circle" aria-hidden="true"><ChatGlyph name="plus" size={16} /></span>New chat
       </button>
       <nav className="cx-thread-scroll">
         {pinnedChats.length ? <section className="cx-thread-group">
@@ -731,8 +732,8 @@ export function ChatThreadList(props: ThreadListProps) {
               : <button type="button" className="cx-project cx-section-head" aria-expanded={open}
                 onClick={() => { const next = new Set(collapsed); if (open) next.add(key); else next.delete(key); saveCollapsed(next); }}
                 onContextMenu={(event) => openMenu(event, sectionMenu(section), section.name)}>
-                <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
                 <span className="cx-thread-title">{section.name}</span>
+                <Icon name="chevron" width="12" height="12" className={`cx-caret${open ? " is-open" : ""}`} />
               </button>}
             {open ? <ul>{members.map((chat) => row(chat, sectionDrag))}{!members.length ? <li className="cx-thread-empty">No chats from this project here</li> : null}</ul> : null}
           </section>;
@@ -743,7 +744,7 @@ export function ChatThreadList(props: ThreadListProps) {
             <h3>Projects</h3>
             <button type="button" className="cx-list-settings" aria-label="Chat list settings" title="Chat list settings" aria-expanded={Boolean(settingsAt)}
               onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); setSettingsAt(settingsAt ? null : { top: box.bottom + 4, left: box.left }); }}>
-              <Icon name="settings" width="13" height="13" />
+              <ChatGlyph name="more" size={16} />
             </button>
           </div>
           <ul className="cx-projects">
@@ -751,23 +752,27 @@ export function ChatThreadList(props: ThreadListProps) {
               const current = item.id === workspaceId;
               const open = current ? !collapsed.has(item.id) : openOthers.has(item.id);
               const git = projectGitLabel(item.path ? gits[item.path] : null);
+              // Collapsed, Claude Code's folder header shows the most urgent state of its sessions as a dot.
+              const members = current ? chats : otherChats[item.id] ?? [];
+              const badge = open ? null : members.some((chat) => chat.status === "attention") ? "attention"
+                : members.some((chat) => chat.status === "running" || chat.status === "queued") ? "running"
+                : members.some((chat) => unread.includes(chat.taskId)) ? "unread" : null;
               return <li key={item.id} {...dragRow(item.id, projectsDrag)} className={`cx-project-item${isDragged(item.id, projectsDrag) ? " is-dragging" : ""}`}>
                 <div className="cx-project-row" onMouseEnter={(event) => hoverProject(item, event.currentTarget)} onMouseLeave={leaveProject}>
+                  {/* Claude Code's folder group header: the folder's name and a caret, no folder icon. */}
                   <button type="button" className="cx-project" aria-expanded={open}
                     onClick={() => clickProject(item.id)} onContextMenu={(event) => openMenu(event, projectMenu(item), item.name)}>
-                    <ChatGlyph name="folder" size={15} />
                     <span className="cx-thread-title">{item.name}</span>
-                    {git?.tag ? <span className={`cx-project-tag${git.warn ? " is-warn" : ""}`} title={git.line}>{git.tag}</span> : null}
+                    <Icon name="chevron" width="12" height="12" className={`cx-caret${open ? " is-open" : ""}`} />
+                    {badge ? <span className={`cx-project-badge is-${badge}`} aria-label={badge === "attention" ? "A chat in this project is waiting on you"
+                      : badge === "running" ? "Running" : "Unread response"} /> : null}
+                    {git?.warn ? <span className="cx-project-tag is-warn" title={git.line}>{git.tag}</span> : null}
                     {props.pinnedProjects.includes(item.id) ? <span className="cx-project-pin" aria-label="Pinned project">📌</span> : null}
                   </button>
-                  {/* Codex's project row actions: its menu and a new chat in this project. */}
+                  {/* Its one hover action, as Claude Code's: a new chat in this folder. The rest is on right-click. */}
                   <span className="cx-project-hover">
-                    <button type="button" aria-label={`${item.name} actions`} title="More"
-                      onClick={(event) => { const owner = event.currentTarget, box = owner.getBoundingClientRect(); setProjectCard(null);
-                        setMenu((current) => current?.owner === owner ? null : { x: box.left, y: box.bottom + 4, items: projectMenu(item), label: item.name, owner }); }}>
-                      <ChatGlyph name="more" size={14} /></button>
-                    <button type="button" aria-label={`New chat in ${item.name}`} title="New chat in this project" onClick={() => actions.newChatIn(item.id)}>
-                      <ChatGlyph name="edit" size={14} /></button>
+                    <button type="button" aria-label={`New chat in ${item.name}`} title={`New chat in ${item.name}`} onClick={() => actions.newChatIn(item.id)}>
+                      <ChatGlyph name="plus" size={16} /></button>
                   </span>
                 </div>
                 {open && !current ? <ul>{otherRows(item.id)}</ul> : null}
@@ -827,8 +832,8 @@ export function ChatThreadList(props: ThreadListProps) {
                 const { chats: shown, drag } = archivedDrag(group.key, group.chats);
                 return <li key={group.key}>
                   <button type="button" className="cx-project" aria-expanded={open} onClick={() => toggle(key)}>
-                    {group.project ? <ChatGlyph name="folder" size={15} /> : <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />}
                     <span className="cx-thread-title">{group.name}</span>
+                    <Icon name="chevron" width="12" height="12" className={`cx-caret${open ? " is-open" : ""}`} />
                     <span className="cx-archived-count">{group.chats.length}</span>
                   </button>
                   {open ? <ul>{shown.map((chat) => archivedRow(chat, drag))}</ul> : null}
@@ -836,8 +841,8 @@ export function ChatThreadList(props: ThreadListProps) {
               })}
               {gone.length ? <li>
                 <button type="button" className="cx-project cx-deleted-head" aria-expanded={!collapsed.has("archived:deleted")} onClick={() => toggle("archived:deleted")}>
-                  <Icon name="chevron" width="12" height="12" className={!collapsed.has("archived:deleted") ? "is-open" : undefined} />
                   <span className="cx-thread-title">Recently deleted</span>
+                  <Icon name="chevron" width="12" height="12" className={`cx-caret${!collapsed.has("archived:deleted") ? " is-open" : ""}`} />
                   <span className="cx-archived-count">{gone.length}</span>
                 </button>
                 {!collapsed.has("archived:deleted") ? (() => {
@@ -903,7 +908,7 @@ export function ChatThreadList(props: ThreadListProps) {
           <span>days</span>
         </label> : null}
         {props.setArchiveDays ? <p className="cx-popover-hint">0 keeps them archived. Deleted chats can still be restored.</p> : null}
-        <p className="cx-popover-hint">Drag chats to reorder them in any list (a project, Pinned, a section, Archived), or press Alt+Shift+↑/↓ on the open chat.</p>
+        <p className="cx-popover-hint">Drag chats to reorder any list, or press Alt+Shift+↑/↓ on the open chat.</p>
         {manualOrder.length ? <button type="button" className="cx-popover-reset" onClick={() => saveOrder([])}>Reset to newest first</button> : null}
       </FloatingLayer> : null}
       <ChatMenu menu={menu} onClose={() => setMenu(null)} />

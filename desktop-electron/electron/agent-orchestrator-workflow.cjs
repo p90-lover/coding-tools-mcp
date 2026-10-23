@@ -23,7 +23,7 @@ function clean(value, limit, required = true) {
 function clausesFrom(value) {
   const clauses = value?.clauses;
   if (!Array.isArray(clauses) || clauses.length < 1 || clauses.length > 12) {
-    throw new Error("Provide between one and twelve clauses");
+    throw new Error("Add 1 to 12 clauses");
   }
   return clauses.map((item) => ({
     title: clean(item?.title, 240),
@@ -395,7 +395,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (agent === "agy" && node.route.approval_policy === "on-request") throw new Error(AGY_ASK_REASON);
     const viaCpa = node.route.model.startsWith(CPA_MODEL_PREFIX) ? node.route.model.slice(CPA_MODEL_PREFIX.length) : null;
     if (viaCpa && !GATEWAY_AGENTS.has(agent)) {
-      throw new Error(`${node.settings?.name || "This card"}: ${agent} cannot use CPA models (${node.route.model}); choose one of its own models`);
+      throw new Error(`${node.settings?.name || "This card"}: ${agent} can't use the CPA model ${node.route.model}. Choose one of its own models.`);
     }
     // The gateway serves CPA through OpenAI- and Anthropic-compatible endpoints; opencode names
     // models as provider/model, so a CPA model is its OpenAI provider's "openai/<model>".
@@ -775,7 +775,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
 
   function connection() {
     const value = cpaConnection();
-    if (!value?.proxyApiKey) throw new Error("Start managed CPA and configure a proxy API key first");
+    if (!value?.proxyApiKey) throw new Error("Start CPA and set a proxy API key first");
     const url = new URL(value.baseUrl);
     if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.port !== "8317"
       || url.username || url.password || url.search || url.hash) {
@@ -811,8 +811,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   const pluginUnavailable = (provider, accounts) => {
     const name = PLUGIN_NAMES[provider] || provider;
     return accounts?.disabled?.has(provider)
-      ? `${name}'s account is disabled in CPA; enable it again on the CPA page (Accounts), or choose another model`
-      : `no ${name} account is added in CPA; add one on the CPA page (Accounts), or choose another model`;
+      ? `${name}'s account is disabled in CPA. Turn it on in CPA > Accounts, or choose another model`
+      : `no ${name} account is added in CPA. Add one in CPA > Accounts, or choose another model`;
   };
 
   /** Which CPA provider serves each model (the plain list's owned_by), or null when unreadable. */
@@ -1213,20 +1213,20 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         if (!capability) {
           if (node.route.model.startsWith(CPA_MODEL_PREFIX)) {
             const cpaUp = await models().then(() => true, () => false);
-            if (!cpaUp) throw new Error("CPA's model list cannot be read right now, so this card's effort and context window cannot be checked. Check that CPA is running, then retry.");
+            if (!cpaUp) throw new Error("Couldn't read CPA's model list to check this card's effort and context window. Check that CPA is running, then retry.");
           }
-          throw new Error(`${node.route.model} is no longer in this harness's model list, so its effort and context window cannot be checked. Choose a listed model, or clear the card's effort and context window.`);
+          throw new Error(`${node.route.model} is no longer in this agent's model list. Choose a listed model, or clear the card's effort and context window.`);
         }
         // A provider-plugin card saved with an effort before it stopped offering one launches without it.
         const effortIgnored = baseModel.startsWith(CPA_MODEL_PREFIX) && verbatimModel(baseModel.slice(CPA_MODEL_PREFIX.length), capability.provider);
         if (node.route.effort && !effortIgnored && !capability?.efforts?.includes(node.route.effort)) {
-          throw new Error("Reasoning effort is not supported by the current model/harness catalog");
+          throw new Error("This model doesn't support the chosen reasoning effort");
         }
         if (node.route.context_window != null) {
           const setting = capability?.contextWindow, tokens = node.route.context_window;
           const maximum = Math.min(setting?.max ?? 2000000, capability?.contextLimit ?? 2000000);
           if (!setting || !Number.isSafeInteger(tokens) || tokens < setting.min || tokens > maximum) {
-            throw new Error("Context limit for this model/harness is " + maximum + " tokens or no override is supported");
+            throw new Error("This model's context window can't be set to that. Its limit is " + maximum + " tokens.");
           }
         }
       };
@@ -1352,16 +1352,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           ...(!session && failure ? { error: String(failure?.message || failure).slice(0, 400) } : {}),
         });
       } catch (error) {
-        if (await stopIfAbandoned()) throw new Error("The card was stopped while it launched; its agent was stopped too");
+        if (await stopIfAbandoned()) throw new Error("The card was stopped while starting. Its agent was stopped too.");
         throw error;
       }
       if (failure) throw failure;
       if (saved?.ok !== true) {
-        if (await stopIfAbandoned()) throw new Error("The card was stopped while it launched; its agent was stopped too");
+        if (await stopIfAbandoned()) throw new Error("The card was stopped while starting. Its agent was stopped too.");
         throw new Error("AO harness session outcome is unknown");
       }
       if (backgroundRuns.get(runKey(workspaceId, runId))?.stopped && await stopIfAbandoned()) {
-        throw new Error("The card was stopped while it launched; its agent was stopped too");
+        throw new Error("The card was stopped while starting. Its agent was stopped too.");
       }
       return { ok: true, run: saved.run, session_id: session };
     } finally { dispatching.delete(key); launchStages.delete(key); }
@@ -1429,9 +1429,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       ...(observed.turnId ? { turn_id: observed.turnId } : {}),
       ...(observed.answer ? { answer: observed.answer } : {}),
       completed,
-      ...(!completed ? { failure: observed.error || (observed.exited ? "AO session exited before a final answer" : `AO turn ${observed.turnState}`) } : {}),
+      ...(!completed ? { failure: observed.error || (observed.exited ? "The agent exited before it gave a final answer" : `AO turn ${observed.turnState}`) } : {}),
     });
-    if (result?.ok !== true) throw new Error("AO harness result could not be saved; inspect the card");
+    if (result?.ok !== true) throw new Error("Couldn't save the agent's result. Check the card.");
     return { ...result, pending_approvals: [] };
   }
 
@@ -1528,7 +1528,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (listed.includes(route.model) || listed.includes(base)) return null;
     const why = (viaCpa ? catalog.unavailable?.[base.slice(CPA_MODEL_PREFIX.length)] ?? catalog.unavailable?.[route.model.slice(CPA_MODEL_PREFIX.length)] : null);
     if (why) return `${who ? who + ": " : ""}${route.model.replace(/^cpa\//, "")} is not offered right now: ${why}${who ? " in Team settings" : ""}, then send again.`;
-    return `${who ? who + ": " : ""}${route.model.replace(/^cpa\//, "")} is not offered right now (renamed, or no account is signed in for it). Choose another model${who ? " in Team settings" : ""}, then send again.`;
+    return `${who ? who + ": " : ""}${route.model.replace(/^cpa\//, "")} is not offered right now. It was renamed, or no account is signed in for it. Choose another model${who ? " in Team settings" : ""}, then send again.`;
   }
   function missingModelNotice(team) {
     const invalid = Array.isArray(team?.nodes) ? team.nodes.find(node => !node.route?.model || node.route.model === "default") : null;
@@ -1542,7 +1542,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const response = await requestHeadless("/api/v1/ao/update", {
       workspace_id: clean(workspaceId, 128), change, confirm: true,
     }, { localConfirmation: true });
-    if (response?.ok !== true) throw new Error("Team settings changed; refresh before applying again");
+    if (response?.ok !== true) throw new Error("Team settings changed. Refresh, then apply again.");
     return response;
   }
 
@@ -2002,7 +2002,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       throw new Error("AO native connection does not match the saved route and permission");
     }
     if (!granted && !await confirm({
-      message: "Connect this AO-owned Codex session?",
+      message: "Connect this Codex session?",
       detail: `Workspace: ${workspaceId}\nRun: ${runId}\nNode: ${nodeId}\nProvider: ${route.provider_id}\nAccount policy: ${route.account_id}\nModel: ${route.model}\nExecutable: ${selected.executable}\nSHA-256: ${selected.expected_sha256}\nPermission: ${permissionText(route.permission_profile)}; approval policy: ${route.approval_policy ?? 'legacy runtime default'}; reviewer: ${route.approvals_reviewer ?? 'legacy runtime default'}; standalone commands: off`.slice(0, 1200),
     })) return { ok: false, cancelled: true };
     if (!worker) {
@@ -2022,7 +2022,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     }, granted ? undefined : { localConfirmation: true });
     if (response?.ok === true && response.waiting === true) return response;
     if (response?.ok !== true || response.status?.model !== route.model) {
-      throw new Error("AO harness connection outcome is unknown; inspect status before retrying");
+      throw new Error("Couldn't confirm the connection. Check the status before you retry.");
     }
     return { ok: true, owned: response.owned === true, route_verified: false, status: response.status };
   }
@@ -2032,13 +2032,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const run = clean(runId, 80);
     const node = clean(nodeId, 80);
     if (!await confirm({
-      message: "Stop this AO-owned Codex session?",
-      detail: `Workspace: ${id}\nRun: ${run}\nNode: ${node}\nActive work may be interrupted.`,
+      message: "Stop this Codex session?",
+      detail: `Workspace: ${id}\nRun: ${run}\nNode: ${node}\nWork in progress may stop.`,
     })) return { ok: false, cancelled: true };
     const response = await requestHeadless("/api/v1/ao/harness/disconnect", {
       workspace_id: id, run_id: run, node_id: node, confirm: true,
     }, { localConfirmation: true });
-    if (response?.ok !== true) throw new Error("AO harness stop outcome unknown");
+    if (response?.ok !== true) throw new Error("Couldn't confirm the session stopped. Check its status.");
     return response;
   }
 
@@ -2170,11 +2170,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         [key, questions.some(question => question.id === key && question.isSecret === true) ? "[redacted secret answer]" : answer])) }
       : reply;
     if (!await confirm({
-      message: typed ? "Send this scoped native reply?" : allow ? "Allow this AO tool request once?" : "Deny this AO tool request?",
+      message: typed ? "Send this reply?" : allow ? "Allow this tool request once?" : "Deny this tool request?",
       detail: typed
-        ? `Run: ${run}\nNode: ${node}\nThread: ${thread}\nTurn: ${turn}\nMethod: ${pending.method}\nRequest: ${JSON.stringify(pending.request || {})}\nSelected response: ${JSON.stringify(displayReply)}\nThe native runtime validates its offered decisions and requested permission subset; workspace MCP grants are not changed.`
+        ? `Run: ${run}\nNode: ${node}\nThread: ${thread}\nTurn: ${turn}\nMethod: ${pending.method}\nRequest: ${JSON.stringify(pending.request || {})}\nSelected response: ${JSON.stringify(displayReply)}\nThe agent checks this reply against the choices and permissions it offered. Workspace MCP permissions don't change.`
         : pending.kind === "command"
-          ? `Run: ${run}\nNode: ${node}\nCommand: ${String(pending.command || "")}\nWorking directory: ${String(pending.cwd || "")}\nReason: ${String(pending.reason || "")}\nRequested permissions: ${JSON.stringify(pending.permissions || {})}\nThis approves this command once, not the session. The native runtime may execute it beyond the default read-only sandbox.`
+          ? `Run: ${run}\nNode: ${node}\nCommand: ${String(pending.command || "")}\nWorking directory: ${String(pending.cwd || "")}\nReason: ${String(pending.reason || "")}\nRequested permissions: ${JSON.stringify(pending.permissions || {})}\nThis allows the command once, not for the session. It may run outside the read-only sandbox.`
           : `Run: ${run}\nNode: ${node}\nPath: ${String(pending.path || "").slice(0, 500)}\nReason: ${String(pending.reason || "").slice(0, 500)}`,
     })) return { ok: false, cancelled: true };
     const result = await requestHeadless("/api/v1/ao/harness/approval", {
@@ -2182,7 +2182,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       ...(typed ? { response: reply, thread_id: thread, turn_id: turn } : { allow }), confirm: true,
     }, { localConfirmation: true });
     if (result?.ok !== true || result.result?.ok !== true) {
-      throw new Error("AO tool approval outcome is unknown; inspect the card before retrying");
+      throw new Error("Couldn't confirm your answer was sent. Check the card before you retry.");
     }
     logger?.info?.("ao.approval_decided", { approval_id: approval, actor: "user", decision: typed ? "typed_reply" : allow ? "allow" : "deny" });
     return result;
@@ -2192,11 +2192,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const id = clean(workspaceId, 128);
     const run = clean(runId, 80);
     if (backgroundRuns.get(runKey(id, run))?.status === "running") {
-      throw new Error("This AO run is already advancing in the background");
+      throw new Error("This task is already running in the background");
     }
     const saved = await runs({ workspaceId: id, runId: run });
     let mission = saved.runs.find((entry) => entry.id === run && entry.workspace_id === id);
-    if (!mission || mission.cancelled) throw new Error("Select an active AO run");
+    if (!mission || mission.cancelled) throw new Error("Select an active task");
     const active = mission.nodes.find((node) => ["reserved", "running"].includes(node.state));
     if (active) return observe({ workspaceId: id, runId: run, nodeId: active.id });
     const exhausted = mission.nodes.filter(node => node.role === "worker" && node.state === "held"
@@ -2217,15 +2217,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     if (externalAgent(ready)) {
       if (!await confirm({
-        message: "Run this AO card?",
-        detail: `Workspace: ${id}\nRun: ${run}\nNode: ${ready.id}\nHarness: ${ready.route.harness_id}\nModel: ${ready.route.model}\nAO starts a worker session in its own worktree.`.slice(0, 1200),
+        message: "Run this card?",
+        detail: `Workspace: ${id}\nRun: ${run}\nNode: ${ready.id}\nHarness: ${ready.route.harness_id}\nModel: ${ready.route.model}\nThe agent works in its own worktree.`.slice(0, 1200),
       })) return { ok: false, cancelled: true };
       return dispatchExternal(id, run, ready, mission.revision, false, mission.execution_mode === "single");
     }
     const selectedExecutable = clean(executable, 1024);
     const status = await harnessStatus({ workspaceId: id, runId: run, nodeId: ready.id });
     if (status.status?.connected && status.status.model !== ready.route.model) {
-      throw new Error("AO connected harness model does not match the saved card");
+      throw new Error("The connected agent uses a different model than the saved card");
     }
     const stalePolicy = status.status?.connected && (
       typeof status.status.permission_profile === "string" && status.status.permission_profile !== ready.route.permission_profile
@@ -2237,7 +2237,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (connected.cancelled) return connected;
     }
     if (!await confirm({
-      message: "Run this AO card?",
+      message: "Run this card?",
       detail: `Workspace: ${id}\nRun: ${run}\nNode: ${ready.id}\nRole: ${ready.role}\nModel: ${ready.route.model}\nPermission: ${permissionText(ready.route.permission_profile)}; approval policy: ${ready.route.approval_policy ?? "legacy runtime default"}; reviewer: ${ready.route.approvals_reviewer ?? "legacy runtime default"}; workspace MCP approvals are separate`.slice(0, 1200),
     })) return { ok: false, cancelled: true };
     await requireWebReadiness(ready);
@@ -2245,7 +2245,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       workspace_id: id, run_id: run, node_id: ready.id,
       expected_revision: mission.revision, confirm: true,
     }, { localConfirmation: true });
-    if (response?.ok !== true) throw new Error("AO dispatch outcome is unknown; inspect the run before retrying");
+    if (response?.ok !== true) throw new Error("Couldn't confirm the card started. Check the task before you retry.");
     return response;
   }
 
@@ -3021,7 +3021,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           : !incomplete && routineAppCommand(approval)
           ? { action: "allow", actor: "safety_rules", reason_code: "routine_command", reason: routineAppCommand(approval) }
           : incomplete && !blocked
-          ? { action: "ask", unresolved: true, reason: "The complete request cannot be safely reviewed; inspect the command and permission scope yourself" }
+          ? { action: "ask", unresolved: true, reason: "The full request can't be reviewed safely. Check the command and its permissions yourself." }
           : blocked
             ? { action: "deny", actor: "safety_rules", reason_code: "blocked_command", reason: "Blocked by the command approver's safety rules" }
               // A shell line counts only from the agent's own shell tool; the app's exec_command
@@ -3048,16 +3048,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           if (tries < REVIEW_TRIES) {
             reviewFailures.set(approval.approval_id, { tries, at: now() });
             if (reviewFailures.size > 500) reviewFailures.delete(reviewFailures.keys().next().value);
-            note = `The reviewer could not answer yet (${why}); trying again`;
+            note = `The reviewer couldn't answer yet, trying again: ${why}`;
             continue;
           }
-          advice = { action: "ask", unresolved: true, reason: `The command reviewer could not answer after ${tries} tries (${why}); check it yourself` };
+          advice = { action: "ask", unresolved: true, reason: `The command reviewer couldn't answer after ${tries} tries, so check it yourself: ${why}` };
         }
         reviewFailures.delete(approval.approval_id);
         const offered = approval.request?.availableDecisions;
         if (Array.isArray(offered) && advice.action !== "ask"
           && !offered.includes(advice.action === "allow" ? "accept" : "decline")) {
-          advice = { action: "ask", reason: "This native request requires a typed offered decision from you" };
+          advice = { action: "ask", reason: "Choose one of this request's own answers" };
         }
         approverAdvice.set(approval.approval_id, advice);
         if (approverAdvice.size > 500) approverAdvice.delete(approverAdvice.keys().next().value);
@@ -3069,7 +3069,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           else if (await harnessService().resolveApproval(approval.thread_id, approval.approval_id, decision).then(() => true, () => false)) {
             logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action });
             note = `Reviewer ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
-          } else approverAdvice.set(approval.approval_id, { action: "ask", unresolved: true, unsent: advice.action, reason: `The reviewer's answer could not be sent (${advice.action}: ${advice.reason}); check it yourself` });
+          } else approverAdvice.set(approval.approval_id, { action: "ask", unresolved: true, unsent: advice.action, reason: `The reviewer's answer couldn't be sent, so check it yourself. It said ${advice.action}: ${advice.reason}` });
         } else if (approver.settings?.auto_decide === true && advice.action !== "ask") {
           const sent = await requestHeadless("/api/v1/ao/harness/approval", {
             workspace_id: workspaceId, run_id: runId, node_id: active[index].id, approval_id: approval.approval_id,
@@ -3077,7 +3077,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           }).then(result => result?.ok === true && result.result?.ok === true, () => false);
           if (sent) logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action });
           if (sent) note = `Command approver ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
-          else approverAdvice.set(approval.approval_id, { action: "ask", unresolved: true, unsent: advice.action, reason: `The command approver's answer could not be sent (${advice.action}: ${advice.reason}); check it yourself` });
+          else approverAdvice.set(approval.approval_id, { action: "ask", unresolved: true, unsent: advice.action, reason: `The command approver's answer couldn't be sent, so check it yourself. It said ${advice.action}: ${advice.reason}` });
         } else {
           note = `Command approver suggests ${advice.action === "ask" ? "checking it yourself" : advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
         }
@@ -3268,10 +3268,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const node = held.find(entry => entry.role !== "retry") ?? held[0];
     if (!node) return null;
     const error = String(node.receipt?.error || "");
-    if (POOL_EXHAUSTED.test(error)) return { detail: "This failure needs you (the account pool or a sign-in); automatic retry does not help it" };
-    if (MODEL_RETIRED.test(error)) return { detail: "CPA no longer serves this model; choose another model and send again" };
+    if (POOL_EXHAUSTED.test(error)) return { detail: "This failure needs you. Check the account pool or sign in again, since retrying won't fix it." };
+    if (MODEL_RETIRED.test(error)) return { detail: "CPA no longer serves this model. Choose another model and send again." };
     const attempt = (node.history?.length ?? 0) + 1;
-    if (attempt > AUTO_RETRY_LIMIT) return { detail: `Retried automatically ${AUTO_RETRY_LIMIT} times; inspect the saved answer and retry explicitly` };
+    if (attempt > AUTO_RETRY_LIMIT) return { detail: `Retried ${AUTO_RETRY_LIMIT} times. Check the saved answer, then retry.` };
     const key = `${mission.id}:${node.id}:${attempt}`;
     if (!autoRetrySeen.has(key)) {
       autoRetrySeen.set(key, now());
@@ -3317,7 +3317,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     const name = node.settings?.name || node.role;
     const wait = OUTAGE_RETRY_PAUSE_MS * attempt - (now() - autoRetrySeen.get(key));
-    if (wait > 0) return { waiting: true, detail: `${name} lost its connection (the local proxy or the browser was down); retrying in ${Math.ceil(wait / 1000)}s (attempt ${attempt} of ${OUTAGE_RETRY_LIMIT})` };
+    if (wait > 0) return { waiting: true, detail: `${name} lost its connection to the local proxy or browser. Retrying in ${Math.ceil(wait / 1000)}s, attempt ${attempt} of ${OUTAGE_RETRY_LIMIT}.` };
     autoRetrySeen.delete(key);
     return { retry: true, attempt, name };
   }
@@ -3351,7 +3351,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       outageAttempts.set(`${mission.id}:${outage.id}`, outageRetry.attempt);
       if (outageAttempts.size > 500) outageAttempts.delete(outageAttempts.keys().next().value);
       logger?.info?.("ao.outage_retried", { attempt: outageRetry.attempt, role: outage.role });
-      return { changed: true, retried: true, detail: `Retrying ${outageRetry.name} after a lost connection (attempt ${outageRetry.attempt} of ${OUTAGE_RETRY_LIMIT})` };
+      return { changed: true, retried: true, detail: `Retrying ${outageRetry.name} after a lost connection, attempt ${outageRetry.attempt} of ${OUTAGE_RETRY_LIMIT}` };
     }
     if (outageRetry?.detail) return { waiting: true, detail: outageRetry.detail };
     if (mission.execution_mode === "single") {
@@ -3363,20 +3363,20 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (auto?.retry) {
           await controlRun({ workspaceId, runId: mission.id, action: "retry" });
           logger?.info?.("ao.auto_retried", { attempt: auto.attempt });
-          return { changed: true, retried: true, detail: `Retrying the failed step automatically (attempt ${auto.attempt} of ${AUTO_RETRY_LIMIT})` };
+          return { changed: true, retried: true, detail: `Retrying the failed step, attempt ${auto.attempt} of ${AUTO_RETRY_LIMIT}` };
         }
         if (auto?.detail) return { detail: auto.detail, ...(auto.waiting ? { waiting: true } : {}) };
-        return { detail: "Single model failed; inspect the saved answer and retry explicitly." };
+        return { detail: "The model failed. Check the saved answer, then retry." };
       }
       await controlRun({ workspaceId, runId: mission.id, action: "retry" });
-      return { changed: true, retried: true, detail: "The app restarted while this step was running; it continues" };
+      return { changed: true, retried: true, detail: "The app restarted during this step. The step continues." };
     }
     const workers = held.filter(node => node.role === "worker");
     const exhausted = workers.filter(node => !restartInterrupted(node) && ((node.history?.length ?? 0) >= HELPER_ATTEMPT_LIMIT ||
       POOL_EXHAUSTED.test(String(node.receipt?.error || ""))));
     if (exhausted.length) {
       for (const node of exhausted) await controlRun({ workspaceId, runId: mission.id, action: "review_failures", nodeId: node.id });
-      return { changed: true, detail: "Retries or the account pool are exhausted; review will receive partial work and errors" };
+      return { changed: true, detail: "Out of retries or accounts. The partial work and errors go to review." };
     }
     const node = workers[0] || held.find(entry => entry.role !== "retry");
     if (!node) return null;
@@ -3384,7 +3384,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       return { detail: "Reviewer next step: " + publicText(node.receipt?.answer || node.receipt?.error, 400) };
     }
     if ((node.history?.length ?? 0) >= HELPER_ATTEMPT_LIMIT && !restartInterrupted(node)) {
-      return { detail: (node.settings?.name || node.role) + " failed 3 times; decide the next step yourself or send a follow-up" };
+      return { detail: (node.settings?.name || node.role) + " failed 3 times. Decide the next step, or send a follow-up." };
     }
     state.recoveryWaits ||= new Map();
     const workerAttempt = node.receipt?.request_key || node.id;
@@ -3397,23 +3397,23 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (retry.state === "held" || retry.state === "failed") {
         await controlRun({ workspaceId, runId: mission.id, action: "review_failures", nodeId: node.id });
         if (retry.state === "held") await controlRun({ workspaceId, runId: mission.id, action: "review_failures", nodeId: retry.id });
-        return { changed: true, detail: "Retry role failed; partial work and recovery errors go to review" };
+        return { changed: true, detail: "The Retry role failed. The partial work and errors go to review." };
       }
-      if (retry.state !== "finished") return { detail: "The configured Retry role is deciding the failed step" };
+      if (retry.state !== "finished") return { detail: "The Retry role is deciding what to do with the failed step" };
       state.recoveryDecisions ||= new Map();
       const request = retry.receipt?.request_key || retry.id;
       const attempt = node.receipt?.request_key || node.id;
       const prior = state.recoveryDecisions.get(request);
       if ((prior && prior !== attempt) || (retry.receipt?.started_at_ms && node.receipt?.started_at_ms > retry.receipt.started_at_ms)) {
         await controlRun({ workspaceId, runId: mission.id, action: "retry", nodeId: retry.id });
-        return { changed: true, detail: "Retry role is inspecting the new failed attempt" };
+        return { changed: true, detail: "The Retry role is checking the new failure" };
       }
       if (prior === attempt) return { detail: state.recoveryDetail || "Retry is waiting for your action" };
       try {
         const answer = String(retry.receipt?.answer || "").slice(0, 4000);
         decision = JSON.parse(answer.slice(answer.indexOf("{"), answer.lastIndexOf("}") + 1));
         if (!["retry", "wait", "stop", "give_up"].includes(decision?.action)) throw new Error("Retry returned no bounded decision");
-      } catch { decision = { action: "give_up", reason: "Retry returned no verifiable decision" }; }
+      } catch { decision = { action: "give_up", reason: "The Retry role gave no clear decision" }; }
       state.recoveryDecisions.set(request, attempt);
     } else {
       try {
@@ -3422,7 +3422,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       } catch {
         decision = TRANSIENT_FAILURE.test(String(node.receipt?.error || ""))
           ? { action: "retry", reason: "The failure looks transient" }
-          : { action: "wait", reason: "The recovery helper is unavailable; inspect the failed step" };
+          : { action: "wait", reason: "The recovery helper is unavailable. Check the failed step." };
       }
     }
     const detail = "Helper: " + publicText(decision.reason || decision.action, 300);
@@ -3471,7 +3471,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         let saved = await runs({ workspaceId, runId });
         let mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
         if (!mission) throw new Error("Saved mission is unavailable");
-        if (!Number.isInteger(saved.worker_capacity?.[runId])) throw new Error("The installed AO service does not report worker capacity; update the matching runtime");
+        if (!Number.isInteger(saved.worker_capacity?.[runId])) throw new Error("The installed orchestrator doesn't report worker capacity. Update the runtime.");
         state.socketRestarts = 0;
         // Start every ready Native Codex card's harness together first. Launching a Codex process
         // can take minutes on a slow disk; done one card at a time, a sibling worker waited for
@@ -3717,7 +3717,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     try {
       const saved = await runs({ workspaceId: id, runId: run });
       let mission = saved.runs.find((entry) => entry.id === run && entry.workspace_id === id);
-      if (mission?.paused) throw new Error("Resume this paused mission from its local controls");
+      if (mission?.paused) throw new Error("This task is paused. Resume it first.");
       // A grant whose turns are all started or whose hour is over cannot start anything more: a chat
       // resumed on it after restarts and retries stopped with "no turns left" and needed a new
       // message. Starting such a run asks for a fresh grant instead, as a first start does.
@@ -3735,7 +3735,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         || mission.nodes.some((node) => ["cancelled", "archived", "reserved"].includes(node.state))) {
         throw new Error("AO run has an active or unresolved card; inspect it before starting");
       }
-      if (missionSettled(mission)) throw new Error("AO run is already finished");
+      if (missionSettled(mission)) throw new Error("This task is already finished");
       const resuming = mission.nodes.some((node) => node.state === "running")
         || Boolean(mission.grant && !grantSpent(mission.grant) && mission.nodes.some(node => ["held", "failed"].includes(node.state)));
       const readyWebRole = mission.nodes.find(node => node.state === "pending"
@@ -3793,7 +3793,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const additions = clausesFrom({ clauses });
     if (!await confirm({
       message: "Add clauses to this Coding Tools plan?",
-      detail: `${additions.length} clauses will be added to task ${id}. Existing clauses and evidence remain intact.`,
+      detail: `${additions.length} clauses will be added to task ${id}. Existing clauses and evidence stay.`,
     })) return { ok: false, cancelled: true };
     await write(workspaceId, {
       expected_revision: expectedRevision,
@@ -4040,9 +4040,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * steering), like Codex's steer. It is kept in the chat under the latest message. If the turn
    * ended before it arrived, `steered` is false and the caller sends it as a normal follow-up.
    */
-  const STEER_STALL_MS = 3 * 60_000;
-  // With a tool call still "running": the chat's own "may be stuck" line (ao-chat's STALL_MS).
-  const STEER_TOOL_STALL_MS = 10 * 60_000;
+  // As long as the chat's own "may be stuck" (ao-chat's STALL_MS): a slow model thinking for three
+  // minutes (MiMo on a 400k context) had its turn stopped by a plain "keep going" ("Stopped by the
+  // user"), then the message waited seconds for the stop to settle. Claude Code never stops a turn
+  // because something was typed; only a turn the chat itself calls stuck is restarted, with or
+  // without a tool call still "running".
+  const STEER_STALL_MS = 10 * 60_000;
   // "Approve for me" answers a request within 20 s (its reviewer up to 25 s): a steer waits that long.
   const STEER_ANSWER_WAIT_MS = 30_000;
   const STEER_ANSWER_POLL_MS = 750;
@@ -4063,7 +4066,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // A single chat steers its one card; a team steers its orchestrator, never an arbitrary worker.
     const card = run?.nodes.find(node => node.state === "running" && externalAgent(node) && node.receipt?.thread_id
       && (run.execution_mode === "single" || node.role === "planner"));
-    if (!card) return { ok: true, steered: false, reason: "No AO agent you can steer is working in this chat" };
+    if (!card) return { ok: true, steered: false, reason: "No agent is working in this chat to steer" };
     // Steering a turn that waits on an approval or a question cancelled that request ("Tool use
     // aborted"), and the agent lost the step it asked about. While one waits, the steer waits for it
     // to be answered: with "Approve for me" every tool call waits a moment (the routine ones are
@@ -4077,9 +4080,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // (seen 2026-10-21: a steer into a turn waiting on an approval held the session's dispatch lock,
     // and every later steer, approval answer and stop hung for 180 s). The message waits instead.
     if (waiting === null) {
-      return { ok: true, steered: false, waiting: true, reason: "The agent's state could not be read; your message is steered in once it can be" };
+      return { ok: true, steered: false, waiting: true, reason: "Couldn't read the agent's state. Your message is sent once it can be read." };
     }
-    const asking = (state) => Boolean(state?.approvals?.length || state?.needsInput);
+    // The agent's process is gone (its turn reads "interrupted" from here on): there is nothing to
+    // steer and nothing to stop. Steering it failed with "the agent controller for this session is
+    // not running"; the message goes as the chat's next turn, which starts the agent again.
+    if (waiting?.agentGone === true) {
+      return { ok: true, steered: false, waiting: true, restarted: true,
+        reason: "The agent's process had stopped. Your message starts its next turn." };
+    }
+    const asking =(state) => Boolean(state?.approvals?.length || state?.needsInput);
     // A steer never stops what the agent is doing (the user: "it shouldnt stop the model action,
     // wait it done to steer"). Declining the waiting request made the agent's tool call fail with
     // "The user doesn't want to take this action right now. STOP…"; the steer now waits for it.
@@ -4088,13 +4098,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       waiting = await observeCard();
     }
     if (asking(waiting)) {
-      return { ok: true, steered: false, waiting: true, reason: "The agent is waiting for an answer to its request; your message is steered in once that is answered" };
+      return { ok: true, steered: false, waiting: true, reason: "The agent is waiting for an answer. Your message is sent once you answer." };
     }
     // A turn whose agent hung (a model request that never came back, a retry loop) takes a steer and
-    // never reads it: "keep going" did nothing. Nothing new for STEER_STALL_MS with no tool call
-    // running stops that turn; the message is then sent as the chat's next turn, like a queued one.
-    // A tool call still running (a long build, a GUI it launched) is left to finish, and the agent
-    // reads the steer when it returns, unless it has been silent as long as a stuck turn.
+    // never reads it: "keep going" did nothing. Nothing new for STEER_STALL_MS stops that turn; the
+    // message is then sent as the chat's next turn, like a queued one. A tool call still running (a
+    // long build, a GUI it launched) is left to finish, and the agent reads the steer when it
+    // returns, unless it has been silent as long as a stuck turn.
     const idle = Number.isFinite(waiting?.lastActivityAt) ? now() - waiting.lastActivityAt : 0;
     // A notice (a provider retry's "Retrying Claude, attempt 7 of 10" stays "running") is no tool.
     // Nor is the model's reasoning: a stream that stopped mid-thought stays "running" too, so a
@@ -4102,17 +4112,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // the hung turn (blocking the composer for minutes) and never read.
     const toolRunning = Array.isArray(waiting?.timeline) && waiting.timeline.some(item => item?.status === "running"
       && !["message", "system", "reasoning", "thinking"].includes(item.kind));
-    // A tool call silent as long as the chat calls a turn stuck (STEER_TOOL_STALL_MS, the chat's
-    // "may be stuck") is stuck with it: the user, looking at "may be stuck", asked that a steer then
-    // retrigger the model rather than wait on a call that may never return.
-    if (restart === true || idle > (toolRunning ? STEER_TOOL_STALL_MS : STEER_STALL_MS)) {
+    // A tool call silent as long as the chat calls a turn stuck (the chat's "may be stuck") is stuck
+    // with it: the user, looking at "may be stuck", asked that a steer then retrigger the model
+    // rather than wait on a call that may never return.
+    if (restart === true || idle > STEER_STALL_MS) {
       // A tool call that never returns cannot be interrupted either: the agent's host is shut down then
       // (escalate), and AO resumes the same session for the message's turn.
       await stopExternalTurn(card.receipt.thread_id, { owner: runKey(id, run.id), escalate: true });
       logger?.info?.("ao.steer_restarted_stalled_turn", { idleSeconds: Math.round(idle / 1000), toolRunning, asked: restart === true });
       return { ok: true, steered: false, waiting: true, restarted: true,
-        reason: restart === true ? "Its turn was stopped; your message is sent as the next turn"
-          : `The agent had shown nothing for ${Math.round(idle / 60_000)} minutes${toolRunning ? " (a tool call never returned)" : ""}, so its turn was stopped; your message is sent as the next turn` };
+        reason: restart === true ? "Its turn was stopped. Your message is sent as the next turn."
+          : `The agent showed nothing for ${Math.round(idle / 60_000)} minutes${toolRunning ? " while a tool call hung" : ""}, so its turn was stopped. Your message is sent as the next turn.` };
     }
     // A chat's session is created in the background (spawn's async): its card runs, with the session,
     // while the agent is still starting, and AO has no controller to steer yet. The message waits
@@ -4122,7 +4132,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       throw error;
     });
     if (result.starting) {
-      return { ok: true, steered: false, waiting: true, starting: true, reason: "The agent is still starting; your message is sent after its turn" };
+      return { ok: true, steered: false, waiting: true, starting: true, reason: "The agent is still starting. Your message is sent after its turn." };
     }
     if (!result.steered) return { ok: true, steered: false, reason: "The agent's turn already ended" };
     const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
@@ -4171,14 +4181,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     } else {
       if (singleRoute !== undefined) throw new Error("A team request cannot include a single model route");
       if (executionMode === "team" && (teamId === undefined || teamRevision === undefined)) {
-        throw new Error("Saved team changed; refresh its identity and revision before sending");
+        throw new Error("The saved team changed. Refresh, then send again.");
       }
       // A follow-up keeps the team the task last ran with unless another is chosen.
       const previous = taskId ? saved.runs.filter(run => run.project_id === taskId).at(-1) : null;
       const selectedId = (teamId === undefined ? "" : clean(teamId, 80)) || previous?.team?.id;
       team = selectedId ? (saved.teams ?? (saved.team ? [saved.team] : [])).find(item => item?.id === selectedId) : saved.team;
       // Saved teams are shared by every project; workspace_id only records where one was first saved.
-      if (!team?.id || !Number.isSafeInteger(team.revision)) throw new Error("Saved team changed or was not found; refresh before starting");
+      if (!team?.id || !Number.isSafeInteger(team.revision)) throw new Error("The saved team wasn't found. Refresh, then try again.");
       if (teamRevision !== undefined && (!Number.isSafeInteger(teamRevision) || teamRevision < 0 || teamRevision !== team.revision)) {
         throw new Error("Saved team revision changed; refresh before starting");
       }
@@ -4220,11 +4230,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // A long chat compacts itself, as Codex does, instead of stopping at the size limit: the
         // earlier conversation becomes a handoff summary (what /compact does) and the chat goes on.
         const compacted = await compactChat({ workspaceId: id, taskId: task })
-          .catch(error => { throw new Error(`This chat is full and could not be compacted: ${String(error?.message || error).slice(0, 200)}`); });
+          .catch(error => { throw new Error(`This chat is full and couldn't be compacted: ${String(error?.message || error).slice(0, 200)}`); });
         detail = await board({ workspaceId: id, taskId: task });
         if (!detail.task) throw new Error("This chat's task no longer exists");
         description = extended();
-        if (!compacted.compacted || utf8Bytes(description) > BOARD_TEXT_BYTES) throw new Error("This chat is full; start a new chat to continue");
+        if (!compacted.compacted || utf8Bytes(description) > BOARD_TEXT_BYTES) throw new Error("This chat is full. Start a new chat to continue.");
       }
       await write(id, { expected_revision: detail.revision,
         change: { operation: "edit", id: task, title: detail.task.title, description } });
@@ -4237,7 +4247,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         operation: "create", title: startTitle, description: text,
       } });
       const added = (await board({ workspaceId: id })).tasks.filter((entry) => !known.has(entry.id));
-      if (added.length !== 1) throw new Error("The new chat's task needs review; refresh the board");
+      if (added.length !== 1) throw new Error("Couldn't find the new chat's task. Refresh the board.");
       task = added[0].id;
     }
 
@@ -4448,7 +4458,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
     const goal = goals.get(id, task);
     if (action === "clear") return { ok: true, cleared: goals.clear(id, task) };
-    if (!goal) throw new Error("No goal is currently set");
+    if (!goal) throw new Error("No goal set");
     // The model or team picker changed while the goal runs: its next round uses the new pick.
     if (action === "route") {
       if (teamId !== undefined) {
@@ -4459,12 +4469,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       return { ok: true, goal: goals.update(id, task, { route: checkedSingleRoute(singleRoute), team: null }) };
     }
-    if (action === "pause") return { ok: true, goal: goals.update(id, task, { status: "paused", note: "The current round finishes, then the goal waits" }) };
+    if (action === "pause") return { ok: true, goal: goals.update(id, task, { status: "paused", note: "" }) };
     // Edit goal: a new objective for the rounds still to come; the running round is left alone. An
     // achieved or stopped goal waits paused with the new objective, so Resume pursues it.
     if (action === "edit") {
       const edited = { objective: cleanObjective(objective) };
-      if (goal.status !== "active") Object.assign(edited, { status: "paused", note: "Edited; resume pursues the new goal" });
+      if (goal.status !== "active") Object.assign(edited, { status: "paused", note: "Edited; resume to pursue it" });
       return { ok: true, goal: goals.update(id, task, edited) };
     }
     if (action !== "resume") throw new Error("Choose clear, pause, resume, edit or route");
@@ -4820,14 +4830,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     try {
       summary = await handoffSummary(before);
     } catch (error) {
-      throw new Error(`Compacting needs a CPA model and none answered (${String(error?.message || error).slice(0, 160)})`);
+      throw new Error(`Couldn't compact: no CPA model answered. ${String(error?.message || error).slice(0, 160)}`);
     }
-    if (!summary) throw new Error("The model returned no summary; the chat is unchanged");
+    if (!summary) throw new Error("The model returned no summary. The chat is unchanged.");
     const stamp = new Date(now()).toISOString().replace("T", " ").slice(0, 16);
     const description = boardText(clean(`Summary of the earlier conversation (compacted ${stamp} UTC):\n${summary}`, 6000, false));
     if (utf8Bytes(description) >= utf8Bytes(before)) return { ok: true, compacted: false, before: before.length, after: before.length };
     const fresh = await board({ workspaceId: id, taskId: task });
-    if (!fresh.task || String(fresh.task.description || "") !== before) throw new Error("The chat changed while compacting; try again");
+    if (!fresh.task || String(fresh.task.description || "") !== before) throw new Error("The chat changed while compacting. Try again.");
     await write(id, { expected_revision: fresh.revision, change: { operation: "edit", id: task, title: fresh.task.title, description } });
     return { ok: true, compacted: true, before: before.length, after: description.length };
   }
@@ -4840,13 +4850,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function chatDeleteMessage({ workspaceId, taskId, index, runId, runIds = [] } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
     if (!Number.isSafeInteger(index) || index < 0) throw new Error("Choose a message to delete");
-    if (typeof runId !== "string" || !runId) throw new Error("This message has no reply yet; it can be deleted once its turn has run");
+    if (typeof runId !== "string" || !runId) throw new Error("This message has no reply yet. Delete it after its turn runs.");
     if (!Array.isArray(runIds) || runIds.length > 50) throw new Error("This message's reply was not found; reload the chat");
     const own = [runId, ...runIds].map(value => clean(value, 80));
     const saved = await runs({ workspaceId: id });
     const chatRuns = saved.runs.filter(run => run.project_id === task);
     const latest = chatRuns.at(-1);
-    if ((latest && !runSettled(latest)) || chatWorking(id, task, saved.runs)) throw new Error("Stop the chat first; a message can't be deleted while the chat is working");
+    if ((latest && !runSettled(latest)) || chatWorking(id, task, saved.runs)) throw new Error("Stop the chat first to delete a message");
     const detail = await board({ workspaceId: id, taskId: task });
     if (!detail.task) throw new Error("This chat's task no longer exists");
     // The chat says which of its runs answered this message; each must be one it shows.
@@ -4957,7 +4967,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const tries = signalled ? Math.ceil(settleMs / STOP_SETTLE_POLL_MS) : 0;
         for (let attempt = 0; attempt < tries; attempt++) {
           const observation = await service.observe(session);
-          if (observation?.exited === true || (["completed", "failed", "interrupted", "cancelled"].includes(observation?.turnState)
+          // No agent process left behind the session (it exited, or a start was cancelled): nothing
+          // can still be working. Waiting the full 15 s for its turn row (which AO leaves "running"
+          // until it restarts) made Stop take half a minute.
+          if (observation?.exited === true || observation?.agentGone === true || (["completed", "failed", "interrupted", "cancelled"].includes(observation?.turnState)
             && !["working", "running", "starting"].includes(observation?.status))) { stopped = true; break; }
           if (attempt < tries - 1) await new Promise(resolve => setTimer(resolve, STOP_SETTLE_POLL_MS));
         }
@@ -5072,9 +5085,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (!mission) throw new Error("Current task-owned mission was not found");
       if (!draft || draft.workspace_id !== workspaceId || !Array.isArray(draft.nodes)) throw new Error("Choose a valid workspace team");
       const invalid = draft.nodes.find(node => !node.route?.model || node.route.model === "default");
-      if (invalid) throw new Error(`Choose an explicit model for ${invalid.settings?.name || invalid.role}; configuration was not applied`);
+      if (invalid) throw new Error(`Choose an explicit model for ${invalid.settings?.name || invalid.role}. The settings weren't applied.`);
       const currentTeam = (saved.teams || [saved.team]).find(team => team?.id === draft.id);
-      if (!currentTeam) throw new Error("Saved team identity changed; reopen its settings");
+      if (!currentTeam) throw new Error("The saved team changed. Reopen its settings.");
       const known = ownTeamRevisions.get(JSON.stringify([workspaceId, draft.id]));
       if (draft.revision !== currentTeam.revision && known !== currentTeam.revision) throw new Error("Team changed in another window; refresh before retrying");
       const response = await teamUpdate({ workspaceId, change: { operation: "save_team",
@@ -5098,14 +5111,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (finished.lifecycle.schedule && ["scheduled","missed","needs_attention","cancelled","claimed"].includes(finished.lifecycle.schedule.state)) {
           armSchedule(workspaceId, finished.lifecycle);
           return { ok: true, taskId, previousRunId: mission.id, runId: replacement.id, team, status: finished.lifecycle.schedule.state,
-            detail: finished.lifecycle.schedule.state === "scheduled" ? "Original deadline preserved" : "Configuration applied; explicit schedule recovery is required." };
+            detail: finished.lifecycle.schedule.state === "scheduled" ? "Original deadline kept" : "Settings applied. Reschedule the task to run it." };
         }
         try {
           const started = await startRun({ workspaceId, runId: replacement.id, ...(input.executable ? { executable: input.executable } : {}) });
           return { ok: true, taskId, previousRunId: mission.id, runId: replacement.id, team, status: started.status };
         } catch {
           return { ok: true, taskId, previousRunId: mission.id, runId: replacement.id, team, status: "failed",
-            detail: "Configuration applied; the new mission could not start. Check its harness and start it explicitly." };
+            detail: "Settings applied, but the new task couldn't start. Check its agent, then start it." };
         }
       } catch (error) {
         await lifecycleMutation(workspaceId, { operation: "reconfigure_attention", task_id: taskId, intent_id: intentId,

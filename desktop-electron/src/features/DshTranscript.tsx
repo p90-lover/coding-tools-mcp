@@ -13,7 +13,8 @@ import { ChatMarkdown } from "./ChatMarkdown";
 import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart, ToolImages } from "./ChatToolParts";
 import {
   dshActivity, dshDuration, dshItemDetail, dshLiveTitle, dshProcessTitle, dshQuietNote, dshRetryNote, dshSegments, dshThinkSummary, dshToolTitle,
-  steerReader, steerReceipts, tidyTimeline, withoutReplied, type ChatLiveItem, type ChatStep, type ChatTurn, type DshActivity, type SteerReceipt,
+  steerReader, steerReceipts, tidyTimeline, withoutReplied, cpaRefusalNote, type ChatLiveItem, type ChatStep, type ChatTurn, type CpaRefusal,
+  type DshActivity, type SteerReceipt,
 } from "./ao-chat";
 
 // Icons: ui-primitives/src/icons, 1px strokes on a 16 box, drawn 14px inside a 16px leading box.
@@ -232,7 +233,7 @@ function DshStepWork({ step, useWork, answer }: { step: ChatStep; useWork: UseSt
   // not shown at all here, and the other view drew them under the new attempt's work.
   const earlier = <EarlierRounds rounds={step.earlier} />;
   if (!work.length) return <>{earlier}{step.hasWork && !step.working ? <p className="dsh-hint">Loading…</p> : null}</>;
-  return <>{earlier}<SteerReader.Provider value={steerReader(step.detail)}>
+  return <>{earlier}<SteerReader.Provider value={steerReader(step)}>
     <DshFlow items={work} grouped={!step.working} finished={!step.working && step.state === "finished"} hideReply={answer} />
   </SteerReader.Provider></>;
 }
@@ -250,7 +251,7 @@ function DshAgent({ step, useWork, answer }: { step: ChatStep; useWork: UseStepW
     open={open} expandable={Boolean(step.hasWork || work?.length || step.text || step.earlier?.length)} onToggle={() => setChosen(!open)}>
     <div className="dsh-agent-body">
       <EarlierRounds rounds={step.earlier} />
-      {work?.length ? <SteerReader.Provider value={steerReader(step.detail)}>
+      {work?.length ? <SteerReader.Provider value={steerReader(step)}>
         <DshFlow items={work} grouped={!live} finished={!live && step.state === "finished"} hideReply={answer} />
       </SteerReader.Provider> : null}
       {step.text && step.text.trim() !== answer?.trim() ? <div className="dsh-reply"><ChatMarkdown text={step.text} /></div> : null}
@@ -259,12 +260,13 @@ function DshAgent({ step, useWork, answer }: { step: ChatStep; useWork: UseStepW
 }
 
 /** RunningStatus: a hairline over the whale's tail and "Deep diving for 1m 4s ···", in DeepSeek blue. */
-function DshRunning({ since, divider, heardAt, retry = "" }: { since?: number; divider: boolean; heardAt?: number; retry?: string }) {
+function DshRunning({ since, divider, heardAt, retry = "", refusal = null }: { since?: number; divider: boolean; heardAt?: number; retry?: string; refusal?: CpaRefusal | null }) {
   const now = useNow(true);
   // A long turn can go quiet for many minutes (a slow model request): say how long, so a quiet turn
   // does not look frozen, and say plainly when it has been quiet as long as a stuck one. A turn whose
-  // agent is waiting out a model error says that instead (dshRetryNote).
-  const quietNote = retry || dshQuietNote(heardAt, now);
+  // agent is waiting out a model error says that instead (dshRetryNote), or CPA refusing its model
+  // (a subagent's requests too, which post no retry notice).
+  const quietNote = retry || `${cpaRefusalNote(refusal, now)}${dshQuietNote(heardAt, now)}`;
   const { onRestart, restarting } = useContext(TurnRestart);
   return <div className="dsh-running" role="status" aria-live="polite">
     {divider ? <span className="dsh-running-divider" aria-hidden="true" /> : null}
@@ -290,15 +292,18 @@ const ENDED = new Map<string, number>();
 /** Turns this chat watched running, so only a turn seen ending gets an end time. */
 const WATCHED = new Set<string>();
 
-/** `errorShownBelow`: the chat's failed-step card shows this turn's error, so the turn leaves it out. */
-export type DshTurnWorkProps = { turn: ChatTurn; live: boolean; expanded: boolean; useWork: UseStepWork; errorShownBelow?: boolean };
+/**
+ * `errorShownBelow`: the chat's failed-step card shows this turn's error, so the turn leaves it out.
+ * `refusal`: CPA refusing the running turn's model (cpaRefusalNote), said on its "Deep diving" line.
+ */
+export type DshTurnWorkProps = { turn: ChatTurn; live: boolean; expanded: boolean; useWork: UseStepWork; errorShownBelow?: boolean; refusal?: CpaRefusal | null };
 
 /**
  * A DeepSeek turn's work. Running: its rows flat, "Deep diving" under them. Ended: "Completed in
  * 1m 4s" heads it, folded unless the chat shows work details; a failed or stopped turn stays open.
  * The chat memoizes it with its own check of what a turn shows.
  */
-export function DshTurnWork({ turn, live, expanded, useWork, errorShownBelow = false }: DshTurnWorkProps) {
+export function DshTurnWork({ turn, live, expanded, useWork, errorShownBelow = false, refusal = null }: DshTurnWorkProps) {
   const steps = [...turn.steps, ...(turn.final ? [turn.final] : [])];
   const failed = steps.some((step) => step.error);
   const stopped = turn.status === "stopped";
@@ -328,6 +333,6 @@ export function DshTurnWork({ turn, live, expanded, useWork, errorShownBelow = f
     {errorShownBelow ? null : steps.filter((step) => step.error).map((step) => <div key={`error:${step.key}`} className="dsh-turn-error">
       <span className="dsh-turn-error-title">This turn failed</span><span className="dsh-turn-error-message">{step.error}</span>
     </div>)}
-    {live ? <DshRunning since={turn.startedAtMs} divider heardAt={heardAt} retry={dshRetryNote(steps)} /> : null}
+    {live ? <DshRunning since={turn.startedAtMs} divider heardAt={heardAt} retry={dshRetryNote(steps)} refusal={refusal} /> : null}
   </div>;
 }

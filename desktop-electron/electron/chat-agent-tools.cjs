@@ -200,6 +200,14 @@ const CHAT_DESCRIPTIONS = Object.freeze({
   write_stdin: "Type input into a command started with exec_command that is waiting for it.",
   kill_command: "Stop a command started with exec_command (for example a dev server you no longer need).",
 });
+// Codex's unelevated Windows sandbox runs every command on a private desktop of its own
+// (CodexSandboxDesktop-…); its old opt-out, windows.sandbox_private_desktop, is ignored now. Tested
+// 2026-10-22: a window a sandboxed command opens is "visible" there and never on the user's screen,
+// and window capture cannot reach it. The user chose to keep programs sandboxed, so the agent is
+// told, instead of launching a GUI and waiting on a window nobody can see.
+const SANDBOX_GUI_NOTE = "In the sandbox a program with windows (a GUI app, a game, a desktop app you built) runs on the "
+  + "sandbox's own hidden desktop: its windows never reach the user's screen and window capture cannot see them. Do not "
+  + "start one to show it or wait on it; test it headless, or give the user the exact command to open it themselves.";
 // Consent the agent may never give itself: stripped from every call it makes.
 const CONSENT_ARGUMENTS = Object.freeze(["confirm", "confirmed", "approval_token"]);
 // Schema properties a chat agent never needs, left out of its tool list (a call naming one still
@@ -908,7 +916,7 @@ function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview
       ? sandboxed
         ? "exec_command, write_stdin, read_output and kill_command run commands in a sandbox (Codex's Windows sandbox), "
           + "through cmd.exe in the worktree: a command may write only inside this worktree and the package managers' caches, "
-          + "reads the rest of the machine, and has the network (npm/pip installs work). "
+          + "reads the rest of the machine, and has the network (npm/pip installs work). " + SANDBOX_GUI_NOTE + " "
           + (bypass ? ""
             : autoReview ? "Each command is reviewed before it runs, like any other tool request; keep each one plain and to the point. "
             : "The user confirms each command and each input sent to one, shown in full: a command with its input must fit "
@@ -1260,7 +1268,8 @@ function createChatAgentTools({
       // agent gains nothing from it.
       .map(({ name, title, description, inputSchema, annotations }) => ({
         name, ...(title ? { title } : {}),
-        ...(CHAT_DESCRIPTIONS[name] || description ? { description: CHAT_DESCRIPTIONS[name] ?? description } : {}),
+        ...(CHAT_DESCRIPTIONS[name] || description ? { description: `${CHAT_DESCRIPTIONS[name] ?? description}${
+          name === "exec_command" && sandboxed() ? ` ${SANDBOX_GUI_NOTE}` : ""}` } : {}),
         inputSchema: inputSchema && typeof inputSchema === "object" ? chatSchema(name, inputSchema) : { type: "object" },
         ...(annotations ? { annotations } : {}),
       }));
@@ -1741,7 +1750,8 @@ function createChatAgentTools({
       if (name === "check_exec_environment") {
         const described = sandbox.describe();
         return toolResult(name, args, { ok: true, sandbox: "codex-windows-unelevated", sandbox_enforced: true, shell: "cmd.exe",
-          writable_roots: [root.path, ...(described?.writableCaches ?? [])], network: true, confirmation: "none" });
+          writable_roots: [root.path, ...(described?.writableCaches ?? [])], network: true, confirmation: "none",
+          gui_windows: "hidden", gui_note: SANDBOX_GUI_NOTE });
       }
       if (name === "exec_command") {
         const workdir = typeof args.workdir === "string" ? args.workdir : typeof args.cwd === "string" ? args.cwd : ".";

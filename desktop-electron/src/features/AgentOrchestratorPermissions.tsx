@@ -32,7 +32,7 @@ export function permissionSummary(nodes: AoNode[]): string {
 }
 /** Persist only explicit fields, never replay a historical chat's other routes or saved permissions. */
 export function mergeSavedPermissions(saved: AoTeam, ids: string[], selection: PermissionSelection): AoTeam {
-  if (ids.some(id => !saved.nodes.some(node => node.id === id))) throw new Error("Selected role no longer exists in the saved team; refresh before applying.");
+  if (ids.some(id => !saved.nodes.some(node => node.id === id))) throw new Error("This role no longer exists in the team. Refresh and try again.");
   return { ...saved, nodes: saved.nodes.map(node => {
     if (!ids.includes(node.id)) return node;
     const route = { ...node.route };
@@ -115,14 +115,14 @@ export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles
     nativePermission(node.route) === mode.profile && node.route.approval_policy === mode.policy && node.route.approvals_reviewer === mode.reviewer));
   const effective = mission?.nodes.filter(node => ["running", "reserved"].includes(node.state)).map(node => {
     const status = runtimePolicies?.[mission.id + ":" + node.id];
-    return status?.policy_acknowledged && status.effective_policy ? "Effective native runtime: " + Object.values(status.effective_policy).join(" · ")
-      : "Native policy not acknowledged / effective readback unavailable";
+    return status?.policy_acknowledged && status.effective_policy ? "Active: " + Object.values(status.effective_policy).join(" · ")
+      : "Active permissions not confirmed yet";
   }).join("; ");
   const reason = nodes.map(node => metadata[node.id]?.reason).filter(Boolean).join("; ")
-    || (!nodes.length ? "Choose a model or saved team first." : !nodes.every(node => metadata[node.id] !== undefined) ? "Reading runtime permission capabilities…" : !supported.length ? "Permissions unavailable on this adapter; existing settings remain unchanged." : "Runtime or managed policy does not allow this selection.");
+    || (!nodes.length ? "Choose a model or saved team first." : !nodes.every(node => metadata[node.id] !== undefined) ? "Checking permissions…" : !supported.length ? "This agent can't change permissions. Settings are unchanged." : "This agent or your policy doesn't allow this.");
   const apply = async (selection: PermissionSelection) => {
     if (!team || !canSelect(selection) || busy || saving) return;
-    if (selection.profile === ":danger-full-access" && !window.confirm("Full access removes the native sandbox boundary. Apply explicitly to these roles? Workspace MCP and app grants remain unchanged.")) return;
+    if (selection.profile === ":danger-full-access" && !window.confirm("Full access turns off the sandbox for these agents. Continue? Project MCP access stays the same.")) return;
     setSaving(true); setNotice(""); setFailed(false);
     try {
       const ids = supported.map(node => node.id);
@@ -135,12 +135,12 @@ export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles
     <button type="button" className="ao-composer-chip" ref={popup.trigger} aria-expanded={popup.open} aria-haspopup="menu"
       aria-controls="ao-permissions-panel" disabled={busy || saving} title={permissionSummary(nodes) + (effective ? " · " + effective : "") + (notice && !failed ? " · " + notice : "")}
       onClick={() => popup.setOpen(value => !value)}>
-      <Icon name={active?.icon ?? "shield"} width="16" height="16" /><span>{active?.label || "Custom / Mixed"}</span><Caret />
+      <Icon name={active?.icon ?? "shield"} width="16" height="16" /><span>{active?.label || "Custom"}</span><Caret />
     </button>
     {popup.open ? <section ref={popup.panel} id="ao-permissions-panel" className="ao-composer-popover ao-permissions-panel" aria-label="Access permissions" role="menu">
       <header><h3>How should actions be approved?</h3><button type="button" className="ao-popover-close" aria-label="Close permissions" onClick={popup.close}><Icon name="close" width="14" height="14" /></button></header>
       {PERMISSION_MODES.map(mode => <button key={mode.label} type="button" role="menuitemradio" aria-checked={active?.label === mode.label}
-        className={"ao-permission-option" + (mode.danger ? " is-danger" : "")} disabled={busy || saving || !canSelect(mode)} title={canSelect(mode) ? "Applies to queued / future attempts only; running attempts and shared app grants are unchanged." : unavailableReason(mode)}
+        className={"ao-permission-option" + (mode.danger ? " is-danger" : "")} disabled={busy || saving || !canSelect(mode)} title={canSelect(mode) ? "Applies from the next turn" : unavailableReason(mode)}
         onClick={() => void apply({ profile: mode.profile, policy: mode.policy, reviewer: mode.reviewer })}>
         <span className="ao-permission-symbol"><Icon name={mode.icon} width="17" height="17" /></span>
         <span><strong>{mode.label}</strong><small>{mode.detail}</small></span>

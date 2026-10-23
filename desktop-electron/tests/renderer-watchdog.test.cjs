@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
-const { createRendererWatchdog, GRACE_MS, UNRESPONSIVE_MS } = require("../electron/renderer-watchdog.cjs");
+const { createRendererWatchdog, GRACE_MS, UNRESPONSIVE_MS, LOAD_MS } = require("../electron/renderer-watchdog.cjs");
 
 /** A fake window whose page reports `rootChildren` for #root, with manual timers. */
 function world({ rootChildren = 3 } = {}) {
@@ -65,6 +65,32 @@ test("a renderer hung past the limit is crashed on purpose (the crash path reloa
   await fire(UNRESPONSIVE_MS);
   assert.equal(state.crashed, 1);
   assert.ok(state.logs.some(([event]) => event === "launcher.renderer_hung"));
+});
+
+test("a load that never finishes is reloaded, then the app restarts; a load that ends in time is left alone", async () => {
+  // Seen after a Windows restart: every page sat on about:blank for 20+ minutes and the window,
+  // waiting for ready-to-show, never appeared.
+  const { contents, state, fire } = world();
+  let loading = true;
+  contents.isLoading = () => loading;
+  contents.emit("did-start-loading");
+  contents.emit("did-stop-loading");
+  loading = false;
+  await fire(LOAD_MS);
+  assert.deepEqual(state.recovered, [], "it finished in time");
+  loading = true;
+  contents.emit("did-start-loading");
+  await fire(LOAD_MS);
+  assert.deepEqual(state.recovered, ["stalled"], "first a reload");
+  assert.equal(state.logs.at(-1)[0], "launcher.renderer_load_stalled");
+  contents.emit("did-start-loading");
+  await fire(LOAD_MS);
+  assert.deepEqual(state.recovered, ["stalled", "stalled-again"], "stuck again: the whole app restarts");
+  // A page that loads resets the count.
+  contents.emit("did-finish-load");
+  contents.emit("did-start-loading");
+  await fire(LOAD_MS);
+  assert.equal(state.recovered.at(-1), "stalled");
 });
 
 test("console errors from the page are logged, a few a minute, so a blank window says why", () => {

@@ -118,7 +118,7 @@ export function AntigravityCliSurface({ setError, openNetwork }: { setError: (er
         </div>
         <span className="agy-spacer" />
         <button type="button" className={`agy-proxy ${proxyReady ? "is-ok" : "is-off"}`} onClick={openNetwork}
-          title={proxyReady ? "agy requests and managed sign-in use the selected global proxy" : status?.proxy?.error || "Select a global proxy to run agy"}>
+          title={proxyReady ? "agy uses the global proxy" : status?.proxy?.error || "Choose a global proxy to run agy"}>
           {proxyReady ? "Proxy on" : "Proxy required"}
         </button>
         {status?.installed ? <>
@@ -127,7 +127,7 @@ export function AntigravityCliSurface({ setError, openNetwork }: { setError: (er
             {workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
           </select>
           <button type="button" className="button-primary" disabled={Boolean(busy) || !proxyReady} onClick={openTerminal}
-            title="Opens agy in an in-app terminal. Click its Google sign-in link, then paste the authorization code back into the terminal.">{terminal ? "New terminal" : "Open agy"}</button>
+            title="Open agy in a terminal">{terminal ? "New terminal" : "Open agy"}</button>
           {terminal ? <button type="button" className="button-secondary" disabled={Boolean(busy)} onClick={closeTerminal}>Close</button> : null}
         </> : <button type="button" className="button-primary" disabled={!status?.supported || Boolean(busy) || status?.installing}
           onClick={run("install", "install")} title={status?.download ? `${status.download.fileName} · ${(status.download.size / 1048576).toFixed(0)} MB · checksum-verified` : undefined}>
@@ -138,7 +138,7 @@ export function AntigravityCliSurface({ setError, openNetwork }: { setError: (er
       {tab === "terminal" ? <div className="agy-terminal">
         {terminal ? <AgentOrchestratorOriginalSurface hostbar={false} openMissions={() => undefined} terminal={terminal} />
           : <div className="agy-empty">
-            <p>{!status?.installed ? "Install the Antigravity CLI to run it here." : !proxyReady ? "agy runs only through the network proxy." : "Start agy in the selected workspace."}</p>
+            <p>{!status?.installed ? "Install the Antigravity CLI to run it here." : !proxyReady ? "agy needs the proxy." : "Start agy in the selected workspace."}</p>
             {status?.installed && !proxyReady ? <button type="button" className="button-secondary" onClick={openNetwork}>Open Proxy</button> : null}
             {status?.installed && proxyReady ? <button type="button" className="button-primary" disabled={Boolean(busy)} onClick={openTerminal}>Open agy</button> : null}
           </div>}
@@ -146,7 +146,7 @@ export function AntigravityCliSurface({ setError, openNetwork }: { setError: (er
         <section className="agy-card">
           <header>
             <h2>Gemini accounts in CPA</h2>
-            <label className="agy-toggle" title="Refresh expired tokens automatically; if Google revoked one, open CPA's sign-in (at most every 6 hours per account).">
+            <label className="agy-toggle" title="Refresh expired tokens. Reopen sign-in for revoked ones, at most every 6 hours">
               <input type="checkbox" checked={cpa?.auto ?? true} disabled={!cpa || Boolean(busy)}
                 onChange={event => void run("auto", "set_auto", { auto: event.target.checked })()} />
               Auto re-auth
@@ -168,20 +168,20 @@ export function AntigravityCliSurface({ setError, openNetwork }: { setError: (er
                   <span role="status">Waiting for sign-in…</span>
                   <button type="button" className="button-secondary" onClick={cancelSignIn(account.name)}>Cancel</button>
                 </> : <button type="button" className={needsAuth(account) ? "button-primary" : "button-secondary"} disabled={!proxyReady}
-                  onClick={signIn(account.name)} title={activeSignIn ? "Cancels the current sign-in and starts this account" : undefined}>Sign in again</button>}
+                  onClick={signIn(account.name)} title={activeSignIn ? "Cancel the other sign-in and start this one" : undefined}>Sign in again</button>}
               </> : null}
             </li>)}
           </ul>
           {cpa?.lastSweep ? <p className="agy-note">Last check {new Date(cpa.lastSweep.at).toLocaleTimeString()}
             {cpa.lastSweep.refreshed.length ? ` · refreshed ${cpa.lastSweep.refreshed.length}` : ""}
             {cpa.lastSweep.signIn.length ? ` · signed in ${cpa.lastSweep.signIn.length}` : ""}
-            {cpa.lastSweep.failed.length ? ` · ${cpa.lastSweep.failed.length} need you` : ""}</p> : null}
+            {cpa.lastSweep.failed.length ? ` · ${cpa.lastSweep.failed.length} need sign-in` : ""}</p> : null}
         </section>
         <section className="agy-card agy-facts">
           <dl>
-            <dt>Agent Orchestrator</dt><dd>{status?.installed ? "Available as the Agy worker harness (restart the AO runtime once after install or proxy changes)" : "Install to enable the Agy harness"}</dd>
-            <dt>Network</dt><dd>Every agy process, in this terminal or started by AO, uses the global network proxy and refuses to start without it.</dd>
-            <dt>Sign-in</dt><dd>For CLI sign-in, click the Google link in the terminal to open the proxy-routed window, then paste its authorization code back into agy. CPA accounts renew separately; their sign-in can be cancelled or switched to another account.</dd>
+            <dt>Agent Orchestrator</dt><dd>{status?.installed ? "Available as the Agy agent. Restart the orchestrator after installing or changing the proxy." : "Install to use the Agy agent."}</dd>
+            <dt>Network</dt><dd>Every agy process uses the global proxy and won't start without it.</dd>
+            <dt>Sign-in</dt><dd>Click the Google link in the terminal, then paste the authorization code back into agy. CPA accounts renew on their own.</dd>
           </dl>
         </section>
       </div>}
