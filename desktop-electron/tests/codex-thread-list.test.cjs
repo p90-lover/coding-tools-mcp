@@ -268,15 +268,20 @@ test("chat order: active chats stay on top, new chats come next, then the order 
   const list = compile("ChatThreadList.tsx", (name) => name === "./ao-chat" ? chat : name === "react" ? { useState() {}, useRef() {}, useEffect() {} } : name === "react/jsx-runtime" ? { jsx() {}, jsxs() {} } : {});
   const chats = [{ taskId: "new", status: "done" }, { taskId: "a", status: "done" }, { taskId: "b", status: "running" }, { taskId: "c", status: "stopped" }];
   // Arrays from the sandbox have their own prototype; compare them as plain JSON.
-  const ids = (order, manual, keep = true) => JSON.parse(JSON.stringify(list.orderChats(order, manual, keep).map((item) => item.taskId)));
+  const ids = (order, manual, keep = true, placed = []) => JSON.parse(JSON.stringify(list.orderChats(order, manual, keep, placed).map((item) => item.taskId)));
   const move = (...args) => JSON.parse(JSON.stringify(list.moveChat(...args)));
   assert.deepEqual(ids(chats, []), ["b", "new", "a", "c"], "running first, then newest first");
   assert.deepEqual(ids(chats, ["c", "a"]), ["b", "new", "c", "a"], "a chat you haven't placed stays above your order");
   assert.deepEqual(ids(chats, ["c", "a", "new", "b"], false), ["c", "a", "new", "b"], "without the setting, only your order counts");
-  // A chat waiting on you floats until you place it; placed, it stays where you put it.
+  // A chat waiting on you, or running, floats until you move it; moved, it stays where you put it.
   const waiting = [{ taskId: "w", status: "attention" }, { taskId: "a", status: "done" }];
   assert.deepEqual(ids(waiting, []), ["w", "a"], "an unplaced chat waiting on you is on top");
-  assert.deepEqual(ids(waiting, ["a", "w"]), ["a", "w"], "dragged below another, it stays there");
+  assert.deepEqual(ids(waiting, ["a", "w"], true, ["w"]), ["a", "w"], "dragged below another, it stays there");
+  assert.deepEqual(ids(chats, ["new", "a", "c", "b"], true, ["b"]), ["new", "a", "c", "b"], "a running chat you dragged stays where you put it");
+  // A drag saves the whole list's order: another running chat it carried along stays on top.
+  const two = [{ taskId: "r1", status: "running" }, { taskId: "r2", status: "running" }, { taskId: "d", status: "done" }];
+  assert.deepEqual(ids(two, ["r1", "d", "r2"], true, ["r2"]), ["r1", "d", "r2"], "only the dragged one leaves the top");
+  assert.deepEqual(ids(two, ["d", "r1", "r2"], true, ["r2"]), ["r1", "d", "r2"], "r1 was only carried along: still on top");
   assert.deepEqual(move(["x", "y", "z"], "z", "x"), ["z", "x", "y"]);
   assert.deepEqual(move(["x", "y", "z"], "x", null), ["y", "z", "x"]);
 });
@@ -296,6 +301,26 @@ test("a drop lands before a row's upper half and after its lower half; Pinned an
 const dragEvent = (lower) => ({ preventDefault() {}, stopPropagation() {}, clientY: lower ? 15 : 5, dataTransfer: { setData() {} },
   currentTarget: { getBoundingClientRect: () => ({ top: 0, height: 20 }) } });
 const rowOf = (view, title) => walk(view).find((element) => element.type === "li" && String(element.props.className).startsWith("cx-thread-row") && text(element).includes(title));
+
+test("a running chat dragged below others stays there, and the running chat it passed stays on top", async () => {
+  for (const key of Object.keys(stored)) delete stored[key];
+  const { props } = fixture();
+  stored["coding-tools:ao:open-projects"] = JSON.stringify(["b"]);
+  const list = mount("ChatThreadList.tsx", { ...props, loadProjectChats: async () => [
+    { taskId: "b1", title: "Beta busy", status: "running", runIds: ["rb1"], latestRunId: "rb1" },
+    { taskId: "b2", title: "Beta also busy", status: "running", runIds: ["rb2"], latestRunId: "rb2" },
+    { taskId: "b3", title: "Beta idle", status: "done", runIds: ["rb3"], latestRunId: "rb3" }] }, { effects: true });
+  list.render();
+  await new Promise((resolve) => setImmediate(resolve));
+  const order = () => { const shown = text(list.render()); return ["Beta busy", "Beta also busy", "Beta idle"].sort((a, b) => shown.indexOf(a) - shown.indexOf(b)); };
+  assert.deepEqual(order(), ["Beta busy", "Beta also busy", "Beta idle"]);
+  rowOf(list.render(), "Beta busy").props.onDragStart(dragEvent(true));
+  rowOf(list.render(), "Beta idle").props.onDragOver(dragEvent(true));
+  walk(list.render()).find((element) => element.props?.className === "cx-threads").props.onDrop(dragEvent(true));
+  // Before, it jumped straight back to the top: running chats were always kept there.
+  assert.deepEqual(order(), ["Beta also busy", "Beta idle", "Beta busy"]);
+  assert.deepEqual(JSON.parse(stored["coding-tools:ao:chat-placed:b"]), ["b1"]);
+});
 
 test("chats can be dragged into place in every list: Pinned, another open project and Archived, each within itself", async () => {
   for (const key of Object.keys(stored)) delete stored[key];

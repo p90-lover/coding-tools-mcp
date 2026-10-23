@@ -512,18 +512,18 @@ class RuntimeSupervisor {
 
   readState() {
     if (!fs.existsSync(this.statePath)) return null;
-    // A marker a power cut tore (empty, or its size in NUL bytes) holds no ownership to protect: the
-    // processes it named died with the machine. Failing on it stopped every watchdog restart until
-    // something rewrote the file; it is set aside as if it were missing.
-    let raw = null;
-    try { raw = fs.readFileSync(this.statePath); } catch { /* readJson below reports it */ }
-    if (raw && raw.every((byte) => byte === 0 || byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d)) {
-      this.logger?.warn?.("runtime.state_torn", { bytes: raw.length });
-      this.clearState();
-      return null;
-    }
+    let bytes = null;
     try {
-      const state = readJson(this.statePath);
+      bytes = fs.readFileSync(this.statePath);
+      // A marker a power cut tore (empty, or its size in NUL bytes) holds no ownership to protect:
+      // the processes it named died with the machine. Failing on it stopped every watchdog restart
+      // until something rewrote the file. Its bytes go to Trash, the file stays as it is, and it
+      // reads as missing; the next state write replaces it.
+      if (bytes.every((byte) => byte === 0 || byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d)) {
+        this.logger?.warn?.("runtime.state_torn", { bytes: bytes.length, backup: this.backUpState(bytes) });
+        return null;
+      }
+      const state = JSON.parse(bytes.toString("utf8"));
       const validPid = (value) => value === null || (Number.isInteger(value) && value > 0);
       if (!state
         || state.version !== 1
@@ -538,19 +538,39 @@ class RuntimeSupervisor {
       }
       return state;
     } catch (error) {
-      if (this.discardUnreadableStateFromBeforeBoot(error)) return null;
+      if (bytes && this.setAsideUnreadableStateFromBeforeBoot(bytes, error)) return null;
       throw new Error(`Launcher runtime ownership state is invalid at ${this.statePath}: ${errorMessage(error)}`);
     }
   }
 
   /**
-   * A marker last written before this boot can name only processes the restart ended, which is
-   * why a readable one is cleared (stopStaleOwnedRuntime). One a crash left unreadable, such as a
-   * file of NULs, is dropped the same way instead of failing closed: that kept every chat from
-   * starting for over an hour after an unexpected Windows restart. One written since boot still
-   * fails closed, as its processes may be alive.
+   * Copies a marker's bytes into a new folder under Trash, where nothing reads them; the backup's
+   * path. The marker stays until the next state write, and health checks read it meanwhile, so one
+   * version of the file (its time and size) is copied once, not on every read.
    */
-  discardUnreadableStateFromBeforeBoot(error) {
+  backUpState(bytes) {
+    let version = null;
+    try {
+      const stat = fs.statSync(this.statePath);
+      version = `${stat.mtimeMs}:${stat.size}`;
+    } catch {}
+    if (version && this.stateBackup?.version === version) return this.stateBackup.path;
+    const trash = path.join(this.coreHome, "Trash");
+    fs.mkdirSync(trash, { recursive: true, mode: 0o700 });
+    const backup = path.join(fs.mkdtempSync(path.join(trash, "runtime-ownership-")), path.basename(this.statePath));
+    fs.writeFileSync(backup, bytes, { flag: "wx", mode: 0o600 });
+    if (version) this.stateBackup = { version, path: backup };
+    return backup;
+  }
+
+  /**
+   * A marker last written before this boot can name only processes the restart ended, which is
+   * why a readable one is cleared (stopStaleOwnedRuntime). One a crash left unreadable in another
+   * way (JSON cut off mid-write) reads as missing too, its bytes kept in Trash, instead of failing
+   * closed: that kept every chat from starting for over an hour after an unexpected Windows
+   * restart. One written since boot still fails closed, as its processes may be alive.
+   */
+  setAsideUnreadableStateFromBeforeBoot(bytes, error) {
     let modifiedAt;
     try {
       modifiedAt = fs.statSync(this.statePath).mtimeMs;
@@ -558,10 +578,10 @@ class RuntimeSupervisor {
       return false;
     }
     if (!(modifiedAt < CURRENT_BOOT_STARTED_AT_MS - BOOT_TIME_CLOCK_TOLERANCE_MS)) return false;
-    this.clearState();
     this.logger.warn("runtime.state_discarded", {
       reason: "unreadable ownership marker from before this boot",
       message: errorMessage(error),
+      backup: this.backUpState(bytes),
     });
     return true;
   }

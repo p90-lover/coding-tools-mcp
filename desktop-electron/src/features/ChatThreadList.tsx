@@ -132,19 +132,22 @@ const ACTIVE: ReadonlySet<ChatStatus> = new Set(["running", "queued", "attention
 const WORKING: ReadonlySet<ChatStatus> = new Set(["running", "queued"]);
 
 /**
- * The list's order: working chats first (when keepActiveOnTop), and chats waiting on you until you
- * place them; then chats you haven't placed yet, newest first, so a new chat appears at the top as
- * in Codex; then the order you dragged chats into. Each group keeps that order.
+ * The list's order: working chats and chats waiting on you first (when keepActiveOnTop), unless you
+ * moved them yourself; then chats you haven't placed yet, newest first, so a new chat appears at the
+ * top as in Codex; then the order you dragged chats into. Each group keeps that order.
  *
- * A chat waiting on you was always kept on top, so one could never be dragged anywhere else: it
- * jumped back at once. Such chats can sit for days, and a list full of them could not be ordered
- * at all. Placed by hand, one stays where you put it; a new run releases it (releaseUsedChats).
+ * Such a chat was always kept on top, so it could never be dragged anywhere else: it jumped back at
+ * once (a running chat as well as one waiting on you, which can sit for days). One you moved
+ * (`placed`: dragged, or moved with Alt+Shift+↑/↓) stays where you put it; its next run releases it
+ * (releaseUsedChats). A drag saves the whole list's order, so a position alone does not mean the
+ * chat was moved: the other running chats stay on top.
  */
-export function orderChats<T extends { taskId: string; status: ChatStatus }>(chats: T[], manual: string[], keepActiveOnTop: boolean): T[] {
+export function orderChats<T extends { taskId: string; status: ChatStatus }>(chats: T[], manual: string[], keepActiveOnTop: boolean, placed: readonly string[] = []): T[] {
   const position = new Map(manual.map((id, index) => [id, index]));
+  const moved = new Set(placed);
   const recent = new Map(chats.map((chat, index) => [chat.taskId, index]));
   const rank = (chat: T) => position.get(chat.taskId) ?? (recent.get(chat.taskId) ?? 0) - chats.length;
-  const onTop = (chat: T) => WORKING.has(chat.status) || (chat.status === "attention" && !position.has(chat.taskId));
+  const onTop = (chat: T) => (WORKING.has(chat.status) || chat.status === "attention") && !moved.has(chat.taskId);
   return [...chats].sort((a, b) =>
     (keepActiveOnTop ? Number(onTop(b)) - Number(onTop(a)) : 0) || rank(a) - rank(b));
 }
@@ -225,9 +228,18 @@ function readIdsAt(key: string): string[] {
   catch { return []; }
 }
 const readOrder = (workspaceId: string) => readIdsAt(orderKey(workspaceId));
+// The chats of a project you moved yourself (orderChats' `placed`).
+const placedKey = (workspaceId: string) => `coding-tools:ao:chat-placed:${workspaceId}`;
+const readPlaced = (workspaceId: string) => readIdsAt(placedKey(workspaceId));
+function writePlaced(workspaceId: string, ids: string[]) {
+  try { localStorage.setItem(placedKey(workspaceId), JSON.stringify(ids)); } catch { /* per-session only */ }
+}
 
-/** A list a row can be dragged within: its key, the ids in the order shown, and how to keep a new order. */
-type DragList = { list: string; order: string[]; save: (next: string[]) => void };
+/**
+ * A list a row can be dragged within: its key, the ids in the order shown, and how to keep a new
+ * order (`moved` is the chat that was dragged).
+ */
+type DragList = { list: string; order: string[]; save: (next: string[], moved: string) => void };
 
 /**
  * Codex's sidebar: New chat, Pinned, then projects that collapse on click, each with its chats.
@@ -300,6 +312,11 @@ export function ChatThreadList(props: ThreadListProps) {
   const saveOrder = (next: string[]) => {
     setManualOrder(next);
     try { localStorage.setItem(orderKey(workspaceId), JSON.stringify(next)); } catch { /* per-session only */ }
+  };
+  /** A chat of `projectId` you moved: it keeps its place even while it runs or waits on you. */
+  const place = (projectId: string, id: string) => {
+    const placed = readPlaced(projectId);
+    if (!placed.includes(id)) writePlaced(projectId, [...placed, id]);
   };
   const saveSections = (next: ChatSection[]) => {
     setSections(next);
@@ -390,8 +407,13 @@ export function ChatThreadList(props: ThreadListProps) {
     // A switch empties the list before the new project's chats arrive; that load is not a use.
     if (!chats.length) { seenRuns.current.runs = {}; return; }
     const known = seenRuns.current.runs;
-    const { order } = releaseUsedChats(manualOrder, known, chats);
+    const { order, used } = releaseUsedChats(manualOrder, known, chats);
     for (const chat of chats) known[chat.taskId] = chat.latestRunId;
+    // A new run releases a chat you moved, too: running again, it goes back on top.
+    if (used.length) {
+      const placed = readPlaced(workspaceId);
+      if (placed.some((id) => used.includes(id))) writePlaced(workspaceId, placed.filter((id) => !used.includes(id)));
+    }
     if (order !== manualOrder) saveOrder(order);
   }, [chats, workspaceId]);
   const startRename = (chat: ChatSummary) => setRenaming({ taskId: chat.taskId, title: chat.title });
@@ -519,6 +541,7 @@ export function ChatThreadList(props: ThreadListProps) {
         const to = at + (event.key === "ArrowUp" ? -1 : 1);
         if (at < 0 || to < 0 || to >= shownOrder.length) return;
         event.preventDefault();
+        place(workspaceId, chat.taskId);
         saveOrder(moveChat(shownOrder, chat.taskId, event.key === "ArrowUp" ? shownOrder[to] : shownOrder[to + 1] ?? null));
       }
     };
@@ -551,7 +574,7 @@ export function ChatThreadList(props: ThreadListProps) {
   const listDrop = (event: ReactDragEvent<HTMLElement>) => {
     event.preventDefault();
     if (dragging && dropAt && dropAt.id !== dragging.id && inSourceList(event)) {
-      dragging.drag.save(dropChat(dragging.drag.order, dragging.id, dropAt.id, dropAt.after));
+      dragging.drag.save(dropChat(dragging.drag.order, dragging.id, dropAt.id, dropAt.after), dragging.id);
     }
     endDrag();
   };
@@ -637,9 +660,11 @@ export function ChatThreadList(props: ThreadListProps) {
   const pinnedKey = listOrderKey("pinned");
   const pinnedChats = inManualOrder(chats.filter((chat) => pinned.includes(chat.taskId)), readIdsAt(pinnedKey), (chat) => chat.taskId);
   const pinnedDrag: DragList = { list: "pinned", order: pinnedChats.map((chat) => chat.taskId), save: (next) => saveListOrder(pinnedKey, next) };
-  const projectChats = orderChats(chats.filter((chat) => !pinned.includes(chat.taskId) && !sectionOf(chat.taskId)), manualOrder, settings.keepActiveOnTop);
+  const projectChats = orderChats(chats.filter((chat) => !pinned.includes(chat.taskId) && !sectionOf(chat.taskId)), manualOrder, settings.keepActiveOnTop,
+    readPlaced(workspaceId));
   const shownOrder = projectChats.map((chat) => chat.taskId);
-  const projectDrag: DragList = { list: `project:${workspaceId}`, order: shownOrder, save: saveOrder };
+  const projectDrag: DragList = { list: `project:${workspaceId}`, order: shownOrder,
+    save: (next, moved) => { place(workspaceId, moved); saveOrder(next); } };
   // Like Codex, a long project shows its first chats and "Show more"; the open chat always shows.
   const showAll = expanded.has(workspaceId);
   const visibleChats = showAll ? projectChats : projectChats.filter((chat, index) => index < settings.visible || chat.taskId === selectedTaskId);
@@ -649,9 +674,10 @@ export function ChatThreadList(props: ThreadListProps) {
     const list = otherChats[projectId];
     if (!list) return <li className="cx-thread-empty">Loading chats…</li>;
     if (!list.length) return <li className="cx-thread-empty">No chats yet</li>;
-    const ordered = orderChats(list.filter((chat) => !pinned.includes(chat.taskId)), readOrder(projectId), settings.keepActiveOnTop);
+    const ordered = orderChats(list.filter((chat) => !pinned.includes(chat.taskId)), readOrder(projectId), settings.keepActiveOnTop, readPlaced(projectId));
     // Its order is the one the project keeps when it is the open one.
-    const drag: DragList = { list: `project:${projectId}`, order: ordered.map((chat) => chat.taskId), save: (next) => saveListOrder(orderKey(projectId), next) };
+    const drag: DragList = { list: `project:${projectId}`, order: ordered.map((chat) => chat.taskId),
+      save: (next, moved) => { place(projectId, moved); saveListOrder(orderKey(projectId), next); } };
     const all = expanded.has(projectId);
     return <>
       {(all ? ordered : ordered.slice(0, settings.visible)).map((chat) => <li key={chat.taskId} {...dragRow(chat.taskId, drag, projectId)}
@@ -822,6 +848,8 @@ export function ChatThreadList(props: ThreadListProps) {
           </section>;
         })()}
       </nav>
+      {/* In split view the chat pet's house stands here, under the list (ChatPet draws it in). */}
+      <div className="cx-pet-yard" />
       {hover && !menu ? <FloatingLayer className="cx-hover-card" role="tooltip" style={{ top: hover.top, left: hover.left }}>
         <strong>{hover.chat.title}</strong>
         <span>{STATUS_LABEL[hover.chat.status]}{hover.chat.updatedAtMs ? ` · updated ${chatRelativeTime(hover.chat.updatedAtMs, now)} ago`.replace("now ago", "just now") : ""}</span>

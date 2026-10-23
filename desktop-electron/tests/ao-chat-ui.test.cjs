@@ -26,7 +26,7 @@ const meter = load("ChatContextMeter.tsx", { "./ao-chat": chat, "./ChatMenu": me
 const toolParts = load("ChatToolParts.tsx", { "./ao-chat": chat, "./ChatMarkdown": markdown });
 const dsh = load("DshTranscript.tsx", { "./ao-chat": chat, "./ChatMarkdown": markdown, "./ChatToolParts": toolParts });
 const clawd = load("Clawd.tsx");
-const pet = load("ChatPet.tsx", { "./ao-chat": chat, "./Clawd": clawd });
+const pet = load("ChatPet.tsx", { "./ao-chat": chat, "./Clawd": clawd, "./chat-pet-stage": load("chat-pet-stage.ts") });
 const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null, Caret: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
   "./ChatContextMeter": meter, "./DshTranscript": dsh, "./ChatToolParts": toolParts,
   "./ChatPet": pet, "../PartErrorBoundary": load("../PartErrorBoundary.tsx"),

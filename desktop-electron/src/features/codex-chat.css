@@ -357,14 +357,20 @@
 
 /* The chat's details panel (Changes / Agents / Setup), like Claude's session panel. */
 .cx-details { position: fixed; z-index: 60; width: 300px; padding: 12px; border: 1px solid var(--ao-line); border-radius: 14px;
-  background: var(--color-bg-primary); color: var(--color-text-primary); box-shadow: 0 12px 32px rgb(0 0 0 / 0.14); font-size: 13px; }
+  background: var(--color-bg-primary); color: var(--color-text-primary); box-shadow: 0 12px 32px rgb(0 0 0 / 0.14); font-size: 13px;
+  overflow-y: auto; overscroll-behavior: contain; }
 .cx-details-head { display: flex; align-items: baseline; gap: 8px; margin: 0 4px 8px; }
 .cx-details-head small { color: var(--color-text-secondary); font-size: 12px; }
 .cx-details-label { margin: 12px 4px 4px; color: var(--color-text-secondary); font-size: 12px; }
 .cx-details-row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 6px; border: 0; border-radius: 8px;
   background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-.cx-details-row:hover:not(:disabled) { background: var(--cx-hover); }
+.cx-details-row:hover:not(:disabled):not(.is-static) { background: var(--cx-hover); }
 .cx-details-row:disabled { opacity: 0.5; cursor: default; }
+/* Outputs and Sources: a link or a static line looks like the buttons, one ellipsised line each. */
+a.cx-details-row, p.cx-details-row { box-sizing: border-box; margin: 0; text-decoration: none; }
+.cx-details-row.is-static { cursor: default; }
+.cx-details-row > svg { flex: none; color: var(--color-text-secondary); }
+.cx-details-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cx-details-dots { display: inline-flex; gap: 3px; }
 .cx-details-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--color-text-secondary); }
 .cx-details-dot.is-working { background: #2f80ed; }
@@ -1215,6 +1221,11 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 /* On the pointer: carried along above everything, never in the way of a click. */
 .cx-pet.is-riding { z-index: 60; transition: none; }
 .cx-pet.is-riding .cx-pet-body { pointer-events: none; }
+/* Leaping between split panes, or to and from its house under the chat list: over everything. */
+.cx-pet.is-leaping .cx-pet-body { pointer-events: none; }
+/* Split view: one Clawd for all panes, its house in a yard under the chat list (empty otherwise). */
+.cx-pet-yard { position: relative; flex: none; }
+.cx-pet-lot { position: relative; width: 136px; height: 104px; margin: 6px auto 10px; }
 @keyframes cx-pet-z { 0% { transform: translateY(6px); opacity: 0; } 30% { opacity: 1; } 100% { transform: translateY(-14px); opacity: 0; } }
 @keyframes cx-pet-rise { to { transform: translateY(-36px); opacity: 0; } }
 @media (prefers-reduced-motion: reduce) {

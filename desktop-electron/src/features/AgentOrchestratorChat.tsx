@@ -6,7 +6,7 @@ import { modelShortLabel } from "./AgentOrchestratorRoleEditor";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { ChatWorkbench, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
+import { ChatWorkbench, navigatePreview, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
 import { ChatBranchBar } from "./ChatBranchBar";
 import { AnnotationTray, SelectionAnnotator, SentAnnotations, type DraftAnnotation } from "./ChatAnnotations";
 import { ChatContextMeter } from "./ChatContextMeter";
@@ -19,8 +19,8 @@ import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalFeedback, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen,
-  chatAgentSessions, chatAgentSummary, chatApprovalMode, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
-  chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
+  chatAgentSessions, chatAgentSummary, chatApprovalMode, chatDetailLinks, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
+  chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatDetailLink, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
   activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshQuietNote, dshRetryNote, steerReader, steerReceipts, waitsForPerson,
   cpaRefusalNote, type ChatWakeup, type CpaRefusal,
   chatLoopParse, loopInterval, loopLabel, type ChatLoop, localChatStamp,
@@ -108,6 +108,8 @@ let annotationIds = 0;
 const CARDS_WIDTH_KEY = "coding-tools:ao:cards-panel-width";
 /** Whether the chat's pet is shown ("off" hides it), kept on this computer. */
 const PET_KEY = "coding-tools:ao:pet";
+/** Sent to every chat in the window when the pet is shown or hidden (its detail: shown). */
+const PET_EVENT = "coding-tools:ao:pet-shown";
 /** What an AO agent is started with; a follow-up with any of them changed gets a new agent (continuationCard). */
 type RouteFields = Record<string, unknown>;
 /** A route's model as the composer's picker names it ("MiMo V2.6 Pro"), not its id. */
@@ -411,11 +413,19 @@ function LiveTimeline({ items, live = false, finished = false, reply }: { items:
 const CHAT_WORK = new Map<string, ChatLiveItem[]>();
 const CHAT_WORK_LIVE = new Set<string>();
 type LoadWork = (runId: string, nodeId: string) => Promise<ChatLiveItem[]>;
+// Kept per attempt: a retried card starts again (a new start time) with nothing of the last one.
+const stepWorkKey = (step: ChatStep) => `${step.key}@${step.startedAtMs ?? ""}`;
+/** Whether the chat details panel is open, kept across chats and restarts. */
+const DETAILS_OPEN_KEY = "coding-tools:chat:details-open";
+/** The details panel reads back the finished cards of this many newest turns, each card once. */
+const DETAILS_READ_TURNS = 3;
+const DETAILS_READ = new Set<string>();
+/** Newest first, the panel lists this many outputs and this many sources. */
+const DETAILS_LIST_LIMIT = 12;
 
 function useStepWork(step: ChatStep, runId: string, wanted: boolean, loadWork?: LoadWork): ChatLiveItem[] | null {
-  // Kept per attempt: a retried card starts again (a new start time) with nothing of the last one.
   // Within an attempt nothing seen is ever dropped (mergeTimeline).
-  const workKey = `${step.key}@${step.startedAtMs ?? ""}`;
+  const workKey = stepWorkKey(step);
   const live = step.working?.timeline;
   const [, setLoaded] = useState(0);
   // A poll carries only the turn's newest items; the ones before them stay (mergeTimeline).
@@ -911,21 +921,31 @@ export function AgentOrchestratorChat({
     try { localStorage.setItem(workKey, next ? "on" : "off"); } catch { /* the choice still applies now */ }
     setWorkPrefs((current) => ({ ...current, [workKey]: next }));
   };
-  // The chat's details panel (like Claude's session panel): changes, agents, setup.
+  // The chat's details panel (Codex's task panel): changes, agents, setup, outputs and sources. It
+  // stays open, in every chat and after a restart, until its button closes it: a click anywhere
+  // else closed it, so it was never there to glance at while the agents worked.
+  const [detailsOpen, setDetailsOpen] = useState(() => { try { return localStorage.getItem(DETAILS_OPEN_KEY) === "on"; } catch { return false; } });
+  const toggleDetails = () => setDetailsOpen((open) => {
+    try { localStorage.setItem(DETAILS_OPEN_KEY, open ? "off" : "on"); } catch { /* the choice still applies now */ }
+    return !open;
+  });
+  const detailsToggle = useRef<HTMLButtonElement>(null);
   const [details, setDetails] = useState<{ left: number; top: number } | null>(null);
-  const detailsPanel = useRef<HTMLDivElement>(null);
+  // Anchored under its button, following it when the window or a split pane resizes (it shows once
+  // placed, so it never flashes at the window's corner).
   useEffect(() => {
-    if (!details) return;
-    const outside = (event: MouseEvent) => {
-      const target = event.target as Node | null;
-      if (target && (detailsPanel.current?.contains(target) || (target as Element).closest?.("[data-details-toggle]"))) return;
-      setDetails(null);
+    const button = detailsToggle.current;
+    if (!detailsOpen || !button) { setDetails(null); return; }
+    const place = () => {
+      const box = button.getBoundingClientRect();
+      setDetails({ left: Math.max(8, Math.min(box.right - 300, window.innerWidth - 308)), top: box.bottom + 6 });
     };
-    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setDetails(null); };
-    document.addEventListener("mousedown", outside, true);
-    document.addEventListener("keydown", escape);
-    return () => { document.removeEventListener("mousedown", outside, true); document.removeEventListener("keydown", escape); };
-  }, [details]);
+    place();
+    const observer = new ResizeObserver(place);
+    if (button.parentElement) observer.observe(button.parentElement);
+    window.addEventListener("resize", place);
+    return () => { observer.disconnect(); window.removeEventListener("resize", place); };
+  }, [detailsOpen, selectedTaskId]);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [menu, setMenu] = useState<ChatMenuState>(null);
   // A menu button toggles its menu: pressing it again closes the menu instead of reopening it.
@@ -1017,6 +1037,29 @@ export function AgentOrchestratorChat({
   const agentSessionIds = useMemo(() => agentSessions.map((session) => session.id), [agentSessions]);
   const livePage = useWorkbenchAutoOpen(selectedTaskId ? agentSessionIds : [], workbench !== null, (tab) => setWorkbench(tab), projectId);
   useEffect(() => { setWorkbench(null); }, [selectedTaskId]);
+  // The details panel's Outputs and Sources: the cards' work this window has seen (CHAT_WORK holds
+  // live polls and turns read back), plus the newest turns' finished cards, read back once each
+  // while the panel is open. Older turns count once their work is opened in the chat.
+  const [detailsWorkTick, setDetailsWorkTick] = useState(0);
+  useEffect(() => {
+    if (!detailsOpen || !loadWork) return;
+    for (const turn of turns.slice(-DETAILS_READ_TURNS)) {
+      for (const step of [...turn.steps, ...(turn.final ? [turn.final] : [])]) {
+        const key = stepWorkKey(step);
+        if (!step.hasWork || step.working || CHAT_WORK.has(key) || DETAILS_READ.has(key)) continue;
+        DETAILS_READ.add(key);
+        void loadWork(turn.runId, step.nodeId).then((items) => {
+          if (!items.length) return;
+          CHAT_WORK.set(key, mergeTimeline(CHAT_WORK.get(key), items, { cap: Infinity }));
+          setDetailsWorkTick((tick) => tick + 1);
+        }).catch(() => undefined);
+      }
+    }
+  }, [detailsOpen, loadWork, turns]);
+  const detailLinks = useMemo(() => detailsOpen ? chatDetailLinks(turns.flatMap((turn) => [...turn.steps, ...(turn.final ? [turn.final] : [])])
+    .flatMap((step) => CHAT_WORK.get(stepWorkKey(step)) ?? step.working?.timeline ?? [])) : null,
+  // CHAT_WORK changes with the polls that change turns, or with a read back (the tick).
+  [detailsOpen, turns, detailsWorkTick]);
   // Following new output jumps, even under a theme's smooth scrolling: an animated follow lags the
   // stream and flashes the ↓ button. Only that button scrolls smoothly.
   useEffect(() => { if (atBottom) scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "instant" }); }, [turns.length, stepCount, atBottom]);
@@ -1050,10 +1093,18 @@ export function AgentOrchestratorChat({
   });
   // Bit, the chat's pet (ChatPet), shown unless turned off from the header menu or its own right-click.
   const [petOn, setPetOn] = useState(() => { try { return localStorage.getItem(PET_KEY) !== "off"; } catch { return true; } });
-  const togglePet = () => setPetOn((current) => {
-    try { localStorage.setItem(PET_KEY, current ? "off" : "on"); } catch { /* applies now regardless */ }
-    return !current;
-  });
+  // In split view the panes share one pet: hiding it in one pane hides it in all of them.
+  const togglePet = () => {
+    const next = !petOn;
+    try { localStorage.setItem(PET_KEY, next ? "on" : "off"); } catch { /* applies now regardless */ }
+    setPetOn(next);
+    window.dispatchEvent(new CustomEvent<boolean>(PET_EVENT, { detail: next }));
+  };
+  useEffect(() => {
+    const shown = (event: Event) => setPetOn((event as CustomEvent<boolean>).detail === true);
+    window.addEventListener(PET_EVENT, shown);
+    return () => window.removeEventListener(PET_EVENT, shown);
+  }, []);
   // The context ring's reading, which the pet's belly follows.
   const [contextShare, setContextShare] = useState<number | null>(null);
   // The cards panel can be dragged wider for more board room; the width is kept per viewer.
@@ -1862,12 +1913,9 @@ export function AgentOrchestratorChat({
             <Icon name="browser" width="16" height="16" /></button> : null}
           {onOpenMissionBoard ? <button type="button" className="cx-icon-button" title="Mission Board" aria-label="Open Mission Board" onClick={onOpenMissionBoard}>
             <Icon name="logs" width="16" height="16" /></button> : null}
-          {selectedTaskId ? <button type="button" className="cx-icon-button" data-details-toggle="" title="Chat details" aria-label="Chat details"
-            aria-haspopup="dialog" aria-expanded={Boolean(details)}
-            onClick={(event) => {
-              const box = event.currentTarget.getBoundingClientRect();
-              setDetails((open) => open ? null : { left: Math.max(8, Math.min(box.right - 300, window.innerWidth - 308)), top: box.bottom + 6 });
-            }}><ChatGlyph name="section" size={16} /></button> : null}
+          {selectedTaskId ? <button type="button" ref={detailsToggle} className="cx-icon-button" data-details-toggle=""
+            title={detailsOpen ? "Hide chat details" : "Chat details: changes, agents, setup, outputs and sources"} aria-label="Chat details"
+            aria-pressed={detailsOpen} onClick={toggleDetails}><ChatGlyph name="section" size={16} /></button> : null}
           <button type="button" className="cx-icon-button" title="More" aria-label="More chat actions" aria-haspopup="menu"
             onClick={(event) => toggleMenu(event.currentTarget, (box) => ({ x: box.right - 240, y: box.bottom + 4, items: headerMenu(), label: "Chat actions" }))}>⋯</button>
           {/* Claude Code's pane close: on every split view pane, the window's own chat included. */}
@@ -1878,15 +1926,29 @@ export function AgentOrchestratorChat({
           const nodes = latest?.nodes ?? [];
           const lead = nodes.find((node) => node.role === "planner") ?? nodes[0];
           const agents = chatAgentSummary(nodes);
-          return <FloatingLayer className="cx-details" role="dialog" style={{ left: details.left, top: details.top }}>
-            <div ref={detailsPanel} aria-label="Chat details">
+          const { outputs = [], sources = [] } = detailLinks ?? {};
+          // A file opens the worktree's files, a page on this machine the agent's preview, a web page
+          // the browser; an MCP server only names what was called.
+          const linkRow = (link: ChatDetailLink) => {
+            const icon = link.kind === "file" ? <ChatGlyph name="edit" size={15} /> : link.kind === "image" ? <ChatGlyph name="spark" size={15} />
+              : <Icon name={link.kind === "page" ? "globe" : link.kind === "tool" ? "mcp" : "external"} width="15" height="15" />;
+            const body = <>{icon}<span>{link.kind === "image" ? `Generated image · ${link.label}` : link.label}</span></>;
+            if (link.kind === "link") return <a key={link.key} className="cx-details-row" href={link.title} target="_blank" rel="noreferrer noopener" title={link.title}>{body}</a>;
+            if (link.kind === "tool") return <p key={link.key} className="cx-details-row is-static" title={link.title}>{body}</p>;
+            return <button key={link.key} type="button" className="cx-details-row" title={link.title} onClick={() => {
+              if (link.kind === "page" && agentSessionIds[0]) { navigatePreview(agentSessionIds[0], link.title); setWorkbench("preview"); }
+              else if (link.kind !== "page") setWorkbench("files");
+            }}>{body}</button>;
+          };
+          return <FloatingLayer className="cx-details" role="complementary" style={{ left: details.left, top: details.top, maxHeight: `calc(100vh - ${details.top + 12}px)` }}>
+            <div aria-label="Chat details">
               <div className="cx-details-head"><strong>{projectName || "Project"}</strong>{branch ? <small>{branch}</small> : null}</div>
               <button type="button" className="cx-details-row" disabled={!commands || !latest}
-                onClick={() => { setDetails(null); void runCommand("diff", "", false); }}>
+                onClick={() => { void runCommand("diff", "", false); }}>
                 <ChatGlyph name="edit" size={15} /><span>Changes</span></button>
               <p className="cx-details-label">Agents</p>
               {latest ? <button type="button" className="cx-details-row" title="Open the cards"
-                onClick={() => { setDetails(null); if (structure) setShowStructure(true); else openStructure(latest.id); }}>
+                onClick={() => { if (structure) setShowStructure(true); else openStructure(latest.id); }}>
                 <span className="cx-details-dots" aria-hidden="true">{agents.dots.slice(0, 8).map((state, index) =>
                   <span key={index} className={`cx-details-dot is-${state}`} />)}</span><span>{agents.text}</span></button>
                 : <p className="cx-details-empty">No agents yet. They start with your first message.</p>}
@@ -1895,6 +1957,12 @@ export function AgentOrchestratorChat({
                 <p className="cx-details-line">{describeNode?.(lead) || lead.route?.model || "Model not set"}</p>
                 <p className="cx-details-line">Approvals: {chatApprovalMode(lead.route as { approval_policy?: string; approvals_reviewer?: string } | undefined)}</p>
               </> : <p className="cx-details-empty">Chosen when you send.</p>}
+              <p className="cx-details-label">Outputs</p>
+              {outputs.length ? outputs.slice(0, DETAILS_LIST_LIMIT).map(linkRow)
+                : <p className="cx-details-empty">Files, images and local pages the agents make show here.</p>}
+              <p className="cx-details-label">Sources</p>
+              {sources.length ? sources.slice(0, DETAILS_LIST_LIMIT).map(linkRow)
+                : <p className="cx-details-empty">Web pages and MCP servers the agents use show here.</p>}
             </div>
           </FloatingLayer>;
         })() : null}

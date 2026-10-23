@@ -297,11 +297,16 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId }: {
   </aside>;
 }
 
+/** Loads a page in the chat agent's preview browser; the caller shows the Preview tab. */
+export function navigatePreview(sessionId: string, url: string) {
+  void paneCall("chat_preview_navigate", { sessionId, url }).catch(() => undefined);
+}
+
 /** The new-tab page: the panel's tools and the pages this chat's agent opened. */
 function NewTabPage({ sessionId, onTool }: { sessionId: string; onTool: (kind: WorkbenchTab) => void }) {
   const recents = RECENT_PAGES.get(sessionId) ?? [];
   const open = (url: string) => {
-    void paneCall("chat_preview_navigate", { sessionId, url }).catch(() => undefined);
+    navigatePreview(sessionId, url);
     onTool("preview");
   };
   return <div className="cx-newtab">

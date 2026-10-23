@@ -1745,6 +1745,56 @@ test("stale ownership recovery stops a managed tmux runtime even though it has n
   }
 });
 
+for (const [label, content] of [["empty", Buffer.alloc(0)], ["zero-filled", Buffer.alloc(179)]]) {
+  test(`launcher recovers a ${label} ownership marker without losing its bytes`, async (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-empty-ownership-"));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const descriptor = path.join(root, "launcher.json");
+    const supervisor = new RuntimeSupervisor({
+      app: { getVersion: () => "0.2.0", isPackaged: false },
+      logger: { info() {}, warn() {}, error() {} },
+      sourceRoot: root, coreHome: root, browserDescriptorPath: descriptor,
+    });
+    fs.mkdirSync(path.dirname(supervisor.statePath), { recursive: true });
+    fs.writeFileSync(supervisor.statePath, content);
+    assert.equal(supervisor.readState(), null);
+    assert.deepEqual(fs.readFileSync(supervisor.statePath), content, "reading must not consume the marker");
+    supervisor.readConfig = () => launcherConfig(descriptor);
+    supervisor.proxyHealth = async () => false;
+    let starts = 0;
+    supervisor.startDaemon = async () => { starts += 1; };
+    supervisor.startTunnel = async () => {};
+    assert.equal((await supervisor.startConfigured()).status, "ready");
+    assert.equal(starts, 1);
+    assert.equal(JSON.parse(fs.readFileSync(supervisor.statePath, "utf8")).status, "ready");
+    const trash = path.join(root, "Trash");
+    const backups = fs.readdirSync(trash);
+    assert.ok(backups.length > 0);
+    for (const backup of backups) {
+      assert.deepEqual(fs.readFileSync(path.join(trash, backup, "launcher-supervisor.json")), content);
+    }
+  });
+}
+
+test("a zero-filled marker never authorizes taking over a healthy unowned runtime", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-empty-unowned-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const descriptor = path.join(root, "launcher.json");
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root, coreHome: root, browserDescriptorPath: descriptor,
+  });
+  fs.mkdirSync(path.dirname(supervisor.statePath), { recursive: true });
+  fs.writeFileSync(supervisor.statePath, Buffer.alloc(179));
+  supervisor.readConfig = () => launcherConfig(descriptor);
+  supervisor.proxyHealth = async () => true;
+  supervisor.startDaemon = async () => assert.fail("must not start a second runtime");
+  supervisor.control = async () => assert.fail("must not control an unowned runtime");
+  assert.equal((await supervisor.startConfigured()).status, "external");
+  assert.equal(supervisor.daemon, null);
+});
+
 test("launcher fails closed on a corrupt runtime ownership marker", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-corrupt-runtime-state-"));
   const supervisor = new RuntimeSupervisor({
@@ -1763,7 +1813,7 @@ test("launcher fails closed on a corrupt runtime ownership marker", () => {
   }
 });
 
-test("a marker a power cut tore (NUL bytes, or empty) reads as missing and is cleared, not as corrupt", () => {
+test("a marker a power cut tore (NUL bytes, or empty) reads as missing, not as corrupt, and keeps its bytes", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-torn-runtime-state-"));
   const warnings = [];
   const supervisor = new RuntimeSupervisor({
@@ -1780,10 +1830,15 @@ test("a marker a power cut tore (NUL bytes, or empty) reads as missing and is cl
     for (const torn of [Buffer.alloc(233), Buffer.alloc(0), Buffer.from("\n")]) {
       fs.writeFileSync(supervisor.statePath, torn);
       assert.equal(supervisor.readState(), null);
-      assert.equal(fs.existsSync(supervisor.statePath), false, "it is set aside");
+      assert.deepEqual(fs.readFileSync(supervisor.statePath), torn, "reading must not consume the marker");
     }
     assert.deepEqual(warnings.map(([event]) => event), ["runtime.state_torn", "runtime.state_torn", "runtime.state_torn"]);
     assert.equal(warnings[0][1].bytes, 233);
+    assert.deepEqual(fs.readFileSync(warnings[0][1].backup), Buffer.alloc(233), "its bytes are kept in Trash");
+    // Health checks read the marker until the next write replaces it: one copy per version, not per read.
+    assert.equal(supervisor.readState(), null);
+    assert.equal(warnings[3][1].backup, warnings[2][1].backup);
+    assert.equal(fs.readdirSync(path.join(root, "Trash")).length, 3);
     supervisor.writeState("idle");
     assert.equal(supervisor.readState().status, "idle");
   } finally {
@@ -1791,7 +1846,7 @@ test("a marker a power cut tore (NUL bytes, or empty) reads as missing and is cl
   }
 });
 
-test("an unreadable marker is dropped only when it was written before this boot", () => {
+test("an unreadable marker reads as missing only when it was written before this boot", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-preboot-runtime-state-"));
   const warnings = [];
   const supervisor = new RuntimeSupervisor({
@@ -1812,8 +1867,10 @@ test("an unreadable marker is dropped only when it was written before this boot"
     const beforeBoot = new Date(Date.now() - os.uptime() * 1_000 - 60_000);
     fs.utimesSync(supervisor.statePath, beforeBoot, beforeBoot);
     assert.equal(supervisor.readState(), null);
-    assert.equal(fs.existsSync(supervisor.statePath), false);
+    assert.equal(fs.existsSync(supervisor.statePath), true, "reading must not consume the marker");
     assert.deepEqual(warnings, ["runtime.state_discarded"]);
+    const [backup] = fs.readdirSync(path.join(root, "Trash"));
+    assert.equal(fs.readFileSync(path.join(root, "Trash", backup, "launcher-supervisor.json"), "utf8"), "{\n  \"version\": 1,\n  \"ownerPid\": 324");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
