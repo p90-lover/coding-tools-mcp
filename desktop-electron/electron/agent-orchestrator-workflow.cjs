@@ -4352,10 +4352,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // Resuming a goal that ran out of rounds (one saved with a limit) allows it as many more again.
     const rounds = goal.status === "limited" && goal.rounds > 0 ? goal.round + goal.rounds : goal.rounds;
     goals.update(id, task, { status: "active", rounds, note: "" });
-    const saved = await runs({ workspaceId: id });
-    if (chatWorking(id, task, saved.runs)) return { ok: true, goal: goals.get(id, task) };
-    const latest = saved.runs.filter(run => run.project_id === task).at(-1);
-    await continueGoal(id, task, goals.get(id, task), latest);
+    // The next round starts in the background: setting it up (board writes, a compaction when the
+    // chat is full, the run's creation) took up to a minute, and the goal bar's Resume sat frozen
+    // that long. A round that can't start marks the goal stalled (startGoalRound).
+    void (async () => {
+      const saved = await runs({ workspaceId: id });
+      if (chatWorking(id, task, saved.runs)) return;
+      const latest = saved.runs.filter(run => run.project_id === task).at(-1);
+      await continueGoal(id, task, goals.get(id, task), latest);
+    })().catch((error) => { logger?.warn?.("ao.goal_resume_failed", { message: publicText(error?.message || error, 200) }); });
     return { ok: true, goal: goals.get(id, task) };
   }
 

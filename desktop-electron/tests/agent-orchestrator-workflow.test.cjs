@@ -3147,6 +3147,8 @@ async function goalChat({ evaluator = (prompt) => /ALL DONE/.test(prompt)
   return { world, workflow, checks };
 }
 const goalOf = async (workflow) => (await workflow.call("runs", { workspaceId: "ws-1" })).goals["task-1"];
+// A resumed goal starts its round in the background: wait for it (or, with no condition, a while).
+const goalSettle = async (done = () => false) => { for (let tick = 0; tick < 200 && !done(); tick += 1) await new Promise((resolve) => setImmediate(resolve)); };
 
 test("after a round without the goal achieved, the chat runs the next round with the same Single model", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default", effort: "max" };
@@ -3197,6 +3199,7 @@ test("an app restart under a goal's round does not stall the goal; the round's r
   const sentBefore = world.updates.length;
   await Promise.all([workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" }),
     workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" })]);
+  await goalSettle();
   assert.equal(world.updates.length, sentBefore + 1, "one round, one message");
   // A round held on the person (no restart) still waits for them.
   world.runs.push({ id: "r2", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
@@ -3264,7 +3267,12 @@ test("a team's goal round continues on the chat's team; an achieved, failed or s
   assert.equal(goal.status, "paused");
   const resumed = await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" });
   assert.equal(resumed.goal.status, "active");
-  assert.equal(resumed.goal.round, 12, "resume starts the next round right away");
+  // The click returns at once; the round it starts follows in the background, not after a frozen wait.
+  assert.equal(resumed.goal.round, 11, "resume answers before the round is set up");
+  let after = resumed.goal;
+  for (let tick = 0; tick < 50 && after.round !== 12; tick += 1) { await goalSettle(); after = await goalOf(workflow); }
+  await goalSettle(() => /Stop hook feedback/.test(world.edits.at(-1)?.description ?? ""));
+  assert.equal(after.round, 12, "and the next round starts right after");
   assert.match(world.edits.at(-1).description, /Stop hook feedback:\n\[build green on CI\]: Two tests still fail\./, "with the last feedback");
   await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" });
   world.runs.push(teamRun("t5", "more"));

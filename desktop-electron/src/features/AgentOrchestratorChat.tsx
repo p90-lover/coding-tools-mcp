@@ -1167,6 +1167,7 @@ export function AgentOrchestratorChat({
   const [card, setCard] = useState<ChatCommandCard | null>(null);
   // Edit goal: the objective being edited, or null.
   const [goalEditing, setGoalEditing] = useState<string | null>(null);
+  const [goalBusy, setGoalBusy] = useState(false);
   // Edit wake-up: its note and the minutes from now being edited, or null.
   const [wakeupEditing, setWakeupEditing] = useState<{ reason: string; minutes: string } | null>(null);
   // Another chat's card or goal edit never shows over this one (its queue says so itself, below).
@@ -1483,10 +1484,12 @@ export function AgentOrchestratorChat({
     } finally { setDeletingBusy(false); setDeleting(null); }
   };
 
-  const runCommand = async (name: string, arg = "") => {
+  /** `typed`: the command was typed or picked in the box, which it then clears; a button (the goal
+   * bar's icons, Stop loop, Compact) leaves what is typed alone. Clicking the goal bar's icons wiped
+   * the draft ("remove boxes when clicked on logos"). */
+  const runCommand = async (name: string, arg = "", typed = true) => {
     setSlashIndex(0);
-    const keep = name === "goal" && arg === "edit";
-    if (!keep) setDraft("");
+    if (typed) setDraft("");
     try {
       switch (name) {
         case "goal": {
@@ -1505,12 +1508,13 @@ export function AgentOrchestratorChat({
             }
             if (!commands) break;
             if (!goal) { say("Goal", "No goal set."); break; }
-            await commands.goalAction(action as "pause" | "resume" | "clear");
+            // The bar's icons wait while it is applied, so a second click can't stack another action.
+            setGoalBusy(true);
+            try { await commands.goalAction(action as "pause" | "resume" | "clear"); } finally { setGoalBusy(false); }
             say("Goal", action === "clear" ? "Goal cleared." : action === "pause" ? "Goal paused. The current round finishes first." : "Goal resumed.");
             break;
           }
           if (action === "edit") {
-            setDraft("");
             if (!goal) say("Goal", "No goal set."); else { setCard(null); setGoalEditing(goal.objective); }
             break;
           }
@@ -1840,7 +1844,7 @@ export function AgentOrchestratorChat({
             <div ref={detailsPanel} aria-label="Chat details">
               <div className="cx-details-head"><strong>{projectName || "Project"}</strong>{branch ? <small>{branch}</small> : null}</div>
               <button type="button" className="cx-details-row" disabled={!commands || !latest}
-                onClick={() => { setDetails(null); void runCommand("diff"); }}>
+                onClick={() => { setDetails(null); void runCommand("diff", "", false); }}>
                 <ChatGlyph name="edit" size={15} /><span>Changes</span></button>
               <p className="cx-details-label">Agents</p>
               {latest ? <button type="button" className="cx-details-row" title="Open the cards"
@@ -1986,7 +1990,7 @@ export function AgentOrchestratorChat({
           </section>;
         })() : null}
         {commands?.goal || commands?.planMode || commands?.wakeup || commands?.loop ? <div className="cx-composer-modes">
-          {commands?.loop ? <LoopBar loop={commands.loop} onStop={() => void runCommand("loop", "stop")} /> : null}
+          {commands?.loop ? <LoopBar loop={commands.loop} onStop={() => void runCommand("loop", "stop", false)} /> : null}
           {commands?.wakeup ? <WakeupBar wakeup={commands.wakeup}
             onEdit={commands.editWakeup ? () => { setCard(null); setWakeupEditing({ reason: commands.wakeup!.reason,
               minutes: String(Math.min(720, Math.max(1, Math.ceil((commands.wakeup!.dueAt - Date.now()) / 60_000)))) }); } : undefined}
@@ -2001,11 +2005,11 @@ export function AgentOrchestratorChat({
               {/* A goal being pursued counts to the second, as Codex shows it; the label ticks alone. */}
               <Elapsed since={commands.goal.startedAt} live={commands.goal.status === "active"} until={commands.goal.updatedAt}
                 format={(ms) => goalElapsed(0, ms)} /></span>
-            <button type="button" className="cx-goal-icon" title="Clear goal" aria-label="Clear goal" onClick={() => void runCommand("goal", "clear")}><GoalGlyph name="trash" /></button>
+            <button type="button" className="cx-goal-icon" title="Clear goal" aria-label="Clear goal" disabled={goalBusy} onClick={() => void runCommand("goal", "clear", false)}><GoalGlyph name="trash" /></button>
             {commands.goal.status === "active"
-              ? <button type="button" className="cx-goal-icon" title="Pause goal" aria-label="Pause goal" onClick={() => void runCommand("goal", "pause")}><GoalGlyph name="pause" /></button>
-              : commands.goal.status !== "achieved" ? <button type="button" className="cx-goal-icon" title="Resume goal" aria-label="Resume goal" onClick={() => void runCommand("goal", "resume")}><GoalGlyph name="play" /></button> : null}
-            <button type="button" className="cx-goal-icon" title="Edit goal" aria-label="Edit goal" onClick={() => void runCommand("goal", "edit")}><GoalGlyph name="expand" /></button>
+              ? <button type="button" className="cx-goal-icon" title="Pause goal" aria-label="Pause goal" disabled={goalBusy} onClick={() => void runCommand("goal", "pause", false)}><GoalGlyph name="pause" /></button>
+              : commands.goal.status !== "achieved" ? <button type="button" className="cx-goal-icon" title="Resume goal" aria-label="Resume goal" disabled={goalBusy} onClick={() => void runCommand("goal", "resume", false)}><GoalGlyph name="play" /></button> : null}
+            <button type="button" className="cx-goal-icon" title="Edit goal" aria-label="Edit goal" onClick={() => void runCommand("goal", "edit", false)}><GoalGlyph name="expand" /></button>
           </div> : null}
           {commands?.planMode ? <span className="cx-plan-chip" role="status">Plan mode
             <button type="button" aria-label="Turn plan mode off" title="Turn plan mode off" onClick={() => commands.setPlanMode(false)}><Icon name="close" width="11" height="11" /></button></span> : null}
@@ -2119,7 +2123,7 @@ export function AgentOrchestratorChat({
                 && session.label.split(" · ")[0] === agentSessions[0]?.label.split(" · ")[0]).map((session) => session.id)}
               agentLabel={agentSessions[0]?.label} model={agentSessions[0]?.model}
               launchedWindow={agentSessions[0]?.contextWindow} nextWindow={composer?.route?.context_window}
-              canCompact={Boolean(commands && accepts)} onCompact={() => void runCommand("compact")} onFraction={setContextShare} /> : null}
+              canCompact={Boolean(commands && accepts)} onCompact={() => void runCommand("compact", "", false)} onFraction={setContextShare} /> : null}
             <button type="button" className="cx-icon-button cx-mic" aria-label="Voice input" title="Voice input isn't available yet" disabled>
               <ChatGlyph name="mic" size={16} /></button>
             {latest && runOpen && stop && !accepts && !((steering || queueing) && canSend)
