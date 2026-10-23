@@ -4373,10 +4373,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       wakeups.clear(workspaceId, taskId, id);
       wakeFailures.delete(id);
       if (action !== "send") { logger?.info?.("ao.wakeup.dropped", { workspaceId, taskId }); return; }
-      const result = await chatSend({ workspaceId, taskId, message: loop ? loopMessage(loop, wakeup.reason) : wakePrompt(wakeup, now()),
-        ...followUpSelection(latest), deferStart: true });
-      if (loop && result?.ok !== false) loops.update(workspaceId, taskId, { round: loop.round + 1, lastRunId: String(result?.runId || ""), note: "" });
-      logger?.info?.("ao.wakeup.sent", { workspaceId, taskId, minutes: wakeup.minutes, ok: result?.ok !== false, ...(loop ? { loop: true } : {}) });
+      if (loop) {
+        // The loop's round is the loop's own (runLoop): kept due, with the agent's note, until it starts,
+        // and retried when it fails to, as an interval loop's round is.
+        loops.update(workspaceId, taskId, { due: true, wakeNote: wakeup.reason });
+        logger?.info?.("ao.wakeup.loop", { workspaceId, taskId, minutes: wakeup.minutes });
+        await runLoop(workspaceId, taskId, loop.id);
+        return;
+      }
+      const result = await chatSend({ workspaceId, taskId, message: wakePrompt(wakeup, now()), ...followUpSelection(latest), deferStart: true });
+      logger?.info?.("ao.wakeup.sent", { workspaceId, taskId, minutes: wakeup.minutes, ok: result?.ok !== false });
     } catch (error) {
       const failures = (wakeFailures.get(id) ?? 0) + 1;
       wakeFailures.set(id, failures);
@@ -4469,9 +4475,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const loop = loops.get(workspaceId, taskId);
     if (wakeupsDisposed || !loop || loop.id !== id || looping.has(key)) return;
     if (loop.nextAt !== null && loop.nextAt > now()) { armLoop(workspaceId, taskId); return; }
+    // A loop stopped or replaced while this round awaited a read is left alone from then on.
+    const current = () => !wakeupsDisposed && loops.get(workspaceId, taskId)?.id === id;
     looping.add(key);
     try {
       const saved = await runs({ workspaceId });
+      if (!current()) return;
       const chatRuns = saved.runs.filter(run => run.project_id === taskId);
       const action = loopAction(loop, {
         active: chatRuns.length > 0 && taskLifecycle(saved, taskId).visibility === "active",
@@ -4486,9 +4495,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         logger?.info?.("ao.loop.ended", { workspaceId, taskId, rounds: loop.round, why: now() >= loop.expiresAt ? "expired" : "chat closed" });
         return;
       }
-      const result = await chatSend({ workspaceId, taskId, message: loopMessage(loop), ...followUpSelection(chatRuns.at(-1)), deferStart: true });
+      const result = await chatSend({ workspaceId, taskId, message: loopMessage(loop, loop.wakeNote || ""), ...followUpSelection(chatRuns.at(-1)), deferStart: true });
       if (result?.ok === false) throw new Error(String(result.reason || "the round could not start"));
-      loops.update(workspaceId, taskId, { round: loop.round + 1, lastRunId: String(result.runId || ""), due: false, note: "",
+      // Stopped while this round was sent: the round stands, but the stopped loop goes no further.
+      if (!current()) return;
+      loops.update(workspaceId, taskId, { round: loop.round + 1, lastRunId: String(result.runId || ""), due: false, note: "", wakeNote: "",
         nextAt: loop.minutes === null ? null : now() + loop.minutes * 60_000 });
       loopFailures.delete(id);
       logger?.info?.("ao.loop.sent", { workspaceId, taskId, round: loop.round + 1, minutes: loop.minutes });
@@ -4498,7 +4509,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       loopFailures.set(id, failures);
       const why = publicText(error?.message || error, 200);
       logger?.warn?.("ao.loop.failed", { workspaceId, taskId, failures, error: why });
-      if (failures >= WAKE_RETRIES || !loops.get(workspaceId, taskId)) { loops.clear(workspaceId, taskId, id); loopFailures.delete(id); return; }
+      if (!current()) { loopFailures.delete(id); return; }
+      if (failures >= WAKE_RETRIES) { loops.clear(workspaceId, taskId, id); loopFailures.delete(id); return; }
       loops.update(workspaceId, taskId, { due: true, note: `The last round could not start (${why}); trying again in a minute` });
       armLoop(workspaceId, taskId, WAKE_RETRY_MS);
     } finally { looping.delete(key); }
@@ -4535,12 +4547,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     await runLoop(id, task, loop.id);
     return { ok: true, loop: loops.get(id, task) };
   }
-  // Loops saved before a restart: an interval loop's overdue round runs shortly after the app is back.
+  // Loops saved before a restart: an interval loop's overdue round runs shortly after the app is back,
+  // and so does a self-paced loop's round that was due (held, or waiting to retry); one waiting on its
+  // agent's wake-up is armed by restoreWakeups.
   function restoreLoops() {
     for (const { workspaceId, taskId, loop } of loops.all()) {
       if (typeof workspaceId !== "string" || typeof taskId !== "string") continue;
       if (now() >= loop.expiresAt) { loops.clear(workspaceId, taskId, loop.id); continue; }
       if (loop.minutes !== null) armLoop(workspaceId, taskId, Math.max(WAKE_RESTORE_MS, (loop.nextAt ?? now()) - now()));
+      else if (loop.due) armLoop(workspaceId, taskId, WAKE_RESTORE_MS);
     }
   }
 

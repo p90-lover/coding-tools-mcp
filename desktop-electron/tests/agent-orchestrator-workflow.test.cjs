@@ -3245,7 +3245,8 @@ test("a team's goal round continues on the chat's team; an achieved, failed or s
 
 /** A chat whose Single agent (AO session "sess-1") just finished run r1, with a clock and timers the test drives. */
 /** `hold`: a turn the chat sends never finishes starting, so it never settles as failed (a self-paced /loop would end). */
-function wakeChat({ goal = false, hold = false } = {}) {
+/** `gate`: `read` (a promise) holds the runs reads until it settles; `fail` board calls throw that many times. */
+function wakeChat({ goal = false, hold = false, loopsFile = null } = {}) {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
   const world = chatWorld({ tasks: [{ id: "task-1", title: "Ship", description: "watch CI", state: "in_progress", clauses: [] }], runs: [
     { id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
@@ -3253,7 +3254,13 @@ function wakeChat({ goal = false, hold = false } = {}) {
   const clock = { at: 1_000_000 };
   const timers = new Map();
   let next = 0;
-  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/codex.exe",
+  const gate = { read: null, fail: 0 };
+  const requestHeadless = async (endpoint, ...rest) => {
+    if (endpoint === "/api/v1/ao/read" && gate.read) await gate.read;
+    if (endpoint === "/api/v1/tools/call" && gate.fail > 0) { gate.fail -= 1; throw new Error("board unavailable"); }
+    return world.requestHeadless(endpoint, ...rest);
+  };
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless, findCodexExecutable: () => "C:/codex.exe", loopsFile,
     resolveHarness: hold ? () => new Promise(() => {}) : async () => { throw new Error("stop before the background loop"); }, now: () => clock.at,
     setTimer: (fn, ms) => { next += 1; timers.set(next, { fn, at: clock.at + ms }); return next; }, clearTimer: (id) => timers.delete(id) });
   /** Moves the clock and runs every timer due by then (and those they arm). */
@@ -3267,7 +3274,7 @@ function wakeChat({ goal = false, hold = false } = {}) {
       await new Promise((resolve) => setImmediate(resolve));
     }
   };
-  return { world, workflow, route, advance, timers };
+  return { world, workflow, route, advance, timers, gate };
 }
 const wakeupOf = async (workflow) => (await workflow.call("runs", { workspaceId: "ws-1" })).wakeups["task-1"];
 
@@ -3413,6 +3420,53 @@ test("a self-paced /loop goes on whenever its agent schedules a wake-up and ends
   await assert.rejects(workflow.call("chat_loop", { workspaceId: "ws-1", taskId: "task-1", action: "start", prompt: "x", minutes: 0 }), /interval must be/);
   await assert.rejects(workflow.call("chat_loop", { workspaceId: "ws-1", taskId: "task-1", action: "start", prompt: "  ", minutes: 5 }), /Say what to run/);
   await assert.rejects(workflow.call("chat_loop", { workspaceId: "ws-1", taskId: "task-9", action: "start", prompt: "x", minutes: 5 }), /Send this chat a message first/);
+});
+
+const settle = async () => { for (let pass = 0; pass < 10; pass++) await new Promise((resolve) => setImmediate(resolve)); };
+
+test("a loop stopped while its due round reads the chat sends nothing more", async () => {
+  const { world, workflow, advance, gate } = wakeChat();
+  await workflow.call("chat_loop", { workspaceId: "ws-1", taskId: "task-1", action: "start", prompt: "check", minutes: 5 });
+  const before = world.updates.length;
+  let release;
+  gate.read = new Promise((resolve) => { release = resolve; });
+  await advance(5 * 60_000);
+  assert.equal((await Promise.race([workflow.call("chat_loop", { workspaceId: "ws-1", taskId: "task-1", action: "stop" }), settle().then(() => null)]))?.stopped, true,
+    "stop answers without waiting for the held read");
+  gate.read = null;
+  release();
+  await settle();
+  assert.equal(world.updates.length, before, "the held round sees the loop is gone");
+});
+
+test("a self-paced round that fails to start stays due and is retried, and is restored after a restart", async () => {
+  const { world, workflow, advance, gate } = wakeChat({ hold: true });
+  await workflow.call("chat_loop", { workspaceId: "ws-1", taskId: "task-1", action: "start", prompt: "watch CI", minutes: null });
+  await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 7, reason: "CI run 42" });
+  const before = world.updates.length;
+  gate.fail = 1;
+  await advance(7 * 60_000);
+  assert.equal(world.updates.length, before, "the board read failed");
+  const pending = await loopOf(workflow);
+  assert.equal(pending.due, true);
+  assert.match(pending.note, /could not start \(board unavailable\)/);
+  await advance(60_000);
+  assert.equal(world.updates.length, before + 1, "retried a minute later");
+  assert.match(world.edits.at(-1).description, /\(Your note from the last round: CI run 42\)/, "with the agent's note");
+  assert.equal((await loopOf(workflow)).round, 2);
+
+  // A due self-paced round saved before a restart runs shortly after the app is back.
+  const file = path.join(require("node:os").tmpdir(), `ct-loops-${crypto.randomUUID()}.json`);
+  try {
+    const store = createLoopStore({ file, now: () => 1_000_000 });
+    store.set("ws-1", "task-1", { prompt: "watch CI", minutes: null });
+    store.update("ws-1", "task-1", { due: true, round: 1, nextAt: null });
+    const restarted = wakeChat({ hold: true, loopsFile: file });
+    const quiet = restarted.world.updates.length;
+    await restarted.advance(30_000);
+    assert.equal(restarted.world.updates.length, quiet + 1);
+    restarted.workflow.dispose();
+  } finally { fs.rmSync(file, { force: true }); }
 });
 
 const { createLoopStore, loopAction, loopMessage, cleanLoop, LOOP_LIFETIME_MS } = require("../electron/chat-loops.cjs");
