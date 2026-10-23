@@ -232,7 +232,13 @@ test("Codex slash commands run from the composer in a Single chat or a team, wit
   type(teamChat, "/compact"); await enter(teamChat);
   assert.match(text(cardOf(teamChat)), /Compact is disabled while a chat is in progress/);
   type(teamChat, "/review"); await enter(teamChat);
-  assert.match(text(cardOf(teamChat)), /Queued: it's sent when the current turn finishes/, "a command that sends queues behind the working turn");
+  // Claude Code queues a command as it queues a message: its bubble, as typed, with the queued ones.
+  // The user: "remake the steer message panel exact the same as claude code" (the "Queued: it's sent
+  // when the current turn finishes" card).
+  const queuedRows = walk(teamChat.render({ commands: commands() })).filter((element) => element.type === "li" && element.props.className === "cx-queued-row");
+  assert.deepEqual(queuedRows.map((row) => text(walk(row).find((element) => String(element.props?.className).includes("cx-queued-message")))), ["/review"],
+    "a command that sends queues behind the working turn, shown as typed");
+  assert.equal(cardOf(teamChat), undefined, "no card says it was queued");
   assert.equal(busy.calls.filter((call) => call[0] === "send").length, 0, "nothing is sent while the turn works");
   const pill = walk(teamChat.render({ commands: commands() })).find((element) => String(element.props?.className).startsWith("cx-goal "));
   assert.match(text(pill), /^Pursuing goalship the release5m \d+s$/, "Codex's goal bar: state, objective, running time");
@@ -352,9 +358,22 @@ test("while the agent works, /review and /init steer it; a new goal waits for th
   assert.match(steered.at(-1).message, /^Generate a file named AGENTS\.md/);
   type("/goal finish the migration"); await enter();
   assert.equal(steered.length, 2, "a goal is never steered");
-  assert.match(text(card()), /Queued: it's sent when the current turn finishes/);
+  assert.equal(card(), undefined, "queued like a message: no card");
+  const goalRow = () => walk(view.render()).find((element) => element.type === "li" && element.props.className === "cx-queued-row"
+    && text(element).includes("/goal finish the migration"));
+  assert.ok(goalRow(), "the queued goal shows as typed, with the queued messages");
+  const sendNow = walk(goalRow()).find((element) => element.props?.className === "cx-queued-send-now");
+  assert.equal(sendNow?.props.disabled, true, "a goal is never steered in: Send now waits for the turn");
+  assert.equal(sendNow?.props["data-tip"], "A goal starts when the current turn finishes");
+  // Clicking it puts the command back in the composer.
+  walk(goalRow()).find((element) => element.props?.role === "button").props.onClick({ target: null, currentTarget: null });
+  assert.equal(goalRow(), undefined);
+  assert.equal(walk(view.render()).find((element) => element.type === "textarea").props.value, "/goal finish the migration");
+  type("/goal finish the migration"); await enter();
+  assert.ok(goalRow(), "queued again");
   type("/goal clear"); await enter();
   assert.match(text(card()), /The queued goal was dropped/);
+  assert.equal(goalRow(), undefined);
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0);
 
   // /rewind lists the messages (newest first) and opens the chosen one to edit; a number picks directly.

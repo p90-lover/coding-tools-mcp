@@ -1349,8 +1349,11 @@ export const GOAL_SUMMARY: Record<ChatGoal["status"], string> = {
 export function goalRounds(goal: Pick<ChatGoal, "round" | "rounds">): string {
   return goal.rounds > 0 ? `${goal.round} of ${goal.rounds}` : String(goal.round);
 }
-/** Something typed while a chat's turn runs, sent when the turn finishes: a message, or a command's message. */
-export type QueuedChatMessage = { what: string; message: string; goal?: string };
+/**
+ * Something typed while a chat's turn runs, sent when the turn finishes: a message, or a command's
+ * message. `typed` is a command as the person typed it ("/goal …"), which its queued bubble shows.
+ */
+export type QueuedChatMessage = { what: string; message: string; goal?: string; typed?: string };
 /**
  * Adds to one chat's queue. A plain message joins a plain message queued just before it (they are
  * sent together); anything else (a command, a goal) waits for a turn of its own. Nothing is replaced.

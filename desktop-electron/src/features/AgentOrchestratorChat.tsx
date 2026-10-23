@@ -1342,17 +1342,19 @@ export function AgentOrchestratorChat({
    * Sends a command's message now when the chat is free, steers it into the working agent when it
    * can be steered (never a goal), and otherwise queues it for when the current turn finishes.
    */
-  const dispatch = async (what: string, message: string, goal?: string): Promise<"sent" | "queued" | false> => {
+  const dispatch = async (what: string, message: string, goal: string | undefined, typed: string): Promise<"sent" | "queued" | false> => {
     if (busy || sending) { say(what, "Another action is still running; try again in a moment."); return false; }
     if (accepts || (steering && !goal)) return await deliver(message, goal) ? "sent" : false;
-    setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what, message, ...(goal ? { goal } : {}) }));
-    say(what, `Queued: it's sent when the current turn finishes.${latest && runOpen && stop ? " Send /stop to end the turn now." : ""}`);
+    // Queued as Claude Code queues a command: its bubble joins the queued messages above the
+    // composer, as typed. The "Queued: it's sent when the current turn finishes" card is gone.
+    setQueue(selectedTaskId, chatQueueAdd(queueOf(selectedTaskId), { what, message, ...(goal ? { goal } : {}), typed }));
+    setCard(null);
     return "queued";
   };
-  // The queued-message bar: this chat's queued messages (a command or a goal waits out of sight, as
-  // before), then the steers still on their way to the agent. Send now steers a message in at once,
-  // or sends it when the chat is free; while the agent waits on its own request steering would
-  // cancel that request, so it waits too.
+  // The queued-message bar: this chat's queued messages and commands, then the steers still on their
+  // way to the agent. Send now steers a message in at once, or sends it when the chat is free; while
+  // the agent waits on its own request steering would cancel that request, so it waits too. A goal
+  // is never steered: it starts once the current turn finishes.
   const sendNowBlocked = busy || sending ? "Another message is being sent"
     : accepts || (steering && !awaitingAnswer) ? undefined
     : awaitingAnswer ? "Answer the agent's request first" : "Sent when the current turn finishes";
@@ -1362,7 +1364,33 @@ export function AgentOrchestratorChat({
     return item;
   };
   const queuedBar: QueuedBarItem[] = [
-    ...queued.flatMap((item, index): QueuedBarItem[] => item.what !== "Message" || item.goal ? [] : [{
+    ...queued.map((item, index): QueuedBarItem => {
+      if (item.what === "Message" && !item.goal) return queuedMessageItem(item, index);
+      // A command shows as typed; clicking it puts it back in the composer, ahead of anything typed.
+      const typed = item.typed ?? (item.goal ? `/goal ${item.goal}` : `/${item.what.toLowerCase()}`);
+      return {
+        key: `queued:${index}:${typed.length}`, text: typed, state: "queued",
+        sendNowBlocked: item.goal && !accepts ? (busy || sending ? "Another message is being sent" : "A goal starts when the current turn finishes") : sendNowBlocked,
+        onRemove: () => { takeQueued(index); },
+        onEdit: () => {
+          if (!takeQueued(index)) return;
+          setDraft((draft) => (draft.trim() ? `${typed}\n\n${draft}` : typed));
+          input.current?.focus();
+        },
+        onSendNow: () => {
+          const task = selectedTaskId, taken = takeQueued(index);
+          if (!taken) return;
+          void deliver(taken.message, taken.goal, false).then((sent) => { if (!sent) setQueue(task, [taken, ...queueOf(task)]); });
+        },
+      };
+    }),
+    // A steer that waits for the agent's own request is in the queue too: it shows once, as queued.
+    ...pendingSteers.filter((entry) => entry.taskId === selectedTaskId
+      && !queued.some((item) => item.what === "Message" && item.message === entry.text))
+      .map((entry): QueuedBarItem => ({ key: entry.id, text: entry.text, state: "pending" })),
+  ];
+  function queuedMessageItem(item: QueuedChatMessage, index: number): QueuedBarItem {
+    return {
       key: `queued:${index}:${item.message.length}`, text: item.message, state: "queued", sendNowBlocked,
       onRemove: () => { takeQueued(index); },
       onEdit: () => {
@@ -1381,12 +1409,8 @@ export function AgentOrchestratorChat({
         if (!taken) return;
         void deliver(taken.message, undefined, false).then((sent) => { if (!sent) setQueue(task, [taken, ...queueOf(task)]); });
       },
-    }]),
-    // A steer that waits for the agent's own request is in the queue too: it shows once, as queued.
-    ...pendingSteers.filter((entry) => entry.taskId === selectedTaskId
-      && !queued.some((item) => item.what === "Message" && item.message === entry.text))
-      .map((entry): QueuedBarItem => ({ key: entry.id, text: entry.text, state: "pending" })),
-  ];
+    };
+  }
   // The messages /rewind can go back to, oldest first, with the turn each one opened.
   const rewindPoints = turns.flatMap((turn, turnIndex) => turn.user ? [{ turnIndex, messageIndex: turn.messageIndex ?? turnIndex, text: chatMessageReadable(turn.user.text) }] : []);
   // Delete message: the turn whose message waits for the in-chat confirmation, or null. A message
@@ -1445,7 +1469,7 @@ export function AgentOrchestratorChat({
           if (goal && ["active", "paused"].includes(goal.status)
             && !window.confirm("Replace current goal?\n\nThis keeps the chat but replaces the saved goal with this one.")) { setDraft(`/goal ${arg}`); break; }
           // While a turn is working the goal is queued; it starts once the turn finishes.
-          const outcome = await dispatch("Goal", arg, arg);
+          const outcome = await dispatch("Goal", arg, arg, `/goal ${arg}`);
           if (!outcome) setDraft(`/goal ${arg}`);
           else if (outcome === "sent") setCard(null);
           break;
@@ -1461,10 +1485,10 @@ export function AgentOrchestratorChat({
           say("Compact", await commands.compact());
           break;
         case "review":
-          if (await dispatch("Review", reviewPrompt(arg)) === "sent" && !accepts) say("Review", "Sent to the working agent.");
+          if (await dispatch("Review", reviewPrompt(arg), undefined, arg ? `/review ${arg}` : "/review") === "sent" && !accepts) say("Review", "Sent to the working agent.");
           break;
         case "init":
-          if (await dispatch("Init", INIT_PROMPT) === "sent" && !accepts) say("Init", "Sent to the working agent.");
+          if (await dispatch("Init", INIT_PROMPT, undefined, "/init") === "sent" && !accepts) say("Init", "Sent to the working agent.");
           break;
         case "rewind": {
           if (!thread?.rewind) break;
